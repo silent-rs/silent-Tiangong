@@ -271,7 +271,6 @@ fn run_gui() {
     let _guard = init_logging(true).expect("failed to initialize logging");
 
     tauri::Builder::default()
-        .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
             use tauri::Listener;
 
@@ -279,53 +278,25 @@ fn run_gui() {
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
             setup_tray(app)?;
 
-            // Desktop 端独立初始化调度器（不依赖 server）
+            // 先 manage TiangongApp（需要 app.handle 供 ensure_core 构造 browser/terminal）
+            app.manage(tiangong_app::TiangongApp::new(app.handle().clone()));
             let state = app.state::<tiangong_app::TiangongApp>();
 
-            // 注册进程内插件（issue #156）：每个插件封装自己的全部能力，
-            // 在 engine 创建/重建时自行注册，替代旧的逐字段手工注册。
-            // 注意：build_plugin 必须在对应 Tauri plugin（.plugin(init())）注册之后调用，
-            // 否则 app.state::<X>() 拿不到插件 state，from_app_handle 返回 None。
-            match tiangong_plugin_browser::build_plugin(app.handle()) {
-                Some(plugin) => state.register_plugin(plugin),
-                None => warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失"),
-            }
-            match tiangong_plugin_terminal::build_plugin(app.handle()) {
-                Some(plugin) => {
-                    state.register_plugin(plugin);
+            // 全部插件（browser/terminal/fs/index/memory/scheduler）均由 ensure_core
+            // 创建 Core 时现场 build_plugin() 构造，确保每个 Core 持有独立实例
+            //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
+            // 此处只做 setup 阶段的初始化（不构造插件实例）。
 
-                    // 将 workspace 目录设为系统 PTY 默认 cwd。
-                    // 系统 PTY 启动时 cwd 取自环境变量（HOME/tmp），若不在此 cd，
-                    // agent 命令会在用户主目录而非 workspace 执行。
-                    let app_handle = app.handle().clone();
-                    let core_state = state.state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let workspace = {
-                            let guard = core_state.lock().await;
-                            guard.workspace_dir().to_string()
-                        };
-                        tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
-                    });
-                }
-                None => warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失"),
-            }
-
-            // 定时任务插件：不依赖 Tauri 句柄（纯文件存储），无条件注册，
-            // 让 Agent 可通过命名参数工具调用管理定时任务（替代旧的 LocalToolExecutor 实现）。
-            state.register_plugin(tiangong_plugin_scheduler::build_plugin());
-
-            // 基础文件工具插件：不依赖 Tauri 句柄，无条件注册，提供 list_dir / read_file /
-            // write_file / tree_dir / current_time / replace_in_file / apply_patch 等 7 个工具
-            // （替代 core 的 LocalToolExecutor 实现）。
-            state.register_plugin(tiangong_plugin_fs::build_plugin());
-
-            // 索引搜索插件：提供 index_search（全文索引）与 search_code（rg/grep 检索），
-            // 并通过生命周期钩子维护 workspace / session 索引。不依赖 Tauri 句柄。
-            state.register_plugin(tiangong_plugin_index::build_plugin());
-
-            // 记忆召回插件：提供 recall_memory 工具，按需回忆历史上下文。
-            // 记忆句柄由 core 内部创建并经 set_memory_handle 注入，不依赖 Tauri 句柄。
-            state.register_plugin(tiangong_plugin_memory::build_plugin());
+            // 将 workspace 目录设为系统 PTY 默认 cwd（独立于插件实例化的全局状态）。
+            let app_handle = app.handle().clone();
+            let core_state = state.state.clone();
+            tauri::async_runtime::spawn(async move {
+                let workspace = {
+                    let guard = core_state.lock().await;
+                    guard.workspace_dir().to_string()
+                };
+                tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
+            });
 
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
             // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。

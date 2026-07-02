@@ -158,6 +158,14 @@ impl TiangongCore {
         process_type: tiangong_memory::ProcessType,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
+        // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
+        // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
+        if !session.cwd.is_empty() && !std::path::Path::new(&session.cwd).is_dir() {
+            tracing::warn!(
+                cwd = %session.cwd,
+                "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
+            );
+        }
         let config_snapshot = config.snapshot();
         let config_generation = config.generation();
         let initial_trust_mode = session.trust_mode;

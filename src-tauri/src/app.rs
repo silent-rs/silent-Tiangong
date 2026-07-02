@@ -8,7 +8,7 @@ use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{error, warn};
+use tracing::warn;
 
 /// 天工应用状态
 ///
@@ -21,11 +21,11 @@ pub struct TiangongApp {
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
-    /// 进程内插件集合（issue #156 自注册架构）。
+    /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
-    /// 每个插件封装自己的全部能力，在 [`Self::ensure_core`] 创建 core 时传入，
-    /// 由 worker_loop 在 engine 创建/重建时遍历调用 `Plugin::register`。
-    plugins: Mutex<Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>>>,
+    /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例，
+    /// 确保 browser/terminal/fs/index/memory/scheduler 都是 per-Core 独立的。
+    app_handle: tauri::AppHandle,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -44,8 +44,9 @@ pub struct ToolInjection {
     pub refresh_frontend: bool,
 }
 
-impl Default for TiangongApp {
-    fn default() -> Self {
+impl TiangongApp {
+    /// 构造应用状态。`app_handle` 由 setup 阶段传入，供 ensure_core 现场构造插件。
+    pub fn new(app_handle: tauri::AppHandle) -> Self {
         let app_config = load_tiangong_config();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
@@ -59,31 +60,9 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            plugins: Mutex::new(Vec::new()),
+            app_handle,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
-        }
-    }
-}
-
-impl TiangongApp {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册进程内插件（issue #156 自注册架构）。
-    ///
-    /// 由 main.rs setup 阶段调用：插件在 engine 创建/重建时自行向 engine 注册
-    /// 全部能力（页面获取、终端能力、工具覆盖、Prompt 段落等），替代旧的
-    /// `set_page_fetcher` / `register_tool_override` 等逐字段注册。
-    pub fn register_plugin(&self, plugin: std::sync::Arc<dyn tiangong_core::core::Plugin>) {
-        match self.plugins.lock() {
-            Ok(mut guard) => guard.push(plugin),
-            Err(err) => error!(
-                plugin_id = plugin.id(),
-                error = %err,
-                "plugins 锁已污染，插件注册失败，其能力将静默缺失",
-            ),
         }
     }
 
@@ -282,6 +261,9 @@ impl TiangongApp {
         session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
+        // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
+        // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
+        //（普通聊天会话）要么是有效工作区目录。
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             if core.is_running() {
@@ -293,11 +275,23 @@ impl TiangongApp {
             warn!(session_id, "移除已停止的 TiangongCore");
             cores.remove(session_id);
         }
-        let plugins = self
-            .plugins
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
+        // 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
+        // browser/terminal 依赖 Tauri 句柄；fs/index/memory/scheduler 不依赖。
+        let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
+        if let Some(browser) = tiangong_plugin_browser::build_plugin(&self.app_handle) {
+            plugins.push(browser);
+        } else {
+            warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
+        }
+        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&self.app_handle) {
+            plugins.push(terminal);
+        } else {
+            warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
+        }
+        plugins.push(tiangong_plugin_fs::build_plugin());
+        plugins.push(tiangong_plugin_index::build_plugin());
+        plugins.push(tiangong_plugin_memory::build_plugin());
+        plugins.push(tiangong_plugin_scheduler::build_plugin());
         let core =
             TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
         // plugins 已随构造传入 worker_loop，在 engine 创建/重建时遍历调用
