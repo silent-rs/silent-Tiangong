@@ -360,7 +360,6 @@ async fn worker_loop_async(
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
     let mut session_ready_fired = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
-    let mut turn_count: u32 = 0;
 
     // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
     // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
@@ -584,7 +583,6 @@ async fn worker_loop_async(
                     &mcp_targets,
                     &stream_tx,
                     &mut cmd_rx,
-                    memory.handle.as_ref(),
                     team_context.clone(),
                 )
                 .await;
@@ -615,25 +613,7 @@ async fn worker_loop_async(
                     plugin.on_turn_finished(&mut session, turn_start_idx);
                 }
 
-                // turn 完成后触发增强版 Micro 反刍
-                if let Some(handle) = memory.handle.as_ref() {
-                    let enhanced_result = build_enhanced_memory_turn_result(
-                        &session,
-                        turn_start_idx,
-                        &content,
-                        vec![],
-                    );
-                    tokio::task::block_in_place(|| {
-                        handle.run_enhanced_micro_rumination_blocking(enhanced_result);
-                    });
-
-                    // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
-                    turn_count += 1;
-                    if turn_count.is_multiple_of(10) {
-                        handle.run_meta_rumination();
-                        tracing::debug!(turn_count, "Meta 反刍已触发（定期归档）");
-                    }
-                }
+                // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
                 // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
@@ -690,13 +670,6 @@ async fn worker_loop_async(
     drop(stream_tx);
     tokio::task::spawn_blocking(|| ()).await.ok(); // yield，让 forward_handle 有机会 drain
     let _ = forward_handle.join();
-
-    // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
-    // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory.handle.as_ref() {
-        handle.run_meso_rumination(session_id.clone(), "__global__".to_string());
-        tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
-    }
 
     // 会话结束：回调插件生命周期钩子（index 插件在此 finalize Session 索引）。
     // 注意：stream 通道已关闭，钩子内不应再投递流事件。
@@ -830,7 +803,6 @@ async fn execute_turn_async(
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    memory_handle: Option<&tiangong_memory::MemoryHandle>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -842,7 +814,7 @@ async fn execute_turn_async(
     )
     .with_shared_team(team_context, "main".to_string());
     react
-        .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
+        .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;
 }
 
@@ -1158,4 +1130,3 @@ fn attachment_tool_result(
 }
 
 // ── Turn 记忆记录函数（已迁移至 memory::turn_result） ──
-pub(crate) use crate::memory::turn_result::build_enhanced_memory_turn_result;

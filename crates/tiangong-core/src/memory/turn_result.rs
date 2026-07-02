@@ -535,3 +535,57 @@ pub(crate) fn build_enhanced_memory_turn_result(
         turn_messages,
     }
 }
+
+// ── 插件入口：从 session 构建增强反刍结果（含候选评估）──
+
+/// 从会话消息构建增强版轮次结果，并评估本轮所有工具结果生成记忆候选。
+///
+/// 供 memory 插件在 `on_turn_finished` 钩子中调用：传入 `&Session` + `turn_start_idx`
+/// + 用户输入，返回完整的 `EnhancedTurnResult`（含候选、产物、消息）。
+///
+/// 插件拿到结果后调 `handle.run_enhanced_micro_rumination_blocking(result)`。
+///
+/// 候选评估从 session 的 tool result 消息回溯（替代原 ReactEngine 内部的
+/// `submit_memory_candidate` 逐条提交），确保插件无需感知 engine 内部状态。
+pub fn build_turn_memory_result(
+    session: &crate::session::Session,
+    turn_start_idx: usize,
+    user_input: &str,
+) -> tiangong_memory::EnhancedTurnResult {
+    // 从本轮消息中评估记忆候选（替代原 engine 的逐条 submit_memory_candidate）。
+    let messages = session.messages.get(turn_start_idx..).unwrap_or_default();
+    let mut candidates = Vec::new();
+    let mut step_index = 0usize;
+    // 构建 tool_call_id → path 映射（从 assistant 消息的 tool_calls 参数提取），
+    // 供 write_file/replace_in_file 候选关联文件路径。
+    let mut path_by_call_id: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
+    for msg in messages {
+        if msg.role == MessageRole::Assistant {
+            for tc in &msg.tool_calls {
+                if let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str()) {
+                    path_by_call_id.insert(tc.id.as_str(), path);
+                }
+            }
+        }
+    }
+    for msg in messages {
+        if msg.role != MessageRole::Tool {
+            continue;
+        }
+        let tool_name = msg.tool_name.as_deref().unwrap_or("");
+        let success = !msg.tool_result_is_error;
+        let summary = msg.text_content();
+        let file_path = path_by_call_id
+            .get(msg.tool_call_id.as_deref().unwrap_or_default())
+            .copied();
+        if let Some(candidate) =
+            evaluate_tool_result_for_memory(tool_name, success, &summary, file_path, step_index)
+        {
+            candidates.push(candidate);
+            step_index += 1;
+        }
+    }
+
+    build_enhanced_memory_turn_result(session, turn_start_idx, user_input, candidates)
+}
