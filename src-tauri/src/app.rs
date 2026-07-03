@@ -270,6 +270,11 @@ impl TiangongApp {
         // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
         // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
         //（普通聊天会话）要么是有效工作区目录。
+        //
+        // Invariant: 同一 session 的 ensure_core 调用由上层业务串行化（Tauri 命令
+        // 经 session 级互斥 / 前端单消息流保证），不会并发为同一 session 创建 Core。
+        // 因此这里可以在 await 初始化 memory handle 后直接创建并插入。
+        // 如未来允许同 session 并发入口，需要在 await 后增加二次检查。
 
         // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
         {

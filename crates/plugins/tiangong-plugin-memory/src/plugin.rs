@@ -6,14 +6,16 @@
 //! - [`Plugin::on_config_updated`]：config 变化时热更新 memory actor。
 //! - [`ToolOverrideHandler::handle`] 的 `&Session` 参数：按调用获取会话消息。
 //!
-//! ## 共享与隔离模型
+//! ## 实例模型
 //!
-//! `memory_handle` 与 `feedback_tx` 是**跨 session 共享**的全局资源——记忆数据
-//!（知识点、技能、跨会话经验）本就是用户级全局状态，多 session 共享同一
-//! memory actor 单例是正确设计。
+//! `MemoryPlugin` 实例是 **per-Core** 的（每次 ensure_core / with_session 现场构造）。
+//! 但 `memory_handle` 指向**进程级** memory actor 单例——多个 Core 的 MemoryPlugin
+//! 持有同一 handle 的 clone，共享同一记忆数据（知识点、技能、跨会话经验）。
+//! `feedback_tx` 是当前 Core 的反馈通道，不跨 session 共享。
 //!
 //! `session_states` 按 session_id 隔离 per-session 控制流状态（recall_attempted /
-//! turn_count），避免多 session 并发互相覆盖。
+//! turn_count）。per-Core 模型下同一时刻只有一个 session 使用本实例，HashMap
+//! 保留防御性（未来如改回共享实例也不会立即出错）。
 //!
 //! ## 写记忆业务
 //!
@@ -118,7 +120,8 @@ impl Plugin for MemoryPlugin {
     }
 
     fn on_config_updated(&self, _config: &CoreConfig) {
-        // config 变化时热更新 memory actor（reconfigure 模型/embedding/rerank 配置）。
+        // Memory 使用独立 MemoryConfig 文件，CoreConfig 参数仅作为变更触发点。
+        // 这里重新加载 MemoryConfig 并 reconfigure memory actor。
         // 异步执行不阻塞 worker，失败仅告警（记忆功能降级而非中断）。
         if let Some(handle) = &self.memory_handle {
             let options = tiangong_memory::MemoryConfig::load_or_default().to_options();

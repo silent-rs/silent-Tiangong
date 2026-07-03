@@ -112,6 +112,10 @@ impl ServerCoreManager {
     }
 
     async fn ensure_core(&self, requested_session_id: &str) -> Result<(String, Session, bool)> {
+        // Invariant: 同一 session 的 ensure_core 调用由上层串行化（HTTP handler 按
+        // session 单消息流处理），不会并发为同一 session 创建 Core。因此这里可以在
+        // await 初始化 memory handle 后直接创建并插入。如未来允许同 session 并发入口，
+        // 需要在 await 后增加二次检查。
         let (session_id, session) = {
             let mut state = self.state.lock().await;
             let session_id = if state
