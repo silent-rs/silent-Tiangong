@@ -3,7 +3,7 @@
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(test)]
-use tiangong_core::CoreConfig;
+use tiangong_core::core_config::CoreConfig;
 use tiangong_types::now_text;
 
 use crate::{MemoryConfig, MemoryOptions};
@@ -287,12 +287,6 @@ fn memory_config_changed(running: &MemoryConfigSummary, latest: &MemoryConfigSum
     running != latest
 }
 
-#[cfg(test)]
-fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
-    let options = crate::MemoryConfig::load_or_default().to_options();
-    memory_config_summary_from_options(&options)
-}
-
 fn memory_config_summary_from_options(options: &crate::MemoryOptions) -> MemoryConfigSummary {
     MemoryConfigSummary {
         model: options.model.as_ref().map(|model| MemoryModelSummary {
@@ -330,6 +324,10 @@ mod tests {
     use super::*;
 
     static MEMORY_REGISTRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
+        let options = crate::MemoryConfig::load_or_default().to_options();
+        memory_config_summary_from_options(&options)
+    }
 
     fn memory_registry_test_lock() -> std::sync::MutexGuard<'static, ()> {
         MEMORY_REGISTRY_TEST_LOCK
@@ -342,8 +340,8 @@ mod tests {
     fn memory_config_summary_tracks_memory_relevant_fields() {
         let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter();
-        write_memory_test_config(768, crate::config::MemoryVectorMode::EmbeddedLanceDb);
-        let summary = memory_config_summary();
+        write_memory_test_config(768, crate::MemoryVectorMode::EmbeddedLanceDb);
+        let summary = memory_config_summary(&Default::default());
 
         let model = summary.model.as_ref().expect("应包含 memory model 摘要");
         assert_eq!(model.base_url, "http://memory.example");
@@ -357,19 +355,19 @@ mod tests {
         assert_eq!(rerank.model, "rerank-model");
         assert_eq!(summary.vector_mode, "EmbeddedLanceDb");
 
-        write_memory_test_config(1024, crate::config::MemoryVectorMode::EmbeddedLanceDb);
-        write_memory_test_config(1024, crate::config::MemoryVectorMode::EmbeddedLanceDb);
-        let changed_dimension = memory_config_summary();
+        write_memory_test_config(1024, crate::MemoryVectorMode::EmbeddedLanceDb);
+        write_memory_test_config(1024, crate::MemoryVectorMode::EmbeddedLanceDb);
+        let changed_dimension = memory_config_summary(&Default::default());
         assert!(memory_config_changed(&summary, &changed_dimension));
 
-        write_memory_test_config(768, crate::config::MemoryVectorMode::Disabled);
-        write_memory_test_config(768, crate::config::MemoryVectorMode::Disabled);
-        let changed_vector_mode = memory_config_summary();
+        write_memory_test_config(768, crate::MemoryVectorMode::Disabled);
+        write_memory_test_config(768, crate::MemoryVectorMode::Disabled);
+        let changed_vector_mode = memory_config_summary(&Default::default());
         assert!(memory_config_changed(&summary, &changed_vector_mode));
 
-        write_memory_test_config(768, crate::config::MemoryVectorMode::EmbeddedLanceDb);
-        write_memory_test_config(768, crate::config::MemoryVectorMode::EmbeddedLanceDb);
-        let same_memory_config = memory_config_summary();
+        write_memory_test_config(768, crate::MemoryVectorMode::EmbeddedLanceDb);
+        write_memory_test_config(768, crate::MemoryVectorMode::EmbeddedLanceDb);
+        let same_memory_config = memory_config_summary(&Default::default());
         assert!(!memory_config_changed(&summary, &same_memory_config));
         assert!(memory_config_can_update_in_place(
             &summary,
@@ -383,8 +381,6 @@ mod tests {
         let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter_without_vector();
         shutdown_memory_registry_blocking();
-
-        let config = CoreConfig::default();
 
         let options = MemoryConfig::load_or_default().to_options();
         let handle_a = get_or_init_memory_async(options.clone(), 1, crate::ProcessType::Cli)
@@ -444,8 +440,8 @@ mod tests {
             .await
             .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(1024, crate::config::MemoryVectorMode::Disabled);
-        let expected_summary = memory_config_summary();
+        write_memory_test_config(1024, crate::MemoryVectorMode::Disabled);
+        let expected_summary = memory_config_summary(&Default::default());
         let updated_options = MemoryConfig::load_or_default().to_options();
         let updated_handle = get_or_init_memory_async(updated_options, 2, crate::ProcessType::Cli)
             .await
@@ -480,8 +476,8 @@ mod tests {
                 .await
                 .expect("初始 MemoryHandle 应启动成功");
 
-        write_memory_test_config(2048, crate::config::MemoryVectorMode::Disabled);
-        let expected_summary = memory_config_summary();
+        write_memory_test_config(2048, crate::MemoryVectorMode::Disabled);
+        let expected_summary = memory_config_summary(&Default::default());
         let updated_handle = get_or_init_memory_async(
             MemoryConfig::load_or_default().to_options(),
             2,
@@ -515,22 +511,22 @@ mod tests {
         shutdown_memory_registry_blocking();
     }
 
-    fn write_memory_test_config(dimension: usize, vector_mode: crate::config::MemoryVectorMode) {
+    fn write_memory_test_config(dimension: usize, vector_mode: crate::MemoryVectorMode) {
         let config = crate::MemoryConfig {
-            model: Some(crate::config::MemoryLlmConfig {
+            model: Some(crate::MemoryLlmConfig {
                 base_url: "http://memory.example".to_string(),
                 api_key: "secret".to_string(),
                 model: "memory-model".to_string(),
                 ..Default::default()
             }),
-            embedding: Some(crate::config::MemoryEmbeddingConfig {
+            embedding: Some(crate::MemoryEmbeddingConfig {
                 base_url: "http://embed.example".to_string(),
                 api_key: "secret".to_string(),
                 model: "embed-model".to_string(),
                 dimension,
                 ..Default::default()
             }),
-            rerank: Some(crate::config::MemoryRerankConfig {
+            rerank: Some(crate::MemoryRerankConfig {
                 base_url: "http://rerank.example".to_string(),
                 api_key: "secret".to_string(),
                 model: "rerank-model".to_string(),
@@ -572,7 +568,7 @@ mod tests {
         /// 时 Actor 线程析构 lancedb 与进程 C++ 静态析构的竞态（Linux 偶发 SIGSEGV）。
         fn enter_without_vector() -> Self {
             let guard = Self::enter();
-            write_memory_test_config(768, crate::config::MemoryVectorMode::Disabled);
+            write_memory_test_config(768, crate::MemoryVectorMode::Disabled);
             guard
         }
     }
