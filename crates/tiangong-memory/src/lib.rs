@@ -15,8 +15,10 @@
 pub mod command;
 pub mod config;
 pub mod election;
+pub mod gui_api;
 pub mod handle;
 pub mod ipc;
+pub mod registry;
 pub mod types;
 
 mod actor;

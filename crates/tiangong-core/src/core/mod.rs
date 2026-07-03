@@ -33,11 +33,6 @@ pub use crate::index::{
     list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
     workspace_index_exists,
 };
-pub use crate::memory::gui_api::*;
-pub use crate::memory::registry::{
-    get_or_init_memory_handle_async, init_memory_handle_for_process, load_memory_config,
-    save_memory_config, shutdown_memory_registry_blocking,
-};
 
 pub(crate) mod command;
 pub(crate) use command::Command;
@@ -1073,5 +1068,3 @@ fn attachment_tool_result(
         }),
     }
 }
-
-// ── Turn 记忆记录函数（已迁移至 memory::turn_result） ──

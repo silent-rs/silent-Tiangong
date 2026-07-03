@@ -287,11 +287,8 @@ impl TiangongApp {
         }
 
         // 2. 初始化 Memory Handle（async，不持有 cores 锁）。
-        let cfg = self.config.snapshot();
-        let cfg_gen = self.config.generation();
-        let memory_handle = tiangong_core::core::init_memory_handle_for_process(
-            &cfg,
-            cfg_gen,
+        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
+            self.config.generation(),
             tiangong_memory::ProcessType::Gui,
         )
         .await;

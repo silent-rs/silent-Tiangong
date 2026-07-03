@@ -141,16 +141,11 @@ impl ServerCoreManager {
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
 
         // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
-        let memory_handle = {
-            let cfg = self.config.snapshot();
-            let cfg_gen = self.config.generation();
-            tiangong_core::core::init_memory_handle_for_process(
-                &cfg,
-                cfg_gen,
-                tiangong_memory::ProcessType::Server,
-            )
-            .await
-        };
+        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
+            self.config.generation(),
+            tiangong_memory::ProcessType::Server,
+        )
+        .await;
 
         let core = tiangong_core::core::TiangongCore::with_session_for_server(
             self.config.clone(),

@@ -28,7 +28,7 @@ use tiangong_core::core::Plugin;
 
 /// 构造记忆召回插件实例，返回 `Arc<dyn Plugin>` 供入口注册。
 ///
-/// `memory_handle` 由入口层经 `tiangong_core::core::init_memory_handle_for_process`
+/// `memory_handle` 由入口层经 `tiangong_memory::registry::init_memory_handle_for_process`
 /// 初始化后传入。`None` 表示记忆系统未启用（插件降级为「未启用」提示）。
 pub fn build_plugin(memory_handle: Option<tiangong_memory::MemoryHandle>) -> Arc<dyn Plugin> {
     Arc::new(MemoryPlugin::new(memory_handle))

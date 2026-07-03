@@ -9756,6 +9756,7 @@ dependencies = [
  "tempfile",
  "tiangong-config",
  "tiangong-llm",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]

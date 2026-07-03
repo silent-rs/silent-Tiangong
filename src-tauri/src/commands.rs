@@ -3087,7 +3087,7 @@ pub async fn set_models_config(
 /// 获取 Memory 独立模型配置
 #[tauri::command]
 pub async fn get_memory_config(state: State<'_, TiangongApp>) -> Result<MemoryConfigView, String> {
-    let config = tiangong_core::core::load_memory_config();
+    let config = tiangong_memory::registry::load_memory_config();
     state
         .with_state_read(|core_state| {
             Ok(MemoryConfigView::from_memory(
@@ -3111,7 +3111,7 @@ pub async fn set_memory_config(
                 .map_err(anyhow::Error::msg)
         })
         .await?;
-    tiangong_core::core::save_memory_config(memory_config).map_err(|err| err.to_string())?;
+    tiangong_memory::registry::save_memory_config(memory_config).map_err(|err| err.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(())
 }
@@ -3123,9 +3123,9 @@ pub async fn list_memory_nodes(
     status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
-    tiangong_core::core::list_memory_nodes_for_gui(&state.config, query, status, limit, offset)
+    tiangong_memory::gui_api::list_memory_nodes_for_gui(query, status, limit, offset)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3136,9 +3136,9 @@ pub async fn count_memory_nodes(
     query: Option<String>,
     status: Option<String>,
     created_after: Option<String>,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<usize, String> {
-    tiangong_core::core::count_memory_nodes_for_gui(&state.config, query, status, created_after)
+    tiangong_memory::gui_api::count_memory_nodes_for_gui(query, status, created_after)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3147,7 +3147,7 @@ pub async fn count_memory_nodes(
 #[tauri::command]
 pub async fn upsert_manual_memory(
     draft: tiangong_memory::ManualMemoryDraft,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryNode, String> {
     if draft.title.trim().is_empty() {
         return Err("记忆标题不能为空".to_string());
@@ -3155,7 +3155,7 @@ pub async fn upsert_manual_memory(
     if draft.summary.trim().is_empty() {
         return Err("记忆内容不能为空".to_string());
     }
-    tiangong_core::core::upsert_manual_memory_for_gui(&state.config, draft)
+    tiangong_memory::gui_api::upsert_manual_memory_for_gui(draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3165,9 +3165,9 @@ pub async fn upsert_manual_memory(
 pub async fn set_memory_node_status(
     node_id: String,
     status: String,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    tiangong_core::core::set_memory_node_status_for_gui(&state.config, node_id, status)
+    tiangong_memory::gui_api::set_memory_node_status_for_gui(node_id, status)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3176,9 +3176,9 @@ pub async fn set_memory_node_status(
 #[tauri::command]
 pub async fn list_memory_relations(
     node_id: String,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    tiangong_core::core::list_memory_relations_for_gui(&state.config, node_id)
+    tiangong_memory::gui_api::list_memory_relations_for_gui(node_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3187,9 +3187,9 @@ pub async fn list_memory_relations(
 #[tauri::command]
 pub async fn list_memory_relations_batch(
     node_ids: Vec<String>,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    tiangong_core::core::list_memory_relations_batch_for_gui(&state.config, node_ids)
+    tiangong_memory::gui_api::list_memory_relations_batch_for_gui(node_ids)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3198,9 +3198,9 @@ pub async fn list_memory_relations_batch(
 #[tauri::command]
 pub async fn upsert_memory_relation(
     draft: tiangong_memory::MemoryRelationDraft,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<tiangong_memory::MemoryRelation, String> {
-    tiangong_core::core::upsert_memory_relation_for_gui(&state.config, draft)
+    tiangong_memory::gui_api::upsert_memory_relation_for_gui(draft)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3209,9 +3209,9 @@ pub async fn upsert_memory_relation(
 #[tauri::command]
 pub async fn delete_memory_relation(
     relation_id: String,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    tiangong_core::core::delete_memory_relation_for_gui(&state.config, relation_id)
+    tiangong_memory::gui_api::delete_memory_relation_for_gui(relation_id)
         .await
         .map_err(|err| err.to_string())
 }
@@ -3221,9 +3221,9 @@ pub async fn delete_memory_relation(
 pub async fn test_memory_recall(
     query: String,
     limit: Option<usize>,
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_memory::RecallHit>, String> {
-    tiangong_core::core::test_memory_recall_for_gui(&state.config, query, limit)
+    tiangong_memory::gui_api::test_memory_recall_for_gui(query, limit)
         .await
         .map_err(|err| err.to_string())
 }

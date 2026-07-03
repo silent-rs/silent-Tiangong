@@ -61,7 +61,7 @@ pub struct MemoryPlugin {
 
 impl MemoryPlugin {
     /// 构造插件实例。`memory_handle` 由入口层经
-    /// [`tiangong_core::core::init_memory_handle_for_process`] 初始化后传入。
+    /// [`tiangong_memory::registry::init_memory_handle_for_process`] 初始化后传入。
     pub fn new(memory_handle: Option<MemoryHandle>) -> Self {
         Self {
             memory_handle,

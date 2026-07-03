@@ -4,7 +4,7 @@ use anyhow::Result;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::app_state::TiangongState;
-use tiangong_core::core::{TiangongCore, shutdown_memory_registry_blocking};
+use tiangong_core::core::TiangongCore;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 use std::sync::mpsc;
@@ -27,11 +27,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     // CLI 入口是同步函数，用临时 tokio runtime block_on。
     let memory_handle = tokio::runtime::Runtime::new()
         .map(|rt| {
-            let cfg = config.snapshot();
-            let cfg_gen = config.generation();
-            rt.block_on(tiangong_core::core::init_memory_handle_for_process(
-                &cfg,
-                cfg_gen,
+            rt.block_on(tiangong_memory::registry::init_memory_handle_for_process(
+                config.generation(),
                 tiangong_memory::ProcessType::Cli,
             ))
         })
@@ -123,7 +120,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     if !final_session.messages.is_empty() {
         state.save_core_session(final_session);
     }
-    shutdown_memory_registry_blocking();
+    tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())
 }
 

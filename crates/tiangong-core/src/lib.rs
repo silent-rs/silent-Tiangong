@@ -15,7 +15,6 @@ pub mod index;
 pub mod mcp;
 pub mod media;
 pub mod media_archive;
-pub mod memory;
 pub mod model;
 pub mod models_config;
 pub mod observe;

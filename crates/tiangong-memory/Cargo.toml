@@ -21,6 +21,7 @@ hex = { workspace = true }
 tantivy = { workspace = true }
 libc = { workspace = true }
 tiangong-llm = { workspace = true }
+tiangong-types = { workspace = true }
 lancedb = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }

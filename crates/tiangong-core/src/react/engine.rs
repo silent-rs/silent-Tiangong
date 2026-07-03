@@ -1078,10 +1078,7 @@ impl ReactEngine {
                                     "",
                                 )
                             };
-                        crate::memory::turn_result::localize_tool_result_images(
-                            &call.name,
-                            &mut result,
-                        );
+                        crate::tool::media::localize_tool_result_images(&call.name, &mut result);
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };
                     accumulated_usage.accumulate(&tool_llm_usage);
@@ -1104,7 +1101,7 @@ impl ReactEngine {
                         &result.summary,
                     );
                     let tool_media = if result.ok {
-                        crate::memory::turn_result::parse_media_assets_from_tool_result(
+                        crate::tool::media::parse_media_assets_from_tool_result(
                             &call.name,
                             &result.stdout,
                             &result.summary,
