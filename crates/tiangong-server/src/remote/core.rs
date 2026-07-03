@@ -133,12 +133,25 @@ impl ServerCoreManager {
             (session_id, session)
         };
 
-        let mut cores = self.cores.lock().unwrap();
-        if cores.contains_key(&session_id) {
+        // 先检查是否已有 core（不持有锁跨 await）。
+        if self.cores.lock().unwrap().contains_key(&session_id) {
             return Ok((session_id, session, false));
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+
+        // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
+        let memory_handle = {
+            let cfg = self.config.snapshot();
+            let cfg_gen = self.config.generation();
+            tiangong_core::core::init_memory_handle_for_process(
+                &cfg,
+                cfg_gen,
+                tiangong_memory::ProcessType::Server,
+            )
+            .await
+        };
+
         let core = tiangong_core::core::TiangongCore::with_session_for_server(
             self.config.clone(),
             session.clone(),
@@ -146,7 +159,7 @@ impl ServerCoreManager {
             {
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                plugins.extend(tiangong_plugin_memory::default_plugins());
+                plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
@@ -156,8 +169,10 @@ impl ServerCoreManager {
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);
-        cores.insert(actual_session_id.clone(), core);
-        drop(cores);
+        {
+            let mut cores = self.cores.lock().unwrap();
+            cores.insert(actual_session_id.clone(), core);
+        }
 
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 

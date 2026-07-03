@@ -48,15 +48,8 @@ struct MemoryRerankSummary {
     protocol: String,
 }
 
-pub(crate) struct WorkerMemoryContext {
-    pub handle: Option<tiangong_memory::MemoryHandle>,
-    pub process_type: tiangong_memory::ProcessType,
-    pub initial_config_snapshot: Option<std::sync::Arc<crate::core_config::CoreConfig>>,
-    pub initial_config_generation: u64,
-}
-
 /// 获取或初始化全局 Memory Handle（异步）。
-pub(crate) async fn get_or_init_memory_async(
+pub async fn get_or_init_memory_async(
     config: &CoreConfig,
     config_generation: u64,
     process_type: tiangong_memory::ProcessType,
@@ -221,6 +214,18 @@ pub async fn get_or_init_memory_handle_async(
         tiangong_memory::ProcessType::Gui,
     )
     .await
+}
+
+/// 为指定进程类型初始化 Memory Handle（供 GUI / CLI / Server 入口层创建插件前调用）。
+///
+/// 内部经全局 registry 复用同一 actor 单例，config 变化时自动 reconfigure。
+/// 返回的 `MemoryHandle`（内部 Arc）传入 `MemoryPlugin::new` 构造注入。
+pub async fn init_memory_handle_for_process(
+    config: &crate::core_config::CoreConfig,
+    config_generation: u64,
+    process_type: tiangong_memory::ProcessType,
+) -> Option<tiangong_memory::MemoryHandle> {
+    get_or_init_memory_async(config, config_generation, process_type).await
 }
 
 /// 通过 Core 读取 Memory 独立配置，供 GUI 配置页展示。

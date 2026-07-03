@@ -23,10 +23,27 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
     let mut state = TiangongState::load_or_default();
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+    // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
+    // CLI 入口是同步函数，用临时 tokio runtime block_on。
+    let memory_handle = tokio::runtime::Runtime::new()
+        .map(|rt| {
+            let cfg = config.snapshot();
+            let cfg_gen = config.generation();
+            rt.block_on(tiangong_core::core::init_memory_handle_for_process(
+                &cfg,
+                cfg_gen,
+                tiangong_memory::ProcessType::Cli,
+            ))
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "创建临时 tokio runtime 失败，memory 将不可用");
+            None
+        });
+
     let core = TiangongCore::new_for_cli(config.clone(), stream_tx, {
         let mut plugins = tiangong_plugin_fs::default_plugins();
         plugins.extend(tiangong_plugin_index::default_plugins());
-        plugins.extend(tiangong_plugin_memory::default_plugins());
+        plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
         plugins.extend(tiangong_plugin_fetch::default_plugins());
         plugins.extend(tiangong_plugin_command::default_plugins());
         plugins.extend(tiangong_plugin_scheduler::default_plugins());

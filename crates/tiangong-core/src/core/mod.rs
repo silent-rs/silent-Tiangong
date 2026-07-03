@@ -34,10 +34,9 @@ pub use crate::index::{
     workspace_index_exists,
 };
 pub use crate::memory::gui_api::*;
-pub(crate) use crate::memory::registry::{WorkerMemoryContext, get_or_init_memory_async};
 pub use crate::memory::registry::{
-    get_or_init_memory_handle_async, load_memory_config, save_memory_config,
-    shutdown_memory_registry_blocking,
+    get_or_init_memory_handle_async, init_memory_handle_for_process, load_memory_config,
+    save_memory_config, shutdown_memory_registry_blocking,
 };
 
 pub(crate) mod command;
@@ -68,12 +67,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::new_for_process(
-            config,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::new_for_process(config, stream_tx, plugins)
     }
 
     /// 创建 CLI 入口 core。
@@ -82,22 +76,16 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::new_for_process(
-            config,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::new_for_process(config, stream_tx, plugins)
     }
 
     pub fn new_for_process(
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
-        process_type: tiangong_memory::ProcessType,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, process_type, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     /// 从已有 session 创建（CLI 便捷入口）。
@@ -107,13 +95,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     pub fn with_session_for_gui(
@@ -122,13 +104,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Gui,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     pub fn with_session_for_server(
@@ -137,13 +113,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Server,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     /// 从已有 session 创建，并显式标记入口进程类型。
@@ -155,7 +125,6 @@ impl TiangongCore {
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
-        process_type: tiangong_memory::ProcessType,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
@@ -166,8 +135,6 @@ impl TiangongCore {
                 "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
             );
         }
-        let config_snapshot = config.snapshot();
-        let config_generation = config.generation();
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -178,19 +145,12 @@ impl TiangongCore {
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
         let worker = thread::spawn(move || {
-            let memory = WorkerMemoryContext {
-                handle: None,
-                process_type,
-                initial_config_snapshot: Some(config_snapshot),
-                initial_config_generation: config_generation,
-            };
             worker_loop(
                 config,
                 session,
                 stream_tx,
                 cmd_rx,
                 worker_trust_mode,
-                memory,
                 plugins,
                 worker_cmd_tx,
             )
@@ -310,7 +270,6 @@ fn worker_loop(
     external_tx: StdSender<SessionStreamEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
@@ -330,7 +289,6 @@ fn worker_loop(
         external_tx,
         cmd_rx,
         shared_trust_mode,
-        memory,
         plugins,
         cmd_tx,
     ))
@@ -344,22 +302,12 @@ async fn worker_loop_async(
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    mut memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
 
-    // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
-    if let Some(ref cfg) = memory.initial_config_snapshot {
-        memory.handle = get_or_init_memory_async(
-            cfg,
-            memory.initial_config_generation,
-            memory.process_type.clone(),
-        )
-        .await;
-    }
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
@@ -435,8 +383,6 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory.handle =
-                get_or_init_memory_async(&cfg, cfg_gen, memory.process_type.clone()).await;
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -455,13 +401,12 @@ async fn worker_loop_async(
                 None
             };
             for plugin in &plugins {
-                crate::core::plugin::register_plugin(
-                    e,
-                    plugin.clone(),
-                    workspace,
-                    cmd_tx.clone(),
-                    memory.handle.as_ref(),
-                );
+                crate::core::plugin::register_plugin(e, plugin.clone(), workspace, cmd_tx.clone());
+            }
+            // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
+            // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
+            for plugin in &plugins {
+                plugin.on_config_updated(&cfg);
             }
             // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
             // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
@@ -525,14 +470,6 @@ async fn worker_loop_async(
                         plugin.set_workspace(workspace);
                     }
                 }
-                let cfg = config.snapshot();
-                memory.handle = get_or_init_memory_async(
-                    &cfg,
-                    config.generation(),
-                    memory.process_type.clone(),
-                )
-                .await;
-
                 // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
                 if cwd_changed {
                     for plugin in &plugins {

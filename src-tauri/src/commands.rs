@@ -785,7 +785,9 @@ async fn send_message_inner(
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+    let (sid, is_new_core) = state
+        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .await;
     // 发送消息（core 内部会 append 到 core session 并推送 UserMessage 事件）
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
@@ -1606,7 +1608,9 @@ pub async fn edit_and_resend(
 
     // 4. 创建新 core 并发送消息
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
-    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+    let (sid, is_new_core) = state
+        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .await;
 
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
@@ -1659,7 +1663,9 @@ async fn ensure_active_context_core(
         .await?;
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
-    let (sid, is_new_core) = state.ensure_core(&session_id, session_snapshot, stream_tx);
+    let (sid, is_new_core) = state
+        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .await;
     if is_new_core {
         let cancel_flag = get_cancel_flag(state, &sid)?;
         start_stream_consumer(app, stream_rx, cancel_flag);

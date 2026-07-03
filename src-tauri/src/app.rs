@@ -46,6 +46,7 @@ pub struct ToolInjection {
 
 impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let app_config = load_tiangong_config();
         let core_config = app_config.to_core_config();
@@ -130,7 +131,7 @@ impl TiangongApp {
                         use tiangong_types::SessionStreamEvent;
                         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
                         let (_sid, _is_new) =
-                            app_state.ensure_core(&session_id, session, stream_tx);
+                            app_state.ensure_core(&session_id, session, stream_tx).await;
                         // 启动 stream_consumer 同步 worker session → TiangongState session
                         let cancel_flag = {
                             let cores = app_state.lock_cores();
@@ -260,7 +261,7 @@ impl TiangongApp {
     ///
     /// 如果 core 已存在（多轮对话），直接复用。
     /// stream_tx 只在创建新 core 时使用。
-    pub fn ensure_core(
+    pub async fn ensure_core(
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
@@ -269,19 +270,33 @@ impl TiangongApp {
         // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
         // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
         //（普通聊天会话）要么是有效工作区目录。
-        let mut cores = self.lock_cores();
-        if let Some(core) = cores.get(session_id) {
-            if core.is_running() {
-                let _ = core.deliver(AgentInputKind::reload_config());
-                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
-                core.set_trust_mode(session.trust_mode);
-                return (session_id.to_string(), false); // 已存在，复用
+
+        // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
+        {
+            let mut cores = self.lock_cores();
+            if let Some(core) = cores.get(session_id) {
+                if core.is_running() {
+                    let _ = core.deliver(AgentInputKind::reload_config());
+                    let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
+                    core.set_trust_mode(session.trust_mode);
+                    return (session_id.to_string(), false); // 已存在，复用
+                }
+                warn!(session_id, "移除已停止的 TiangongCore");
+                cores.remove(session_id);
             }
-            warn!(session_id, "移除已停止的 TiangongCore");
-            cores.remove(session_id);
         }
-        // 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
-        // browser/terminal 依赖 Tauri 句柄；fs/index/memory/scheduler 不依赖。
+
+        // 2. 初始化 Memory Handle（async，不持有 cores 锁）。
+        let cfg = self.config.snapshot();
+        let cfg_gen = self.config.generation();
+        let memory_handle = tiangong_core::core::init_memory_handle_for_process(
+            &cfg,
+            cfg_gen,
+            tiangong_memory::ProcessType::Gui,
+        )
+        .await;
+
+        // 3. 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
         let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
         let Some(app_handle) = self.app_handle.get() else {
             panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
@@ -298,14 +313,17 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
-        plugins.push(tiangong_plugin_memory::build_plugin());
+        plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
+
+        // 4. 创建 Core 并插入（重新拿锁）。
         let core =
             TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
-        // plugins 已随构造传入 worker_loop，在 engine 创建/重建时遍历调用
-        // Plugin::register 完成能力注入（issue #156），无需在此逐字段灌入。
         let id = core.session_id().to_string();
-        cores.insert(id.clone(), core);
+        {
+            let mut cores = self.lock_cores();
+            cores.insert(id.clone(), core);
+        }
         (id, true) // 新创建
     }
 

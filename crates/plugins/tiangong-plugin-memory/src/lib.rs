@@ -27,11 +27,16 @@ use std::sync::Arc;
 use tiangong_core::core::Plugin;
 
 /// 构造记忆召回插件实例，返回 `Arc<dyn Plugin>` 供入口注册。
-pub fn build_plugin() -> Arc<dyn Plugin> {
-    Arc::new(MemoryPlugin::new())
+///
+/// `memory_handle` 由入口层经 `tiangong_core::core::init_memory_handle_for_process`
+/// 初始化后传入。`None` 表示记忆系统未启用（插件降级为「未启用」提示）。
+pub fn build_plugin(memory_handle: Option<tiangong_memory::MemoryHandle>) -> Arc<dyn Plugin> {
+    Arc::new(MemoryPlugin::new(memory_handle))
 }
 
-/// 构造默认的记忆召回插件列表，供各入口（CLI / Server / Tauri）注入 core 时使用。
-pub fn default_plugins() -> Vec<Arc<dyn Plugin>> {
-    vec![build_plugin()]
+/// 构造默认的记忆召回插件列表，供各入口（CLI / Server）注入 core 时使用。
+pub fn default_plugins(
+    memory_handle: Option<tiangong_memory::MemoryHandle>,
+) -> Vec<Arc<dyn Plugin>> {
+    vec![build_plugin(memory_handle)]
 }
