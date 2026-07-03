@@ -47,7 +47,7 @@ impl SpeechToTextPlugin {
             return Box::pin(async { missing_arg("file_path 不能为空") });
         }
 
-        let Some(models) = self.models_config() else {
+        let Some(endpoint) = self.endpoint() else {
             return Box::pin(async { media_unavailable() });
         };
 
@@ -80,9 +80,11 @@ impl SpeechToTextPlugin {
         Box::pin(async move {
             let started = Instant::now();
             let tool_name = TOOL_SPEECH_TO_TEXT.to_string();
-            let result =
-                tiangong_core::media::transcribe_audio(&models, audio_data, mime_type, language)
-                    .await;
+            let resolved = endpoint.to_resolved();
+            let result = tiangong_core::media::transcribe_audio_with(
+                &resolved, audio_data, mime_type, language,
+            )
+            .await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {

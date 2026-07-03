@@ -316,7 +316,8 @@ impl TiangongApp {
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
         // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-        let llm = &self.config.snapshot().llm;
+        let cfg = self.config.snapshot();
+        let llm = &cfg.llm;
         if llm.has_image_generation() {
             plugins.push(tiangong_plugin_generate_image::build_plugin());
         }

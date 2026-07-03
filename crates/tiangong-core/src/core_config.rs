@@ -58,6 +58,24 @@ impl Default for ModelEndpoint {
     }
 }
 
+impl ModelEndpoint {
+    /// 转为 [`ResolvedModel`]，供 media facade 等需要路由解析结果的调用方使用。
+    ///
+    /// `ModelEndpoint` 与 `ResolvedModel` 字段一一对应（仅 `provider` 缺失，置空），
+    /// 避免插件每次调用都走 `ModelsConfig::resolve_for_capability` 的完整路由解析。
+    pub fn to_resolved(&self) -> crate::models_config::ResolvedModel {
+        crate::models_config::ResolvedModel {
+            provider: String::new(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            timeout_ms: self.timeout_ms,
+            protocol: self.protocol,
+            model: self.model.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
 /// LLM 配置 — TiangongCore 所需的模型端点
 ///
 /// 扁平结构，直接描述端点，无需解析 Provider/Model/Routing。

@@ -47,7 +47,7 @@ impl TextToSpeechPlugin {
             return Box::pin(async { missing_arg("text 不能为空") });
         }
 
-        let Some(models) = self.models_config() else {
+        let Some(endpoint) = self.endpoint() else {
             return Box::pin(async { media_unavailable() });
         };
 
@@ -61,8 +61,10 @@ impl TextToSpeechPlugin {
         Box::pin(async move {
             let started = Instant::now();
             let tool_name = TOOL_TEXT_TO_SPEECH.to_string();
+            let resolved = endpoint.to_resolved();
             let result =
-                tiangong_core::media::synthesize_speech(&models, text, voice, speed, None).await;
+                tiangong_core::media::synthesize_speech_with(&resolved, text, voice, speed, None)
+                    .await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {

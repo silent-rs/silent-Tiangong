@@ -47,7 +47,7 @@ impl GenerateImagePlugin {
             return Box::pin(async { missing_arg("prompt 不能为空") });
         }
 
-        let Some(models) = self.models_config() else {
+        let Some(endpoint) = self.endpoint() else {
             return Box::pin(async { media_unavailable() });
         };
 
@@ -72,8 +72,10 @@ impl GenerateImagePlugin {
         Box::pin(async move {
             let started = Instant::now();
             let tool_name = TOOL_GENERATE_IMAGE.to_string();
+            let resolved = endpoint.to_resolved();
             let result =
-                tiangong_core::media::generate_image(&models, prompt, width, height, style).await;
+                tiangong_core::media::generate_image_with(&resolved, prompt, width, height, style)
+                    .await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {

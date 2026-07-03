@@ -47,7 +47,7 @@ impl GenerateVideoPlugin {
             return Box::pin(async { missing_arg("prompt 不能为空") });
         }
 
-        let Some(models) = self.models_config() else {
+        let Some(endpoint) = self.endpoint() else {
             return Box::pin(async { media_unavailable() });
         };
 
@@ -66,8 +66,10 @@ impl GenerateVideoPlugin {
         Box::pin(async move {
             let started = Instant::now();
             let tool_name = TOOL_GENERATE_VIDEO.to_string();
+            let resolved = endpoint.to_resolved();
             let result =
-                tiangong_core::media::generate_video(&models, prompt, duration, resolution).await;
+                tiangong_core::media::generate_video_with(&resolved, prompt, duration, resolution)
+                    .await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {

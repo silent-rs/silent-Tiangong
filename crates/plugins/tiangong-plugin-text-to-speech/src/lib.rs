@@ -1,9 +1,8 @@
 //! 文本转语音进程内插件（`text_to_speech`）。
 //!
-//! 通过 OpenAI 兼容 API（tts-1 等）合成语音。[`ModelsConfig`] 在 engine 创建时
-//! 由 [`Plugin::register`] 注入，插件据此在 [`Plugin::tool_specs`] 中按能力是否配置
-//! 决定是否向 LLM 暴露工具。判定逻辑（LlmConfig 优先、ModelsConfig 回退）与原 core
-//! `inject_enhanced_tools` 完全一致，迁移自 `runtime.rs`。
+//! 通过 OpenAI 兼容 API（tts-1 等）合成语音。入口层根据 [`LlmConfig`] 的 TTS 能力
+//! 配置决定是否注册本插件；注册后，[`Plugin::register`] 从 engine 取出对应的
+//! [`ModelEndpoint`] 私有持有，供 handler 直接调用后端（免去每次路由解析）。
 
 pub mod handler;
 pub mod plugin;
