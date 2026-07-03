@@ -2,6 +2,8 @@
 
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(test)]
+use tiangong_core::CoreConfig;
 use tiangong_types::now_text;
 
 use crate::{MemoryConfig, MemoryOptions};
