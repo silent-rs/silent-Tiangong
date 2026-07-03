@@ -171,11 +171,6 @@ impl CoreConfig {
     pub fn builder() -> CoreConfigBuilder {
         CoreConfigBuilder::default()
     }
-
-    /// 根据 CoreConfig 生成 Memory 启动参数。
-    pub fn to_memory_options(&self) -> tiangong_memory::MemoryOptions {
-        tiangong_memory::MemoryConfig::load_or_default().to_options()
-    }
 }
 
 /// CoreConfig 构建器

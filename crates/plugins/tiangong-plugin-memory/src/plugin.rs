@@ -57,6 +57,10 @@ pub struct MemoryPlugin {
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     /// per-session 控制流状态（recall_attempted + turn_count），按 session_id 隔离。
     session_states: RwLock<HashMap<String, SessionState>>,
+    /// 当前 session_id（经 on_session_ready 设置，供 prompt_sections 读 Session 级 injection）。
+    session_id: RwLock<Option<String>>,
+    /// 当前 workspace 路径（经 set_workspace 设置，供 prompt_sections 读 Workspace 级 injection）。
+    workspace: RwLock<Option<std::path::PathBuf>>,
 }
 
 impl MemoryPlugin {
@@ -67,6 +71,8 @@ impl MemoryPlugin {
             memory_handle,
             feedback_tx: RwLock::new(None),
             session_states: RwLock::new(HashMap::new()),
+            session_id: RwLock::new(None),
+            workspace: RwLock::new(None),
         }
     }
 
@@ -99,17 +105,23 @@ impl Plugin for MemoryPlugin {
         "memory"
     }
 
+    fn set_workspace(&self, workspace: &std::path::Path) {
+        if let Ok(mut guard) = self.workspace.write() {
+            *guard = Some(workspace.to_path_buf());
+        }
+    }
+
     fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
         if let Ok(mut guard) = self.feedback_tx.write() {
             *guard = Some(tx);
         }
     }
 
-    fn on_config_updated(&self, config: &CoreConfig) {
+    fn on_config_updated(&self, _config: &CoreConfig) {
         // config 变化时热更新 memory actor（reconfigure 模型/embedding/rerank 配置）。
         // 异步执行不阻塞 worker，失败仅告警（记忆功能降级而非中断）。
         if let Some(handle) = &self.memory_handle {
-            let options = config.to_memory_options();
+            let options = tiangong_memory::MemoryConfig::load_or_default().to_options();
             let handle = handle.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle.reconfigure(options).await {
@@ -120,6 +132,12 @@ impl Plugin for MemoryPlugin {
     }
 
     // register 留空：工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集。
+
+    fn on_session_ready(&self, session: &mut Session) {
+        if let Ok(mut guard) = self.session_id.write() {
+            *guard = Some(session.id.clone());
+        }
+    }
 
     fn on_turn_started(&self, session: &mut Session, _turn_start_idx: usize) {
         // 每轮重置该 session 的「已回忆」标志，允许新的一轮重新调用 recall_memory。
@@ -180,6 +198,19 @@ impl Plugin for MemoryPlugin {
     }
 }
 
-// recall_memory 无独立 Prompt 段落（使用指引已内嵌在工具 description 中），
-// 采用默认空实现即可。
-impl PromptSectionProvider for MemoryPlugin {}
+/// 注入三级 Memory Injection（Profile / Workspace / Session 的 agent.md），
+/// 作为 system prompt 段落。替代原 core 的 build_user_context（load_injection_sync）。
+impl PromptSectionProvider for MemoryPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        let session_id = self.session_id.read().ok().and_then(|g| g.clone());
+        let workspace = self.workspace.read().ok().and_then(|g| g.clone());
+        let workspace_id = workspace
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+        tiangong_memory::load_injection_sync(
+            session_id.as_deref().unwrap_or(""),
+            workspace_id.as_deref(),
+        )
+    }
+}

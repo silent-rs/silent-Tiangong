@@ -458,7 +458,6 @@ impl ReactEngine {
             let base_config = crate::prompt::SystemPromptConfig::from_configs(
                 self.engine.models_config(),
                 self.engine.agent_config(),
-                &child_session.id,
             );
             let team_roster = format_team_roster(team_arc);
             let ctx = crate::prompt::SubAgentPromptContext::new(
