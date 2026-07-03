@@ -51,16 +51,18 @@ impl GenerateImagePlugin {
             return Box::pin(async { media_unavailable() });
         };
 
-        let width = call
-            .arguments
-            .get("width")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        let height = call
-            .arguments
-            .get("height")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
+        let width = match parse_optional_u32_arg(call, "width") {
+            Ok(v) => v.unwrap_or(0),
+            Err(msg) => {
+                return Box::pin(async move { invalid_arg(&msg) });
+            }
+        };
+        let height = match parse_optional_u32_arg(call, "height") {
+            Ok(v) => v.unwrap_or(0),
+            Err(msg) => {
+                return Box::pin(async move { invalid_arg(&msg) });
+            }
+        };
         let style = call
             .arguments
             .get("style")
@@ -195,5 +197,30 @@ fn media_failure(
             exit_code: 1,
             summary,
         }),
+    }
+}
+
+/// 解析可选的 u32 参数，避免 `u64 as u32` 静默截断。
+///
+/// 返回 `Ok(None)` 表示参数未提供；`Ok(Some(v))` 表示有效值；`Err(msg)` 表示
+/// 值超出 u32 范围，msg 为错误描述。
+fn parse_optional_u32_arg(call: &ToolCall, name: &str) -> Result<Option<u32>, String> {
+    match call.arguments.get(name).and_then(|v| v.as_u64()) {
+        None => Ok(None),
+        Some(v) => u32::try_from(v)
+            .map(Some)
+            .map_err(|_| format!("参数 {name} 超出 u32 范围（{v}）")),
+    }
+}
+
+/// 无效参数时的错误结果。
+fn invalid_arg(message: &str) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: message.to_string(),
+        stdout: String::new(),
+        stderr: message.to_string(),
+        exit_code: 1,
+        execution: None,
     }
 }

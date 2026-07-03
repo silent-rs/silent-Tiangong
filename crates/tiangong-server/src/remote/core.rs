@@ -156,7 +156,8 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
-                let llm = &self.config.snapshot().llm;
+                let cfg = self.config.snapshot();
+                let llm = &cfg.llm;
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
                 // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。

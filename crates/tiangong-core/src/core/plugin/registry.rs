@@ -9,14 +9,14 @@
 //! 1. `set_workspace` — 注入会话工作目录；
 //! 2. `set_trust_mode` — 注入共享信任模式引用；
 //! 3. `set_feedback_tx` — 注入状态反馈通道（复用 worker 命令通道）；
-//! 4. `Plugin::register` — 让插件初始化内部状态（如据 engine 配置设置能力开关），
-//!    并注入外部能力（PageFetcher / TerminalProvider 等）。**必须在收集 tool_specs 前**，
-//!    因为部分插件（如媒体插件）在 `register` 内据配置决定 `tool_specs()` 的返回值；
-//! 5. 收集 `tool_specs` 并注册为 `ToolSpecProvider`（懒求值，供后续独立收集）；
+//! 4. `Plugin::register` — 让插件初始化内部状态或注入 engine 依赖
+//!    （如克隆 models_config、注入 PageFetcher / TerminalProvider 等）。必须在收集
+//!    tool_specs 前，确保插件已就绪；
+//! 5. 收集 `tool_specs` 并注册为 `ToolSpecProvider`；
 //! 6. 按 spec.name 逐个注册 `ToolOverrideHandler`（基于 register 之后的正确 specs）；
 //! 7. 注册 `PromptSectionProvider`。
 //!
-//! 步骤 4-6 的顺序至关重要：`register` 先执行，确保插件内部状态（能力开关等）就绪，
+//! 步骤 4-6 的顺序至关重要：`register` 先执行，确保插件内部状态就绪，
 //! 此后 `tool_specs()` 读到的才是最新值，override handler 才会注册到正确的工具名上。
 //!
 //! engine 仅暴露原子能力槽位（`register_tool_*`），全部编排逻辑集中在此。
@@ -62,9 +62,8 @@ pub(crate) fn register_plugin(
     // 3) 注入状态反馈通道（复用 worker 命令通道，clone 给插件持有）
     plugin.set_feedback_tx(PluginFeedbackTx::from(cmd_tx));
 
-    // 4) 让插件初始化内部状态并注入外部能力。
-    //    必须在收集 tool_specs 前：媒体插件等在 register 内据 engine 配置设置能力开关，
-    //    tool_specs() 的返回值依赖此开关。
+    // 4) 让插件初始化内部状态并注入外部能力（如克隆 models_config 供 handler 使用）。
+    //    必须在收集 tool_specs 前，确保插件已就绪。
     plugin.register(engine);
 
     // 5) 工具规格：register 之后收集，确保读到插件初始化后的最新值。

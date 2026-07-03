@@ -51,39 +51,25 @@ impl SpeechToTextPlugin {
             return Box::pin(async { media_unavailable() });
         };
 
-        // 读取音频文件与 MIME 推断在同步阶段完成（文件 IO 同步即可）。
-        let audio_data = match std::fs::read(&file_path) {
-            Ok(data) => data,
-            Err(e) => {
-                let summary = format!("读取音频文件失败：{e}");
-                let stderr = e.to_string();
+        // 安全限制：仅允许读取 ~/.tiangong/media/ 目录内的音频文件。
+        // 校验扩展名为已知音频类型，canonicalize 后确认未逃逸媒体目录。
+        // 与 GUI 设计一致（GUI 由前端录音、后端保存到固定媒体目录，不接受任意路径）。
+        let (audio_data, mime_type) = match read_media_audio(&file_path) {
+            Ok(v) => v,
+            Err(message) => {
+                let msg = message.to_string();
                 return Box::pin(async move {
                     ToolResult {
                         ok: false,
-                        summary,
+                        summary: msg.clone(),
                         stdout: String::new(),
-                        stderr,
+                        stderr: msg,
                         exit_code: 1,
                         execution: None,
                     }
                 });
             }
         };
-
-        // 根据扩展名推断 MIME 类型
-        let mime_type = match std::path::Path::new(&file_path)
-            .extension()
-            .and_then(|e| e.to_str())
-        {
-            Some("mp3") => "audio/mpeg",
-            Some("wav") => "audio/wav",
-            Some("ogg") | Some("oga") => "audio/ogg",
-            Some("flac") => "audio/flac",
-            Some("webm") => "audio/webm",
-            Some("m4a") => "audio/mp4",
-            _ => "audio/mpeg",
-        }
-        .to_string();
 
         let language = call
             .arguments
@@ -146,7 +132,7 @@ impl ToolSpecProvider for SpeechToTextPlugin {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "file_path": { "type": "string", "description": "音频文件路径" },
+                    "file_path": { "type": "string", "description": "音频文件路径（仅允许 ~/.tiangong/media 目录下的音频文件）" },
                     "language": { "type": "string", "description": "语言提示（可选）" }
                 },
                 "required": ["file_path"]
@@ -169,6 +155,42 @@ impl ToolOverrideHandler for SpeechToTextPlugin {
 }
 
 // ── ToolResult 构造辅助 ──────────────────────────────────────────
+
+/// 读取 `~/.tiangong/media/` 目录下的音频文件，返回 (音频数据, MIME 类型)。
+///
+/// 安全限制：
+/// - 仅允许读取媒体目录内的文件（canonicalize 后确认父级为媒体目录，防 `..` 逃逸）；
+/// - 校验扩展名为已知音频类型；
+/// - 与 GUI 设计一致（GUI 由前端录音保存到固定媒体目录，不接受任意路径）。
+fn read_media_audio(file_path: &str) -> Result<(Vec<u8>, String), &'static str> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let media_dir = std::path::PathBuf::from(home)
+        .join(".tiangong")
+        .join("media");
+
+    let mime_type = match std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("ogg") | Some("oga") => "audio/ogg",
+        Some("flac") => "audio/flac",
+        Some("webm") => "audio/webm",
+        Some("m4a") => "audio/mp4",
+        _ => return Err("不支持的音频格式（仅支持 mp3/wav/ogg/flac/webm/m4a）"),
+    };
+
+    let canonical = std::fs::canonicalize(file_path).map_err(|_| "文件不存在或无法访问")?;
+    let canonical_media =
+        std::fs::canonicalize(&media_dir).map_err(|_| "媒体目录 ~/.tiangong/media 不存在")?;
+    if !canonical.starts_with(&canonical_media) {
+        return Err("音频文件必须在 ~/.tiangong/media 目录下");
+    }
+
+    let data = std::fs::read(&canonical).map_err(|_| "读取音频文件失败")?;
+    Ok((data, mime_type.to_string()))
+}
 
 /// 缺少必填参数时的错误结果。
 fn missing_arg(message: &str) -> ToolResult {

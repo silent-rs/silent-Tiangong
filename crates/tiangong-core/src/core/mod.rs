@@ -387,10 +387,10 @@ async fn worker_loop_async(
             // 根治「注册竞态窗口」。
             //
             // register_plugin 内部先注入上下文（workspace/trust_mode/feedback_tx），
-            // 再调 Plugin::register 初始化插件内部状态（如媒体插件据配置设置能力开关），
-            // 最后才收集 tool_specs 并注册 override handler——保证 handler 注册到
-            // 正确的工具名上。返回的 specs 累积到 plugin_specs，供后续 MCP 冲突避让
-            // 与 tools 合并使用。
+            // 再调 Plugin::register 初始化插件内部状态或注入 engine 依赖（如克隆
+            // models_config），最后才收集 tool_specs 并注册 override handler——保证
+            // handler 注册到正确的工具名上。返回的 specs 累积到 plugin_specs，供后续
+            // MCP 冲突避让与 tools 合并使用。
             let e = engine.as_ref().unwrap();
             let workspace = std::path::Path::new(&session.cwd);
             let workspace = if workspace.is_dir() {

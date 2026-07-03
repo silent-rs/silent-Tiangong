@@ -57,72 +57,75 @@ impl TextToSpeechPlugin {
             .and_then(|v| v.as_str())
             .map(String::from);
         let speed = call.arguments.get("speed").and_then(|v| v.as_f64());
-        let output_path = call
-            .arguments
-            .get("output_path")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                let dir = std::path::PathBuf::from(home)
-                    .join(".tiangong")
-                    .join("media");
-                let _ = std::fs::create_dir_all(&dir);
-                dir.join(format!("tts_{}.mp3", scru128::new()))
-                    .to_string_lossy()
-                    .to_string()
-            });
 
         Box::pin(async move {
             let started = Instant::now();
             let tool_name = TOOL_TEXT_TO_SPEECH.to_string();
-            let result = tiangong_core::media::synthesize_speech(
-                &models,
-                text,
-                voice,
-                speed,
-                Some("mp3".to_string()),
-            )
-            .await;
+            let result =
+                tiangong_core::media::synthesize_speech(&models, text, voice, speed, None).await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {
-                Ok(output) => match std::fs::write(&output_path, &output.response.audio) {
-                    Ok(_) => {
-                        let duration_info = output
-                            .response
-                            .duration
-                            .map(|d| format!("，时长 {:.1}s", d))
-                            .unwrap_or_default();
-                        let summary = format!(
-                            "语音合成成功（模型：{}{}）",
-                            output.resolved.model, duration_info
-                        );
-                        ToolResult {
-                            ok: true,
-                            summary: summary.clone(),
-                            stdout: format!("音频文件已保存到：{output_path}"),
-                            stderr: String::new(),
-                            exit_code: 0,
-                            execution: Some(ToolExecutionRecord {
-                                tool_name,
-                                args: vec![],
-                                duration_ms,
-                                ok: true,
-                                exit_code: 0,
-                                summary,
-                            }),
+                Ok(output) => {
+                    // 扩展名由后端返回的 mime_type 决定，与 GUI command 保持一致。
+                    let ext = match output.response.mime_type.as_str() {
+                        "audio/mpeg" => "mp3",
+                        "audio/wav" => "wav",
+                        "audio/opus" => "opus",
+                        "audio/aac" => "aac",
+                        "audio/flac" => "flac",
+                        _ => "mp3",
+                    };
+                    let file_path = match media_file_path("tts", ext) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return ToolResult {
+                                ok: false,
+                                summary: format!("音频文件路径构造失败：{e}"),
+                                stdout: String::new(),
+                                stderr: e.to_string(),
+                                exit_code: 1,
+                                execution: None,
+                            };
                         }
+                    };
+                    match std::fs::write(&file_path, &output.response.audio) {
+                        Ok(_) => {
+                            let duration_info = output
+                                .response
+                                .duration
+                                .map(|d| format!("，时长 {:.1}s", d))
+                                .unwrap_or_default();
+                            let summary = format!(
+                                "语音合成成功（模型：{}{}）",
+                                output.resolved.model, duration_info
+                            );
+                            ToolResult {
+                                ok: true,
+                                summary: summary.clone(),
+                                stdout: format!("音频文件已保存到：{}", file_path.display()),
+                                stderr: String::new(),
+                                exit_code: 0,
+                                execution: Some(ToolExecutionRecord {
+                                    tool_name,
+                                    args: vec![],
+                                    duration_ms,
+                                    ok: true,
+                                    exit_code: 0,
+                                    summary,
+                                }),
+                            }
+                        }
+                        Err(e) => ToolResult {
+                            ok: false,
+                            summary: format!("音频文件写入失败：{e}"),
+                            stdout: String::new(),
+                            stderr: e.to_string(),
+                            exit_code: 1,
+                            execution: None,
+                        },
                     }
-                    Err(e) => ToolResult {
-                        ok: false,
-                        summary: format!("音频文件写入失败：{e}"),
-                        stdout: String::new(),
-                        stderr: e.to_string(),
-                        exit_code: 1,
-                        execution: None,
-                    },
-                },
+                }
                 Err(err) => media_failure(&tool_name, "语音合成", &err, duration_ms),
             }
         })
@@ -139,8 +142,7 @@ impl ToolSpecProvider for TextToSpeechPlugin {
                 "properties": {
                     "text": { "type": "string", "description": "待合成文本" },
                     "voice": { "type": "string", "description": "音色（可选）" },
-                    "speed": { "type": "number", "description": "语速（可选）" },
-                    "output_path": { "type": "string", "description": "输出路径（可选）" }
+                    "speed": { "type": "number", "description": "语速（可选）" }
                 },
                 "required": ["text"]
             }),
@@ -162,6 +164,19 @@ impl ToolOverrideHandler for TextToSpeechPlugin {
 }
 
 // ── ToolResult 构造辅助 ──────────────────────────────────────────
+
+/// 构造 `~/.tiangong/media/<prefix>_<scru128>.<ext>` 媒体文件路径，并确保目录存在。
+///
+/// 与 GUI command 的媒体存储策略保持一致：固定目录、随机文件名，不暴露自定义路径。
+fn media_file_path(prefix: &str, ext: &str) -> std::io::Result<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let dir = std::path::PathBuf::from(home)
+        .join(".tiangong")
+        .join("media");
+    std::fs::create_dir_all(&dir)?;
+    let file_name = format!("{}_{}.{}", prefix, scru128::new(), ext);
+    Ok(dir.join(file_name))
+}
 
 /// 缺少必填参数时的错误结果。
 fn missing_arg(message: &str) -> ToolResult {
