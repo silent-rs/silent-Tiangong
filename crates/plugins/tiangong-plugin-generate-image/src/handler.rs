@@ -110,9 +110,6 @@ impl GenerateImagePlugin {
 
 impl ToolSpecProvider for GenerateImagePlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        if !self.has_image() {
-            return Vec::new();
-        }
         vec![ToolSpec {
             name: TOOL_GENERATE_IMAGE.to_string(),
             description: "根据文字描述生成图片。每次调用会等待生成完成后返回图片路径。\

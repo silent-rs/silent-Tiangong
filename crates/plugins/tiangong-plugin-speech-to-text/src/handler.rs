@@ -140,9 +140,6 @@ impl SpeechToTextPlugin {
 
 impl ToolSpecProvider for SpeechToTextPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        if !self.has_stt() {
-            return Vec::new();
-        }
         vec![ToolSpec {
             name: TOOL_SPEECH_TO_TEXT.to_string(),
             description: "将音频文件转录为文本".to_string(),

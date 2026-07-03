@@ -125,6 +125,26 @@ impl LlmConfig {
     pub fn is_valid(&self) -> bool {
         !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
     }
+
+    /// 图片生成能力是否已配置。
+    pub fn has_image_generation(&self) -> bool {
+        self.image_generation.is_some()
+    }
+
+    /// 视频生成能力是否已配置。
+    pub fn has_video_generation(&self) -> bool {
+        self.video_generation.is_some()
+    }
+
+    /// 语音合成（TTS）能力是否已配置。
+    pub fn has_tts(&self) -> bool {
+        self.tts.is_some()
+    }
+
+    /// 语音识别（STT）能力是否已配置。
+    pub fn has_stt(&self) -> bool {
+        self.stt.is_some()
+    }
 }
 
 /// TiangongCore 运行所需的最小配置

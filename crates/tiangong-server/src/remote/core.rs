@@ -156,12 +156,22 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
+                let llm = &self.config.snapshot().llm;
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                plugins.extend(tiangong_plugin_generate_image::default_plugins());
-                plugins.extend(tiangong_plugin_generate_video::default_plugins());
-                plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
-                plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
+                // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
+                if llm.has_image_generation() {
+                    plugins.extend(tiangong_plugin_generate_image::default_plugins());
+                }
+                if llm.has_video_generation() {
+                    plugins.extend(tiangong_plugin_generate_video::default_plugins());
+                }
+                if llm.has_tts() {
+                    plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
+                }
+                if llm.has_stt() {
+                    plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
+                }
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());

@@ -143,9 +143,6 @@ impl GenerateVideoPlugin {
 
 impl ToolSpecProvider for GenerateVideoPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        if !self.has_video() {
-            return Vec::new();
-        }
         vec![ToolSpec {
             name: TOOL_GENERATE_VIDEO.to_string(),
             description: "根据文字描述生成视频，成功时返回结构化视频资源".to_string(),

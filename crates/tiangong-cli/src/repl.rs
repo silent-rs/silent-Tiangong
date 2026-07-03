@@ -18,6 +18,9 @@ use crate::output;
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
     let app_config = load_tiangong_config();
     let core_config = app_config.to_core_config();
+    // 媒体插件注册需要读取能力配置；core_config 随后会 move 进 CoreConfigProvider，
+    // 故在此先克隆 llm 供 plugins 构造使用。
+    let llm_config = core_config.llm.clone();
 
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 
@@ -38,12 +41,22 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         });
 
     let core = TiangongCore::new_for_cli(config.clone(), stream_tx, {
+        let llm = &llm_config;
         let mut plugins = tiangong_plugin_fs::default_plugins();
         plugins.extend(tiangong_plugin_index::default_plugins());
-        plugins.extend(tiangong_plugin_generate_image::default_plugins());
-        plugins.extend(tiangong_plugin_generate_video::default_plugins());
-        plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
-        plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
+        // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
+        if llm.has_image_generation() {
+            plugins.extend(tiangong_plugin_generate_image::default_plugins());
+        }
+        if llm.has_video_generation() {
+            plugins.extend(tiangong_plugin_generate_video::default_plugins());
+        }
+        if llm.has_tts() {
+            plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
+        }
+        if llm.has_stt() {
+            plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
+        }
         plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
         plugins.extend(tiangong_plugin_fetch::default_plugins());
         plugins.extend(tiangong_plugin_command::default_plugins());

@@ -1,8 +1,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use crate::core_config::LlmConfig;
-use crate::models_config::{ModelCapability, ModelsConfig, ResolvedModel, RoutingSlot};
+use crate::models_config::{ModelCapability, ModelsConfig, ResolvedModel};
 
 pub struct MediaCallOutput<T> {
     pub resolved: ResolvedModel,
@@ -231,34 +230,4 @@ pub async fn list_tts_voices(
         .await
         .map_err(|_| MediaServiceError::Timeout("获取音色列表超时".to_string()))?
         .map_err(|e| MediaServiceError::Backend(e.to_string()))
-}
-
-// ── 能力可用性判断 ──────────────────────────────────────────────────
-//
-// 统一封装「某类媒体能力是否已配置」的判定逻辑，供插件在 register() 时据此决定
-// 是否向 LLM 暴露对应工具规格。判定优先级与原 runtime::inject_enhanced_tools 一致：
-// 先看新路径 LlmConfig（core_config），缺失时回退到旧路径 ModelsConfig（routing slot）。
-
-/// 图片生成能力是否已配置。
-pub fn has_image_generation(models: &ModelsConfig, llm: Option<&LlmConfig>) -> bool {
-    llm.map(|c| c.image_generation.is_some())
-        .unwrap_or_else(|| models.resolve_slot(RoutingSlot::ImageGeneration).is_some())
-}
-
-/// 视频生成能力是否已配置。
-pub fn has_video_generation(models: &ModelsConfig, llm: Option<&LlmConfig>) -> bool {
-    llm.map(|c| c.video_generation.is_some())
-        .unwrap_or_else(|| models.resolve_slot(RoutingSlot::VideoGeneration).is_some())
-}
-
-/// 语音合成（TTS）能力是否已配置。
-pub fn has_tts(models: &ModelsConfig, llm: Option<&LlmConfig>) -> bool {
-    llm.map(|c| c.tts.is_some())
-        .unwrap_or_else(|| models.resolve_slot(RoutingSlot::Tts).is_some())
-}
-
-/// 语音识别（STT）能力是否已配置。
-pub fn has_stt(models: &ModelsConfig, llm: Option<&LlmConfig>) -> bool {
-    llm.map(|c| c.stt.is_some())
-        .unwrap_or_else(|| models.resolve_slot(RoutingSlot::Stt).is_some())
 }

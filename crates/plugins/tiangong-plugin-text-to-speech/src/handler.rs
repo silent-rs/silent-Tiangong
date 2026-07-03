@@ -131,9 +131,6 @@ impl TextToSpeechPlugin {
 
 impl ToolSpecProvider for TextToSpeechPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        if !self.has_tts() {
-            return Vec::new();
-        }
         vec![ToolSpec {
             name: TOOL_TEXT_TO_SPEECH.to_string(),
             description: "将文本转换为语音音频文件".to_string(),
