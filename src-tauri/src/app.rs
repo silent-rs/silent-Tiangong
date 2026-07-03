@@ -8,7 +8,7 @@ use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{error, warn};
+use tracing::warn;
 
 /// 天工应用状态
 ///
@@ -21,11 +21,11 @@ pub struct TiangongApp {
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
-    /// 进程内插件集合（issue #156 自注册架构）。
+    /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
-    /// 每个插件封装自己的全部能力，在 [`Self::ensure_core`] 创建 core 时传入，
-    /// 由 worker_loop 在 engine 创建/重建时遍历调用 `Plugin::register`。
-    plugins: Mutex<Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>>>,
+    /// 由 setup 阶段经 [`Self::set_app_handle`] 注入（builder 链构造时尚无 handle）。
+    /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例。
+    app_handle: std::sync::OnceLock<tauri::AppHandle>,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -44,8 +44,10 @@ pub struct ToolInjection {
     pub refresh_frontend: bool,
 }
 
-impl Default for TiangongApp {
-    fn default() -> Self {
+impl TiangongApp {
+    /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         let app_config = load_tiangong_config();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
@@ -59,32 +61,15 @@ impl Default for TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             embedded_server: Mutex::new(None),
-            plugins: Mutex::new(Vec::new()),
+            app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
     }
-}
 
-impl TiangongApp {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 注册进程内插件（issue #156 自注册架构）。
-    ///
-    /// 由 main.rs setup 阶段调用：插件在 engine 创建/重建时自行向 engine 注册
-    /// 全部能力（页面获取、终端能力、工具覆盖、Prompt 段落等），替代旧的
-    /// `set_page_fetcher` / `register_tool_override` 等逐字段注册。
-    pub fn register_plugin(&self, plugin: std::sync::Arc<dyn tiangong_core::core::Plugin>) {
-        match self.plugins.lock() {
-            Ok(mut guard) => guard.push(plugin),
-            Err(err) => error!(
-                plugin_id = plugin.id(),
-                error = %err,
-                "plugins 锁已污染，插件注册失败，其能力将静默缺失",
-            ),
-        }
+    /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        let _ = self.app_handle.set(handle);
     }
 
     /// 获取工具消息注入 channel sender。
@@ -146,7 +131,7 @@ impl TiangongApp {
                         use tiangong_types::SessionStreamEvent;
                         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
                         let (_sid, _is_new) =
-                            app_state.ensure_core(&session_id, session, stream_tx);
+                            app_state.ensure_core(&session_id, session, stream_tx).await;
                         // 启动 stream_consumer 同步 worker session → TiangongState session
                         let cancel_flag = {
                             let cores = app_state.lock_cores();
@@ -276,34 +261,71 @@ impl TiangongApp {
     ///
     /// 如果 core 已存在（多轮对话），直接复用。
     /// stream_tx 只在创建新 core 时使用。
-    pub fn ensure_core(
+    pub async fn ensure_core(
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
-        let mut cores = self.lock_cores();
-        if let Some(core) = cores.get(session_id) {
-            if core.is_running() {
-                let _ = core.deliver(AgentInputKind::reload_config());
-                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
-                core.set_trust_mode(session.trust_mode);
-                return (session_id.to_string(), false); // 已存在，复用
+        // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
+        // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
+        //（普通聊天会话）要么是有效工作区目录。
+        //
+        // Invariant: 同一 session 的 ensure_core 调用由上层业务串行化（Tauri 命令
+        // 经 session 级互斥 / 前端单消息流保证），不会并发为同一 session 创建 Core。
+        // 因此这里可以在 await 初始化 memory handle 后直接创建并插入。
+        // 如未来允许同 session 并发入口，需要在 await 后增加二次检查。
+
+        // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
+        {
+            let mut cores = self.lock_cores();
+            if let Some(core) = cores.get(session_id) {
+                if core.is_running() {
+                    let _ = core.deliver(AgentInputKind::reload_config());
+                    let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
+                    core.set_trust_mode(session.trust_mode);
+                    return (session_id.to_string(), false); // 已存在，复用
+                }
+                warn!(session_id, "移除已停止的 TiangongCore");
+                cores.remove(session_id);
             }
-            warn!(session_id, "移除已停止的 TiangongCore");
-            cores.remove(session_id);
         }
-        let plugins = self
-            .plugins
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
+
+        // 2. 初始化 Memory Handle（async，不持有 cores 锁）。
+        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
+            self.config.generation(),
+            tiangong_memory::ProcessType::Gui,
+        )
+        .await;
+
+        // 3. 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
+        let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
+        let Some(app_handle) = self.app_handle.get() else {
+            panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
+        };
+        if let Some(browser) = tiangong_plugin_browser::build_plugin(app_handle) {
+            plugins.push(browser);
+        } else {
+            warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
+        }
+        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(app_handle) {
+            plugins.push(terminal);
+        } else {
+            warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
+        }
+        plugins.push(tiangong_plugin_fs::build_plugin());
+        plugins.push(tiangong_plugin_index::build_plugin());
+        plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
+        plugins.push(tiangong_plugin_scheduler::build_plugin());
+
+        // 4. 创建 Core 并插入（重新拿锁）。
         let core =
             TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
-        // plugins 已随构造传入 worker_loop，在 engine 创建/重建时遍历调用
-        // Plugin::register 完成能力注入（issue #156），无需在此逐字段灌入。
         let id = core.session_id().to_string();
-        cores.insert(id.clone(), core);
+        {
+            let mut cores = self.lock_cores();
+            cores.insert(id.clone(), core);
+        }
         (id, true) // 新创建
     }
 

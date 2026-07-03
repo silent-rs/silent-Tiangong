@@ -11,6 +11,7 @@
 
 pub mod background_task;
 pub mod common;
+pub(crate) mod media;
 pub use common::{session_workspace_root, set_session_cwd};
 
 use serde::{Deserialize, Serialize};

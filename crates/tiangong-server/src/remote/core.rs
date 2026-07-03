@@ -112,6 +112,10 @@ impl ServerCoreManager {
     }
 
     async fn ensure_core(&self, requested_session_id: &str) -> Result<(String, Session, bool)> {
+        // Invariant: 同一 session 的 ensure_core 调用由上层串行化（HTTP handler 按
+        // session 单消息流处理），不会并发为同一 session 创建 Core。因此这里可以在
+        // await 初始化 memory handle 后直接创建并插入。如未来允许同 session 并发入口，
+        // 需要在 await 后增加二次检查。
         let (session_id, session) = {
             let mut state = self.state.lock().await;
             let session_id = if state
@@ -133,12 +137,20 @@ impl ServerCoreManager {
             (session_id, session)
         };
 
-        let mut cores = self.cores.lock().unwrap();
-        if cores.contains_key(&session_id) {
+        // 先检查是否已有 core（不持有锁跨 await）。
+        if self.cores.lock().unwrap().contains_key(&session_id) {
             return Ok((session_id, session, false));
         }
 
         let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+
+        // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
+        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
+            self.config.generation(),
+            tiangong_memory::ProcessType::Server,
+        )
+        .await;
+
         let core = tiangong_core::core::TiangongCore::with_session_for_server(
             self.config.clone(),
             session.clone(),
@@ -146,6 +158,7 @@ impl ServerCoreManager {
             {
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
+                plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
@@ -155,8 +168,10 @@ impl ServerCoreManager {
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);
-        cores.insert(actual_session_id.clone(), core);
-        drop(cores);
+        {
+            let mut cores = self.cores.lock().unwrap();
+            cores.insert(actual_session_id.clone(), core);
+        }
 
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 

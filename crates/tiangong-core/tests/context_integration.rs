@@ -67,7 +67,6 @@ fn rebuild_session(session: &mut Session) {
     let config = SystemPromptConfig::from_configs(
         &tiangong_core::models_config::ModelsConfig::default(),
         &AgentConfig::default(),
-        &session.id,
     );
     session.rebuild_system_prompt(&config);
 }
@@ -110,8 +109,10 @@ fn new_path_system_prompt_includes_all_sections() {
         skills_text: "已安装的 Skills：\n- test-skill (id=s1): 测试技能".to_string(),
         media_text: "已配置的多媒体能力：\n- 图片生成：已配置".to_string(),
         team_text: "团队协作能力".to_string(),
-        user_context: vec!["用户偏好深色主题".to_string()],
-        plugin_sections: vec!["插件规则段：终端交互引导".to_string()],
+        plugin_sections: vec![
+            "插件规则段：终端交互引导".to_string(),
+            "用户偏好深色主题".to_string(),
+        ],
         attachment_rules_text: String::new(),
     };
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
@@ -129,7 +130,7 @@ fn new_path_system_prompt_includes_all_sections() {
     assert!(text.contains("test-skill"), "应包含 Skills 列表");
     assert!(text.contains("图片生成"), "应包含多媒体能力");
     assert!(text.contains("团队协作"), "应包含团队协作");
-    // 用户上下文
+    // 用户上下文（经 plugin_sections 注入，含 memory injection）
     assert!(text.contains("用户偏好深色主题"), "应包含用户上下文");
 }
 

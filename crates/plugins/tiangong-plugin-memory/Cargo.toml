@@ -1,0 +1,15 @@
+[package]
+name = "tiangong-plugin-memory"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+tiangong-core = { workspace = true }
+tiangong-memory = { workspace = true }
+tiangong-types = { workspace = true }
+scru128 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

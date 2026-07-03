@@ -157,6 +157,9 @@ impl ReactEngine {
                                 &self.engine,
                             );
                         }
+                        Some(Command::EmitStreamEvent(ev)) => {
+                            let _ = stream_tx.send(ev);
+                        }
                     }
                 }
                 chunk_opt = chunk_rx.recv() => {

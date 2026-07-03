@@ -8,19 +8,33 @@ license = "Apache-2.0"
 default = []
 
 [dependencies]
-tokio = { workspace = true, features = ["sync", "time", "fs", "rt", "net", "io-util", "macros"] }
+tokio = { workspace = true, features = [
+    "sync",
+    "time",
+    "fs",
+    "rt",
+    "net",
+    "io-util",
+    "macros",
+] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
+chrono = { workspace = true, default-features = false, features = [
+    "std",
+    "clock",
+] }
 scru128 = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { workspace = true, features = [
+    "bundled-sqlcipher-vendored-openssl",
+] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tantivy = { workspace = true }
 libc = { workspace = true }
 tiangong-llm = { workspace = true }
+tiangong-types = { workspace = true }
 lancedb = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
@@ -31,3 +45,4 @@ futures-util = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 tiangong-config = { workspace = true }
+tiangong-core = { workspace = true }

@@ -155,16 +155,13 @@ impl ReactEngine {
         user_input: &str,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        memory_handle: Option<&tiangong_memory::MemoryHandle>,
     ) -> TokenUsage {
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
-        let mut memory_recall_attempted = false;
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
-        let mut memory_candidate_count = 0usize;
         let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
         let mut last_browser_check: Option<std::time::Instant> = None;
 
@@ -182,7 +179,7 @@ impl ReactEngine {
                 .unwrap_or(false);
             if routed {
                 let sub_result = self
-                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle)
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
                     .await;
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
@@ -220,11 +217,9 @@ impl ReactEngine {
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
-                        memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
-                        memory_candidate_count = 0;
                     }
                     PendingCommandEffect::None => {}
                 }
@@ -323,7 +318,6 @@ impl ReactEngine {
                                         media,
                                     });
                                     user_message_injected_during_stream = true;
-                        memory_candidate_count = 0;
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
                                     session.cwd = cwd;
@@ -353,6 +347,9 @@ impl ReactEngine {
                                         stream_tx,
                                         &self.engine,
                                     );
+                                }
+                                Some(Command::EmitStreamEvent(ev)) => {
+                                    let _ = stream_tx.send(ev);
                                 }
                             }
                         }
@@ -525,11 +522,9 @@ impl ReactEngine {
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                     if user_message_injected_during_stream {
-                        memory_recall_attempted = false;
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
-                        memory_candidate_count = 0;
                         continue 'react_loop;
                     }
 
@@ -627,7 +622,6 @@ impl ReactEngine {
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
-                            memory_recall_attempted = false;
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
@@ -918,7 +912,6 @@ impl ReactEngine {
                                             content: content.clone(),
                                             media: msg_media,
                                         });
-                                        memory_candidate_count = 0;
                                     }
                                     Some(Command::UpdateCwd { cwd }) => {
                                         session.cwd = cwd;
@@ -945,6 +938,9 @@ impl ReactEngine {
                                             stream_tx,
                                             &self.engine,
                                         );
+                                    }
+                                    Some(Command::EmitStreamEvent(ev)) => {
+                                        let _ = stream_tx.send(ev);
                                     }
                                 }
                             };
@@ -1060,32 +1056,7 @@ impl ReactEngine {
 
                     let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                         let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                            if call.name == "recall_memory" {
-                                if memory_recall_attempted {
-                                    // 本轮已完成回忆：补一次 Start→Done，让状态栏有清晰过渡
-                                    let _ = stream_tx.send(StreamEvent::MemoryRecallStart {
-                                        strategy: "skip".to_string(),
-                                    });
-                                    let _ = stream_tx.send(StreamEvent::MemoryRecallDone {
-                                        hit_count: 0,
-                                        hits: Vec::new(),
-                                    });
-                                    let (result, usage, allow_context) =
-                                        crate::core::duplicate_memory_recall_tool_result();
-                                    (result, usage, allow_context, "recall_memory")
-                                } else {
-                                    memory_recall_attempted = true;
-                                    let (result, usage, allow_context) =
-                                        crate::core::execute_memory_recall_tool(
-                                            call,
-                                            memory_handle,
-                                            session,
-                                            stream_tx,
-                                        )
-                                        .await;
-                                    (result, usage, allow_context, "recall_memory")
-                                }
-                            } else if call.name == "analyze_attachment" {
+                            if call.name == "analyze_attachment" {
                                 let (result, usage) = crate::core::execute_attachment_analysis_tool(
                                     call,
                                     &self.engine,
@@ -1099,7 +1070,7 @@ impl ReactEngine {
                                             call,
                                             &self.mcp_targets,
                                             &self.engine.agent_config().mcp,
-                                            &session.id,
+                                            session,
                                         )
                                         .await,
                                     tiangong_types::TokenUsage::default(),
@@ -1107,10 +1078,7 @@ impl ReactEngine {
                                     "",
                                 )
                             };
-                        crate::memory::turn_result::localize_tool_result_images(
-                            &call.name,
-                            &mut result,
-                        );
+                        crate::tool::media::localize_tool_result_images(&call.name, &mut result);
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };
                     accumulated_usage.accumulate(&tool_llm_usage);
@@ -1133,7 +1101,7 @@ impl ReactEngine {
                         &result.summary,
                     );
                     let tool_media = if result.ok {
-                        crate::memory::turn_result::parse_media_assets_from_tool_result(
+                        crate::tool::media::parse_media_assets_from_tool_result(
                             &call.name,
                             &result.stdout,
                             &result.summary,
@@ -1201,42 +1169,19 @@ impl ReactEngine {
                         need_failure_recovery_prompt = true;
                     }
 
-                    // 记忆候选评估
                     if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
                         return accumulated_usage;
                     }
-                    if let Some(handle) = memory_handle {
-                        let file_path =
-                            if matches!(call.name.as_str(), "write_file" | "replace_in_file") {
-                                call.arguments.as_object().and_then(|o| {
-                                    o.get("path").and_then(|v| v.as_str()).map(String::from)
-                                })
-                            } else {
-                                None
-                            };
-                        if let Some(candidate) =
-                            crate::memory::turn_result::evaluate_tool_result_for_memory(
-                                &call.name,
-                                result.ok,
-                                &result.summary,
-                                file_path.as_deref(),
-                                memory_candidate_count,
-                            )
-                        {
-                            handle.submit_memory_candidate(candidate);
-                            memory_candidate_count += 1;
-                        }
-                    }
+                    // 记忆候选评估已下沉到 memory 插件 on_turn_finished（从 session 重建候选，
+                    // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
-                            memory_recall_attempted = false;
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
-                            memory_candidate_count = 0;
                             session.persist_to_disk();
                             continue 'react_loop;
                         }
@@ -1269,7 +1214,6 @@ impl ReactEngine {
                         .iter()
                         .any(|tool| tool.name == "recall_memory")
                     {
-                        memory_recall_attempted = false;
                         "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
                     } else {
                         ""
@@ -1291,7 +1235,7 @@ impl ReactEngine {
 
                 // 执行有待处理任务的 Sub Agent
                 let sub_result = self
-                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx, memory_handle)
+                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
                     .await;
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
@@ -1358,11 +1302,9 @@ impl ReactEngine {
                         }),
                     );
                     session.persist_to_disk();
-                    memory_recall_attempted = false;
                     successful_tool_call_keys.clear();
                     failed_tool_call_keys.clear();
                     failed_tool_names.clear();
-                    memory_candidate_count = 0;
                     continue 'outer;
                 }
                 SummaryPhaseResult::Cancelled(usage) => {

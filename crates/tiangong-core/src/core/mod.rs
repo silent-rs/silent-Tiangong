@@ -33,15 +33,6 @@ pub use crate::index::{
     list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
     workspace_index_exists,
 };
-pub use crate::memory::gui_api::*;
-pub(crate) use crate::memory::recall::{
-    duplicate_memory_recall_tool_result, execute_memory_recall_tool, inject_memory_recall_tool,
-};
-pub(crate) use crate::memory::registry::{WorkerMemoryContext, get_or_init_memory_async};
-pub use crate::memory::registry::{
-    get_or_init_memory_handle_async, load_memory_config, save_memory_config,
-    shutdown_memory_registry_blocking,
-};
 
 pub(crate) mod command;
 pub(crate) use command::Command;
@@ -71,12 +62,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::new_for_process(
-            config,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::new_for_process(config, stream_tx, plugins)
     }
 
     /// 创建 CLI 入口 core。
@@ -85,22 +71,16 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::new_for_process(
-            config,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::new_for_process(config, stream_tx, plugins)
     }
 
     pub fn new_for_process(
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
-        process_type: tiangong_memory::ProcessType,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, process_type, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     /// 从已有 session 创建（CLI 便捷入口）。
@@ -110,13 +90,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Cli,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     pub fn with_session_for_gui(
@@ -125,13 +99,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Gui,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     pub fn with_session_for_server(
@@ -140,13 +108,7 @@ impl TiangongCore {
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        Self::with_session_for_process(
-            config,
-            session,
-            stream_tx,
-            tiangong_memory::ProcessType::Server,
-            plugins,
-        )
+        Self::with_session_for_process(config, session, stream_tx, plugins)
     }
 
     /// 从已有 session 创建，并显式标记入口进程类型。
@@ -158,11 +120,16 @@ impl TiangongCore {
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
-        process_type: tiangong_memory::ProcessType,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
-        let config_snapshot = config.snapshot();
-        let config_generation = config.generation();
+        // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
+        // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
+        if !session.cwd.is_empty() && !std::path::Path::new(&session.cwd).is_dir() {
+            tracing::warn!(
+                cwd = %session.cwd,
+                "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
+            );
+        }
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -173,19 +140,12 @@ impl TiangongCore {
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
         let worker = thread::spawn(move || {
-            let memory = WorkerMemoryContext {
-                handle: None,
-                process_type,
-                initial_config_snapshot: Some(config_snapshot),
-                initial_config_generation: config_generation,
-            };
             worker_loop(
                 config,
                 session,
                 stream_tx,
                 cmd_rx,
                 worker_trust_mode,
-                memory,
                 plugins,
                 worker_cmd_tx,
             )
@@ -305,7 +265,6 @@ fn worker_loop(
     external_tx: StdSender<SessionStreamEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
@@ -325,7 +284,6 @@ fn worker_loop(
         external_tx,
         cmd_rx,
         shared_trust_mode,
-        memory,
         plugins,
         cmd_tx,
     ))
@@ -339,22 +297,12 @@ async fn worker_loop_async(
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
-    mut memory: WorkerMemoryContext,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
 
-    // 在 Worker 的 tokio runtime 中异步初始化 Memory Handle
-    if let Some(ref cfg) = memory.initial_config_snapshot {
-        memory.handle = get_or_init_memory_async(
-            cfg,
-            memory.initial_config_generation,
-            memory.process_type.clone(),
-        )
-        .await;
-    }
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
     let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
@@ -363,7 +311,6 @@ async fn worker_loop_async(
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
     let mut session_ready_fired = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
-    let mut turn_count: u32 = 0;
 
     // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
     // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
@@ -431,8 +378,6 @@ async fn worker_loop_async(
         let cfg_gen = config.generation();
         if engine.is_none() || cfg_gen != last_cfg_gen {
             let cfg = config.snapshot();
-            memory.handle =
-                get_or_init_memory_async(&cfg, cfg_gen, memory.process_type.clone()).await;
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
@@ -453,6 +398,11 @@ async fn worker_loop_async(
             for plugin in &plugins {
                 crate::core::plugin::register_plugin(e, plugin.clone(), workspace, cmd_tx.clone());
             }
+            // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
+            // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
+            for plugin in &plugins {
+                plugin.on_config_updated(&cfg);
+            }
             // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
             // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
             let plugin_specs = e.collect_plugin_tool_specs();
@@ -471,11 +421,8 @@ async fn worker_loop_async(
             // 合并 plugin 注册的工具规格
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools, e);
-            // index_search 工具规格改由 index 插件通过 tool_specs() 声明，
+            // recall_memory 工具规格改由 memory 插件通过 tool_specs() 声明，
             // 随 plugin_specs 自动汇入（且自动进入 reserved_names，MCP 同名工具会被避让）。
-            if memory.handle.is_some() {
-                inject_memory_recall_tool(&mut new_tools);
-            }
             tools = new_tools;
             mcp_targets = new_mcp_targets;
             if !team_restored {
@@ -518,14 +465,6 @@ async fn worker_loop_async(
                         plugin.set_workspace(workspace);
                     }
                 }
-                let cfg = config.snapshot();
-                memory.handle = get_or_init_memory_async(
-                    &cfg,
-                    config.generation(),
-                    memory.process_type.clone(),
-                )
-                .await;
-
                 // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
                 if cwd_changed {
                     for plugin in &plugins {
@@ -584,7 +523,6 @@ async fn worker_loop_async(
                     &mcp_targets,
                     &stream_tx,
                     &mut cmd_rx,
-                    memory.handle.as_ref(),
                     team_context.clone(),
                 )
                 .await;
@@ -615,25 +553,7 @@ async fn worker_loop_async(
                     plugin.on_turn_finished(&mut session, turn_start_idx);
                 }
 
-                // turn 完成后触发增强版 Micro 反刍
-                if let Some(handle) = memory.handle.as_ref() {
-                    let enhanced_result = build_enhanced_memory_turn_result(
-                        &session,
-                        turn_start_idx,
-                        &content,
-                        vec![],
-                    );
-                    tokio::task::block_in_place(|| {
-                        handle.run_enhanced_micro_rumination_blocking(enhanced_result);
-                    });
-
-                    // 每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
-                    turn_count += 1;
-                    if turn_count.is_multiple_of(10) {
-                        handle.run_meta_rumination();
-                        tracing::debug!(turn_count, "Meta 反刍已触发（定期归档）");
-                    }
-                }
+                // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
                 // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
@@ -672,6 +592,9 @@ async fn worker_loop_async(
                 );
                 let _ = stream_tx.send(StreamEvent::Done { usage: None });
             }
+            Command::EmitStreamEvent(ev) => {
+                let _ = stream_tx.send(ev);
+            }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
                 continue;
@@ -687,13 +610,6 @@ async fn worker_loop_async(
     drop(stream_tx);
     tokio::task::spawn_blocking(|| ()).await.ok(); // yield，让 forward_handle 有机会 drain
     let _ = forward_handle.join();
-
-    // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）
-    // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）
-    if let Some(handle) = memory.handle.as_ref() {
-        handle.run_meso_rumination(session_id.clone(), "__global__".to_string());
-        tracing::info!(session_id = %session_id, "Meso 反刍已触发（会话结束）");
-    }
 
     // 会话结束：回调插件生命周期钩子（index 插件在此 finalize Session 索引）。
     // 注意：stream 通道已关闭，钩子内不应再投递流事件。
@@ -827,7 +743,6 @@ async fn execute_turn_async(
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    memory_handle: Option<&tiangong_memory::MemoryHandle>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -839,7 +754,7 @@ async fn execute_turn_async(
     )
     .with_shared_team(team_context, "main".to_string());
     react
-        .execute_turn(session, user_input, stream_tx, cmd_rx, memory_handle)
+        .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;
 }
 
@@ -1153,6 +1068,3 @@ fn attachment_tool_result(
         }),
     }
 }
-
-// ── Turn 记忆记录函数（已迁移至 memory::turn_result） ──
-pub(crate) use crate::memory::turn_result::build_enhanced_memory_turn_result;

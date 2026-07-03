@@ -108,6 +108,9 @@ pub(super) fn drain_pending_commands_async(
             Command::ResetContext => {
                 crate::core::reset_context_for_session(session, stream_tx, engine);
             }
+            Command::EmitStreamEvent(ev) => {
+                let _ = stream_tx.send(ev);
+            }
         }
     }
 

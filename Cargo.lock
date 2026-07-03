@@ -9590,6 +9590,7 @@ dependencies = [
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
  "tiangong-plugin-index",
+ "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-terminal",
  "tiangong-scheduler",
@@ -9611,10 +9612,12 @@ dependencies = [
  "termimad",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-memory",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-index",
+ "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-types",
  "tokio",
@@ -9659,7 +9662,6 @@ dependencies = [
  "tempfile",
  "tiangong-llm",
  "tiangong-media",
- "tiangong-memory",
  "tiangong-types",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -9752,7 +9754,9 @@ dependencies = [
  "tantivy",
  "tempfile",
  "tiangong-config",
+ "tiangong-core",
  "tiangong-llm",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]
@@ -9824,6 +9828,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-memory"
+version = "0.11.0"
+dependencies = [
+ "scru128",
+ "serde",
+ "serde_json",
+ "tiangong-core",
+ "tiangong-memory",
+ "tiangong-types",
  "tokio",
  "tracing",
 ]
@@ -9904,10 +9922,12 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",
+ "tiangong-memory",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-index",
+ "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-scheduler",
  "tiangong-types",

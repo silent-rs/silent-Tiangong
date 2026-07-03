@@ -344,7 +344,6 @@ impl ReactEngine {
         max_concurrent: usize,
         token_budget: usize,
         sub_max_rounds: usize,
-        memory_handle: Option<&tiangong_memory::MemoryHandle>,
     ) -> bool {
         let remaining_slots = max_concurrent.saturating_sub(active_sub_agents.len());
         if remaining_slots == 0 {
@@ -459,7 +458,6 @@ impl ReactEngine {
             let base_config = crate::prompt::SystemPromptConfig::from_configs(
                 self.engine.models_config(),
                 self.engine.agent_config(),
-                &child_session.id,
             );
             let team_roster = format_team_roster(team_arc);
             let ctx = crate::prompt::SubAgentPromptContext::new(
@@ -468,17 +466,9 @@ impl ReactEngine {
                 &team_roster,
             );
             child_session.system_prompt_message = Some(ctx.build(&child_session));
-
-            // 条件性赋予能力：根据 tools 列表决定是否共享 memory_handle。
-            // index_manager 不再需要透传——子 engine 经 ReactEngine::new(self.engine.clone())
-            // 共享父 engine 的 RuntimeEngine，自动继承其 tool_overrides（含 index 插件
-            // 注册的 handler），故子 agent 的 index_search 能直接路由到同一插件实例。
-            let has_memory = tool_names.iter().any(|n| n == "recall_memory");
-            let sub_memory = if has_memory {
-                memory_handle.cloned()
-            } else {
-                None
-            };
+            // 子 agent 经 ReactEngine::new(self.engine.clone()) 共享父 engine 的
+            // RuntimeEngine，自动继承其 tool_overrides（含 memory/index 等插件注册的
+            // handler），故子 agent 的 recall_memory / index_search 能直接路由到同一插件实例。
 
             let (sub_cmd_tx, mut sub_cmd_rx) = tokio_mpsc::unbounded_channel();
             let _ = sub_cmd_tx.send(Command::Message {
@@ -513,13 +503,7 @@ impl ReactEngine {
                 );
                 let _keep_sub_cmd_tx_alive = sub_cmd_tx;
                 let usage = sub_engine
-                    .execute_turn(
-                        &mut child_session,
-                        "",
-                        &child_stream_tx,
-                        &mut sub_cmd_rx,
-                        sub_memory.as_ref(),
-                    )
+                    .execute_turn(&mut child_session, "", &child_stream_tx, &mut sub_cmd_rx)
                     .await;
                 drop(child_stream_tx);
                 let _ = forwarder.join();
@@ -544,7 +528,6 @@ impl ReactEngine {
         parent_session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        memory_handle: Option<&tiangong_memory::MemoryHandle>,
     ) -> SubAgentDrainResult {
         let mut result = SubAgentDrainResult::default();
 
@@ -579,7 +562,6 @@ impl ReactEngine {
             max_concurrent,
             token_budget,
             sub_max_rounds,
-            memory_handle,
         ) {
             result.ran = true;
         }
@@ -610,7 +592,6 @@ impl ReactEngine {
                             max_concurrent,
                             token_budget,
                             sub_max_rounds,
-                            memory_handle,
                         ) {
                             result.ran = true;
                         }
@@ -627,7 +608,6 @@ impl ReactEngine {
                             max_concurrent,
                             token_budget,
                             sub_max_rounds,
-                            memory_handle,
                         )
                     {
                         result.ran = true;
@@ -721,6 +701,9 @@ impl ReactEngine {
                                 &tool_name,
                                 &payload,
                             );
+                        }
+                        Some(Command::EmitStreamEvent(ev)) => {
+                            let _ = stream_tx.send(ev);
                         }
                         None => break,
                     }

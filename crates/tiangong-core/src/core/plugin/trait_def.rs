@@ -77,6 +77,16 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
 
+    // ── 配置与生命周期钩子 ──
+
+    /// Core 配置快照更新后调用。
+    ///
+    /// worker_loop 在首次 build engine 以及 config generation 变化导致 engine rebuild 时
+    /// 调用（在 [`Plugin::register`] 之后、[`Plugin::on_engine_rebuilt`] 之前）。插件可
+    /// 按需读取模型配置、memory 配置、MCP 配置等，执行热更新（如 reconfigure memory actor）。
+    /// 默认实现为空。
+    fn on_config_updated(&self, _config: &crate::core_config::CoreConfig) {}
+
     // ── 生命周期钩子 ──
     //
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理

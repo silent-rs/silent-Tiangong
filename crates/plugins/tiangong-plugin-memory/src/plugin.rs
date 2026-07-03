@@ -1,0 +1,219 @@
+//! 记忆召回插件：结构体定义与生命周期钩子实现。
+//!
+//! [`MemoryPlugin`] 通过以下方式获取运行时上下文：
+//! - **构造注入**：`memory_handle` 在插件构造时由入口层注入（入口层负责 init）。
+//! - [`Plugin::set_feedback_tx`]：注入状态反馈通道（用于转发流事件）。
+//! - [`Plugin::on_config_updated`]：config 变化时热更新 memory actor。
+//! - [`ToolOverrideHandler::handle`] 的 `&Session` 参数：按调用获取会话消息。
+//!
+//! ## 实例模型
+//!
+//! `MemoryPlugin` 实例是 **per-Core** 的（每次 ensure_core / with_session 现场构造）。
+//! 但 `memory_handle` 指向**进程级** memory actor 单例——多个 Core 的 MemoryPlugin
+//! 持有同一 handle 的 clone，共享同一记忆数据（知识点、技能、跨会话经验）。
+//! `feedback_tx` 是当前 Core 的反馈通道，不跨 session 共享。
+//!
+//! `session_states` 按 session_id 隔离 per-session 控制流状态（recall_attempted /
+//! turn_count）。per-Core 模型下同一时刻只有一个 session 使用本实例，HashMap
+//! 保留防御性（未来如改回共享实例也不会立即出错）。
+//!
+//! ## 写记忆业务
+//!
+//! 反刍/候选由生命周期钩子接管：
+//! - [`Plugin::on_turn_finished`]：评估本轮候选 + 异步触发增强版 Micro 反刍，
+//!   每 10 turn 额外触发 Meta 反刍（归档低活跃节点）。
+//! - [`Plugin::on_session_ended`]：触发 Meso 反刍（提炼 Entity/Decision）。
+
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+use crate::turn_extract::build_turn_memory_result;
+use tiangong_core::core::plugin::PluginFeedbackTx;
+use tiangong_core::core::Plugin;
+use tiangong_core::core_config::CoreConfig;
+use tiangong_core::session::Session;
+use tiangong_core::tool_override::PromptSectionProvider;
+use tiangong_memory::MemoryHandle;
+
+/// 每 N 个 turn 触发一次 Meta 反刍（归档低活跃节点）。
+const META_RUMINATION_INTERVAL: u32 = 10;
+
+/// per-session 控制流状态（按 session_id 隔离）。
+#[derive(Default)]
+struct SessionState {
+    /// 本轮已回忆标志（去重用）。每轮 on_turn_started 重置为 false。
+    recall_attempted: bool,
+    /// turn 计数器（定期触发 Meta 反刍）。
+    turn_count: u32,
+}
+
+/// 记忆召回插件。
+///
+/// `memory_handle` 在构造时由入口层注入（构造后不可变，跨 session 共享同一
+/// memory actor 单例）；`feedback_tx` 由 core 在 register 时注入（跨 session 共享）；
+/// `session_states` 按 session_id 隔离 per-session 控制流状态。
+pub struct MemoryPlugin {
+    /// 记忆句柄（构造时注入，内部 Arc 跨 session 共享）。None 表示记忆系统未启用。
+    memory_handle: Option<MemoryHandle>,
+    /// 状态反馈通道（转发 MemoryRecall* 流事件，由 set_feedback_tx 注入）。
+    feedback_tx: RwLock<Option<PluginFeedbackTx>>,
+    /// per-session 控制流状态（recall_attempted + turn_count），按 session_id 隔离。
+    session_states: RwLock<HashMap<String, SessionState>>,
+    /// 当前 session_id（经 on_session_ready 设置，供 prompt_sections 读 Session 级 injection）。
+    session_id: RwLock<Option<String>>,
+    /// 当前 workspace 路径（经 set_workspace 设置，供 prompt_sections 读 Workspace 级 injection）。
+    workspace: RwLock<Option<std::path::PathBuf>>,
+}
+
+impl MemoryPlugin {
+    /// 构造插件实例。`memory_handle` 由入口层经
+    /// [`tiangong_memory::registry::init_memory_handle_for_process`] 初始化后传入。
+    pub fn new(memory_handle: Option<MemoryHandle>) -> Self {
+        Self {
+            memory_handle,
+            feedback_tx: RwLock::new(None),
+            session_states: RwLock::new(HashMap::new()),
+            session_id: RwLock::new(None),
+            workspace: RwLock::new(None),
+        }
+    }
+
+    /// 读取记忆句柄的 clone（供 handler 检索用）。
+    pub(crate) fn memory_handle(&self) -> Option<MemoryHandle> {
+        self.memory_handle.clone()
+    }
+
+    /// 读取反馈通道的 clone（供 handler 发流事件用）。
+    pub(crate) fn feedback_tx(&self) -> Option<PluginFeedbackTx> {
+        self.feedback_tx.read().ok()?.as_ref().cloned()
+    }
+
+    /// 标记指定 session 本轮已完成回忆。
+    ///
+    /// 返回操作前的旧值（true 表示本轮已回忆过，应走去重分支）。
+    pub(crate) fn mark_recall_attempted(&self, session_id: &str) -> bool {
+        let Ok(mut guard) = self.session_states.write() else {
+            return true;
+        };
+        let state = guard.entry(session_id.to_string()).or_default();
+        let was_attempted = state.recall_attempted;
+        state.recall_attempted = true;
+        was_attempted
+    }
+}
+
+impl Plugin for MemoryPlugin {
+    fn id(&self) -> &str {
+        "memory"
+    }
+
+    fn set_workspace(&self, workspace: &std::path::Path) {
+        if let Ok(mut guard) = self.workspace.write() {
+            *guard = Some(workspace.to_path_buf());
+        }
+    }
+
+    fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
+        if let Ok(mut guard) = self.feedback_tx.write() {
+            *guard = Some(tx);
+        }
+    }
+
+    fn on_config_updated(&self, _config: &CoreConfig) {
+        // Memory 使用独立 MemoryConfig 文件，CoreConfig 参数仅作为变更触发点。
+        // 这里重新加载 MemoryConfig 并 reconfigure memory actor。
+        // 异步执行不阻塞 worker，失败仅告警（记忆功能降级而非中断）。
+        if let Some(handle) = &self.memory_handle {
+            let options = tiangong_memory::MemoryConfig::load_or_default().to_options();
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                if let Err(e) = handle.reconfigure(options).await {
+                    tracing::warn!(error = %e, "Memory actor reconfigure 失败");
+                }
+            });
+        }
+    }
+
+    // register 留空：工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集。
+
+    fn on_session_ready(&self, session: &mut Session) {
+        if let Ok(mut guard) = self.session_id.write() {
+            *guard = Some(session.id.clone());
+        }
+    }
+
+    fn on_turn_started(&self, session: &mut Session, _turn_start_idx: usize) {
+        // 每轮重置该 session 的「已回忆」标志，允许新的一轮重新调用 recall_memory。
+        if let Ok(mut guard) = self.session_states.write() {
+            guard
+                .entry(session.id.clone())
+                .or_default()
+                .recall_attempted = false;
+        }
+    }
+
+    fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
+        let Some(handle) = self.memory_handle.clone() else {
+            return;
+        };
+
+        // 从本轮用户消息取 user_input（反刍摘要需要）。
+        let user_input = session
+            .messages
+            .get(turn_start_idx)
+            .filter(|m| m.role == tiangong_core::session::MessageRole::User)
+            .map(|m| m.text_content())
+            .unwrap_or_default();
+
+        // 从 session 构建增强反刍结果（含候选评估，替代原 engine 的逐条 submit）。
+        let enhanced_result = build_turn_memory_result(session, turn_start_idx, &user_input);
+
+        // 异步反刍：不阻塞 worker 收尾。反刍在 memory actor 内部排队执行，
+        // 结果会在后续 recall 时自然可见（非强实时）。
+        tokio::spawn(async move {
+            handle.run_enhanced_micro_rumination(enhanced_result).await;
+        });
+
+        // 每 N 个 turn 触发一次 Meta 反刍（归档低活跃节点）。
+        // run_meta_rumination 本身是 try_send fire-and-forget，不阻塞。
+        if let Ok(mut guard) = self.session_states.write() {
+            let state = guard.entry(session.id.clone()).or_default();
+            state.turn_count += 1;
+            if state.turn_count.is_multiple_of(META_RUMINATION_INTERVAL) {
+                if let Some(h) = &self.memory_handle {
+                    h.run_meta_rumination();
+                    tracing::debug!(turn_count = state.turn_count, "Meta 反刍已触发（定期归档）");
+                }
+            }
+        }
+    }
+
+    fn on_session_ended(&self, session: &mut Session) {
+        if let Some(handle) = &self.memory_handle {
+            // 会话结束 → 触发 Meso 反刍（提炼 Entity/Decision，更新 Workspace Injection）。
+            // fire-and-forget：handle 仍可使用（Memory Actor 在 registry 中持续运行）。
+            handle.run_meso_rumination(session.id.clone(), session.cwd.clone());
+        }
+        // 清理该 session 的控制流状态。
+        if let Ok(mut guard) = self.session_states.write() {
+            guard.remove(&session.id);
+        }
+    }
+}
+
+/// 注入三级 Memory Injection（Profile / Workspace / Session 的 agent.md），
+/// 作为 system prompt 段落。替代原 core 的 build_user_context（load_injection_sync）。
+impl PromptSectionProvider for MemoryPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        let session_id = self.session_id.read().ok().and_then(|g| g.clone());
+        let workspace = self.workspace.read().ok().and_then(|g| g.clone());
+        let workspace_id = workspace
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+        tiangong_memory::load_injection_sync(
+            session_id.as_deref().unwrap_or(""),
+            workspace_id.as_deref(),
+        )
+    }
+}

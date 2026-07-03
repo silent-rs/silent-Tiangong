@@ -56,9 +56,9 @@ impl ToolOverrideHandler for BrowserPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        session_id: &str,
+        session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        ToolOverrideHandler::handle(&self.override_handler, call, session_id)
+        ToolOverrideHandler::handle(&self.override_handler, call, session)
     }
 }
 

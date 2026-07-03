@@ -18,6 +18,7 @@ members = [
     "crates/plugins/tiangong-plugin-fetch",
     "crates/plugins/tiangong-plugin-fs",
     "crates/plugins/tiangong-plugin-index",
+    "crates/plugins/tiangong-plugin-memory",
     "crates/plugins/tiangong-plugin-scheduler",
     "crates/plugins/tiangong-plugin-terminal",
     "src-tauri",
@@ -41,6 +42,7 @@ tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch = { path = "crates/plugins/tiangong-plugin-fetch" }
 tiangong-plugin-fs = { path = "crates/plugins/tiangong-plugin-fs" }
 tiangong-plugin-index = { path = "crates/plugins/tiangong-plugin-index" }
+tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-server = { path = "crates/tiangong-server" }

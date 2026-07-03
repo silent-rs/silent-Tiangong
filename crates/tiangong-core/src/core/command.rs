@@ -33,6 +33,12 @@ pub(crate) enum Command {
         tool_name: String,
         payload: serde_json::Value,
     },
+    /// 插件投递的流事件（如 MemoryRecallStart/Progress/Done）。
+    ///
+    /// 插件通过 [`crate::core::plugin::feedback::PluginFeedbackTx::send_stream_event`]
+    /// 投递，worker 收到后直接转发到 `stream_tx`，与 worker 自身发出的流事件
+    /// 走同一出口。用于让插件复用 UI 实时事件通道，无需各自持有 stream_tx。
+    EmitStreamEvent(tiangong_types::StreamEvent),
     /// 关闭
     Shutdown,
 }

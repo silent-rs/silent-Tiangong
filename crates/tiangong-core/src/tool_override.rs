@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::model::{ToolCall, ToolSpec};
+use crate::session::Session;
 use crate::tool::ToolResult;
 
 /// 工具覆盖处理器。
@@ -11,12 +12,13 @@ use crate::tool::ToolResult;
 pub trait ToolOverrideHandler: Send + Sync + 'static {
     /// 处理工具调用。返回 None 表示不拦截，由默认逻辑处理。
     ///
-    /// `session_id` 标识当前对话，用于按对话路由终端 PTY 等场景。
+    /// `session` 为当前对话的只读引用：插件可读取 `session.id` 用于按对话路由
+    /// （如终端 PTY），也可读取消息历史（如记忆召回构建上下文）。
     /// 默认不拦截任何调用，不关心工具覆盖的插件无需覆写。
     fn handle(
         &self,
         _call: &ToolCall,
-        _session_id: &str,
+        _session: &Session,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         Box::pin(async { None })
     }

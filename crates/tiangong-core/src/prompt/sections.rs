@@ -108,13 +108,6 @@ fn session_working_directory(session: &Session) -> String {
         .unwrap_or_else(|_| ".".into())
 }
 
-/// 构建 User Context（用户偏好/记忆，以 system-reminder 方式注入）
-///
-/// 通过 tiangong-memory 的三级 Injection 层（Profile / Workspace / Session）读取注入文件。
-pub fn build_user_context(session_id: &str, workspace_id: Option<&str>) -> Vec<String> {
-    tiangong_memory::load_injection_sync(session_id, workspace_id)
-}
-
 /// 团队协作工具使用指引
 fn build_agent_team_section() -> String {
     "团队协作能力（可选使用）：
@@ -154,7 +147,6 @@ pub struct SystemPromptConfig {
     pub skills_text: String,
     pub media_text: String,
     pub team_text: String,
-    pub user_context: Vec<String>,
     /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范等）
     pub plugin_sections: Vec<String>,
     /// 文档附件解析规则段（PDF/Office 处理引导，issue #149）
@@ -163,17 +155,12 @@ pub struct SystemPromptConfig {
 
 impl SystemPromptConfig {
     /// 从配置实例构建动态数据快照
-    pub fn from_configs(
-        models_config: &ModelsConfig,
-        agent_config: &AgentConfig,
-        session_id: &str,
-    ) -> Self {
+    pub fn from_configs(models_config: &ModelsConfig, agent_config: &AgentConfig) -> Self {
         Self {
             custom_prompt: agent_config.custom_system_prompt.trim().to_string(),
             skills_text: build_skills_section(agent_config),
             media_text: build_media_section(models_config),
             team_text: build_agent_team_section(),
-            user_context: build_user_context(session_id, None),
             plugin_sections: Vec::new(),
             attachment_rules_text: super::attachment_rules::attachment_rules_section(),
         }
@@ -252,12 +239,6 @@ fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
         if !trimmed.is_empty() {
             parts.push(trimmed.to_string());
         }
-    }
-    if !config.user_context.is_empty() {
-        parts.push(format!(
-            "## 用户偏好与记忆上下文\n{}\n\nIMPORTANT: this context may or may not be relevant to your tasks.",
-            config.user_context.join("\n")
-        ));
     }
     parts
 }

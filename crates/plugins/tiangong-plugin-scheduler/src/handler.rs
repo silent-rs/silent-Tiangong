@@ -427,7 +427,7 @@ impl ToolOverrideHandler for SchedulerPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session_id: &str,
+        _session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let result = self.dispatch(call);
         Box::pin(async move { result })
