@@ -1,15 +1,16 @@
 //! 附件分析工具规格与覆盖处理器实现。
 //!
 //! 实现 [`ToolSpecProvider`] 与 [`ToolOverrideHandler`]，提供 `analyze_attachment` 工具。
-//! 工具规格仅当插件 `enabled`（`has_multimodal_client && !chat_is_multimodal`）时返回。
+//! 工具规格仅当插件 `enabled`（`has_multimodal_client && !chat_is_multimodal`）时返回；
+//! handler 入口同样检查 `enabled`，避免工具未暴露但仍被异常调用。
 //!
 //! 参数直接从 LLM 传入的命名参数 JSON（`call.arguments`）按 key 取参，逻辑与原
 //! `core::execute_attachment_analysis_tool` 完全一致：定位包含附件的用户消息 → 收集
 //! 媒体资源 → 构造附件解析请求 → 调用 multimodal 客户端。
 //!
-//! multimodal 子调用的 token 用量经 [`PluginFeedbackTx::send_stream_event`] 转发为
-//! `StreamEvent::TokenUsage`，保留原 react engine 通过 `emit_token_usage` 上报的
-//! 用量统计（`ToolOverrideHandler::handle` 返回值不携带 usage，故走反馈通道）。
+//! multimodal 子调用的 token 用量经 [`PluginFeedbackTx::report_token_usage`] 反馈给
+//! core，由 core 统一累加到本轮 `accumulated_usage` 并发送 `StreamEvent::TokenUsage`
+//! （`ToolOverrideHandler::handle` 返回值不携带 usage，故走语义反馈通道）。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,7 +21,7 @@ use tiangong_core::model::{ModelClient, ModelRequest, ToolCall, ToolSpec};
 use tiangong_core::session::{Message, MessageRole, Session};
 use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
-use tiangong_types::{ContentBlock, MediaAsset, StreamEvent};
+use tiangong_types::{ContentBlock, MediaAsset};
 
 use crate::plugin::AnalyzeAttachmentPlugin;
 
@@ -34,6 +35,11 @@ impl AnalyzeAttachmentPlugin {
         call: &ToolCall,
         session: &Session,
     ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
+        // 防御：工具未启用（chat 模型已自带 multimodal，或未配置 multimodal 客户端）
+        // 时拒绝执行，避免工具未暴露但仍被异常调用时使用陈旧状态。
+        if !self.enabled() {
+            return None;
+        }
         match call.name.as_str() {
             TOOL_ANALYZE_ATTACHMENT => Some(self.handle_analyze_attachment(call, session)),
             _ => None,
@@ -49,12 +55,18 @@ impl AnalyzeAttachmentPlugin {
         session: &Session,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
         let started = Instant::now();
+        let tool_name = TOOL_ANALYZE_ATTACHMENT.to_string();
 
         // 未配置 multimodal 客户端（理论上不会进入：register 时未启用即不暴露工具，
         // 这里做防御性检查）。
         let Some(client) = self.client() else {
-            return Box::pin(async {
-                attachment_error("未配置多模态模型", "multimodal model is not configured")
+            return Box::pin(async move {
+                attachment_error(
+                    &tool_name,
+                    "未配置多模态模型",
+                    "multimodal model is not configured",
+                    started,
+                )
             });
         };
 
@@ -81,10 +93,12 @@ impl AnalyzeAttachmentPlugin {
 
         // 定位包含附件的用户消息（借用 session，不逃逸）。
         let Some(source) = find_attachment_source_message(session, message_id.as_deref()) else {
-            return Box::pin(async {
+            return Box::pin(async move {
                 attachment_error(
+                    &tool_name,
                     "未找到可解析的附件",
                     "no user message with attachments found",
+                    started,
                 )
             });
         };
@@ -98,8 +112,10 @@ impl AnalyzeAttachmentPlugin {
                     None => {
                         return Box::pin(async move {
                             attachment_error(
+                                &tool_name,
                                 "附件序号不存在",
                                 &format!("attachment_index {index} out of range"),
+                                started,
                             )
                         });
                     }
@@ -109,8 +125,13 @@ impl AnalyzeAttachmentPlugin {
         };
 
         if media.is_empty() {
-            return Box::pin(async {
-                attachment_error("未找到可解析的附件", "selected message has no attachments")
+            return Box::pin(async move {
+                attachment_error(
+                    &tool_name,
+                    "未找到可解析的附件",
+                    "selected message has no attachments",
+                    started,
+                )
             });
         }
 
@@ -156,7 +177,6 @@ impl AnalyzeAttachmentPlugin {
         };
 
         let feedback_tx = self.feedback_tx();
-        let tool_name = TOOL_ANALYZE_ATTACHMENT.to_string();
 
         Box::pin(async move {
             // `complete` 是阻塞调用，放到 spawn_blocking 避免占用 reactor。
@@ -165,17 +185,11 @@ impl AnalyzeAttachmentPlugin {
 
             match result {
                 Ok(Ok(response)) => {
-                    // 经反馈通道转发 multimodal 子调用的 token 用量，保留原
-                    // react engine emit_token_usage 的统计能力。
+                    // 经语义反馈通道把 multimodal 子调用的 token 用量上报给 core，
+                    // 由 core 累加到本轮 accumulated_usage 并统一发送 StreamEvent::TokenUsage，
+                    // 确保成本统计、上下文压缩判断与 Done.usage 都包含该消耗。
                     if let Some(tx) = feedback_tx {
-                        tx.send_stream_event(StreamEvent::TokenUsage {
-                            usage: response.usage.clone(),
-                            current_tokens: None,
-                            compression_threshold_tokens: None,
-                            context_limit_tokens: None,
-                            source: TOOL_ANALYZE_ATTACHMENT.to_string(),
-                            agent_id: None,
-                        });
+                        tx.report_token_usage(response.usage.clone(), TOOL_ANALYZE_ATTACHMENT);
                     }
                     attachment_success(&response.text, &tool_name, duration_ms)
                 }
@@ -336,14 +350,23 @@ fn attachment_failure(
     }
 }
 
-/// 未携带 ToolExecutionRecord 的轻量错误结果（参数/前置条件不满足）。
-fn attachment_error(summary: &str, stderr: &str) -> ToolResult {
+/// 参数/前置条件不满足时的错误结果。
+///
+/// 与原 runtime 实现一致：所有结果都携带 `ToolExecutionRecord`，便于审计与前端展示。
+fn attachment_error(tool_name: &str, summary: &str, stderr: &str, started: Instant) -> ToolResult {
     ToolResult {
         ok: false,
         summary: summary.to_string(),
         stdout: String::new(),
         stderr: stderr.to_string(),
         exit_code: 1,
-        execution: None,
+        execution: Some(ToolExecutionRecord {
+            tool_name: tool_name.to_string(),
+            args: Vec::new(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            ok: false,
+            exit_code: 1,
+            summary: summary.to_string(),
+        }),
     }
 }

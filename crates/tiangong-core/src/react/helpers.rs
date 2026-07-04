@@ -58,6 +58,7 @@ pub(super) fn drain_pending_commands_async(
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut crate::model::TokenUsage,
 ) -> PendingCommandEffect {
     let mut injected_message = false;
 
@@ -110,6 +111,20 @@ pub(super) fn drain_pending_commands_async(
             }
             Command::EmitStreamEvent(ev) => {
                 let _ = stream_tx.send(ev);
+            }
+            Command::ReportPluginUsage {
+                usage,
+                source,
+                agent_id,
+            } => {
+                crate::react::context::handle_plugin_usage(
+                    accumulated_usage,
+                    stream_tx,
+                    engine.context_limit,
+                    &usage,
+                    &source,
+                    agent_id.as_deref(),
+                );
             }
         }
     }

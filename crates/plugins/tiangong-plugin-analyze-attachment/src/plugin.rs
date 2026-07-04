@@ -86,10 +86,14 @@ impl Plugin for AnalyzeAttachmentPlugin {
         if let Ok(mut guard) = self.enabled.write() {
             *guard = enabled;
         }
-        if enabled {
-            if let Ok(mut guard) = self.client.write() {
-                *guard = Some(engine.multimodal_client().clone());
-            }
+        // enabled=false 时清空旧 client，避免工具未暴露但仍持有陈旧客户端状态
+        // （如 engine 重建后 multimodal 配置变更）。
+        if let Ok(mut guard) = self.client.write() {
+            *guard = if enabled {
+                Some(engine.multimodal_client().clone())
+            } else {
+                None
+            };
         }
     }
 }

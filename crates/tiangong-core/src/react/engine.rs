@@ -19,7 +19,8 @@ use crate::permission::{
     normalize_permission_target,
 };
 use crate::react::context::{
-    emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
+    emit_token_usage, handle_plugin_usage, maybe_update_context_summary, persist_error,
+    select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -214,7 +215,13 @@ impl ReactEngine {
                 if round == 0 {
                     crate::react::context::rebuild_system_prompt(session, &self.engine);
                 }
-                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(
+                    session,
+                    &self.engine,
+                    stream_tx,
+                    cmd_rx,
+                    &mut accumulated_usage,
+                ) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         successful_tool_call_keys.clear();
@@ -350,6 +357,20 @@ impl ReactEngine {
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let _ = stream_tx.send(ev);
+                                }
+                                Some(Command::ReportPluginUsage {
+                                    usage,
+                                    source,
+                                    agent_id,
+                                }) => {
+                                    handle_plugin_usage(
+                                        &mut accumulated_usage,
+                                        stream_tx,
+                                        self.engine.context_limit,
+                                        &usage,
+                                        &source,
+                                        agent_id.as_deref(),
+                                    );
                                 }
                             }
                         }
@@ -619,7 +640,13 @@ impl ReactEngine {
                     // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
-                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(
+                        session,
+                        &self.engine,
+                        stream_tx,
+                        cmd_rx,
+                        &mut accumulated_usage,
+                    ) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();
@@ -942,6 +969,20 @@ impl ReactEngine {
                                     Some(Command::EmitStreamEvent(ev)) => {
                                         let _ = stream_tx.send(ev);
                                     }
+                                    Some(Command::ReportPluginUsage {
+                                        usage,
+                                        source,
+                                        agent_id,
+                                    }) => {
+                                        handle_plugin_usage(
+                                            &mut accumulated_usage,
+                                            stream_tx,
+                                            self.engine.context_limit,
+                                            &usage,
+                                            &source,
+                                            agent_id.as_deref(),
+                                        );
+                                    }
                                 }
                             };
 
@@ -1171,7 +1212,13 @@ impl ReactEngine {
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
-                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(
+                        session,
+                        &self.engine,
+                        stream_tx,
+                        cmd_rx,
+                        &mut accumulated_usage,
+                    ) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();

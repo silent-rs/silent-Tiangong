@@ -39,6 +39,17 @@ pub(crate) enum Command {
     /// 投递，worker 收到后直接转发到 `stream_tx`，与 worker 自身发出的流事件
     /// 走同一出口。用于让插件复用 UI 实时事件通道，无需各自持有 stream_tx。
     EmitStreamEvent(tiangong_types::StreamEvent),
+    /// 插件上报的一笔 LLM token 用量（如 `analyze_attachment` 调用 multimodal 子模型）。
+    ///
+    /// 由 [`crate::core::plugin::feedback::PluginFeedbackTx::report_token_usage`]
+    /// 投递。处理方式：在本轮执行中（react engine 持有 `accumulated_usage`）累加到本轮
+    /// 用量并发送 `StreamEvent::TokenUsage`；在 turn 之外（worker 顶层无 `accumulated_usage`）
+    /// 仅转发 `StreamEvent::TokenUsage`。确保最终 `Done.usage` 与成本统计包含该消耗。
+    ReportPluginUsage {
+        usage: tiangong_types::TokenUsage,
+        source: String,
+        agent_id: Option<String>,
+    },
     /// 关闭
     Shutdown,
 }

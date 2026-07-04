@@ -160,6 +160,24 @@ impl ReactEngine {
                         Some(Command::EmitStreamEvent(ev)) => {
                             let _ = stream_tx.send(ev);
                         }
+                        // 总结阶段流式期间收到的插件用量反馈：仅转发为流事件，
+                        // 不计入 usage（总结阶段 usage 由 run_summary_phase 返回值统一回传）。
+                        Some(Command::ReportPluginUsage {
+                            usage,
+                            source,
+                            agent_id,
+                        }) => {
+                            if usage.total_tokens > 0 {
+                                let _ = stream_tx.send(StreamEvent::TokenUsage {
+                                    usage,
+                                    current_tokens: None,
+                                    compression_threshold_tokens: None,
+                                    context_limit_tokens: None,
+                                    source,
+                                    agent_id,
+                                });
+                            }
+                        }
                     }
                 }
                 chunk_opt = chunk_rx.recv() => {
