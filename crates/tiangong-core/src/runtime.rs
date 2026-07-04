@@ -929,41 +929,13 @@ impl RuntimeEngine {
     }
 }
 
-/// 注入增强工具定义（多媒体、Skill、后台任务、MCP 管理）
+/// 注入增强工具定义（Skill、后台任务、MCP 管理）
 pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeEngine) {
     let agent_config = engine.agent_config();
 
-    // 多媒体能力（图片/视频/TTS/STT）的工具规格与分发已迁移至独立插件 crate
-    //（tiangong-plugin-{generate-image,generate-video,text-to-speech,speech-to-text}），
-    // 此处仅保留 analyze_attachment（依赖 multimodal 客户端，未纳入插件化范围）。
-    let has_multimodal = engine.has_multimodal_client();
-    // 当对话模型本身就是 multimodal 时，图片直接随消息发送，不需要工具
-    let chat_is_multimodal = engine.chat_is_multimodal();
-
-    if has_multimodal && !chat_is_multimodal {
-        tools.push(ToolSpec {
-            name: "analyze_attachment".to_string(),
-            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "instruction": {
-                        "type": "string",
-                        "description": "希望多模态模型如何解析附件，例如提取文字、描述画面、识别表格、回答与附件有关的问题"
-                    },
-                    "message_id": {
-                        "type": "string",
-                        "description": "包含附件的用户消息 ID。省略时使用最近一条包含附件的用户消息"
-                    },
-                    "attachment_index": {
-                        "type": "integer",
-                        "description": "附件序号，从 0 开始。省略时解析该消息中的全部附件"
-                    }
-                },
-                "required": ["instruction"]
-            }),
-        });
-    }
+    // 多媒体能力（图片/视频/TTS/STT）与附件分析（analyze_attachment）的工具规格与
+    // 分发已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
+    // text-to-speech,speech-to-text,analyze-attachment}），由 tool_overrides 统一分发。
 
     if agent_config.skills.installed.iter().any(|s| s.enabled) {
         tools.push(ToolSpec {

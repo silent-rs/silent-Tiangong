@@ -1055,29 +1055,24 @@ impl ReactEngine {
                     });
 
                     let (result, tool_llm_usage, allow_memory_context, usage_source) = {
-                        let (mut result, tool_llm_usage, allow_memory_context, usage_source) =
-                            if call.name == "analyze_attachment" {
-                                let (result, usage) = crate::core::execute_attachment_analysis_tool(
-                                    call,
-                                    &self.engine,
-                                    session,
-                                );
-                                (result, usage, false, "analyze_attachment")
-                            } else {
-                                (
-                                    self.engine
-                                        .execute_tool_call(
-                                            call,
-                                            &self.mcp_targets,
-                                            &self.engine.agent_config().mcp,
-                                            session,
-                                        )
-                                        .await,
-                                    tiangong_types::TokenUsage::default(),
-                                    false,
-                                    "",
-                                )
-                            };
+                        // analyze_attachment 已迁移至独立插件（tiangong-plugin-analyze-
+                        // attachment），经 execute_tool_call → tool_overrides 统一分发，
+                        // 其 multimodal 子调用的 token 用量由插件经反馈通道上报。
+                        let (mut result, tool_llm_usage, allow_memory_context, usage_source) = {
+                            (
+                                self.engine
+                                    .execute_tool_call(
+                                        call,
+                                        &self.mcp_targets,
+                                        &self.engine.agent_config().mcp,
+                                        session,
+                                    )
+                                    .await,
+                                tiangong_types::TokenUsage::default(),
+                                false,
+                                "",
+                            )
+                        };
                         crate::tool::media::localize_tool_result_images(&call.name, &mut result);
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };

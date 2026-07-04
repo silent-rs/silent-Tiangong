@@ -21,6 +21,7 @@ tiangong-plugin-speech-to-text = { workspace = true }
 tiangong-plugin-memory = { workspace = true }
 tiangong-plugin-scheduler = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }
+tiangong-plugin-analyze-attachment = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-memory = { workspace = true }

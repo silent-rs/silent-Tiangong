@@ -25,6 +25,7 @@ members = [
     "crates/plugins/tiangong-plugin-memory",
     "crates/plugins/tiangong-plugin-scheduler",
     "crates/plugins/tiangong-plugin-terminal",
+    "crates/plugins/tiangong-plugin-analyze-attachment",
     "src-tauri",
 ]
 
@@ -53,6 +54,7 @@ tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech
 tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
+tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-analyze-attachment" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
 tiangong-types = { path = "crates/tiangong-types" }

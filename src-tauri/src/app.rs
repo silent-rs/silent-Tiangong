@@ -332,6 +332,9 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
+        // 附件分析（analyze_attachment）：是否暴露工具由插件在 register 时根据
+        // multimodal 客户端与 chat 模型能力动态决定，入口层无条件注册。
+        plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core =

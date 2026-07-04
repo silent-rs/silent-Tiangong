@@ -1,0 +1,349 @@
+//! 附件分析工具规格与覆盖处理器实现。
+//!
+//! 实现 [`ToolSpecProvider`] 与 [`ToolOverrideHandler`]，提供 `analyze_attachment` 工具。
+//! 工具规格仅当插件 `enabled`（`has_multimodal_client && !chat_is_multimodal`）时返回。
+//!
+//! 参数直接从 LLM 传入的命名参数 JSON（`call.arguments`）按 key 取参，逻辑与原
+//! `core::execute_attachment_analysis_tool` 完全一致：定位包含附件的用户消息 → 收集
+//! 媒体资源 → 构造附件解析请求 → 调用 multimodal 客户端。
+//!
+//! multimodal 子调用的 token 用量经 [`PluginFeedbackTx::send_stream_event`] 转发为
+//! `StreamEvent::TokenUsage`，保留原 react engine 通过 `emit_token_usage` 上报的
+//! 用量统计（`ToolOverrideHandler::handle` 返回值不携带 usage，故走反馈通道）。
+
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Instant;
+
+use serde_json::json;
+use tiangong_core::model::{ModelClient, ModelRequest, ToolCall, ToolSpec};
+use tiangong_core::session::{Message, MessageRole, Session};
+use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
+use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_types::{ContentBlock, MediaAsset, StreamEvent};
+
+use crate::plugin::AnalyzeAttachmentPlugin;
+
+/// 工具名常量。
+const TOOL_ANALYZE_ATTACHMENT: &str = "analyze_attachment";
+
+impl AnalyzeAttachmentPlugin {
+    /// 主分发入口：同步解析参数并返回 owned Future（借用不逃逸到 async 上下文）。
+    fn dispatch(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+    ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
+        match call.name.as_str() {
+            TOOL_ANALYZE_ATTACHMENT => Some(self.handle_analyze_attachment(call, session)),
+            _ => None,
+        }
+    }
+
+    /// 同步解析参数并构造异步执行体。
+    ///
+    /// 所有对 `call` / `session` 的借用在此函数内完成，move 进 async 块的均为 owned 值。
+    fn handle_analyze_attachment(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
+        let started = Instant::now();
+
+        // 未配置 multimodal 客户端（理论上不会进入：register 时未启用即不暴露工具，
+        // 这里做防御性检查）。
+        let Some(client) = self.client() else {
+            return Box::pin(async {
+                attachment_error("未配置多模态模型", "multimodal model is not configured")
+            });
+        };
+
+        let instruction = call
+            .arguments
+            .get("instruction")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("请解析附件内容，并提取与用户问题有关的信息。")
+            .to_string();
+        let message_id = call
+            .arguments
+            .get("message_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from);
+        let attachment_index = call
+            .arguments
+            .get("attachment_index")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize);
+
+        // 定位包含附件的用户消息（借用 session，不逃逸）。
+        let Some(source) = find_attachment_source_message(session, message_id.as_deref()) else {
+            return Box::pin(async {
+                attachment_error(
+                    "未找到可解析的附件",
+                    "no user message with attachments found",
+                )
+            });
+        };
+
+        // 按序号筛选或收集全部媒体资源。
+        let media = match attachment_index {
+            Some(index) => {
+                let all = collect_message_media(source);
+                match all.get(index) {
+                    Some(asset) => vec![asset.clone()],
+                    None => {
+                        return Box::pin(async move {
+                            attachment_error(
+                                "附件序号不存在",
+                                &format!("attachment_index {index} out of range"),
+                            )
+                        });
+                    }
+                }
+            }
+            None => collect_message_media(source),
+        };
+
+        if media.is_empty() {
+            return Box::pin(async {
+                attachment_error("未找到可解析的附件", "selected message has no attachments")
+            });
+        }
+
+        // 构造附件解析请求上下文（owned）。
+        let source_text = source.text_content();
+        let session_title = session.title.clone();
+        let mut attachment_context = vec![
+            Message::new(
+                MessageRole::User,
+                "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。".to_string(),
+            ),
+            Message::new(
+                MessageRole::Assistant,
+                "好的，我将作为附件解析助手，根据附件内容和解析要求进行分析。".to_string(),
+            ),
+        ];
+        let mut user_message = Message::new(
+            MessageRole::User,
+            format!(
+                "用户原始消息：{}\n\n解析要求：{}",
+                source_text.trim(),
+                instruction
+            ),
+        );
+        for asset in media {
+            user_message.content.push(ContentBlock::Media {
+                kind: asset.kind,
+                url: asset.url,
+                mime_type: asset.mime_type,
+                title: asset.title,
+            });
+        }
+        attachment_context.push(user_message);
+
+        let req = ModelRequest {
+            session_title: format!("{session_title} · attachment-analysis"),
+            user_input: String::new(),
+            context: attachment_context,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            include_media: true,
+        };
+
+        let feedback_tx = self.feedback_tx();
+        let tool_name = TOOL_ANALYZE_ATTACHMENT.to_string();
+
+        Box::pin(async move {
+            // `complete` 是阻塞调用，放到 spawn_blocking 避免占用 reactor。
+            let result = tokio::task::spawn_blocking(move || client.complete(&req)).await;
+            let duration_ms = started.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(Ok(response)) => {
+                    // 经反馈通道转发 multimodal 子调用的 token 用量，保留原
+                    // react engine emit_token_usage 的统计能力。
+                    if let Some(tx) = feedback_tx {
+                        tx.send_stream_event(StreamEvent::TokenUsage {
+                            usage: response.usage.clone(),
+                            current_tokens: None,
+                            compression_threshold_tokens: None,
+                            context_limit_tokens: None,
+                            source: TOOL_ANALYZE_ATTACHMENT.to_string(),
+                            agent_id: None,
+                        });
+                    }
+                    attachment_success(&response.text, &tool_name, duration_ms)
+                }
+                Ok(Err(err)) => attachment_failure(&tool_name, "附件解析失败", &err, duration_ms),
+                Err(join_err) => attachment_failure(
+                    &tool_name,
+                    "附件解析失败",
+                    &anyhow::anyhow!("multimodal 调用任务异常：{join_err}"),
+                    duration_ms,
+                ),
+            }
+        })
+    }
+}
+
+impl ToolSpecProvider for AnalyzeAttachmentPlugin {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        if !self.enabled() {
+            return Vec::new();
+        }
+        vec![ToolSpec {
+            name: TOOL_ANALYZE_ATTACHMENT.to_string(),
+            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "description": "希望多模态模型如何解析附件，例如提取文字、描述画面、识别表格、回答与附件有关的问题"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "包含附件的用户消息 ID。省略时使用最近一条包含附件的用户消息"
+                    },
+                    "attachment_index": {
+                        "type": "integer",
+                        "description": "附件序号，从 0 开始。省略时解析该消息中的全部附件"
+                    }
+                },
+                "required": ["instruction"]
+            }),
+        }]
+    }
+}
+
+impl ToolOverrideHandler for AnalyzeAttachmentPlugin {
+    fn handle(
+        &self,
+        call: &ToolCall,
+        session: &Session,
+    ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+        match self.dispatch(call, session) {
+            Some(future) => Box::pin(async move { Some(future.await) }),
+            None => Box::pin(async { None }),
+        }
+    }
+}
+
+// ── 消息检索辅助 ──────────────────────────────────────────
+
+/// 判断消息是否携带媒体附件。
+fn has_media(msg: &Message) -> bool {
+    !msg.media.is_empty()
+        || msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Media { .. }))
+}
+
+/// 定位用于附件解析的源用户消息。
+///
+/// 优先按 `message_id` 精确匹配；省略时取最近一条带附件的用户消息。
+fn find_attachment_source_message<'a>(
+    session: &'a Session,
+    message_id: Option<&str>,
+) -> Option<&'a Message> {
+    if let Some(message_id) = message_id {
+        return session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id && has_media(message));
+    }
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User && has_media(message))
+}
+
+/// 收集消息中的全部媒体资源（content Media 块 + 旧 media 字段）。
+fn collect_message_media(message: &Message) -> Vec<MediaAsset> {
+    let mut assets = Vec::new();
+    for block in &message.content {
+        if let ContentBlock::Media {
+            kind,
+            url,
+            mime_type,
+            title,
+        } = block
+        {
+            assets.push(MediaAsset {
+                kind: *kind,
+                url: url.clone(),
+                mime_type: mime_type.clone(),
+                title: title.clone(),
+                capability: None,
+            });
+        }
+    }
+    assets.extend(message.media.clone());
+    assets
+}
+
+// ── ToolResult 构造辅助 ──────────────────────────────────────────
+
+/// 成功结果。
+fn attachment_success(text: &str, tool_name: &str, duration_ms: u64) -> ToolResult {
+    let summary = "附件解析完成".to_string();
+    ToolResult {
+        ok: true,
+        summary: summary.clone(),
+        stdout: text.to_string(),
+        stderr: String::new(),
+        exit_code: 0,
+        execution: Some(ToolExecutionRecord {
+            tool_name: tool_name.to_string(),
+            args: Vec::new(),
+            duration_ms,
+            ok: true,
+            exit_code: 0,
+            summary,
+        }),
+    }
+}
+
+/// 调用失败时的统一结果构造（对齐原 runtime 实现）。
+fn attachment_failure(
+    tool_name: &str,
+    prefix: &str,
+    err: &anyhow::Error,
+    duration_ms: u64,
+) -> ToolResult {
+    let summary = format!("{prefix}：{err}");
+    ToolResult {
+        ok: false,
+        summary: summary.clone(),
+        stdout: String::new(),
+        stderr: err.to_string(),
+        exit_code: 1,
+        execution: Some(ToolExecutionRecord {
+            tool_name: tool_name.to_string(),
+            args: Vec::new(),
+            duration_ms,
+            ok: false,
+            exit_code: 1,
+            summary,
+        }),
+    }
+}
+
+/// 未携带 ToolExecutionRecord 的轻量错误结果（参数/前置条件不满足）。
+fn attachment_error(summary: &str, stderr: &str) -> ToolResult {
+    ToolResult {
+        ok: false,
+        summary: summary.to_string(),
+        stdout: String::new(),
+        stderr: stderr.to_string(),
+        exit_code: 1,
+        execution: None,
+    }
+}

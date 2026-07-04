@@ -177,6 +177,9 @@ impl ServerCoreManager {
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                // 附件分析（analyze_attachment）：是否暴露工具由插件在 register 时根据
+                // multimodal 客户端与 chat 模型能力动态决定，入口层无条件注册。
+                plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
                 plugins
             },
         );
