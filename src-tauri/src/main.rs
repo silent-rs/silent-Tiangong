@@ -299,6 +299,10 @@ fn run_gui() {
                 tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
             });
 
+            // 媒体生成/转换插件（generate_image / generate_video / text_to_speech /
+            // speech_to_text）在 app.rs 的 create_core_if_absent 中统一组装（与其他
+            // 进程内插件一致），此处不再单独注册。
+
             // 注意：GUI 不注册 fetch / command 插件。web_fetch 由 browser 插件提供
             // （内嵌浏览器渲染），run_command / run_shell 由 terminal 插件提供（PTY 执行）。
             // CLI / Server 才注册 fetch / command（基础 reqwest 获取 + 子进程执行）。

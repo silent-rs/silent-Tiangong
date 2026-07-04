@@ -58,6 +58,24 @@ impl Default for ModelEndpoint {
     }
 }
 
+impl ModelEndpoint {
+    /// 转为 [`ResolvedModel`]，供 media facade 等需要路由解析结果的调用方使用。
+    ///
+    /// `ModelEndpoint` 与 `ResolvedModel` 字段一一对应（仅 `provider` 缺失，置空），
+    /// 避免插件每次调用都走 `ModelsConfig::resolve_for_capability` 的完整路由解析。
+    pub fn to_resolved(&self) -> crate::models_config::ResolvedModel {
+        crate::models_config::ResolvedModel {
+            provider: String::new(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            timeout_ms: self.timeout_ms,
+            protocol: self.protocol,
+            model: self.model.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
 /// LLM 配置 — TiangongCore 所需的模型端点
 ///
 /// 扁平结构，直接描述端点，无需解析 Provider/Model/Routing。
@@ -124,6 +142,26 @@ impl LlmConfig {
     /// 检查是否有有效的 Chat 端点
     pub fn is_valid(&self) -> bool {
         !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
+    }
+
+    /// 图片生成能力是否已配置。
+    pub fn has_image_generation(&self) -> bool {
+        self.image_generation.is_some()
+    }
+
+    /// 视频生成能力是否已配置。
+    pub fn has_video_generation(&self) -> bool {
+        self.video_generation.is_some()
+    }
+
+    /// 语音合成（TTS）能力是否已配置。
+    pub fn has_tts(&self) -> bool {
+        self.tts.is_some()
+    }
+
+    /// 语音识别（STT）能力是否已配置。
+    pub fn has_stt(&self) -> bool {
+        self.stt.is_some()
     }
 }
 

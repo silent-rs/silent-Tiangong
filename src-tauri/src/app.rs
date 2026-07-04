@@ -315,6 +315,21 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
+        // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
+        let cfg = self.config.snapshot();
+        let llm = &cfg.llm;
+        if llm.has_image_generation() {
+            plugins.push(tiangong_plugin_generate_image::build_plugin());
+        }
+        if llm.has_video_generation() {
+            plugins.push(tiangong_plugin_generate_video::build_plugin());
+        }
+        if llm.has_tts() {
+            plugins.push(tiangong_plugin_text_to_speech::build_plugin());
+        }
+        if llm.has_stt() {
+            plugins.push(tiangong_plugin_speech_to_text::build_plugin());
+        }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
 

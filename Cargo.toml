@@ -18,6 +18,10 @@ members = [
     "crates/plugins/tiangong-plugin-fetch",
     "crates/plugins/tiangong-plugin-fs",
     "crates/plugins/tiangong-plugin-index",
+    "crates/plugins/tiangong-plugin-generate-image",
+    "crates/plugins/tiangong-plugin-generate-video",
+    "crates/plugins/tiangong-plugin-text-to-speech",
+    "crates/plugins/tiangong-plugin-speech-to-text",
     "crates/plugins/tiangong-plugin-memory",
     "crates/plugins/tiangong-plugin-scheduler",
     "crates/plugins/tiangong-plugin-terminal",
@@ -42,6 +46,10 @@ tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch = { path = "crates/plugins/tiangong-plugin-fetch" }
 tiangong-plugin-fs = { path = "crates/plugins/tiangong-plugin-fs" }
 tiangong-plugin-index = { path = "crates/plugins/tiangong-plugin-index" }
+tiangong-plugin-generate-image = { path = "crates/plugins/tiangong-plugin-generate-image" }
+tiangong-plugin-generate-video = { path = "crates/plugins/tiangong-plugin-generate-video" }
+tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-to-speech" }
+tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech-to-text" }
 tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }

@@ -738,11 +738,12 @@ fn spawn_drain(
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     // 达到上限后只读不存：保持 pipe 畅通，但不再增长 buffer。
-                    let mut guard = match buf.lock() {
-                        Ok(g) => g,
-                        Err(_) => continue,
-                    };
-                    if guard.len() < MAX_CAPTURE_BYTES {
+                    // 先无副作用判满（避免持锁状态下 pipe 关闭导致死锁），未满再写入。
+                    let already_full = buf
+                        .lock()
+                        .map(|g| g.len() >= MAX_CAPTURE_BYTES)
+                        .unwrap_or(false);
+                    if !already_full && let Ok(mut guard) = buf.lock() {
                         let remaining = MAX_CAPTURE_BYTES.saturating_sub(guard.len());
                         let take = n.min(remaining);
                         guard.extend_from_slice(&tmp[..take]);

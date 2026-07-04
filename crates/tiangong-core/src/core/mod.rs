@@ -386,8 +386,11 @@ async fn worker_loop_async(
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
             //
-            // 先注入会话工作目录（set_workspace），再收集三种能力（工具规格/覆盖/Prompt
-            // 段落）注册到 engine，最后让插件注入外部能力（PageFetcher 等）。
+            // register_plugin 内部先注入上下文（workspace/trust_mode/feedback_tx），
+            // 再调 Plugin::register 初始化插件内部状态或注入 engine 依赖（如克隆
+            // models_config），最后才收集 tool_specs 并注册 override handler——保证
+            // handler 注册到正确的工具名上。返回的 specs 累积到 plugin_specs，供后续
+            // MCP 冲突避让与 tools 合并使用。
             let e = engine.as_ref().unwrap();
             let workspace = std::path::Path::new(&session.cwd);
             let workspace = if workspace.is_dir() {
@@ -395,17 +398,23 @@ async fn worker_loop_async(
             } else {
                 None
             };
+            let mut plugin_specs: Vec<ToolSpec> = Vec::new();
             for plugin in &plugins {
-                crate::core::plugin::register_plugin(e, plugin.clone(), workspace, cmd_tx.clone());
+                let specs = crate::core::plugin::register_plugin(
+                    e,
+                    plugin.clone(),
+                    workspace,
+                    cmd_tx.clone(),
+                );
+                plugin_specs.extend(specs);
             }
             // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
             // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
             for plugin in &plugins {
                 plugin.on_config_updated(&cfg);
             }
-            // 先收集插件工具规格 + plugin_injection，作为 MCP 工具的 reserved names，
+            // 插件工具规格 + plugin_injection 作为 MCP 工具的 reserved names，
             // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
-            let plugin_specs = e.collect_plugin_tool_specs();
             let injection_spec = crate::core::plugin::injection_tool_spec();
             let reserved_names: std::collections::HashSet<String> = plugin_specs
                 .iter()
