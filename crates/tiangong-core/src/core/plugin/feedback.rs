@@ -68,10 +68,18 @@ struct TurnUsageBinding {
 /// 一个可重绑定的共享插槽：turn 开始时 core 绑定本轮的 [`TurnUsageBinding`]，turn
 /// 结束时解绑（清空）。插件通过 [`PluginFeedbackTx`] 持有同一个 `Arc<TurnUsageSink>`
 /// 引用，调用 [`TurnUsageSink::report`] 时即时累加并发送——**不经过命令队列**，
-/// 因此不受 agent loop drain 时机影响，也不会被 `check_cancel` 等 drain 吞掉。
+/// 因此不受 agent loop drain 时机影响，也会被 `check_cancel` 等 drain 吞掉。
 ///
 /// 作用域保证：turn 结束后立即解绑，迟到的 usage（如上一轮后台任务迟到上报）会被
 /// 静默丢弃并打 debug 日志，不会错误计入下一轮。
+///
+/// # 当前边界：单活跃 turn
+///
+/// 当前 `TurnUsageSink` 按单活跃 turn 设计（单槽 `Option<TurnUsageBinding>`）。主
+/// Agent 执行中若嵌套 Sub Agent 且 Sub Agent 也 `bind()`，会覆盖主 Agent 的 binding；
+/// Sub Agent 结束时 guard drop 又会清空 binding，导致主 Agent 后续插件 usage 被丢弃。
+/// 当前 Sub Agent 尚未插件化，不构成阻塞；后续 Sub Agent 插件化改造时需要改为
+/// 栈式 binding 或 agent-scoped binding。
 #[derive(Clone)]
 pub struct TurnUsageSink {
     binding: Arc<Mutex<Option<TurnUsageBinding>>>,

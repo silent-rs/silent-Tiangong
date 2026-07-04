@@ -201,13 +201,11 @@ impl ReactEngine {
                     }
                 }
                 session.persist_to_disk();
+                merge_plugin_usage(&mut accumulated_usage);
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(accumulated_usage.clone()),
                 });
-                {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
-                }
+                return accumulated_usage;
             }
         }
 
@@ -232,7 +230,10 @@ impl ReactEngine {
                     crate::react::context::rebuild_system_prompt(session, &self.engine);
                 }
                 match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
-                    PendingCommandEffect::Terminate => return accumulated_usage,
+                    PendingCommandEffect::Terminate => {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                     PendingCommandEffect::MessageInjected => {
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
@@ -567,13 +568,11 @@ impl ReactEngine {
                             message.phase = crate::session::MessagePhase::Summary;
                         }
                         session.persist_to_disk();
+                        merge_plugin_usage(&mut accumulated_usage);
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
-                        {
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
+                        return accumulated_usage;
                     }
 
                     // 智能提升（工具场景）：本轮执行过工具、且 LLM 已给出一段「看起来像
@@ -587,13 +586,11 @@ impl ReactEngine {
                             message.phase = crate::session::MessagePhase::Summary;
                         }
                         session.persist_to_disk();
+                        merge_plugin_usage(&mut accumulated_usage);
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
-                        {
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
+                        return accumulated_usage;
                     }
 
                     break 'react_loop;
@@ -651,7 +648,10 @@ impl ReactEngine {
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
-                        PendingCommandEffect::Terminate => return accumulated_usage,
+                        PendingCommandEffect::Terminate => {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
@@ -1018,13 +1018,11 @@ impl ReactEngine {
                                     full_output: None,
                                     media: vec![],
                                 });
+                                merge_plugin_usage(&mut accumulated_usage);
                                 let _ = stream_tx.send(StreamEvent::Done {
                                     usage: Some(accumulated_usage.clone()),
                                 });
-                                {
-                                    merge_plugin_usage(&mut accumulated_usage);
-                                    return accumulated_usage;
-                                }
+                                return accumulated_usage;
                             }
                         }
                     }
@@ -1218,7 +1216,10 @@ impl ReactEngine {
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
                     match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
-                        PendingCommandEffect::Terminate => return accumulated_usage,
+                        PendingCommandEffect::Terminate => {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
@@ -1303,13 +1304,11 @@ impl ReactEngine {
 
                 if sub_result.ran {
                     session.persist_to_disk();
+                    merge_plugin_usage(&mut accumulated_usage);
                     let _ = stream_tx.send(StreamEvent::Done {
                         usage: Some(accumulated_usage.clone()),
                     });
-                    {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
+                    return accumulated_usage;
                 }
 
                 session.persist_to_disk();
@@ -1323,13 +1322,11 @@ impl ReactEngine {
             match summary_result {
                 SummaryPhaseResult::Completed(usage) => {
                     accumulated_usage.accumulate(&usage);
+                    merge_plugin_usage(&mut accumulated_usage);
                     let _ = stream_tx.send(StreamEvent::Done {
                         usage: Some(accumulated_usage.clone()),
                     });
-                    {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
+                    return accumulated_usage;
                 }
                 SummaryPhaseResult::NeedMoreWork { reason, usage } => {
                     accumulated_usage.accumulate(&usage);
