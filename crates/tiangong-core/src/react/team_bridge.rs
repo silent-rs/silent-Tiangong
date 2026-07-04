@@ -705,25 +705,6 @@ impl ReactEngine {
                         Some(Command::EmitStreamEvent(ev)) => {
                             let _ = stream_tx.send(ev);
                         }
-                        // 子代理 inbox drain：插件用量反馈在此仅转发为流事件。
-                        // 子代理自身的用量已通过 SubAgentDrainResult 独立统计并累加到
-                        // accumulated_usage，这里不再重复记账。
-                        Some(Command::ReportPluginUsage {
-                            usage,
-                            source,
-                            agent_id,
-                        }) => {
-                            if usage.total_tokens > 0 {
-                                let _ = stream_tx.send(StreamEvent::TokenUsage {
-                                    usage,
-                                    current_tokens: None,
-                                    compression_threshold_tokens: None,
-                                    context_limit_tokens: None,
-                                    source,
-                                    agent_id,
-                                });
-                            }
-                        }
                         None => break,
                     }
                 }

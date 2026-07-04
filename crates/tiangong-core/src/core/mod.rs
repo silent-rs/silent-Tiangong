@@ -604,24 +604,6 @@ async fn worker_loop_async(
             Command::EmitStreamEvent(ev) => {
                 let _ = stream_tx.send(ev);
             }
-            // turn 之外（无本轮 accumulated_usage 可累加）：插件用量反馈仅转发为流事件，
-            // 供 UI/统计消费。附件分析等工具实际运行在 turn 内，其用量会在 engine 侧累加。
-            Command::ReportPluginUsage {
-                usage,
-                source,
-                agent_id,
-            } => {
-                if usage.total_tokens > 0 {
-                    let _ = stream_tx.send(StreamEvent::TokenUsage {
-                        usage,
-                        current_tokens: None,
-                        compression_threshold_tokens: None,
-                        context_limit_tokens: None,
-                        source,
-                        agent_id,
-                    });
-                }
-            }
             Command::CompressContext => {
                 compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
                 continue;

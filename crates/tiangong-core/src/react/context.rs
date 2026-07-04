@@ -70,24 +70,6 @@ pub(crate) fn emit_token_usage(
     });
 }
 
-/// 处理插件上报的 token 用量：累加到本轮 `accumulated_usage` 并统一发送
-/// `StreamEvent::TokenUsage`。
-///
-/// 用于 react engine 中处理 [`crate::core::command::Command::ReportPluginUsage`]：
-/// 插件（如 `analyze_attachment`）在工具执行中产生的 LLM 子调用用量经此入口计入
-/// 本轮统计，确保最终 `Done.usage`、成本统计与上下文压缩判断都包含该消耗。
-pub(crate) fn handle_plugin_usage(
-    accumulated_usage: &mut TokenUsage,
-    stream_tx: &StdSender<StreamEvent>,
-    context_limit: usize,
-    usage: &TokenUsage,
-    source: &str,
-    agent_id: Option<&str>,
-) {
-    accumulated_usage.accumulate(usage);
-    emit_token_usage(stream_tx, usage, None, context_limit, source, agent_id);
-}
-
 pub(crate) fn maybe_update_context_summary(
     session: &mut Session,
     engine: &RuntimeEngine,

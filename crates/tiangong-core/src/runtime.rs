@@ -100,6 +100,9 @@ pub struct RuntimeEngine {
     tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
     /// Plugin 注册的 Prompt 段落提供者
     prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
+    /// Turn-scoped 插件 usage 收集器（由插件经 PluginFeedbackTx.report_token_usage
+    /// 即时累加，turn 开始绑定 / 结束解绑，见 core::plugin::feedback::TurnUsageSink）。
+    turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
 }
 
 impl std::fmt::Debug for RuntimeEngine {
@@ -151,6 +154,7 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
 
@@ -185,6 +189,7 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
 
@@ -243,6 +248,12 @@ impl RuntimeEngine {
     /// 获取权限网关引用
     pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
         &self.permission_gate
+    }
+
+    /// 取 turn-scoped 插件 usage 收集器的共享引用（供 ReactEngine 在 turn
+    /// 开始时绑定本轮 usage 上下文，插件经 PluginFeedbackTx 即时上报）。
+    pub fn turn_usage_sink(&self) -> &Arc<crate::core::plugin::TurnUsageSink> {
+        &self.turn_usage_sink
     }
 
     /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）

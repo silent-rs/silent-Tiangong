@@ -19,8 +19,7 @@ use crate::permission::{
     normalize_permission_target,
 };
 use crate::react::context::{
-    emit_token_usage, handle_plugin_usage, maybe_update_context_summary, persist_error,
-    select_client_for_request,
+    emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -160,6 +159,17 @@ impl ReactEngine {
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
+        // 绑定本轮 turn-scoped 插件 usage sink：插件经 PluginFeedbackTx.report_token_usage
+        // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
+        // check_cancel 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
+        // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
+        let usage_sink = self.engine.turn_usage_sink().clone();
+        let _usage_guard = usage_sink.bind(stream_tx.clone(), self.engine.context_limit);
+        // 把本轮插件累计的 usage 折算进 accumulated_usage（在每个返回点调用）。
+        // 注意：捕获 usage_sink 的 clone，而非 self，避免与循环内 &mut self 借用冲突。
+        let merge_plugin_usage = |acc: &mut TokenUsage| {
+            acc.accumulate(&usage_sink.take_usage());
+        };
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
@@ -185,13 +195,19 @@ impl ReactEngine {
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
                     session.persist_to_disk();
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
                 session.persist_to_disk();
                 let _ = stream_tx.send(StreamEvent::Done {
                     usage: Some(accumulated_usage.clone()),
                 });
-                return accumulated_usage;
+                {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    return accumulated_usage;
+                }
             }
         }
 
@@ -215,13 +231,7 @@ impl ReactEngine {
                 if round == 0 {
                     crate::react::context::rebuild_system_prompt(session, &self.engine);
                 }
-                match drain_pending_commands_async(
-                    session,
-                    &self.engine,
-                    stream_tx,
-                    cmd_rx,
-                    &mut accumulated_usage,
-                ) {
+                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => return accumulated_usage,
                     PendingCommandEffect::MessageInjected => {
                         successful_tool_call_keys.clear();
@@ -357,22 +367,7 @@ impl ReactEngine {
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let _ = stream_tx.send(ev);
-                                }
-                                Some(Command::ReportPluginUsage {
-                                    usage,
-                                    source,
-                                    agent_id,
-                                }) => {
-                                    handle_plugin_usage(
-                                        &mut accumulated_usage,
-                                        stream_tx,
-                                        self.engine.context_limit,
-                                        &usage,
-                                        &source,
-                                        agent_id.as_deref(),
-                                    );
-                                }
-                            }
+                                }                            }
                         }
                         chunk_opt = chunk_rx.recv() => {
                             match chunk_opt {
@@ -392,7 +387,7 @@ impl ReactEngine {
                                             let _ = stream_tx.send(StreamEvent::Error {
                                                 message: "已取消".into(),
                                             });
-                                            return accumulated_usage;
+                                            { merge_plugin_usage(&mut accumulated_usage); return accumulated_usage; }
                                         }
                                         Err(e) => Err(anyhow::anyhow!(e.to_string())),
                                     };
@@ -419,7 +414,10 @@ impl ReactEngine {
                                         &accumulated_usage,
                                         self.engine.context_limit,
                                     );
-                                    return accumulated_usage;
+                                    {
+                                        merge_plugin_usage(&mut accumulated_usage);
+                                        return accumulated_usage;
+                                    }
                                 }
                                 CancelSignal::WaitForUsage => {
                                     accumulated_usage.accumulate(&streaming_usage);
@@ -457,7 +455,10 @@ impl ReactEngine {
                                             }
                                         });
                                     }
-                                    return accumulated_usage;
+                                    {
+                                        merge_plugin_usage(&mut accumulated_usage);
+                                        return accumulated_usage;
+                                    }
                                 }
                             }
                         }
@@ -491,7 +492,10 @@ impl ReactEngine {
                         });
                         // 持久化错误到 session，避免前端 Error 事件时序丢失导致中断无痕迹。
                         persist_error(session, format!("ReAct 循环请求失败：{err_msg}"));
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
                 };
 
@@ -566,7 +570,10 @@ impl ReactEngine {
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
 
                     // 智能提升（工具场景）：本轮执行过工具、且 LLM 已给出一段「看起来像
@@ -583,7 +590,10 @@ impl ReactEngine {
                         let _ = stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
 
                     break 'react_loop;
@@ -640,13 +650,7 @@ impl ReactEngine {
                     // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
-                    match drain_pending_commands_async(
-                        session,
-                        &self.engine,
-                        stream_tx,
-                        cmd_rx,
-                        &mut accumulated_usage,
-                    ) {
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();
@@ -918,7 +922,10 @@ impl ReactEngine {
                                         let _ = stream_tx.send(StreamEvent::Error {
                                             message: "已取消".into(),
                                         });
-                                        return accumulated_usage;
+                                        {
+                                            merge_plugin_usage(&mut accumulated_usage);
+                                            return accumulated_usage;
+                                        }
                                     }
                                     Some(Command::Message {
                                         content,
@@ -969,20 +976,6 @@ impl ReactEngine {
                                     Some(Command::EmitStreamEvent(ev)) => {
                                         let _ = stream_tx.send(ev);
                                     }
-                                    Some(Command::ReportPluginUsage {
-                                        usage,
-                                        source,
-                                        agent_id,
-                                    }) => {
-                                        handle_plugin_usage(
-                                            &mut accumulated_usage,
-                                            stream_tx,
-                                            self.engine.context_limit,
-                                            &usage,
-                                            &source,
-                                            agent_id.as_deref(),
-                                        );
-                                    }
                                 }
                             };
 
@@ -1028,13 +1021,19 @@ impl ReactEngine {
                                 let _ = stream_tx.send(StreamEvent::Done {
                                     usage: Some(accumulated_usage.clone()),
                                 });
-                                return accumulated_usage;
+                                {
+                                    merge_plugin_usage(&mut accumulated_usage);
+                                    return accumulated_usage;
+                                }
                             }
                         }
                     }
 
                     if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
 
                     // 文件编辑锁检查
@@ -1184,7 +1183,10 @@ impl ReactEngine {
                         format_tool_trace_message(&result),
                     );
                     if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
 
                     if result.ok {
@@ -1206,19 +1208,16 @@ impl ReactEngine {
                     }
 
                     if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
                     // 记忆候选评估已下沉到 memory 插件 on_turn_finished（从 session 重建候选，
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
-                    match drain_pending_commands_async(
-                        session,
-                        &self.engine,
-                        stream_tx,
-                        cmd_rx,
-                        &mut accumulated_usage,
-                    ) {
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => return accumulated_usage,
                         PendingCommandEffect::MessageInjected => {
                             successful_tool_call_keys.clear();
@@ -1282,7 +1281,10 @@ impl ReactEngine {
                 accumulated_usage.accumulate(&sub_result.usage);
                 if sub_result.cancelled {
                     session.persist_to_disk();
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
 
                 let main_messages = self.drain_main_agent_messages();
@@ -1304,7 +1306,10 @@ impl ReactEngine {
                     let _ = stream_tx.send(StreamEvent::Done {
                         usage: Some(accumulated_usage.clone()),
                     });
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
 
                 session.persist_to_disk();
@@ -1321,7 +1326,10 @@ impl ReactEngine {
                     let _ = stream_tx.send(StreamEvent::Done {
                         usage: Some(accumulated_usage.clone()),
                     });
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
                 SummaryPhaseResult::NeedMoreWork { reason, usage } => {
                     accumulated_usage.accumulate(&usage);
@@ -1329,7 +1337,10 @@ impl ReactEngine {
                     if outer_iteration >= self.max_outer_iterations {
                         // 重入次数已达上限，强制输出最终回复。
                         self.force_final_response(session, stream_tx, ForceFinalReason::OuterLimit);
-                        return accumulated_usage;
+                        {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
                     }
                     // 注入"上轮总结判定未完成"的上下文，重新进入工具执行阶段。
                     // 必须用合法的 tool injection pair（assistant tool_call + tool result），
@@ -1352,7 +1363,10 @@ impl ReactEngine {
                 SummaryPhaseResult::Cancelled(usage) => {
                     accumulated_usage.accumulate(&usage);
                     session.persist_to_disk();
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
                 SummaryPhaseResult::Failed { message, usage } => {
                     accumulated_usage.accumulate(&usage);
@@ -1361,11 +1375,15 @@ impl ReactEngine {
                     });
                     persist_error(session, format!("总结阶段失败：{message}"));
                     self.force_final_response(session, stream_tx, ForceFinalReason::SummaryError);
-                    return accumulated_usage;
+                    {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return accumulated_usage;
+                    }
                 }
             }
         }
 
+        merge_plugin_usage(&mut accumulated_usage);
         accumulated_usage
     }
 }

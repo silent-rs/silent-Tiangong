@@ -186,8 +186,9 @@ impl AnalyzeAttachmentPlugin {
             match result {
                 Ok(Ok(response)) => {
                     // 经语义反馈通道把 multimodal 子调用的 token 用量上报给 core，
-                    // 由 core 累加到本轮 accumulated_usage 并统一发送 StreamEvent::TokenUsage，
-                    // 确保成本统计、上下文压缩判断与 Done.usage 都包含该消耗。
+                    // 由 turn-scoped usage sink 即时累加到本轮 accumulated_usage 并发送
+                    // StreamEvent::TokenUsage，确保成本统计与 Done.usage 都包含该消耗
+                    // （上下文压缩由主对话 LLM 的用量驱动，与子调用用量无关）。
                     if let Some(tx) = feedback_tx {
                         tx.report_token_usage(response.usage.clone(), TOOL_ANALYZE_ATTACHMENT);
                     }
