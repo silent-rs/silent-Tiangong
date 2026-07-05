@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{
-    AgentConfig, InstalledSkillConfig, McpConfig, McpServerConfig, McpTransportMode,
-    SkillMcpRequirementConfig, SkillsConfig,
+    AgentConfig, McpConfig, McpServerConfig, McpTransportMode, SkillMcpRequirementConfig,
+    SkillsConfig,
 };
 use crate::agents::skill_convert_agent::convert_external_skill_with_agent;
 use crate::mcp::{
@@ -31,7 +31,7 @@ use crate::tool::{ToolExecutionRecord, ToolResult};
 pub(crate) mod audit;
 mod facade;
 pub(crate) mod formatting;
-mod repository;
+pub(crate) mod repository;
 mod services;
 mod store;
 mod support;
@@ -42,9 +42,8 @@ mod tests;
 use self::repository::{
     converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
     default_mcp_capability_cache_path, default_mcp_config_path, default_mcp_lock_path,
-    default_sessions_dir_path, default_skills_config_path, default_skills_storage_dir_path,
-    default_workspace_dir, ensure_dir, normalize_model_list, parse_bool, parse_list_value,
-    validate_agent_config,
+    default_sessions_dir_path, default_skills_config_path, default_workspace_dir, ensure_dir,
+    normalize_model_list, parse_bool, validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 pub use self::support::StreamEvent;
@@ -54,6 +53,7 @@ use self::support::{
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
+pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };

@@ -66,6 +66,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         if tiangong_plugin_analyze_attachment::should_register(llm) {
             plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
         }
+        // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在已启用
+        // skill 决定是否暴露工具与注入 prompt 段落。
+        plugins.extend(tiangong_plugin_skill::default_plugins());
         plugins
     });
 

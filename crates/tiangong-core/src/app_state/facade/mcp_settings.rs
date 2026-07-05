@@ -3,11 +3,7 @@ use super::super::*;
 impl TiangongState {
     pub fn agent_config_summary(&self) -> String {
         format!(
-            "skills.enabled={}, skills.max_matches={}, skills.dirs={}, skills.installed={}, mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
-            self.store.agent.agent_config.skills.enabled,
-            self.store.agent.agent_config.skills.max_matches,
-            self.store.agent.agent_config.skills.dirs.len(),
-            self.store.agent.agent_config.skills.installed.len(),
+            "mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
             self.store.agent.agent_config.mcp.enabled,
             self.store.agent.agent_config.mcp.timeout_ms,
             self.store.agent.agent_config.mcp.servers.len()

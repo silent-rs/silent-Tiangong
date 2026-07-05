@@ -194,7 +194,6 @@ impl TiangongConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
             mcp: self.mcp.clone(),
             mcp_capabilities: self.mcp_capabilities.clone(),
-            skills: self.skills.clone(),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),

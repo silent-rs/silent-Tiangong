@@ -337,6 +337,9 @@ impl TiangongApp {
         if tiangong_plugin_analyze_attachment::should_register(llm) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
         }
+        // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在已启用
+        // skill 决定是否暴露工具与注入 prompt 段落。
+        plugins.push(tiangong_plugin_skill::build_plugin());
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core =

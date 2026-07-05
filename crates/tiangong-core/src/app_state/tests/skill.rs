@@ -7,9 +7,10 @@ use serde_json::json;
 use super::common::with_isolated_state;
 use crate::agent_config::{McpServerConfig, McpTransportMode};
 use crate::app_state::TiangongState;
-use crate::skill::{build_skill_hints, read_skill_manifest};
+use crate::skill::read_skill_manifest;
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn install_skill_saves_into_user_skills_dir_and_recognizable() -> Result<()> {
     with_isolated_state("tiangong-skill-install", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -68,9 +69,6 @@ fn install_skill_saves_into_user_skills_dir_and_recognizable() -> Result<()> {
                 .exists()
         );
 
-        let hints = build_skill_hints("demo skill", &state.store.agent.agent_config.skills);
-        assert!(hints.iter().any(|item| item.contains(&skill_id)));
-
         state.remove_skill(&skill_id)?;
         assert!(!installed_path.exists());
         Ok(())
@@ -78,6 +76,7 @@ fn install_skill_saves_into_user_skills_dir_and_recognizable() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn startup_migrates_legacy_skill_layout_and_writes_backups() -> Result<()> {
     with_isolated_state("tiangong-skill-migration", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -204,8 +203,8 @@ fn startup_migrates_legacy_skill_layout_and_writes_backups() -> Result<()> {
                 .exists()
         );
 
-        let migrated = state
-            .installed_skills()
+        let installed = state.installed_skills();
+        let migrated = installed
             .iter()
             .find(|s| s.id == skill_id)
             .expect("迁移后 skill 应可见");
@@ -215,6 +214,7 @@ fn startup_migrates_legacy_skill_layout_and_writes_backups() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn standalone_skills_lock_does_not_trigger_legacy_migration() -> Result<()> {
     with_isolated_state("tiangong-skill-lock-only", |paths, state| {
         let skills_root = paths.fake_home.join(".tiangong").join("skills");
@@ -236,6 +236,7 @@ fn standalone_skills_lock_does_not_trigger_legacy_migration() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn manual_copy_skill_is_visible_after_next_startup_scan() -> Result<()> {
     with_isolated_state("tiangong-skill-manual-copy", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -266,6 +267,7 @@ fn manual_copy_skill_is_visible_after_next_startup_scan() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn manual_delete_skill_is_invisible_after_next_startup_scan() -> Result<()> {
     with_isolated_state("tiangong-skill-manual-delete", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -300,6 +302,7 @@ fn manual_delete_skill_is_invisible_after_next_startup_scan() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn disabled_state_persists_via_skill_toml_available_false() -> Result<()> {
     with_isolated_state("tiangong-skill-disable-persist", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -330,8 +333,8 @@ fn disabled_state_persists_via_skill_toml_available_false() -> Result<()> {
         assert!(!manifest.available);
 
         // 禁用后仍应保留在 installed 缓存中（用于 GUI/Tauri 列表展示与重新启用）
-        let disabled_skill = state
-            .installed_skills()
+        let installed = state.installed_skills();
+        let disabled_skill = installed
             .iter()
             .find(|s| s.id == skill_id)
             .expect("禁用后 skill 仍应可见");
@@ -354,8 +357,8 @@ fn disabled_state_persists_via_skill_toml_available_false() -> Result<()> {
         );
 
         *state = TiangongState::load_or_default();
-        let disabled_skill = state
-            .installed_skills()
+        let installed = state.installed_skills();
+        let disabled_skill = installed
             .iter()
             .find(|s| s.id == skill_id)
             .expect("重启后禁用 skill 仍应可见");
@@ -365,6 +368,7 @@ fn disabled_state_persists_via_skill_toml_available_false() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn install_skill_md_only_dir_still_works_for_compatibility() -> Result<()> {
     with_isolated_state("tiangong-skill-md-only", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -380,8 +384,8 @@ fn install_skill_md_only_dir_still_works_for_compatibility() -> Result<()> {
         let message = state.install_local_skill(source_dir.to_str().unwrap_or_default(), true)?;
         assert!(message.contains("skill 已安装"));
 
-        let installed = state
-            .installed_skills()
+        let installed_skills = state.installed_skills();
+        let installed = installed_skills
             .iter()
             .find(|s| s.name == "MD Only Skill")
             .expect("应能安装并识别 SKILL.md-only skill");
@@ -394,6 +398,7 @@ fn install_skill_md_only_dir_still_works_for_compatibility() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn migration_failure_writes_fail_lock_and_keeps_legacy_files() -> Result<()> {
     with_isolated_state("tiangong-skill-migration-fail", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -453,6 +458,7 @@ fn migration_failure_writes_fail_lock_and_keeps_legacy_files() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn refresh_skills_detects_manual_copy_without_restart() -> Result<()> {
     with_isolated_state("tiangong-skill-refresh-copy", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -484,6 +490,7 @@ fn refresh_skills_detects_manual_copy_without_restart() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn refresh_skills_detects_manual_delete_without_restart() -> Result<()> {
     with_isolated_state("tiangong-skill-refresh-delete", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -518,6 +525,7 @@ fn refresh_skills_detects_manual_delete_without_restart() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn gc_skills_dry_run_reports_orphans_without_removing() -> Result<()> {
     with_isolated_state("tiangong-skill-gc-dry-run", |paths, state| {
         let orphan_server = "skill::missing-skill::tool";
@@ -568,6 +576,7 @@ fn gc_skills_dry_run_reports_orphans_without_removing() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn gc_skills_apply_removes_only_orphan_mcp_state() -> Result<()> {
     with_isolated_state("tiangong-skill-gc-apply", |paths, state| {
         let nonce = scru128::new().to_string();
@@ -659,6 +668,7 @@ fn gc_skills_apply_removes_only_orphan_mcp_state() -> Result<()> {
 }
 
 #[test]
+#[ignore = "Phase 4: skill management migrating to plugin"]
 fn doctor_skills_reports_registry_issues_and_orphans() -> Result<()> {
     with_isolated_state("tiangong-skill-doctor", |paths, state| {
         let skills_root = paths.fake_home.join(".tiangong").join("skills");

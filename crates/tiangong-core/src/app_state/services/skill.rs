@@ -241,9 +241,8 @@ impl AppSkillService {
 
         rollback_guard.commit();
 
-        // 刷新注册表并同步内存缓存
+        // 刷新注册表缓存
         state.services.skill_registry.refresh();
-        state.sync_installed_from_registry();
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_app_only()?;
@@ -295,12 +294,8 @@ impl AppSkillService {
         let skill_dir = entry.dir.clone();
 
         // 收集该 Skill 托管的 MCP server（用于清理引用）
-        let managed_mcp_servers: Vec<String> = state
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
+        let installed = state.installed_skills();
+        let managed_mcp_servers: Vec<String> = installed
             .iter()
             .find(|s| s.id == id)
             .map(|s| s.managed_mcp_servers.clone())
@@ -312,19 +307,14 @@ impl AppSkillService {
                 .with_context(|| format!("删除 skill 目录失败：{}", skill_dir.display()))?;
         }
 
-        // 驱逐注册表缓存并同步内存
+        // 驱逐注册表缓存
         state.services.skill_registry.invalidate(id);
         state.services.skill_registry.refresh();
-        state.sync_installed_from_registry();
 
         // 清理该 skill 托管的 MCP server（引用计数为 0 时移除）
+        let installed_after = state.installed_skills();
         for mcp_id in &managed_mcp_servers {
-            let still_referenced = state
-                .store
-                .agent
-                .agent_config
-                .skills
-                .installed
+            let still_referenced = installed_after
                 .iter()
                 .any(|s| s.managed_mcp_servers.contains(mcp_id));
             if !still_referenced {
@@ -368,8 +358,7 @@ impl AppSkillService {
             .set_available(id, enabled)
             .with_context(|| format!("设置 skill available 失败：{id}"))?;
 
-        // 同步内存缓存
-        state.sync_installed_from_registry();
+        // 同步内存缓存（skills 已脱离 agent_config，registry 已刷新）
         validate_agent_config(&state.store.agent.agent_config)?;
         state.rebuild_runtime_for_agent_config();
         state.persist_agent_configs_only()?;

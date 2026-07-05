@@ -2731,8 +2731,8 @@ pub async fn get_skill_env(
 ) -> Result<std::collections::HashMap<String, String>, String> {
     state
         .with_state_read(|core_state| {
-            let skill = core_state
-                .installed_skills()
+            let installed = core_state.installed_skills();
+            let skill = installed
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
@@ -2788,8 +2788,8 @@ pub async fn set_skill_env(
 ) -> Result<(), String> {
     state
         .with_state_read(|core_state| {
-            let skill = core_state
-                .installed_skills()
+            let installed = core_state.installed_skills();
+            let skill = installed
                 .iter()
                 .find(|s| s.id == id)
                 .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;

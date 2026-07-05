@@ -49,11 +49,11 @@ pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
     default_storage_root().join("sessions.json")
 }
 
-pub(in crate::app_state) fn default_skills_storage_dir_path() -> PathBuf {
+pub fn default_skills_storage_dir_path() -> PathBuf {
     default_storage_root().join("skills")
 }
 
-pub(in crate::app_state) fn default_mcp_lock_path() -> PathBuf {
+pub fn default_mcp_lock_path() -> PathBuf {
     default_skills_storage_dir_path().join("mcp-lock.json")
 }
 
@@ -170,19 +170,6 @@ pub(in crate::app_state) fn normalize_model_list(
 }
 
 pub(in crate::app_state) fn validate_agent_config(config: &AgentConfig) -> Result<()> {
-    if config.skills.max_matches == 0 {
-        return Err(anyhow!("skills.max_matches 必须大于 0"));
-    }
-    let mut seen_skill_ids = HashSet::new();
-    for skill in &config.skills.installed {
-        let id = skill.id.trim();
-        if id.is_empty() {
-            return Err(anyhow!("skills.installed 包含空 id"));
-        }
-        if !seen_skill_ids.insert(id.to_string()) {
-            return Err(anyhow!("skills.installed 存在重复 id：{id}"));
-        }
-    }
     validate_mcp_config(&config.mcp)?;
     Ok(())
 }

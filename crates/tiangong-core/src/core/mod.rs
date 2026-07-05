@@ -429,7 +429,7 @@ async fn worker_loop_async(
             new_tools.push(injection_spec);
             // 合并 plugin 注册的工具规格
             new_tools.extend(plugin_specs);
-            inject_enhanced_tools(&mut new_tools, e);
+            inject_enhanced_tools(&mut new_tools);
             // recall_memory 工具规格改由 memory 插件通过 tool_specs() 声明，
             // 随 plugin_specs 自动汇入（且自动进入 reserved_names，MCP 同名工具会被避让）。
             tools = new_tools;
@@ -786,7 +786,6 @@ fn build_engine_from_config(
 
     let agent_config = AgentConfig {
         mcp: config.mcp.clone(),
-        skills: config.skills.clone(),
         trust_mode: config.trust_mode,
         default_trust_mode: config.default_trust_mode,
         custom_system_prompt: config.custom_system_prompt.clone(),

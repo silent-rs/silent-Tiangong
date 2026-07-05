@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::agent_config::{AgentConfig, McpConfig};
@@ -404,10 +404,9 @@ impl RuntimeEngine {
         if let Some(result) = self.handle_background_task(call) {
             return result;
         }
-        // Skill 详情查询
-        if call.name == "get_skill_detail" {
-            return self.handle_get_skill_detail(call);
-        }
+
+        // Skill 详情查询（get_skill_detail）已迁移至独立插件 crate
+        // （tiangong-plugin-skill），由 tool_overrides 统一分发。
 
         // 多媒体工具（generate_image / generate_video / text_to_speech / speech_to_text）
         // 已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
@@ -860,101 +859,26 @@ impl RuntimeEngine {
         }
     }
 
-    fn handle_get_skill_detail(&self, call: &ToolCall) -> ToolResult {
-        let skill_id = call
-            .arguments
-            .get("skill_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let skill = self
-            .agent_config
-            .skills
-            .installed
-            .iter()
-            .find(|s| s.id == skill_id && s.enabled);
-
-        let Some(skill) = skill else {
-            return ToolResult {
-                ok: false,
-                summary: format!("未找到 skill：{skill_id}"),
-                stdout: String::new(),
-                stderr: format!(
-                    "可用的 skill：{}",
-                    self.agent_config
-                        .skills
-                        .installed
-                        .iter()
-                        .filter(|s| s.enabled)
-                        .map(|s| s.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                exit_code: 1,
-                execution: None,
-            };
-        };
-
-        let missing_mcp = missing_managed_mcp_servers(skill, &self.agent_config);
-        if !missing_mcp.is_empty() {
-            return ToolResult {
-                ok: false,
-                summary: format!("Skill {skill_id} 缺少托管 MCP 依赖"),
-                stdout: String::new(),
-                stderr: format!(
-                    "SkillActivationError::MissingMcp skill_id={skill_id} missing={}；请提示用户确认后补充注册这些托管 MCP",
-                    missing_mcp.join(",")
-                ),
-                exit_code: 1,
-                execution: None,
-            };
-        }
-
-        let skill_dir = &skill.source.value;
-        let skill_md = std::path::Path::new(skill_dir).join(&skill.entry);
-        match std::fs::read_to_string(&skill_md) {
-            Ok(content) => {
-                let resolved = content.replace("{skill_dir}", skill_dir);
-                ToolResult {
-                    ok: true,
-                    summary: format!("Skill {} 的使用说明", skill.name),
-                    stdout: resolved,
-                    stderr: String::new(),
-                    exit_code: 0,
-                    execution: None,
-                }
-            }
-            Err(e) => ToolResult {
-                ok: false,
-                summary: format!("读取 skill 说明失败：{e}"),
-                stdout: String::new(),
-                stderr: e.to_string(),
-                exit_code: 1,
-                execution: None,
-            },
-        }
-    }
-
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
 }
 
-/// 注入增强工具定义（Skill、后台任务、MCP 管理）
-pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeEngine) {
-    let agent_config = engine.agent_config();
-
+/// 注入增强工具定义（后台任务、MCP 管理）。
+///
+/// 注：多媒体/附件分析工具规格已迁移至独立插件 crate；Skill 详情查询
+/// （get_skill_detail）与 system prompt 中的 Skills 段落已迁移至
+/// `tiangong-plugin-skill`；install/remove/set_skill_enabled 不再作为 LLM 工具暴露。
+pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
     // 多媒体能力（图片/视频/TTS/STT）与附件分析（analyze_attachment）的工具规格与
     // 分发已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
     // text-to-speech,speech-to-text,analyze-attachment}），由 tool_overrides 统一分发。
 
-    if agent_config.skills.installed.iter().any(|s| s.enabled) {
-        tools.push(ToolSpec {
-            name: "get_skill_detail".to_string(),
-            description: "获取已安装 Skill 的完整使用说明".to_string(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}),
-        });
-    }
+    // Skill 详情查询（get_skill_detail）与 system prompt 中的「已安装 Skills」段落
+    // 已迁移至独立插件 crate（tiangong-plugin-skill），由 tool_overrides 统一分发。
+    // install_skill / remove_skill / set_skill_enabled 不再作为 LLM 工具暴露——它们
+    // 是 app 层（Tauri 命令 / CLI modal / app_state facade）使用的管理 API。
+
     // 后台任务管理
     for spec in [
         (
@@ -989,7 +913,9 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
             input_schema: spec.2,
         });
     }
-    // MCP/Skill 管理
+    // MCP 管理（register/remove/set_mcp_enabled）
+    // 注：install_skill / remove_skill / set_skill_enabled 不再作为 LLM 工具暴露，
+    // 它们是 app 层管理 API；此处仅保留 MCP 管理工具 spec。
     for spec in [
         (
             "register_mcp_server",
@@ -1006,21 +932,6 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
             "启用/禁用 MCP 服务器",
             serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]}),
         ),
-        (
-            "install_skill",
-            "安装 Skill",
-            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"enabled":{"type":"boolean"}},"required":["path"]}),
-        ),
-        (
-            "remove_skill",
-            "卸载 Skill",
-            serde_json::json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}),
-        ),
-        (
-            "set_skill_enabled",
-            "启用/禁用 Skill",
-            serde_json::json!({"type":"object","properties":{"id":{"type":"string"},"enabled":{"type":"boolean"}},"required":["id","enabled"]}),
-        ),
     ] {
         tools.push(ToolSpec {
             name: spec.0.to_string(),
@@ -1031,38 +942,6 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>, engine: &RuntimeE
 
     // 多智能体团队工具
     crate::agent_team::tools::inject_agent_team_tools(tools);
-}
-
-fn missing_managed_mcp_servers(
-    skill: &crate::agent_config::InstalledSkillConfig,
-    agent_config: &AgentConfig,
-) -> Vec<String> {
-    if skill.requires_mcp.is_empty() {
-        return Vec::new();
-    }
-    let configured = agent_config
-        .mcp
-        .servers
-        .iter()
-        .map(|server| server.name.as_str())
-        .collect::<HashSet<_>>();
-
-    skill
-        .requires_mcp
-        .iter()
-        .filter_map(|requirement| {
-            let mcp_id = if requirement.id.trim().is_empty() {
-                requirement.package.trim()
-            } else {
-                requirement.id.trim()
-            };
-            if mcp_id.is_empty() {
-                return None;
-            }
-            let server_name = format!("skill::{}::{mcp_id}", skill.id);
-            (!configured.contains(server_name.as_str())).then_some(server_name)
-        })
-        .collect()
 }
 
 /// 清理 LLM 响应中混入的工具执行 trace 文本
@@ -1128,82 +1007,4 @@ pub(crate) fn strip_tool_traces_from_response(text: &str) -> String {
     }
 
     cleaned.trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent_config::{
-        InstalledSkillConfig, McpServerConfig, McpTransportMode, SkillMcpRequirementConfig,
-        SkillSourceConfig,
-    };
-
-    #[test]
-    fn missing_managed_mcp_servers_reports_absent_skill_server() {
-        let skill = InstalledSkillConfig {
-            id: "demo".to_string(),
-            name: "Demo".to_string(),
-            version: "0.1.0".to_string(),
-            description: String::new(),
-            entry: "SKILL.md".to_string(),
-            enabled: true,
-            installed_at: String::new(),
-            managed_mcp_servers: vec!["skill::demo::tool".to_string()],
-            source: SkillSourceConfig {
-                kind: "local".to_string(),
-                value: "/tmp/demo".to_string(),
-            },
-            requires_mcp: vec![SkillMcpRequirementConfig {
-                id: "tool".to_string(),
-                source: "npm".to_string(),
-                package: "demo-tool".to_string(),
-                version: "1.0.0".to_string(),
-            }],
-            permissions: Default::default(),
-        };
-
-        let missing = missing_managed_mcp_servers(&skill, &AgentConfig::default());
-        assert_eq!(missing, vec!["skill::demo::tool"]);
-    }
-
-    #[test]
-    fn missing_managed_mcp_servers_accepts_configured_skill_server() {
-        let mut config = AgentConfig::default();
-        config.mcp.servers.push(McpServerConfig {
-            name: "skill::demo::tool".to_string(),
-            transport: McpTransportMode::Stdio,
-            command: "echo".to_string(),
-            args: Vec::new(),
-            endpoint: String::new(),
-            auth_header: String::new(),
-            headers: Default::default(),
-            env: Default::default(),
-            enabled: true,
-            tags: Vec::new(),
-        });
-        let skill = InstalledSkillConfig {
-            id: "demo".to_string(),
-            name: "Demo".to_string(),
-            version: "0.1.0".to_string(),
-            description: String::new(),
-            entry: "SKILL.md".to_string(),
-            enabled: true,
-            installed_at: String::new(),
-            managed_mcp_servers: vec!["skill::demo::tool".to_string()],
-            source: SkillSourceConfig {
-                kind: "local".to_string(),
-                value: "/tmp/demo".to_string(),
-            },
-            requires_mcp: vec![SkillMcpRequirementConfig {
-                id: "tool".to_string(),
-                source: "npm".to_string(),
-                package: "demo-tool".to_string(),
-                version: "1.0.0".to_string(),
-            }],
-            permissions: Default::default(),
-        };
-
-        let missing = missing_managed_mcp_servers(&skill, &config);
-        assert!(missing.is_empty());
-    }
 }

@@ -49,33 +49,6 @@ fn build_media_section(models_config: &ModelsConfig) -> String {
     format!("已配置的多媒体能力：\n{}", hints.join("\n"))
 }
 
-/// Skills 摘要 section
-fn build_skills_section(agent_config: &AgentConfig) -> String {
-    let mut summaries = Vec::new();
-    for skill in &agent_config.skills.installed {
-        if !skill.enabled {
-            continue;
-        }
-        summaries.push(format!(
-            "- {} (id={}): {}",
-            skill.name,
-            skill.id,
-            if skill.description.is_empty() {
-                "无描述"
-            } else {
-                &skill.description
-            }
-        ));
-    }
-    if summaries.is_empty() {
-        return String::new();
-    }
-    format!(
-        "已安装的 Skills（使用前先调用 get_skill_detail 获取完整说明）：\n{}",
-        summaries.join("\n")
-    )
-}
-
 /// 构建 System Context（环境事实，追加到 system prompt 尾部）
 pub fn build_system_context(session: &Session) -> Vec<String> {
     let mut ctx = Vec::new();
@@ -158,7 +131,9 @@ impl SystemPromptConfig {
     pub fn from_configs(models_config: &ModelsConfig, agent_config: &AgentConfig) -> Self {
         Self {
             custom_prompt: agent_config.custom_system_prompt.trim().to_string(),
-            skills_text: build_skills_section(agent_config),
+            // Skills 摘要段落已迁移至 tiangong-plugin-skill 的 PromptSectionProvider，
+            // 经 plugin_sections 流入；此处置空，保留字段以维持结构稳定。
+            skills_text: String::new(),
             media_text: build_media_section(models_config),
             team_text: build_agent_team_section(),
             plugin_sections: Vec::new(),

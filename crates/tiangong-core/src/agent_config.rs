@@ -160,8 +160,6 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
     #[serde(default)]
-    pub skills: SkillsConfig,
-    #[serde(default)]
     pub mcp: McpConfig,
     /// 当前权限信任模式（可按当前会话调整）
     #[serde(default)]

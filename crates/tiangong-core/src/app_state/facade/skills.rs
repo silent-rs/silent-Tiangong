@@ -1,30 +1,27 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::agent_config::SkillSourceConfig;
+use crate::agent_config::{InstalledSkillConfig, SkillSourceConfig};
 use crate::app_state::audit;
 use crate::skill::{LoadedSkill, SkillRegistryEntry, SkillRegistryView};
 
 use super::super::*;
 
 impl TiangongState {
-    pub fn installed_skills(&self) -> &[InstalledSkillConfig] {
-        &self.store.agent.agent_config.skills.installed
-    }
-
-    /// 从文件系统注册表扫描，并同步内存中的 installed[] 缓存（包含启用与禁用 Skill）
-    pub(in crate::app_state) fn sync_installed_from_registry(&mut self) {
-        let view = self.services.skill_registry.refresh();
+    /// 返回已安装 Skill 列表（从磁盘注册表扫描，含启用与禁用）。
+    ///
+    /// skills 已从 AgentConfig 脱离，此处每次调用都从 registry 扫描磁盘，
+    /// 不再缓存到 agent_config.skills.installed。
+    pub fn installed_skills(&self) -> Vec<InstalledSkillConfig> {
+        let view = self.services.skill_registry.view();
         let mut installed = Vec::new();
         for entry in view.entries.values() {
-            if let Some(config) =
-                build_installed_skill_config_from_entry(entry, &self.services.skill_registry)
-            {
+            if let Some(config) = build_installed_skill_config_from_entry(entry) {
                 installed.push(config);
             }
         }
         installed.sort_by(|a, b| a.id.cmp(&b.id));
-        self.store.agent.agent_config.skills.installed = installed;
+        installed
     }
 
     /// 返回注册表轻量视图（不含 SKILL.md 全文）
@@ -97,23 +94,22 @@ impl TiangongState {
         service.set_skill_enabled(self, id, enabled)
     }
 
-    /// 手动重扫 skills/<id>/ 注册表并同步运行时缓存
+    /// 手动重扫 skills/<id>/ 注册表
     pub fn refresh_skills(&mut self) -> Result<String> {
-        self.services.skill_registry.refresh();
-        self.sync_installed_from_registry();
+        let view = self.services.skill_registry.refresh();
         validate_agent_config(&self.store.agent.agent_config)?;
         self.rebuild_runtime_for_agent_config();
         self.persist_agent_configs_only()?;
 
-        let total = self.store.agent.agent_config.skills.installed.len();
-        let enabled = self
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
-            .iter()
-            .filter(|s| s.enabled)
+        let total = view.entries.len();
+        let enabled = view
+            .entries
+            .values()
+            .filter(|entry| {
+                crate::skill::read_skill_manifest(&entry.dir.join("skill.toml"))
+                    .map(|m| m.available)
+                    .unwrap_or(false)
+            })
             .count();
         Ok(format!(
             "skills 已刷新：total={total} enabled={enabled} disabled={}",
@@ -124,9 +120,8 @@ impl TiangongState {
     /// 检测或清理手动删除 Skill 后遗留的托管 MCP 配置与锁条目。
     pub fn gc_skills(&mut self, apply: bool) -> Result<String> {
         self.services.skill_registry.refresh();
-        self.sync_installed_from_registry();
-
-        let gc_report = self.build_skill_gc_report()?;
+        let installed = self.installed_skills();
+        let gc_report = self.build_skill_gc_report(&installed)?;
 
         if apply {
             if !gc_report.orphan_mcp_servers.is_empty() {
@@ -168,8 +163,8 @@ impl TiangongState {
 
     pub fn doctor_skills(&mut self) -> Result<String> {
         let view = self.services.skill_registry.refresh();
-        self.sync_installed_from_registry();
-        let gc_report = self.build_skill_gc_report()?;
+        let installed = self.installed_skills();
+        let gc_report = self.build_skill_gc_report(&installed)?;
 
         let mut lines = vec![format!(
             "skill doctor: skills={} issues={} orphan_mcp_servers={} orphan_mcp_lock_entries={}",
@@ -201,22 +196,12 @@ impl TiangongState {
         Ok(lines.join("\n"))
     }
 
-    fn build_skill_gc_report(&self) -> Result<SkillGcReport> {
-        let declared_mcp_servers = self
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
+    fn build_skill_gc_report(&self, installed: &[InstalledSkillConfig]) -> Result<SkillGcReport> {
+        let declared_mcp_servers = installed
             .iter()
             .flat_map(|skill| skill.managed_mcp_servers.iter().cloned())
             .collect::<HashSet<_>>();
-        let declared_lock_keys = self
-            .store
-            .agent
-            .agent_config
-            .skills
-            .installed
+        let declared_lock_keys = installed
             .iter()
             .flat_map(|skill| {
                 skill
@@ -259,7 +244,6 @@ impl TiangongState {
 /// 从注册表 entry 构建 InstalledSkillConfig（轻量，只读 skill.toml，不读 SKILL.md）
 fn build_installed_skill_config_from_entry(
     entry: &SkillRegistryEntry,
-    registry: &crate::skill::SkillRegistry,
 ) -> Option<InstalledSkillConfig> {
     let manifest = crate::skill::read_skill_manifest(&entry.dir.join("skill.toml")).ok()?;
     let managed_mcp_servers = manifest
@@ -274,7 +258,6 @@ fn build_installed_skill_config_from_entry(
             }
         })
         .collect::<Vec<_>>();
-    let _ = registry; // 当前不需要额外读取
     Some(InstalledSkillConfig {
         id: manifest.id,
         name: manifest.name,

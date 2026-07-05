@@ -88,7 +88,6 @@ impl TiangongState {
             llm: crate::core_config::LlmConfig::from_models_config(self.models_config()),
             mcp: self.agent_config().mcp.clone(),
             mcp_capabilities: base.mcp_capabilities.clone(),
-            skills: self.agent_config().skills.clone(),
             trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),

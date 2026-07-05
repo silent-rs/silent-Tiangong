@@ -111,10 +111,9 @@ impl AppRepository {
         &self,
         legacy_agent_config: Option<AgentConfig>,
     ) -> Result<Option<AgentConfig>> {
-        let skills = self.load_skills_config_from_disk()?;
         let mcp = self.load_mcp_config_from_disk()?;
-        if skills.is_none() && mcp.is_none() {
-            // 无 skills/mcp 独立配置，直接用 legacy agent_config，
+        if mcp.is_none() {
+            // 无 mcp 独立配置，直接用 legacy agent_config，
             // 但仍需用 custom-prompt.md 加载优先级回填 custom_system_prompt
             // （custom-prompt.md 优先，回退 legacy 旧字段）。
             let mut agent_config = legacy_agent_config;
@@ -127,9 +126,6 @@ impl AppRepository {
             return Ok(agent_config);
         }
         let mut agent_config = legacy_agent_config.unwrap_or_default();
-        if let Some(skills) = skills {
-            agent_config.skills = skills;
-        }
         if let Some(mcp) = mcp {
             agent_config.mcp = mcp;
         }

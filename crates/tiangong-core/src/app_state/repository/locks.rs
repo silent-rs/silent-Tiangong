@@ -1,16 +1,26 @@
 use super::*;
 
+use crate::skill::{read_skill_manifest, scan_skill_registry};
+
 impl AppRepository {
-    pub(in crate::app_state) fn sync_mcp_dependency_lock(
-        &self,
-        agent_config: &AgentConfig,
-    ) -> Result<()> {
+    /// 同步 MCP 依赖锁文件（mcp-lock.json）。
+    ///
+    /// 从磁盘扫描已安装 skill 的 `skill.toml.requires.mcp`，聚合依赖包名/版本，
+    /// 写入 `~/.tiangong/skills/mcp-lock.json`。
+    ///
+    /// skills 已从 AgentConfig 脱离，此处直接扫盘而非读 agent_config.skills.installed。
+    pub(in crate::app_state) fn sync_mcp_dependency_lock(&self) -> Result<()> {
         let skills_dir = default_skills_storage_dir_path();
         ensure_dir(&skills_dir)?;
 
         let mut mcp_lock = BTreeMap::<String, McpDependencyLockRecord>::new();
-        for skill in &agent_config.skills.installed {
-            for requires_mcp in &skill.requires_mcp {
+        let view = scan_skill_registry(&skills_dir);
+        for entry in view.entries.values() {
+            let manifest_path = entry.dir.join("skill.toml");
+            let Ok(manifest) = read_skill_manifest(&manifest_path) else {
+                continue;
+            };
+            for requires_mcp in &manifest.requires.mcp {
                 let package = requires_mcp.package.trim();
                 if package.is_empty() {
                     continue;
@@ -21,14 +31,14 @@ impl AppRepository {
                 } else {
                     format!("{package}@{version}")
                 };
-                let entry = mcp_lock
+                let record = mcp_lock
                     .entry(key)
                     .or_insert_with(|| McpDependencyLockRecord {
                         path: String::new(),
                         ref_count: 0,
-                        installed_at: skill.installed_at.clone(),
+                        installed_at: String::new(),
                     });
-                entry.ref_count += 1;
+                record.ref_count += 1;
             }
         }
 

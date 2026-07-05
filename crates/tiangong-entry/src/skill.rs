@@ -11,13 +11,13 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
     let mut state = TiangongState::load_or_default();
     match args.command {
         SkillSubcommand::List => {
-            println!("{}", summarize_skills(state.installed_skills()));
+            println!("{}", summarize_skills(&state.installed_skills()));
         }
         SkillSubcommand::Show { id } => {
             if let Some(id) = id {
-                println!("{}", describe_skills(state.installed_skills(), Some(&id)));
+                println!("{}", describe_skills(&state.installed_skills(), Some(&id)));
             } else {
-                println!("{}", summarize_skills(state.installed_skills()));
+                println!("{}", summarize_skills(&state.installed_skills()));
             }
         }
         SkillSubcommand::Init {
