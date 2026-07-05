@@ -332,6 +332,11 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
+        // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
+        // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
+        if tiangong_plugin_analyze_attachment::should_register(llm) {
+            plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
+        }
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core =

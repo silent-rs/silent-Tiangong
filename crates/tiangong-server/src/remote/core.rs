@@ -177,6 +177,11 @@ impl ServerCoreManager {
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
+                // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
+                if tiangong_plugin_analyze_attachment::should_register(llm) {
+                    plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
+                }
                 plugins
             },
         );

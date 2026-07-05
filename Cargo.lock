@@ -9587,6 +9587,7 @@ dependencies = [
  "tiangong-entry",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
  "tiangong-plugin-generate-image",
@@ -9617,6 +9618,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-memory",
+ "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
@@ -9767,6 +9769,17 @@ dependencies = [
  "tiangong-types",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-analyze-attachment"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tiangong-core",
+ "tiangong-types",
+ "tokio",
 ]
 
 [[package]]
@@ -9973,6 +9986,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-media",
  "tiangong-memory",
+ "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",

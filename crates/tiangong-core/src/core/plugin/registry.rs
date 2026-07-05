@@ -60,7 +60,10 @@ pub(crate) fn register_plugin(
     plugin.set_trust_mode(shared_trust);
 
     // 3) 注入状态反馈通道（复用 worker 命令通道，clone 给插件持有）
-    plugin.set_feedback_tx(PluginFeedbackTx::from(cmd_tx));
+    plugin.set_feedback_tx(PluginFeedbackTx::new(
+        cmd_tx,
+        engine.turn_usage_sink().clone(),
+    ));
 
     // 4) 让插件初始化内部状态并注入外部能力（如克隆 models_config 供 handler 使用）。
     //    必须在收集 tool_specs 前，确保插件已就绪。
