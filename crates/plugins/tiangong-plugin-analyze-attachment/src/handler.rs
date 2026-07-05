@@ -1,12 +1,11 @@
 //! 附件分析工具规格与覆盖处理器实现。
 //!
 //! 实现 [`ToolSpecProvider`] 与 [`ToolOverrideHandler`]，提供 `analyze_attachment` 工具。
-//! 工具规格仅当插件 `enabled`（`has_multimodal_client && !chat_is_multimodal`）时返回；
-//! handler 入口同样检查 `enabled`，避免工具未暴露但仍被异常调用。
+//! 入口层通过 [`crate::should_register`] 按 multimodal 能力条件注册；工具规格仅当
+//! `register` 阶段成功缓存 multimodal client 时返回，handler 内部保留 client 缺失兜底。
 //!
-//! 参数直接从 LLM 传入的命名参数 JSON（`call.arguments`）按 key 取参，逻辑与原
-//! `core::execute_attachment_analysis_tool` 完全一致：定位包含附件的用户消息 → 收集
-//! 媒体资源 → 构造附件解析请求 → 调用 multimodal 客户端。
+//! 参数直接从 LLM 传入的命名参数 JSON（`call.arguments`）按 key 取参：附件定位、
+//! 媒体收集与请求构造行为与原 `core::execute_attachment_analysis_tool` 保持一致。
 //!
 //! multimodal 子调用的 token 用量经 [`PluginFeedbackTx::report_token_usage`] 反馈给
 //! core，由 core 统一累加到本轮 `accumulated_usage` 并发送 `StreamEvent::TokenUsage`

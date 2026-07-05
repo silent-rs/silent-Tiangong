@@ -6,8 +6,8 @@
 //! 两类投递，链路不同：
 //!
 //! - **会话注入**（[`PluginFeedbackTx::inject_tool`]）：走 worker 命令队列
-//!  （[`Command::InjectTool`]），由 agent loop drain 时注入 session。适合不要求
-//!  即时性的外部事件（浏览器页面变化、终端用户操作）。
+//!   （[`Command::InjectTool`]），由 agent loop drain 时注入 session。适合不要求
+//!   即时性的外部事件（浏览器页面变化、终端用户操作）。
 //!
 //! - **用量上报**（[`PluginFeedbackTx::report_token_usage`]）：走 **core 拥有的
 //!   turn-scoped usage sink**，即时累加到本轮用量并立即发送 `StreamEvent::TokenUsage`，
@@ -68,7 +68,7 @@ struct TurnUsageBinding {
 /// 一个可重绑定的共享插槽：turn 开始时 core 绑定本轮的 [`TurnUsageBinding`]，turn
 /// 结束时解绑（清空）。插件通过 [`PluginFeedbackTx`] 持有同一个 `Arc<TurnUsageSink>`
 /// 引用，调用 [`TurnUsageSink::report`] 时即时累加并发送——**不经过命令队列**，
-/// 因此不受 agent loop drain 时机影响，也会被 `check_cancel` 等 drain 吞掉。
+/// 因此不受 agent loop drain 时机影响，也不会被 `check_cancel` 等 drain 吞掉。
 ///
 /// 作用域保证：turn 结束后立即解绑，迟到的 usage（如上一轮后台任务迟到上报）会被
 /// 静默丢弃并打 debug 日志，不会错误计入下一轮。
