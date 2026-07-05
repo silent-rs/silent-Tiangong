@@ -35,11 +35,8 @@ impl AnalyzeAttachmentPlugin {
         call: &ToolCall,
         session: &Session,
     ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
-        // 防御：工具未启用（chat 模型已自带 multimodal，或未配置 multimodal 客户端）
-        // 时拒绝执行，避免工具未暴露但仍被异常调用时使用陈旧状态。
-        if !self.enabled() {
-            return None;
-        }
+        // client 缺失时的防御在 handle_analyze_attachment 内部完成（返回明确错误），
+        // 此处不再单独检查，避免误注册时落到 runtime 的“未注册工具”。
         match call.name.as_str() {
             TOOL_ANALYZE_ATTACHMENT => Some(self.handle_analyze_attachment(call, session)),
             _ => None,
@@ -208,7 +205,9 @@ impl AnalyzeAttachmentPlugin {
 
 impl ToolSpecProvider for AnalyzeAttachmentPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        if !self.enabled() {
+        // 入口层已通过 should_register 保证满足条件才注册；此处以 client 是否就绪
+        // 作为防御兜底，避免误注册时暴露无效工具。
+        if self.client().is_none() {
             return Vec::new();
         }
         vec![ToolSpec {
