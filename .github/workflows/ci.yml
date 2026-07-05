@@ -121,6 +121,7 @@ jobs:
               "tiangong-plugin-memory":         "crates/plugins/tiangong-plugin-memory/",
               "tiangong-plugin-scheduler":      "crates/plugins/tiangong-plugin-scheduler/",
               "tiangong-plugin-terminal":       "crates/plugins/tiangong-plugin-terminal/",
+              "tiangong-plugin-analyze-attachment": "crates/plugins/tiangong-plugin-analyze-attachment/",
               "tiangong-app":             "src-tauri/",
               "tiangong":                 "src/",
           }
