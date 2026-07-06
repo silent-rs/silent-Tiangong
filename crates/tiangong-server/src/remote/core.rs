@@ -20,17 +20,26 @@ pub struct ServerCoreManager {
     state: SharedState,
     config: CoreConfigProvider,
     event_bus: Arc<EventBus>,
+    /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
+    /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
+    mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     cores: Arc<Mutex<HashMap<String, tiangong_core::core::TiangongCore>>>,
     trackers: Arc<Mutex<HashMap<String, Arc<ExecutionTracker>>>>,
     remote_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ServerCoreManager {
-    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        state: SharedState,
+        config: CoreConfigProvider,
+        event_bus: Arc<EventBus>,
+        mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    ) -> Self {
         Self {
             state,
             config,
             event_bus,
+            mcp_plugin,
             cores: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -185,8 +194,10 @@ impl ServerCoreManager {
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
                 plugins.extend(tiangong_plugin_skill::default_plugins());
-                // MCP 工具（动态收集 MCP server 工具 + 执行分发）：无条件注册。
-                plugins.extend(tiangong_plugin_mcp::default_plugins());
+                // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
+                // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
+                //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
+                plugins.push(self.mcp_plugin.clone());
                 plugins
             },
         );

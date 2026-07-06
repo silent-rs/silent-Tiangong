@@ -10,10 +10,7 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_core::app_state::audit::{AuditEntry, append_audit_log};
 
-use crate::capability::{
-    McpServerHealthStatus, cached_server_tools, mcp_server_health_statuses,
-    probe_single_mcp_server_by_name,
-};
+use crate::capability::McpServerHealthStatus;
 use crate::client::McpToolMeta;
 use crate::config::{
     McpConfig, McpServerConfig, RegisterMcpServerRequest, normalize_request_fields,
@@ -29,12 +26,12 @@ impl McpPlugin {
 
     /// MCP server 缓存的工具列表（供前端展示）。
     pub fn mcp_server_cached_tools(&self, name: &str) -> Option<Vec<McpToolMeta>> {
-        cached_server_tools(name)
+        self.capability.cached_server_tools(name)
     }
 
     /// 所有 MCP server 的健康状态（供前端健康面板）。
     pub fn mcp_server_health_statuses(&self) -> Vec<McpServerHealthStatus> {
-        mcp_server_health_statuses()
+        self.capability.health_statuses()
     }
 
     /// 文本摘要（供 CLI `mcp list`）。
@@ -51,7 +48,7 @@ impl McpPlugin {
 
     /// 探测单个 MCP server 并刷新缓存（供前端"重试"按钮）。
     pub fn probe_mcp_server(&self, name: &str) -> Result<()> {
-        probe_single_mcp_server_by_name(name)
+        self.capability.probe_single_by_name(name)
     }
 
     /// 注册新的 MCP server。
@@ -89,7 +86,7 @@ impl McpPlugin {
             validate_mcp_config(&config)?;
         }
 
-        self.persist_and_reconfigure()?;
+        self.persist_and_sync_probe(Some(&name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.register",
             &name,
@@ -135,7 +132,7 @@ impl McpPlugin {
             validate_mcp_config(&config)?;
         }
 
-        self.persist_and_reconfigure()?;
+        self.persist_and_sync_probe(Some(name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.update",
             name,
@@ -165,7 +162,7 @@ impl McpPlugin {
             validate_mcp_config(&config)?;
         }
 
-        self.persist_and_reconfigure()?;
+        self.persist_and_sync_probe(None)?;
         append_audit_log(&AuditEntry::new(
             "mcp.remove",
             name,
@@ -194,7 +191,7 @@ impl McpPlugin {
             validate_mcp_config(&config)?;
         }
 
-        self.persist_and_reconfigure()?;
+        self.persist_and_sync_probe(Some(name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.toggle",
             name,
@@ -249,15 +246,28 @@ impl McpPlugin {
             }
         };
 
-        self.persist_and_reconfigure()?;
+        self.persist_and_sync_probe(None)?;
         Ok(format!("配置已更新：{key}={updated_value}"))
     }
 
-    /// 持久化配置 + 重配 scheduler + 重建 targets。
-    fn persist_and_reconfigure(&self) -> Result<()> {
+    /// 持久化配置 + 同步探测受影响 server + 重建 targets。
+    ///
+    /// `affected_server` 传 `Some(name)` 时，同步探测该 server（确保管理操作返回时
+    /// 工具即用）；传 `None` 时（remove/disable）只重建 targets（无需探测已删/禁用的）。
+    /// 同时重配后台 scheduler 以更新它持有的 config 快照。
+    fn persist_and_sync_probe(&self, affected_server: Option<&str>) -> Result<()> {
         let config = self.config_snapshot();
         crate::plugin::write_mcp_config_to_path(self.mcp_config_path(), &config)?;
-        self.reconfigure();
+        // 更新后台 scheduler 持有的 config 快照（它仍会周期性全量探测兜底）。
+        self.capability.configure_scheduler(
+            config.clone(),
+            self.capability_cache_path.clone(),
+            crate::plugin::MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
+        );
+        match affected_server {
+            Some(name) => self.sync_probe_and_rebuild(name),
+            None => self.rebuild_targets(&config),
+        }
         Ok(())
     }
 

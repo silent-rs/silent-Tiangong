@@ -2271,7 +2271,7 @@ pub async fn get_mention_candidates(
 ) -> Result<Vec<MentionCandidate>, String> {
     // MCP servers + active tools 由 mcp plugin 自管，先读取快照。
     let mcp_servers = state.mcp_plugin.mcp_servers();
-    let active_tools = tiangong_plugin_mcp::capability::cached_active_tools();
+    let active_tools = state.mcp_plugin.cached_active_tools();
     state
         .with_state_read(|core_state| {
             let mut candidates = Vec::new();
@@ -2451,8 +2451,10 @@ pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpSer
 
 /// 获取 MCP 服务器健康状态
 #[tauri::command]
-pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
-    let statuses = tiangong_plugin_mcp::capability::mcp_server_health_statuses();
+pub async fn get_mcp_health(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let statuses = state.mcp_plugin.mcp_server_health_statuses();
     statuses
         .into_iter()
         .map(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
@@ -2461,8 +2463,10 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
 
 /// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
 #[tauri::command]
-pub async fn probe_mcp_server(name: String) -> Result<(), String> {
-    tiangong_plugin_mcp::capability::probe_single_mcp_server_by_name(&name)
+pub async fn probe_mcp_server(name: String, state: State<'_, TiangongApp>) -> Result<(), String> {
+    state
+        .mcp_plugin
+        .probe_mcp_server(&name)
         .map_err(|e| e.to_string())
 }
 

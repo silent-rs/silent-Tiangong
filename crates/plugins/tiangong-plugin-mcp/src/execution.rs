@@ -13,8 +13,7 @@ use serde_json::Value;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
 
-use crate::capability::cached_active_tools;
-use crate::client::{LocalMcpClient, McpClient};
+use crate::client::{LocalMcpClient, McpClient, McpToolMeta};
 use crate::config::{McpConfig, McpServerConfig};
 
 #[derive(Debug, Clone)]
@@ -23,8 +22,13 @@ pub struct McpFunctionTarget {
     pub tool_name: String,
 }
 
+/// 基于显式传入的 capability 缓存构建工具规格 + 目标绑定。
+///
+/// `active` 由调用方从 plugin 实例的 [`crate::capability::McpCapabilityIndex`]
+/// 获取，保持实例隔离（不再读全局 static）。
 pub fn execution_function_tools(
     mcp_config: &McpConfig,
+    active: Vec<(String, Vec<McpToolMeta>)>,
     _reserved_names: HashSet<String>,
 ) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
     // core 内置工具 spec 已全部迁出至进程内插件（fs/fetch/command/browser/terminal），
@@ -33,12 +37,18 @@ pub fn execution_function_tools(
     //
     // 命名策略：所有 MCP 工具统一使用 `mcp__{server}__{tool}` 前缀格式，天然避免与
     // 内置插件工具名（read_file / web_fetch / run_command 等）冲突，且来源可辨识。
-    // 不再使用「无冲突时用原名、冲突时加 _2/_3 后缀」的旧规则——统一前缀更一致。
+    // 不再使用「无冲突时用原名、冲突加 _2 后缀」的旧规则——统一前缀更一致。
     // `_reserved_names` 参数保留以兼容签名，内部不再使用（前缀格式已无冲突风险）。
+    build_tools_from_cache(mcp_config, active)
+}
+
+/// 内部：从 capability 缓存构建 (specs, bindings)。
+fn build_tools_from_cache(
+    mcp_config: &McpConfig,
+    active: Vec<(String, Vec<McpToolMeta>)>,
+) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
     let mut tools = Vec::new();
     let mut bindings = HashMap::new();
-
-    let active = cached_active_tools();
 
     for (server_name, server_tools) in active {
         for tool in server_tools {
@@ -54,7 +64,6 @@ pub fn execution_function_tools(
                 continue;
             }
 
-            // 始终使用 mcp__server__tool 前缀；同一 server 下若有重名 tool 才追加后缀。
             let function_name = resolve_mcp_function_name(&server_name, raw_tool_name);
 
             tools.push(function_tool_from_mcp_tool(
@@ -78,7 +87,7 @@ pub fn execution_function_tools(
 /// 生成 MCP 工具的 LLM 可见函数名：始终使用 `mcp__{server}__{tool}` 前缀格式。
 ///
 /// 统一前缀天然避免与内置插件工具名冲突，且让 MCP 工具来源一目了然。
-fn resolve_mcp_function_name(server_name: &str, tool_name: &str) -> String {
+pub(crate) fn resolve_mcp_function_name(server_name: &str, tool_name: &str) -> String {
     format!(
         "mcp__{}__{}",
         sanitize_fn_name(server_name),
@@ -103,7 +112,7 @@ fn sanitize_fn_name(value: &str) -> String {
     }
 }
 
-fn function_tool_from_mcp_tool(
+pub(crate) fn function_tool_from_mcp_tool(
     function_name: &str,
     server_name: &str,
     tool: &crate::client::McpToolMeta,
@@ -214,8 +223,10 @@ pub fn resolve_mcp_tool_call_from_run_command(
     call: &ToolCall,
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     mcp_config: &McpConfig,
+    active: &[(String, Vec<McpToolMeta>)],
 ) -> Option<(McpFunctionTarget, Value)> {
-    if call.name != "run_command" {
+    // 兼容 run_command 与 run_shell：模型可能把 MCP 工具名误作为 shell 命令调用。
+    if !matches!(call.name.as_str(), "run_command" | "run_shell") {
         return None;
     }
     if call
@@ -249,20 +260,21 @@ pub fn resolve_mcp_tool_call_from_run_command(
     let target = mcp_targets
         .get(&tool_name)
         .cloned()
-        .or_else(|| resolve_unique_mcp_target_by_raw_name(&tool_name, mcp_config))?;
+        .or_else(|| resolve_unique_mcp_target_by_raw_name(&tool_name, mcp_config, active))?;
     Some((target, serde_json::json!({})))
 }
 
 pub fn resolve_unique_mcp_target_by_raw_name(
     tool_name: &str,
     mcp_config: &McpConfig,
+    active: &[(String, Vec<McpToolMeta>)],
 ) -> Option<McpFunctionTarget> {
     let mut hit_server = None::<String>;
-    for (server_name, tools) in cached_active_tools() {
+    for (server_name, tools) in active {
         if !mcp_config
             .servers
             .iter()
-            .any(|server| server.enabled && server.name == server_name)
+            .any(|server| server.enabled && &server.name == server_name)
         {
             continue;
         }
@@ -272,7 +284,7 @@ pub fn resolve_unique_mcp_target_by_raw_name(
         if hit_server.is_some() {
             return None;
         }
-        hit_server = Some(server_name);
+        hit_server = Some(server_name.clone());
     }
     hit_server.map(|server_name| McpFunctionTarget {
         server_name,

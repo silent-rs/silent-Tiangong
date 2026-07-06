@@ -1,8 +1,12 @@
 //! MCP 管理插件——自治状态 + [`Plugin`] trait 实现。
 //!
 //! 对齐 [`tiangong_plugin_skill::SkillPlugin`] 的自治配方：plugin 自托管
-//! [`McpConfig`]（读写 `~/.tiangong/mcp.json`）与 `mcp_targets` 绑定，
-//! core 不再持有 MCP 概念。
+//! [`McpConfig`]（读写 `~/.tiangong/mcp.json`）、`mcp_targets` 绑定与
+//! [`McpCapabilityIndex`]（capability 缓存 + 后台调度器），core 不再持有 MCP 概念。
+//!
+//! 状态隔离：capability 缓存与调度器作为 plugin 实例字段（非全局 static），
+//! 每个 plugin 实例独立一份，避免多实例（测试隔离 / server API 与 core 共存）
+//! 场景下互相污染。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,9 +18,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::permission::TrustMode;
 use tiangong_core::runtime::RuntimeEngine;
 
-use crate::capability::{
-    configure_mcp_capability_scheduler, load_mcp_capabilities_cache, refresh_mcp_capabilities_async,
-};
+use crate::capability::McpCapabilityIndex;
 use crate::config::McpConfig;
 use crate::execution::{McpFunctionTarget, execution_function_tools};
 use crate::paths::{default_mcp_capability_cache_path, default_mcp_config_path};
@@ -31,6 +33,8 @@ pub struct McpPlugin {
     pub(crate) mcp_config: RwLock<McpConfig>,
     /// 动态工具名 → (server, tool) 目标绑定（engine build 时快照）。
     pub(crate) mcp_targets: RwLock<HashMap<String, McpFunctionTarget>>,
+    /// MCP 能力索引（capability 缓存 + 后台刷新调度器），实例隔离。
+    pub(crate) capability: McpCapabilityIndex,
     /// MCP tools 缓存路径（`~/.tiangong/mcp-tools-cache.json`）。
     pub(crate) capability_cache_path: PathBuf,
     /// MCP 配置文件路径（`~/.tiangong/mcp.json`）。
@@ -50,12 +54,13 @@ impl McpPlugin {
         )
     }
 
-    /// 用显式路径构造（主要供测试使用）。
+    /// 用显式路径构造（主要供测试使用，capability 状态实例隔离）。
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Self {
         let mcp_config = load_mcp_config_from_path(&mcp_config_path);
         Self {
             mcp_config: RwLock::new(mcp_config),
             mcp_targets: RwLock::new(HashMap::new()),
+            capability: McpCapabilityIndex::new(),
             capability_cache_path,
             mcp_config_path,
             workspace: RwLock::new(None),
@@ -95,27 +100,58 @@ impl McpPlugin {
             .unwrap_or_default()
     }
 
-    /// 重配 capability scheduler + 重建 mcp_targets 绑定。
+    /// 当前所有 healthy server 的工具列表快照（供入口层 @mcp 补全展示工具数）。
+    pub fn cached_active_tools(&self) -> Vec<(String, Vec<crate::client::McpToolMeta>)> {
+        self.capability.cached_active_tools()
+    }
+
+    /// 重配 capability scheduler + 异步预热 + 重建 mcp_targets 绑定。
     ///
-    /// 在 register、config 变更、engine rebuild 时调用，保证 MCP 工具规格
-    /// 与 capability 缓存同步。
+    /// 在 register、engine rebuild 时调用。管理操作（register/update/set_enabled）
+    /// 应改用 [`Self::sync_probe_and_rebuild`] 做同步探测，确保操作返回时工具即用。
     pub(crate) fn reconfigure(&self) {
         let config = self.config_snapshot();
-        configure_mcp_capability_scheduler(
+        self.capability.configure_scheduler(
             config.clone(),
             self.capability_cache_path.clone(),
             MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
         );
-        refresh_mcp_capabilities_async(config.clone());
+        self.capability.refresh_async(config.clone());
+        self.rebuild_targets(&config);
+    }
+
+    /// 同步探测单个 server + 重建 mcp_targets 绑定。
+    ///
+    /// 供管理操作（register/update/set_enabled）使用：操作完成后同步探测受影响
+    /// 的 server，探测完重建 targets，确保管理操作返回时新工具立即对 LLM 可见。
+    pub(crate) fn sync_probe_and_rebuild(&self, server_name: &str) {
+        let config = self.config_snapshot();
+        if let Some(server) = config.servers.iter().find(|s| s.name == server_name) {
+            if server.enabled {
+                let outcome = self.capability.probe_single(server, config.timeout_ms);
+                if outcome.healthy {
+                    tracing::info!(
+                        "MCP server 同步探测成功：server={} tools={}",
+                        server_name,
+                        outcome.tool_count
+                    );
+                } else if let Some(err) = outcome.last_error {
+                    tracing::warn!(
+                        "MCP server 同步探测失败（工具暂不可用，后台调度器会重试）：server={} error={}",
+                        server_name,
+                        err
+                    );
+                }
+            }
+        }
         self.rebuild_targets(&config);
     }
 
     /// 根据当前 capability 缓存重建工具名→目标绑定。
-    fn rebuild_targets(&self, config: &McpConfig) {
-        // reserved_names 留空：MCP 工具内部的同名冲突由 execution_function_tools
-        // 自行处理（mcp__server__tool 前缀），与其他插件工具的冲突在 core/mod.rs
-        // 工具汇总阶段通过 reserved_names 过滤（此处 plugin 独立收集不感知其他插件）。
-        let (specs, targets) = execution_function_tools(config, std::collections::HashSet::new());
+    pub(crate) fn rebuild_targets(&self, config: &McpConfig) {
+        let active = self.capability.cached_active_tools();
+        let (specs, targets) =
+            execution_function_tools(config, active, std::collections::HashSet::new());
         if let Ok(mut guard) = self.mcp_targets.write() {
             *guard = targets;
         }
@@ -139,8 +175,8 @@ impl Plugin for McpPlugin {
     }
 
     fn register(&self, _engine: &RuntimeEngine) {
-        // 加载 capability 缓存 + 启动后台调度器 + 预热 + 重建 targets。
-        let _ = load_mcp_capabilities_cache(&self.capability_cache_path);
+        // 加载 capability 缓存 + 启动后台调度器 + 异步预热 + 重建 targets。
+        let _ = self.capability.load_cache(&self.capability_cache_path);
         self.reconfigure();
     }
 
@@ -167,16 +203,34 @@ impl Plugin for McpPlugin {
 }
 
 /// MCP capability 后台刷新间隔（秒），与原 app_state 常量保持一致。
-const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;
+pub(crate) const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;
 
 /// 从指定路径加载 MCP 配置；文件不存在或解析失败时返回默认配置。
+///
+/// 解析失败（JSON 语法错误 / 字段不兼容）时记录 `warn!`，避免静默吞错导致
+/// 后续管理操作覆盖用户原配置。读取失败仍返回默认配置以保证可用性。
 pub(crate) fn load_mcp_config_from_path(path: &std::path::Path) -> McpConfig {
     if !path.exists() {
         return McpConfig::default();
     }
     match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => McpConfig::default(),
+        Ok(content) => match serde_json::from_str::<McpConfig>(&content) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(
+                    "MCP 配置解析失败，回退为默认配置（原文件保留，管理操作可能覆盖）：path={} error={err}",
+                    path.display()
+                );
+                McpConfig::default()
+            }
+        },
+        Err(err) => {
+            tracing::warn!(
+                "MCP 配置读取失败，回退为默认配置：path={} error={err}",
+                path.display()
+            );
+            McpConfig::default()
+        }
     }
 }
 

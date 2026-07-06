@@ -25,6 +25,7 @@ impl McpPlugin {
     ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
         let config = self.config_snapshot();
         let targets = self.targets_snapshot();
+        let active = self.capability.cached_active_tools();
 
         // (1) MCP 工具直接命中
         if let Some(target) = targets.get(&call.name) {
@@ -47,14 +48,12 @@ impl McpPlugin {
         }
 
         // (2) run_command/run_shell 误用 MCP 工具名的兼容 shim
-        if call.name == "run_command" || call.name == "run_shell" {
+        if matches!(call.name.as_str(), "run_command" | "run_shell") {
             if let Some((target, args)) =
-                resolve_mcp_tool_call_from_run_command(call, &targets, &config)
+                resolve_mcp_tool_call_from_run_command(call, &targets, &config, &active)
             {
                 let config = config;
-                let call_name = call.name.clone();
                 return Some(Box::pin(async move {
-                    let _ = call_name;
                     match execute_mcp_tool_call_with_args(&target, args, &config).await {
                         Ok(result) => result,
                         Err(err) => ToolResult {
@@ -77,10 +76,14 @@ impl McpPlugin {
 impl ToolSpecProvider for McpPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
         let config = self.config_snapshot();
+        let active = self.capability.cached_active_tools();
         // reserved_names 留空：MCP 工具规格在 plugin 内独立收集，
         // 与其他插件工具名的冲突消解由 core/mod.rs 工具汇总阶段统一处理。
-        let (specs, _) =
-            crate::execution::execution_function_tools(&config, std::collections::HashSet::new());
+        let (specs, _) = crate::execution::execution_function_tools(
+            &config,
+            active,
+            std::collections::HashSet::new(),
+        );
         specs
     }
 }
