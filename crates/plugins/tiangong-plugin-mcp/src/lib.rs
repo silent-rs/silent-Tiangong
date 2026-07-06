@@ -21,15 +21,15 @@ pub mod paths;
 pub mod plugin;
 pub mod validate;
 
-pub use capability::McpServerHealthStatus;
-pub use client::{LocalMcpClient, McpClient, McpToolArgumentSummary, McpToolMeta};
+// 仅 re-export 有外部 crate 消费方的符号。其余类型（McpToolMeta / McpClient /
+// McpFunctionTarget / describe_mcp_servers 等）为 plugin 内部使用，外部如需可直接
+// 经 `tiangong_plugin_mcp::client::McpToolMeta` 等模块路径访问。
 pub use config::{
     McpConfig, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
-    RegisterMcpServerRequest, ResolvedMcpTransport, is_http_endpoint,
+    RegisterMcpServerRequest, ResolvedMcpTransport,
 };
-pub use execution::McpFunctionTarget;
 pub use plugin::McpPlugin;
-pub use validate::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
+pub use validate::validate_mcp_config;
 
 use std::sync::Arc;
 

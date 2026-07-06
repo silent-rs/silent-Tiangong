@@ -165,26 +165,6 @@ impl McpCapabilityIndex {
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// 同步全量刷新所有 server 的 capability（阻塞至探测完成）。
-    ///
-    /// 供启动时 cache 为空的场景使用：确保首次 tool_specs 可用，避免异步 refresh
-    /// 完成前 LLM 看不到工具。
-    pub fn refresh_sync(&self, config: &McpConfig) {
-        refresh_mcp_capabilities(&self.index, config);
-    }
-
-    /// 若 scheduler 已配置 cache 路径，则持久化当前 index 到磁盘。
-    pub fn persist_cache_if_configured(&self) {
-        if let Some(path) = self
-            .scheduler
-            .read()
-            .ok()
-            .and_then(|guard| guard.cache_path.clone())
-        {
-            let _ = persist_mcp_capabilities_cache(&self.index, &path);
-        }
-    }
-
     /// 异步刷新所有 server 的 capability（spawn 线程，不阻塞调用方）。
     ///
     /// 用于启动时批量预热。管理操作（register/update）应改用 [`Self::probe_single`]
@@ -339,13 +319,6 @@ pub struct McpServerHealthStatus {
     pub tool_count: usize,
     pub last_error: Option<String>,
     pub server_version: Option<String>,
-}
-
-pub fn build_mcp_tools_system_prompt(max_tools_per_server: usize) -> Option<String> {
-    // 此函数仅用于诊断/旧路径，现 tool spec 由 plugin 经 cached_active_tools 动态生成。
-    // 保留为独立函数（无实例上下文时不可用），返回 None。
-    let _ = max_tools_per_server;
-    None
 }
 
 // ── 内部刷新逻辑（操作实例化的 index，不再用全局 static）──

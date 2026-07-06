@@ -128,22 +128,22 @@ impl McpPlugin {
     /// 的 server，探测完重建 targets，确保管理操作返回时新工具立即对 LLM 可见。
     pub(crate) fn sync_probe_and_rebuild(&self, server_name: &str) {
         let config = self.config_snapshot();
-        if let Some(server) = config.servers.iter().find(|s| s.name == server_name) {
-            if server.enabled {
-                let outcome = self.capability.probe_single(server, config.timeout_ms);
-                if outcome.healthy {
-                    tracing::info!(
-                        "MCP server 同步探测成功：server={} tools={}",
-                        server_name,
-                        outcome.tool_count
-                    );
-                } else if let Some(err) = outcome.last_error {
-                    tracing::warn!(
-                        "MCP server 同步探测失败（工具暂不可用，后台调度器会重试）：server={} error={}",
-                        server_name,
-                        err
-                    );
-                }
+        if let Some(server) = config.servers.iter().find(|s| s.name == server_name)
+            && server.enabled
+        {
+            let outcome = self.capability.probe_single(server, config.timeout_ms);
+            if outcome.healthy {
+                tracing::info!(
+                    "MCP server 同步探测成功：server={} tools={}",
+                    server_name,
+                    outcome.tool_count
+                );
+            } else if let Some(err) = outcome.last_error {
+                tracing::warn!(
+                    "MCP server 同步探测失败（工具暂不可用，后台调度器会重试）：server={} error={}",
+                    server_name,
+                    err
+                );
             }
         }
         self.rebuild_targets(&config);

@@ -261,6 +261,8 @@ impl McpPlugin {
     /// 合并磁盘上其他进程新增的 MCP server（多进程共存）。
     ///
     /// 同名 server 以内存（当前进程）为准，磁盘上独有的 server 保留。
+    /// 走 copy-on-write + validate + apply_config，保证合并后配置有效且
+    /// memory/disk 一致（磁盘异常配置会被 validate 拒绝）。
     pub fn merge_with_disk(&self) -> Result<()> {
         let path = self.mcp_config_path();
         if !path.exists() {
@@ -271,30 +273,28 @@ impl McpPlugin {
         let disk_mcp: McpConfig = serde_json::from_str(&disk_content)
             .with_context(|| format!("解析 mcp 配置失败：{}", path.display()))?;
 
-        let mut external_added = Vec::new();
-        {
-            let mut config = self
-                .mcp_config
-                .write()
-                .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-            let memory_names: Vec<String> = config.servers.iter().map(|s| s.name.clone()).collect();
-            let to_add: Vec<McpServerConfig> = disk_mcp
-                .servers
-                .into_iter()
-                .filter(|s| !memory_names.contains(&s.name))
-                .collect();
-            for server in &to_add {
-                external_added.push(server.name.clone());
-            }
-            config.servers.extend(to_add);
+        // copy-on-write：在 snapshot 上合并磁盘外部新增 server。
+        let mut next = self.config_snapshot();
+        let memory_names: Vec<String> = next.servers.iter().map(|s| s.name.clone()).collect();
+        let to_add: Vec<McpServerConfig> = disk_mcp
+            .servers
+            .into_iter()
+            .filter(|s| !memory_names.contains(&s.name))
+            .collect();
+        if to_add.is_empty() {
+            return Ok(());
         }
+        let external_added: Vec<String> = to_add.iter().map(|s| s.name.clone()).collect();
+        next.servers.extend(to_add);
+        validate_mcp_config(&next)?;
+        // apply_config 先写磁盘（规范化合并后的格式）再 commit 内存 + rebuild。
+        // affected=None：合并的 server 工具由后台 scheduler 异步探测兜底。
+        self.apply_config(next, None)?;
 
-        if !external_added.is_empty() {
-            tracing::warn!(
-                "检测到 mcp.json 被其他进程修改，已合并外部新增的 server：{}",
-                external_added.join(", ")
-            );
-        }
+        tracing::warn!(
+            "检测到 mcp.json 被其他进程修改，已合并外部新增的 server：{}",
+            external_added.join(", ")
+        );
         Ok(())
     }
 
