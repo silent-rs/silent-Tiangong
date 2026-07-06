@@ -74,12 +74,12 @@ pub(in crate::app_state) struct McpDependencyLockRecord {
 }
 
 #[derive(Debug)]
-pub(in crate::app_state) struct ScopedDirCleanup {
+pub struct ScopedDirCleanup {
     dir: Option<PathBuf>,
 }
 
 impl ScopedDirCleanup {
-    pub(in crate::app_state) fn new(dir: Option<PathBuf>) -> Self {
+    pub fn new(dir: Option<PathBuf>) -> Self {
         Self { dir }
     }
 
@@ -116,12 +116,12 @@ pub struct AppServices {
 }
 
 #[derive(Debug)]
-pub(in crate::app_state) struct InstallRollbackGuard {
+pub struct InstallRollbackGuard {
     dir: Option<PathBuf>,
 }
 
 impl InstallRollbackGuard {
-    pub(in crate::app_state) fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf) -> Self {
         Self { dir: Some(dir) }
     }
 

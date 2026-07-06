@@ -20,6 +20,9 @@ pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
+    /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
+    /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
+    pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
     /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
@@ -60,6 +63,7 @@ impl TiangongApp {
             )),
             cores: Mutex::new(HashMap::new()),
             config,
+            skill_plugin: std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new()),
             embedded_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
@@ -337,9 +341,9 @@ impl TiangongApp {
         if tiangong_plugin_analyze_attachment::should_register(llm) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
         }
-        // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在已启用
-        // skill 决定是否暴露工具与注入 prompt 段落。
-        plugins.push(tiangong_plugin_skill::build_plugin());
+        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具/get_skill_detail/install_skill，
+        // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
+        plugins.push(self.skill_plugin.clone());
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core =

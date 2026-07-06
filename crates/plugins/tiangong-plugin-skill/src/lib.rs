@@ -1,23 +1,23 @@
 //! Skill 管理插件。
 //!
 //! 承载 Skill 相关的全部能力：
-//! - **LLM 工具**：`get_skill_detail`（经 [`ToolSpecProvider`]/[`ToolOverrideHandler`]）
+//! - **LLM 工具**：`get_skill_detail`（查看 skill 说明）、`install_skill`（agent 编写并安装 skill）
 //! - **System Prompt 段落**：已安装 Skills 摘要（经 [`PromptSectionProvider`]）
-//! - **App 管理 facade**：经 [`management::SkillManagementExt`] 收敛 App/Tauri/CLI 的
-//!   skill 管理调用入口（install/remove/set_enabled/refresh/gc/doctor/list/detail）
+//! - **App 管理 API**：[`SkillPlugin`] 直接提供 remove / set_enabled / refresh / gc /
+//!   doctor / list / detail 方法，供 App/Tauri/CLI 调用（入口层持有插件实例）
 //!
 //! skills 已从 [`tiangong_core::agent_config::AgentConfig`] 彻底脱离，由本插件自托管
 //! [`tiangong_core::skill::SkillRegistry`]。`collect_runtime_env` 直接扫描
 //! `~/.tiangong/skills/` 读 skill env，不经 agent_config 流转。
 //!
-//! 管理实现当前委托回 core 的 `TiangongState`（过渡），后续逐步下沉到插件内部自治。
+//! 安装统一经 agent 的 `install_skill` 工具（内容式：agent 编写 SKILL.md 正文 → 落地），
+//! 不再支持固定路径安装。
 
 pub mod handler;
 pub mod management;
 pub mod plugin;
 pub mod prompt;
 
-pub use management::SkillManagementExt;
 pub use plugin::SkillPlugin;
 
 use std::sync::Arc;

@@ -28,22 +28,22 @@ use crate::skill::{
 };
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
-pub(crate) mod audit;
+pub mod audit;
 mod facade;
 pub(crate) mod formatting;
 pub(crate) mod repository;
 mod services;
 mod store;
-mod support;
+pub(crate) mod support;
 #[cfg(test)]
 mod tests;
 
 // Private imports
 use self::repository::{
     converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
-    default_mcp_capability_cache_path, default_mcp_config_path, default_mcp_lock_path,
-    default_sessions_dir_path, default_skills_config_path, default_workspace_dir, ensure_dir,
-    normalize_model_list, parse_bool, validate_agent_config,
+    default_mcp_capability_cache_path, default_mcp_config_path, default_sessions_dir_path,
+    default_skills_config_path, default_workspace_dir, ensure_dir, normalize_model_list,
+    parse_bool, validate_agent_config,
 };
 use self::services::{AppMcpService, AppSkillService, AppTurnService};
 pub use self::support::StreamEvent;
@@ -53,6 +53,7 @@ use self::support::{
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
+pub use self::repository::default_mcp_lock_path;
 pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,

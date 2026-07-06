@@ -25,6 +25,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 
     let mut state = TiangongState::load_or_default();
+    let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> =
+        std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new());
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     // CLI 入口是同步函数，用临时 tokio runtime block_on。
@@ -66,9 +68,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         if tiangong_plugin_analyze_attachment::should_register(llm) {
             plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
         }
-        // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在已启用
-        // skill 决定是否暴露工具与注入 prompt 段落。
-        plugins.extend(tiangong_plugin_skill::default_plugins());
+        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
+        // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
+        plugins.push(skill_plugin.clone());
         plugins
     });
 
@@ -114,7 +116,13 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, &config, trimmed, &mut draft_new_session) {
+            match commands::handle_command(
+                &mut state,
+                &config,
+                trimmed,
+                &mut draft_new_session,
+                &skill_plugin,
+            ) {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {

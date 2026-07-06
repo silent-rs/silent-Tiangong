@@ -1,9 +1,6 @@
 use super::super::*;
 
-pub(in crate::app_state) fn converted_stage_cleanup_dir(
-    install_path: &Path,
-    converted: bool,
-) -> Option<PathBuf> {
+pub fn converted_stage_cleanup_dir(install_path: &Path, converted: bool) -> Option<PathBuf> {
     if !converted {
         return None;
     }
@@ -96,11 +93,11 @@ pub(in crate::app_state) fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(in crate::app_state) fn ensure_dir(path: &Path) -> Result<()> {
+pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录失败：{}", path.display()))
 }
 
-pub(in crate::app_state) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     if !src.is_dir() {
         return Err(anyhow!("复制目录失败，源不是目录：{}", src.display()));
     }
@@ -169,7 +166,7 @@ pub(in crate::app_state) fn normalize_model_list(
     list
 }
 
-pub(in crate::app_state) fn validate_agent_config(config: &AgentConfig) -> Result<()> {
+pub fn validate_agent_config(config: &AgentConfig) -> Result<()> {
     validate_mcp_config(&config.mcp)?;
     Ok(())
 }

@@ -9708,6 +9708,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-memory",
+ "tiangong-plugin-skill",
  "tiangong-server",
 ]
 

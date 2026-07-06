@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -5,18 +7,21 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use tiangong_core::app_state::TiangongState;
+use tiangong_plugin_skill::SkillPlugin;
 
 /// 打开 Skill 管理 modal
-pub fn open(state: &mut TiangongState) -> Result<()> {
+///
+/// `state` 仅用于变更后触发 config 同步；skill 数据读写全部经 `skill_plugin`。
+pub fn open(state: &mut TiangongState, skill_plugin: &Arc<SkillPlugin>) -> Result<()> {
     let mut selected: usize = 0;
     let mut query = String::new();
     let mut add_input: Option<String> = None;
-    let mut status = "空格 启/禁用 | A 新增 | Backspace 删除 | Esc 返回".to_string();
+    let mut status = "空格 启/禁用 | Backspace 删除 | Esc 返回".to_string();
     let mut list_state = ListState::default();
 
     super::run_modal(|terminal| {
         loop {
-            let skills = state.installed_skills().to_vec();
+            let skills = skill_plugin.installed_skills();
             let matched: Vec<usize> = skills
                 .iter()
                 .enumerate()
@@ -111,15 +116,10 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(raw) = add_input.take() {
-                                let path = raw.trim();
-                                if path.is_empty() {
-                                    status = "路径不能为空".to_string();
-                                } else {
-                                    match state.install_local_skill(path, true) {
-                                        Ok(msg) => status = msg,
-                                        Err(err) => status = format!("安装失败：{err}"),
-                                    }
-                                }
+                                let _ = raw;
+                                add_input = None;
+                                status = "安装请通过对话让 Agent 创建（调用 install_skill 工具）"
+                                    .to_string();
                             }
                         }
                         KeyCode::Backspace => {
@@ -149,7 +149,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                         if let Some(&si) = matched.get(selected) {
                             let id = skills[si].id.clone();
                             let new_enabled = !skills[si].enabled;
-                            match state.set_skill_enabled(&id, new_enabled) {
+                            match skill_plugin.set_skill_enabled(&id, new_enabled) {
                                 Ok(msg) => status = msg,
                                 Err(err) => status = format!("操作失败：{err}"),
                             }
@@ -162,9 +162,15 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                     KeyCode::Backspace => {
                         if let Some(&si) = matched.get(selected) {
                             let id = skills[si].id.clone();
-                            match state.remove_skill(&id) {
-                                Ok(msg) => {
-                                    status = msg;
+                            match skill_plugin.remove_skill(&id) {
+                                Ok(outcome) => {
+                                    // 清理 plugin 报告的孤儿托管 MCP server
+                                    if !outcome.orphan_mcp_servers.is_empty() {
+                                        state.store.agent.agent_config.mcp.servers.retain(|s| {
+                                            !outcome.orphan_mcp_servers.contains(&s.name)
+                                        });
+                                    }
+                                    status = outcome.message;
                                     selected = selected.saturating_sub(1);
                                 }
                                 Err(err) => status = format!("删除失败：{err}"),

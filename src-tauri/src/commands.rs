@@ -2629,23 +2629,21 @@ pub async fn set_mcp_server_enabled(
 /// 获取已安装的 Skill 列表
 #[tauri::command]
 pub async fn get_skills(state: State<'_, TiangongApp>) -> Result<Vec<SkillView>, String> {
-    state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .installed_skills()
-                .iter()
-                .map(SkillView::from_core)
-                .collect())
-        })
-        .await
+    Ok(state
+        .skill_plugin
+        .installed_skills()
+        .iter()
+        .map(SkillView::from_core)
+        .collect())
 }
 
 /// 刷新 Skill 注册表（重扫 skills/<id>/）
 #[tauri::command]
 pub async fn refresh_skills(state: State<'_, TiangongApp>) -> Result<String, String> {
     let message = state
-        .with_state(|core_state| core_state.refresh_skills())
-        .await?;
+        .skill_plugin
+        .refresh_skills()
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2654,8 +2652,9 @@ pub async fn refresh_skills(state: State<'_, TiangongApp>) -> Result<String, Str
 #[tauri::command]
 pub async fn gc_skills(apply: bool, state: State<'_, TiangongApp>) -> Result<String, String> {
     let message = state
-        .with_state(|core_state| core_state.gc_skills(apply))
-        .await?;
+        .skill_plugin
+        .gc_skills(apply)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2666,61 +2665,37 @@ pub async fn get_skill_detail(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<SkillDetailView, String> {
-    state
-        .with_state_read(|core_state| {
-            let detail = core_state.get_skill_detail(&id)?;
-            Ok(SkillDetailView::from_core(&detail))
-        })
-        .await
-}
-
-/// 检查 Skill 安装需求（返回需要配置的环境变量列表）
-#[tauri::command]
-pub async fn inspect_skill(
-    path: String,
-    state: State<'_, TiangongApp>,
-) -> Result<SkillInspection, String> {
-    state
-        .with_state_read(|core_state| {
-            let inspection = core_state.inspect_skill_install_requirements(&path, true)?;
-            Ok(SkillInspection {
-                env_vars: inspection.env_vars,
-                missing_env_vars: inspection.missing_env_vars,
-                dependencies: inspection.dependencies,
-            })
-        })
-        .await
-}
-
-/// 安装 Skill（支持传入环境变量配置）
-#[tauri::command]
-pub async fn install_skill(
-    path: String,
-    env_values: Option<std::collections::HashMap<String, String>>,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    let message = state
-        .with_state(|core_state| {
-            let env: Vec<(String, String)> = env_values
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(_, v)| !v.trim().is_empty())
-                .collect();
-            core_state.install_local_skill_with_options_and_inputs(&path, true, true, &env)
-        })
-        .await?;
-    state.sync_core_config_from_state().await?;
-    Ok(message)
+    let detail = state
+        .skill_plugin
+        .get_skill_detail(&id)
+        .map_err(|e| e.to_string())?;
+    Ok(SkillDetailView::from_core(&detail))
 }
 
 /// 移除 Skill
 #[tauri::command]
 pub async fn remove_skill(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
-    let message = state
-        .with_state(|core_state| core_state.remove_skill(&id))
-        .await?;
+    let outcome = state
+        .skill_plugin
+        .remove_skill(&id)
+        .map_err(|e| e.to_string())?;
+    // 清理 plugin 报告的孤儿托管 MCP server（需操作 TiangongState）
+    if !outcome.orphan_mcp_servers.is_empty() {
+        state
+            .with_state(|core_state| {
+                core_state
+                    .store
+                    .agent
+                    .agent_config
+                    .mcp
+                    .servers
+                    .retain(|s| !outcome.orphan_mcp_servers.contains(&s.name));
+                anyhow::Ok(())
+            })
+            .await?;
+    }
     state.sync_core_config_from_state().await?;
-    Ok(message)
+    Ok(outcome.message)
 }
 
 /// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
@@ -2729,54 +2704,49 @@ pub async fn get_skill_env(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
-    state
-        .with_state_read(|core_state| {
-            let installed = core_state.installed_skills();
-            let skill = installed
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
+    let installed = state.skill_plugin.installed_skills();
+    let skill = installed
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("未找到 skill：{id}"))?;
+    let skill_dir = std::path::Path::new(&skill.source.value);
+    let mut env = std::collections::HashMap::new();
 
-            let skill_dir = std::path::Path::new(&skill.source.value);
-            let mut env = std::collections::HashMap::new();
-
-            // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
-            let toml_path = skill_dir.join("skill.toml");
-            if let Ok(raw) = std::fs::read_to_string(&toml_path) {
-                #[derive(serde::Deserialize, Default)]
-                struct T {
-                    #[serde(default)]
-                    requires: R,
-                }
-                #[derive(serde::Deserialize, Default)]
-                struct R {
-                    #[serde(default)]
-                    env: Vec<String>,
-                }
-                if let Ok(parsed) = toml::from_str::<T>(&raw) {
-                    for key in parsed.requires.env {
-                        env.insert(key, String::new());
-                    }
-                }
+    // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
+    let toml_path = skill_dir.join("skill.toml");
+    if let Ok(raw) = std::fs::read_to_string(&toml_path) {
+        #[derive(serde::Deserialize, Default)]
+        struct T {
+            #[serde(default)]
+            requires: R,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct R {
+            #[serde(default)]
+            env: Vec<String>,
+        }
+        if let Ok(parsed) = toml::from_str::<T>(&raw) {
+            for key in parsed.requires.env {
+                env.insert(key, String::new());
             }
+        }
+    }
 
-            // 2. 从 .env.local 读取已有值（覆盖空值）
-            let env_path = skill_dir.join(".env.local");
-            if let Ok(content) = std::fs::read_to_string(&env_path) {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((k, v)) = line.split_once('=') {
-                        env.insert(k.trim().to_string(), v.trim().to_string());
-                    }
-                }
+    // 2. 从 .env.local 读取已有值（覆盖空值）
+    let env_path = skill_dir.join(".env.local");
+    if let Ok(content) = std::fs::read_to_string(&env_path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
             }
+            if let Some((k, v)) = line.split_once('=') {
+                env.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+    }
 
-            Ok(env)
-        })
-        .await
+    Ok(env)
 }
 
 /// 设置 Skill 的环境变量
@@ -2786,28 +2756,24 @@ pub async fn set_skill_env(
     env: std::collections::HashMap<String, String>,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state
-        .with_state_read(|core_state| {
-            let installed = core_state.installed_skills();
-            let skill = installed
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| anyhow::anyhow!("未找到 skill：{id}"))?;
-            let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
-            let lines: Vec<String> = env
-                .iter()
-                .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
-                .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
-                .collect();
-            if lines.is_empty() {
-                let _ = std::fs::remove_file(&env_path);
-            } else {
-                std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
-                    .map_err(|e| anyhow::anyhow!("写入 .env.local 失败：{e}"))?;
-            }
-            Ok(())
-        })
-        .await
+    let installed = state.skill_plugin.installed_skills();
+    let skill = installed
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("未找到 skill：{id}"))?;
+    let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
+    let lines: Vec<String> = env
+        .iter()
+        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+        .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
+        .collect();
+    if lines.is_empty() {
+        let _ = std::fs::remove_file(&env_path);
+    } else {
+        std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
+            .map_err(|e| format!("写入 .env.local 失败：{e}"))?;
+    }
+    Ok(())
 }
 
 /// 设置 Skill 启用状态
@@ -2818,8 +2784,9 @@ pub async fn set_skill_enabled(
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     let message = state
-        .with_state(|core_state| core_state.set_skill_enabled(&id, enabled))
-        .await?;
+        .skill_plugin
+        .set_skill_enabled(&id, enabled)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }

@@ -13,6 +13,7 @@ pub fn handle_command(
     config: &CoreConfigProvider,
     command: &str,
     draft_new_session: &mut bool,
+    skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
 ) -> Result<bool> {
     let command = command.trim();
     let mut sync_core_config = false;
@@ -44,7 +45,7 @@ pub fn handle_command(
             sync_core_config = true;
         }
         "/skill" => {
-            modal::skill::open(state)?;
+            modal::skill::open(state, &skill_plugin)?;
             sync_core_config = true;
         }
         "/cancel" => {
