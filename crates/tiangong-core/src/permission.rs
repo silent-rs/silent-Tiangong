@@ -96,6 +96,9 @@ pub struct PermissionGate {
     policy: PermissionPolicy,
     /// 共享的信任模式引用，clone 后仍指向同一个 RwLock
     shared_trust_mode: Arc<RwLock<TrustMode>>,
+    /// 插件贡献的工具权限覆盖表（由 core/mod.rs 汇总各插件的
+    /// `tool_permission_overrides` 写入）。check 时优先于 classify_tool 查询。
+    plugin_overrides: Arc<RwLock<std::collections::BTreeMap<String, PermissionLevel>>>,
 }
 
 impl Default for PermissionGate {
@@ -105,6 +108,7 @@ impl Default for PermissionGate {
         Self {
             policy,
             shared_trust_mode: shared,
+            plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 }
@@ -115,10 +119,11 @@ impl PermissionGate {
         Self {
             policy,
             shared_trust_mode: shared,
+            plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
-    /// 使用外部共享的信任模式创建（确保所有 clone 共享同一引用）
+    /// 使用外部共享的信任模式创建（确保所有持有该 Gate clone 共享同一引用）
     pub fn with_shared_trust_mode(
         policy: PermissionPolicy,
         shared: Arc<RwLock<TrustMode>>,
@@ -126,6 +131,7 @@ impl PermissionGate {
         Self {
             policy,
             shared_trust_mode: shared,
+            plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -138,6 +144,16 @@ impl PermissionGate {
     pub fn set_trust_mode(&self, mode: TrustMode) {
         if let Ok(mut guard) = self.shared_trust_mode.write() {
             *guard = mode;
+        }
+    }
+
+    /// 写入插件贡献的工具权限覆盖表（供 core/mod.rs 汇总插件能力时调用）。
+    pub fn set_plugin_overrides(
+        &self,
+        overrides: std::collections::BTreeMap<String, PermissionLevel>,
+    ) {
+        if let Ok(mut guard) = self.plugin_overrides.write() {
+            *guard = overrides;
         }
     }
 
@@ -167,8 +183,15 @@ impl PermissionGate {
             return PermissionDecision::Approved;
         }
 
-        // 根据工具风险等级决策
-        let level = classify_tool(tool_name);
+        // 根据工具风险等级决策：优先查插件贡献的覆盖表，未命中再走 classify_tool。
+        let level = if let Ok(overrides) = self.plugin_overrides.read() {
+            overrides
+                .get(tool_name)
+                .copied()
+                .unwrap_or_else(|| classify_tool(tool_name))
+        } else {
+            classify_tool(tool_name)
+        };
         match level {
             PermissionLevel::Safe => PermissionDecision::Approved,
             PermissionLevel::Standard => PermissionDecision::Approved,
@@ -289,14 +312,16 @@ fn network_matches(pattern: &str, target: &str) -> bool {
 
 /// 根据工具名分类风险等级（pub(crate) 供测试访问）
 ///
-/// 注意：此处中心化维护各插件工具的权限等级（含 get_skill_detail / recall_memory
-/// 等插件工具）。完整方案应改为插件贡献 `tool_permission_overrides`，由 permission
-/// gate 汇总——当前中心化分类是既有架构，暂保留。
+/// 仅维护 core 内置/通用工具的风险等级。各插件工具（如 get_skill_detail /
+/// recall_memory / web_form_extract）的权限等级由插件经
+/// [`crate::core::Plugin::tool_permission_overrides`] 贡献，PermissionGate.check
+/// 优先查覆盖表，未命中才走此函数。
 pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
-        // 安全：只读
-        "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch" | "current_time"
-        | "get_skill_detail" | "recall_memory" | "web_form_extract" => PermissionLevel::Safe,
+        // 安全：只读（core 内置工具）
+        "read_file" | "list_dir" | "tree_dir" | "search_code" | "web_fetch" | "current_time" => {
+            PermissionLevel::Safe
+        }
         // 标准：文件写入
         "write_file" | "replace_in_file" => PermissionLevel::Standard,
         // 高级：命令执行 + 浏览器操作
@@ -676,7 +701,8 @@ mod tests {
     fn classify_tool_levels() {
         assert_eq!(classify_tool("read_file"), PermissionLevel::Safe);
         assert_eq!(classify_tool("tree_dir"), PermissionLevel::Safe);
-        assert_eq!(classify_tool("web_form_extract"), PermissionLevel::Safe);
+        // web_form_extract / get_skill_detail / recall_memory 已改由各插件经
+        // tool_permission_overrides 贡献，不在 classify_tool 中心化维护。
         assert_eq!(classify_tool("write_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("replace_in_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("run_command"), PermissionLevel::Elevated);

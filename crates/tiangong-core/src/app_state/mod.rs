@@ -44,13 +44,6 @@ pub use self::support::{AppPaths, AppServices};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 
-#[derive(Debug, Clone, Default)]
-pub struct SkillInstallInspection {
-    pub dependencies: Vec<String>,
-    pub env_vars: Vec<String>,
-    pub missing_env_vars: Vec<String>,
-}
-
 #[derive(Debug)]
 pub struct TiangongState {
     pub store: AppStore,

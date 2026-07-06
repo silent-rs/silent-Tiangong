@@ -437,6 +437,30 @@ async fn worker_loop_async(
                 }
                 e.set_runtime_env(exec_env);
             }
+            // 汇总插件贡献的允许文件根目录（如 skill 的 ~/.tiangong/skills），
+            // 写入 process-level 允许表供 tool/common.rs 写权限校验，避免 core 硬编码。
+            {
+                let mut extra_roots: Vec<std::path::PathBuf> = Vec::new();
+                for plugin in &plugins {
+                    for root in plugin.allowed_file_roots() {
+                        if !extra_roots.contains(&root) {
+                            extra_roots.push(root);
+                        }
+                    }
+                }
+                crate::tool::common::set_extra_allowed_roots(extra_roots);
+            }
+            // 汇总插件贡献的工具权限覆盖（如 get_skill_detail -> Safe），
+            // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
+            {
+                let mut overrides = std::collections::BTreeMap::new();
+                for plugin in &plugins {
+                    for (name, level) in plugin.tool_permission_overrides() {
+                        overrides.insert(name, level);
+                    }
+                }
+                e.permission_gate().set_plugin_overrides(overrides);
+            }
             // 各插件（含 MCP 等动态工具插件）的工具规格经 tool_specs() 声明，
             // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
             let injection_spec = crate::core::plugin::injection_tool_spec();
