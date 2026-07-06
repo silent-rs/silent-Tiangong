@@ -474,15 +474,6 @@ pub(crate) enum SkillSubcommand {
         #[arg(long, default_value_t = false, help = "存在同名文件时是否覆盖")]
         force: bool,
     },
-    #[command(about = "安装 Skill（本地目录）", visible_alias = "add")]
-    Install {
-        #[arg(help = "Skill 本地目录")]
-        path: String,
-        #[arg(long, default_value_t = true, help = "是否启用（true/false）")]
-        enabled: bool,
-        #[arg(long, default_value_t = false, help = "是否启用外部 Skill 转换")]
-        convert: bool,
-    },
     #[command(about = "删除 Skill")]
     Remove {
         #[arg(help = "Skill ID")]
@@ -500,13 +491,6 @@ pub(crate) enum SkillSubcommand {
     },
     #[command(about = "刷新 Skill 注册表（重扫 skills/<id>/）")]
     Refresh,
-    #[command(about = "检测或清理孤儿 Skill 托管 MCP 配置")]
-    Gc {
-        #[arg(long, default_value_t = false, help = "执行清理；默认只报告不删除")]
-        apply: bool,
-    },
-    #[command(about = "诊断 Skill 注册表、manifest 与托管 MCP 一致性")]
-    Doctor,
     #[command(about = "校验配置")]
     Validate,
 }

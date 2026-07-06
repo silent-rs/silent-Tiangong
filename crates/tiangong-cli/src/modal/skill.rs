@@ -1,22 +1,27 @@
+use std::sync::Arc;
+
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use tiangong_core::app_state::TiangongState;
+use tiangong_plugin_skill::SkillPlugin;
 
 /// 打开 Skill 管理 modal
-pub fn open(state: &mut TiangongState) -> Result<()> {
+///
+/// `state` 仅用于变更后触发 config 同步；skill 数据读写全部经 `skill_plugin`。
+/// Skill 创建请在主对话中让 Agent 用文件工具完成（见 prompt 段落指引）。
+pub fn open(state: &mut TiangongState, skill_plugin: &Arc<SkillPlugin>) -> Result<()> {
     let mut selected: usize = 0;
     let mut query = String::new();
-    let mut add_input: Option<String> = None;
-    let mut status = "空格 启/禁用 | A 新增 | Backspace 删除 | Esc 返回".to_string();
+    let mut status = "空格 启/禁用 | Backspace 删除 | Esc 返回".to_string();
     let mut list_state = ListState::default();
 
     super::run_modal(|terminal| {
         loop {
-            let skills = state.installed_skills().to_vec();
+            let skills = skill_plugin.installed_skills();
             let matched: Vec<usize> = skills
                 .iter()
                 .enumerate()
@@ -35,8 +40,6 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                 Some(selected)
             });
 
-            let is_adding = add_input.is_some();
-
             terminal.draw(|frame| {
                 let area = frame.area();
                 let chunks = Layout::default()
@@ -54,7 +57,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                     .map(|(vi, &si)| {
                         let s = &skills[si];
                         let marker = if s.enabled { "●" } else { "○" };
-                        let style = if vi == selected && !is_adding {
+                        let style = if vi == selected {
                             Style::default()
                                 .bg(Color::Blue)
                                 .fg(Color::White)
@@ -83,13 +86,8 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                     .highlight_symbol("› ");
                 frame.render_stateful_widget(list, chunks[0], &mut list_state);
 
-                let input_text = if let Some(ref input) = add_input {
-                    format!("新增: {input}")
-                } else {
-                    format!("筛选: {query}")
-                };
-                let input =
-                    Paragraph::new(input_text).block(Block::default().borders(Borders::ALL));
+                let input = Paragraph::new(format!("筛选: {query}"))
+                    .block(Block::default().borders(Borders::ALL));
                 frame.render_widget(input, chunks[1]);
 
                 let status_line =
@@ -99,43 +97,6 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
 
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                if is_adding {
-                    match key.code {
-                        KeyCode::Esc => {
-                            add_input = None;
-                            status =
-                                "空格 启/禁用 | A 新增 | Backspace 删除 | Esc 返回".to_string();
-                        }
-                        KeyCode::Enter => {
-                            if let Some(raw) = add_input.take() {
-                                let path = raw.trim();
-                                if path.is_empty() {
-                                    status = "路径不能为空".to_string();
-                                } else {
-                                    match state.install_local_skill(path, true) {
-                                        Ok(msg) => status = msg,
-                                        Err(err) => status = format!("安装失败：{err}"),
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if let Some(ref mut input) = add_input {
-                                input.pop();
-                            }
-                        }
-                        KeyCode::Char(ch)
-                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                        {
-                            if let Some(ref mut input) = add_input {
-                                input.push(ch);
-                            }
-                        }
-                        _ => {}
-                    }
                     continue;
                 }
 
@@ -149,26 +110,33 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                         if let Some(&si) = matched.get(selected) {
                             let id = skills[si].id.clone();
                             let new_enabled = !skills[si].enabled;
-                            match state.set_skill_enabled(&id, new_enabled) {
+                            match skill_plugin.set_skill_enabled(&id, new_enabled) {
                                 Ok(msg) => status = msg,
                                 Err(err) => status = format!("操作失败：{err}"),
                             }
                         }
                     }
-                    KeyCode::Char('a') | KeyCode::Char('A') => {
-                        add_input = Some(String::new());
-                        status = "输入 skill 本地目录路径 | Enter 确认 | Esc 取消".to_string();
-                    }
                     KeyCode::Backspace => {
-                        if let Some(&si) = matched.get(selected) {
-                            let id = skills[si].id.clone();
-                            match state.remove_skill(&id) {
-                                Ok(msg) => {
-                                    status = msg;
-                                    selected = selected.saturating_sub(1);
+                        if query.is_empty() {
+                            // 在无筛选输入时，Backspace 删除选中 skill
+                            if let Some(&si) = matched.get(selected) {
+                                let id = skills[si].id.clone();
+                                match skill_plugin.remove_skill(&id) {
+                                    Ok(outcome) => {
+                                        // 清理 plugin 报告的孤儿托管 MCP server
+                                        if !outcome.orphan_mcp_servers.is_empty() {
+                                            state.store.agent.agent_config.mcp.servers.retain(
+                                                |s| !outcome.orphan_mcp_servers.contains(&s.name),
+                                            );
+                                        }
+                                        status = outcome.message;
+                                        selected = selected.saturating_sub(1);
+                                    }
+                                    Err(err) => status = format!("删除失败：{err}"),
                                 }
-                                Err(err) => status = format!("删除失败：{err}"),
                             }
+                        } else {
+                            query.pop();
                         }
                     }
                     KeyCode::Delete => {

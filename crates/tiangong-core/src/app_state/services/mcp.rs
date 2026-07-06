@@ -202,30 +202,6 @@ impl AppMcpService {
         }
 
         let updated_value = match key {
-            "skills.enabled" => {
-                let parsed = parse_bool(value)?;
-                state.store.agent.agent_config.skills.enabled = parsed;
-                parsed.to_string()
-            }
-            "skills.max_matches" => {
-                let parsed = value
-                    .parse::<usize>()
-                    .with_context(|| format!("配置值无效，要求正整数：{value}"))?;
-                if parsed == 0 {
-                    return Err(anyhow!("skills.max_matches 必须大于 0"));
-                }
-                state.store.agent.agent_config.skills.max_matches = parsed;
-                parsed.to_string()
-            }
-            "skills.dirs" => {
-                let parsed = parse_list_value(value);
-                state.store.agent.agent_config.skills.dirs = parsed.clone();
-                if parsed.is_empty() {
-                    "(empty)".to_string()
-                } else {
-                    parsed.join(",")
-                }
-            }
             "mcp.enabled" => {
                 let parsed = parse_bool(value)?;
                 state.store.agent.agent_config.mcp.enabled = parsed;
@@ -243,7 +219,7 @@ impl AppMcpService {
             }
             _ => {
                 return Err(anyhow!(
-                    "不支持的配置键：{key}。支持：skills.enabled、skills.max_matches、skills.dirs、mcp.enabled、mcp.timeout_ms"
+                    "不支持的配置键：{key}。支持：mcp.enabled、mcp.timeout_ms（skills 配置已迁移至 skill plugin）"
                 ));
             }
         };

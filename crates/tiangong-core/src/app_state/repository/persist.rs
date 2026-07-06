@@ -25,8 +25,7 @@ impl AppRepository {
     pub(in crate::app_state) fn persist_app_only(&self, store: &AppStore) -> Result<()> {
         ensure_parent_dir(&self.paths.app_storage_path)?;
 
-        let mut app_agent_config = store.agent.agent_config.clone();
-        app_agent_config.skills.installed.clear();
+        let app_agent_config = store.agent.agent_config.clone();
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
             workspace_dir: store.session.workspace_dir.clone(),
@@ -62,8 +61,7 @@ impl AppRepository {
         // 每个进程只持有自己加载到内存的会话子集，删除"未知"文件会导致其他进程创建的会话丢失。
         // 会话文件的清理由 delete_active_session 显式执行。
 
-        let mut app_agent_config = store.agent.agent_config.clone();
-        app_agent_config.skills.installed.clear();
+        let app_agent_config = store.agent.agent_config.clone();
         let payload = PersistedAppState {
             active_session_id: store.session.active_session_id.clone(),
             workspace_dir: store.session.workspace_dir.clone(),
@@ -129,23 +127,9 @@ impl AppRepository {
         agent_config: &AgentConfig,
         merge_mcp: bool,
     ) -> Result<()> {
-        ensure_parent_dir(&self.paths.skills_config_path)?;
         ensure_parent_dir(&self.paths.mcp_config_path)?;
 
-        // --- skills.json：合并磁盘上其他进程新增的 dirs ---
-        let merged_skills = self.merge_skills_with_disk(&agent_config.skills)?;
-        let skills_content = serde_json::to_string_pretty(&SkillsConfig {
-            installed: Vec::new(),
-            ..merged_skills
-        })
-        .context("序列化 skills 配置失败")?;
-        fs::write(&self.paths.skills_config_path, skills_content).with_context(|| {
-            format!(
-                "写入 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-
+        // skills.json 由 skill plugin 自治管理，此处不再写入。
         // --- mcp.json ---
         let final_mcp = if merge_mcp {
             self.merge_mcp_with_disk(&agent_config.mcp)?
@@ -162,51 +146,6 @@ impl AppRepository {
         })?;
 
         Ok(())
-    }
-
-    /// 读取磁盘上的 skills.json，合并其他进程新增的 dirs。
-    /// 合并策略：标量字段以内存为准，dirs 取并集。
-    fn merge_skills_with_disk(&self, memory_skills: &SkillsConfig) -> Result<SkillsConfig> {
-        if !self.paths.skills_config_path.exists() {
-            return Ok(memory_skills.clone());
-        }
-
-        let disk_content =
-            fs::read_to_string(&self.paths.skills_config_path).with_context(|| {
-                format!(
-                    "读取 skills 配置失败：{}",
-                    self.paths.skills_config_path.display()
-                )
-            })?;
-        let disk_skills: SkillsConfig = serde_json::from_str(&disk_content).with_context(|| {
-            format!(
-                "解析 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-
-        let mut merged_dirs: Vec<String> = memory_skills.dirs.clone();
-        for dir in &disk_skills.dirs {
-            if !merged_dirs.contains(dir) {
-                merged_dirs.push(dir.clone());
-            }
-        }
-
-        if disk_skills.enabled != memory_skills.enabled
-            || disk_skills.max_matches != memory_skills.max_matches
-            || merged_dirs.len() != memory_skills.dirs.len()
-        {
-            tracing::warn!(
-                "检测到 skills.json 被其他进程修改，已合并外部变更（dirs 并集，标量字段以当前进程为准）"
-            );
-        }
-
-        Ok(SkillsConfig {
-            enabled: memory_skills.enabled,
-            max_matches: memory_skills.max_matches,
-            dirs: merged_dirs,
-            installed: Vec::new(),
-        })
     }
 
     /// 读取磁盘上的 mcp.json，合并其他进程新增的 server。

@@ -33,67 +33,16 @@ pub(in crate::app_state) struct LoadedState {
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
 }
 
-/// 管理命令：由 RuntimeEngine 中的内置工具触发，主线程负责执行
-#[derive(Debug, Clone)]
-pub enum ManagementCommand {
-    RegisterMcpServer {
-        name: String,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-        transport: Option<String>,
-        endpoint: Option<String>,
-    },
-    RemoveMcpServer {
-        name: String,
-    },
-    SetMcpServerEnabled {
-        name: String,
-        enabled: bool,
-    },
-    InstallSkill {
-        path: String,
-        enabled: bool,
-    },
-    RemoveSkill {
-        id: String,
-    },
-    SetSkillEnabled {
-        id: String,
-        enabled: bool,
-    },
-}
-
 pub use tiangong_types::StreamEvent;
 
+/// mcp-lock.json 中单个 MCP 依赖包的引用计数记录。
+///
+/// 语义：聚合所有已安装 skill 的 `requires.mcp` 声明，按 `package[@version]` 分组，
+/// 记录被多少 skill 引用。不再记录安装路径与时间（旧字段的兼容读取见 serde default）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(in crate::app_state) struct McpDependencyLockRecord {
-    pub(in crate::app_state) path: String,
+    /// 引用该依赖的 skill 数量。
     pub(in crate::app_state) ref_count: usize,
-    pub(in crate::app_state) installed_at: String,
-}
-
-#[derive(Debug)]
-pub(in crate::app_state) struct ScopedDirCleanup {
-    dir: Option<PathBuf>,
-}
-
-impl ScopedDirCleanup {
-    pub(in crate::app_state) fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir }
-    }
-
-    pub(in crate::app_state) fn is_enabled(&self) -> bool {
-        self.dir.is_some()
-    }
-}
-
-impl Drop for ScopedDirCleanup {
-    fn drop(&mut self) {
-        if let Some(dir) = self.dir.take() {
-            let _ = fs::remove_dir_all(dir);
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -107,46 +56,9 @@ pub struct AppPaths {
 
 #[derive(Debug)]
 pub struct AppServices {
-    pub skill_service: AppSkillService,
     pub mcp_service: AppMcpService,
     pub repository: AppRepository,
     pub runtime: RuntimeEngine,
     pub turn_service: AppTurnService,
     pub skill_registry: Arc<crate::skill::SkillRegistry>,
-}
-
-#[derive(Debug)]
-pub(in crate::app_state) struct InstallRollbackGuard {
-    dir: Option<PathBuf>,
-}
-
-impl InstallRollbackGuard {
-    pub(in crate::app_state) fn new(dir: PathBuf) -> Self {
-        Self { dir: Some(dir) }
-    }
-
-    pub(in crate::app_state) fn commit(mut self) {
-        self.dir = None;
-    }
-}
-
-impl Drop for InstallRollbackGuard {
-    fn drop(&mut self) {
-        if let Some(dir) = self.dir.take() {
-            let _ = std::fs::remove_dir_all(&dir);
-            // 清理空父目录
-            let mut current = dir.parent().map(std::path::Path::to_path_buf);
-            while let Some(p) = current {
-                if std::fs::read_dir(&p)
-                    .ok()
-                    .and_then(|mut d| d.next())
-                    .is_some()
-                {
-                    break;
-                }
-                let _ = std::fs::remove_dir(&p);
-                current = p.parent().map(std::path::Path::to_path_buf);
-            }
-        }
-    }
 }

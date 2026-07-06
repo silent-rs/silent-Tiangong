@@ -111,10 +111,9 @@ impl AppRepository {
         &self,
         legacy_agent_config: Option<AgentConfig>,
     ) -> Result<Option<AgentConfig>> {
-        let skills = self.load_skills_config_from_disk()?;
         let mcp = self.load_mcp_config_from_disk()?;
-        if skills.is_none() && mcp.is_none() {
-            // 无 skills/mcp 独立配置，直接用 legacy agent_config，
+        if mcp.is_none() {
+            // 无 mcp 独立配置，直接用 legacy agent_config，
             // 但仍需用 custom-prompt.md 加载优先级回填 custom_system_prompt
             // （custom-prompt.md 优先，回退 legacy 旧字段）。
             let mut agent_config = legacy_agent_config;
@@ -127,9 +126,6 @@ impl AppRepository {
             return Ok(agent_config);
         }
         let mut agent_config = legacy_agent_config.unwrap_or_default();
-        if let Some(skills) = skills {
-            agent_config.skills = skills;
-        }
         if let Some(mcp) = mcp {
             agent_config.mcp = mcp;
         }
@@ -140,25 +136,6 @@ impl AppRepository {
             crate::custom_prompt::load_custom_prompt(&legacy_prompt).unwrap_or(legacy_prompt);
         agent_config.custom_system_prompt = prompt;
         Ok(Some(agent_config))
-    }
-
-    fn load_skills_config_from_disk(&self) -> Result<Option<SkillsConfig>> {
-        if !self.paths.skills_config_path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(&self.paths.skills_config_path).with_context(|| {
-            format!(
-                "读取 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-        let config: SkillsConfig = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "解析 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-        Ok(Some(config))
     }
 
     fn load_mcp_config_from_disk(&self) -> Result<Option<McpConfig>> {

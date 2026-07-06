@@ -6,7 +6,6 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::Result;
 
 use super::super::*;
-use crate::agent_config::{InstalledSkillConfig, SkillMcpRequirementConfig, SkillSourceConfig};
 
 pub(super) struct TestEnvPaths {
     pub(super) temp_root: PathBuf,
@@ -76,27 +75,4 @@ where
     let _guard = TestEnvGuard::setup(&paths)?;
     let mut state = TiangongState::load_or_default();
     test(&paths, &mut state)
-}
-
-pub(super) fn make_installed_skill(
-    id: &str,
-    installed_at: &str,
-    requires_mcp: Vec<SkillMcpRequirementConfig>,
-) -> InstalledSkillConfig {
-    InstalledSkillConfig {
-        id: id.to_string(),
-        name: format!("Skill {id}"),
-        version: "0.1.0".to_string(),
-        description: String::new(),
-        entry: "SKILL.md".to_string(),
-        enabled: true,
-        installed_at: installed_at.to_string(),
-        managed_mcp_servers: Vec::new(),
-        source: SkillSourceConfig {
-            kind: "local".to_string(),
-            value: format!("/tmp/{id}"),
-        },
-        requires_mcp,
-        permissions: Default::default(),
-    }
 }

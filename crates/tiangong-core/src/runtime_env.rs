@@ -2,13 +2,22 @@
 //!
 //! 原属 `tool/run_command.rs::collect_runtime_env`，LocalToolExecutor 删除后迁出至此，
 //! 供 RuntimeEngine 在构造时收集、command 插件在 register 时读取。
+//!
+//! Skills 的环境变量直接从磁盘扫描（`~/.tiangong/skills/<id>/`），
+//! 不再经过 `AgentConfig.skills`——skills 已从 AgentConfig 脱离，由 skill plugin 自治。
+//! 这里扫描 enabled（skill.toml.available=true）的 skill 目录，读其 `.env.local`。
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::agent_config::AgentConfig;
+use crate::app_state::default_skills_storage_dir_path;
+use crate::skill::{read_skill_manifest, scan_skill_registry};
 
-/// 从 agent_config 的 MCP servers 和 skills 收集环境变量。
+/// 从 agent_config 的 MCP servers 和磁盘 skills 收集环境变量。
+///
+/// MCP env 来自 `agent_config.mcp.servers`；skill env 来自磁盘扫描
+/// `~/.tiangong/skills/` 下 `available=true` 的 skill 目录的 `.env.local`。
 pub fn collect_runtime_env(agent_config: &AgentConfig) -> BTreeMap<String, String> {
     let mut runtime_env = BTreeMap::new();
 
@@ -27,26 +36,20 @@ pub fn collect_runtime_env(agent_config: &AgentConfig) -> BTreeMap<String, Strin
         }
     }
 
-    if agent_config.skills.enabled {
-        for skill in &agent_config.skills.installed {
-            if !skill.enabled {
-                continue;
-            }
-            let source = skill.source.value.trim();
-            if source.is_empty() {
-                continue;
-            }
-            let source_path = Path::new(source);
-            let skill_dir = if source_path.is_dir() {
-                source_path
-            } else if let Some(parent) = source_path.parent() {
-                parent
-            } else {
-                continue;
-            };
-            for (key, value) in load_local_env(skill_dir) {
-                runtime_env.insert(key, value);
-            }
+    // Skill env：直接扫描磁盘（skills 已从 AgentConfig 脱离，由 skill plugin 自治）。
+    // 过渡方案：后续可改为读 skill plugin 的 registry，避免重复扫盘。
+    let skills_root = default_skills_storage_dir_path();
+    let view = scan_skill_registry(&skills_root);
+    for entry in view.entries.values() {
+        let manifest_path = entry.dir.join("skill.toml");
+        let Ok(manifest) = read_skill_manifest(&manifest_path) else {
+            continue;
+        };
+        if !manifest.available {
+            continue;
+        }
+        for (key, value) in load_local_env(&entry.dir) {
+            runtime_env.insert(key, value);
         }
     }
 

@@ -13,7 +13,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent_config::{McpConfig, McpServerConfig, SkillsConfig};
+use crate::agent_config::{McpConfig, McpServerConfig};
 use crate::mcp::McpToolMeta;
 use crate::model::ProviderProtocol;
 use crate::models_config::ModelsConfig;
@@ -174,8 +174,6 @@ pub struct CoreConfig {
     pub mcp: McpConfig,
     /// MCP 能力数据（预填充，Core 不发起网络请求）
     pub mcp_capabilities: Vec<(String, Vec<McpToolMeta>)>,
-    /// Skill 配置（已安装的 skill 列表）
-    pub skills: SkillsConfig,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -194,7 +192,6 @@ impl Default for CoreConfig {
             llm: LlmConfig::default(),
             mcp: McpConfig::default(),
             mcp_capabilities: Vec::new(),
-            skills: SkillsConfig::default(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
@@ -246,12 +243,6 @@ impl CoreConfigBuilder {
     /// 设置完整的 McpConfig
     pub fn with_mcp_config(mut self, mcp: McpConfig) -> Self {
         self.config.mcp = mcp;
-        self
-    }
-
-    /// 设置 Skills 配置
-    pub fn with_skills_config(mut self, skills: SkillsConfig) -> Self {
-        self.config.skills = skills;
         self
     }
 

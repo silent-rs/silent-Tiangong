@@ -6,6 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { workspace = true }
+tiangong-plugin-skill = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-memory = { workspace = true }
 tiangong-cli = { workspace = true }

@@ -14,5 +14,5 @@ pub use package::{
 pub use registry::{
     DEFAULT_SKILL_REGISTRY_CACHE_TTL, DEFAULT_SKILL_REGISTRY_LOADED_CAPACITY, LoadedSkill,
     SkillManifest, SkillRegistry, SkillRegistryEntry, SkillRegistryIssue, SkillRegistryIssueKind,
-    SkillRegistryView, read_skill_manifest, write_skill_available,
+    SkillRegistryView, read_skill_manifest, scan_skill_registry, write_skill_available,
 };

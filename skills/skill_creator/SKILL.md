@@ -6,6 +6,10 @@
 
 创建skill、新建技能、导入skill、创建一个skill、skill_creator
 
+## Skill 存储目录
+
+所有 Skill 安装到 `~/.tiangong/skills/<skill-id>/`（平铺布局，目录名必须等于 skill.toml 的 id）。
+
 ## 工作流
 
 ### 一、需求分析
@@ -19,28 +23,31 @@
 
 ### 二、创建 Skill 文件
 
-工作目录：`~/.tiangong/skills/workspace/{skill-id}/`
+在 `~/.tiangong/skills/<skill-id>/` 下用 `write_file` 等文件工具创建以下文件。
 
 #### 必需文件
 
 **1. skill.toml** - 元数据声明
 ```toml
-id = "my-skill"                    # 唯一 ID（kebab-case）
+id = "my-skill"                    # 唯一 ID（kebab-case，必须与目录名一致）
 name = "技能显示名称"               # 中文名称
-version = "0.1.0"                   # 版本号（跟随天工版本）
+version = "0.1.0"                   # 版本号
 entry = "SKILL.md"                  # 入口文件
+available = true                    # 是否启用
 
 [source]
 type = "local"
+value = ""
 
 [requires]
-env = ["API_KEY"]                   # 所需环境变量（可选）
+mcp = []
+env = []
 
 [permissions]
-# fs_read = true                   # 文件读取权限
-# fs_write = true                  # 文件写入权限
-# cmd_exec = true                  # 命令执行权限
-# net = true                       # 网络访问权限
+fs_read = []
+fs_write = []
+cmd_exec = []
+net = []
 ```
 
 **2. SKILL.md** - 技能使用说明（给 Agent 看的指令文档）
@@ -71,45 +78,29 @@ JSON 格式：`{"ok": true, "result": "..."}`
 关键词1、关键词2
 ```
 
-**3. 执行脚本** - Python/Shell 脚本
+> `{skill_dir}` 占位符在运行时会被替换为 skill 目录的绝对路径。
+
+**3. 执行脚本** - Python/Shell 脚本（按需）
 - Python 脚本使用 `argparse` 解析参数
 - 输出 JSON 格式结果到 stdout
 - 错误信息输出到 stderr
 
-### 三、安装 Skill
+### 三、注册 MCP 服务器（如需）
 
-使用内置工具 `install_skill` 安装：
-- `path`: Skill 目录路径（如 `~/.tiangong/skills/workspace/my-skill`）
-- `enabled`: true
-
-### 四、注册 MCP 服务器（如需）
-
-如果 Skill 依赖 MCP 服务器，使用内置工具 `register_mcp_server`：
+如果 Skill 依赖 MCP 服务器，使用 `register_mcp_server` 工具：
 - `name`: 服务器名称
 - `command`: 启动命令完整路径（如 `/usr/local/bin/uvx`）
 - `args`: 命令参数（如 `["mcp-server-name"]`）
 - `env`: 环境变量（如 `{"API_KEY": "xxx"}`）
 - `transport`: 传输方式（`stdio` 或 `http`）
 
-### 五、验证
+### 四、验证与提示
 
-安装完成后告知用户：
+创建完成后告知用户：
 - Skill 名称和 ID
 - 触发词
 - 环境变量配置提示（如有）
-
-## 管理工具参考
-
-以下内置工具可直接调用：
-
-| 工具 | 参数 | 说明 |
-|------|------|------|
-| `register_mcp_server` | name, command, args?, env?, transport?, endpoint? | 注册 MCP 服务器 |
-| `remove_mcp_server` | name | 移除 MCP 服务器 |
-| `set_mcp_enabled` | name, enabled | 启停 MCP 服务器 |
-| `install_skill` | path, enabled? | 安装本地 Skill |
-| `remove_skill` | id | 卸载 Skill |
-| `set_skill_enabled` | id, enabled | 启停 Skill |
+- 提示用户：刷新 Skill 列表或开启新对话后生效
 
 ## 外部 Skill 适配指引
 
