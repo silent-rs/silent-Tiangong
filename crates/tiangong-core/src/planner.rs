@@ -58,8 +58,10 @@ pub struct TaskPlan {
     pub summary: String,
     pub plans: Vec<PlanItem>,
     pub risks: Vec<String>,
-    pub skill_hints: Vec<String>,
-    pub mcp_hints: Vec<String>,
+    /// 能力提示（原 skill_hints + mcp_hints 合并，避免 core 持有具体领域概念）。
+    /// 旧 serde 数据通过 #[serde(default)] 兼容（skill_hints/mcp_hints 字段忽略）。
+    #[serde(default)]
+    pub capability_hints: Vec<String>,
     #[serde(default)]
     pub revisions: Vec<PlanRevision>,
 }

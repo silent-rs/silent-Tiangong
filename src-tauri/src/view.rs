@@ -145,8 +145,7 @@ pub struct TaskPlan {
     pub summary: String,
     pub items: Vec<PlanItem>,
     pub risks: Vec<String>,
-    pub skill_hints: Vec<String>,
-    pub mcp_hints: Vec<String>,
+    pub capability_hints: Vec<String>,
 }
 
 impl TaskPlan {
@@ -161,8 +160,7 @@ impl TaskPlan {
                 .map(PlanItem::from_session_step)
                 .collect(),
             risks: vec![],
-            skill_hints: vec![],
-            mcp_hints: vec![],
+            capability_hints: vec![],
         }
     }
 }
