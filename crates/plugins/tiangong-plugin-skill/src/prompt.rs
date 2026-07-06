@@ -16,7 +16,8 @@ fn skill_creation_guide(root: &std::path::Path) -> String {
         r#"Skill 创建规范（当用户要求创建/安装/编写 Skill 时遵循）：
 - Skill 存储目录：{root}
 - 创建步骤：
-  1. 在存储目录下创建子目录 `<skill-id>/`（id 用小写字母、数字、中横线，与 skill.toml 的 id 一致）
+  1. 在存储目录下创建子目录 `<skill-id>/`（id 用小写字母、数字、中横线）。
+     **目录名必须与 skill.toml 中 id 完全一致**，否则 registry 会忽略该 Skill。
   2. 写入 `skill.toml`（manifest，最小模板见下）
   3. 写入 `SKILL.md`（使用说明，首行 `# <标题>`）
 - skill.toml 最小模板：

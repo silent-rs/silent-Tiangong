@@ -24,7 +24,7 @@ impl TiangongState {
 
     /// 仅持久化 agent 配置（mcp.json）+ MCP 依赖锁。
     /// 只应由显式修改 agent_config 的操作调用，避免多进程覆盖。
-    pub(in crate::app_state) fn persist_agent_configs_only(&self) -> Result<()> {
+    pub fn persist_agent_configs_only(&self) -> Result<()> {
         self.services
             .repository
             .persist_agent_configs(&self.store.agent.agent_config)?;
@@ -32,7 +32,7 @@ impl TiangongState {
     }
 
     /// 持久化 agent 配置但跳过 MCP 磁盘合并，用于删除操作。
-    pub(in crate::app_state) fn persist_agent_configs_no_merge_mcp(&self) -> Result<()> {
+    pub fn persist_agent_configs_no_merge_mcp(&self) -> Result<()> {
         self.services
             .repository
             .persist_agent_configs_no_merge_mcp(&self.store.agent.agent_config)?;

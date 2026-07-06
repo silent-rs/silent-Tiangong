@@ -474,15 +474,6 @@ pub(crate) enum SkillSubcommand {
         #[arg(long, default_value_t = false, help = "存在同名文件时是否覆盖")]
         force: bool,
     },
-    #[command(about = "安装 Skill（本地目录）", visible_alias = "add")]
-    Install {
-        #[arg(help = "Skill 本地目录")]
-        path: String,
-        #[arg(long, default_value_t = true, help = "是否启用（true/false）")]
-        enabled: bool,
-        #[arg(long, default_value_t = false, help = "是否启用外部 Skill 转换")]
-        convert: bool,
-    },
     #[command(about = "删除 Skill")]
     Remove {
         #[arg(help = "Skill ID")]

@@ -41,11 +41,6 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
                 result.dir.display()
             );
         }
-        SkillSubcommand::Install { .. } => {
-            println!(
-                "固定路径安装已废弃。请在对话中让 Agent 创建 skill（Agent 会用文件工具在 skills 目录下编写 skill.toml + SKILL.md）。"
-            );
-        }
         SkillSubcommand::Remove { id } => {
             let outcome = skill_plugin.remove_skill(&id)?;
             // 清理孤儿托管 MCP server
@@ -58,6 +53,8 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
                     .servers
                     .retain(|s| !outcome.orphan_mcp_servers.contains(&s.name));
             }
+            // 持久化 mcp 配置变更（删除必须用 no_merge，否则磁盘上刚删的 server 会被加回）
+            state.persist_agent_configs_no_merge_mcp()?;
             println!("{}", outcome.message);
         }
         SkillSubcommand::Enable { id } => {

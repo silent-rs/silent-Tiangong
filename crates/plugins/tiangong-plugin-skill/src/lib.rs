@@ -4,8 +4,8 @@
 //! - **LLM 工具**：`get_skill_detail`（查看 skill 说明）
 //! - **System Prompt 段落**：已安装 Skills 摘要 + Skill 创建规范（引导 Agent 用文件工具
 //!   在 skills 目录下编写 `skill.toml` + `SKILL.md`）
-//! - **App 管理 API**：[`SkillPlugin`] 直接提供 remove / set_enabled / refresh / gc /
-//!   doctor / list / detail 方法，供 App/Tauri/CLI 调用（入口层持有插件实例）
+//! - **App 管理 API**：[`SkillPlugin`] 直接提供 remove / set_enabled / refresh /
+//!   list / detail 方法，供 App/Tauri/CLI 调用（入口层持有插件实例）
 //!
 //! skills 已从 [`tiangong_core::agent_config::AgentConfig`] 彻底脱离，由本插件自托管
 //! [`tiangong_core::skill::SkillRegistry`]。`collect_runtime_env` 直接扫描

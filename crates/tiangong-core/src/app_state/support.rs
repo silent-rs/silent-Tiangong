@@ -35,11 +35,14 @@ pub(in crate::app_state) struct LoadedState {
 
 pub use tiangong_types::StreamEvent;
 
+/// mcp-lock.json 中单个 MCP 依赖包的引用计数记录。
+///
+/// 语义：聚合所有已安装 skill 的 `requires.mcp` 声明，按 `package[@version]` 分组，
+/// 记录被多少 skill 引用。不再记录安装路径与时间（旧字段的兼容读取见 serde default）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(in crate::app_state) struct McpDependencyLockRecord {
-    pub(in crate::app_state) path: String,
+    /// 引用该依赖的 skill 数量。
     pub(in crate::app_state) ref_count: usize,
-    pub(in crate::app_state) installed_at: String,
 }
 
 #[derive(Debug)]

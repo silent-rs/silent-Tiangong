@@ -39,7 +39,9 @@
 
 ## MCP 依赖
 
-- `mcp-lock.json` 保留，用于 MCP 依赖引用计数。
+- `mcp-lock.json` 保留，作为 MCP 依赖的聚合计数快照：按 `package[@version]` 聚合
+  所有已安装 skill 的 `requires.mcp` 声明，记录被多少 skill 引用（`ref_count`）。
+  不再记录安装路径与安装时间（旧文件的 `path`/`installed_at` 字段在读取时被忽略）。
 - `skills-lock.json` 不再作为注册状态读取或写入，仅作为旧布局迁移输入被备份。
 - Skill 声明 `requires.mcp` 后，托管 MCP server 名称固定为 `skill::<id>::<mcp_id>`。
 - 激活 Skill 时如缺少托管 MCP，会返回 `SkillActivationError::MissingMcp`，需要用户确认后补充注册对应 MCP。
@@ -48,13 +50,10 @@
 
 ```bash
 tiangong skill refresh
-tiangong skill gc
-tiangong skill gc --apply
-tiangong skill doctor
 ```
 
 - `refresh`：强制重扫 `skills/<id>/`。
-- `gc`：默认只报告孤儿托管 MCP server 和孤儿 `mcp-lock` 条目。
-- `gc` 也会列出超过 30 天的 `.legacy` 备份。
-- `gc --apply`：删除报告中的孤儿托管 MCP server，重写 `mcp-lock.json`，并清理过期 `.legacy` 备份。
-- `doctor`：诊断缺失 manifest、id 不一致、entry 缺失、托管 MCP 孤儿等问题。
+
+> `gc` / `doctor` 子命令已移除。孤儿托管 MCP 的清理由 `skill remove` 自动完成
+> （删除 skill 时，不再被任何 skill 引用的托管 MCP server 会从 `agent_config.mcp.servers`
+> 移除并持久化）。

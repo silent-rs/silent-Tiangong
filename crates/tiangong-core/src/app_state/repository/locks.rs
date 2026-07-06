@@ -31,13 +31,7 @@ impl AppRepository {
                 } else {
                     format!("{package}@{version}")
                 };
-                let record = mcp_lock
-                    .entry(key)
-                    .or_insert_with(|| McpDependencyLockRecord {
-                        path: String::new(),
-                        ref_count: 0,
-                        installed_at: String::new(),
-                    });
+                let record = mcp_lock.entry(key).or_default();
                 record.ref_count += 1;
             }
         }
