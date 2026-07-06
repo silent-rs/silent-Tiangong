@@ -8,10 +8,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::{
-    AgentConfig, McpConfig, McpServerConfig, McpTransportMode, SkillMcpRequirementConfig,
-    SkillsConfig,
+    AgentConfig, McpConfig, McpServerConfig, McpTransportMode, SkillsConfig,
 };
-use crate::agents::skill_convert_agent::convert_external_skill_with_agent;
 use crate::mcp::{
     McpToolMeta, cached_server_tools, configure_mcp_capability_scheduler, describe_mcp_servers,
     load_mcp_capabilities_cache, refresh_mcp_capabilities_async, summarize_mcp_servers,
@@ -23,9 +21,6 @@ use crate::runtime::{
     LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
 };
 use crate::session::{MessageRole, Session, SessionTaskPlan, now_text};
-use crate::skill::{
-    analyze_external_skill, init_tiangong_skill_scaffold, prepare_skill_source_for_install,
-};
 use crate::tool::{ToolExecutionRecord, ToolResult};
 
 pub mod audit;
@@ -40,15 +35,14 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    converted_stage_cleanup_dir, copy_dir_recursive, default_app_storage_path,
-    default_mcp_capability_cache_path, default_mcp_config_path, default_sessions_dir_path,
-    default_skills_config_path, default_workspace_dir, ensure_dir, normalize_model_list,
-    parse_bool, validate_agent_config,
+    default_app_storage_path, default_mcp_capability_cache_path, default_mcp_config_path,
+    default_sessions_dir_path, default_skills_config_path, default_workspace_dir,
+    normalize_model_list, parse_bool, validate_agent_config,
 };
-use self::services::{AppMcpService, AppSkillService, AppTurnService};
+use self::services::{AppMcpService, AppTurnService};
 pub use self::support::StreamEvent;
 use self::support::{
-    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState, ScopedDirCleanup,
+    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState,
 };
 
 // Public re-exports for Tauri API
@@ -58,7 +52,7 @@ pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };
-pub use self::support::{AppPaths, AppServices, ManagementCommand};
+pub use self::support::{AppPaths, AppServices};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;

@@ -1,7 +1,3 @@
-use std::io::{self, IsTerminal, Write};
-
-use anyhow::Result;
-
 use tiangong_core::agent_config::InstalledSkillConfig;
 use tiangong_core::app_state::TiangongState;
 use tiangong_core::skill::init_tiangong_skill_scaffold;

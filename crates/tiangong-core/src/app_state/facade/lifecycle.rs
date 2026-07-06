@@ -56,7 +56,6 @@ impl TiangongState {
                 },
             },
             services: AppServices {
-                skill_service: AppSkillService,
                 mcp_service: AppMcpService,
                 repository: AppRepository::new(AppPaths {
                     app_storage_path,

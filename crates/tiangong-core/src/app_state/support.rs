@@ -33,37 +33,6 @@ pub(in crate::app_state) struct LoadedState {
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
 }
 
-/// 管理命令：由 RuntimeEngine 中的内置工具触发，主线程负责执行
-#[derive(Debug, Clone)]
-pub enum ManagementCommand {
-    RegisterMcpServer {
-        name: String,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-        transport: Option<String>,
-        endpoint: Option<String>,
-    },
-    RemoveMcpServer {
-        name: String,
-    },
-    SetMcpServerEnabled {
-        name: String,
-        enabled: bool,
-    },
-    InstallSkill {
-        path: String,
-        enabled: bool,
-    },
-    RemoveSkill {
-        id: String,
-    },
-    SetSkillEnabled {
-        id: String,
-        enabled: bool,
-    },
-}
-
 pub use tiangong_types::StreamEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -107,7 +76,6 @@ pub struct AppPaths {
 
 #[derive(Debug)]
 pub struct AppServices {
-    pub skill_service: AppSkillService,
     pub mcp_service: AppMcpService,
     pub repository: AppRepository,
     pub runtime: RuntimeEngine,
