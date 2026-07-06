@@ -247,8 +247,9 @@ fn check_mcp(report: &mut DoctorReport) {
 }
 
 fn check_skills(report: &mut DoctorReport) {
-    let state = tiangong_core::app_state::TiangongState::load_or_default();
-    let skills = state.installed_skills();
+    // Skill 数据由 skill plugin 自管，doctor 构造临时实例读取。
+    let skill_plugin = tiangong_plugin_skill::SkillPlugin::new();
+    let skills = skill_plugin.installed_skills();
     if skills.is_empty() {
         report.warn("Skill 目录", "0 个 Skill");
     } else {

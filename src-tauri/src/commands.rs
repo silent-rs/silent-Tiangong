@@ -2269,49 +2269,46 @@ pub async fn stop_audio() -> Result<(), String> {
 pub async fn get_mention_candidates(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<MentionCandidate>, String> {
-    // MCP servers + active tools 由 mcp plugin 自管，先读取快照。
+    // Skill + MCP servers + active tools 均由各自 plugin 自管，先读取快照。
+    let skills = state.skill_plugin.installed_skills();
     let mcp_servers = state.mcp_plugin.mcp_servers();
     let active_tools = state.mcp_plugin.cached_active_tools();
-    state
-        .with_state_read(|core_state| {
-            let mut candidates = Vec::new();
+    let mut candidates = Vec::new();
 
-            // 已启用的 Skill
-            for skill in core_state.installed_skills() {
-                if skill.enabled {
-                    candidates.push(MentionCandidate {
-                        value: format!("@skill:{}", skill.id),
-                        label: skill.name.clone(),
-                        kind: "skill".to_string(),
-                        hint: if skill.description.is_empty() {
-                            format!("v{}", skill.version)
-                        } else {
-                            skill.description.clone()
-                        },
-                    });
-                }
-            }
+    // 已启用的 Skill（数据来自 skill plugin）
+    for skill in &skills {
+        if skill.enabled {
+            candidates.push(MentionCandidate {
+                value: format!("@skill:{}", skill.id),
+                label: skill.name.clone(),
+                kind: "skill".to_string(),
+                hint: if skill.description.is_empty() {
+                    format!("v{}", skill.version)
+                } else {
+                    skill.description.clone()
+                },
+            });
+        }
+    }
 
-            // 已启用的 MCP 服务器（数据来自 mcp plugin）
-            for server in &mcp_servers {
-                if server.enabled {
-                    let tool_count = active_tools
-                        .iter()
-                        .find(|(name, _)| name == &server.name)
-                        .map(|(_, tools)| tools.len())
-                        .unwrap_or(0);
-                    candidates.push(MentionCandidate {
-                        value: format!("@mcp:{}", server.name),
-                        label: server.name.clone(),
-                        kind: "mcp".to_string(),
-                        hint: format!("{} 工具", tool_count),
-                    });
-                }
-            }
+    // 已启用的 MCP 服务器（数据来自 mcp plugin）
+    for server in &mcp_servers {
+        if server.enabled {
+            let tool_count = active_tools
+                .iter()
+                .find(|(name, _)| name == &server.name)
+                .map(|(_, tools)| tools.len())
+                .unwrap_or(0);
+            candidates.push(MentionCandidate {
+                value: format!("@mcp:{}", server.name),
+                label: server.name.clone(),
+                kind: "mcp".to_string(),
+                hint: format!("{} 工具", tool_count),
+            });
+        }
+    }
 
-            Ok(candidates)
-        })
-        .await
+    Ok(candidates)
 }
 
 /// 获取运行状态快照

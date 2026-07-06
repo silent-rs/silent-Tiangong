@@ -100,10 +100,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
         let input = {
-            let state_ref = &state;
             reader.read_line(&prompt, |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, state_ref, &mcp_plugin)
+                    completion::complete(trigger, &prefix, &skill_plugin, &mcp_plugin)
                 } else {
                     Vec::new()
                 }
