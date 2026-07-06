@@ -97,7 +97,7 @@ fn execute_get_skill_detail(
         .unwrap_or("");
 
     match registry.get(skill_id) {
-        Ok(loaded) => {
+        Ok(loaded) if loaded.manifest.available => {
             let skill_dir = registry.root().join(skill_id);
             let resolved = loaded
                 .readme
@@ -111,6 +111,17 @@ fn execute_get_skill_detail(
                 execution: None,
             }
         }
+        Ok(loaded) => ToolResult {
+            ok: false,
+            summary: format!("Skill {skill_id} 已禁用"),
+            stdout: String::new(),
+            stderr: format!(
+                "skill {skill_id}（{}）当前 available=false，启用后可查看详情",
+                loaded.manifest.name
+            ),
+            exit_code: 1,
+            execution: None,
+        },
         Err(_) => {
             let view = scan_skill_registry(registry.root());
             let available: Vec<&str> = view

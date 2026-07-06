@@ -1,8 +1,9 @@
 //! Skill 管理插件。
 //!
 //! 承载 Skill 相关的全部能力：
-//! - **LLM 工具**：`get_skill_detail`（查看 skill 说明）、`install_skill`（agent 编写并安装 skill）
-//! - **System Prompt 段落**：已安装 Skills 摘要（经 [`PromptSectionProvider`]）
+//! - **LLM 工具**：`get_skill_detail`（查看 skill 说明）
+//! - **System Prompt 段落**：已安装 Skills 摘要 + Skill 创建规范（引导 Agent 用文件工具
+//!   在 skills 目录下编写 `skill.toml` + `SKILL.md`）
 //! - **App 管理 API**：[`SkillPlugin`] 直接提供 remove / set_enabled / refresh / gc /
 //!   doctor / list / detail 方法，供 App/Tauri/CLI 调用（入口层持有插件实例）
 //!
@@ -10,8 +11,8 @@
 //! [`tiangong_core::skill::SkillRegistry`]。`collect_runtime_env` 直接扫描
 //! `~/.tiangong/skills/` 读 skill env，不经 agent_config 流转。
 //!
-//! 安装统一经 agent 的 `install_skill` 工具（内容式：agent 编写 SKILL.md 正文 → 落地），
-//! 不再支持固定路径安装。
+//! Skill 创建/安装不提供专用工具；由 prompt 引导 Agent 使用文件工具在 skills 目录下
+//! 创建 `skill.toml` 和 `SKILL.md`。
 
 pub mod handler;
 pub mod management;

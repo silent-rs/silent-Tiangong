@@ -43,7 +43,7 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
         }
         SkillSubcommand::Install { .. } => {
             println!(
-                "固定路径安装已废弃。请在对话中让 Agent 调用 install_skill 工具自主创建 skill。"
+                "固定路径安装已废弃。请在对话中让 Agent 创建 skill（Agent 会用文件工具在 skills 目录下编写 skill.toml + SKILL.md）。"
             );
         }
         SkillSubcommand::Remove { id } => {
@@ -70,14 +70,6 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
         }
         SkillSubcommand::Refresh => {
             let msg = skill_plugin.refresh_skills()?;
-            println!("{msg}");
-        }
-        SkillSubcommand::Gc { apply } => {
-            let msg = skill_plugin.gc_skills(apply)?;
-            println!("{msg}");
-        }
-        SkillSubcommand::Doctor => {
-            let msg = skill_plugin.doctor_skills()?;
             println!("{msg}");
         }
         SkillSubcommand::Validate => {

@@ -32,6 +32,7 @@ fn skill_creation_guide(root: &std::path::Path) -> String {
 
   [requires]
   mcp = []
+  env = []
 
   [permissions]
   fs_read = []

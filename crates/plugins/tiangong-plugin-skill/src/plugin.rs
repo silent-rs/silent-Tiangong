@@ -4,12 +4,11 @@
 //! 不再依赖 `AgentConfig.skills`——skills 已从 AgentConfig 脱离，由本插件完全自治。
 //!
 //! `tool_specs()` / `prompt_sections()` / `handle_get_skill_detail` 均从自有的
-//! `skill_registry` 读取，`register()` 阶段刷新缓存并缓存 mcp servers 快照。
+//! `skill_registry` 读取，`register()` 阶段刷新缓存。
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use tiangong_core::agent_config::McpServerConfig;
 use tiangong_core::app_state::default_skills_storage_dir_path;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
@@ -19,11 +18,9 @@ use tiangong_core::skill::SkillRegistry;
 /// Skill 插件。
 ///
 /// 持有独立的 [`SkillRegistry`]，提供：
-/// - `get_skill_detail` / `install_skill` LLM 工具（经 ToolSpecProvider/ToolOverrideHandler）
+/// - `get_skill_detail` LLM 工具（经 ToolSpecProvider/ToolOverrideHandler）
 /// - 已安装 Skills 的 system prompt 段落（经 PromptSectionProvider）
-/// - App 管理 API（remove / set_enabled / refresh / gc / doctor / list / detail）
-///
-/// `register` 阶段缓存 mcp servers 快照，供 gc 检测孤儿托管 MCP。
+/// - App 管理 API（remove / set_enabled / refresh / list / detail）
 pub struct SkillPlugin {
     /// 自托管的 Skill 注册表（扫描 `~/.tiangong/skills/`）。
     skill_registry: Arc<SkillRegistry>,
@@ -31,8 +28,6 @@ pub struct SkillPlugin {
     workspace: RwLock<Option<PathBuf>>,
     /// 状态反馈通道（保持与其他插件一致的注入接口）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
-    /// MCP servers 快照（register 时从 engine 缓存，供 gc 检测孤儿）。
-    mcp_servers: RwLock<Vec<McpServerConfig>>,
 }
 
 impl SkillPlugin {
@@ -47,21 +42,12 @@ impl SkillPlugin {
             skill_registry: Arc::new(SkillRegistry::new(root)),
             workspace: RwLock::new(None),
             feedback_tx: RwLock::new(None),
-            mcp_servers: RwLock::new(Vec::new()),
         }
     }
 
     /// 取 SkillRegistry 的 Arc 引用（供 handler / management 使用）。
     pub(crate) fn registry(&self) -> Arc<SkillRegistry> {
         Arc::clone(&self.skill_registry)
-    }
-
-    /// 取 mcp servers 快照（供 gc 检测孤儿）。
-    pub(crate) fn mcp_servers(&self) -> Vec<McpServerConfig> {
-        self.mcp_servers
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
     }
 }
 
@@ -88,12 +74,8 @@ impl Plugin for SkillPlugin {
         }
     }
 
-    fn register(&self, engine: &RuntimeEngine) {
+    fn register(&self, _engine: &RuntimeEngine) {
         // 刷新 registry 缓存，确保读到最新磁盘状态。
         self.skill_registry.refresh();
-        // 缓存 mcp servers 快照，供 gc 检测孤儿托管 MCP。
-        if let Ok(mut guard) = self.mcp_servers.write() {
-            *guard = engine.agent_config().mcp.servers.clone();
-        }
     }
 }

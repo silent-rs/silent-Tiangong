@@ -508,7 +508,6 @@ fn run_gui() {
             tiangong_app::commands::set_mcp_server_enabled,
             tiangong_app::commands::get_skills,
             tiangong_app::commands::refresh_skills,
-            tiangong_app::commands::gc_skills,
             tiangong_app::commands::get_skill_detail,
             tiangong_app::commands::get_skill_env,
             tiangong_app::commands::set_skill_env,

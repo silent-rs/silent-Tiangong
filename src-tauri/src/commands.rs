@@ -2648,17 +2648,6 @@ pub async fn refresh_skills(state: State<'_, TiangongApp>) -> Result<String, Str
     Ok(message)
 }
 
-/// 检测或清理孤儿 Skill 托管 MCP 配置
-#[tauri::command]
-pub async fn gc_skills(apply: bool, state: State<'_, TiangongApp>) -> Result<String, String> {
-    let message = state
-        .skill_plugin
-        .gc_skills(apply)
-        .map_err(|e| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(message)
-}
-
 /// 获取 Skill 完整详情（按需读取 SKILL.md）
 #[tauri::command]
 pub async fn get_skill_detail(

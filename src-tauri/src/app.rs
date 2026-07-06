@@ -341,7 +341,7 @@ impl TiangongApp {
         if tiangong_plugin_analyze_attachment::should_register(llm) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
         }
-        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具/get_skill_detail/install_skill，
+        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
         // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
         plugins.push(self.skill_plugin.clone());
 
