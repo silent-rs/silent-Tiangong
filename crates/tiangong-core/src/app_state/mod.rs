@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,19 +28,15 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    default_app_storage_path, default_mcp_capability_cache_path, default_mcp_config_path,
-    default_sessions_dir_path, default_skills_config_path, default_workspace_dir,
+    default_app_storage_path, default_sessions_dir_path, default_workspace_dir,
     normalize_model_list, validate_agent_config,
 };
 use self::services::AppTurnService;
 pub use self::support::StreamEvent;
-use self::support::{
-    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState,
-};
+use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
-pub use self::repository::default_mcp_lock_path;
 pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,

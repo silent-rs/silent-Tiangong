@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::{SkillMcpRequirementConfig, SkillPermissionConfig, SkillSourceConfig};
+use crate::skill_config::{SkillMcpRequirementConfig, SkillPermissionConfig, SkillSourceConfig};
 
 pub const DEFAULT_SKILL_REGISTRY_CACHE_TTL: Duration = Duration::from_secs(2);
 pub const DEFAULT_SKILL_REGISTRY_LOADED_CAPACITY: usize = 32;

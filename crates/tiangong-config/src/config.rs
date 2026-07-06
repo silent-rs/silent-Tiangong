@@ -3,10 +3,10 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tiangong_core::agent_config::SkillsConfig;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_core::permission::TrustMode;
+use tiangong_plugin_skill::SkillsConfig;
 
 /// Server 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

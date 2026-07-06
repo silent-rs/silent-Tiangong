@@ -397,9 +397,8 @@ async fn worker_loop_async(
             };
             let mut plugin_specs: Vec<ToolSpec> = Vec::new();
             // 追踪已注册的工具名，用于跨插件工具名冲突消解：
-            // 当 MCP server 暴露与内置插件同名的工具（如 read_file）时，保留先注册的
-            // 内置插件工具，跳过后注册的同名 MCP 工具（对齐原 execution_function_tools
-            // 的 reserved_names 语义）。MCP plugin 应在其他业务插件之后注册。
+            // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
+            // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
             let mut seen_tool_names: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             for plugin in &plugins {

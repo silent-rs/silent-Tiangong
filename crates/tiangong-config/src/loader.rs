@@ -11,9 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tiangong_core::agent_config::SkillsConfig;
 use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
+use tiangong_plugin_skill::SkillsConfig;
 
 use crate::config::{ConnectorConfig, TiangongConfig};
 

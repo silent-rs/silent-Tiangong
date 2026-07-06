@@ -5,7 +5,7 @@
 //! 2. **Skill 创建规范**：当用户要求创建/安装 skill 时，引导 Agent 用通用文件工具
 //!    在 skills 目录下编写 `skill.toml` + `SKILL.md`（不使用专用安装工具）。
 
-use tiangong_core::skill::read_skill_manifest;
+use crate::skill_registry::read_skill_manifest;
 use tiangong_core::tool_override::PromptSectionProvider;
 
 use crate::plugin::SkillPlugin;
@@ -77,7 +77,7 @@ impl PromptSectionProvider for SkillPlugin {
         }
         if !summaries.is_empty() {
             sections.push(format!(
-                "已安装的 Skills（使用前先调用 get_skill_detail 获取完整说明）：\n{}",
+                "已安装的 Skills（如果 Skill 能处理用户请求，优先调用 get_skill_detail 获取完整说明，然后按文档使用 run_command/run_shell 执行对应脚本）：\n{}",
                 summaries.join("\n")
             ));
         }

@@ -9,10 +9,10 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::skill_registry::{read_skill_manifest, scan_skill_registry};
 use serde_json::json;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::session::Session;
-use tiangong_core::skill::{read_skill_manifest, scan_skill_registry};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
 
@@ -88,7 +88,7 @@ impl ToolOverrideHandler for SkillPlugin {
 /// 未找到时列出可用的 enabled skill id。
 fn execute_get_skill_detail(
     call: &ToolCall,
-    registry: &tiangong_core::skill::SkillRegistry,
+    registry: &crate::skill_registry::SkillRegistry,
 ) -> ToolResult {
     let skill_id = call
         .arguments

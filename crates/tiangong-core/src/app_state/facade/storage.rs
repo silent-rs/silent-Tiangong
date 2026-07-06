@@ -22,19 +22,6 @@ impl TiangongState {
         self.services.repository.persist_app_only(&self.store)
     }
 
-    /// 同步 MCP 依赖锁（mcp-lock.json）。
-    ///
-    /// mcp.json 的持久化已随 MCP 管理插件化迁出（由 mcp plugin 自管），
-    /// 此处仅保留 skill↔MCP 依赖锁的同步（扫描 skills 的 requires.mcp 声明）。
-    pub fn persist_agent_configs_only(&self) -> Result<()> {
-        self.services.repository.sync_mcp_dependency_lock()
-    }
-
-    /// 同步 MCP 依赖锁（保留方法名兼容旧调用点）。
-    pub fn persist_agent_configs_no_merge_mcp(&self) -> Result<()> {
-        self.services.repository.sync_mcp_dependency_lock()
-    }
-
     pub(in crate::app_state) fn persist_to_disk(&mut self) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services.repository.persist_to_disk(&self.store)
@@ -42,10 +29,6 @@ impl TiangongState {
 
     pub(in crate::app_state) fn remove_session_file(&self, session_id: &str) -> Result<()> {
         self.services.repository.remove_session_file(session_id)
-    }
-
-    pub(in crate::app_state) fn sync_mcp_dependency_lock(&self) -> Result<()> {
-        self.services.repository.sync_mcp_dependency_lock()
     }
 
     pub(in crate::app_state) fn load_from_disk(&self) -> Result<Option<LoadedState>> {

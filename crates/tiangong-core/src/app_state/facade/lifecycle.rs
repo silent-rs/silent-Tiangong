@@ -5,9 +5,6 @@ use super::super::*;
 impl TiangongState {
     pub fn load_or_default() -> Self {
         let app_storage_path = default_app_storage_path();
-        let skills_config_path = default_skills_config_path();
-        let mcp_config_path = default_mcp_config_path();
-        let mcp_capability_cache_path = default_mcp_capability_cache_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_agent_config = AgentConfig::default();
 
@@ -58,16 +55,10 @@ impl TiangongState {
             services: AppServices {
                 repository: AppRepository::new(AppPaths {
                     app_storage_path,
-                    skills_config_path,
-                    mcp_config_path,
-                    mcp_capability_cache_path,
                     sessions_dir_path,
                 }),
                 runtime,
                 turn_service: AppTurnService,
-                skill_registry: std::sync::Arc::new(crate::skill::SkillRegistry::new(
-                    default_skills_storage_dir_path(),
-                )),
             },
         };
 
@@ -78,18 +69,12 @@ impl TiangongState {
         } else if let Ok(Some(legacy_loaded)) = state.load_from_legacy_disk() {
             state.apply_loaded_state(legacy_loaded);
             let _ = state.persist_to_disk();
-            let _ = state.persist_agent_configs_only();
+            // mcp-lock 同步已迁至 tiangong-plugin-skill（入口层在 skill 管理时调用）。
         }
 
-        if loaded_from_disk
-            && (!state
-                .services
-                .repository
-                .paths()
-                .skills_config_path
-                .exists()
-                || !state.services.repository.paths().mcp_config_path.exists())
-        {
+        if loaded_from_disk && !state.services.repository.paths().app_storage_path.exists() {
+            // 首次安装（app.json 不存在）：持久化初始 app 状态。
+            // skill/mcp 配置已由各自 plugin 自管，core 不再判断其文件是否存在。
             let _ = state.persist_app_only();
         }
 
@@ -158,10 +143,9 @@ impl TiangongState {
         state.store.runtime.run.updated_at = now_text();
         // EventLoop 状态恢复已移除（TiangongCore 统一管理执行状态）
 
-        // skills / MCP 均已脱离 agent_config（由各自 plugin 自治）：
-        // - skill 依赖锁（mcp-lock.json）同步仍保留（跨 skill↔MCP 的所有权记录）
-        // - MCP capability 缓存加载 + 后台调度器由 mcp plugin 在 register 时自管
-        let _ = state.sync_mcp_dependency_lock();
+        // skills / MCP 均已脱离 core（由各自 plugin 自治）：
+        // - skill 依赖锁（mcp-lock.json）由 tiangong-plugin-skill 在管理操作时同步
+        // - MCP capability 缓存 + 后台调度器由 tiangong-plugin-mcp 在 register 时自管
 
         state
     }

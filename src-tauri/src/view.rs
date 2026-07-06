@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tiangong_plugin_mcp::ResolvedMcpTransport;
+use tiangong_plugin_skill::{InstalledSkillConfig, LoadedSkill};
 
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +262,7 @@ pub struct SkillDetailView {
 }
 
 impl SkillDetailView {
-    pub fn from_core(core_skill: &tiangong_core::skill::LoadedSkill) -> Self {
+    pub fn from_core(core_skill: &LoadedSkill) -> Self {
         Self {
             id: core_skill.manifest.id.clone(),
             name: core_skill.manifest.name.clone(),
@@ -279,7 +280,7 @@ impl SkillDetailView {
 }
 
 impl SkillView {
-    pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
+    pub fn from_core(core_skill: &InstalledSkillConfig) -> Self {
         Self {
             id: core_skill.id.clone(),
             name: core_skill.name.clone(),

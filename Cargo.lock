@@ -9648,6 +9648,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-plugin-skill",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -9931,11 +9932,15 @@ name = "tiangong-plugin-skill"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "scru128",
+ "serde",
  "serde_json",
  "tempfile",
  "tiangong-core",
  "tiangong-types",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

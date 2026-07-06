@@ -424,7 +424,7 @@ impl RuntimeEngine {
         // text-to-speech,speech-to-text}），由 tool_overrides 统一分发。
 
         // MCP 工具已迁移至独立插件 crate（tiangong-plugin-mcp），
-        // 由 tool_overrides 统一分发（含 run_command/run_shell 误用 MCP 名的兼容 shim）。
+        // 由 tool_overrides 按 mcp__server__tool 显式工具名统一分发。
 
         // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal / mcp 等）
         if let Some(handler) = self

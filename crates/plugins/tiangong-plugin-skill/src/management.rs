@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use tiangong_core::agent_config::{InstalledSkillConfig, SkillSourceConfig};
 use tiangong_core::app_state::audit;
-use tiangong_core::skill::{read_skill_manifest, LoadedSkill, SkillRegistryView};
 
 use crate::plugin::SkillPlugin;
+use crate::skill_config::{InstalledSkillConfig, SkillSourceConfig};
+use crate::skill_registry::{LoadedSkill, SkillRegistryView, read_skill_manifest};
 
 /// remove_skill 的返回值：操作消息 + 需入口层清理的孤儿 MCP server 名。
 pub struct RemoveOutcome {
@@ -165,7 +165,7 @@ impl SkillPlugin {
 
 /// 从 registry entry 构建 InstalledSkillConfig（轻量，只读 skill.toml，不读 SKILL.md）。
 pub(crate) fn build_installed_skill_config_from_entry(
-    entry: &tiangong_core::skill::SkillRegistryEntry,
+    entry: &crate::skill_registry::SkillRegistryEntry,
 ) -> Option<InstalledSkillConfig> {
     let manifest = read_skill_manifest(&entry.dir.join("skill.toml")).ok()?;
     let managed_mcp_servers = manifest

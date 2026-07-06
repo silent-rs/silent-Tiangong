@@ -14,18 +14,6 @@ pub(in crate::app_state) fn default_workspace_dir() -> String {
         .unwrap_or_default()
 }
 
-pub(in crate::app_state) fn default_skills_config_path() -> PathBuf {
-    default_storage_root().join("skills.json")
-}
-
-pub(in crate::app_state) fn default_mcp_config_path() -> PathBuf {
-    default_storage_root().join("mcp.json")
-}
-
-pub(in crate::app_state) fn default_mcp_capability_cache_path() -> PathBuf {
-    default_storage_root().join("mcp-tools-cache.json")
-}
-
 pub(in crate::app_state) fn default_sessions_dir_path() -> PathBuf {
     default_storage_root().join("sessions")
 }
@@ -36,10 +24,6 @@ pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
 
 pub fn default_skills_storage_dir_path() -> PathBuf {
     default_storage_root().join("skills")
-}
-
-pub fn default_mcp_lock_path() -> PathBuf {
-    default_skills_storage_dir_path().join("mcp-lock.json")
 }
 
 fn user_storage_root() -> PathBuf {

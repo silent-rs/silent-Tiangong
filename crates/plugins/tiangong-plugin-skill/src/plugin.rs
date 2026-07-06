@@ -9,11 +9,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::skill_registry::SkillRegistry;
 use tiangong_core::app_state::default_skills_storage_dir_path;
-use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::runtime::RuntimeEngine;
-use tiangong_core::skill::SkillRegistry;
 
 /// Skill 插件。
 ///
@@ -86,7 +86,7 @@ impl Plugin for SkillPlugin {
         let mut env = std::collections::BTreeMap::new();
         for entry in view.entries.values() {
             let manifest_path = entry.dir.join("skill.toml");
-            let Ok(manifest) = tiangong_core::skill::read_skill_manifest(&manifest_path) else {
+            let Ok(manifest) = crate::skill_registry::read_skill_manifest(&manifest_path) else {
                 continue;
             };
             if !manifest.available {

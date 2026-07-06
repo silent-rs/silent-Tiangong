@@ -16,8 +16,29 @@
 
 pub mod handler;
 pub mod management;
+pub mod mcp_lock;
+pub mod paths;
 pub mod plugin;
 pub mod prompt;
+pub mod skill_analysis;
+pub mod skill_config;
+pub mod skill_context;
+pub mod skill_init;
+pub mod skill_package;
+pub mod skill_registry;
+pub mod skill_util;
+
+// Skill 领域类型 re-export（原 tiangong_core::skill / agent_config 的 Skill 类型）。
+pub use skill_config::{
+    InstalledSkillConfig, SkillMcpRequirementConfig, SkillPermissionConfig, SkillSourceConfig,
+    SkillsConfig,
+};
+pub use skill_init::init_tiangong_skill_scaffold;
+pub use skill_package::{load_skill_from_local_dir, prepare_skill_source_for_install};
+pub use skill_registry::{
+    LoadedSkill, SkillManifest, SkillRegistry, SkillRegistryEntry, SkillRegistryView,
+    read_skill_manifest, scan_skill_registry,
+};
 
 pub use plugin::SkillPlugin;
 
