@@ -1,17 +1,5 @@
 use super::super::*;
 
-pub fn converted_stage_cleanup_dir(install_path: &Path, converted: bool) -> Option<PathBuf> {
-    if !converted {
-        return None;
-    }
-    let imported_root = default_skills_storage_dir_path().join("imported");
-    if install_path.starts_with(&imported_root) {
-        Some(install_path.to_path_buf())
-    } else {
-        None
-    }
-}
-
 pub(in crate::app_state) fn default_storage_root() -> PathBuf {
     user_storage_root()
 }
@@ -97,36 +85,6 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("创建目录失败：{}", path.display()))
 }
 
-pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !src.is_dir() {
-        return Err(anyhow!("复制目录失败，源不是目录：{}", src.display()));
-    }
-    ensure_dir(dst)?;
-    for entry in fs::read_dir(src).with_context(|| format!("读取目录失败：{}", src.display()))?
-    {
-        let entry = entry.with_context(|| format!("读取目录项失败：{}", src.display()))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("读取目录项类型失败：{}", src_path.display()))?;
-        if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-            continue;
-        }
-        if file_type.is_file() {
-            fs::copy(&src_path, &dst_path).with_context(|| {
-                format!(
-                    "复制文件失败：{} -> {}",
-                    src_path.display(),
-                    dst_path.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
 pub(in crate::app_state) fn canonical_scru128_id(raw: &str) -> Option<String> {
     raw.trim()
         .parse::<scru128::Id>()
@@ -177,18 +135,4 @@ pub(in crate::app_state) fn parse_bool(raw: &str) -> Result<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(anyhow!("布尔值无效：{raw}（可用 true/false）")),
     }
-}
-
-pub(in crate::app_state) fn parse_list_value(raw: &str) -> Vec<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "[]" || trimmed == "-" {
-        return Vec::new();
-    }
-
-    trimmed
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
 }

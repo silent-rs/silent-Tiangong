@@ -43,29 +43,6 @@ pub(in crate::app_state) struct McpDependencyLockRecord {
 }
 
 #[derive(Debug)]
-pub struct ScopedDirCleanup {
-    dir: Option<PathBuf>,
-}
-
-impl ScopedDirCleanup {
-    pub fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir }
-    }
-
-    pub(in crate::app_state) fn is_enabled(&self) -> bool {
-        self.dir.is_some()
-    }
-}
-
-impl Drop for ScopedDirCleanup {
-    fn drop(&mut self) {
-        if let Some(dir) = self.dir.take() {
-            let _ = fs::remove_dir_all(dir);
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct AppPaths {
     pub app_storage_path: PathBuf,
     pub skills_config_path: PathBuf,
@@ -81,40 +58,4 @@ pub struct AppServices {
     pub runtime: RuntimeEngine,
     pub turn_service: AppTurnService,
     pub skill_registry: Arc<crate::skill::SkillRegistry>,
-}
-
-#[derive(Debug)]
-pub struct InstallRollbackGuard {
-    dir: Option<PathBuf>,
-}
-
-impl InstallRollbackGuard {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir: Some(dir) }
-    }
-
-    pub(in crate::app_state) fn commit(mut self) {
-        self.dir = None;
-    }
-}
-
-impl Drop for InstallRollbackGuard {
-    fn drop(&mut self) {
-        if let Some(dir) = self.dir.take() {
-            let _ = std::fs::remove_dir_all(&dir);
-            // 清理空父目录
-            let mut current = dir.parent().map(std::path::Path::to_path_buf);
-            while let Some(p) = current {
-                if std::fs::read_dir(&p)
-                    .ok()
-                    .and_then(|mut d| d.next())
-                    .is_some()
-                {
-                    break;
-                }
-                let _ = std::fs::remove_dir(&p);
-                current = p.parent().map(std::path::Path::to_path_buf);
-            }
-        }
-    }
 }

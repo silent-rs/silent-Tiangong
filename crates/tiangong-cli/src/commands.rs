@@ -45,7 +45,7 @@ pub fn handle_command(
             sync_core_config = true;
         }
         "/skill" => {
-            modal::skill::open(state, &skill_plugin)?;
+            modal::skill::open(state, skill_plugin)?;
             sync_core_config = true;
         }
         "/cancel" => {

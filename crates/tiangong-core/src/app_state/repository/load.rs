@@ -138,25 +138,6 @@ impl AppRepository {
         Ok(Some(agent_config))
     }
 
-    fn load_skills_config_from_disk(&self) -> Result<Option<SkillsConfig>> {
-        if !self.paths.skills_config_path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(&self.paths.skills_config_path).with_context(|| {
-            format!(
-                "读取 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-        let config: SkillsConfig = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "解析 skills 配置失败：{}",
-                self.paths.skills_config_path.display()
-            )
-        })?;
-        Ok(Some(config))
-    }
-
     fn load_mcp_config_from_disk(&self) -> Result<Option<McpConfig>> {
         if !self.paths.mcp_config_path.exists() {
             return Ok(None);

@@ -7,9 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::{
-    AgentConfig, McpConfig, McpServerConfig, McpTransportMode, SkillsConfig,
-};
+use crate::agent_config::{AgentConfig, McpConfig, McpServerConfig, McpTransportMode};
 use crate::mcp::{
     McpToolMeta, cached_server_tools, configure_mcp_capability_scheduler, describe_mcp_servers,
     load_mcp_capabilities_cache, refresh_mcp_capabilities_async, summarize_mcp_servers,
