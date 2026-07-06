@@ -13,8 +13,6 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent_config::{McpConfig, McpServerConfig};
-use crate::mcp::McpToolMeta;
 use crate::model::ProviderProtocol;
 use crate::models_config::ModelsConfig;
 use crate::permission::TrustMode;
@@ -170,10 +168,6 @@ impl LlmConfig {
 pub struct CoreConfig {
     /// LLM 模型端点配置
     pub llm: LlmConfig,
-    /// MCP 服务配置（server 列表）
-    pub mcp: McpConfig,
-    /// MCP 能力数据（预填充，Core 不发起网络请求）
-    pub mcp_capabilities: Vec<(String, Vec<McpToolMeta>)>,
     /// 权限信任模式
     pub trust_mode: TrustMode,
     /// 新对话默认权限信任模式
@@ -190,8 +184,6 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             llm: LlmConfig::default(),
-            mcp: McpConfig::default(),
-            mcp_capabilities: Vec::new(),
             trust_mode: TrustMode::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
@@ -231,18 +223,6 @@ impl CoreConfigBuilder {
     /// 设置完整的 LlmConfig
     pub fn with_llm_config(mut self, llm: LlmConfig) -> Self {
         self.config.llm = llm;
-        self
-    }
-
-    /// 添加 MCP server
-    pub fn with_mcp_server(mut self, server: McpServerConfig) -> Self {
-        self.config.mcp.servers.push(server);
-        self
-    }
-
-    /// 设置完整的 McpConfig
-    pub fn with_mcp_config(mut self, mcp: McpConfig) -> Self {
-        self.config.mcp = mcp;
         self
     }
 

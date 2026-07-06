@@ -27,6 +27,11 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let mut state = TiangongState::load_or_default();
     let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> =
         std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new());
+    // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
+    // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
+    // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
+    let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> =
+        std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::new());
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     // CLI 入口是同步函数，用临时 tokio runtime block_on。
@@ -71,6 +76,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
         // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
         plugins.push(skill_plugin.clone());
+        // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
+        // CLI 侧经 mcp_plugin 做管理。
+        plugins.push(mcp_plugin.clone());
         plugins
     });
 
@@ -95,7 +103,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             let state_ref = &state;
             reader.read_line(&prompt, |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, state_ref)
+                    completion::complete(trigger, &prefix, state_ref, &mcp_plugin)
                 } else {
                     Vec::new()
                 }
@@ -122,6 +130,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 trimmed,
                 &mut draft_new_session,
                 &skill_plugin,
+                &mcp_plugin,
             ) {
                 Ok(true) => break,
                 Ok(false) => continue,

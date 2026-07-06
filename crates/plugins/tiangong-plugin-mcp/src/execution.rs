@@ -1,44 +1,44 @@
+//! MCP 工具执行适配器。
+//!
+//! 原属 `tiangong-core::agents::execution_mcp_agent`，MCP 管理插件化后迁入本 crate。
+//! 将动态 MCP 工具缓存转换为静态 [`ToolSpec`]，并将每个 LLM 可见的函数名绑定回
+//! `(server, tool)` 目标。
+
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
-use crate::agent_config::{McpConfig, McpServerConfig};
-use crate::mcp::{LocalMcpClient, McpClient, McpToolMeta, cached_active_tools};
-use crate::model::{ToolCall, ToolSpec};
-use crate::tool::{ToolExecutionRecord, ToolResult};
+use tiangong_core::model::{ToolCall, ToolSpec};
+use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
+
+use crate::capability::cached_active_tools;
+use crate::client::{LocalMcpClient, McpClient};
+use crate::config::{McpConfig, McpServerConfig};
 
 #[derive(Debug, Clone)]
-pub(crate) struct McpFunctionTarget {
-    pub(crate) server_name: String,
-    pub(crate) tool_name: String,
+pub struct McpFunctionTarget {
+    pub server_name: String,
+    pub tool_name: String,
 }
-pub(crate) fn execution_function_tools(
+
+pub fn execution_function_tools(
     mcp_config: &McpConfig,
-    reserved_names: HashSet<String>,
+    _reserved_names: HashSet<String>,
 ) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
     // core 内置工具 spec 已全部迁出至进程内插件（fs/fetch/command/browser/terminal），
     // 此处仅收集 MCP 工具。plugin_injection / plan 控制等 synthetic tool 由 core/mod.rs
     // 工具汇总阶段单独注入。
     //
-    // reserved_names 传入插件已注册的工具名（含 plugin_injection），MCP 同名工具会自动
-    // 改名（加 _2/_3 后缀），避免插件工具与 MCP 工具名冲突。
+    // 命名策略：所有 MCP 工具统一使用 `mcp__{server}__{tool}` 前缀格式，天然避免与
+    // 内置插件工具名（read_file / web_fetch / run_command 等）冲突，且来源可辨识。
+    // 不再使用「无冲突时用原名、冲突时加 _2/_3 后缀」的旧规则——统一前缀更一致。
+    // `_reserved_names` 参数保留以兼容签名，内部不再使用（前缀格式已无冲突风险）。
     let mut tools = Vec::new();
-    let mut reserved_names = reserved_names;
     let mut bindings = HashMap::new();
 
     let active = cached_active_tools();
-    let mut tool_name_count = HashMap::<String, usize>::new();
-    for (_server, server_tools) in &active {
-        for tool in server_tools {
-            let name = tool.name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            *tool_name_count.entry(name.to_string()).or_insert(0) += 1;
-        }
-    }
 
     for (server_name, server_tools) in active {
         for tool in server_tools {
@@ -54,18 +54,8 @@ pub(crate) fn execution_function_tools(
                 continue;
             }
 
-            let mut function_name = resolve_mcp_function_name(
-                &server_name,
-                raw_tool_name,
-                &tool_name_count,
-                &reserved_names,
-            );
-            let mut suffix = 2usize;
-            while reserved_names.contains(&function_name) {
-                function_name = format!("{}_{}", function_name, suffix);
-                suffix += 1;
-            }
-            reserved_names.insert(function_name.clone());
+            // 始终使用 mcp__server__tool 前缀；同一 server 下若有重名 tool 才追加后缀。
+            let function_name = resolve_mcp_function_name(&server_name, raw_tool_name);
 
             tools.push(function_tool_from_mcp_tool(
                 &function_name,
@@ -85,16 +75,10 @@ pub(crate) fn execution_function_tools(
     (tools, bindings)
 }
 
-fn resolve_mcp_function_name(
-    server_name: &str,
-    tool_name: &str,
-    tool_name_count: &HashMap<String, usize>,
-    reserved_names: &HashSet<String>,
-) -> String {
-    let count = *tool_name_count.get(tool_name).unwrap_or(&1);
-    if count == 1 && !reserved_names.contains(tool_name) {
-        return tool_name.to_string();
-    }
+/// 生成 MCP 工具的 LLM 可见函数名：始终使用 `mcp__{server}__{tool}` 前缀格式。
+///
+/// 统一前缀天然避免与内置插件工具名冲突，且让 MCP 工具来源一目了然。
+fn resolve_mcp_function_name(server_name: &str, tool_name: &str) -> String {
     format!(
         "mcp__{}__{}",
         sanitize_fn_name(server_name),
@@ -122,7 +106,7 @@ fn sanitize_fn_name(value: &str) -> String {
 fn function_tool_from_mcp_tool(
     function_name: &str,
     server_name: &str,
-    tool: &McpToolMeta,
+    tool: &crate::client::McpToolMeta,
 ) -> ToolSpec {
     ToolSpec {
         name: function_name.to_string(),
@@ -142,7 +126,7 @@ fn function_tool_from_mcp_tool(
     }
 }
 
-pub(crate) async fn execute_mcp_tool_call(
+pub async fn execute_mcp_tool_call(
     call: &ToolCall,
     target: &McpFunctionTarget,
     mcp_config: &McpConfig,
@@ -150,7 +134,7 @@ pub(crate) async fn execute_mcp_tool_call(
     execute_mcp_tool_call_with_args(target, normalize_mcp_call_arguments(call), mcp_config).await
 }
 
-pub(crate) async fn execute_mcp_tool_call_with_args(
+pub async fn execute_mcp_tool_call_with_args(
     target: &McpFunctionTarget,
     args: Value,
     mcp_config: &McpConfig,
@@ -218,7 +202,7 @@ pub(crate) async fn execute_mcp_tool_call_with_args(
     }
 }
 
-pub(crate) fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
+pub fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
     if call.arguments.is_object() {
         call.arguments.clone()
     } else {
@@ -226,7 +210,7 @@ pub(crate) fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
     }
 }
 
-pub(crate) fn resolve_mcp_tool_call_from_run_command(
+pub fn resolve_mcp_tool_call_from_run_command(
     call: &ToolCall,
     mcp_targets: &HashMap<String, McpFunctionTarget>,
     mcp_config: &McpConfig,
@@ -269,7 +253,7 @@ pub(crate) fn resolve_mcp_tool_call_from_run_command(
     Some((target, serde_json::json!({})))
 }
 
-pub(crate) fn resolve_unique_mcp_target_by_raw_name(
+pub fn resolve_unique_mcp_target_by_raw_name(
     tool_name: &str,
     mcp_config: &McpConfig,
 ) -> Option<McpFunctionTarget> {

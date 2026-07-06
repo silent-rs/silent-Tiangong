@@ -5,23 +5,26 @@ use anyhow::{Context, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
 
-use tiangong_core::agent_config::{McpConfig, McpServerConfig, McpTransportMode};
-use tiangong_core::app_state::{RegisterMcpServerOptions, RegisterMcpServerRequest, TiangongState};
-use tiangong_core::mcp::validate_mcp_config;
+use tiangong_plugin_mcp::{
+    McpConfig, McpPlugin, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
+    RegisterMcpServerRequest, validate_mcp_config,
+};
 
 use crate::args::{McpArgs, McpSubcommand};
 
 pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
-    let mut state = TiangongState::load_or_default();
+    // MCP 配置由 mcp plugin 自管（~/.tiangong/mcp.json），CLI 子命令构造临时
+    // plugin 实例操作（文件共享，多进程一致）。
+    let mcp_plugin = McpPlugin::new();
     match args.command {
         McpSubcommand::List => {
-            println!("{}", state.mcp_server_summary(None));
+            println!("{}", mcp_plugin.mcp_server_summary(None));
         }
         McpSubcommand::Show { name } => {
             if let Some(name) = name {
-                println!("{}", state.mcp_server_detail(Some(&name)));
+                println!("{}", mcp_plugin.mcp_server_detail(Some(&name)));
             } else {
-                println!("{}", state.mcp_server_summary(None));
+                println!("{}", mcp_plugin.mcp_server_summary(None));
             }
         }
         McpSubcommand::Add {
@@ -55,7 +58,7 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                 )?;
                 let raw_json = load_add_json_payload(json, json_file)?;
                 let imported = parse_mcp_servers_from_json(&raw_json)?;
-                let msgs = import_mcp_servers(&mut state, imported, force)?;
+                let msgs = import_mcp_servers(&mcp_plugin, imported, force)?;
                 for msg in msgs {
                     println!("{msg}");
                 }
@@ -63,14 +66,14 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                 let name = name.ok_or_else(|| anyhow!("缺少 MCP server 名称"))?;
                 let (command, args) = resolve_mcp_add_command(command, args, cmdline)?;
                 if force
-                    && state
+                    && mcp_plugin
                         .mcp_servers()
                         .iter()
                         .any(|item| item.name == name.trim())
                 {
-                    let _ = state.remove_mcp_server(&name)?;
+                    let _ = mcp_plugin.remove_mcp_server(&name)?;
                 }
-                let msg = state.register_mcp_server(RegisterMcpServerRequest {
+                let msg = mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
                     name,
                     command,
                     args,
@@ -88,15 +91,15 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
             }
         }
         McpSubcommand::Remove { name } => {
-            let msg = state.remove_mcp_server(&name)?;
+            let msg = mcp_plugin.remove_mcp_server(&name)?;
             println!("{msg}");
         }
         McpSubcommand::Enable { name } => {
-            let msg = state.set_mcp_server_enabled(&name, true)?;
+            let msg = mcp_plugin.set_mcp_server_enabled(&name, true)?;
             println!("{msg}");
         }
         McpSubcommand::Disable { name } => {
-            let msg = state.set_mcp_server_enabled(&name, false)?;
+            let msg = mcp_plugin.set_mcp_server_enabled(&name, false)?;
             println!("{msg}");
         }
     }
@@ -373,7 +376,7 @@ fn normalize_map_pairs(input: BTreeMap<String, String>) -> Vec<(String, String)>
 }
 
 fn import_mcp_servers(
-    state: &mut TiangongState,
+    mcp_plugin: &McpPlugin,
     servers: Vec<ImportedMcpServer>,
     force: bool,
 ) -> anyhow::Result<Vec<String>> {
@@ -382,20 +385,20 @@ fn import_mcp_servers(
     }
 
     ensure_import_servers_valid(&servers)?;
-    ensure_import_conflicts(state, &servers, force)?;
+    ensure_import_conflicts(mcp_plugin, &servers, force)?;
 
     let mut msgs = Vec::new();
     for server in servers {
-        let exists = state
+        let exists = mcp_plugin
             .mcp_servers()
             .iter()
             .any(|item| item.name == server.name);
         if force && exists {
-            let msg = state.remove_mcp_server(&server.name)?;
+            let msg = mcp_plugin.remove_mcp_server(&server.name)?;
             msgs.push(msg);
         }
 
-        let msg = state.register_mcp_server(RegisterMcpServerRequest {
+        let msg = mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
             name: server.name,
             command: server.command,
             args: server.args,
@@ -433,7 +436,7 @@ fn ensure_import_servers_valid(servers: &[ImportedMcpServer]) -> anyhow::Result<
 }
 
 fn ensure_import_conflicts(
-    state: &TiangongState,
+    mcp_plugin: &McpPlugin,
     servers: &[ImportedMcpServer],
     force: bool,
 ) -> anyhow::Result<()> {
@@ -441,14 +444,14 @@ fn ensure_import_conflicts(
         return Ok(());
     }
 
-    let existing = state
+    let existing = mcp_plugin
         .mcp_servers()
         .iter()
-        .map(|item| item.name.as_str())
-        .collect::<HashSet<_>>();
+        .map(|item| item.name.clone())
+        .collect::<HashSet<String>>();
     let conflicts = servers
         .iter()
-        .filter(|server| existing.contains(server.name.as_str()))
+        .filter(|server| existing.contains(&server.name))
         .map(|server| server.name.clone())
         .collect::<Vec<_>>();
     if !conflicts.is_empty() {

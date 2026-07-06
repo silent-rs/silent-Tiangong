@@ -124,11 +124,14 @@ pub(in crate::app_state) fn normalize_model_list(
     list
 }
 
-pub fn validate_agent_config(config: &AgentConfig) -> Result<()> {
-    validate_mcp_config(&config.mcp)?;
+pub fn validate_agent_config(_config: &AgentConfig) -> Result<()> {
+    // MCP 配置校验已随 MCP 管理插件化迁出（由 mcp plugin 在管理方法内调用
+    // validate_mcp_config）。AgentConfig 现仅含 trust_mode / prompt / reasoning，
+    // 无需额外校验。保留方法供 facade 调用点兼容。
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(in crate::app_state) fn parse_bool(raw: &str) -> Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),

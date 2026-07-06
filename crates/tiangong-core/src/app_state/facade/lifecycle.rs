@@ -56,7 +56,6 @@ impl TiangongState {
                 },
             },
             services: AppServices {
-                mcp_service: AppMcpService,
                 repository: AppRepository::new(AppPaths {
                     app_storage_path,
                     skills_config_path,
@@ -159,22 +158,10 @@ impl TiangongState {
         state.store.runtime.run.updated_at = now_text();
         // EventLoop 状态恢复已移除（TiangongCore 统一管理执行状态）
 
-        // skills 已脱离 agent_config（由 skill plugin 自治），此处仅同步 MCP 依赖锁
+        // skills / MCP 均已脱离 agent_config（由各自 plugin 自治）：
+        // - skill 依赖锁（mcp-lock.json）同步仍保留（跨 skill↔MCP 的所有权记录）
+        // - MCP capability 缓存加载 + 后台调度器由 mcp plugin 在 register 时自管
         let _ = state.sync_mcp_dependency_lock();
-        let _ = load_mcp_capabilities_cache(
-            &state.services.repository.paths().mcp_capability_cache_path,
-        );
-        configure_mcp_capability_scheduler(
-            state.store.agent.agent_config.mcp.clone(),
-            state
-                .services
-                .repository
-                .paths()
-                .mcp_capability_cache_path
-                .clone(),
-            MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
-        );
-        refresh_mcp_capabilities_async(state.store.agent.agent_config.mcp.clone());
 
         state
     }
@@ -186,22 +173,15 @@ impl TiangongState {
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;
-            // agent_config 变更后需重建 runtime，否则 runtime 持有默认空 MCP 配置
+            // agent_config 变更后需重建 runtime
             self.rebuild_runtime_from_current_config();
         }
     }
 
+    #[allow(dead_code)]
     pub(in crate::app_state) fn rebuild_runtime_for_agent_config(&mut self) {
         self.rebuild_runtime_from_current_config();
-        configure_mcp_capability_scheduler(
-            self.store.agent.agent_config.mcp.clone(),
-            self.services
-                .repository
-                .paths()
-                .mcp_capability_cache_path
-                .clone(),
-            MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
-        );
-        refresh_mcp_capabilities_async(self.store.agent.agent_config.mcp.clone());
+        // MCP capability scheduler 由 mcp plugin 在 on_engine_rebuilt 时自管，
+        // core 不再触发 capability 刷新。
     }
 }

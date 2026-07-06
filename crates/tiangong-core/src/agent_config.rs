@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -72,95 +70,12 @@ pub struct SkillsConfig {
     pub installed: Vec<InstalledSkillConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransportMode {
-    Auto,
-    Stdio,
-    Http,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedMcpTransport {
-    Stdio,
-    Http,
-    Metadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    pub name: String,
-    #[serde(default = "default_mcp_transport_mode")]
-    pub transport: McpTransportMode,
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub endpoint: String,
-    #[serde(default)]
-    pub auth_header: String,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-impl McpServerConfig {
-    pub fn resolved_transport(&self) -> ResolvedMcpTransport {
-        match self.transport {
-            McpTransportMode::Auto => {
-                if !self.endpoint.trim().is_empty() || is_http_endpoint(&self.command) {
-                    ResolvedMcpTransport::Http
-                } else if !self.command.trim().is_empty() {
-                    ResolvedMcpTransport::Stdio
-                } else {
-                    ResolvedMcpTransport::Metadata
-                }
-            }
-            McpTransportMode::Stdio => ResolvedMcpTransport::Stdio,
-            McpTransportMode::Http => ResolvedMcpTransport::Http,
-        }
-    }
-
-    pub fn resolved_http_endpoint(&self) -> Option<&str> {
-        if matches!(self.transport, McpTransportMode::Stdio) {
-            return None;
-        }
-        let endpoint = self.endpoint.trim();
-        if !endpoint.is_empty() {
-            return Some(endpoint);
-        }
-        let command = self.command.trim();
-        if is_http_endpoint(command) {
-            return Some(command);
-        }
-        None
-    }
-
-    pub fn command_text(&self) -> &str {
-        self.command.trim()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpConfig {
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_mcp_timeout_ms")]
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub servers: Vec<McpServerConfig>,
-}
+/// MCP 相关配置类型（`McpConfig` / `McpServerConfig` / `McpTransportMode` 等）
+/// 已迁出至 `tiangong-plugin-mcp` crate，core 不再持有 MCP 概念。
+/// `~/.tiangong/mcp.json` 由 MCP 插件自托管读写。
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
-    #[serde(default)]
-    pub mcp: McpConfig,
     /// 当前权限信任模式（可按当前会话调整）
     #[serde(default)]
     pub trust_mode: crate::permission::TrustMode,
@@ -190,39 +105,10 @@ impl Default for SkillsConfig {
     }
 }
 
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            timeout_ms: default_mcp_timeout_ms(),
-            servers: Vec::new(),
-        }
-    }
-}
-
-impl Default for McpTransportMode {
-    fn default() -> Self {
-        default_mcp_transport_mode()
-    }
-}
-
 fn default_enabled() -> bool {
     true
 }
 
 fn default_max_matches() -> usize {
     3
-}
-
-fn default_mcp_timeout_ms() -> u64 {
-    15_000
-}
-
-fn default_mcp_transport_mode() -> McpTransportMode {
-    McpTransportMode::Auto
-}
-
-pub fn is_http_endpoint(value: &str) -> bool {
-    let value = value.trim().to_ascii_lowercase();
-    value.starts_with("http://") || value.starts_with("https://")
 }

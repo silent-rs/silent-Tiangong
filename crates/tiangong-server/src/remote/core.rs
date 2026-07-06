@@ -185,6 +185,8 @@ impl ServerCoreManager {
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
                 plugins.extend(tiangong_plugin_skill::default_plugins());
+                // MCP 工具（动态收集 MCP server 工具 + 执行分发）：无条件注册。
+                plugins.extend(tiangong_plugin_mcp::default_plugins());
                 plugins
             },
         );

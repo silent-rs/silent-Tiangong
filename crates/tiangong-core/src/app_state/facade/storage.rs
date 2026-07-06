@@ -22,20 +22,16 @@ impl TiangongState {
         self.services.repository.persist_app_only(&self.store)
     }
 
-    /// 仅持久化 agent 配置（mcp.json）+ MCP 依赖锁。
-    /// 只应由显式修改 agent_config 的操作调用，避免多进程覆盖。
+    /// 同步 MCP 依赖锁（mcp-lock.json）。
+    ///
+    /// mcp.json 的持久化已随 MCP 管理插件化迁出（由 mcp plugin 自管），
+    /// 此处仅保留 skill↔MCP 依赖锁的同步（扫描 skills 的 requires.mcp 声明）。
     pub fn persist_agent_configs_only(&self) -> Result<()> {
-        self.services
-            .repository
-            .persist_agent_configs(&self.store.agent.agent_config)?;
         self.services.repository.sync_mcp_dependency_lock()
     }
 
-    /// 持久化 agent 配置但跳过 MCP 磁盘合并，用于删除操作。
+    /// 同步 MCP 依赖锁（保留方法名兼容旧调用点）。
     pub fn persist_agent_configs_no_merge_mcp(&self) -> Result<()> {
-        self.services
-            .repository
-            .persist_agent_configs_no_merge_mcp(&self.store.agent.agent_config)?;
         self.services.repository.sync_mcp_dependency_lock()
     }
 

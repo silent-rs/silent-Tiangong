@@ -12,7 +12,6 @@ pub mod core_config;
 pub mod custom_prompt;
 pub mod event;
 pub mod index;
-pub mod mcp;
 pub mod media;
 pub mod media_archive;
 pub mod model;

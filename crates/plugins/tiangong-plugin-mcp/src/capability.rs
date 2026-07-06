@@ -1,3 +1,7 @@
+//! MCP 能力动态发现 + 后台刷新调度器 + 缓存。
+//!
+//! 原属 `tiangong-core::mcp::capability`，MCP 管理插件化后整块迁入本 crate。
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,9 +12,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::{McpConfig, McpServerConfig};
-
-use super::client::{LocalMcpClient, McpClient, McpToolMeta};
+use crate::client::{LocalMcpClient, McpClient, McpToolMeta, get_cached_server_version};
+use crate::config::{McpConfig, McpServerConfig};
 
 const MIN_REFRESH_INTERVAL_SECS: u64 = 60;
 
@@ -339,7 +342,7 @@ fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServ
     match result {
         Ok(tools) => {
             let tools = dedup_tools(&tools);
-            let server_version = super::client::get_cached_server_version(&server_name);
+            let server_version = get_cached_server_version(&server_name);
             McpServerCapability {
                 healthy: true,
                 tools,

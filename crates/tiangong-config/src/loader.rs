@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tiangong_core::agent_config::{McpConfig, SkillsConfig};
+use tiangong_core::agent_config::SkillsConfig;
 use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
 
@@ -40,7 +40,6 @@ pub fn load_tiangong_config() -> TiangongConfig {
 /// 从指定目录加载完整配置
 pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let models = load_models_config();
-    let mcp = load_json_config::<McpConfig>(dir, "mcp.json").unwrap_or_default();
     let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
     let server = crate::config::load_server_config_from_dir(dir);
     let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
@@ -55,16 +54,11 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     // 首次安装：释放默认 context_windows.json
     ensure_context_windows(dir);
 
-    // MCP 能力缓存加载 + 异步刷新
-    let cache_path = dir.join("mcp-tools-cache.json");
-    let _ = tiangong_core::mcp::load_mcp_capabilities_cache(&cache_path);
-    let mcp_capabilities = tiangong_core::mcp::cached_active_tools();
-    tiangong_core::mcp::refresh_mcp_capabilities_async(mcp.clone());
+    // MCP 配置（mcp.json）与 capability 缓存由 tiangong-plugin-mcp 自管：
+    // plugin 在 register 时加载缓存 + 启动后台调度器 + 预热探测，config 不再参与。
 
     TiangongConfig {
         models,
-        mcp,
-        mcp_capabilities,
         skills,
         custom_system_prompt,
         server,

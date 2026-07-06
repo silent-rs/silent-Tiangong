@@ -9593,6 +9593,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9626,6 +9627,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9708,6 +9710,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-memory",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-skill",
  "tiangong-server",
 ]
@@ -9878,6 +9881,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-mcp"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "http",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-memory"
 version = "0.11.0"
 dependencies = [
@@ -10008,6 +10027,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",

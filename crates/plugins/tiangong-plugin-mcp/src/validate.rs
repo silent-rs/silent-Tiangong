@@ -1,9 +1,13 @@
+//! MCP 配置校验 / 摘要 / 详情。
+//!
+//! 原属 `tiangong-core::mcp::config`，MCP 管理插件化后迁入本 crate。
+
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, anyhow};
 use http::HeaderName;
 
-use crate::agent_config::{McpConfig, McpServerConfig, ResolvedMcpTransport, is_http_endpoint};
+use crate::config::{McpConfig, McpServerConfig, ResolvedMcpTransport, is_http_endpoint};
 
 pub fn summarize_mcp_servers(servers: &[McpServerConfig], name_filter: Option<&str>) -> String {
     let mut entries = Vec::new();

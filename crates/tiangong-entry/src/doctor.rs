@@ -236,8 +236,9 @@ fn check_memory(report: &mut DoctorReport) {
 }
 
 fn check_mcp(report: &mut DoctorReport) {
-    let state = tiangong_core::app_state::TiangongState::load_or_default();
-    let count = state.agent_config().mcp.servers.len();
+    // MCP 配置由 mcp plugin 自管，doctor 构造临时实例读取。
+    let mcp_plugin = tiangong_plugin_mcp::McpPlugin::new();
+    let count = mcp_plugin.mcp_servers().len();
     if count == 0 {
         report.warn("MCP 配置", "0 个服务");
     } else {

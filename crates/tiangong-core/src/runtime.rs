@@ -2,10 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::agent_config::{AgentConfig, McpConfig};
-use crate::agents::execution_mcp_agent::{
-    McpFunctionTarget, execute_mcp_tool_call, resolve_mcp_tool_call_from_run_command,
-};
+use crate::agent_config::AgentConfig;
 use crate::browser_trait::PageFetcher;
 use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
@@ -140,9 +137,7 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env(
-                &agent_config,
-            ))),
+            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env())),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -175,9 +170,7 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env(
-                &agent_config,
-            ))),
+            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env())),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -290,10 +283,15 @@ impl RuntimeEngine {
         self.terminal_provider.lock().ok()?.clone()
     }
 
-    /// 注册工具覆盖处理器
+    /// 注册工具覆盖处理器（first-writer-wins）。
+    ///
+    /// 若该工具名已被其他插件注册，保留先注册者，跳过当前注册。
+    /// 这保证了内置业务插件（fs/fetch/command 等）的工具优先于后注册的动态工具
+    ///（如 MCP server 暴露的同名工具），对齐原 `execution_function_tools` 的
+    /// `reserved_names` 冲突消解语义。
     pub fn register_tool_override(&self, name: &str, handler: Arc<dyn ToolOverrideHandler>) {
         if let Ok(mut guard) = self.tool_overrides.lock() {
-            guard.insert(name.to_string(), handler);
+            guard.entry(name.to_string()).or_insert(handler);
         }
     }
 
@@ -369,17 +367,14 @@ impl RuntimeEngine {
         self.permission_gate.check(tool_name)
     }
 
-    /// 执行单个工具调用（本地工具、MCP 工具、多媒体生成或后台任务）
+    /// 执行单个工具调用（本地工具或后台任务）
     ///
     /// 注意：权限检查已由调用方（core/mod.rs）在执行前完成，
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
-    pub(crate) async fn execute_tool_call(
-        &self,
-        call: &ToolCall,
-        mcp_targets: &HashMap<String, McpFunctionTarget>,
-        mcp_config: &McpConfig,
-        session: &Session,
-    ) -> ToolResult {
+    ///
+    /// MCP 工具已迁移至独立插件 crate（tiangong-plugin-mcp），由 tool_overrides
+    /// 统一分发，此方法不再持有 mcp_targets / mcp_config 参数。
+    pub(crate) async fn execute_tool_call(&self, call: &ToolCall, session: &Session) -> ToolResult {
         // 权限检查
         use crate::permission::PermissionDecision;
         match self.permission_gate.check(&call.name) {
@@ -411,44 +406,10 @@ impl RuntimeEngine {
         // 已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
         // text-to-speech,speech-to-text}），由 tool_overrides 统一分发。
 
-        // 检查是否是 MCP 工具
-        if let Some(target) = mcp_targets.get(&call.name) {
-            return match execute_mcp_tool_call(call, target, mcp_config).await {
-                Ok(result) => result,
-                Err(err) => ToolResult {
-                    ok: false,
-                    summary: format!("MCP工具调用失败：{err}"),
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    exit_code: 1,
-                    execution: None,
-                },
-            };
-        }
+        // MCP 工具已迁移至独立插件 crate（tiangong-plugin-mcp），
+        // 由 tool_overrides 统一分发（含 run_command/run_shell 误用 MCP 名的兼容 shim）。
 
-        // 检查 run_command 是否误用了 MCP 工具名
-        if (call.name == "run_command" || call.name == "run_shell")
-            && let Some((target, args)) =
-                resolve_mcp_tool_call_from_run_command(call, mcp_targets, mcp_config)
-        {
-            return match crate::agents::execution_mcp_agent::execute_mcp_tool_call_with_args(
-                &target, args, mcp_config,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => ToolResult {
-                    ok: false,
-                    summary: format!("MCP工具调用失败：{err}"),
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    exit_code: 1,
-                    execution: None,
-                },
-            };
-        }
-
-        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal 等）
+        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal / mcp 等）
         if let Some(handler) = self
             .tool_overrides
             .lock()
@@ -770,32 +731,8 @@ pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
             input_schema: spec.2,
         });
     }
-    // MCP 管理（register/remove/set_mcp_enabled）
-    // 注：install_skill / remove_skill / set_skill_enabled 不再作为 LLM 工具暴露，
-    // 它们是 app 层管理 API；此处仅保留 MCP 管理工具 spec。
-    for spec in [
-        (
-            "register_mcp_server",
-            "注册 MCP 服务器",
-            serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"env":{"type":"object"},"transport":{"type":"string"},"endpoint":{"type":"string"}},"required":["name","command"]}),
-        ),
-        (
-            "remove_mcp_server",
-            "移除 MCP 服务器",
-            serde_json::json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}),
-        ),
-        (
-            "set_mcp_enabled",
-            "启用/禁用 MCP 服务器",
-            serde_json::json!({"type":"object","properties":{"name":{"type":"string"},"enabled":{"type":"boolean"}},"required":["name","enabled"]}),
-        ),
-    ] {
-        tools.push(ToolSpec {
-            name: spec.0.to_string(),
-            description: spec.1.to_string(),
-            input_schema: spec.2,
-        });
-    }
+    // MCP 管理（register/remove/set_mcp_enabled）已迁移至独立插件 crate
+    // （tiangong-plugin-mcp），是 app 层管理 API，不再作为 LLM 工具暴露。
 
     // 多智能体团队工具
     crate::agent_team::tools::inject_agent_team_tools(tools);

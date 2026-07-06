@@ -56,7 +56,6 @@ pub struct AppPaths {
 
 #[derive(Debug)]
 pub struct AppServices {
-    pub mcp_service: AppMcpService,
     pub repository: AppRepository,
     pub runtime: RuntimeEngine,
     pub turn_service: AppTurnService,

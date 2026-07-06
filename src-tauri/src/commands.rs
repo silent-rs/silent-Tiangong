@@ -2269,6 +2269,9 @@ pub async fn stop_audio() -> Result<(), String> {
 pub async fn get_mention_candidates(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<MentionCandidate>, String> {
+    // MCP servers + active tools 由 mcp plugin 自管，先读取快照。
+    let mcp_servers = state.mcp_plugin.mcp_servers();
+    let active_tools = tiangong_plugin_mcp::capability::cached_active_tools();
     state
         .with_state_read(|core_state| {
             let mut candidates = Vec::new();
@@ -2289,9 +2292,8 @@ pub async fn get_mention_candidates(
                 }
             }
 
-            // 已启用的 MCP 服务器
-            let active_tools = tiangong_core::mcp::cached_active_tools();
-            for server in core_state.mcp_servers() {
+            // 已启用的 MCP 服务器（数据来自 mcp plugin）
+            for server in &mcp_servers {
                 if server.enabled {
                     let tool_count = active_tools
                         .iter()
@@ -2439,21 +2441,18 @@ pub async fn set_session_cwd(cwd: String, state: State<'_, TiangongApp>) -> Resu
 /// 获取 MCP 服务器列表
 #[tauri::command]
 pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
-    state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .mcp_servers()
-                .iter()
-                .map(McpServerView::from_core)
-                .collect())
-        })
-        .await
+    Ok(state
+        .mcp_plugin
+        .mcp_servers()
+        .iter()
+        .map(McpServerView::from_core)
+        .collect())
 }
 
 /// 获取 MCP 服务器健康状态
 #[tauri::command]
 pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
-    let statuses = tiangong_core::mcp::mcp_server_health_statuses();
+    let statuses = tiangong_plugin_mcp::capability::mcp_server_health_statuses();
     statuses
         .into_iter()
         .map(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
@@ -2463,7 +2462,8 @@ pub async fn get_mcp_health() -> Result<Vec<serde_json::Value>, String> {
 /// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
 #[tauri::command]
 pub async fn probe_mcp_server(name: String) -> Result<(), String> {
-    tiangong_core::mcp::probe_single_mcp_server_by_name(&name).map_err(|e| e.to_string())
+    tiangong_plugin_mcp::capability::probe_single_mcp_server_by_name(&name)
+        .map_err(|e| e.to_string())
 }
 
 /// 注册 MCP 服务器
@@ -2480,9 +2480,9 @@ pub async fn register_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    use tiangong_core::agent_config::McpTransportMode;
-    use tiangong_core::app_state::RegisterMcpServerOptions;
-    use tiangong_core::app_state::RegisterMcpServerRequest;
+    use tiangong_plugin_mcp::{
+        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
+    };
 
     let transport = match transport
         .as_deref()
@@ -2504,28 +2504,28 @@ pub async fn register_mcp_server(
         None => None,
     };
 
+    let header_vec = headers.unwrap_or_default().into_iter().collect();
+    let env_vec = env.unwrap_or_default().into_iter().collect();
+    let request = RegisterMcpServerRequest {
+        name,
+        command,
+        args,
+        tags: vec![],
+        enabled: true,
+        options: RegisterMcpServerOptions {
+            transport,
+            endpoint,
+            auth_header,
+            headers: header_vec,
+            env: env_vec,
+        },
+    };
+    // MCP 管理由 mcp plugin 自治（读写 ~/.tiangong/mcp.json），不经 TiangongState。
+    // core engine rebuild 由 plugin 的 on_engine_rebuilt 钩子触发 capability 重配。
     let message = state
-        .with_state(|core_state| {
-            let header_vec = headers.unwrap_or_default().into_iter().collect();
-            let env_vec = env.unwrap_or_default().into_iter().collect();
-
-            let request = RegisterMcpServerRequest {
-                name: name.clone(),
-                command,
-                args,
-                tags: vec![],
-                enabled: true,
-                options: RegisterMcpServerOptions {
-                    transport,
-                    endpoint,
-                    auth_header,
-                    headers: header_vec,
-                    env: env_vec,
-                },
-            };
-            core_state.register_mcp_server(request)
-        })
-        .await?;
+        .mcp_plugin
+        .register_mcp_server(request)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2544,9 +2544,9 @@ pub async fn update_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    use tiangong_core::agent_config::McpTransportMode;
-    use tiangong_core::app_state::RegisterMcpServerOptions;
-    use tiangong_core::app_state::RegisterMcpServerRequest;
+    use tiangong_plugin_mcp::{
+        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
+    };
 
     let transport = match transport
         .as_deref()
@@ -2568,29 +2568,27 @@ pub async fn update_mcp_server(
         None => None,
     };
 
+    let header_vec = headers.unwrap_or_default().into_iter().collect();
+    let env_vec = env.unwrap_or_default().into_iter().collect();
+    let request = RegisterMcpServerRequest {
+        name: name.clone(),
+        command,
+        args,
+        tags: vec![],
+        // enabled 由列表开关单独控制，编辑表单不覆盖；update_mcp_server 会保留原值
+        enabled: true,
+        options: RegisterMcpServerOptions {
+            transport,
+            endpoint,
+            auth_header,
+            headers: header_vec,
+            env: env_vec,
+        },
+    };
     let message = state
-        .with_state(|core_state| {
-            let header_vec = headers.unwrap_or_default().into_iter().collect();
-            let env_vec = env.unwrap_or_default().into_iter().collect();
-
-            let request = RegisterMcpServerRequest {
-                name: name.clone(),
-                command,
-                args,
-                tags: vec![],
-                // enabled 由列表开关单独控制，编辑表单不覆盖；update_mcp_server 会保留原值
-                enabled: true,
-                options: RegisterMcpServerOptions {
-                    transport,
-                    endpoint,
-                    auth_header,
-                    headers: header_vec,
-                    env: env_vec,
-                },
-            };
-            core_state.update_mcp_server(&name, request)
-        })
-        .await?;
+        .mcp_plugin
+        .update_mcp_server(&name, request)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2602,8 +2600,9 @@ pub async fn remove_mcp_server(
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     let message = state
-        .with_state(|core_state| core_state.remove_mcp_server(&name))
-        .await?;
+        .mcp_plugin
+        .remove_mcp_server(&name)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2616,8 +2615,9 @@ pub async fn set_mcp_server_enabled(
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
     let message = state
-        .with_state(|core_state| core_state.set_mcp_server_enabled(&name, enabled))
-        .await?;
+        .mcp_plugin
+        .set_mcp_server_enabled(&name, enabled)
+        .map_err(|e| e.to_string())?;
     state.sync_core_config_from_state().await?;
     Ok(message)
 }
@@ -2668,20 +2668,11 @@ pub async fn remove_skill(id: String, state: State<'_, TiangongApp>) -> Result<S
         .skill_plugin
         .remove_skill(&id)
         .map_err(|e| e.to_string())?;
-    // 清理 plugin 报告的孤儿托管 MCP server（需操作 TiangongState）
+    // 清理 plugin 报告的孤儿托管 MCP server（MCP 配置由 mcp plugin 自管）
     if !outcome.orphan_mcp_servers.is_empty() {
-        state
-            .with_state(|core_state| {
-                core_state
-                    .store
-                    .agent
-                    .agent_config
-                    .mcp
-                    .servers
-                    .retain(|s| !outcome.orphan_mcp_servers.contains(&s.name));
-                anyhow::Ok(())
-            })
-            .await?;
+        for orphan in &outcome.orphan_mcp_servers {
+            let _ = state.mcp_plugin.remove_mcp_server(orphan);
+        }
     }
     state.sync_core_config_from_state().await?;
     Ok(outcome.message)

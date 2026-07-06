@@ -3,14 +3,12 @@
 //! 单一线程完成所有工作：接收消息 → LLM 调用 → 工具执行 → session 更新 → 推送 StreamEvent
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::agents::execution_mcp_agent::{McpFunctionTarget, execution_function_tools};
 use crate::core_config::CoreConfigProvider;
 use crate::model::{SingleProviderClient, ToolSpec};
 use crate::react::message::{append_or_reuse_user_message, append_runtime_tool_message};
@@ -305,7 +303,6 @@ async fn worker_loop_async(
 
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
-    let mut mcp_targets: HashMap<String, McpFunctionTarget> = HashMap::new();
     let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
     let mut team_restored = false;
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
@@ -399,6 +396,12 @@ async fn worker_loop_async(
                 None
             };
             let mut plugin_specs: Vec<ToolSpec> = Vec::new();
+            // 追踪已注册的工具名，用于跨插件工具名冲突消解：
+            // 当 MCP server 暴露与内置插件同名的工具（如 read_file）时，保留先注册的
+            // 内置插件工具，跳过后注册的同名 MCP 工具（对齐原 execution_function_tools
+            // 的 reserved_names 语义）。MCP plugin 应在其他业务插件之后注册。
+            let mut seen_tool_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for plugin in &plugins {
                 let specs = crate::core::plugin::register_plugin(
                     e,
@@ -406,34 +409,34 @@ async fn worker_loop_async(
                     workspace,
                     cmd_tx.clone(),
                 );
-                plugin_specs.extend(specs);
+                for spec in specs {
+                    if seen_tool_names.insert(spec.name.clone()) {
+                        plugin_specs.push(spec);
+                    } else {
+                        tracing::debug!(
+                            tool = %spec.name,
+                            plugin = %plugin.id(),
+                            "跳过与其他插件重名的工具规格（保留先注册者）"
+                        );
+                    }
+                }
             }
             // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
             // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
             for plugin in &plugins {
                 plugin.on_config_updated(&cfg);
             }
-            // 插件工具规格 + plugin_injection 作为 MCP 工具的 reserved names，
-            // 避免 MCP server 暴露同名工具（read_file/web_fetch/run_command 等）与插件冲突。
+            // MCP 工具规格改由 mcp 插件通过 tool_specs() 声明（动态收集 MCP server 工具），
+            // 随 plugin_specs 自动汇入。MCP 与其他插件工具名的冲突消解由 mcp 插件在
+            // tool_specs() 内部处理（mcp__server__tool 前缀）。
             let injection_spec = crate::core::plugin::injection_tool_spec();
-            let reserved_names: std::collections::HashSet<String> = plugin_specs
-                .iter()
-                .map(|s| s.name.clone())
-                .chain(std::iter::once(injection_spec.name.clone()))
-                .collect();
-
-            let (all_tools, new_mcp_targets) =
-                execution_function_tools(&e.agent_config().mcp, reserved_names);
-            let mut new_tools: Vec<ToolSpec> = all_tools;
+            let mut new_tools: Vec<ToolSpec> = Vec::new();
             // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
             new_tools.push(injection_spec);
-            // 合并 plugin 注册的工具规格
+            // 合并 plugin 注册的工具规格（含 MCP 插件动态收集的 MCP 工具）
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools);
-            // recall_memory 工具规格改由 memory 插件通过 tool_specs() 声明，
-            // 随 plugin_specs 自动汇入（且自动进入 reserved_names，MCP 同名工具会被避让）。
             tools = new_tools;
-            mcp_targets = new_mcp_targets;
             if !team_restored {
                 if let Ok(mut team) = team_context.lock() {
                     let restored =
@@ -529,7 +532,6 @@ async fn worker_loop_async(
                     &content,
                     engine.as_ref().unwrap(),
                     &tools,
-                    &mcp_targets,
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
@@ -749,7 +751,6 @@ async fn execute_turn_async(
     user_input: &str,
     engine: &RuntimeEngine,
     tools: &[ToolSpec],
-    mcp_targets: &HashMap<String, McpFunctionTarget>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
@@ -757,7 +758,6 @@ async fn execute_turn_async(
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
         tools.to_vec(),
-        mcp_targets.clone(),
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
     )
@@ -785,7 +785,6 @@ fn build_engine_from_config(
     let chat_is_multimodal = models_config.chat_is_multimodal();
 
     let agent_config = AgentConfig {
-        mcp: config.mcp.clone(),
         trust_mode: config.trust_mode,
         default_trust_mode: config.default_trust_mode,
         custom_system_prompt: config.custom_system_prompt.clone(),

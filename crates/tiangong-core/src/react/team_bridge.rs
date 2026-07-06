@@ -448,7 +448,6 @@ impl ReactEngine {
             let mut sub_engine = ReactEngine::new(
                 self.engine.clone(),
                 sub_tools,
-                self.mcp_targets.clone(),
                 sub_max_rounds,
                 crate::agent_team::tools::SUB_AGENT_MAX_OUTER_ITERATIONS,
             )

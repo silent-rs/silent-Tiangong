@@ -126,10 +126,11 @@ pub fn complete(
     trigger: CompletionTrigger,
     prefix: &str,
     state: &TiangongState,
+    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
 ) -> Vec<CompletionCandidate> {
     match trigger {
         CompletionTrigger::SlashCommand => complete_slash_commands(prefix),
-        CompletionTrigger::AtMention => complete_at_mentions(prefix, state),
+        CompletionTrigger::AtMention => complete_at_mentions(prefix, state, mcp_plugin),
     }
 }
 
@@ -145,7 +146,11 @@ fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-fn complete_at_mentions(prefix: &str, state: &TiangongState) -> Vec<CompletionCandidate> {
+fn complete_at_mentions(
+    prefix: &str,
+    state: &TiangongState,
+    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
+) -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
 
     // @file: 提及补全 - 列出当前目录文件
@@ -166,8 +171,8 @@ fn complete_at_mentions(prefix: &str, state: &TiangongState) -> Vec<CompletionCa
         }
     }
 
-    // @mcp: 提及补全
-    for server in state.mcp_servers() {
+    // @mcp: 提及补全（MCP servers 由 mcp plugin 自管）
+    for server in mcp_plugin.mcp_servers() {
         if !server.enabled {
             continue;
         }

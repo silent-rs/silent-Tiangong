@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use tiangong_core::agent_config::ResolvedMcpTransport;
+use tiangong_plugin_mcp::ResolvedMcpTransport;
 
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +208,7 @@ pub struct McpServerView {
 }
 
 impl McpServerView {
-    pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
+    pub fn from_core(core_server: &tiangong_plugin_mcp::McpServerConfig) -> Self {
         let transport = match core_server.resolved_transport() {
             ResolvedMcpTransport::Stdio => "stdio",
             ResolvedMcpTransport::Http => "http",
