@@ -88,9 +88,7 @@ impl McpPlugin {
             tags: fields.tags,
         });
         validate_mcp_config(&next)?;
-        self.commit_config(next)?;
-
-        self.persist_and_sync_probe(Some(&name))?;
+        self.apply_config(next, Some(&name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.register",
             &name,
@@ -133,9 +131,7 @@ impl McpPlugin {
         server.env = fields.env;
         server.tags = fields.tags;
         validate_mcp_config(&next)?;
-        self.commit_config(next)?;
-
-        self.persist_and_sync_probe(Some(name))?;
+        self.apply_config(next, Some(name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.update",
             name,
@@ -160,9 +156,7 @@ impl McpPlugin {
             return Err(anyhow!("未找到 MCP server：{name}"));
         }
         validate_mcp_config(&next)?;
-        self.commit_config(next)?;
-
-        self.persist_and_sync_probe(None)?;
+        self.apply_config(next, None)?;
         append_audit_log(&AuditEntry::new(
             "mcp.remove",
             name,
@@ -188,9 +182,7 @@ impl McpPlugin {
             .ok_or_else(|| anyhow!("未找到 MCP server：{name}"))?;
         server.enabled = enabled;
         validate_mcp_config(&next)?;
-        self.commit_config(next)?;
-
-        self.persist_and_sync_probe(Some(name))?;
+        self.apply_config(next, Some(name))?;
         append_audit_log(&AuditEntry::new(
             "mcp.toggle",
             name,
@@ -233,39 +225,35 @@ impl McpPlugin {
             }
         };
         validate_mcp_config(&next)?;
-        self.commit_config(next)?;
-
-        self.persist_and_sync_probe(None)?;
+        self.apply_config(next, None)?;
         Ok(format!("配置已更新：{key}={updated_value}"))
     }
 
-    /// 把校验通过的配置写回内存（copy-on-write 的提交步骤）。
-    fn commit_config(&self, next: McpConfig) -> Result<()> {
-        if let Ok(mut guard) = self.mcp_config.write() {
-            *guard = next;
-            Ok(())
-        } else {
-            Err(anyhow!("MCP 配置锁中毒"))
-        }
-    }
-
-    /// 持久化配置 + 同步探测受影响 server + 重建 targets。
+    /// 应用已校验通过的新配置：**先写磁盘，成功后再 commit 内存** + probe + rebuild。
     ///
-    /// `affected_server` 传 `Some(name)` 时，同步探测该 server（确保管理操作返回时
-    /// 工具即用）；传 `None` 时（remove/disable）只重建 targets（无需探测已删/禁用的）。
-    /// 同时重配后台 scheduler 以更新它持有的 config 快照。
-    fn persist_and_sync_probe(&self, affected_server: Option<&str>) -> Result<()> {
-        let config = self.config_snapshot();
-        crate::plugin::write_mcp_config_to_path(self.mcp_config_path(), &config)?;
-        // 更新后台 scheduler 持有的 config 快照（它仍会周期性全量探测兜底）。
+    /// 保证磁盘写入失败时内存不被污染（memory/disk 不分叉）。
+    ///
+    /// `affected_server` 传 `Some(name)` 时，commit 后同步探测该 server（确保管理
+    /// 操作返回时工具即用）；传 `None` 时（remove/disable/全局开关）只重建 targets。
+    fn apply_config(&self, next: McpConfig, affected_server: Option<&str>) -> Result<()> {
+        // 1) 先写磁盘：失败则直接返回，内存保持旧配置。
+        crate::plugin::write_mcp_config_to_path(self.mcp_config_path(), &next)?;
+        // 2) 磁盘成功后才 commit 内存。
+        if let Ok(mut guard) = self.mcp_config.write() {
+            *guard = next.clone();
+        } else {
+            return Err(anyhow!("MCP 配置锁中毒"));
+        }
+        // 3) 更新后台 scheduler 持有的 config 快照（它仍会周期性全量探测兜底）。
         self.capability.configure_scheduler(
-            config.clone(),
+            next.clone(),
             self.capability_cache_path.clone(),
             crate::plugin::MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
         );
+        // 4) probe / rebuild targets。
         match affected_server {
             Some(name) => self.sync_probe_and_rebuild(name),
-            None => self.rebuild_targets(&config),
+            None => self.rebuild_targets(&next),
         }
         Ok(())
     }

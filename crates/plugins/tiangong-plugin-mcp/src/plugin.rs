@@ -105,12 +105,12 @@ impl McpPlugin {
         self.capability.cached_active_tools()
     }
 
-    /// 重配 capability scheduler + 重建 mcp_targets 绑定。
+    /// 重配 capability scheduler + 异步刷新 + 重建 mcp_targets 绑定。
     ///
-    /// 在 register、engine rebuild 时调用。策略：
-    /// - capability cache 为空且 config 有 enabled server 时，**同步全量探测**，
-    ///   确保首次启动无 cache 时 tool_specs 可用（避免异步 refresh 完成前 LLM 看不到工具）。
-    /// - cache 非空时**异步刷新**（不阻塞），立即用已有 cache 重建 targets。
+    /// 在 register、engine rebuild 时调用。统一走异步刷新（不阻塞启动）：
+    /// capability 探测在后台线程完成，完成后由后台 scheduler 周期性刷新；
+    /// 首次启动若 cache 为空，MCP 工具会在下一次 engine rebuild（异步探测完成后
+    /// 触发的 config 变更 / 手动操作）对 LLM 可见——这是当前架构下可接受的行为。
     pub(crate) fn reconfigure(&self) {
         let config = self.config_snapshot();
         self.capability.configure_scheduler(
@@ -118,21 +118,7 @@ impl McpPlugin {
             self.capability_cache_path.clone(),
             MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
         );
-        let cache_empty = self.capability.cached_active_tools().is_empty();
-        let has_enabled_servers = config.enabled && config.servers.iter().any(|s| s.enabled);
-        if cache_empty && has_enabled_servers {
-            // 首次启动 / cache 缺失：同步全量探测，确保 tool_specs 首次可用。
-            // 带整体超时兜底（每个 server 受 mcp_config.timeout_ms 约束）。
-            tracing::info!(
-                "MCP capability cache 为空，启动时同步全量探测（{} 个 enabled server）",
-                config.servers.iter().filter(|s| s.enabled).count()
-            );
-            self.capability.refresh_sync(&config);
-            self.capability.persist_cache_if_configured();
-        } else {
-            // 已有 cache：异步刷新（后台更新），立即用旧 cache 重建 targets。
-            self.capability.refresh_async(config.clone());
-        }
+        self.capability.refresh_async(config.clone());
         self.rebuild_targets(&config);
     }
 

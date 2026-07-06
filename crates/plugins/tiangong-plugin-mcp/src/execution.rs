@@ -223,79 +223,6 @@ pub fn normalize_mcp_call_arguments(call: &ToolCall) -> Value {
     }
 }
 
-pub fn resolve_mcp_tool_call_from_run_command(
-    call: &ToolCall,
-    mcp_targets: &HashMap<String, McpFunctionTarget>,
-    mcp_config: &McpConfig,
-    active: &[(String, Vec<McpToolMeta>)],
-) -> Option<(McpFunctionTarget, Value)> {
-    // 兼容 run_command 与 run_shell：模型可能把 MCP 工具名误作为 shell 命令调用。
-    if !matches!(call.name.as_str(), "run_command" | "run_shell") {
-        return None;
-    }
-    if call
-        .arguments
-        .get("args")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty())
-    {
-        return None;
-    }
-    if call
-        .arguments
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|text| !text.is_empty())
-    {
-        return None;
-    }
-    let raw_cmd = call
-        .arguments
-        .get("cmd")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    let mut parts = split_command_parts(raw_cmd)?;
-    if parts.len() != 1 {
-        return None;
-    }
-    let tool_name = parts.remove(0);
-    let target = mcp_targets
-        .get(&tool_name)
-        .cloned()
-        .or_else(|| resolve_unique_mcp_target_by_raw_name(&tool_name, mcp_config, active))?;
-    Some((target, serde_json::json!({})))
-}
-
-pub fn resolve_unique_mcp_target_by_raw_name(
-    tool_name: &str,
-    mcp_config: &McpConfig,
-    active: &[(String, Vec<McpToolMeta>)],
-) -> Option<McpFunctionTarget> {
-    let mut hit_server = None::<String>;
-    for (server_name, tools) in active {
-        if !mcp_config
-            .servers
-            .iter()
-            .any(|server| server.enabled && &server.name == server_name)
-        {
-            continue;
-        }
-        if !tools.iter().any(|tool| tool.name.trim() == tool_name) {
-            continue;
-        }
-        if hit_server.is_some() {
-            return None;
-        }
-        hit_server = Some(server_name.clone());
-    }
-    hit_server.map(|server_name| McpFunctionTarget {
-        server_name,
-        tool_name: tool_name.to_string(),
-    })
-}
-
 fn find_mcp_server<'a>(config: &'a McpConfig, name: &str) -> Option<&'a McpServerConfig> {
     // 顶层 mcp.enabled=false 时禁止执行任何 MCP 工具（执行兜底，防止 config 切换后
     // 已有 targets 仍可调用）。
@@ -306,49 +233,6 @@ fn find_mcp_server<'a>(config: &'a McpConfig, name: &str) -> Option<&'a McpServe
         .servers
         .iter()
         .find(|server| server.enabled && server.name == name)
-}
-
-/// 拆分命令字符串为参数列表（支持引号、转义）。
-fn split_command_parts(raw: &str) -> Option<Vec<String>> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escaped = false;
-
-    for ch in raw.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if !in_single => {
-                escaped = true;
-            }
-            '\'' if !in_double => {
-                in_single = !in_single;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-            }
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !current.is_empty() {
-                    out.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if escaped || in_single || in_double {
-        return None;
-    }
-    if !current.is_empty() {
-        out.push(current);
-    }
-    if out.is_empty() { None } else { Some(out) }
 }
 
 fn elapsed_ms_u64(ms: u128) -> u64 {

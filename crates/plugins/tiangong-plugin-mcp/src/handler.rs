@@ -12,64 +12,38 @@ use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
 
-use crate::execution::{
-    execute_mcp_tool_call, execute_mcp_tool_call_with_args, resolve_mcp_tool_call_from_run_command,
-};
+use crate::execution::execute_mcp_tool_call;
 use crate::plugin::McpPlugin;
 
 impl McpPlugin {
     /// 分发 MCP 工具调用。返回 `Some(result)` 表示命中 MCP 工具。
+    ///
+    /// MCP 工具只通过 `mcp__{server}__{tool}` 显式函数名调用（由 tool_overrides
+    /// 按 spec.name 注册路由）。run_command/run_shell 的兼容 shim 已移除——
+    /// runtime 的 register_tool_override 是 first-writer-wins，command plugin
+    /// 先注册，MCP plugin 收不到这两个 tool name，shim 不可达。
     fn dispatch(
         &self,
         call: &ToolCall,
     ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
         let config = self.config_snapshot();
         let targets = self.targets_snapshot();
-        let active = self.capability.cached_active_tools();
 
-        // (1) MCP 工具直接命中
-        if let Some(target) = targets.get(&call.name) {
-            let target = target.clone();
-            let config = config;
-            let call = call.clone();
-            return Some(Box::pin(async move {
-                match execute_mcp_tool_call(&call, &target, &config).await {
-                    Ok(result) => result,
-                    Err(err) => ToolResult {
-                        ok: false,
-                        summary: format!("MCP工具调用失败：{err}"),
-                        stdout: String::new(),
-                        stderr: err.to_string(),
-                        exit_code: 1,
-                        execution: None,
-                    },
-                }
-            }));
-        }
-
-        // (2) run_command/run_shell 误用 MCP 工具名的兼容 shim
-        if matches!(call.name.as_str(), "run_command" | "run_shell") {
-            if let Some((target, args)) =
-                resolve_mcp_tool_call_from_run_command(call, &targets, &config, &active)
-            {
-                let config = config;
-                return Some(Box::pin(async move {
-                    match execute_mcp_tool_call_with_args(&target, args, &config).await {
-                        Ok(result) => result,
-                        Err(err) => ToolResult {
-                            ok: false,
-                            summary: format!("MCP工具调用失败：{err}"),
-                            stdout: String::new(),
-                            stderr: err.to_string(),
-                            exit_code: 1,
-                            execution: None,
-                        },
-                    }
-                }));
+        let target = targets.get(&call.name)?.clone();
+        let call = call.clone();
+        Some(Box::pin(async move {
+            match execute_mcp_tool_call(&call, &target, &config).await {
+                Ok(result) => result,
+                Err(err) => ToolResult {
+                    ok: false,
+                    summary: format!("MCP工具调用失败：{err}"),
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    exit_code: 1,
+                    execution: None,
+                },
             }
-        }
-
-        None
+        }))
     }
 }
 
