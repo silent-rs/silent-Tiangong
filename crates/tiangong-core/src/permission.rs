@@ -288,6 +288,10 @@ fn network_matches(pattern: &str, target: &str) -> bool {
 }
 
 /// 根据工具名分类风险等级（pub(crate) 供测试访问）
+///
+/// 注意：此处中心化维护各插件工具的权限等级（含 get_skill_detail / recall_memory
+/// 等插件工具）。完整方案应改为插件贡献 `tool_permission_overrides`，由 permission
+/// gate 汇总——当前中心化分类是既有架构，暂保留。
 pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
     match tool_name {
         // 安全：只读

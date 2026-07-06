@@ -7,8 +7,8 @@
 //! - **App 管理 API**：[`SkillPlugin`] 直接提供 remove / set_enabled / refresh /
 //!   list / detail 方法，供 App/Tauri/CLI 调用（入口层持有插件实例）
 //!
-//! skills 已从 [`tiangong_core::agent_config::AgentConfig`] 彻底脱离，由本插件自托管
-//! [`tiangong_core::skill::SkillRegistry`]。`collect_runtime_env` 直接扫描
+//! skills 已从 `tiangong_core::agent_config::AgentConfig` 彻底脱离，由本插件自托管
+//! [`crate::skill_registry::SkillRegistry`]。`collect_runtime_env` 直接扫描
 //! `~/.tiangong/skills/` 读 skill env，不经 agent_config 流转。
 //!
 //! Skill 创建/安装不提供专用工具；由 prompt 引导 Agent 使用文件工具在 skills 目录下
@@ -28,7 +28,7 @@ pub mod skill_package;
 pub mod skill_registry;
 pub mod skill_util;
 
-// Skill 领域类型 re-export（原 tiangong_core::skill / agent_config 的 Skill 类型）。
+// Skill 领域类型 re-export（Skill 概念已从 core 完整迁入本 plugin）。
 pub use skill_config::{
     InstalledSkillConfig, SkillMcpRequirementConfig, SkillPermissionConfig, SkillSourceConfig,
     SkillsConfig,

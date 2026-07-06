@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::paths::default_skills_storage_dir_path;
 use crate::skill_registry::SkillRegistry;
-use tiangong_core::app_state::default_skills_storage_dir_path;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::runtime::RuntimeEngine;

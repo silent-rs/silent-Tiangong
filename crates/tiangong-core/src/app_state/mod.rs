@@ -37,7 +37,6 @@ use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
-pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };

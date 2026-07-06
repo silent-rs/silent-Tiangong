@@ -15,9 +15,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::skill_registry::read_skill_manifest;
-use tiangong_core::app_state::default_skills_storage_dir_path;
 
-use crate::paths::default_mcp_lock_path;
+use crate::paths::{default_mcp_lock_path, default_skills_storage_dir_path};
 use crate::plugin::SkillPlugin;
 
 /// MCP 依赖锁记录：聚合所有已安装 skill 的 `requires.mcp` 声明，

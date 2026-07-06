@@ -22,10 +22,6 @@ pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
     default_storage_root().join("sessions.json")
 }
 
-pub fn default_skills_storage_dir_path() -> PathBuf {
-    default_storage_root().join("skills")
-}
-
 fn user_storage_root() -> PathBuf {
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))

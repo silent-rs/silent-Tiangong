@@ -82,7 +82,10 @@ impl PromptSectionProvider for SkillPlugin {
             ));
         }
 
-        // 2. Skill 创建规范（始终注入）
+        // 2. Skill 目录允许文件操作声明（core 不再硬编码 skills 路径，由 plugin 注入）
+        sections.push(format!("额外允许文件操作目录：{}", root.display()));
+
+        // 3. Skill 创建规范（始终注入）
         sections.push(skill_creation_guide(&root));
 
         sections

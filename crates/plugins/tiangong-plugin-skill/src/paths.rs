@@ -32,7 +32,12 @@ pub(crate) fn storage_root() -> PathBuf {
         .join(".tiangong")
 }
 
+/// Skill 存储目录：`~/.tiangong/skills/`。
+pub fn default_skills_storage_dir_path() -> PathBuf {
+    storage_root().join("skills")
+}
+
 /// MCP 依赖锁路径：`~/.tiangong/skills/mcp-lock.json`。
 pub fn default_mcp_lock_path() -> PathBuf {
-    storage_root().join("skills").join("mcp-lock.json")
+    default_skills_storage_dir_path().join("mcp-lock.json")
 }

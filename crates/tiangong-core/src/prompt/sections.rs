@@ -22,9 +22,8 @@ fn rules_block() -> String {
 5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
 6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
-8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
-9. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。
-10. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。"
+8. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。
+9. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。"
         .to_string()
 }
 
@@ -55,13 +54,9 @@ pub fn build_system_context(session: &Session) -> Vec<String> {
 
     let workspace = session_working_directory(session);
     ctx.push(format!("当前工作目录：{}", workspace));
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut roots = vec![workspace];
-    if !home.is_empty() {
-        roots.push(format!("{home}/.tiangong/skills"));
-    }
-    ctx.push(format!("允许文件操作目录：{}", roots.join(", ")));
+    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录（如 skills 目录）
+    // 由各插件经 prompt section 自行注入，core 不再硬编码。
+    ctx.push(format!("允许文件操作目录：{}", workspace));
 
     ctx
 }
@@ -184,12 +179,8 @@ fn collect_environment_parts(session: &Session) -> Vec<String> {
     let workspace = session_working_directory(session);
     parts.push(format!("当前会话：{}", session.title));
     parts.push(format!("当前工作目录：{}", workspace));
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut roots = vec![workspace];
-    if !home.is_empty() {
-        roots.push(format!("{home}/.tiangong/skills"));
-    }
-    parts.push(format!("允许文件操作目录：{}", roots.join(", ")));
+    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录由各插件自行注入。
+    parts.push(format!("允许文件操作目录：{}", workspace));
     parts
 }
 

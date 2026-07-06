@@ -437,9 +437,8 @@ async fn worker_loop_async(
                 }
                 e.set_runtime_env(exec_env);
             }
-            // MCP 工具规格改由 mcp 插件通过 tool_specs() 声明（动态收集 MCP server 工具），
-            // 随 plugin_specs 自动汇入。MCP 与其他插件工具名的冲突消解由 mcp 插件在
-            // tool_specs() 内部处理（mcp__server__tool 前缀）。
+            // 各插件（含 MCP 等动态工具插件）的工具规格经 tool_specs() 声明，
+            // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
             let injection_spec = crate::core::plugin::injection_tool_spec();
             let mut new_tools: Vec<ToolSpec> = Vec::new();
             // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）

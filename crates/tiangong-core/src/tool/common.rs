@@ -52,21 +52,26 @@ pub fn session_workspace_root() -> Option<PathBuf> {
     SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
 }
 
-/// 计算允许写入的根目录列表（工作空间 + `~/.tiangong/skills`）。
+/// 计算允许写入的根目录列表（工作空间 + 额外允许目录）。
 ///
 /// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
 /// 避免隐式依赖 `SESSION_CWD`。
+///
+/// TODO(Phase 5): 改为插件贡献 allowed_file_roots，由 fs plugin 汇总，
+/// 消除此处对存储目录的硬编码。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     let workspace_canonical = workspace
         .canonicalize()
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
 
     let mut roots = vec![workspace_canonical];
+    // 额外允许目录：用户存储下的扩展资源目录（如插件托管的资源）。
+    // 完整方案见 Phase 5 allowed_file_roots 插件化。
     if let Some(home) = user_home_dir() {
-        let skills = home.join(".tiangong").join("skills");
-        let skills_canonical = skills.canonicalize().unwrap_or(skills);
-        if !roots.iter().any(|root| root == &skills_canonical) {
-            roots.push(skills_canonical);
+        let extra = home.join(".tiangong").join("skills");
+        let extra_canonical = extra.canonicalize().unwrap_or(extra);
+        if !roots.iter().any(|root| root == &extra_canonical) {
+            roots.push(extra_canonical);
         }
     }
     Ok(roots)
@@ -85,7 +90,7 @@ fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path
         .with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             canonical.display()
         ));
     }
@@ -161,7 +166,7 @@ pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
 
     if !is_path_in_allowed_roots(&parent_canonical, &roots) {
         return Err(anyhow!(
-            "路径越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "路径越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             candidate.display()
         ));
     }
@@ -191,7 +196,7 @@ fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
         .with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             canonical.display()
         ));
     }
