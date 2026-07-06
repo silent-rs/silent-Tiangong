@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -54,12 +54,14 @@ struct CapabilitySchedulerConfig {
 ///
 /// 作为 [`crate::plugin::McpPlugin`] 的实例字段，每个 plugin 实例独立一份，
 /// 避免全局 static 在多实例（测试隔离 / server API 与 core 共存）场景下互相污染。
-/// 后台调度器线程持有 `Arc` 引用，生命周期与 plugin 实例一致。
+/// 后台调度器线程持有 `Arc` 引用 + shutdown flag，plugin drop 时置 flag 让线程退出。
 pub struct McpCapabilityIndex {
     index: Arc<RwLock<BTreeMap<String, McpServerCapability>>>,
     scheduler: Arc<RwLock<CapabilitySchedulerConfig>>,
     /// 调度器线程启动守护（Once 保证每个实例只启动一次后台线程）。
     scheduler_started: Arc<Once>,
+    /// 后台线程停止标志：plugin drop 时置 true，调度器 loop 检测后退出，避免线程泄漏。
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl McpCapabilityIndex {
@@ -68,6 +70,7 @@ impl McpCapabilityIndex {
             index: Arc::new(RwLock::new(BTreeMap::new())),
             scheduler: Arc::new(RwLock::new(CapabilitySchedulerConfig::default())),
             scheduler_started: Arc::new(Once::new()),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -119,6 +122,7 @@ impl McpCapabilityIndex {
         }
         let index = Arc::clone(&self.index);
         let scheduler = Arc::clone(&self.scheduler);
+        let shutdown = Arc::clone(&self.shutdown);
         self.scheduler_started.call_once(|| {
             let _ = thread::Builder::new()
                 .name("tiangong-mcp-capability-scheduler".to_string())
@@ -128,7 +132,17 @@ impl McpCapabilityIndex {
                             .read()
                             .map(|guard| guard.refresh_interval_secs.max(MIN_REFRESH_INTERVAL_SECS))
                             .unwrap_or(MIN_REFRESH_INTERVAL_SECS);
-                        thread::sleep(Duration::from_secs(interval_secs));
+                        // 分段睡眠以便及时响应 shutdown。
+                        let deadline = Instant::now() + Duration::from_secs(interval_secs);
+                        while Instant::now() < deadline {
+                            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(200));
+                        }
+                        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
                         let (config, cache_path) = scheduler
                             .read()
                             .map(|guard| (guard.mcp_config.clone(), guard.cache_path.clone()))
@@ -145,6 +159,32 @@ impl McpCapabilityIndex {
         });
     }
 
+    /// 请求后台调度器线程停止（plugin drop 时调用，避免线程泄漏）。
+    pub fn shutdown(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 同步全量刷新所有 server 的 capability（阻塞至探测完成）。
+    ///
+    /// 供启动时 cache 为空的场景使用：确保首次 tool_specs 可用，避免异步 refresh
+    /// 完成前 LLM 看不到工具。
+    pub fn refresh_sync(&self, config: &McpConfig) {
+        refresh_mcp_capabilities(&self.index, config);
+    }
+
+    /// 若 scheduler 已配置 cache 路径，则持久化当前 index 到磁盘。
+    pub fn persist_cache_if_configured(&self) {
+        if let Some(path) = self
+            .scheduler
+            .read()
+            .ok()
+            .and_then(|guard| guard.cache_path.clone())
+        {
+            let _ = persist_mcp_capabilities_cache(&self.index, &path);
+        }
+    }
+
     /// 异步刷新所有 server 的 capability（spawn 线程，不阻塞调用方）。
     ///
     /// 用于启动时批量预热。管理操作（register/update）应改用 [`Self::probe_single`]
@@ -155,9 +195,13 @@ impl McpCapabilityIndex {
         }
         let index = Arc::clone(&self.index);
         let scheduler = Arc::clone(&self.scheduler);
+        let shutdown = Arc::clone(&self.shutdown);
         let _ = thread::Builder::new()
             .name("tiangong-mcp-capability-prewarm".to_string())
             .spawn(move || {
+                if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
                 refresh_mcp_capabilities(&index, &config);
                 if let Some(path) = scheduler
                     .read()

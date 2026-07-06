@@ -47,8 +47,14 @@ impl McpPlugin {
     }
 
     /// 探测单个 MCP server 并刷新缓存（供前端"重试"按钮）。
+    ///
+    /// 探测成功后重建 mcp_targets 绑定，确保 retry 成功的工具立即对 LLM 可见。
     pub fn probe_mcp_server(&self, name: &str) -> Result<()> {
-        self.capability.probe_single_by_name(name)
+        self.capability.probe_single_by_name(name)?;
+        // 探测可能改变 capability cache（失败→成功），重建 targets 让新工具生效。
+        let config = self.config_snapshot();
+        self.rebuild_targets(&config);
+        Ok(())
     }
 
     /// 注册新的 MCP server。
@@ -63,28 +69,26 @@ impl McpPlugin {
             return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
         }
 
-        {
-            let mut config = self
-                .mcp_config
-                .write()
-                .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-            if config.servers.iter().any(|server| server.name == name) {
-                return Err(anyhow!("MCP server 已存在：{name}"));
-            }
-            config.servers.push(McpServerConfig {
-                name: name.clone(),
-                transport: fields.transport,
-                command: fields.command,
-                args: fields.args,
-                endpoint: fields.endpoint,
-                auth_header: fields.auth_header,
-                headers: fields.headers,
-                env: fields.env,
-                enabled: fields.enabled,
-                tags: fields.tags,
-            });
-            validate_mcp_config(&config)?;
+        // copy-on-write：在 snapshot 上修改 + validate，成功后整体写回，
+        // 校验失败不污染内存状态。
+        let mut next = self.config_snapshot();
+        if next.servers.iter().any(|server| server.name == name) {
+            return Err(anyhow!("MCP server 已存在：{name}"));
         }
+        next.servers.push(McpServerConfig {
+            name: name.clone(),
+            transport: fields.transport,
+            command: fields.command,
+            args: fields.args,
+            endpoint: fields.endpoint,
+            auth_header: fields.auth_header,
+            headers: fields.headers,
+            env: fields.env,
+            enabled: fields.enabled,
+            tags: fields.tags,
+        });
+        validate_mcp_config(&next)?;
+        self.commit_config(next)?;
 
         self.persist_and_sync_probe(Some(&name))?;
         append_audit_log(&AuditEntry::new(
@@ -112,25 +116,24 @@ impl McpPlugin {
             return Err(anyhow!("MCP server 需至少配置 command、endpoint 或 tags"));
         }
 
-        {
-            let mut config = self
-                .mcp_config
-                .write()
-                .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-            let Some(server) = config.servers.iter_mut().find(|server| server.name == name) else {
-                return Err(anyhow!("未找到 MCP server：{name}"));
-            };
-            // enabled 由列表里的开关单独控制，编辑表单不覆盖它。
-            server.transport = fields.transport;
-            server.command = fields.command;
-            server.args = fields.args;
-            server.endpoint = fields.endpoint;
-            server.auth_header = fields.auth_header;
-            server.headers = fields.headers;
-            server.env = fields.env;
-            server.tags = fields.tags;
-            validate_mcp_config(&config)?;
-        }
+        // copy-on-write：在 snapshot 上修改 + validate，成功后整体写回。
+        let mut next = self.config_snapshot();
+        let server = next
+            .servers
+            .iter_mut()
+            .find(|server| server.name == name)
+            .ok_or_else(|| anyhow!("未找到 MCP server：{name}"))?;
+        // enabled 由列表里的开关单独控制，编辑表单不覆盖它。
+        server.transport = fields.transport;
+        server.command = fields.command;
+        server.args = fields.args;
+        server.endpoint = fields.endpoint;
+        server.auth_header = fields.auth_header;
+        server.headers = fields.headers;
+        server.env = fields.env;
+        server.tags = fields.tags;
+        validate_mcp_config(&next)?;
+        self.commit_config(next)?;
 
         self.persist_and_sync_probe(Some(name))?;
         append_audit_log(&AuditEntry::new(
@@ -149,18 +152,15 @@ impl McpPlugin {
             return Err(anyhow!("MCP server 名称不能为空"));
         }
 
-        {
-            let mut config = self
-                .mcp_config
-                .write()
-                .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-            let before = config.servers.len();
-            config.servers.retain(|server| server.name != name);
-            if config.servers.len() == before {
-                return Err(anyhow!("未找到 MCP server：{name}"));
-            }
-            validate_mcp_config(&config)?;
+        // copy-on-write：在 snapshot 上删除 + validate，成功后整体写回。
+        let mut next = self.config_snapshot();
+        let before = next.servers.len();
+        next.servers.retain(|server| server.name != name);
+        if next.servers.len() == before {
+            return Err(anyhow!("未找到 MCP server：{name}"));
         }
+        validate_mcp_config(&next)?;
+        self.commit_config(next)?;
 
         self.persist_and_sync_probe(None)?;
         append_audit_log(&AuditEntry::new(
@@ -179,17 +179,16 @@ impl McpPlugin {
             return Err(anyhow!("MCP server 名称不能为空"));
         }
 
-        {
-            let mut config = self
-                .mcp_config
-                .write()
-                .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-            let Some(server) = config.servers.iter_mut().find(|server| server.name == name) else {
-                return Err(anyhow!("未找到 MCP server：{name}"));
-            };
-            server.enabled = enabled;
-            validate_mcp_config(&config)?;
-        }
+        // copy-on-write：在 snapshot 上修改 + validate，成功后整体写回。
+        let mut next = self.config_snapshot();
+        let server = next
+            .servers
+            .iter_mut()
+            .find(|server| server.name == name)
+            .ok_or_else(|| anyhow!("未找到 MCP server：{name}"))?;
+        server.enabled = enabled;
+        validate_mcp_config(&next)?;
+        self.commit_config(next)?;
 
         self.persist_and_sync_probe(Some(name))?;
         append_audit_log(&AuditEntry::new(
@@ -209,17 +208,12 @@ impl McpPlugin {
             return Err(anyhow!("配置键不能为空"));
         }
 
+        // copy-on-write：在 snapshot 上修改 + validate，成功后整体写回。
+        let mut next = self.config_snapshot();
         let updated_value = match key {
             "mcp.enabled" => {
                 let parsed = parse_bool(value)?;
-                {
-                    let mut config = self
-                        .mcp_config
-                        .write()
-                        .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-                    config.enabled = parsed;
-                    validate_mcp_config(&config)?;
-                }
+                next.enabled = parsed;
                 parsed.to_string()
             }
             "mcp.timeout_ms" => {
@@ -229,14 +223,7 @@ impl McpPlugin {
                 if parsed == 0 {
                     return Err(anyhow!("mcp.timeout_ms 必须大于 0"));
                 }
-                {
-                    let mut config = self
-                        .mcp_config
-                        .write()
-                        .map_err(|_| anyhow!("MCP 配置锁中毒"))?;
-                    config.timeout_ms = parsed;
-                    validate_mcp_config(&config)?;
-                }
+                next.timeout_ms = parsed;
                 parsed.to_string()
             }
             _ => {
@@ -245,9 +232,21 @@ impl McpPlugin {
                 ));
             }
         };
+        validate_mcp_config(&next)?;
+        self.commit_config(next)?;
 
         self.persist_and_sync_probe(None)?;
         Ok(format!("配置已更新：{key}={updated_value}"))
+    }
+
+    /// 把校验通过的配置写回内存（copy-on-write 的提交步骤）。
+    fn commit_config(&self, next: McpConfig) -> Result<()> {
+        if let Ok(mut guard) = self.mcp_config.write() {
+            *guard = next;
+            Ok(())
+        } else {
+            Err(anyhow!("MCP 配置锁中毒"))
+        }
     }
 
     /// 持久化配置 + 同步探测受影响 server + 重建 targets。

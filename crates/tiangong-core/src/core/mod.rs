@@ -426,6 +426,18 @@ async fn worker_loop_async(
             for plugin in &plugins {
                 plugin.on_config_updated(&cfg);
             }
+            // 汇总所有插件贡献的子进程环境变量（mcp server env / skill .env.local 等），
+            // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。
+            // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
+            {
+                let mut exec_env = std::collections::BTreeMap::new();
+                for plugin in &plugins {
+                    for (key, value) in plugin.collect_exec_env() {
+                        exec_env.insert(key, value);
+                    }
+                }
+                e.set_runtime_env(exec_env);
+            }
             // MCP 工具规格改由 mcp 插件通过 tool_specs() 声明（动态收集 MCP server 工具），
             // 随 plugin_specs 自动汇入。MCP 与其他插件工具名的冲突消解由 mcp 插件在
             // tool_specs() 内部处理（mcp__server__tool 前缀）。

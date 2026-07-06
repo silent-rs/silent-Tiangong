@@ -76,6 +76,18 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
+    /// 收集插件贡献的子进程环境变量（供 run_command 等子进程执行注入）。
+    ///
+    /// core 在「所有插件注册完成时」以及「配置变化导致 engine rebuild 时」统一
+    /// 遍历所有插件调用此方法，合并结果写入 RuntimeEngine 的 runtime_env，
+    /// 供 command 插件在执行子进程时注入。
+    ///
+    /// 默认返回空——不贡献环境变量的插件（fs / fetch / memory / scheduler 等）
+    /// 无需覆写。需要贡献 env 的插件（如 mcp server 的 env、skill 的 .env.local）
+    /// 覆写此方法返回自己的环境变量。
+    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::new()
+    }
 
     // ── 配置与生命周期钩子 ──
 

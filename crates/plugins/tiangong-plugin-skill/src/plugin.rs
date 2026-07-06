@@ -78,4 +78,24 @@ impl Plugin for SkillPlugin {
         // 刷新 registry 缓存，确保读到最新磁盘状态。
         self.skill_registry.refresh();
     }
+
+    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+        // 贡献 enabled skill 目录的 .env.local 环境变量，供 run_command 子进程注入。
+        let registry = self.registry();
+        let view = registry.view();
+        let mut env = std::collections::BTreeMap::new();
+        for entry in view.entries.values() {
+            let manifest_path = entry.dir.join("skill.toml");
+            let Ok(manifest) = tiangong_core::skill::read_skill_manifest(&manifest_path) else {
+                continue;
+            };
+            if !manifest.available {
+                continue;
+            }
+            for (key, value) in tiangong_core::runtime_env::load_local_env(&entry.dir) {
+                env.insert(key, value);
+            }
+        }
+        env
+    }
 }

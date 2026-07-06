@@ -137,7 +137,7 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env())),
+            runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -170,7 +170,7 @@ impl RuntimeEngine {
             client,
             lite_client: None,
             multimodal_client: None,
-            runtime_env: Arc::new(Mutex::new(crate::runtime_env::collect_runtime_env())),
+            runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
             models_config: ModelsConfig::default(),
@@ -276,6 +276,23 @@ impl RuntimeEngine {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default()
+    }
+
+    /// 返回 runtime_env 的共享句柄（`Arc<Mutex>`）。
+    ///
+    /// 供 command 插件在 register 时持有，core 在「所有插件注册完成后」汇总各插件
+    /// 的 `collect_exec_env` 写入同一句柄——command 插件执行子进程时读取即为最新值，
+    /// 无需 snapshot 刷新。
+    pub fn runtime_env_handle(&self) -> Arc<Mutex<std::collections::BTreeMap<String, String>>> {
+        Arc::clone(&self.runtime_env)
+    }
+
+    /// 写入由各插件 collect_exec_env 汇总的环境变量（供 core/mod.rs 在所有插件
+    /// 注册完成后统一调用）。
+    pub fn set_runtime_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut guard) = self.runtime_env.lock() {
+            *guard = env;
+        }
     }
 
     /// 获取 terminal_provider 的克隆

@@ -47,6 +47,10 @@ fn build_tools_from_cache(
     mcp_config: &McpConfig,
     active: Vec<(String, Vec<McpToolMeta>)>,
 ) -> (Vec<ToolSpec>, HashMap<String, McpFunctionTarget>) {
+    // 顶层 mcp.enabled=false 时完全不暴露 MCP 工具（全局禁用开关）。
+    if !mcp_config.enabled {
+        return (Vec::new(), HashMap::new());
+    }
     let mut tools = Vec::new();
     let mut bindings = HashMap::new();
 
@@ -293,6 +297,11 @@ pub fn resolve_unique_mcp_target_by_raw_name(
 }
 
 fn find_mcp_server<'a>(config: &'a McpConfig, name: &str) -> Option<&'a McpServerConfig> {
+    // 顶层 mcp.enabled=false 时禁止执行任何 MCP 工具（执行兜底，防止 config 切换后
+    // 已有 targets 仍可调用）。
+    if !config.enabled {
+        return None;
+    }
     config
         .servers
         .iter()

@@ -105,10 +105,12 @@ impl McpPlugin {
         self.capability.cached_active_tools()
     }
 
-    /// 重配 capability scheduler + 异步预热 + 重建 mcp_targets 绑定。
+    /// 重配 capability scheduler + 重建 mcp_targets 绑定。
     ///
-    /// 在 register、engine rebuild 时调用。管理操作（register/update/set_enabled）
-    /// 应改用 [`Self::sync_probe_and_rebuild`] 做同步探测，确保操作返回时工具即用。
+    /// 在 register、engine rebuild 时调用。策略：
+    /// - capability cache 为空且 config 有 enabled server 时，**同步全量探测**，
+    ///   确保首次启动无 cache 时 tool_specs 可用（避免异步 refresh 完成前 LLM 看不到工具）。
+    /// - cache 非空时**异步刷新**（不阻塞），立即用已有 cache 重建 targets。
     pub(crate) fn reconfigure(&self) {
         let config = self.config_snapshot();
         self.capability.configure_scheduler(
@@ -116,7 +118,21 @@ impl McpPlugin {
             self.capability_cache_path.clone(),
             MCP_CAPABILITY_REFRESH_INTERVAL_SECS,
         );
-        self.capability.refresh_async(config.clone());
+        let cache_empty = self.capability.cached_active_tools().is_empty();
+        let has_enabled_servers = config.enabled && config.servers.iter().any(|s| s.enabled);
+        if cache_empty && has_enabled_servers {
+            // 首次启动 / cache 缺失：同步全量探测，确保 tool_specs 首次可用。
+            // 带整体超时兜底（每个 server 受 mcp_config.timeout_ms 约束）。
+            tracing::info!(
+                "MCP capability cache 为空，启动时同步全量探测（{} 个 enabled server）",
+                config.servers.iter().filter(|s| s.enabled).count()
+            );
+            self.capability.refresh_sync(&config);
+            self.capability.persist_cache_if_configured();
+        } else {
+            // 已有 cache：异步刷新（后台更新），立即用旧 cache 重建 targets。
+            self.capability.refresh_async(config.clone());
+        }
         self.rebuild_targets(&config);
     }
 
@@ -166,6 +182,14 @@ impl Default for McpPlugin {
     }
 }
 
+impl Drop for McpPlugin {
+    fn drop(&mut self) {
+        // 通知后台 capability 调度器线程停止，避免 plugin 实例被 drop 后线程继续存活。
+        // 生产入口（CLI/Tauri/Server）持有 Arc<McpPlugin>，最后一个 Arc 释放时触发。
+        self.capability.shutdown();
+    }
+}
+
 /// MCP 工具仅经 function-calling 暴露给 LLM，无 system prompt 段落注入。
 impl tiangong_core::tool_override::PromptSectionProvider for McpPlugin {}
 
@@ -194,6 +218,11 @@ impl Plugin for McpPlugin {
         if let Ok(mut guard) = self.feedback_tx.write() {
             *guard = Some(tx);
         }
+    }
+
+    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+        // 贡献启用 MCP server 的环境变量（API keys 等），供 run_command 子进程注入。
+        self.collect_runtime_env()
     }
 
     fn on_engine_rebuilt(&self, _session: &mut tiangong_core::session::Session) {
