@@ -145,6 +145,29 @@ impl Plugin for AgentTeamPlugin {
     // on_turn_started 不做 @路由：用户输入中的 @提及由主 Agent 自行决定调用
     // send_message 投递（与 LLM 主动发消息完全同构），保持所有子 Agent 交互统一
     // 经工具调用路径。
+
+    fn tool_permission_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
+        // 团队工具均为无副作用的管理操作（创建/解散 Agent、消息路由、通知、文件锁），
+        // 声明为 Safe 避免 core 默认 classify_tool 把未知工具名归为 Critical（需要审批）。
+        let mut overrides = std::collections::BTreeMap::new();
+        for name in [
+            "create_agent",
+            "dismiss_agent",
+            "send_message",
+            "broadcast_message",
+            "notify_user",
+            "lock_file",
+            "unlock_file",
+        ] {
+            overrides.insert(
+                name.to_string(),
+                tiangong_core::permission::PermissionLevel::Safe,
+            );
+        }
+        overrides
+    }
 }
 
 impl AgentTeamPlugin {
