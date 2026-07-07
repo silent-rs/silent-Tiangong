@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+use crate::index::{IndexManager, TurnData};
 use tiangong_core::core::Plugin;
-use tiangong_core::index::{IndexManager, TurnData};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tool_override::PromptSectionProvider;
@@ -86,7 +86,7 @@ impl IndexPlugin {
             return;
         }
         // 仅在索引不存在时扫描，避免重复全量扫描（与原 core 逻辑一致）。
-        if !tiangong_core::index::workspace_index_exists(&root) {
+        if !crate::index::workspace_index_exists(&root) {
             self.with_index_manager(|im| match im.full_scan(&root) {
                 Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
                 Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
@@ -178,13 +178,15 @@ impl Plugin for IndexPlugin {
 // 注入检索工具使用指引：以操作策略为主，说明 search_code 与 index_search 的配合用法。
 impl PromptSectionProvider for IndexPlugin {
     fn prompt_sections(&self) -> Vec<String> {
-        vec!["## 检索工具使用指引\n\
+        vec![
+            "## 检索工具使用指引\n\
              - search_code 用于精确文本/正则检索，优先使用 rg；若环境缺失 rg，工具会自动\
              回退到 grep，可能较慢。调用 search_code 时应尽量指定更小的 path 和更精确的\
              pattern，避免全仓搜索导致超时。\n\
              - index_search 用于基于索引的语义检索（工作区文件 + 对话历史），速度更快但\
              受索引覆盖范围限制；需要精确定位某行代码时优先用 index_search 缩小范围，\
              再用 search_code 取精确行号。"
-            .to_string()]
+                .to_string(),
+        ]
     }
 }

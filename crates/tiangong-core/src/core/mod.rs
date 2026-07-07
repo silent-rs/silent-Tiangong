@@ -25,13 +25,6 @@ const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 const MAX_OUTER_ITERATIONS: u32 = 3;
 
-// ── Memory re-exports ──
-pub use crate::index::{
-    WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
-    list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
-    workspace_index_exists,
-};
-
 pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;

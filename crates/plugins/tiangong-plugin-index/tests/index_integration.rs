@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use tiangong_core::index::{IndexManager, IndexQuery, IndexScope, TurnData};
+use tiangong_plugin_index::{IndexManager, IndexQuery, IndexScope, TurnData};
 
 fn create_temp_workspace(dir: &Path) {
     fs::create_dir_all(dir.join("src")).unwrap();

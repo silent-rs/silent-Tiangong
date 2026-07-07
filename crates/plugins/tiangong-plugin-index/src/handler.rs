@@ -8,12 +8,12 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
-use tiangong_core::index::{IndexQuery, IndexScope};
+use crate::index::{IndexQuery, IndexScope};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::tool::common as shared;
 use tiangong_core::tool::ToolResult;
+use tiangong_core::tool::common as shared;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
 
 use crate::plugin::IndexPlugin;

@@ -604,7 +604,7 @@ pub async fn switch_session(
         .with_state_read(|core_state| Ok(core_state.active_session_effective_cwd()))
         .await?;
     let sid = session_id.clone();
-    let has_session_index = tiangong_core::index::session_index_exists(&sid);
+    let has_session_index = tiangong_plugin_index::session_index_exists(&sid);
     let messages = if !has_session_index {
         state
             .with_state_read(|core_state| {
@@ -628,9 +628,9 @@ pub async fn switch_session(
 
             // Workspace 索引：仅在尚不存在时创建
             if !cwd.is_empty()
-                && !tiangong_core::index::workspace_index_exists(std::path::Path::new(&cwd))
+                && !tiangong_plugin_index::workspace_index_exists(std::path::Path::new(&cwd))
             {
-                match tiangong_core::index::rebuild_workspace_index_for_gui(std::path::Path::new(
+                match tiangong_plugin_index::rebuild_workspace_index_for_gui(std::path::Path::new(
                     &cwd,
                 )) {
                     Ok(count) => {
@@ -645,7 +645,7 @@ pub async fn switch_session(
 
             // Session 索引：回溯已有消息
             if !messages.is_empty() {
-                match tiangong_core::index::backfill_session_index(&sid, &messages) {
+                match tiangong_plugin_index::backfill_session_index(&sid, &messages) {
                     Ok(count) => {
                         debug!(count, "切换会话后 Session 回溯索引完成");
                         need_snapshot = true;
@@ -3180,15 +3180,15 @@ pub async fn test_memory_recall(
 
 /// 列出所有 Workspace 索引
 #[tauri::command]
-pub async fn list_workspace_indexes() -> Result<Vec<tiangong_core::core::WorkspaceIndexInfo>, String>
-{
-    tiangong_core::core::list_workspace_indexes_for_gui().map_err(|err| err.to_string())
+pub async fn list_workspace_indexes(
+) -> Result<Vec<tiangong_plugin_index::WorkspaceIndexInfo>, String> {
+    tiangong_plugin_index::list_workspace_indexes_for_gui().map_err(|err| err.to_string())
 }
 
 /// 删除指定 Workspace 索引
 #[tauri::command]
 pub async fn delete_workspace_index(workspace_id: String) -> Result<(), String> {
-    tiangong_core::core::delete_workspace_index_for_gui(&workspace_id)
+    tiangong_plugin_index::delete_workspace_index_for_gui(&workspace_id)
         .map_err(|err| err.to_string())
 }
 
@@ -3196,7 +3196,7 @@ pub async fn delete_workspace_index(workspace_id: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
     let root = std::path::PathBuf::from(&root);
-    tiangong_core::core::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
+    tiangong_plugin_index::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
 }
 
 /// 获取所有可用的模型能力列表
