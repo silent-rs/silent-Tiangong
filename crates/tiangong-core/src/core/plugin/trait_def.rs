@@ -76,6 +76,45 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
+    /// 收集插件贡献的子进程环境变量（供 run_command 等子进程执行注入）。
+    ///
+    /// core 在「所有插件注册完成时」以及「配置变化导致 engine rebuild 时」统一
+    /// 遍历所有插件调用此方法，合并结果写入 RuntimeEngine 的 runtime_env，
+    /// 供 command 插件在执行子进程时注入。
+    ///
+    /// 默认返回空——不贡献环境变量的插件（fs / fetch / memory / scheduler 等）
+    /// 无需覆写。需要贡献 env 的插件（如 mcp server 的 env、skill 的 .env.local）
+    /// 覆写此方法返回自己的环境变量。
+    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::new()
+    }
+
+    /// 贡献插件允许文件操作的额外根目录（供 fs 工具写权限校验）。
+    ///
+    /// core 在「所有插件注册完成时」以及「配置变化导致 engine rebuild 时」统一
+    /// 遍历所有插件调用此方法，合并结果写入 process-level 的允许根目录表，
+    /// 供 tool/common.rs 的 `write_allowed_roots_with` 读取——避免 core 硬编码
+    /// 任何领域目录（如 `~/.tiangong/skills`）。
+    ///
+    /// 默认返回空——不贡献额外文件根的插件无需覆写。需要贡献的插件（如
+    /// skill plugin 贡献 skills 存储目录）覆写此方法。
+    fn allowed_file_roots(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
+    /// 贡献插件工具的权限等级覆盖（供 core 权限门统一汇总）。
+    ///
+    /// core 在「所有插件注册完成时」统一遍历所有插件调用此方法，合并到
+    /// `PermissionGate` 的覆盖表——避免 core 的 `classify_tool` 硬编码任何插件
+    /// 工具名（如 `get_skill_detail` / `recall_memory`）。插件工具名未命中覆盖表
+    /// 时走 core 的默认分类（按工具名前缀/特征推断）。
+    ///
+    /// 默认返回空——不贡献权限覆盖的插件无需覆写。
+    fn tool_permission_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, crate::permission::PermissionLevel> {
+        std::collections::BTreeMap::new()
+    }
 
     // ── 配置与生命周期钩子 ──
 

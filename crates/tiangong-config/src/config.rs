@@ -3,11 +3,10 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tiangong_core::agent_config::{McpConfig, SkillsConfig};
 use tiangong_core::core_config::CoreConfig;
-use tiangong_core::mcp::McpToolMeta;
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_core::permission::TrustMode;
+use tiangong_plugin_skill::SkillsConfig;
 
 /// Server 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,17 +158,15 @@ pub struct ConnectorConfig {
 
 /// 天工完整应用配置
 ///
-/// 包含 Core 所需的配置（models/mcp/skills/trust_mode）
+/// 包含 Core 所需的配置（models/skills/trust_mode）
 /// 以及应用层配置（server/connectors）。
+///
+/// MCP 配置已脱离（由 tiangong-plugin-mcp 自管 ~/.tiangong/mcp.json）。
 #[derive(Debug, Clone, Default)]
 pub struct TiangongConfig {
     // ===== Core 所需配置 =====
     /// LLM 模型配置
     pub models: ModelsConfig,
-    /// MCP 服务配置
-    pub mcp: McpConfig,
-    /// MCP 能力数据
-    pub mcp_capabilities: Vec<(String, Vec<McpToolMeta>)>,
     /// Skill 配置
     pub skills: SkillsConfig,
     /// 权限信任模式
@@ -192,8 +189,6 @@ impl TiangongConfig {
     pub fn to_core_config(&self) -> CoreConfig {
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
-            mcp: self.mcp.clone(),
-            mcp_capabilities: self.mcp_capabilities.clone(),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),

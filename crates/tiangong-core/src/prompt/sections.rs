@@ -9,7 +9,7 @@ use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 
 /// 身份块
 fn identity_block() -> String {
-    "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和技能完成各种复杂任务。".to_string()
+    "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和扩展能力完成各种复杂任务。".to_string()
 }
 
 /// 规则块
@@ -22,9 +22,8 @@ fn rules_block() -> String {
 5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。
 6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。
 7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。
-8. 如果已安装的 Skill 能处理用户请求，优先通过 run_command 调用 Skill 脚本。
-9. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。
-10. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。"
+8. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。
+9. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。"
         .to_string()
 }
 
@@ -55,13 +54,9 @@ pub fn build_system_context(session: &Session) -> Vec<String> {
 
     let workspace = session_working_directory(session);
     ctx.push(format!("当前工作目录：{}", workspace));
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut roots = vec![workspace];
-    if !home.is_empty() {
-        roots.push(format!("{home}/.tiangong/skills"));
-    }
-    ctx.push(format!("允许文件操作目录：{}", roots.join(", ")));
+    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录（如 skills 目录）
+    // 由各插件经 prompt section 自行注入，core 不再硬编码。
+    ctx.push(format!("允许文件操作目录：{}", workspace));
 
     ctx
 }
@@ -117,10 +112,9 @@ fn build_agent_team_section() -> String {
 /// 由调用方从 AgentConfig / ModelsConfig 构建，传入 session.rebuild_system_prompt()。
 pub struct SystemPromptConfig {
     pub custom_prompt: String,
-    pub skills_text: String,
     pub media_text: String,
     pub team_text: String,
-    /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范等）
+    /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范、Skill 摘要等）
     pub plugin_sections: Vec<String>,
     /// 文档附件解析规则段（PDF/Office 处理引导，issue #149）
     pub attachment_rules_text: String,
@@ -131,9 +125,6 @@ impl SystemPromptConfig {
     pub fn from_configs(models_config: &ModelsConfig, agent_config: &AgentConfig) -> Self {
         Self {
             custom_prompt: agent_config.custom_system_prompt.trim().to_string(),
-            // Skills 摘要段落已迁移至 tiangong-plugin-skill 的 PromptSectionProvider，
-            // 经 plugin_sections 流入；此处置空，保留字段以维持结构稳定。
-            skills_text: String::new(),
             media_text: build_media_section(models_config),
             team_text: build_agent_team_section(),
             plugin_sections: Vec::new(),
@@ -151,7 +142,7 @@ impl SystemPromptConfig {
 /// 构建完整的 system prompt 消息
 ///
 /// 合并静态段（身份 + 规则 + 自定义指令）、环境段（工作目录 + 文件根）、
-/// 动态段（多媒体 + Skills + 团队协作 + 用户上下文）、摘要段。
+/// 动态段（多媒体 + 附件规则 + 团队协作 + Plugin 段落 + 用户上下文）、摘要段。
 /// 返回 `Message { role: System }`，由 `build_provider_messages()` 提取到 system prompt。
 pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
     let mut parts = Vec::new();
@@ -184,16 +175,12 @@ fn collect_environment_parts(session: &Session) -> Vec<String> {
     let workspace = session_working_directory(session);
     parts.push(format!("当前会话：{}", session.title));
     parts.push(format!("当前工作目录：{}", workspace));
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut roots = vec![workspace];
-    if !home.is_empty() {
-        roots.push(format!("{home}/.tiangong/skills"));
-    }
-    parts.push(format!("允许文件操作目录：{}", roots.join(", ")));
+    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录由各插件自行注入。
+    parts.push(format!("允许文件操作目录：{}", workspace));
     parts
 }
 
-/// 收集动态段（多媒体、Skills、团队协作、用户上下文）
+/// 收集动态段（多媒体、附件规则、团队协作、Plugin 段落、用户上下文）
 fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
     let mut parts = Vec::new();
     if !config.media_text.is_empty() {
@@ -201,9 +188,6 @@ fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
     }
     if !config.attachment_rules_text.is_empty() {
         parts.push(config.attachment_rules_text.clone());
-    }
-    if !config.skills_text.is_empty() {
-        parts.push(config.skills_text.clone());
     }
     if !config.team_text.is_empty() {
         parts.push(config.team_text.clone());

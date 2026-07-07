@@ -9,11 +9,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use tiangong_core::app_state::default_skills_storage_dir_path;
-use tiangong_core::core::plugin::PluginFeedbackTx;
+use crate::paths::default_skills_storage_dir_path;
+use crate::skill_registry::SkillRegistry;
 use tiangong_core::core::Plugin;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::runtime::RuntimeEngine;
-use tiangong_core::skill::SkillRegistry;
 
 /// Skill 插件。
 ///
@@ -77,5 +77,43 @@ impl Plugin for SkillPlugin {
     fn register(&self, _engine: &RuntimeEngine) {
         // 刷新 registry 缓存，确保读到最新磁盘状态。
         self.skill_registry.refresh();
+    }
+
+    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+        // 贡献 enabled skill 目录的 .env.local 环境变量，供 run_command 子进程注入。
+        let registry = self.registry();
+        let view = registry.view();
+        let mut env = std::collections::BTreeMap::new();
+        for entry in view.entries.values() {
+            let manifest_path = entry.dir.join("skill.toml");
+            let Ok(manifest) = crate::skill_registry::read_skill_manifest(&manifest_path) else {
+                continue;
+            };
+            if !manifest.available {
+                continue;
+            }
+            for (key, value) in tiangong_core::runtime_env::load_local_env(&entry.dir) {
+                env.insert(key, value);
+            }
+        }
+        env
+    }
+
+    fn allowed_file_roots(&self) -> Vec<std::path::PathBuf> {
+        // 贡献 skills 存储目录（~/.tiangong/skills），供 fs 工具写权限校验，
+        // 让 Agent 能创建/编辑 skill 文件。core 不再硬编码此路径。
+        vec![crate::paths::default_skills_storage_dir_path()]
+    }
+
+    fn tool_permission_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
+        // get_skill_detail 是只读 skill 说明的工具，声明为 Safe，避免 core 硬编码。
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(
+            "get_skill_detail".to_string(),
+            tiangong_core::permission::PermissionLevel::Safe,
+        );
+        overrides
     }
 }

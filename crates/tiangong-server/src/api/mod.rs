@@ -31,14 +31,19 @@ pub struct ServerAppContext {
     pub config: CoreConfigProvider,
     pub cores: Arc<ServerCoreManager>,
     pub router: Arc<MessageRouter>,
+    /// MCP 管理插件共享句柄：API 管理（register/remove/...）与 core 注册使用同一实例，
+    /// 避免管理实例与运行实例状态分叉（对齐 CLI/Tauri 的 dual-ownership）。
+    pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
 }
 
 impl ServerAppContext {
     pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
+        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::new());
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             config.clone(),
             event_bus.clone(),
+            mcp_plugin.clone(),
         ));
         let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
         Self {
@@ -46,6 +51,7 @@ impl ServerAppContext {
             config,
             cores,
             router,
+            mcp_plugin,
         }
     }
 

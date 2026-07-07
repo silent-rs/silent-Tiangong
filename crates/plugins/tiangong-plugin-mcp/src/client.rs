@@ -1,3 +1,7 @@
+//! MCP 传输客户端（stdio / HTTP via rmcp）。
+//!
+//! 原属 `tiangong-core::mcp::client`，MCP 管理插件化后整块迁入本 crate。
+
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -17,8 +21,9 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::agent_config::{McpServerConfig, ResolvedMcpTransport};
-use crate::process::configure_tokio_no_window;
+use crate::config::{McpServerConfig, ResolvedMcpTransport};
+use tiangong_core::process::configure_tokio_no_window;
+use tiangong_core::tool::session_workspace_root;
 
 const MAX_LIST_PAGES: usize = 8;
 /// 最多保留的 stderr 末尾字节数，用于在握手失败时诊断子进程报错。
@@ -427,7 +432,7 @@ async fn run_stdio_mcp_request_async(
             cmd.args(&server.args);
             // stdio MCP 跟随当前会话工作目录（与 run_command 一致）；能力探测等无会话上下文
             // 的路径下此值为 None，子进程自然继承宿主进程 cwd。
-            if let Some(cwd) = crate::tool::session_workspace_root() {
+            if let Some(cwd) = session_workspace_root() {
                 cmd.current_dir(cwd);
             }
             for (key, value) in &server.env {

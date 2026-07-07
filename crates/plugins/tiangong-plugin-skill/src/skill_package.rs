@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use crate::agent_config::{
+use crate::skill_config::{
     InstalledSkillConfig, SkillMcpRequirementConfig, SkillPermissionConfig, SkillSourceConfig,
 };
-use crate::session::now_text;
+use tiangong_core::session::now_text;
 
-use super::analysis::{SkillConversionAnalysis, analyze_external_skill};
+use crate::skill_analysis::{SkillConversionAnalysis, analyze_external_skill};
 
 #[derive(Debug, Clone)]
 pub struct PreparedSkillSource {

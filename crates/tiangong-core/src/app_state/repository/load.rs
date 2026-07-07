@@ -111,50 +111,17 @@ impl AppRepository {
         &self,
         legacy_agent_config: Option<AgentConfig>,
     ) -> Result<Option<AgentConfig>> {
-        let mcp = self.load_mcp_config_from_disk()?;
-        if mcp.is_none() {
-            // 无 mcp 独立配置，直接用 legacy agent_config，
-            // 但仍需用 custom-prompt.md 加载优先级回填 custom_system_prompt
-            // （custom-prompt.md 优先，回退 legacy 旧字段）。
-            let mut agent_config = legacy_agent_config;
-            if let Some(config) = &mut agent_config {
-                let legacy_prompt = config.custom_system_prompt.clone();
-                let prompt = crate::custom_prompt::load_custom_prompt(&legacy_prompt)
-                    .unwrap_or(legacy_prompt);
-                config.custom_system_prompt = prompt;
-            }
-            return Ok(agent_config);
+        // MCP 配置已脱离 AgentConfig（由 mcp plugin 自管 ~/.tiangong/mcp.json），
+        // 此处仅用 custom-prompt.md 加载优先级回填 custom_system_prompt
+        //（custom-prompt.md 优先，回退 legacy 旧字段）。
+        let mut agent_config = legacy_agent_config;
+        if let Some(config) = &mut agent_config {
+            let legacy_prompt = config.custom_system_prompt.clone();
+            let prompt =
+                crate::custom_prompt::load_custom_prompt(&legacy_prompt).unwrap_or(legacy_prompt);
+            config.custom_system_prompt = prompt;
         }
-        let mut agent_config = legacy_agent_config.unwrap_or_default();
-        if let Some(mcp) = mcp {
-            agent_config.mcp = mcp;
-        }
-        // 用 custom-prompt.md 加载优先级回填 custom_system_prompt
-        // （custom-prompt.md 优先，回退 app.json 旧字段）。
-        let legacy_prompt = agent_config.custom_system_prompt.clone();
-        let prompt =
-            crate::custom_prompt::load_custom_prompt(&legacy_prompt).unwrap_or(legacy_prompt);
-        agent_config.custom_system_prompt = prompt;
-        Ok(Some(agent_config))
-    }
-
-    fn load_mcp_config_from_disk(&self) -> Result<Option<McpConfig>> {
-        if !self.paths.mcp_config_path.exists() {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(&self.paths.mcp_config_path).with_context(|| {
-            format!(
-                "读取 mcp 配置失败：{}",
-                self.paths.mcp_config_path.display()
-            )
-        })?;
-        let config: McpConfig = serde_json::from_str(&content).with_context(|| {
-            format!(
-                "解析 mcp 配置失败：{}",
-                self.paths.mcp_config_path.display()
-            )
-        })?;
-        Ok(Some(config))
+        Ok(agent_config)
     }
 
     pub(in crate::app_state) fn load_session_from_disk(

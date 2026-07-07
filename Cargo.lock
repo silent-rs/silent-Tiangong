@@ -9593,6 +9593,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9626,6 +9627,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9646,6 +9648,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-plugin-skill",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -9708,6 +9711,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-memory",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-skill",
  "tiangong-server",
 ]
@@ -9878,6 +9882,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-mcp"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "http",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-memory"
 version = "0.11.0"
 dependencies = [
@@ -9912,11 +9932,15 @@ name = "tiangong-plugin-skill"
 version = "0.11.0"
 dependencies = [
  "anyhow",
+ "scru128",
+ "serde",
  "serde_json",
  "tempfile",
  "tiangong-core",
  "tiangong-types",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -10008,6 +10032,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
+ "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",

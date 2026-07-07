@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use tiangong_core::agent_config::ResolvedMcpTransport;
+use tiangong_plugin_mcp::ResolvedMcpTransport;
+use tiangong_plugin_skill::{InstalledSkillConfig, LoadedSkill};
 
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +145,7 @@ pub struct TaskPlan {
     pub summary: String,
     pub items: Vec<PlanItem>,
     pub risks: Vec<String>,
-    pub skill_hints: Vec<String>,
-    pub mcp_hints: Vec<String>,
+    pub capability_hints: Vec<String>,
 }
 
 impl TaskPlan {
@@ -160,8 +160,7 @@ impl TaskPlan {
                 .map(PlanItem::from_session_step)
                 .collect(),
             risks: vec![],
-            skill_hints: vec![],
-            mcp_hints: vec![],
+            capability_hints: vec![],
         }
     }
 }
@@ -208,7 +207,7 @@ pub struct McpServerView {
 }
 
 impl McpServerView {
-    pub fn from_core(core_server: &tiangong_core::agent_config::McpServerConfig) -> Self {
+    pub fn from_core(core_server: &tiangong_plugin_mcp::McpServerConfig) -> Self {
         let transport = match core_server.resolved_transport() {
             ResolvedMcpTransport::Stdio => "stdio",
             ResolvedMcpTransport::Http => "http",
@@ -261,7 +260,7 @@ pub struct SkillDetailView {
 }
 
 impl SkillDetailView {
-    pub fn from_core(core_skill: &tiangong_core::skill::LoadedSkill) -> Self {
+    pub fn from_core(core_skill: &LoadedSkill) -> Self {
         Self {
             id: core_skill.manifest.id.clone(),
             name: core_skill.manifest.name.clone(),
@@ -279,7 +278,7 @@ impl SkillDetailView {
 }
 
 impl SkillView {
-    pub fn from_core(core_skill: &tiangong_core::agent_config::InstalledSkillConfig) -> Self {
+    pub fn from_core(core_skill: &InstalledSkillConfig) -> Self {
         Self {
             id: core_skill.id.clone(),
             name: core_skill.name.clone(),

@@ -2,8 +2,6 @@
 
 use std::path::Path;
 
-use tiangong_core::app_state::TiangongState;
-
 /// 补全候选项
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -125,11 +123,12 @@ pub fn detect_trigger(input: &str, cursor: usize) -> Option<(CompletionTrigger, 
 pub fn complete(
     trigger: CompletionTrigger,
     prefix: &str,
-    state: &TiangongState,
+    skill_plugin: &tiangong_plugin_skill::SkillPlugin,
+    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
 ) -> Vec<CompletionCandidate> {
     match trigger {
         CompletionTrigger::SlashCommand => complete_slash_commands(prefix),
-        CompletionTrigger::AtMention => complete_at_mentions(prefix, state),
+        CompletionTrigger::AtMention => complete_at_mentions(prefix, skill_plugin, mcp_plugin),
     }
 }
 
@@ -145,14 +144,18 @@ fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-fn complete_at_mentions(prefix: &str, state: &TiangongState) -> Vec<CompletionCandidate> {
+fn complete_at_mentions(
+    prefix: &str,
+    skill_plugin: &tiangong_plugin_skill::SkillPlugin,
+    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
+) -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
 
     // @file: 提及补全 - 列出当前目录文件
     candidates.extend(complete_files(prefix));
 
-    // @skill: 提及补全
-    for skill in state.installed_skills() {
+    // @skill: 提及补全（skill 数据由 skill plugin 自管）
+    for skill in skill_plugin.installed_skills() {
         if !skill.enabled {
             continue;
         }
@@ -166,8 +169,8 @@ fn complete_at_mentions(prefix: &str, state: &TiangongState) -> Vec<CompletionCa
         }
     }
 
-    // @mcp: 提及补全
-    for server in state.mcp_servers() {
+    // @mcp: 提及补全（MCP servers 由 mcp plugin 自管）
+    for server in mcp_plugin.mcp_servers() {
         if !server.enabled {
             continue;
         }

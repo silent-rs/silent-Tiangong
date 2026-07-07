@@ -14,32 +14,12 @@ pub(in crate::app_state) fn default_workspace_dir() -> String {
         .unwrap_or_default()
 }
 
-pub(in crate::app_state) fn default_skills_config_path() -> PathBuf {
-    default_storage_root().join("skills.json")
-}
-
-pub(in crate::app_state) fn default_mcp_config_path() -> PathBuf {
-    default_storage_root().join("mcp.json")
-}
-
-pub(in crate::app_state) fn default_mcp_capability_cache_path() -> PathBuf {
-    default_storage_root().join("mcp-tools-cache.json")
-}
-
 pub(in crate::app_state) fn default_sessions_dir_path() -> PathBuf {
     default_storage_root().join("sessions")
 }
 
 pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
     default_storage_root().join("sessions.json")
-}
-
-pub fn default_skills_storage_dir_path() -> PathBuf {
-    default_storage_root().join("skills")
-}
-
-pub fn default_mcp_lock_path() -> PathBuf {
-    default_skills_storage_dir_path().join("mcp-lock.json")
 }
 
 fn user_storage_root() -> PathBuf {
@@ -124,11 +104,14 @@ pub(in crate::app_state) fn normalize_model_list(
     list
 }
 
-pub fn validate_agent_config(config: &AgentConfig) -> Result<()> {
-    validate_mcp_config(&config.mcp)?;
+pub fn validate_agent_config(_config: &AgentConfig) -> Result<()> {
+    // MCP 配置校验已随 MCP 管理插件化迁出（由 mcp plugin 在管理方法内调用
+    // validate_mcp_config）。AgentConfig 现仅含 trust_mode / prompt / reasoning，
+    // 无需额外校验。保留方法供 facade 调用点兼容。
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(in crate::app_state) fn parse_bool(raw: &str) -> Result<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),

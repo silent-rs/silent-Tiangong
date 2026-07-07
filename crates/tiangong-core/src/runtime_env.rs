@@ -1,60 +1,12 @@
-//! MCP / skills 环境变量收集（供子进程执行注入）。
+//! 子进程环境变量加载工具。
 //!
-//! 原属 `tool/run_command.rs::collect_runtime_env`，LocalToolExecutor 删除后迁出至此，
-//! 供 RuntimeEngine 在构造时收集、command 插件在 register 时读取。
+//! `collect_runtime_env()` 的 skills 扫描逻辑已迁入 skill plugin 的 `collect_exec_env`
+//! 实现；MCP server 的 env 由 mcp plugin 的 `collect_exec_env` 贡献。core 在所有插件
+//! 注册完成后统一汇总各插件的 `collect_exec_env` 写入 RuntimeEngine。
 //!
-//! Skills 的环境变量直接从磁盘扫描（`~/.tiangong/skills/<id>/`），
-//! 不再经过 `AgentConfig.skills`——skills 已从 AgentConfig 脱离，由 skill plugin 自治。
-//! 这里扫描 enabled（skill.toml.available=true）的 skill 目录，读其 `.env.local`。
+//! 本模块仅保留 `.env` / `.env.local` 文件解析工具，供 skill plugin 复用。
 
-use std::collections::BTreeMap;
 use std::path::Path;
-
-use crate::agent_config::AgentConfig;
-use crate::app_state::default_skills_storage_dir_path;
-use crate::skill::{read_skill_manifest, scan_skill_registry};
-
-/// 从 agent_config 的 MCP servers 和磁盘 skills 收集环境变量。
-///
-/// MCP env 来自 `agent_config.mcp.servers`；skill env 来自磁盘扫描
-/// `~/.tiangong/skills/` 下 `available=true` 的 skill 目录的 `.env.local`。
-pub fn collect_runtime_env(agent_config: &AgentConfig) -> BTreeMap<String, String> {
-    let mut runtime_env = BTreeMap::new();
-
-    if agent_config.mcp.enabled {
-        for server in &agent_config.mcp.servers {
-            if !server.enabled {
-                continue;
-            }
-            for (key, value) in &server.env {
-                let key = key.trim();
-                if !is_valid_env_key(key) {
-                    continue;
-                }
-                runtime_env.insert(key.to_string(), value.trim().to_string());
-            }
-        }
-    }
-
-    // Skill env：直接扫描磁盘（skills 已从 AgentConfig 脱离，由 skill plugin 自治）。
-    // 过渡方案：后续可改为读 skill plugin 的 registry，避免重复扫盘。
-    let skills_root = default_skills_storage_dir_path();
-    let view = scan_skill_registry(&skills_root);
-    for entry in view.entries.values() {
-        let manifest_path = entry.dir.join("skill.toml");
-        let Ok(manifest) = read_skill_manifest(&manifest_path) else {
-            continue;
-        };
-        if !manifest.available {
-            continue;
-        }
-        for (key, value) in load_local_env(&entry.dir) {
-            runtime_env.insert(key, value);
-        }
-    }
-
-    runtime_env
-}
 
 /// 加载目录下的 .env.local / .env 文件。
 pub fn load_local_env(cwd: &Path) -> Vec<(String, String)> {

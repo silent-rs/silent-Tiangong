@@ -3,6 +3,5 @@ mod mcp_settings;
 mod provider_settings;
 mod runtime;
 mod sessions;
-mod skills;
 mod storage;
 mod turns;

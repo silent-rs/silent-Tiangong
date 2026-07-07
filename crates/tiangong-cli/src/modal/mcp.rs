@@ -4,10 +4,10 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use tiangong_core::app_state::TiangongState;
+use tiangong_plugin_mcp::{McpPlugin, RegisterMcpServerOptions, RegisterMcpServerRequest};
 
 /// 打开 MCP 管理 modal
-pub fn open(state: &mut TiangongState) -> Result<()> {
+pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
     let mut selected: usize = 0;
     let mut query = String::new();
     let mut add_input: Option<String> = None;
@@ -16,7 +16,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
 
     super::run_modal(|terminal| {
         loop {
-            let servers = state.mcp_servers().to_vec();
+            let servers = mcp_plugin.mcp_servers();
             let matched: Vec<usize> = servers
                 .iter()
                 .enumerate()
@@ -118,7 +118,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(raw) = add_input.take() {
-                                match parse_and_add_mcp(state, &raw) {
+                                match parse_and_add_mcp(mcp_plugin, &raw) {
                                     Ok(msg) => status = msg,
                                     Err(err) => status = format!("新增失败：{err}"),
                                 }
@@ -151,7 +151,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                         if let Some(&si) = matched.get(selected) {
                             let name = servers[si].name.clone();
                             let new_enabled = !servers[si].enabled;
-                            match state.set_mcp_server_enabled(&name, new_enabled) {
+                            match mcp_plugin.set_mcp_server_enabled(&name, new_enabled) {
                                 Ok(msg) => status = msg,
                                 Err(err) => status = format!("操作失败：{err}"),
                             }
@@ -165,7 +165,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
                     KeyCode::Backspace => {
                         if let Some(&si) = matched.get(selected) {
                             let name = servers[si].name.clone();
-                            match state.remove_mcp_server(&name) {
+                            match mcp_plugin.remove_mcp_server(&name) {
                                 Ok(msg) => {
                                     status = msg;
                                     selected = selected.saturating_sub(1);
@@ -190,9 +190,7 @@ pub fn open(state: &mut TiangongState) -> Result<()> {
     })
 }
 
-fn parse_and_add_mcp(state: &mut TiangongState, raw: &str) -> Result<String> {
-    use tiangong_core::app_state::{RegisterMcpServerOptions, RegisterMcpServerRequest};
-
+fn parse_and_add_mcp(mcp_plugin: &McpPlugin, raw: &str) -> Result<String> {
     let parts: Vec<&str> = raw.split_whitespace().collect();
     if parts.len() < 2 {
         return Err(anyhow::anyhow!("至少需要 <name> <command>"));
@@ -201,7 +199,7 @@ fn parse_and_add_mcp(state: &mut TiangongState, raw: &str) -> Result<String> {
     let command = parts[1].to_string();
     let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
 
-    state.register_mcp_server(RegisterMcpServerRequest {
+    mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
         name,
         command,
         args,

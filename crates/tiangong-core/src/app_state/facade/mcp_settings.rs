@@ -1,61 +1,17 @@
+//! MCP 管理 facade 已迁移至 `tiangong-plugin-mcp`。
+//!
+//! 原 `TiangongState` 上的 MCP 管理方法（register/update/remove/set_enabled/
+//! mcp_servers/mcp_server_summary/mcp_server_detail/mcp_server_cached_tools/
+//! update_agent_config_entry）全部迁至 `McpPlugin` 固有方法，由入口层
+//!（Tauri/CLI）持有 `Arc<McpPlugin>` 调用（dual-ownership）。
+//!
+//! `agent_config_summary` / `validate_agent_config` 不再涉及 MCP（MCP 配置
+//! 已从 AgentConfig 脱离），如需保留请改读 plugin。
 use super::super::*;
 
 impl TiangongState {
-    pub fn agent_config_summary(&self) -> String {
-        format!(
-            "mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}",
-            self.store.agent.agent_config.mcp.enabled,
-            self.store.agent.agent_config.mcp.timeout_ms,
-            self.store.agent.agent_config.mcp.servers.len()
-        )
-    }
-
+    /// 校验 agent 配置（MCP 配置已脱离，此处仅保留接口供未来扩展）。
     pub fn validate_agent_config(&self) -> Result<()> {
         validate_agent_config(&self.store.agent.agent_config)
-    }
-
-    pub fn mcp_server_summary(&self, name_filter: Option<&str>) -> String {
-        summarize_mcp_servers(&self.store.agent.agent_config.mcp.servers, name_filter)
-    }
-
-    pub fn mcp_server_detail(&self, name_filter: Option<&str>) -> String {
-        describe_mcp_servers(&self.store.agent.agent_config.mcp.servers, name_filter)
-    }
-
-    pub fn mcp_servers(&self) -> &[McpServerConfig] {
-        &self.store.agent.agent_config.mcp.servers
-    }
-
-    pub fn mcp_server_cached_tools(&self, name: &str) -> Option<Vec<McpToolMeta>> {
-        cached_server_tools(name)
-    }
-
-    pub fn register_mcp_server(&mut self, request: RegisterMcpServerRequest) -> Result<String> {
-        let service = self.services.mcp_service;
-        service.register_mcp_server(self, request)
-    }
-
-    pub fn remove_mcp_server(&mut self, name: &str) -> Result<String> {
-        let service = self.services.mcp_service;
-        service.remove_mcp_server(self, name)
-    }
-
-    pub fn set_mcp_server_enabled(&mut self, name: &str, enabled: bool) -> Result<String> {
-        let service = self.services.mcp_service;
-        service.set_mcp_server_enabled(self, name, enabled)
-    }
-
-    pub fn update_mcp_server(
-        &mut self,
-        name: &str,
-        request: RegisterMcpServerRequest,
-    ) -> Result<String> {
-        let service = self.services.mcp_service;
-        service.update_mcp_server(self, name, request)
-    }
-
-    pub fn update_agent_config_entry(&mut self, key: &str, value: &str) -> Result<String> {
-        let service = self.services.mcp_service;
-        service.update_agent_config_entry(self, key, value)
     }
 }

@@ -4,39 +4,18 @@ use anyhow::Result;
 
 use super::super::*;
 use super::common::with_isolated_state;
-use crate::agent_config::McpServerConfig;
 
 #[test]
-#[ignore = "Phase 4: skills 已脱离 agent_config，skills.json 持久化契约变更"]
+#[ignore = "Phase 4: skills/mcp 已脱离 agent_config，持久化契约由各自 plugin 自治"]
 fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result<()> {
     with_isolated_state("tiangong-repository-roundtrip", |paths, state| {
         state.store.provider.model_list = vec!["glm-test".to_string(), "glm-4.7".to_string()];
-        state.store.agent.agent_config.mcp.timeout_ms = 23_000;
-        state
-            .store
-            .agent
-            .agent_config
-            .mcp
-            .servers
-            .push(McpServerConfig {
-                name: "demo".to_string(),
-                transport: McpTransportMode::Http,
-                command: String::new(),
-                args: Vec::new(),
-                endpoint: "http://127.0.0.1:8080/mcp".to_string(),
-                auth_header: String::new(),
-                headers: Default::default(),
-                env: Default::default(),
-                enabled: true,
-                tags: vec!["demo".to_string()],
-            });
 
         let session = Session::new("第二会话");
         state.store.session.active_session_id = session.id.clone();
         state.store.session.sessions.push(session.clone());
 
         state.persist_to_disk()?;
-        state.persist_agent_configs_only()?;
 
         let loaded = state
             .services
@@ -50,23 +29,14 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
             loaded.model_list.first().map(String::as_str),
             Some("glm-test")
         );
-        let loaded_agent = loaded.agent_config.expect("应从 mcp.json 恢复 agent 配置");
-        assert_eq!(loaded_agent.mcp.timeout_ms, 23_000);
-        assert_eq!(loaded_agent.mcp.servers.len(), 1);
 
         let app_path = paths.fake_home.join(".tiangong").join("app.json");
         assert!(app_path.exists());
         let app_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&app_path)?)?;
         assert!(app_json.get("agent_config").is_some());
+        // MCP 配置已脱离 AgentConfig（由 tiangong-plugin-mcp 自管 ~/.tiangong/mcp.json），
+        // app.json 的 agent_config 不再包含 mcp 字段。
         assert!(app_json["agent_config"].get("mcp").is_none());
-        assert!(
-            paths
-                .fake_home
-                .join(".tiangong")
-                .join("skills.json")
-                .exists()
-        );
-        assert!(paths.fake_home.join(".tiangong").join("mcp.json").exists());
         assert!(
             paths
                 .fake_home
@@ -207,55 +177,4 @@ fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()>
             Ok(())
         },
     )
-}
-
-#[test]
-#[ignore = "Phase 4: mcp-lock 逻辑迁移到 plugin 后重写"]
-fn sync_mcp_dependency_lock_writes_expected_ref_counts() -> Result<()> {
-    with_isolated_state("tiangong-mcp-dependency-lock", |paths, state| {
-        // skills 已脱离 agent_config，sync_mcp_dependency_lock 从磁盘 registry 扫描。
-        // 在隔离存储目录下创建两个 skill 的 skill.toml，声明 mcp 依赖。
-        let skills_dir = paths.fake_home.join(".tiangong").join("skills");
-        fs::create_dir_all(skills_dir.join("alpha"))?;
-        fs::create_dir_all(skills_dir.join("beta"))?;
-        fs::write(
-            skills_dir.join("alpha").join("skill.toml"),
-            "id = \"alpha\"\nname = \"Alpha\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\n\n[source]\ntype = \"local\"\nvalue = \"\"\n\n[[requires.mcp]]\nid = \"m1\"\nsource = \"\"\npackage = \"pkg-a\"\nversion = \"1.0.0\"\n\n[[requires.mcp]]\nid = \"m2\"\nsource = \"\"\npackage = \"pkg-b\"\nversion = \"\"\n",
-        )?;
-        fs::write(
-            skills_dir.join("beta").join("skill.toml"),
-            "id = \"beta\"\nname = \"Beta\"\nversion = \"0.1.0\"\nentry = \"SKILL.md\"\n\n[source]\ntype = \"local\"\nvalue = \"\"\n\n[[requires.mcp]]\nid = \"m3\"\nsource = \"\"\npackage = \"pkg-a\"\nversion = \"1.0.0\"\n",
-        )?;
-
-        state.sync_mcp_dependency_lock()?;
-
-        let mcp_lock_path = skills_dir.join("mcp-lock.json");
-
-        let mcp_lock: std::collections::BTreeMap<String, serde_json::Value> =
-            serde_json::from_str(&fs::read_to_string(mcp_lock_path)?)?;
-
-        assert!(
-            !paths
-                .fake_home
-                .join(".tiangong")
-                .join("skills")
-                .join("skills-lock.json")
-                .exists()
-        );
-        assert_eq!(
-            mcp_lock
-                .get("pkg-a@1.0.0")
-                .and_then(|item| item.get("ref_count"))
-                .and_then(|value| value.as_u64()),
-            Some(2)
-        );
-        assert_eq!(
-            mcp_lock
-                .get("pkg-b")
-                .and_then(|item| item.get("ref_count"))
-                .and_then(|value| value.as_u64()),
-            Some(1)
-        );
-        Ok(())
-    })
 }

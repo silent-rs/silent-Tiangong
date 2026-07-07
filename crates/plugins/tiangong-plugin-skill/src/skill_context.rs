@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agent_config::SkillsConfig;
+use crate::skill_config::SkillsConfig;
 
-use super::package::extract_skill_markdown_meta;
-use super::util::format_skill_record;
+use crate::skill_package::extract_skill_markdown_meta;
+use crate::skill_util::format_skill_record;
 
 #[derive(Debug, Clone)]
 pub(super) struct SkillMeta {

@@ -23,6 +23,10 @@ pub struct TiangongApp {
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
+    /// MCP 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具（动态 MCP 工具
+    /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
+    /// set_enabled/probe/health）。
+    pub mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
     /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
@@ -64,6 +68,7 @@ impl TiangongApp {
             cores: Mutex::new(HashMap::new()),
             config,
             skill_plugin: std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new()),
+            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::new()),
             embedded_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
@@ -344,6 +349,9 @@ impl TiangongApp {
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
         // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
         plugins.push(self.skill_plugin.clone());
+        // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
+        // app 侧经 self.mcp_plugin 做管理（register/update/remove/set_enabled/probe）。
+        plugins.push(self.mcp_plugin.clone());
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core =

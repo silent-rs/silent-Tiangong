@@ -1,12 +1,10 @@
-use tiangong_core::agent_config::InstalledSkillConfig;
 use tiangong_core::app_state::TiangongState;
-use tiangong_core::skill::init_tiangong_skill_scaffold;
-use tiangong_plugin_skill::SkillPlugin;
+use tiangong_plugin_skill::{InstalledSkillConfig, SkillPlugin, init_tiangong_skill_scaffold};
 
 use crate::args::{SkillArgs, SkillSubcommand};
 
 pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
-    let mut state = TiangongState::load_or_default();
+    let state = TiangongState::load_or_default();
     let skill_plugin = SkillPlugin::new();
     match args.command {
         SkillSubcommand::List => {
@@ -43,18 +41,13 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
         }
         SkillSubcommand::Remove { id } => {
             let outcome = skill_plugin.remove_skill(&id)?;
-            // 清理孤儿托管 MCP server
+            // 清理孤儿托管 MCP server（MCP 配置由 mcp plugin 自管）
             if !outcome.orphan_mcp_servers.is_empty() {
-                state
-                    .store
-                    .agent
-                    .agent_config
-                    .mcp
-                    .servers
-                    .retain(|s| !outcome.orphan_mcp_servers.contains(&s.name));
+                let mcp_plugin = tiangong_plugin_mcp::McpPlugin::new();
+                for orphan in &outcome.orphan_mcp_servers {
+                    let _ = mcp_plugin.remove_mcp_server(orphan);
+                }
             }
-            // 持久化 mcp 配置变更（删除必须用 no_merge，否则磁盘上刚删的 server 会被加回）
-            state.persist_agent_configs_no_merge_mcp()?;
             println!("{}", outcome.message);
         }
         SkillSubcommand::Enable { id } => {

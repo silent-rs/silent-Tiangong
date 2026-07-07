@@ -131,8 +131,9 @@ jobs:
           file_list = [f for f in files.splitlines() if f]
 
           # 只校验被直接改动的 crate（不做反向依赖闭包扩散）。
-          # 闭包扩散会让底层 crate 改动触发几乎全部上游作业，而每个作业又各自
-          # 全量编译依赖闭包，总编译量远超单次 workspace 校验，反而更慢更费资源。
+          # rust-crate 作业会把所有受影响 crate 合并到一条 cargo 命令，
+          # 共享同一个 target/，共享依赖只编译一次；若再叠加反向依赖扩散，
+          # 会让底层 crate 改动拉起几乎全部上游 crate，反而拉长单次构建。
           # 直接改动校验已能覆盖大多数破坏；上游编译问题由 Rust fmt（workspace 级）
           # 与单次 workspace check 兜底。
           order = list(crate_to_prefix.keys())
@@ -161,18 +162,15 @@ jobs:
         # 格式校验必须保证整个 workspace 一致，因此仅做一次、不按 crate 拆分
         run: cargo fmt --all -- --check
 
-  # 逐 crate 校验：changes 作业已按依赖闭包筛选出真正受影响的 crate，
-  # 这里只对它们运行 check / clippy / test。
-  # cargo -p <crate> 仅编译该 crate 的依赖闭包，避免触发全量 workspace 编译。
+  # 单作业批量校验所有受影响 crate：changes 作业已筛出被直接改动的 crate，
+  # 这里把它们合并到同一条 cargo 命令（cargo -p a -p b ...）。
+  # 合并后所有 crate 共享同一个 target/ 目录与 rust-cache，共享依赖只编译一次，
+  # 避免「逐 crate 矩阵作业各自全量编译依赖闭包」导致的重复构建。
   rust-crate:
-    name: Rust ${{ matrix.crate }}
+    name: Rust (affected crates)
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: ${{ fromJSON(needs.changes.outputs.matrix) }}
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -195,7 +193,6 @@ jobs:
       - name: Install Linux system dependencies
         # tiangong-core / tiangong-memory 间接引入 tantivy/lancedb/rusqlite/scraper，
         # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库。
-        # 为避免逐 crate 维护系统依赖矩阵，统一安装一次。
         run: |
           # GitHub runner 预装的 Microsoft apt 源偶发 403，提前移除避免污染 apt-get update
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
@@ -218,17 +215,32 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Resolve package args
+        id: pkgs
+        env:
+          MATRIX: ${{ needs.changes.outputs.matrix }}
+        run: |
+          # 把受影响 crate 的 JSON 数组展开为 "-p a -p b ..." 形式，
+          # 后续 cargo 命令通过 $PKGS 复用，确保依赖闭包在同一 target/ 下只编译一次。
+          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
+          echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+
       - name: Check crate
-        run: cargo check -p ${{ matrix.crate }}
+        env:
+          PKGS: ${{ steps.pkgs.outputs.pkgs }}
+        run: cargo check $PKGS
 
       - name: Run clippy
-        run: cargo clippy -p ${{ matrix.crate }} --all-targets --tests --benches -- -D warnings
+        env:
+          PKGS: ${{ steps.pkgs.outputs.pkgs }}
+        run: cargo clippy $PKGS --all-targets --tests --benches -- -D warnings
 
       - name: Run nextest
         env:
+          PKGS: ${{ steps.pkgs.outputs.pkgs }}
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
-        run: cargo nextest run -p ${{ matrix.crate }} --no-tests pass
+        run: cargo nextest run $PKGS --no-tests pass
 
   tauri:
     name: Tauri Shell Check

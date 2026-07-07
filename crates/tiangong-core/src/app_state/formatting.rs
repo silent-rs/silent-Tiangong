@@ -44,15 +44,10 @@ pub(super) fn format_plan_snapshot(plan: &TaskPlan) -> String {
         .iter()
         .map(|item| item.execution_steps.len())
         .sum::<usize>();
-    let skill_hints = if plan.skill_hints.is_empty() {
+    let capability_hints = if plan.capability_hints.is_empty() {
         "无".to_string()
     } else {
-        plan.skill_hints.join("；")
-    };
-    let mcp_hints = if plan.mcp_hints.is_empty() {
-        "无".to_string()
-    } else {
-        plan.mcp_hints.join("；")
+        plan.capability_hints.join("；")
     };
     let revisions = if plan.revisions.is_empty() {
         "无".to_string()
@@ -74,15 +69,8 @@ pub(super) fn format_plan_snapshot(plan: &TaskPlan) -> String {
     };
 
     format!(
-        "{}\n目标：{}\n事项数：{}\n执行步骤数：{}\n风险：{}\nSkills：{}\nMCP：{}\n计划修正：{}",
-        plan.summary,
-        plan.objective,
-        plan_count,
-        step_count,
-        risks,
-        skill_hints,
-        mcp_hints,
-        revisions
+        "{}\n目标：{}\n事项数：{}\n执行步骤数：{}\n风险：{}\n能力提示：{}\n计划修正：{}",
+        plan.summary, plan.objective, plan_count, step_count, risks, capability_hints, revisions
     )
 }
 

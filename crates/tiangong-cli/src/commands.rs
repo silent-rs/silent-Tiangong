@@ -14,6 +14,7 @@ pub fn handle_command(
     command: &str,
     draft_new_session: &mut bool,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
+    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
 ) -> Result<bool> {
     let command = command.trim();
     let mut sync_core_config = false;
@@ -41,11 +42,11 @@ pub fn handle_command(
             sync_core_config = true;
         }
         "/mcp" => {
-            modal::mcp::open(state)?;
+            modal::mcp::open(mcp_plugin)?;
             sync_core_config = true;
         }
         "/skill" => {
-            modal::skill::open(state, skill_plugin)?;
+            modal::skill::open(state, skill_plugin, mcp_plugin)?;
             sync_core_config = true;
         }
         "/cancel" => {
@@ -56,7 +57,7 @@ pub fn handle_command(
             }
         }
         _ if command == "/config" || command.starts_with("/config ") => {
-            handle_config(state, command)?;
+            handle_config(state, command, mcp_plugin)?;
             sync_core_config = command
                 .trim_start_matches("/config")
                 .trim()
@@ -159,11 +160,23 @@ fn handle_model(state: &mut TiangongState, command: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_config(state: &mut TiangongState, command: &str) -> Result<()> {
+fn handle_config(
+    state: &mut TiangongState,
+    command: &str,
+    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
+) -> Result<()> {
     let args = command.trim_start_matches("/config").trim();
 
     if args.is_empty() || args == "show" {
-        output::print_info(&state.agent_config_summary());
+        // agent_config_summary 已随 MCP 脱离移除，此处展示 MCP 摘要 + trust_mode。
+        let mcp = mcp_plugin.config_snapshot_public();
+        output::print_info(&format!(
+            "mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}, trust_mode={:?}",
+            mcp.enabled,
+            mcp.timeout_ms,
+            mcp.servers.len(),
+            state.store.agent.agent_config.trust_mode,
+        ));
         return Ok(());
     }
 
@@ -186,7 +199,8 @@ fn handle_config(state: &mut TiangongState, command: &str) -> Result<()> {
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .ok_or_else(|| anyhow!("缺少配置值"))?;
-        let message = state.update_agent_config_entry(key, value)?;
+        // MCP 配置项（mcp.enabled / mcp.timeout_ms）由 mcp plugin 自管。
+        let message = mcp_plugin.update_mcp_config_entry(key, value)?;
         output::print_status(&message);
         return Ok(());
     }

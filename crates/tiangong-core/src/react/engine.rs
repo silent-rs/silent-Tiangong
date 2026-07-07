@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::agents::execution_mcp_agent::McpFunctionTarget;
 use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::context::assembler::filter_background_task_tools;
 use crate::core::command::{Command, PendingCommandEffect};
@@ -53,7 +52,6 @@ pub(super) enum TurnPhase {
 pub(crate) struct ReactEngine {
     pub(super) engine: crate::runtime::RuntimeEngine,
     pub(super) tools: Vec<ToolSpec>,
-    pub(super) mcp_targets: HashMap<String, McpFunctionTarget>,
     /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
     pub(super) max_tool_rounds: usize,
     /// 总结阶段后重新进入工具执行阶段的最大次数。
@@ -66,14 +64,12 @@ impl ReactEngine {
     pub(crate) fn new(
         engine: crate::runtime::RuntimeEngine,
         tools: Vec<ToolSpec>,
-        mcp_targets: HashMap<String, McpFunctionTarget>,
         max_tool_rounds: usize,
         max_outer_iterations: u32,
     ) -> Self {
         Self {
             engine,
             tools,
-            mcp_targets,
             max_tool_rounds,
             max_outer_iterations,
             team: None,
@@ -1098,14 +1094,7 @@ impl ReactEngine {
                         // 其 multimodal 子调用的 token 用量由插件经反馈通道上报。
                         let (mut result, tool_llm_usage, allow_memory_context, usage_source) = {
                             (
-                                self.engine
-                                    .execute_tool_call(
-                                        call,
-                                        &self.mcp_targets,
-                                        &self.engine.agent_config().mcp,
-                                        session,
-                                    )
-                                    .await,
+                                self.engine.execute_tool_call(call, session).await,
                                 tiangong_types::TokenUsage::default(),
                                 false,
                                 "",

@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -52,21 +52,39 @@ pub fn session_workspace_root() -> Option<PathBuf> {
     SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
 }
 
-/// 计算允许写入的根目录列表（工作空间 + `~/.tiangong/skills`）。
+/// 插件贡献的额外允许文件根目录（process-level，由 core/mod.rs 汇总各插件的
+/// `Plugin::allowed_file_roots` 写入）。
+static EXTRA_ALLOWED_ROOTS: OnceLock<RwLock<Vec<PathBuf>>> = OnceLock::new();
+
+fn extra_allowed_roots() -> &'static RwLock<Vec<PathBuf>> {
+    EXTRA_ALLOWED_ROOTS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// 写入插件贡献的额外允许文件根目录（供 core/mod.rs 在汇总插件能力时调用）。
+pub fn set_extra_allowed_roots(roots: Vec<PathBuf>) {
+    if let Ok(mut guard) = extra_allowed_roots().write() {
+        *guard = roots;
+    }
+}
+
+/// 计算允许写入的根目录列表（工作空间 + 插件贡献的额外根目录）。
 ///
 /// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
-/// 避免隐式依赖 `SESSION_CWD`。
+/// 避免隐式依赖 `SESSION_CWD`。额外根目录由各插件经
+/// [`crate::core::Plugin::allowed_file_roots`] 贡献，core 不再硬编码任何领域目录。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     let workspace_canonical = workspace
         .canonicalize()
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
 
     let mut roots = vec![workspace_canonical];
-    if let Some(home) = user_home_dir() {
-        let skills = home.join(".tiangong").join("skills");
-        let skills_canonical = skills.canonicalize().unwrap_or(skills);
-        if !roots.iter().any(|root| root == &skills_canonical) {
-            roots.push(skills_canonical);
+    // 插件贡献的额外允许目录（如 skill plugin 的 ~/.tiangong/skills）。
+    if let Ok(extra) = extra_allowed_roots().read() {
+        for root in extra.iter() {
+            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+            if !roots.iter().any(|r| r == &canonical) {
+                roots.push(canonical);
+            }
         }
     }
     Ok(roots)
@@ -85,7 +103,7 @@ fn ensure_path_in_write_allowed_roots_with(path: &Path, label: &str, base: &Path
         .with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             canonical.display()
         ));
     }
@@ -161,7 +179,7 @@ pub fn resolve_write_path_from_base(raw: &str, base: &Path) -> Result<PathBuf> {
 
     if !is_path_in_allowed_roots(&parent_canonical, &roots) {
         return Err(anyhow!(
-            "路径越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "路径越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             candidate.display()
         ));
     }
@@ -191,7 +209,7 @@ fn ensure_path_in_write_allowed_roots(path: &Path, label: &str) -> Result<()> {
         .with_context(|| format!("解析{label}失败：{}", path.display()))?;
     if !is_path_in_allowed_roots(&canonical, &roots) {
         return Err(anyhow!(
-            "{label}越界，仅允许当前工作空间或 ~/.tiangong/skills：{}",
+            "{label}越界，仅允许当前工作空间或已注册的额外允许目录：{}",
             canonical.display()
         ));
     }

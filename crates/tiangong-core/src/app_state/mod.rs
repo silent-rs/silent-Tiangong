@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,12 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::{AgentConfig, McpConfig, McpServerConfig, McpTransportMode};
-use crate::mcp::{
-    McpToolMeta, cached_server_tools, configure_mcp_capability_scheduler, describe_mcp_servers,
-    load_mcp_capabilities_cache, refresh_mcp_capabilities_async, summarize_mcp_servers,
-    validate_mcp_config,
-};
+use crate::agent_config::AgentConfig;
 use crate::model::{ModelProviderConfig, SingleProviderClient};
 use crate::planner::{PlanStepStatus, TaskPlan};
 use crate::runtime::{
@@ -33,53 +28,21 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    default_app_storage_path, default_mcp_capability_cache_path, default_mcp_config_path,
-    default_sessions_dir_path, default_skills_config_path, default_workspace_dir,
-    normalize_model_list, parse_bool, validate_agent_config,
+    default_app_storage_path, default_sessions_dir_path, default_workspace_dir,
+    normalize_model_list, validate_agent_config,
 };
-use self::services::{AppMcpService, AppTurnService};
+use self::services::AppTurnService;
 pub use self::support::StreamEvent;
-use self::support::{
-    LegacyPersistedState, LoadedState, McpDependencyLockRecord, PersistedAppState,
-};
+use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
-pub use self::repository::default_mcp_lock_path;
-pub use self::repository::default_skills_storage_dir_path;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };
 pub use self::support::{AppPaths, AppServices};
 
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
-const MCP_CAPABILITY_REFRESH_INTERVAL_SECS: u64 = 300;
-
-#[derive(Debug, Clone, Default)]
-pub struct RegisterMcpServerOptions {
-    pub transport: Option<McpTransportMode>,
-    pub endpoint: Option<String>,
-    pub auth_header: Option<String>,
-    pub headers: Vec<(String, String)>,
-    pub env: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RegisterMcpServerRequest {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    pub tags: Vec<String>,
-    pub enabled: bool,
-    pub options: RegisterMcpServerOptions,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SkillInstallInspection {
-    pub dependencies: Vec<String>,
-    pub env_vars: Vec<String>,
-    pub missing_env_vars: Vec<String>,
-}
 
 #[derive(Debug)]
 pub struct TiangongState {

@@ -50,6 +50,18 @@ impl Plugin for BrowserPlugin {
         // 工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集，
         // 此处仅注入 PageFetcher 能力。
     }
+
+    fn tool_permission_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
+        // web_form_extract 是只读表单提取工具，声明为 Safe，避免 core 硬编码。
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(
+            "web_form_extract".to_string(),
+            tiangong_core::permission::PermissionLevel::Safe,
+        );
+        overrides
+    }
 }
 
 impl ToolOverrideHandler for BrowserPlugin {

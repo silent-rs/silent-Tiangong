@@ -19,6 +19,7 @@ tiangong-plugin-memory = { workspace = true }
 tiangong-plugin-scheduler = { workspace = true }
 tiangong-plugin-analyze-attachment = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
+tiangong-plugin-mcp = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-types = { workspace = true }
 tracing = { workspace = true }
