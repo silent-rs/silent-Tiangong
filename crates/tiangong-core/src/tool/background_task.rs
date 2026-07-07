@@ -41,40 +41,6 @@ pub enum TaskStatus {
     Cancelled,
 }
 
-impl From<&TaskStatus> for crate::task::UnifiedTaskStatus {
-    fn from(status: &TaskStatus) -> Self {
-        match status {
-            TaskStatus::Running => Self::Running,
-            TaskStatus::Completed { exit_code } => Self::Completed {
-                exit_code: *exit_code,
-            },
-            TaskStatus::Failed { error } => Self::Failed {
-                error: error.clone(),
-            },
-            TaskStatus::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-impl From<&crate::task::UnifiedTaskStatus> for TaskStatus {
-    fn from(status: &crate::task::UnifiedTaskStatus) -> Self {
-        match status {
-            crate::task::UnifiedTaskStatus::Running
-            | crate::task::UnifiedTaskStatus::Queued
-            | crate::task::UnifiedTaskStatus::Backgrounded
-            | crate::task::UnifiedTaskStatus::Blocked { .. }
-            | crate::task::UnifiedTaskStatus::WaitingApproval { .. } => Self::Running,
-            crate::task::UnifiedTaskStatus::Completed { exit_code } => Self::Completed {
-                exit_code: *exit_code,
-            },
-            crate::task::UnifiedTaskStatus::Failed { error } => Self::Failed {
-                error: error.clone(),
-            },
-            crate::task::UnifiedTaskStatus::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
     pub id: String,
