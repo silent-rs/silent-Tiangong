@@ -3,17 +3,21 @@
 //! 所有 crate（core、cli、gui、server、connector）共用的数据类型。
 //! 不包含业务逻辑，只有数据结构和序列化。
 
+pub mod event;
 pub mod message;
+pub mod process;
 pub mod remote;
 pub mod session;
 pub mod status;
 pub mod stream;
 pub mod token;
 
+pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
 pub use message::{
     ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
     TurnStatus, now_text,
 };
+pub use process::{configure_no_window, configure_tokio_no_window};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::process::configure_no_window;
+use tiangong_types::process::configure_no_window;
 
 /// 全局后台任务注册表
 static TASK_REGISTRY: OnceLock<Arc<Mutex<TaskRegistry>>> = OnceLock::new();

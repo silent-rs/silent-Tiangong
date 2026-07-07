@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::process::configure_no_window;
+use tiangong_types::process::configure_no_window;
 
 thread_local! {
     /// 当前执行的会话工作目录，由 RuntimeEngine 在执行前设置

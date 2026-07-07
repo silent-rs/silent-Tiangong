@@ -9813,6 +9813,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-types",
  "tokio",
 ]
 
@@ -10052,6 +10053,7 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

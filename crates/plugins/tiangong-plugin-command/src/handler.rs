@@ -303,7 +303,7 @@ async fn exec_and_collect(
     let file_env = load_local_env(cwd);
 
     let mut command = Command::new(cmd);
-    tiangong_core::process::configure_tokio_no_window(&mut command);
+    tiangong_types::process::configure_tokio_no_window(&mut command);
     command
         .args(args)
         .current_dir(cwd)
