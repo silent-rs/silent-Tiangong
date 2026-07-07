@@ -895,7 +895,7 @@ mod tests {
 
     fn make_plugin(dir: &tempfile::TempDir) -> FsPlugin {
         let plugin = FsPlugin::new();
-        plugin.set_workspace(dir.path());
+        plugin.set_workspace(Some(dir.path()));
         plugin
     }
 

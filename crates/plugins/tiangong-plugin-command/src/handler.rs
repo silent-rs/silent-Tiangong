@@ -435,7 +435,7 @@ mod tests {
 
     fn make_plugin(dir: &tempfile::TempDir) -> CommandPlugin {
         let plugin = CommandPlugin::new();
-        plugin.set_workspace(dir.path());
+        plugin.set_workspace(Some(dir.path()));
         plugin
     }
 

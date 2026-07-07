@@ -710,7 +710,7 @@ mod tests {
 
     fn make_plugin(dir: &tempfile::TempDir) -> FetchPlugin {
         let plugin = FetchPlugin::new();
-        plugin.set_workspace(dir.path());
+        plugin.set_workspace(Some(dir.path()));
         plugin
     }
 
