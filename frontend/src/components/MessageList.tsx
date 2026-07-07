@@ -171,7 +171,16 @@ export function MessageList() {
 
   // agent_tab 过滤前置：将渲染时的 return null 改为数据层过滤
   const filteredGroups = useMemo(() => {
-    if (!selectedAgentTab) return messageGroups;
+    if (!selectedAgentTab) {
+      // 主对话视图：排除子 Agent 的过程消息（worker_id 以 "agent:" 开头），
+      // 这些只在对应的 Agent Tab 中展示。
+      return messageGroups.filter(group => {
+        if (group.type === "worker") {
+          return !group.worker_id?.startsWith("agent:");
+        }
+        return true;
+      });
+    }
     return messageGroups.filter(group => {
       if (group.type === "user") return false;
       if (group.type === "worker") {
