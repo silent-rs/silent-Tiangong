@@ -6,6 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { workspace = true }
+tiangong-toolkit = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls"] }
 scraper = { workspace = true }
 sha2 = { workspace = true }

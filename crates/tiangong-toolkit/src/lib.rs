@@ -1,12 +1,12 @@
 //! 工具共享 helper：会话工作目录、路径沙箱、命令白名单、命令执行。
 //!
-//! 既是 core 内置工具（`LocalToolExecutor`）的共享基础设施，也通过 `pub` 暴露给
-//! 进程内插件 crate（如 `tiangong-plugin-fs`）复用——插件单向依赖 core，无需重复
-//! 实现安全逻辑。
+//! 原 `tiangong-core::tool::common`，随收敛重构迁出为独立 crate（#208）。
+//! 作为路径沙箱安全基础设施，供 core 与各进程内插件 crate（fs / command / fetch /
+//! index / terminal）共用，避免重复实现安全逻辑。
 //!
 //! 路径解析相关 helper 提供两套 API：
 //! - 隐式 thread-local 版本（`resolve_workspace_path` 等）：依赖 `SESSION_CWD`，
-//!   供 core 内置工具沿用旧行为；
+//!   供 core 沿用旧行为；
 //! - 显式注入版本（`*_with_base`）：接收 `base: &Path` 参数，供插件 handler 使用，
 //!   无需关心调用方是否设置了 thread-local CWD。
 
@@ -71,7 +71,7 @@ pub fn set_extra_allowed_roots(roots: Vec<PathBuf>) {
 ///
 /// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
 /// 避免隐式依赖 `SESSION_CWD`。额外根目录由各插件经
-/// [`crate::core::Plugin::allowed_file_roots`] 贡献，core 不再硬编码任何领域目录。
+/// `Plugin::allowed_file_roots` 贡献，由 core 汇总后通过 `set_extra_allowed_roots` 注入。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     let workspace_canonical = workspace
         .canonicalize()
@@ -90,7 +90,7 @@ fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-pub(super) fn write_allowed_roots() -> Result<Vec<PathBuf>> {
+pub fn write_allowed_roots() -> Result<Vec<PathBuf>> {
     let workspace = workspace_root()?;
     write_allowed_roots_with(&workspace)
 }

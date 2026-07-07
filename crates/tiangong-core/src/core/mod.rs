@@ -441,7 +441,7 @@ async fn worker_loop_async(
                         }
                     }
                 }
-                crate::tool::common::set_extra_allowed_roots(extra_roots);
+                tiangong_toolkit::set_extra_allowed_roots(extra_roots);
             }
             // 汇总插件贡献的工具权限覆盖（如 get_skill_detail -> Safe），
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
@@ -661,13 +661,13 @@ async fn worker_loop_async(
 pub(crate) fn apply_session_cwd(session: &Session) {
     let cwd = session.cwd.trim();
     if cwd.is_empty() {
-        crate::tool::set_session_cwd(None);
+        tiangong_toolkit::set_session_cwd(None);
         return;
     }
 
     let path = std::path::PathBuf::from(cwd);
     if path.is_dir() {
-        crate::tool::set_session_cwd(Some(path));
+        tiangong_toolkit::set_session_cwd(Some(path));
     }
 }
 

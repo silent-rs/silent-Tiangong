@@ -10,6 +10,7 @@ members = [
     "crates/tiangong-cli",
     "crates/tiangong-entry",
     "crates/tiangong-server",
+    "crates/tiangong-toolkit",
     "crates/tiangong-media",
     "crates/tiangong-media-archive",
     "crates/tiangong-config",
@@ -64,6 +65,7 @@ tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-an
 tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
 tiangong-server = { path = "crates/tiangong-server" }
+tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
 tiangong-types = { path = "crates/tiangong-types" }
 

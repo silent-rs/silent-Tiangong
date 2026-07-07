@@ -13,8 +13,8 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
-use tiangong_core::tool::common as shared;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_toolkit as shared;
 
 use crate::plugin::IndexPlugin;
 

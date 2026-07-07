@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::config::{McpServerConfig, ResolvedMcpTransport};
-use tiangong_core::tool::session_workspace_root;
+use tiangong_toolkit::session_workspace_root;
 use tiangong_types::process::configure_tokio_no_window;
 
 const MAX_LIST_PAGES: usize = 8;

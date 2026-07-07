@@ -429,7 +429,7 @@ pub(crate) async fn spawn_command_loop(
 
 /// 解析默认 shell 可执行文件路径。
 ///
-/// 与 `tiangong_core::tool::common::derive_shell_exec_args` 的跨平台约定保持一致：
+/// 与 `tiangong_toolkit::derive_shell_exec_args` 的跨平台约定保持一致：
 ///
 /// - **非 Windows**：读取 `SHELL` 环境变量，缺失时 fallback 到 `/bin/bash`。
 /// - **Windows**：`SHELL` 是 Unix 概念，Windows 几乎从不设置，且即使设置也通常指向

@@ -425,7 +425,7 @@ fn split_cmd(raw: &str) -> (String, Vec<String>) {
 
 /// 校验命令（白名单 + 路径越界），与 core 原 LocalToolExecutor 行为一致。
 fn validate_terminal_command(cmd: &str, args: &[String], cwd: Option<&str>) -> anyhow::Result<()> {
-    use tiangong_core::tool::common as shared;
+    use tiangong_toolkit as shared;
     // 解析 cwd 为 effective_cwd（用于路径校验）
     let base = if let Some(cwd) = cwd.filter(|s| !s.is_empty()) {
         std::path::PathBuf::from(cwd)

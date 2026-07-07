@@ -9677,6 +9677,7 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-media-archive",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -9824,6 +9825,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
 ]
@@ -9841,6 +9843,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tokio",
 ]
 
@@ -9856,6 +9859,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tokio",
 ]
 
@@ -9894,6 +9898,7 @@ dependencies = [
  "tantivy",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -9910,6 +9915,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -9996,6 +10002,7 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10073,6 +10080,14 @@ dependencies = [
  "tiangong-types",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tiangong-toolkit"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "tiangong-types",
 ]
 
 [[package]]
