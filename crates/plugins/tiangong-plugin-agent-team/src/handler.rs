@@ -175,11 +175,11 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         call: &ToolCall,
         session: &Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        // 桥接：建一个 mpsc channel，转发线程把 lifecycle handler 发出的 StreamEvent
-        // 经 feedback 投递（复用原 handler 的 &StdSender 签名，便于单测）。
+        // 桥接：lifecycle handler 发出的 StreamEvent 先入本地 mpsc channel（保持原
+        // &StdSender 签名，便于单测），执行完后同步 drain 并经 feedback 投递。
+        // 不再用独立转发线程（避免 thread::spawn + join 在 async 上下文中的时序问题）。
         let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
         let feedback_tx = self.feedback_tx();
-        let forward_thread = spawn_stream_forwarder(stream_rx, feedback_tx.clone());
 
         // 取当前调用方身份（经 session.active_agent_id 识别子 Agent）+ 父工具快照。
         let current_agent_id = self.current_agent_id(session);
@@ -188,8 +188,6 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         // 锁 team，执行工具（投递消息 / 注册 Agent / 锁文件等，同步部分）。
         let sync_result = {
             let Ok(mut team) = self.team.lock() else {
-                drop(stream_tx);
-                let _ = forward_thread.join();
                 let err = crate::lifecycle::error_tool_result(&call.name, "团队状态锁定失败");
                 return Box::pin(async move { Some(err) });
             };
@@ -202,9 +200,9 @@ impl ToolOverrideHandler for AgentTeamPlugin {
                 &stream_tx,
             )
         };
-        // 关闭桥接通道，等转发线程退出（确保同步阶段的流事件全部投递）。
+        // drop stream_tx 让 channel 关闭，然后同步 drain 所有事件经 feedback 投递。
         drop(stream_tx);
-        let _ = forward_thread.join();
+        flush_stream_events(stream_rx, feedback_tx.as_ref());
 
         // send_message / broadcast_message：投递消息后，await 目标子 Agent 执行完成，
         // 子 Agent 汇报作为 ToolResult 返回（主 Agent 当轮可见）。这与 recall_memory
@@ -330,25 +328,23 @@ fn collect_broadcast_targets(
         .collect()
 }
 
-/// 启动转发线程：把 `stream_rx` 中的 StreamEvent 经 `feedback_tx` 投递。
+/// 同步 drain `stream_rx` 中的所有 StreamEvent，经 `feedback_tx` 投递。
 ///
-/// lifecycle handler 的签名是 `&StdSender<StreamEvent>`（与原 core 一致，便于单测），
-/// 生产路径经本函数桥接到 feedback 通道。调用方 drop `stream_tx` 后 `join()` 该线程，
-/// 确保所有事件投递完毕再返回 ToolResult。
-fn spawn_stream_forwarder(
+/// lifecycle handler 发出的事件先入本地 mpsc channel（保持 `&StdSender` 签名），
+/// handler 返回后由本函数同步 drain 并经 feedback 投递。不再用独立转发线程，
+/// 避免在 async 上下文中 `thread::spawn + join` 的时序问题。
+/// `feedback_tx` 为 None（测试或极早期）时静默丢弃事件。
+fn flush_stream_events(
     stream_rx: mpsc::Receiver<StreamEvent>,
-    feedback_tx: Option<PluginFeedbackTx>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let Some(tx) = feedback_tx else {
-            // feedback 未注入（极早期或测试）：drain 掉事件即可。
-            for _ in stream_rx {}
-            return;
-        };
-        for event in stream_rx {
-            tx.send_stream_event(event);
-        }
-    })
+    feedback_tx: Option<&PluginFeedbackTx>,
+) {
+    let Some(tx) = feedback_tx else {
+        for _ in stream_rx {}
+        return;
+    };
+    for event in stream_rx {
+        tx.send_stream_event(event);
+    }
 }
 
 // 静默未使用 import 警告（Arc/Mutex 在插件结构体字段使用，本文件仅引用 trait）。
