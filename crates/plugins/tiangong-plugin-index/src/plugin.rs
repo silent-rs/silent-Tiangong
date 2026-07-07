@@ -106,9 +106,9 @@ impl Plugin for IndexPlugin {
         "index"
     }
 
-    fn set_workspace(&self, workspace: &std::path::Path) {
+    fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         if let Ok(mut guard) = self.workspace.write() {
-            *guard = Some(workspace.to_path_buf());
+            *guard = workspace.map(|p| p.to_path_buf());
         }
     }
 

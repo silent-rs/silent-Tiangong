@@ -59,7 +59,12 @@ pub struct TaskInfo {
 }
 
 impl TaskRegistry {
-    /// 启动后台任务
+    /// 启动后台任务。
+    ///
+    /// **输出缓冲限制**：stdout/stderr 设为 piped，但仅在任务结束后通过
+    /// `wait_with_output()` 一次性收集。若子进程持续输出填满 OS pipe 缓冲区
+    /// （通常 64KB），写端会阻塞，任务将无法结束。对高输出/长期运行的任务
+    /// （dev server、日志刷屏等），建议在 cmd/args 中将输出重定向到文件。
     pub fn spawn(
         &mut self,
         name: String,
@@ -211,13 +216,17 @@ impl TaskRegistry {
         }
     }
 
-    /// 检查指定的任务是否全部完成（非 Running）
+    /// 检查指定的任务是否全部存在且全部完成（非 Running）。
+    ///
+    /// 任一 id 不存在即返回 `false`——由调用方据此判定输入错误，避免把不存在的
+    /// task id 误报为「成功完成」。
     fn all_finished(&mut self, task_ids: &[String]) -> bool {
         for id in task_ids {
             self.refresh_task_status(id);
-            if let Some(task) = self.tasks.get(id)
-                && matches!(task.status, TaskStatus::Running)
-            {
+            let Some(task) = self.tasks.get(id) else {
+                return false;
+            };
+            if matches!(task.status, TaskStatus::Running) {
                 return false;
             }
         }
@@ -267,4 +276,25 @@ pub fn wait_tasks(task_ids: Vec<String>, timeout_ms: u64) -> Vec<TaskInfo> {
     }
 
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_finished_rejects_unknown_task_id() {
+        // 不存在的 task id 不应被判定为「全部完成」，避免 wait_tasks 误报成功。
+        let mut reg = TaskRegistry::default();
+        assert!(!reg.all_finished(&["does-not-exist".to_string()]));
+    }
+
+    #[test]
+    fn wait_tasks_returns_empty_for_unknown_ids() {
+        // wait_tasks 对不存在的 id：all_finished 立即返回 false，但无 deadline 时
+        // 会无限轮询——这里用 timeout_ms=1 让它快速超时，返回空 Vec。
+        // handle_wait 据此（results.len() < requested）报错，不再误报成功。
+        let results = wait_tasks(vec!["no-such-task".to_string()], 1);
+        assert!(results.is_empty(), "不存在的 task id 应返回空结果");
+    }
 }

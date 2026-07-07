@@ -267,7 +267,26 @@ impl TaskPlugin {
             });
         }
 
+        let requested = task_ids.len();
         let results = wait_tasks(task_ids, timeout_ms);
+
+        // 结果数少于请求数：存在不认识的 task id，与 query_task/cancel_task 的
+        // 「未找到任务」语义一致——直接判定失败，避免把不存在的 id 误报为成功。
+        if results.len() < requested {
+            let missing = requested - results.len();
+            return Some(ToolResult {
+                ok: false,
+                summary: format!(
+                    "{missing} 个任务未找到（共请求 {requested} 个，仅查到 {} 个）",
+                    results.len()
+                ),
+                stdout: serde_json::to_string_pretty(&results).unwrap_or_default(),
+                stderr: format!("{missing} task id(s) not found"),
+                exit_code: 1,
+                execution: None,
+            });
+        }
+
         let all_ok = results
             .iter()
             .all(|r| matches!(r.status, TaskStatus::Completed { exit_code } if exit_code == 0));
@@ -308,6 +327,23 @@ impl Plugin for TaskPlugin {
             *guard = engine.runtime_env_handle();
         }
     }
+
+    fn tool_permission_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
+        use std::collections::BTreeMap;
+        use tiangong_core::permission::PermissionLevel;
+        // spawn_task 可执行任意命令，与 run_command/run_shell 同属高风险，
+        // 归为 Critical（Supervised 模式需审批）。
+        // query/list/cancel/wait 只读或操作既有任务句柄，归为 Safe。
+        let mut overrides = BTreeMap::new();
+        overrides.insert("spawn_task".to_string(), PermissionLevel::Critical);
+        overrides.insert("query_task".to_string(), PermissionLevel::Safe);
+        overrides.insert("list_tasks".to_string(), PermissionLevel::Safe);
+        overrides.insert("cancel_task".to_string(), PermissionLevel::Safe);
+        overrides.insert("wait_tasks".to_string(), PermissionLevel::Safe);
+        overrides
+    }
 }
 
 impl ToolSpecProvider for TaskPlugin {
@@ -315,7 +351,7 @@ impl ToolSpecProvider for TaskPlugin {
         vec![
             ToolSpec {
                 name: "spawn_task".to_string(),
-                description: "在后台启动特殊命令。仅当用户明确要求后台、不阻塞、并行执行、持续运行、启动服务/监听，或需要让命令跨多轮继续运行时使用；普通命令、构建、检查、git、文件操作必须优先使用 run_shell 或 run_command。".to_string(),
+                description: "在后台启动特殊命令。仅当用户明确要求后台、不阻塞、并行执行、持续运行、启动服务/监听，或需要让命令跨多轮继续运行时使用；普通命令、构建、检查、git、文件操作必须优先使用 run_shell 或 run_command。注意：后台任务的 stdout/stderr 在进程结束前不被消费，高输出任务（如 dev server、日志刷屏）可能因 OS pipe 缓冲区写满而阻塞，请将输出重定向到文件。".to_string(),
                 input_schema: json!({"type":"object","properties":{"name":{"type":"string"},"cmd":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"cwd":{"type":"string"}},"required":["name","cmd"]}),
             },
             ToolSpec {

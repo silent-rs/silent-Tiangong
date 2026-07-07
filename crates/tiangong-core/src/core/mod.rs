@@ -497,12 +497,16 @@ async fn worker_loop_async(
                 let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）
+                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）。
+                // cwd 无效时传 None，让插件清空缓存的旧 workspace，避免在旧目录上继续操作。
                 let workspace = std::path::Path::new(&session.cwd);
-                if workspace.is_dir() {
-                    for plugin in &plugins {
-                        plugin.set_workspace(workspace);
-                    }
+                let workspace = if workspace.is_dir() {
+                    Some(workspace)
+                } else {
+                    None
+                };
+                for plugin in &plugins {
+                    plugin.set_workspace(workspace);
                 }
                 // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
                 if cwd_changed {
