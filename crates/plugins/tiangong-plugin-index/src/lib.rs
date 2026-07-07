@@ -15,8 +15,15 @@
 //! GUI / CLI / Server 全入口无条件启用。
 
 pub mod handler;
+pub mod index;
 pub mod plugin;
 
+pub use index::{
+    IndexHit, IndexManager, IndexMeta, IndexQuery, IndexScope, SessionIndexHit, TurnData,
+    WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
+    list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
+    workspace_index_exists,
+};
 pub use plugin::IndexPlugin;
 
 use std::sync::Arc;

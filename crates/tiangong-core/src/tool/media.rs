@@ -74,7 +74,7 @@ fn archive_image_markdown_output(output: &str) -> String {
             let Some((alt, url)) = parse_markdown_image_line(line.trim()) else {
                 return line.to_string();
             };
-            match crate::media_archive::archive_image_reference(url, None) {
+            match tiangong_media_archive::archive_image_reference(url, None) {
                 Ok(archived) => format!("![{alt}]({})", archived.path()),
                 Err(err) => {
                     tracing::warn!(url = %url, error = %err, "图片归档到本地失败，保留原始 URL");

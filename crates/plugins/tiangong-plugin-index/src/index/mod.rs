@@ -356,7 +356,7 @@ pub fn session_index_exists(session_id: &str) -> bool {
 /// 为已有会话消息建立索引（回溯索引，批量写入后统一 commit）
 pub fn backfill_session_index(
     session_id: &str,
-    messages: &[crate::session::Message],
+    messages: &[tiangong_types::Message],
 ) -> Result<usize> {
     if messages.is_empty() {
         return Ok(0);
@@ -365,10 +365,10 @@ pub fn backfill_session_index(
         .iter()
         .filter_map(|msg| {
             let role = match msg.role {
-                crate::session::MessageRole::User => "user",
-                crate::session::MessageRole::Assistant => "assistant",
-                crate::session::MessageRole::Tool => "tool",
-                crate::session::MessageRole::System => return None,
+                tiangong_types::MessageRole::User => "user",
+                tiangong_types::MessageRole::Assistant => "assistant",
+                tiangong_types::MessageRole::Tool => "tool",
+                tiangong_types::MessageRole::System => return None,
             };
             let text = msg.text_content();
             if text.trim().is_empty() {

@@ -50,10 +50,8 @@ pub(crate) fn register_plugin(
     workspace: Option<&Path>,
     cmd_tx: UnboundedSender<Command>,
 ) -> Vec<ToolSpec> {
-    // 1) 注入当前会话工作目录（插件可覆写 set_workspace 感知）
-    if let Some(ws) = workspace {
-        plugin.set_workspace(ws);
-    }
+    // 1) 注入当前会话工作目录（None 表示无有效 cwd，插件应清空缓存的旧值）
+    plugin.set_workspace(workspace);
 
     // 2) 注入共享信任模式引用（在 register 之前，让 register 内可读）
     let shared_trust = engine.permission_gate().shared_trust_mode_ref();

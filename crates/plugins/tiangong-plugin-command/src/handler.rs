@@ -16,8 +16,8 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
-use tiangong_core::tool::common as shared;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_toolkit as shared;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -303,7 +303,7 @@ async fn exec_and_collect(
     let file_env = load_local_env(cwd);
 
     let mut command = Command::new(cmd);
-    tiangong_core::process::configure_tokio_no_window(&mut command);
+    tiangong_types::process::configure_tokio_no_window(&mut command);
     command
         .args(args)
         .current_dir(cwd)
@@ -435,7 +435,7 @@ mod tests {
 
     fn make_plugin(dir: &tempfile::TempDir) -> CommandPlugin {
         let plugin = CommandPlugin::new();
-        plugin.set_workspace(dir.path());
+        plugin.set_workspace(Some(dir.path()));
         plugin
     }
 

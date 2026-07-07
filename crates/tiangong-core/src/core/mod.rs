@@ -25,13 +25,6 @@ const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 const MAX_OUTER_ITERATIONS: u32 = 3;
 
-// ── Memory re-exports ──
-pub use crate::index::{
-    WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
-    list_workspace_indexes_for_gui, rebuild_workspace_index_for_gui, session_index_exists,
-    workspace_index_exists,
-};
-
 pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;
@@ -448,7 +441,7 @@ async fn worker_loop_async(
                         }
                     }
                 }
-                crate::tool::common::set_extra_allowed_roots(extra_roots);
+                tiangong_toolkit::set_extra_allowed_roots(extra_roots);
             }
             // 汇总插件贡献的工具权限覆盖（如 get_skill_detail -> Safe），
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
@@ -504,12 +497,16 @@ async fn worker_loop_async(
                 let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
-                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）
+                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）。
+                // cwd 无效时传 None，让插件清空缓存的旧 workspace，避免在旧目录上继续操作。
                 let workspace = std::path::Path::new(&session.cwd);
-                if workspace.is_dir() {
-                    for plugin in &plugins {
-                        plugin.set_workspace(workspace);
-                    }
+                let workspace = if workspace.is_dir() {
+                    Some(workspace)
+                } else {
+                    None
+                };
+                for plugin in &plugins {
+                    plugin.set_workspace(workspace);
                 }
                 // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
                 if cwd_changed {
@@ -539,7 +536,7 @@ async fn worker_loop_async(
                 // 归档附件到本地（图片→images/，PDF/Office→files/）。
                 // 必须在 append 之前归档，否则 attachment_notice 引用的是 data URL
                 // 而非本地路径，agent 无法读取文件（issue #149）。
-                let media = crate::media_archive::archive_input_media_assets(media);
+                let media = tiangong_media_archive::archive_input_media_assets(media);
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);
@@ -668,13 +665,13 @@ async fn worker_loop_async(
 pub(crate) fn apply_session_cwd(session: &Session) {
     let cwd = session.cwd.trim();
     if cwd.is_empty() {
-        crate::tool::set_session_cwd(None);
+        tiangong_toolkit::set_session_cwd(None);
         return;
     }
 
     let path = std::path::PathBuf::from(cwd);
     if path.is_dir() {
-        crate::tool::set_session_cwd(Some(path));
+        tiangong_toolkit::set_session_cwd(Some(path));
     }
 }
 

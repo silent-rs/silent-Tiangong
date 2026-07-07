@@ -10,7 +10,9 @@ members = [
     "crates/tiangong-cli",
     "crates/tiangong-entry",
     "crates/tiangong-server",
+    "crates/tiangong-toolkit",
     "crates/tiangong-media",
+    "crates/tiangong-media-archive",
     "crates/tiangong-config",
     "crates/tiangong-scheduler",
     "crates/plugins/tiangong-plugin-browser",
@@ -24,6 +26,7 @@ members = [
     "crates/plugins/tiangong-plugin-speech-to-text",
     "crates/plugins/tiangong-plugin-memory",
     "crates/plugins/tiangong-plugin-scheduler",
+    "crates/plugins/tiangong-plugin-task",
     "crates/plugins/tiangong-plugin-terminal",
     "crates/plugins/tiangong-plugin-analyze-attachment",
     "crates/plugins/tiangong-plugin-skill",
@@ -43,6 +46,7 @@ tiangong-core = { path = "crates/tiangong-core" }
 tiangong-entry = { path = "crates/tiangong-entry" }
 tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
+tiangong-media-archive = { path = "crates/tiangong-media-archive" }
 tiangong-memory = { path = "crates/tiangong-memory" }
 tiangong-plugin-browser = { path = "crates/plugins/tiangong-plugin-browser" }
 tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
@@ -55,11 +59,13 @@ tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-t
 tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech-to-text" }
 tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
+tiangong-plugin-task = { path = "crates/plugins/tiangong-plugin-task" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-analyze-attachment" }
 tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
 tiangong-server = { path = "crates/tiangong-server" }
+tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
 tiangong-types = { path = "crates/tiangong-types" }
 

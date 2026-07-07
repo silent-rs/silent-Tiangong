@@ -2,11 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tiangong_core::app_state::TiangongState;
-use tiangong_core::event::{EventSource, RuntimeEvent, RuntimeEventType};
 use tiangong_core::session::MessageRole;
-use tiangong_core::task::TaskNotification;
 use tiangong_media::agent::MediaAgent;
 use tiangong_media::stt::TranscribeRequest;
+use tiangong_types::event::{EventSource, RuntimeEvent, RuntimeEventType};
 use tiangong_types::{IncomingMessage, MediaAsset, MediaKind, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
 
@@ -114,16 +113,6 @@ impl MessageRouter {
             .handle_runtime_event_with_reply(event, None, None, Vec::new())
             .await?
             .map(|(_, outgoing)| outgoing))
-    }
-
-    pub async fn handle_task_notification(
-        &self,
-        notification: TaskNotification,
-    ) -> Result<Option<OutgoingMessage>> {
-        let Some(event) = notification.to_runtime_event() else {
-            return Ok(None);
-        };
-        self.handle_runtime_event(event).await
     }
 
     pub async fn handle_system_signal(

@@ -50,9 +50,12 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 注入当前会话的工作目录。
     ///
     /// core 在 engine 创建时以及每次会话工作目录变更（`Command::UpdateCwd`）时调用。
+    /// 传入 `None` 表示当前会话无有效工作目录（如 cwd 为空或不存在），插件应清空
+    /// 之前缓存的 workspace，避免在旧目录上继续操作。
+    ///
     /// 默认实现为空操作；需要感知工作目录的插件（如文件工具）应覆写此方法，将路径
     /// 存入内部状态，供后续工具调用使用。
-    fn set_workspace(&self, _workspace: &Path) {}
+    fn set_workspace(&self, _workspace: Option<&Path>) {}
 
     /// 注入共享信任模式引用（与 [`crate::permission::PermissionGate`] 共享同一个 `RwLock`）。
     ///

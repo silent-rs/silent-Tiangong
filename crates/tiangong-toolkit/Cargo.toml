@@ -1,0 +1,9 @@
+[package]
+name = "tiangong-toolkit"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+tiangong-types = { workspace = true }
+anyhow = { workspace = true }

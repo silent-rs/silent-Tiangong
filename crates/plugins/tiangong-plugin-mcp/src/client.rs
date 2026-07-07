@@ -22,8 +22,8 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::config::{McpServerConfig, ResolvedMcpTransport};
-use tiangong_core::process::configure_tokio_no_window;
-use tiangong_core::tool::session_workspace_root;
+use tiangong_toolkit::session_workspace_root;
+use tiangong_types::process::configure_tokio_no_window;
 
 const MAX_LIST_PAGES: usize = 8;
 /// 最多保留的 stderr 末尾字节数，用于在握手失败时诊断子进程报错。

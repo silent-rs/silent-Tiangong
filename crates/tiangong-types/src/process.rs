@@ -1,3 +1,8 @@
+//! 子进程平台适配工具
+//!
+//! 提供跨平台的「无窗口」命令配置，主要供后台任务、命令执行等场景在
+//! Windows 平台抑制控制台窗口弹出。
+
 use std::process::Command as StdCommand;
 
 use tokio::process::Command as TokioCommand;

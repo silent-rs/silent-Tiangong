@@ -327,8 +327,9 @@ pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
         // 高级：命令执行 + 浏览器操作
         "run_command" | "run_shell" | "terminal_send" | "web_form_fill" | "web_click"
         | "web_load_html" => PermissionLevel::Elevated,
-        // 关键：补丁、后台任务、多媒体
-        "apply_patch" | "spawn_task" | "cancel_task" => PermissionLevel::Critical,
+        // 关键：补丁应用（spawn_task/cancel_task 等后台任务工具已由
+        // tiangong-plugin-task 经 tool_permission_overrides 声明，不再在此中心化维护）
+        "apply_patch" => PermissionLevel::Critical,
         // MCP 工具和未知工具默认为关键
         _ => PermissionLevel::Critical,
     }
@@ -710,6 +711,8 @@ mod tests {
         assert_eq!(classify_tool("web_click"), PermissionLevel::Elevated);
         assert_eq!(classify_tool("web_load_html"), PermissionLevel::Elevated);
         assert_eq!(classify_tool("apply_patch"), PermissionLevel::Critical);
+        // spawn_task/cancel_task 已由 tiangong-plugin-task 经 tool_permission_overrides
+        // 声明，classify_tool 不再中心化维护，走未知工具默认 Critical 分支。
         assert_eq!(classify_tool("spawn_task"), PermissionLevel::Critical);
         assert_eq!(classify_tool("unknown_tool"), PermissionLevel::Critical);
     }

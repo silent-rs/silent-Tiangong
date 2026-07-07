@@ -7,6 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 tiangong-types = { workspace = true }
 tiangong-llm = { workspace = true }
+tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
@@ -45,9 +46,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
 tiangong-media = { workspace = true }
-tantivy = { workspace = true }
-notify = { workspace = true }
-dashmap = { workspace = true }
+tiangong-media-archive = { workspace = true }
 
 [features]
 default = []

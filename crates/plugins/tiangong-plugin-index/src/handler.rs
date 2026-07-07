@@ -8,13 +8,13 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
-use tiangong_core::index::{IndexQuery, IndexScope};
+use crate::index::{IndexQuery, IndexScope};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::tool::common as shared;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
+use tiangong_toolkit as shared;
 
 use crate::plugin::IndexPlugin;
 
@@ -87,24 +87,23 @@ impl IndexPlugin {
         let mut stdout_parts: Vec<String> = Vec::new();
 
         // Workspace 索引查询
-        if scope == IndexScope::Workspace || scope == IndexScope::All {
-            if let Some(cwd) = self.workspace() {
-                if cwd.is_dir() {
-                    let index_query = IndexQuery::new(query)
-                        .with_scope(IndexScope::Workspace)
-                        .with_limit(limit);
-                    match im.search(&cwd, &index_query) {
-                        Ok(hits) if !hits.is_empty() => {
-                            stdout_parts.push("【工作区文件】".to_string());
-                            for hit in &hits {
-                                stdout_parts.push(format!("- {} ({})", hit.path, hit.language));
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            stdout_parts.push(format!("【工作区搜索失败: {e}】"));
-                        }
+        if (scope == IndexScope::Workspace || scope == IndexScope::All)
+            && let Some(cwd) = self.workspace()
+            && cwd.is_dir()
+        {
+            let index_query = IndexQuery::new(query)
+                .with_scope(IndexScope::Workspace)
+                .with_limit(limit);
+            match im.search(&cwd, &index_query) {
+                Ok(hits) if !hits.is_empty() => {
+                    stdout_parts.push("【工作区文件】".to_string());
+                    for hit in &hits {
+                        stdout_parts.push(format!("- {} ({})", hit.path, hit.language));
                     }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    stdout_parts.push(format!("【工作区搜索失败: {e}】"));
                 }
             }
         }
