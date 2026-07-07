@@ -129,6 +129,8 @@ impl Plugin for AgentTeamPlugin {
         if let Ok(mut guard) = self.session_id.write() {
             *guard = Some(session.id.clone());
         }
+        // 从 engine 的 tool_spec_providers 收集全部工具规格，供子 Agent 过滤可用工具。
+        self.refresh_parent_tools();
         // 构建 PromptConfig（需要 models_config + agent_config）。
         self.rebuild_prompt_config(session);
         // 从会话历史恢复 Agent（崩溃恢复）。
@@ -139,6 +141,8 @@ impl Plugin for AgentTeamPlugin {
     }
 
     fn on_engine_rebuilt(&self, session: &mut Session) {
+        // engine 重建后工具列表可能变化（插件增减），重新收集。
+        self.refresh_parent_tools();
         self.rebuild_prompt_config(session);
     }
 
@@ -183,6 +187,24 @@ impl AgentTeamPlugin {
         });
         if let Ok(mut guard) = self.prompt_config.write() {
             *guard = Some(prompt_config);
+        }
+    }
+
+    /// 从父 RuntimeEngine 的 tool_spec_providers 收集全部工具规格。
+    ///
+    /// 子 Agent 创建时可选指定 tools 列表（默认继承全部），run_agent_turn 用此快照
+    /// 过滤出子 Agent 可用工具。engine 重建后（插件增减导致工具变化）需重新收集。
+    fn refresh_parent_tools(&self) {
+        let Some(engine) = self.runtime_engine.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let tools: Vec<ToolSpec> = engine
+            .tool_spec_providers()
+            .iter()
+            .flat_map(|provider| provider.tool_specs())
+            .collect();
+        if let Ok(mut guard) = self.parent_tools.write() {
+            *guard = tools;
         }
     }
 }
