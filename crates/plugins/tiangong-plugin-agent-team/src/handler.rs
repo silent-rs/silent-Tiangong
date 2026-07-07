@@ -28,6 +28,8 @@ use tiangong_types::StreamEvent;
 
 use crate::lifecycle::execute_team_tool;
 use crate::plugin::AgentTeamPlugin;
+use crate::state::AgentStatus;
+use crate::TeamContext;
 
 impl ToolSpecProvider for AgentTeamPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
@@ -179,12 +181,12 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         let feedback_tx = self.feedback_tx();
         let forward_thread = spawn_stream_forwarder(stream_rx, feedback_tx.clone());
 
-        // 取当前调用方身份 + 父工具快照（在锁 team 之前，避免借用冲突）。
-        let current_agent_id = self.current_agent_id();
+        // 取当前调用方身份（经 session.active_agent_id 识别子 Agent）+ 父工具快照。
+        let current_agent_id = self.current_agent_id(session);
         let parent_tools = self.parent_tools_snapshot();
 
-        // 锁 team，执行工具。
-        let result = {
+        // 锁 team，执行工具（投递消息 / 注册 Agent / 锁文件等，同步部分）。
+        let sync_result = {
             let Ok(mut team) = self.team.lock() else {
                 drop(stream_tx);
                 let _ = forward_thread.join();
@@ -200,19 +202,133 @@ impl ToolOverrideHandler for AgentTeamPlugin {
                 &stream_tx,
             )
         };
-        // 关闭桥接通道，等转发线程退出（确保事件全部投递后再返回）。
+        // 关闭桥接通道，等转发线程退出（确保同步阶段的流事件全部投递）。
         drop(stream_tx);
         let _ = forward_thread.join();
 
-        // 若工具触发了对 Idle Agent 的消息投递（send_message / broadcast_message），
-        // spawn 这些 Agent 的 turn。
-        self.spawn_pending_idle_agents(feedback_tx);
+        // send_message / broadcast_message：投递消息后，await 目标子 Agent 执行完成，
+        // 子 Agent 汇报作为 ToolResult 返回（主 Agent 当轮可见）。这与 recall_memory
+        // 等 await 型工具一致——主 Agent 工具循环阻塞在此直到子 Agent 完成。
+        // 其他工具（create_agent / dismiss / lock / unlock / notify）不阻塞，直接返回。
+        let needs_await =
+            matches!(call.name.as_str(), "send_message" | "broadcast_message") && sync_result.ok;
+        if !needs_await {
+            return Box::pin(async move { Some(sync_result) });
+        }
 
-        Box::pin(async move { Some(result) })
+        // 解析 send_message 的目标 agent_id（send_message 是单个，broadcast 是多个）。
+        let team = Arc::clone(&self.team);
+        let runtime_engine = match self.runtime_engine_snapshot() {
+            Some(e) => e,
+            None => {
+                return Box::pin(async move { Some(sync_result) });
+            }
+        };
+        let prompt_config = match self.prompt_config_snapshot() {
+            Some(p) => p,
+            None => return Box::pin(async move { Some(sync_result) }),
+        };
+        let Some(feedback) = feedback_tx else {
+            return Box::pin(async move { Some(sync_result) });
+        };
+
+        // 收集需要 await 的目标 agent_id（Idle 且收件箱有待处理消息）。
+        let target_ids: Vec<String> = match call.name.as_str() {
+            "send_message" => collect_send_message_targets(&team, call),
+            "broadcast_message" => collect_broadcast_targets(&team, &current_agent_id),
+            _ => Vec::new(),
+        };
+
+        if target_ids.is_empty() {
+            return Box::pin(async move { Some(sync_result) });
+        }
+
+        let tools = parent_tools.clone();
+        let usage_tx = feedback.clone();
+        Box::pin(async move {
+            let turn_result = if target_ids.len() == 1 {
+                crate::team_bridge::run_agent_turn(
+                    team,
+                    target_ids.into_iter().next().unwrap(),
+                    runtime_engine,
+                    tools,
+                    feedback,
+                    prompt_config,
+                )
+                .await
+            } else {
+                crate::team_bridge::run_agents_turns(
+                    team,
+                    target_ids,
+                    runtime_engine,
+                    tools,
+                    feedback,
+                    prompt_config,
+                )
+                .await
+            };
+            // 上报子 Agent 的 token 用量到本轮主 Agent。
+            usage_tx.report_token_usage(turn_result.usage, "sub_agent_turn");
+            // 把子 Agent 汇报追加到原 ToolResult 的 stdout。
+            let mut result = sync_result;
+            if !result.stdout.is_empty() {
+                result.stdout.push_str("\n\n---\n");
+            }
+            result.stdout.push_str(&turn_result.report);
+            Some(result)
+        })
     }
 }
 
 impl AgentTeamPlugin {}
+
+/// 从 send_message 调用解析目标 agent_id，仅返回当前 Idle（可立即派发）的。
+fn collect_send_message_targets(team: &Arc<Mutex<TeamContext>>, call: &ToolCall) -> Vec<String> {
+    let to = call
+        .arguments
+        .get("to")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('@')
+        .to_string();
+    if to.is_empty() || to == "main" {
+        return Vec::new();
+    }
+    let Ok(team) = team.lock() else {
+        return Vec::new();
+    };
+    let Some(agent) = team.registry.find_by_role(&to) else {
+        return Vec::new();
+    };
+    // 仅 Idle 且非运行中的 Agent 需要 await（运行中的消息已实时注入，不重复启动）。
+    if agent.status == AgentStatus::Idle
+        && !team.active_agent_senders().contains_key(&agent.agent_id)
+    {
+        vec![agent.agent_id.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// 从 broadcast_message 收集所有目标 agent_id（排除 exclude 列表 + 调用方自己），
+/// 仅返回 Idle 且非运行中的。
+fn collect_broadcast_targets(
+    team: &Arc<Mutex<TeamContext>>,
+    current_agent_id: &str,
+) -> Vec<String> {
+    let Ok(team) = team.lock() else {
+        return Vec::new();
+    };
+    team.registry
+        .alive_agents()
+        .iter()
+        .filter(|a| a.status == AgentStatus::Idle)
+        .filter(|a| a.agent_id != current_agent_id)
+        .filter(|a| !team.active_agent_senders().contains_key(&a.agent_id))
+        .map(|a| a.agent_id.clone())
+        .collect()
+}
 
 /// 启动转发线程：把 `stream_rx` 中的 StreamEvent 经 `feedback_tx` 投递。
 ///

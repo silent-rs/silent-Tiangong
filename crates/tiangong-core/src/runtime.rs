@@ -222,6 +222,17 @@ impl RuntimeEngine {
         &self.turn_usage_sink
     }
 
+    /// 替换 turn-scoped usage 收集器（返回新的 RuntimeEngine）。
+    ///
+    /// 子 Agent 经此替换为**独立的 sink**，避免其 `execute_turn` 内的 `bind()`
+    /// 覆盖主 Agent 的 binding（TurnUsageSink 是单槽，覆盖会导致主 Agent 后续插件
+    /// usage 被丢弃）。子 Agent 的 usage 经其 execute_turn 返回值由 team 插件
+    /// handler 上报主 Agent。
+    pub fn with_turn_usage_sink(mut self, sink: Arc<crate::core::plugin::TurnUsageSink>) -> Self {
+        self.turn_usage_sink = sink;
+        self
+    }
+
     /// 获取各插件贡献的环境变量快照（供 command 插件注入子进程）。
     pub fn runtime_env(&self) -> std::collections::BTreeMap<String, String> {
         self.runtime_env

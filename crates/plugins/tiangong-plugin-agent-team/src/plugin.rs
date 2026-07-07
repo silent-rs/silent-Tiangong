@@ -30,8 +30,7 @@ use tiangong_core::session::Session;
 use tiangong_core::tool_override::PromptSectionProvider;
 
 use crate::lifecycle::restore_agents_from_session_history;
-use crate::state::AgentStatus;
-use crate::team_bridge::{spawn_agent_turn, PromptConfig};
+use crate::team_bridge::PromptConfig;
 use crate::TeamContext;
 
 /// 当前调用方身份（默认 "main"，子 Agent turn 内由其引擎 agent_id 决定）。
@@ -51,8 +50,6 @@ pub struct AgentTeamPlugin {
     session_id: RwLock<Option<String>>,
     /// PromptConfig（on_engine_rebuilt 构建，供子 Agent system prompt）。
     prompt_config: RwLock<Option<Arc<PromptConfig>>>,
-    /// 子 Agent 并发上限信号量（spawn-per-message 并发控制）。
-    concurrency_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl AgentTeamPlugin {
@@ -64,9 +61,6 @@ impl AgentTeamPlugin {
             parent_tools: RwLock::new(Vec::new()),
             session_id: RwLock::new(None),
             prompt_config: RwLock::new(None),
-            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                crate::constants::MAX_CONCURRENT_SUB_AGENTS,
-            )),
         }
     }
 
@@ -77,13 +71,15 @@ impl AgentTeamPlugin {
 
     /// 当前调用方身份。
     ///
-    /// 工具经 `tool_overrides` 分发时无法直接知道是 main 还是子 Agent 在调用（engine
-    /// 不把 agent_id 传给 handler）。当前简化为始终 "main"——子 Agent 调用团队工具时，
-    /// 其身份识别依赖 message bus 的 from 字段（子 Agent send_message 时 from=自己 id）。
-    /// 文件锁场景下，lock_file / unlock_file 由本插件内部按 current_agent_id 判定，
-    /// 主 Agent（"main"）恒可 force_unlock。
-    pub(crate) fn current_agent_id(&self) -> String {
-        MAIN_AGENT_ID.to_string()
+    /// 工具经 `tool_overrides` 分发时，handler 收到的 `&Session` 是当前调用方的
+    /// session：子 Agent 调用时是其 child_session（`active_agent_id = Some(agent_id)`），
+    /// 主 Agent 调用时是主 session（`active_agent_id = None`）。据此识别身份，
+    /// 无需扩展 core trait。
+    pub(crate) fn current_agent_id(&self, session: &Session) -> String {
+        session
+            .active_agent_id
+            .clone()
+            .unwrap_or_else(|| MAIN_AGENT_ID.to_string())
     }
 
     /// 父工具快照 clone（供 execute_team_tool 解析子 Agent 可用工具 + 子引擎构造）。
@@ -94,57 +90,14 @@ impl AgentTeamPlugin {
             .unwrap_or_default()
     }
 
-    /// 派发所有 Idle 且收件箱有待处理消息的 Agent。
-    ///
-    /// 在每个团队工具执行后调用：send_message / broadcast_message 可能把消息投到目标
-    /// Agent 收件箱，本函数为这些 Idle Agent spawn 其 execute_turn。
-    pub(crate) fn spawn_pending_idle_agents(&self, feedback_tx: Option<PluginFeedbackTx>) {
-        let Some(feedback) = feedback_tx else {
-            return;
-        };
-        let Some(runtime) = self.runtime_engine.read().ok().and_then(|g| g.clone()) else {
-            return;
-        };
-        let tools = self.parent_tools_snapshot();
-        let prompt_config = match self.prompt_config.read() {
-            Ok(g) => g.clone(),
-            Err(_) => return,
-        };
-        let Some(prompt_config) = prompt_config else {
-            return;
-        };
+    /// 父 RuntimeEngine clone 快照（供 handler 构造子 ReactEngine）。
+    pub(crate) fn runtime_engine_snapshot(&self) -> Option<RuntimeEngine> {
+        self.runtime_engine.read().ok()?.as_ref().cloned()
+    }
 
-        // 收集所有 Idle Agent：收件箱非空的判定由 spawn_agent_turn 内部的 drain_inbox
-        // 完成（空则直接返回），此处只需枚举 Idle Agent。在锁内收集 id，锁外 spawn
-        // 避免长持锁。
-        let to_spawn: Vec<String> = {
-            let Ok(team) = self.team.lock() else {
-                return;
-            };
-            team.registry
-                .alive_agents()
-                .iter()
-                .filter(|a| a.status == AgentStatus::Idle)
-                .map(|a| a.agent_id.clone())
-                .collect()
-        };
-
-        for agent_id in to_spawn {
-            // 并发上限： acquire 许可（非阻塞 try_acquire，满则跳过本轮，下一工具调用再试）。
-            let permit = self.concurrency_semaphore.clone();
-            spawn_agent_turn(
-                Arc::clone(&self.team),
-                agent_id,
-                runtime.clone(),
-                tools.clone(),
-                feedback.clone(),
-                Arc::clone(&prompt_config),
-            );
-            // permit 在 spawn_agent_turn 内部未显式持有；并发控制改由信号量在 spawn 前
-            // try_acquire 实现（见下版本）。当前简化：无硬上限，依赖 MAX_CONCURRENT
-            // 信号量在 acquire 失败时跳过（TODO）。
-            let _ = permit;
-        }
+    /// PromptConfig 快照（供子 Agent system prompt 构建）。
+    pub(crate) fn prompt_config_snapshot(&self) -> Option<Arc<PromptConfig>> {
+        self.prompt_config.read().ok()?.clone()
     }
 }
 
@@ -189,39 +142,9 @@ impl Plugin for AgentTeamPlugin {
         self.rebuild_prompt_config(session);
     }
 
-    fn on_turn_started(&self, session: &mut Session, _turn_start_idx: usize) {
-        // 路由用户 @提及到目标 Agent 并 spawn。
-        let Some(user_input) = session
-            .messages
-            .get(_turn_start_idx)
-            .filter(|m| m.role == tiangong_core::session::MessageRole::User)
-            .map(|m| m.text_content())
-        else {
-            return;
-        };
-        let Some(feedback) = self.feedback_tx() else {
-            return;
-        };
-        let Some(runtime) = self.runtime_engine.read().ok().and_then(|g| g.clone()) else {
-            return;
-        };
-        let tools = self.parent_tools_snapshot();
-        let prompt_config = match self.prompt_config.read() {
-            Ok(g) => g.clone(),
-            Err(_) => return,
-        };
-        let Some(prompt_config) = prompt_config else {
-            return;
-        };
-        crate::team_bridge::route_mentions_and_spawn(
-            Arc::clone(&self.team),
-            &user_input,
-            runtime,
-            tools,
-            feedback,
-            prompt_config,
-        );
-    }
+    // on_turn_started 不做 @路由：用户输入中的 @提及由主 Agent 自行决定调用
+    // send_message 投递（与 LLM 主动发消息完全同构），保持所有子 Agent 交互统一
+    // 经工具调用路径。
 }
 
 impl AgentTeamPlugin {
@@ -270,9 +193,9 @@ fn build_agent_team_section() -> String {
 
 使用要点：
 1. 复杂任务先拆解，为每个子任务创建专职 Agent（明确的 system_prompt）。
-2. 通过 send_message 分配任务；Agent 完成后会自动汇报结果到你的上下文。
-3. 多 Agent 编辑同一文件时，编辑前必须 lock_file，编辑后 unlock_file。
-4. @提及（如 @dev 检查这个改动）可直接把消息投给目标 Agent。
+2. 通过 send_message 分配任务；send_message 会等待目标 Agent 执行完成并把其汇报作为结果返回给你。
+3. 用户输入中的 @提及（如「@dev 检查这个改动」）应转成 send_message(to=dev, content=检查这个改动)。
+4. 多 Agent 编辑同一文件时，编辑前必须 lock_file，编辑后 unlock_file。
 "
     .to_string()
 }

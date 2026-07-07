@@ -44,6 +44,12 @@ pub struct TeamContext {
     pub file_locks: FileLockManager,
     /// 发给主 Agent 的消息（子 Agent 汇报）
     pub main_inbox: Vec<AgentMessage>,
+    /// 运行中子 Agent 的命令通道句柄（供 cancel 路由）。
+    /// agent_id → cmd_tx；Agent 开始执行时注册，结束/取消时注销。
+    active_agent_senders: std::collections::HashMap<
+        String,
+        tokio::sync::mpsc::UnboundedSender<tiangong_core::core::command::Command>,
+    >,
 }
 
 impl TeamContext {
@@ -52,6 +58,7 @@ impl TeamContext {
             registry: AgentRegistry::new(),
             file_locks: FileLockManager::new(),
             main_inbox: Vec::new(),
+            active_agent_senders: std::collections::HashMap::new(),
         }
     }
 
@@ -63,18 +70,81 @@ impl TeamContext {
         std::mem::take(&mut self.main_inbox)
     }
 
-    /// 投递消息到目标 Agent 的收件箱。
+    /// 注册运行中子 Agent 的命令通道（执行开始时调用）。
+    pub fn register_active_agent(
+        &mut self,
+        agent_id: String,
+        tx: tokio::sync::mpsc::UnboundedSender<tiangong_core::core::command::Command>,
+    ) {
+        self.active_agent_senders.insert(agent_id, tx);
+    }
+
+    /// 注销子 Agent 的命令通道（执行结束/取消时调用）。
+    pub fn unregister_active_agent(&mut self, agent_id: &str) {
+        self.active_agent_senders.remove(agent_id);
+    }
+
+    /// 向运行中的子 Agent 发送命令（如 Cancel）。返回是否投递成功。
+    pub fn send_to_active_agent(
+        &self,
+        agent_id: &str,
+        cmd: tiangong_core::core::command::Command,
+    ) -> bool {
+        self.active_agent_senders
+            .get(agent_id)
+            .map(|tx| tx.send(cmd).is_ok())
+            .unwrap_or(false)
+    }
+
+    /// 按 role 查找运行中子 Agent 的 agent_id（供 cancel_agent(role) 路由）。
+    pub fn active_agent_id_by_role(&self, role: &str) -> Option<String> {
+        let role = role.trim().trim_start_matches('@');
+        let agent = self.registry.find_by_role(role)?;
+        if self.active_agent_senders.contains_key(&agent.agent_id) {
+            Some(agent.agent_id.clone())
+        } else {
+            None
+        }
+    }
+
+    /// 当前运行中子 Agent 的 cmd_tx 句柄表（只读视图，供调度判定 Agent 是否运行中）。
+    pub fn active_agent_senders(
+        &self,
+    ) -> &std::collections::HashMap<
+        String,
+        tokio::sync::mpsc::UnboundedSender<tiangong_core::core::command::Command>,
+    > {
+        &self.active_agent_senders
+    }
+
+    /// 投递消息到目标 Agent。
     ///
-    /// 迁入插件后简化为单纯的收件箱投递（原 core 的 `dispatch_agent_message` 会尝试
-    /// 实时注入运行中的 Agent；现统一走收件箱，由 spawn-per-message 调度消费）。
-    /// `media` 暂存于消息体之外，由调度时合并进子 Agent 的首条 user 消息。
+    /// 若目标 Agent 正在运行（已注册 cmd_tx），经 cmd_tx 实时注入其当前 execute_turn
+    /// 循环（`Command::Message`）；否则投到收件箱排队，等下一轮派发时消费。
+    /// `media` 随消息一起经 Command::Message 投递（实时注入时）或并入收件箱消息。
     pub fn dispatch_agent_message(
         &mut self,
         agent_id: &str,
         message: AgentMessage,
-        _media: Vec<tiangong_types::MediaAsset>,
+        media: Vec<tiangong_types::MediaAsset>,
     ) {
-        self.registry.deliver_message(agent_id, message);
+        let content = format!(
+            "[from:{} at {}]\n{}",
+            message.from, message.created_at, message.content
+        );
+        let dispatched = if let Some(tx) = self.active_agent_senders.get(agent_id) {
+            tx.send(tiangong_core::core::command::Command::Message {
+                content,
+                message_id: Some(message.id.clone()),
+                media,
+            })
+            .is_ok()
+        } else {
+            false
+        };
+        if !dispatched {
+            self.registry.deliver_message(agent_id, message);
+        }
     }
 }
 

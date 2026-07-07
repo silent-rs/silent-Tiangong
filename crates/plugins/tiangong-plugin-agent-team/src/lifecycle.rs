@@ -138,7 +138,7 @@ pub fn restore_agents_from_session_history(
             status: AgentStatus::Idle,
         };
         let child_session = load_child_session(parent_session, &agent.agent_id)
-            .unwrap_or_else(|| create_child_session(parent_session, &agent.label));
+            .unwrap_or_else(|| create_child_session(parent_session, &agent.label, &agent.agent_id));
         team.registry
             .register_with_session(descriptor, child_session);
         count += 1;
@@ -301,7 +301,7 @@ pub fn execute_create_agent(
         status: AgentStatus::Idle,
     };
 
-    let child_session = create_child_session(parent_session, &label);
+    let child_session = create_child_session(parent_session, &label, &agent_id);
 
     // 注册
     team.registry
@@ -1244,11 +1244,15 @@ pub fn error_tool_result(name: &str, message: &str) -> ToolResult {
 }
 
 /// 创建 Sub Agent 的独立 Session
-fn create_child_session(parent: &Session, title: &str) -> Session {
+///
+/// `agent_id` 写入 `child.active_agent_id`，供团队工具 handler 经 `&Session`
+/// 反查当前调用方身份（主 Agent session 该字段为 None）。
+fn create_child_session(parent: &Session, title: &str, agent_id: &str) -> Session {
     let mut child = Session::new(title);
     child.cwd = parent.cwd.clone();
     child.reasoning_effort = parent.reasoning_effort.clone();
     child.parent_session_id = Some(parent.id.clone());
+    child.active_agent_id = Some(agent_id.to_string());
     child
 }
 
@@ -1279,7 +1283,11 @@ pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Se
         .join("agents")
         .join(format!("{agent_id}.json"));
     let content = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&content).ok()
+    let mut session: Session = serde_json::from_str(&content).ok()?;
+    // 确保从磁盘恢复的 child session 带有正确的 active_agent_id（旧版本持久化
+    // 的 session 可能缺失该字段）。
+    session.active_agent_id = Some(agent_id.to_string());
+    Some(session)
 }
 
 fn normalize_agent_role(role: &str) -> String {
