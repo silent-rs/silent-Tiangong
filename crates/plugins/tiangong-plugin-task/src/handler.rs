@@ -1,3 +1,9 @@
+//! 后台任务注册表与执行实现。
+//!
+//! 原 `tiangong-core::tool::background_task`，随 task 插件化迁出（#208）。
+//! `task_registry()` 保持全局 `OnceLock` 静态，确保 GUI 管理（src-tauri）与
+//! LLM 工具调用（`spawn_task` 等）命中同一注册表。
+
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -151,14 +157,6 @@ impl TaskRegistry {
         ids.iter().filter_map(|id| self.query(id)).collect()
     }
 
-    /// 列出运行中的任务
-    pub fn list_running(&mut self) -> Vec<TaskInfo> {
-        self.list()
-            .into_iter()
-            .filter(|t| matches!(t.status, TaskStatus::Running))
-            .collect()
-    }
-
     /// 取消任务
     pub fn cancel(&mut self, task_id: &str) -> Option<TaskInfo> {
         let task = self.tasks.get_mut(task_id)?;
@@ -181,12 +179,6 @@ impl TaskRegistry {
             stdout: task.stdout.clone(),
             stderr: task.stderr.clone(),
         })
-    }
-
-    /// 清理已完成的任务
-    pub fn cleanup_completed(&mut self) {
-        self.tasks
-            .retain(|_, t| matches!(t.status, TaskStatus::Running));
     }
 
     /// 收集指定任务的最新状态（内部方法，不返回 TaskInfo）

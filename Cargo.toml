@@ -25,6 +25,7 @@ members = [
     "crates/plugins/tiangong-plugin-speech-to-text",
     "crates/plugins/tiangong-plugin-memory",
     "crates/plugins/tiangong-plugin-scheduler",
+    "crates/plugins/tiangong-plugin-task",
     "crates/plugins/tiangong-plugin-terminal",
     "crates/plugins/tiangong-plugin-analyze-attachment",
     "crates/plugins/tiangong-plugin-skill",
@@ -57,6 +58,7 @@ tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-t
 tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech-to-text" }
 tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
+tiangong-plugin-task = { path = "crates/plugins/tiangong-plugin-task" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-analyze-attachment" }
 tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }

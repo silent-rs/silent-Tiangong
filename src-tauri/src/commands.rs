@@ -2021,7 +2021,7 @@ pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_jso
 /// 获取后台任务列表
 #[tauri::command]
 pub async fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
-    let reg = tiangong_core::tool::background_task::task_registry();
+    let reg = tiangong_plugin_task::task_registry();
     let mut guard = reg.lock().map_err(|e| e.to_string())?;
     let tasks = guard.list();
     tasks
@@ -2033,7 +2033,7 @@ pub async fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// 取消后台任务
 #[tauri::command]
 pub async fn cancel_background_task(task_id: String) -> Result<(), String> {
-    let reg = tiangong_core::tool::background_task::task_registry();
+    let reg = tiangong_plugin_task::task_registry();
     let mut guard = reg.lock().map_err(|e| e.to_string())?;
     guard.cancel(&task_id);
     Ok(())

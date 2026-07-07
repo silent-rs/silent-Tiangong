@@ -9598,6 +9598,7 @@ dependencies = [
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
+ "tiangong-plugin-task",
  "tiangong-plugin-terminal",
  "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
@@ -9632,6 +9633,7 @@ dependencies = [
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
+ "tiangong-plugin-task",
  "tiangong-plugin-text-to-speech",
  "tiangong-types",
  "tokio",
@@ -9970,6 +9972,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-task"
+version = "0.11.0"
+dependencies = [
+ "scru128",
+ "serde",
+ "serde_json",
+ "tiangong-core",
+ "tiangong-types",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-terminal"
 version = "0.11.0"
 dependencies = [
@@ -10053,6 +10067,7 @@ dependencies = [
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
+ "tiangong-plugin-task",
  "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-types",
