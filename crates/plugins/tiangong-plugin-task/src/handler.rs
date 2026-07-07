@@ -216,17 +216,16 @@ impl TaskRegistry {
         }
     }
 
-    /// 检查指定的任务是否全部存在且全部完成（非 Running）。
+    /// 检查指定的任务是否全部完成（非 Running）。
     ///
-    /// 任一 id 不存在即返回 `false`——由调用方据此判定输入错误，避免把不存在的
-    /// task id 误报为「成功完成」。
+    /// 仅判断 Running 状态，不区分「不存在」——缺失 id 由调用方（`wait_tasks`）
+    /// 在轮询前单独检测，避免把「不存在」混入「仍在运行」语义导致无限等待。
     fn all_finished(&mut self, task_ids: &[String]) -> bool {
         for id in task_ids {
             self.refresh_task_status(id);
-            let Some(task) = self.tasks.get(id) else {
-                return false;
-            };
-            if matches!(task.status, TaskStatus::Running) {
+            if let Some(task) = self.tasks.get(id)
+                && matches!(task.status, TaskStatus::Running)
+            {
                 return false;
             }
         }
@@ -237,7 +236,8 @@ impl TaskRegistry {
 /// 等待多个后台任务完成（spawn+join 模式）
 ///
 /// 在持有锁外轮询，避免长时间阻塞其他操作。
-/// `timeout_ms` 为 0 表示无限等待。
+/// `timeout_ms` 为 0 表示无限等待（仅对真实存在的 Running 任务；不存在的 task id
+/// 会立即返回，不阻塞）。
 pub fn wait_tasks(task_ids: Vec<String>, timeout_ms: u64) -> Vec<TaskInfo> {
     let registry = task_registry();
     let deadline = if timeout_ms > 0 {
@@ -253,6 +253,11 @@ pub fn wait_tasks(task_ids: Vec<String>, timeout_ms: u64) -> Vec<TaskInfo> {
                 Ok(reg) => reg,
                 Err(_) => break,
             };
+            // 先检测缺失：任一 task id 不存在立即返回（已完成的 + 缺失的被过滤），
+            // 由 handle_wait 据 results.len() < requested 报错，避免无限等待。
+            if task_ids.iter().any(|id| !reg.tasks.contains_key(id)) {
+                return task_ids.iter().filter_map(|id| reg.query(id)).collect();
+            }
             if reg.all_finished(&task_ids) {
                 // 全部完成，收集结果
                 return task_ids.iter().filter_map(|id| reg.query(id)).collect();
@@ -283,18 +288,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_finished_rejects_unknown_task_id() {
-        // 不存在的 task id 不应被判定为「全部完成」，避免 wait_tasks 误报成功。
+    fn all_finished_unknown_id_treated_as_finished() {
+        // all_finished 只判断 Running，不存在的 id 不算 Running → 返回 true。
+        // 「缺失」语义由 wait_tasks 在轮询前单独检测，避免混入「仍在运行」导致无限等待。
         let mut reg = TaskRegistry::default();
-        assert!(!reg.all_finished(&["does-not-exist".to_string()]));
+        assert!(reg.all_finished(&["does-not-exist".to_string()]));
     }
 
     #[test]
-    fn wait_tasks_returns_empty_for_unknown_ids() {
-        // wait_tasks 对不存在的 id：all_finished 立即返回 false，但无 deadline 时
-        // 会无限轮询——这里用 timeout_ms=1 让它快速超时，返回空 Vec。
-        // handle_wait 据此（results.len() < requested）报错，不再误报成功。
-        let results = wait_tasks(vec!["no-such-task".to_string()], 1);
+    fn wait_tasks_unknown_id_without_timeout_does_not_block() {
+        // 回归：不存在的 task id 即使 timeout_ms=0（无限等待语义）也必须立即返回，
+        // 不能进入无限轮询。handle_wait 据此（results.len() < requested）报错。
+        // 用一个看门狗线程兜底：若 5s 内未返回即判定卡死。
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let results = wait_tasks(vec!["no-such-task".to_string()], 0);
+            let _ = tx.send(results);
+        });
+        let results = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wait_tasks 对不存在的 id 在无 timeout 时卡住（回归）");
+        assert!(
+            results.is_empty(),
+            "不存在的 task id 应返回空结果，实际：{results:?}"
+        );
+    }
+
+    #[test]
+    fn wait_tasks_unknown_id_with_timeout_returns_empty() {
+        // 保留 timeout 路径的覆盖（即便 timeout 较大，缺失检测应先于超时返回）。
+        let results = wait_tasks(vec!["no-such-task".to_string()], 60_000);
         assert!(results.is_empty(), "不存在的 task id 应返回空结果");
     }
 }
