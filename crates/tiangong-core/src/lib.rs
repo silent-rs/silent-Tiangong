@@ -10,7 +10,6 @@ pub mod core_config;
 pub mod custom_prompt;
 pub mod index;
 pub mod media;
-pub mod media_archive;
 pub mod model;
 pub mod models_config;
 pub mod observe;

@@ -9677,6 +9677,7 @@ dependencies = [
  "tempfile",
  "tiangong-llm",
  "tiangong-media",
+ "tiangong-media-archive",
  "tiangong-types",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -9746,6 +9747,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-media-archive"
+version = "0.11.0"
+dependencies = [
+ "base64 0.22.1",
+ "reqwest 0.13.4",
+ "scru128",
+ "tiangong-types",
  "tracing",
 ]
 

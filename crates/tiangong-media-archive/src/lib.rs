@@ -1,3 +1,10 @@
+//! 输入附件本地归档
+//!
+//! 把用户输入的图片 / PDF / Office 文档归档到 `~/.tiangong/media/` 下，
+//! 统一为本地路径引用。支持 data URL、http(s) 和本地路径三种来源。
+//!
+//! 原 `tiangong-core::media_archive`，已迁出为独立 crate（#208）。
+
 use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose};
@@ -94,18 +101,18 @@ fn is_document_mime(mime: &str) -> bool {
     )
 }
 
-pub(crate) struct ArchivedImage {
+pub struct ArchivedImage {
     path: String,
     mime_type: String,
 }
 
 impl ArchivedImage {
-    pub(crate) fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         &self.path
     }
 }
 
-pub(crate) fn archive_image_reference(
+pub fn archive_image_reference(
     reference: &str,
     mime_hint: Option<&str>,
 ) -> Result<ArchivedImage, String> {
@@ -239,7 +246,7 @@ fn is_archived_media_path(value: &str, subdir: &str) -> bool {
         })
 }
 
-pub(crate) fn image_mime_from_reference(value: &str) -> Option<String> {
+pub fn image_mime_from_reference(value: &str) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     if lower.starts_with("data:image/") {
         return lower
@@ -303,7 +310,7 @@ fn document_ext_from_mime(mime_type: &str) -> Option<&'static str> {
 /// 把 PDF/Office 文档引用归档到 `~/.tiangong/media/files/`。
 ///
 /// 支持 data URL、http(s) 和本地路径三种来源。
-pub(crate) fn archive_file_reference(
+pub fn archive_file_reference(
     reference: &str,
     mime_hint: Option<&str>,
 ) -> Result<ArchivedImage, String> {
