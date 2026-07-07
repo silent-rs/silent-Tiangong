@@ -75,7 +75,7 @@ pub async fn run_agent_turn(
     _prompt_config: Arc<PromptConfig>,
 ) -> AgentTurnResult {
     // 1. 锁 team，取收件箱 + child_session，置 Running，注册 cmd_tx。
-    let (combined, mut child_session, agent_label) = {
+    let (combined, mut child_session, agent_label, agent_role) = {
         let Ok(mut team) = team.lock() else {
             return AgentTurnResult {
                 report: "团队状态锁定失败".to_string(),
@@ -113,8 +113,8 @@ pub async fn run_agent_turn(
                 cancelled: false,
             };
         };
-        let label = match team.registry.get(&agent_id) {
-            Some(d) => d.label.clone(),
+        let (label, role) = match team.registry.get(&agent_id) {
+            Some(d) => (d.label.clone(), d.role.clone()),
             None => {
                 return AgentTurnResult {
                     report: "子 Agent 已注销".to_string(),
@@ -134,7 +134,7 @@ pub async fn run_agent_turn(
             .map(|m| format!("[from:{} at {}]\n{}", m.from, m.created_at, m.content))
             .collect::<Vec<_>>()
             .join("\n\n");
-        (combined, child_session, label)
+        (combined, child_session, label, role)
     };
 
     // 2. 构造子 ReactEngine + cmd 通道。
@@ -168,6 +168,7 @@ pub async fn run_agent_turn(
     let (child_stream_tx, child_stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
     let forwarder = spawn_sub_agent_stream_forwarder(
         agent_id.clone(),
+        agent_role,
         agent_label.clone(),
         feedback_tx.clone(),
         child_stream_rx,
@@ -348,14 +349,15 @@ fn build_agent_report(child_session: &Session, agent_label: &str) -> String {
     }
 }
 
-/// 启动转发线程：把子 Agent 的 StreamEvent 经 feedback 投递。
+/// 启动转发线程：把子 Agent 的内部 StreamEvent 翻译为父级事件经 feedback 投递。
 ///
-/// - `TokenUsage` → `report_token_usage`（即时记账到本轮主 Agent）。
-/// - `Done` / `Retry` → 抑制（子 Agent 的 Done 不透传，避免主 Agent 误判 turn 结束）。
-/// - `Error` → 转为 `AgentNotification`。
-/// - 其他 → 原样透传。
+/// 子 Agent 的细粒度事件（Delta/Reasoning/ToolCalls/ToolStart/ToolResult/...）
+/// 收敛为 `AgentOutput`（带 agent_id/role/label），GUI 的 AgentPanel 据此把输出
+/// 归因到具体 Agent Tab。团队级事件（AgentCreated/StatusChanged/...）透传。
+/// TokenUsage → report_token_usage；Done → 抑制（避免主 Agent 误判 turn 结束）。
 fn spawn_sub_agent_stream_forwarder(
     agent_id: String,
+    agent_role: String,
     agent_label: String,
     feedback_tx: PluginFeedbackTx,
     child_rx: std::sync::mpsc::Receiver<StreamEvent>,
@@ -363,8 +365,131 @@ fn spawn_sub_agent_stream_forwarder(
     std::thread::spawn(move || {
         for event in child_rx {
             match event {
+                StreamEvent::Delta {
+                    message_id,
+                    content,
+                }
+                | StreamEvent::ReactText {
+                    message_id,
+                    content,
+                }
+                | StreamEvent::SummaryText {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &feedback_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        content,
+                        "",
+                    ),
+                ),
+                StreamEvent::Reasoning {
+                    message_id,
+                    content,
+                } => send_sub_agent_output(
+                    &feedback_tx,
+                    &agent_id,
+                    &agent_role,
+                    &agent_label,
+                    sub_agent_stream_message(
+                        format!("agent:{agent_id}:assistant:{message_id}"),
+                        MessageRole::Assistant,
+                        "",
+                        content,
+                    ),
+                ),
+                StreamEvent::ToolCalls {
+                    message_id,
+                    names,
+                    usage,
+                    ..
+                } => {
+                    let usage_text = usage
+                        .map(|u| {
+                            format!(
+                                "\ntokens: prompt={}, completion={}, total={}",
+                                u.prompt_tokens, u.completion_tokens, u.total_tokens
+                            )
+                        })
+                        .unwrap_or_default();
+                    send_sub_agent_output(
+                        &feedback_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-calls:{message_id}"),
+                            MessageRole::System,
+                            format!("LLM 输出{usage_text}\ntool_calls: {}", names.join(", ")),
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolStart { name, args_summary } => {
+                    let mut content = format!("工具开始 [{name}]");
+                    if !args_summary.is_empty() {
+                        content.push_str(&format!("\n命令: {args_summary}"));
+                    }
+                    send_sub_agent_output(
+                        &feedback_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            format!("agent:{agent_id}:tool-start:{}", scru128::new()),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
+                StreamEvent::ToolResult {
+                    name,
+                    tool_call_id,
+                    ok,
+                    output,
+                    full_output,
+                    ..
+                } => {
+                    let persisted = full_output.unwrap_or(output);
+                    let mut content = format!(
+                        "工具执行 [{name}]\nok={} exit_code={}",
+                        ok,
+                        if ok { 0 } else { 1 }
+                    );
+                    if !persisted.trim().is_empty() {
+                        content.push_str(&format!("\nstdout:\n{persisted}"));
+                    }
+                    send_sub_agent_output(
+                        &feedback_tx,
+                        &agent_id,
+                        &agent_role,
+                        &agent_label,
+                        sub_agent_stream_message(
+                            tool_call_id.unwrap_or_else(|| {
+                                format!("agent:{agent_id}:tool-result:{}", scru128::new())
+                            }),
+                            MessageRole::System,
+                            content,
+                            "",
+                        ),
+                    );
+                }
                 StreamEvent::TokenUsage { usage, .. } => {
                     feedback_tx.report_token_usage(usage, format!("sub_agent:{agent_id}"));
+                }
+                StreamEvent::AgentCreated { .. }
+                | StreamEvent::AgentStatusChanged { .. }
+                | StreamEvent::AgentNotification { .. }
+                | StreamEvent::AgentMessage { .. }
+                | StreamEvent::FileLockChanged { .. }
+                | StreamEvent::PhaseChanged { .. } => {
+                    let _ = feedback_tx.send_stream_event(event);
                 }
                 StreamEvent::Error { message } => {
                     let _ = feedback_tx.send_stream_event(StreamEvent::AgentNotification {
@@ -374,11 +499,52 @@ fn spawn_sub_agent_stream_forwarder(
                         level: "error".to_string(),
                     });
                 }
-                StreamEvent::Done { .. } | StreamEvent::Retry { .. } => {}
-                other => {
-                    let _ = feedback_tx.send_stream_event(other);
-                }
+                StreamEvent::Done { .. } | StreamEvent::Retry { .. } | _ => {}
             }
         }
     })
+}
+
+/// 构造一条子 Agent 流转发的 Message。
+fn sub_agent_stream_message(
+    id: impl Into<String>,
+    role: MessageRole,
+    content: impl Into<String>,
+    reasoning_content: impl Into<String>,
+) -> tiangong_types::Message {
+    tiangong_types::Message {
+        id: id.into(),
+        role,
+        content: vec![tiangong_types::ContentBlock::text(content.into())],
+        reasoning_content: reasoning_content.into(),
+        reasoning_signature: None,
+        worker_id: None,
+        media: Vec::new(),
+        media_migrated: true,
+        elapsed_ms: None,
+        turn_status: None,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        phase: tiangong_types::MessagePhase::Normal,
+        created_at: tiangong_core::session::now_text(),
+    }
+}
+
+/// 把一条 Message 包装为 StreamEvent::AgentOutput 经 feedback 推送。
+fn send_sub_agent_output(
+    feedback_tx: &PluginFeedbackTx,
+    agent_id: &str,
+    agent_role: &str,
+    agent_label: &str,
+    message: tiangong_types::Message,
+) {
+    let _ = feedback_tx.send_stream_event(StreamEvent::AgentOutput {
+        agent_id: agent_id.to_string(),
+        agent_role: agent_role.to_string(),
+        agent_label: agent_label.to_string(),
+        messages: vec![message],
+    });
 }
