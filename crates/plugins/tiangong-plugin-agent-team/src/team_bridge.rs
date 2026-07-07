@@ -74,8 +74,8 @@ pub async fn run_agent_turn(
     feedback_tx: PluginFeedbackTx,
     _prompt_config: Arc<PromptConfig>,
 ) -> AgentTurnResult {
-    // 1. 锁 team，取收件箱 + child_session，置 Running，注册 cmd_tx。
-    let (combined, mut child_session, agent_label, agent_role) = {
+    // 1. 锁 team，取收件箱 + child_session + descriptor，置 Running，注册 cmd_tx。
+    let (combined, mut child_session, agent_label, agent_role, agent_system_prompt, team_roster) = {
         let Ok(mut team) = team.lock() else {
             return AgentTurnResult {
                 report: "团队状态锁定失败".to_string(),
@@ -113,8 +113,8 @@ pub async fn run_agent_turn(
                 cancelled: false,
             };
         };
-        let (label, role) = match team.registry.get(&agent_id) {
-            Some(d) => (d.label.clone(), d.role.clone()),
+        let (label, role, system_prompt) = match team.registry.get(&agent_id) {
+            Some(d) => (d.label.clone(), d.role.clone(), d.system_prompt.clone()),
             None => {
                 return AgentTurnResult {
                     report: "子 Agent 已注销".to_string(),
@@ -134,7 +134,9 @@ pub async fn run_agent_turn(
             .map(|m| format!("[from:{} at {}]\n{}", m.from, m.created_at, m.content))
             .collect::<Vec<_>>()
             .join("\n\n");
-        (combined, child_session, label, role)
+        // 渲染团队花名册（供子 Agent system prompt 上下文）。
+        let roster = format_team_roster(&team);
+        (combined, child_session, label, role, system_prompt, roster)
     };
 
     // 2. 构造子 ReactEngine + cmd 通道。
@@ -143,6 +145,22 @@ pub async fn run_agent_turn(
     let sub_tools = filter_sub_agent_tools(parent_tools, &agent_id, &team);
     let sub_sink = std::sync::Arc::new(tiangong_core::core::plugin::TurnUsageSink::new());
     let sub_runtime = runtime_engine.with_turn_usage_sink(sub_sink);
+
+    // 构建子 Agent 的 system prompt（角色指令 + 团队花名册 + 基础配置）。
+    // 复刻 main 分支 spawn_ready_sub_agents 的 SubAgentPromptContext 构建。
+    {
+        let base = tiangong_core::prompt::SystemPromptConfig::from_configs(
+            sub_runtime.models_config(),
+            sub_runtime.agent_config(),
+        );
+        let ctx = tiangong_core::prompt::SubAgentPromptContext::new(
+            &base,
+            &agent_system_prompt,
+            &team_roster,
+        );
+        child_session.system_prompt_message = Some(ctx.build(&child_session));
+    }
+
     let mut sub_engine = ReactEngine::new(
         sub_runtime,
         sub_tools,
@@ -278,6 +296,17 @@ pub async fn run_agents_turns(
         usage: total_usage,
         cancelled: any_cancelled,
     }
+}
+
+/// 渲染当前团队花名册（仅存活 Agent），用于子 Agent system prompt 上下文。
+fn format_team_roster(team: &TeamContext) -> String {
+    let mut agents = team.registry.alive_agents();
+    agents.sort_by(|a, b| a.role.cmp(&b.role));
+    agents
+        .iter()
+        .map(|a| format!("- {} (@{})", a.label, a.role))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 从父工具集中过滤出子 Agent 可用的工具（排除团队管理工具）。
