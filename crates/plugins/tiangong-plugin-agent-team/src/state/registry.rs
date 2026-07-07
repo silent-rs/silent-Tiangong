@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::agent_team::descriptor::{AgentDescriptor, AgentStatus};
-use crate::agent_team::message_bus::{AgentInboxEntry, AgentMessage};
-use crate::session::Session;
+use super::descriptor::{AgentDescriptor, AgentStatus};
+use super::message_bus::{AgentInboxEntry, AgentMessage};
+use tiangong_core::session::Session;
 
 /// 会话级 Agent 注册表
 pub struct AgentRegistry {

@@ -1,113 +1,32 @@
-//! Sub Agent 生命周期管理
+//! Sub Agent 生命周期管理与 7 个团队工具 handler（迁自 core
+//! `agent_team/lifecycle.rs`）。
+//!
+//! 本模块承接原 core 的 `execute_create_agent` / `execute_dismiss_agent` /
+//! `execute_send_message` / `execute_broadcast_message` / `execute_notify_user` /
+//! `execute_lock_file` / `execute_unlock_file`，以及 `restore_agents_from_session_history`
+//! / `persist_child_session` / `parse_agent_mention_route` 等辅助逻辑。
+//!
+//! 与原 core 实现的差异：
+//! - 所有 handler 的 `team` 入参改为本插件的 [`crate::TeamContext`]（字段同构）。
+//! - import 路径 `crate::session` / `crate::tool` / `crate::model` →
+//!   `tiangong_core::session` / `tiangong_core::tool` / `tiangong_core::model`。
+//! - `MessagePriority` / `AgentStatus` / `AgentDescriptor` / `AgentMessage` 改引自
+//!   [`crate::state`]。
+//! - `stream_tx` 仍为 `&StdSender<StreamEvent>`，由 handler.rs 桥接到 feedback_tx。
 
-use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::agent_team::descriptor::{AgentDescriptor, AgentStatus};
-use crate::agent_team::file_lock::FileLockManager;
-use crate::agent_team::message_bus::{AgentInboxEntry, AgentMessage};
-use crate::agent_team::registry::AgentRegistry;
-use crate::agent_team::tools::MAX_AGENTS;
-use crate::core::command::Command;
-use crate::model::{ToolCall, ToolSpec};
-use crate::session::{PendingAgentDelivery, Session, now_text};
-use crate::tool::ToolResult;
-use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks};
-use tokio::sync::mpsc as tokio_mpsc;
+use tiangong_core::model::{ToolCall, ToolSpec};
+use tiangong_core::session::{now_text, PendingAgentDelivery, Session};
+use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
+use tiangong_types::{content_blocks_text, stable_content_blocks, ContentBlock, StreamEvent};
 
-/// 团队执行上下文，随 ReactEngine 的 execute_turn 传递
-pub struct TeamContext {
-    /// Agent 注册表
-    pub registry: AgentRegistry,
-    /// 文件锁管理器
-    pub file_locks: FileLockManager,
-    /// 发给主 Agent 的消息
-    pub main_inbox: Vec<AgentMessage>,
-    /// 正在运行的 Agent 实时命令通道
-    active_agent_senders: HashMap<String, tokio_mpsc::UnboundedSender<Command>>,
-    /// 空闲 Agent 收到新消息时唤醒调度器
-    dispatch_waker: Option<tokio_mpsc::UnboundedSender<()>>,
-}
-
-impl TeamContext {
-    pub fn new() -> Self {
-        Self {
-            registry: AgentRegistry::new(),
-            file_locks: FileLockManager::new(),
-            main_inbox: Vec::new(),
-            active_agent_senders: HashMap::new(),
-            dispatch_waker: None,
-        }
-    }
-
-    pub fn deliver_main_message(&mut self, message: AgentMessage) {
-        self.main_inbox.push(message);
-    }
-
-    pub fn drain_main_inbox(&mut self) -> Vec<AgentMessage> {
-        std::mem::take(&mut self.main_inbox)
-    }
-
-    pub(crate) fn register_active_agent(
-        &mut self,
-        agent_id: String,
-        tx: tokio_mpsc::UnboundedSender<Command>,
-    ) {
-        self.active_agent_senders.insert(agent_id, tx);
-    }
-
-    pub(crate) fn unregister_active_agent(&mut self, agent_id: &str) {
-        self.active_agent_senders.remove(agent_id);
-    }
-
-    pub(crate) fn set_dispatch_waker(&mut self, tx: tokio_mpsc::UnboundedSender<()>) {
-        self.dispatch_waker = Some(tx);
-    }
-
-    pub(crate) fn clear_dispatch_waker(&mut self) {
-        self.dispatch_waker = None;
-    }
-
-    pub(crate) fn dispatch_agent_message(
-        &mut self,
-        agent_id: &str,
-        message: AgentMessage,
-        additional_content: Vec<ContentBlock>,
-        session_message_id: Option<String>,
-    ) {
-        // Agent 输入按消息来源分批串行执行；运行中追加会让 direct-user 与
-        // delegated 结果共享一次总结，无法可靠决定结果应展示还是回灌 Main。
-        self.queue_agent_message(agent_id, message, additional_content, session_message_id);
-    }
-
-    pub(crate) fn queue_agent_message(
-        &mut self,
-        agent_id: &str,
-        message: AgentMessage,
-        additional_content: Vec<ContentBlock>,
-        session_message_id: Option<String>,
-    ) {
-        self.registry.deliver_inbox_entry(
-            agent_id,
-            AgentInboxEntry {
-                message,
-                additional_content,
-                session_message_id,
-            },
-        );
-        if let Some(waker) = &self.dispatch_waker {
-            let _ = waker.send(());
-        }
-    }
-}
-
-impl Default for TeamContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+use crate::constants::MAX_AGENTS;
+use crate::state::message_bus::AgentInboxEntry;
+use crate::state::{AgentDescriptor, AgentMessage, AgentStatus, MessagePriority};
+use crate::TeamContext;
 
 fn normalize_agent_role(role: &str) -> String {
     role.trim().trim_start_matches('@').to_string()
@@ -135,7 +54,6 @@ pub(crate) fn prepared_agent_message_for_prompt(
     }
     additional_content
 }
-
 #[derive(Debug, Clone)]
 struct RestoredAgent {
     agent_id: String,
@@ -160,7 +78,7 @@ pub fn restore_agents_from_session_history(
     let mut restored: Vec<RestoredAgent> = Vec::new();
 
     for message in &parent_session.messages {
-        if message.role != crate::session::MessageRole::System {
+        if message.role != tiangong_core::session::MessageRole::System {
             continue;
         }
 
@@ -229,7 +147,9 @@ pub fn restore_agents_from_session_history(
     count
 }
 
-fn parse_persisted_agent_descriptor(message: &crate::session::Message) -> Option<RestoredAgent> {
+fn parse_persisted_agent_descriptor(
+    message: &tiangong_core::session::Message,
+) -> Option<RestoredAgent> {
     message.content.iter().find_map(|block| {
         let ContentBlock::ModelInstruction { text } = block else {
             return None;
@@ -404,18 +324,16 @@ pub fn execute_create_agent(
         .map(|a| a.agent_id.clone())
         .collect();
     for target_id in targets {
-        team.dispatch_agent_message(
+        team.registry.deliver_message(
             &target_id,
             AgentMessage {
                 id: scru128::new().to_string(),
                 from: "system".to_string(),
                 to: target_id.clone(),
                 content: notification.clone(),
-                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                priority: MessagePriority::Normal,
                 created_at: now_text(),
             },
-            Vec::new(),
-            None,
         );
     }
 
@@ -433,7 +351,7 @@ pub fn execute_create_agent(
         ),
         stderr: String::new(),
         exit_code: 0,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: "create_agent".to_string(),
             args: vec![role, label],
             duration_ms: 0,
@@ -494,7 +412,7 @@ pub fn execute_dismiss_agent(
         stdout: format!("Agent '{label}' (role={role}) 已解散，所有资源已释放"),
         stderr: String::new(),
         exit_code: 0,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: "dismiss_agent".to_string(),
             args: vec![role],
             duration_ms: 0,
@@ -543,7 +461,7 @@ pub fn execute_send_message(
             from: current_agent_id.to_string(),
             to: "main".to_string(),
             content: content.clone(),
-            priority: crate::agent_team::message_bus::MessagePriority::Normal,
+            priority: MessagePriority::Normal,
             created_at: now_text(),
         };
         team.deliver_main_message(message);
@@ -560,7 +478,7 @@ pub fn execute_send_message(
             stdout: "消息已送达 → @main (Main Agent)".to_string(),
             stderr: String::new(),
             exit_code: 0,
-            execution: Some(crate::tool::ToolExecutionRecord {
+            execution: Some(ToolExecutionRecord {
                 tool_name: "send_message".to_string(),
                 args: vec![to, content.chars().take(100).collect()],
                 duration_ms: 0,
@@ -580,11 +498,11 @@ pub fn execute_send_message(
         from: current_agent_id.to_string(),
         to: target.agent_id.clone(),
         content: content.clone(),
-        priority: crate::agent_team::message_bus::MessagePriority::Normal,
+        priority: MessagePriority::Normal,
         created_at: now_text(),
     };
 
-    team.dispatch_agent_message(&target.agent_id, message, Vec::new(), None);
+    team.registry.deliver_message(&target.agent_id, message);
 
     let _ = stream_tx.send(StreamEvent::AgentMessage {
         from_agent_id: current_agent_id.to_string(),
@@ -600,7 +518,7 @@ pub fn execute_send_message(
         stdout: format!("消息已送达 → @{to} ({label})", label = target.label),
         stderr: String::new(),
         exit_code: 0,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: "send_message".to_string(),
             args: vec![to, content.chars().take(100).collect()],
             duration_ms: 0,
@@ -662,7 +580,7 @@ pub fn execute_broadcast_message(
         from: current_agent_id.to_string(),
         to: "all".to_string(),
         content: content.clone(),
-        priority: crate::agent_team::message_bus::MessagePriority::Normal,
+        priority: MessagePriority::Normal,
         created_at: now_text(),
     };
 
@@ -685,7 +603,7 @@ pub fn execute_broadcast_message(
             to: agent_id.clone(),
             ..message.clone()
         };
-        team.dispatch_agent_message(agent_id, msg, Vec::new(), None);
+        team.registry.deliver_message(agent_id, msg);
     }
 
     // 为每个目标发送事件
@@ -705,7 +623,7 @@ pub fn execute_broadcast_message(
         stdout: format!("广播消息已送达 → @all ({target_count} 个 Agent)"),
         stderr: String::new(),
         exit_code: 0,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: "broadcast_message".to_string(),
             args: vec![content.chars().take(100).collect()],
             duration_ms: 0,
@@ -762,7 +680,7 @@ pub fn execute_notify_user(
         stdout: format!("已推送给用户 [{level}]: {content}"),
         stderr: String::new(),
         exit_code: 0,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: "notify_user".to_string(),
             args: vec![level, content.chars().take(100).collect()],
             duration_ms: 0,
@@ -814,7 +732,7 @@ pub fn execute_lock_file(
                 stdout: format!("已锁定 {path}"),
                 stderr: String::new(),
                 exit_code: 0,
-                execution: Some(crate::tool::ToolExecutionRecord {
+                execution: Some(ToolExecutionRecord {
                     tool_name: "lock_file".to_string(),
                     args: vec![path],
                     duration_ms: 0,
@@ -830,7 +748,7 @@ pub fn execute_lock_file(
             stdout: String::new(),
             stderr: err,
             exit_code: 1,
-            execution: Some(crate::tool::ToolExecutionRecord {
+            execution: Some(ToolExecutionRecord {
                 tool_name: "lock_file".to_string(),
                 args: vec![path],
                 duration_ms: 0,
@@ -890,7 +808,7 @@ pub fn execute_unlock_file(
                 stdout: format!("已解锁 {path}"),
                 stderr: String::new(),
                 exit_code: 0,
-                execution: Some(crate::tool::ToolExecutionRecord {
+                execution: Some(ToolExecutionRecord {
                     tool_name: "unlock_file".to_string(),
                     args: vec![path],
                     duration_ms: 0,
@@ -906,7 +824,7 @@ pub fn execute_unlock_file(
             stdout: String::new(),
             stderr: err,
             exit_code: 1,
-            execution: Some(crate::tool::ToolExecutionRecord {
+            execution: Some(ToolExecutionRecord {
                 tool_name: "unlock_file".to_string(),
                 args: vec![path],
                 duration_ms: 0,
@@ -916,20 +834,6 @@ pub fn execute_unlock_file(
             }),
         },
     }
-}
-
-/// 判断是否为团队协作工具
-pub fn is_team_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "create_agent"
-            | "dismiss_agent"
-            | "send_message"
-            | "broadcast_message"
-            | "notify_user"
-            | "lock_file"
-            | "unlock_file"
-    )
 }
 
 /// 统一处理团队工具调用
@@ -944,19 +848,20 @@ pub fn execute_team_tool(
     match call.name.as_str() {
         "create_agent" => {
             let result = execute_create_agent(team, call, parent_session, parent_tools, stream_tx);
-            if result.ok
-                && let Some(role) = call.arguments.get("role").and_then(|value| value.as_str())
-                && let Some(agent) = team.registry.find_by_role(role)
-            {
-                append_team_history_message(
-                    parent_session,
-                    stream_tx,
-                    format!(
-                        "[Agent] {} ({}) 已加入团队 id={}",
-                        agent.label, agent.role, agent.agent_id
-                    ),
-                    Some(agent),
-                );
+            if result.ok {
+                if let Some(role) = call.arguments.get("role").and_then(|value| value.as_str()) {
+                    if let Some(agent) = team.registry.find_by_role(role) {
+                        append_team_history_message(
+                            parent_session,
+                            stream_tx,
+                            format!(
+                                "[Agent] {} ({}) 已加入团队 id={}",
+                                agent.label, agent.role, agent.agent_id
+                            ),
+                            Some(agent),
+                        );
+                    }
+                }
             }
             result
         }
@@ -968,15 +873,15 @@ pub fn execute_team_tool(
                 .and_then(|role| team.registry.find_by_role(role))
                 .map(|agent| (agent.agent_id.clone(), agent.label.clone()));
             let result = execute_dismiss_agent(team, call, stream_tx);
-            if result.ok
-                && let Some((agent_id, label)) = previous
-            {
-                append_team_history_message(
-                    parent_session,
-                    stream_tx,
-                    format!("[Agent] {label} 状态变更: terminated id={agent_id}"),
-                    None,
-                );
+            if result.ok {
+                if let Some((agent_id, label)) = previous {
+                    append_team_history_message(
+                        parent_session,
+                        stream_tx,
+                        format!("[Agent] {label} 状态变更: terminated id={agent_id}"),
+                        None,
+                    );
+                }
             }
             result
         }
@@ -995,23 +900,36 @@ fn append_team_history_message(
     content: String,
     descriptor: Option<&AgentDescriptor>,
 ) {
-    let mut message = crate::session::Message::new(crate::session::MessageRole::System, content);
+    let mut message =
+        tiangong_core::session::Message::new(tiangong_core::session::MessageRole::System, content);
     message.model_excluded = true;
-    if let Some(descriptor) = descriptor
-        && let Ok(json) = serde_json::to_string(descriptor)
-    {
-        message
-            .content
-            .push(ContentBlock::model_instruction(format!(
-                "{AGENT_DESCRIPTOR_MARKER}{json}"
-            )));
+    if let Some(descriptor) = descriptor {
+        if let Ok(json) = serde_json::to_string(descriptor) {
+            message
+                .content
+                .push(ContentBlock::model_instruction(format!(
+                    "{AGENT_DESCRIPTOR_MARKER}{json}"
+                )));
+        }
     }
     let message_id = message.id.clone();
     session.messages.push(message);
     if let Err(error) = session.try_persist_to_disk() {
         tracing::warn!(%error, "持久化 Agent 生命周期记录失败");
     }
-    crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
+    if let Some(mut message) = session
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .cloned()
+    {
+        message.clear_transient_data();
+        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message,
+            pending_agent_deliveries: None,
+            deferred_tool_injections: None,
+        });
+    }
 }
 
 /// 用户输入中的 Agent @ 路由结果。
@@ -1122,18 +1040,20 @@ pub(crate) fn dispatch_pending_agent_deliveries(
         }
         let label = agent.label.clone();
         let content = delivery.content.clone();
-        team.queue_agent_message(
+        team.registry.deliver_inbox_entry(
             &delivery.target_agent_id,
-            AgentMessage {
-                id: delivery.delivery_id,
-                from: "user".to_string(),
-                to: delivery.target_agent_id.clone(),
-                content: delivery.content,
-                priority: crate::agent_team::message_bus::MessagePriority::Normal,
-                created_at: delivery.created_at,
+            AgentInboxEntry {
+                message: AgentMessage {
+                    id: delivery.delivery_id,
+                    from: "user".to_string(),
+                    to: delivery.target_agent_id.clone(),
+                    content: delivery.content,
+                    priority: MessagePriority::Normal,
+                    created_at: delivery.created_at,
+                },
+                additional_content: delivery.additional_content,
+                session_message_id: Some(delivery.source_message_id),
             },
-            delivery.additional_content,
-            Some(delivery.source_message_id),
         );
         let _ = stream_tx.send(StreamEvent::AgentMessage {
             from_agent_id: "user".to_string(),
@@ -1160,18 +1080,20 @@ pub(crate) fn restore_pending_agent_deliveries(
         if agent.status == AgentStatus::Terminated {
             continue;
         }
-        team.queue_agent_message(
+        team.registry.deliver_inbox_entry(
             &delivery.target_agent_id,
-            AgentMessage {
-                id: delivery.delivery_id.clone(),
-                from: "user".to_string(),
-                to: delivery.target_agent_id.clone(),
-                content: delivery.content.clone(),
-                priority: crate::agent_team::message_bus::MessagePriority::Normal,
-                created_at: delivery.created_at.clone(),
+            AgentInboxEntry {
+                message: AgentMessage {
+                    id: delivery.delivery_id.clone(),
+                    from: "user".to_string(),
+                    to: delivery.target_agent_id.clone(),
+                    content: delivery.content.clone(),
+                    priority: MessagePriority::Normal,
+                    created_at: delivery.created_at.clone(),
+                },
+                additional_content: delivery.additional_content.clone(),
+                session_message_id: Some(delivery.source_message_id.clone()),
             },
-            delivery.additional_content.clone(),
-            Some(delivery.source_message_id.clone()),
         );
         restored += 1;
     }
@@ -1192,12 +1114,7 @@ pub fn route_user_mentions_with_content(
     }
     for (agent_id, label, entry) in entries {
         let content = entry.message.content.clone();
-        team.queue_agent_message(
-            &agent_id,
-            entry.message,
-            entry.additional_content,
-            entry.session_message_id,
-        );
+        team.registry.deliver_inbox_entry(&agent_id, entry);
         let _ = stream_tx.send(StreamEvent::AgentMessage {
             from_agent_id: "user".to_string(),
             from_agent_label: "User".to_string(),
@@ -1292,7 +1209,7 @@ fn build_user_mention_entries(
                 from: "user".to_string(),
                 to: agent_id.clone(),
                 content: route.content.clone(),
-                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                priority: MessagePriority::Normal,
                 created_at: now_text(),
             };
             (
@@ -1308,14 +1225,14 @@ fn build_user_mention_entries(
         .collect()
 }
 
-pub(crate) fn error_tool_result(name: &str, message: &str) -> ToolResult {
+pub fn error_tool_result(name: &str, message: &str) -> ToolResult {
     ToolResult {
         ok: false,
         summary: format!("{name} 失败: {message}"),
         stdout: String::new(),
         stderr: message.to_string(),
         exit_code: 1,
-        execution: Some(crate::tool::ToolExecutionRecord {
+        execution: Some(ToolExecutionRecord {
             tool_name: name.to_string(),
             args: Vec::new(),
             duration_ms: 0,
@@ -1341,7 +1258,7 @@ pub fn persist_child_session(
     agent_id: &str,
     session: &Session,
 ) -> Result<(), String> {
-    let agents_dir = crate::storage::storage_root()
+    let agents_dir = tiangong_core::storage::storage_root()
         .join("sessions")
         .join(&parent_session.id)
         .join("agents");
@@ -1350,19 +1267,23 @@ pub fn persist_child_session(
     let path = agents_dir.join(format!("{agent_id}.json"));
     let content = serde_json::to_string_pretty(session)
         .map_err(|error| format!("child session 序列化失败：{error}"))?;
-    crate::session::atomic_replace_file(&path, content.as_bytes())
+    tiangong_core::session::atomic_replace_file(&path, content.as_bytes())
         .map_err(|error| format!("child session 持久化写入失败：{error}"))
 }
 
 /// 从磁盘加载 child_session
 pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Session> {
-    let path = crate::storage::storage_root()
+    let path = tiangong_core::storage::storage_root()
         .join("sessions")
         .join(&parent_session.id)
         .join("agents")
         .join(format!("{agent_id}.json"));
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+fn normalize_agent_role(role: &str) -> String {
+    role.trim().trim_start_matches('@').to_string()
 }
 
 #[cfg(test)]
@@ -1377,7 +1298,7 @@ mod tests {
     /// 返回的 TempDir 须保持存活到用例结束。
     fn isolated_storage_root() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("创建临时目录失败");
-        crate::storage::set_storage_root(dir.path().to_path_buf());
+        tiangong_core::storage::set_storage_root(dir.path().to_path_buf());
         dir
     }
 
@@ -1636,11 +1557,10 @@ mod tests {
         let now = chrono::Local::now().naive_local();
         let path = PathBuf::from("src/auth.rs");
 
-        assert!(
-            team.file_locks
-                .ensure_can_write(&path, "dev-agent", &now)
-                .is_err()
-        );
+        assert!(team
+            .file_locks
+            .ensure_can_write(&path, "dev-agent", &now)
+            .is_err());
 
         let result = execute_lock_file(
             &mut team,
@@ -1649,16 +1569,14 @@ mod tests {
             &tx,
         );
         assert!(result.ok);
-        assert!(
-            team.file_locks
-                .ensure_can_write(&path, "dev-agent", &now)
-                .is_ok()
-        );
-        assert!(
-            team.file_locks
-                .ensure_can_write(&path, "test-agent", &now)
-                .is_err()
-        );
+        assert!(team
+            .file_locks
+            .ensure_can_write(&path, "dev-agent", &now)
+            .is_ok());
+        assert!(team
+            .file_locks
+            .ensure_can_write(&path, "test-agent", &now)
+            .is_err());
         assert!(rx.try_iter().any(|event| matches!(
             event,
             StreamEvent::FileLockChanged {
@@ -1724,11 +1642,11 @@ mod tests {
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] 开发者 (dev) 已加入团队 id=agent-dev".to_string(),
         );
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] 项目经理 (pm) 已加入团队 id=agent-pm".to_string(),
         );
 
@@ -1760,11 +1678,11 @@ mod tests {
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] 开发者 (dev) 已加入团队 id=agent-dev".to_string(),
         );
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] 开发者 状态变更: terminated id=agent-dev".to_string(),
         );
 
@@ -1780,15 +1698,15 @@ mod tests {
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] Worker (dev) 已加入团队 id=agent-dev".to_string(),
         );
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] Worker (test) 已加入团队 id=agent-test".to_string(),
         );
         parent.append_message(
-            crate::session::MessageRole::System,
+            tiangong_core::session::MessageRole::System,
             "[Agent] Worker 状态变更: terminated id=agent-dev".to_string(),
         );
 

@@ -458,6 +458,8 @@ impl ServerCoreManager {
                 // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
                 //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
                 plugins.push(self.mcp_plugin.clone());
+                // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+                plugins.extend(tiangong_plugin_agent_team::default_plugins());
                 plugins
             })
             .storage(tiangong_core::core::CoreStorageLocation::new(

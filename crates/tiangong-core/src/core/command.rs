@@ -1,7 +1,7 @@
 //! Agent 命令与执行效果类型
 
 /// 用户命令
-pub(crate) enum Command {
+pub enum Command {
     /// 发送消息
     Message {
         prepared: Vec<tiangong_types::ContentBlock>,
@@ -44,7 +44,7 @@ pub(crate) enum Command {
 }
 
 /// 命令排空后的副作用
-pub(crate) enum PendingCommandEffect {
+pub enum PendingCommandEffect {
     None,
     MessagesInjected {
         current_agent_input: Option<String>,

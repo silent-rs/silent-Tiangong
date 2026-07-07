@@ -1,6 +1,5 @@
 pub mod agent_config;
 pub mod agent_input;
-pub mod agent_team;
 pub mod approval_store;
 pub mod audit;
 pub mod context;

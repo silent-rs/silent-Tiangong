@@ -104,6 +104,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
             // CLI 侧经 mcp_plugin 做管理。
             plugins.push(mcp_plugin.clone());
+            // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+            plugins.extend(tiangong_plugin_agent_team::default_plugins());
             plugins
         })
         .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))

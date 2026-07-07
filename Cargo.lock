@@ -9591,6 +9591,7 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-memory",
+ "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
@@ -9646,6 +9647,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-memory",
+ "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
@@ -9817,6 +9819,22 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-agent-team"
+version = "0.12.1"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10113,6 +10131,7 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-memory",
+ "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",

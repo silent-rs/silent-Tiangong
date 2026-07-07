@@ -386,12 +386,13 @@ impl RuntimeEngine {
     }
 }
 
-/// 注入增强工具定义（团队协作等 core 内置增强工具）。
+/// 保留增强工具注入钩子。
 ///
-/// 其他扩展能力均由插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
-pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
-    // 多智能体团队工具
-    crate::agent_team::tools::inject_agent_team_tools(tools);
+/// 扩展能力均由插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
+pub(crate) fn inject_enhanced_tools(_tools: &mut Vec<ToolSpec>) {
+    // 团队工具（create_agent/dismiss_agent/send_message/broadcast_message/notify_user/
+    // lock_file/unlock_file）已迁移至独立插件 crate（tiangong-plugin-agent-team），
+    // 经 tool_overrides 统一分发，不再由 core 硬编码注入。
 }
 
 /// 清理 LLM 响应中混入的工具执行 trace 文本

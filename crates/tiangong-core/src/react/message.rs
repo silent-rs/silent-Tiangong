@@ -12,7 +12,7 @@ use tiangong_types::{
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub(crate) fn append_or_reuse_user_message(
+pub fn append_or_reuse_user_message(
     session: &mut Session,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
@@ -457,11 +457,7 @@ pub(crate) fn append_tool_result_message(
     session.messages.push(message);
 }
 
-pub(crate) fn append_runtime_tool_message(
-    _session: &mut Session,
-    tool_name: &str,
-    content: String,
-) {
+pub fn append_runtime_tool_message(_session: &mut Session, tool_name: &str, content: String) {
     tracing::info!(tool_name, content, "runtime trace");
 }
 
@@ -899,7 +895,7 @@ pub fn inject_tool_to_messages(
 }
 
 /// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
-pub(crate) fn inject_tool_to_session(
+pub fn inject_tool_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     tool_name: &str,

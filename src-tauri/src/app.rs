@@ -762,6 +762,8 @@ impl TiangongApp {
         // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
         // app 侧经 self.mcp_plugin 做管理（register/update/remove/set_enabled/probe）。
         plugins.push(self.mcp_plugin.clone());
+        // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+        plugins.push(tiangong_plugin_agent_team::build_plugin());
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core = TiangongCore::builder()

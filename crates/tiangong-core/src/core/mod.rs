@@ -27,7 +27,7 @@ const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 const MAX_OUTER_ITERATIONS: u32 = 3;
 
-pub(crate) mod command;
+pub mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
@@ -386,8 +386,6 @@ async fn worker_loop_async(
 
     let mut engine: Option<RuntimeEngine> = None;
     let mut tools: Vec<ToolSpec> = Vec::new();
-    let team_context = Arc::new(Mutex::new(crate::agent_team::lifecycle::TeamContext::new()));
-    let mut team_restored = false;
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
     let mut session_ready_fired = false;
     // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
@@ -580,28 +578,7 @@ async fn worker_loop_async(
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools);
             tools = new_tools;
-            if !team_restored {
-                if let Ok(mut team) = team_context.lock() {
-                    let restored =
-                        crate::agent_team::lifecycle::restore_agents_from_session_history(
-                            &mut team, &session, &tools,
-                        );
-                    if restored > 0 {
-                        tracing::info!(count = restored, "已从会话历史恢复 Agent 团队");
-                    }
-                    let restored_deliveries =
-                        crate::agent_team::lifecycle::restore_pending_agent_deliveries(
-                            &mut team, &session,
-                        );
-                    if restored_deliveries > 0 {
-                        tracing::info!(
-                            count = restored_deliveries,
-                            "已恢复尚未完成的 Agent 用户直达投递"
-                        );
-                    }
-                }
-                team_restored = true;
-            }
+            // Agent 团队从会话历史恢复的逻辑已迁移至 team 插件的 on_session_ready。
             last_cfg_gen = cfg_gen;
 
             // 首次 engine build + 插件注册完成后触发一次 on_session_ready
@@ -665,26 +642,14 @@ async fn worker_loop_async(
                 // 宿主入口已完成输入准备。Core 原样持久化已就绪消息并确认，
                 // 再进入 Agent Loop。
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-                let pending_agent_deliveries = team_context
-                    .lock()
-                    .ok()
-                    .map(|team| {
-                        crate::agent_team::lifecycle::plan_user_mention_deliveries(
-                            &team,
-                            &message_id,
-                            &prepared,
-                        )
-                    })
-                    .unwrap_or_default();
-                let model_excluded = !pending_agent_deliveries.is_empty();
                 let accepted = match accept_prepared_user_message_with_options(
                     &mut session,
                     &stream_tx,
                     Some(message_id),
                     prepared,
                     persistence_ack,
-                    pending_agent_deliveries,
-                    model_excluded,
+                    Vec::new(),
+                    false,
                     true,
                 ) {
                     Ok(accepted) => accepted,
@@ -718,7 +683,6 @@ async fn worker_loop_async(
                     &tools,
                     &stream_tx,
                     &mut cmd_rx,
-                    team_context.clone(),
                     &cancel_flag,
                     &shutdown_flag,
                 )
@@ -1139,7 +1103,6 @@ async fn execute_turn_async(
     tools: &[ToolSpec],
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
     cancel_flag: &Arc<AtomicBool>,
     shutdown_flag: &Arc<AtomicBool>,
 ) {
@@ -1149,7 +1112,6 @@ async fn execute_turn_async(
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
     )
-    .with_shared_team(team_context, "main".to_string())
     .with_cancel_flag(cancel_flag.clone())
     .with_shutdown_flag(shutdown_flag.clone());
     react

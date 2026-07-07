@@ -4,7 +4,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender as StdSender;
-use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -26,8 +25,6 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
 
-use crate::agent_team::lifecycle::TeamContext;
-
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, wait_for_abort_signal};
 use super::helpers::{check_cancel, drain_pending_commands_async, looks_like_final_answer};
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
@@ -46,15 +43,17 @@ pub(super) enum TurnPhase {
 }
 
 /// 单个 agent 的 async ReAct 执行引擎
-pub(crate) struct ReactEngine {
-    pub(super) engine: crate::runtime::RuntimeEngine,
-    pub(super) tools: Vec<ToolSpec>,
+pub struct ReactEngine {
+    /// 共享的 RuntimeEngine（子 Agent 经 clone 继承父引擎的 tool_overrides）。
+    pub engine: crate::runtime::RuntimeEngine,
+    /// 当前 Agent 可用的工具集（子 Agent 经父工具集过滤得到）。
+    pub tools: Vec<ToolSpec>,
     /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
-    pub(super) max_tool_rounds: usize,
+    pub max_tool_rounds: usize,
     /// 总结阶段后重新进入工具执行阶段的最大次数。
-    pub(super) max_outer_iterations: u32,
-    pub(super) team: Option<Arc<Mutex<TeamContext>>>,
-    pub(super) agent_id: String,
+    pub max_outer_iterations: u32,
+    /// 当前 Agent 身份（"main" 或子 Agent 的 agent_id）。
+    pub agent_id: String,
     /// 取消信号（独立于命令队列）：check_cancel 读取此标志判断是否取消，
     /// 不排空命令队列，避免乱序。
     pub(super) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -62,7 +61,7 @@ pub(crate) struct ReactEngine {
 }
 
 impl ReactEngine {
-    pub(crate) fn new(
+    pub fn new(
         engine: crate::runtime::RuntimeEngine,
         tools: Vec<ToolSpec>,
         max_tool_rounds: usize,
@@ -73,7 +72,6 @@ impl ReactEngine {
             tools,
             max_tool_rounds,
             max_outer_iterations,
-            team: None,
             agent_id: "main".to_string(),
             cancel_flag: None,
             shutdown_flag: None,
@@ -100,7 +98,7 @@ impl ReactEngine {
     }
 
     /// 注入取消信号，供 check_cancel 读取（独立于命令队列，不排空队列）。
-    pub(crate) fn with_cancel_flag(
+    pub fn with_cancel_flag(
         mut self,
         cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
@@ -108,7 +106,7 @@ impl ReactEngine {
         self
     }
 
-    pub(crate) fn with_shutdown_flag(
+    pub fn with_shutdown_flag(
         mut self,
         shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
@@ -175,13 +173,11 @@ impl ReactEngine {
         }
     }
 
-    /// 使用已有团队上下文执行指定 Agent。
-    pub(crate) fn with_shared_team(
-        mut self,
-        team: Arc<Mutex<TeamContext>>,
-        agent_id: String,
-    ) -> Self {
-        self.team = Some(team);
+    /// 设置当前 Agent 身份（"main" 或子 Agent 的 agent_id）。
+    ///
+    /// team 插件化后，子 Agent 经此设置身份（TeamContext 改由插件持有），
+    /// 供子 Agent 系统提示构建等识别身份。
+    pub fn with_agent_id(mut self, agent_id: String) -> Self {
         self.agent_id = agent_id;
         self
     }
@@ -190,7 +186,7 @@ impl ReactEngine {
     ///
     /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
     #[allow(clippy::too_many_arguments, unreachable_code)]
-    pub(crate) async fn execute_turn(
+    pub async fn execute_turn(
         &mut self,
         session: &mut Session,
         initial_user_message: Option<(&str, &[ContentBlock])>,
@@ -218,93 +214,6 @@ impl ReactEngine {
             .map(|(_, prepared)| content_blocks_text(prepared))
             .unwrap_or_default();
 
-        if self.agent_id == "main" {
-            let initial_message_was_excluded = initial_user_message
-                .and_then(|(message_id, _)| {
-                    session
-                        .messages
-                        .iter()
-                        .find(|message| message.id == message_id)
-                })
-                .is_some_and(|message| message.model_excluded);
-            let routed = route_initial_prepared_user_message(
-                self.team.as_ref(),
-                session,
-                initial_user_message,
-                stream_tx,
-            );
-            if routed {
-                if let Some((message_id, _)) = initial_user_message {
-                    session.set_message_model_excluded(message_id, true);
-                    if let Err(error) = session.try_persist_to_disk() {
-                        tracing::warn!(%error, "持久化定向消息的模型可见性失败");
-                    }
-                }
-                let sub_result = self
-                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                    .await;
-                accumulated_usage.accumulate(&sub_result.usage);
-                self.flush_deferred_tool_injections(session, stream_tx);
-                if sub_result.cancelled {
-                    session.persist_to_disk();
-                    {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
-                }
-                let delegated_input = self.inject_main_agent_messages(session, stream_tx);
-                if let Some(input) = sub_result.current_agent_input {
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                } else if let Some(input) = delegated_input {
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                } else {
-                    session.persist_to_disk();
-                    merge_plugin_usage(&mut accumulated_usage);
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(accumulated_usage.clone()),
-                    });
-                    return accumulated_usage;
-                }
-            } else if initial_message_was_excluded
-                && let Some((message_id, _)) = initial_user_message
-            {
-                session.set_message_model_excluded(message_id, false);
-                if let Err(error) = session.try_persist_to_disk() {
-                    tracing::warn!(%error, "定向消息路由失效后恢复主模型可见性失败");
-                }
-                crate::react::message::emit_session_message_upsert(session, stream_tx, message_id);
-            }
-        }
-
-        // Core 重建时，父 Session 中尚未完成的直达投递已恢复到内存收件箱。
-        // 下一次主轮次开始前先执行这些投递，避免它们一直等到再次 @ 同一 Agent。
-        let has_recovered_agent_work = self.agent_id == "main"
-            && self
-                .team
-                .as_ref()
-                .and_then(|team| team.lock().ok())
-                .is_some_and(|team| team.registry.has_pending_inbox());
-        if has_recovered_agent_work {
-            let sub_result = self
-                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                .await;
-            accumulated_usage.accumulate(&sub_result.usage);
-            self.flush_deferred_tool_injections(session, stream_tx);
-            if sub_result.cancelled {
-                session.persist_to_disk();
-                merge_plugin_usage(&mut accumulated_usage);
-                return accumulated_usage;
-            }
-            if let Some(latest_input) = sub_result.current_agent_input {
-                user_input = latest_input;
-            }
-            self.inject_main_agent_messages(session, stream_tx);
-        }
-
         // 外层循环：ReAct Loop（工具执行）与总结阶段分离。
         // - 每次迭代先走内层 'react_loop（工具执行阶段），break 后进入总结阶段。
         // - 总结阶段判定未完成且未超 outer 上限时，注入重入上下文后 continue 'outer。
@@ -328,7 +237,7 @@ impl ReactEngine {
                     session,
                     &self.engine,
                     &self.agent_id,
-                    self.team.as_ref(),
+                    None,
                     stream_tx,
                     cmd_rx,
                 ) {
@@ -342,31 +251,12 @@ impl ReactEngine {
                         return accumulated_usage;
                     }
                     PendingCommandEffect::MessagesInjected {
-                        mut current_agent_input,
-                        agent_routed,
+                        current_agent_input,
+                        ..
                     } => {
                         successful_tool_call_keys.clear();
                         failed_tool_call_keys.clear();
                         failed_tool_names.clear();
-                        if agent_routed {
-                            let sub_result = self
-                                .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                                .await;
-                            accumulated_usage.accumulate(&sub_result.usage);
-                            if sub_result.cancelled {
-                                session.persist_to_disk();
-                                merge_plugin_usage(&mut accumulated_usage);
-                                return accumulated_usage;
-                            }
-                            if current_agent_input.is_none() {
-                                current_agent_input = sub_result.current_agent_input;
-                            }
-                            let delegated_input =
-                                self.inject_main_agent_messages(session, stream_tx);
-                            if current_agent_input.is_none() {
-                                current_agent_input = delegated_input;
-                            }
-                        }
                         if let Some(input) = current_agent_input {
                             user_input = input;
                             round = 0;
@@ -376,13 +266,6 @@ impl ReactEngine {
                         }
                     }
                     PendingCommandEffect::None => {}
-                }
-                if let Some(input) = self.inject_main_agent_messages(session, stream_tx) {
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                    session.persist_to_disk();
-                    continue 'outer;
                 }
                 self.flush_deferred_tool_injections(session, stream_tx);
 
@@ -441,7 +324,6 @@ impl ReactEngine {
                         .await
                 }));
                 let mut stream_interruption = None;
-                let mut agent_routed_during_stream = false;
                 let mut streamed_text = String::new();
                 let mut streamed_reasoning = String::new();
                 let mut streaming_usage = tiangong_types::TokenUsage::default();
@@ -477,7 +359,7 @@ impl ReactEngine {
                                     }
                                     match accept_runtime_user_message(
                                         &self.agent_id,
-                                        self.team.as_ref(),
+                                        None,
                                         session,
                                         stream_tx,
                                         message_id,
@@ -493,12 +375,7 @@ impl ReactEngine {
                                                 "模型响应已被新的用户消息中断"
                                             ));
                                         }
-                                        Ok(RuntimeMessageDisposition::RoutedToAgent) => {
-                                            if let Err(error) = session.try_persist_to_disk() {
-                                                tracing::warn!(%error, "清理定向消息产生的临时响应失败");
-                                            }
-                                            agent_routed_during_stream = true;
-                                        }
+                                        Ok(RuntimeMessageDisposition::RoutedToAgent) => {}
                                         Err(err) => {
                                             session
                                                 .messages
@@ -599,24 +476,8 @@ impl ReactEngine {
                     );
                 }
 
-                if let Some(mut input) = stream_interruption {
+                if let Some(input) = stream_interruption {
                     accumulated_usage.accumulate(&streaming_usage);
-                    if agent_routed_during_stream {
-                        let sub_result = self
-                            .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                            .await;
-                        accumulated_usage.accumulate(&sub_result.usage);
-                        if sub_result.cancelled {
-                            session.persist_to_disk();
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
-                        self.inject_main_agent_messages(session, stream_tx);
-                        self.flush_deferred_tool_injections(session, stream_tx);
-                        if let Some(latest_input) = sub_result.current_agent_input {
-                            input = latest_input;
-                        }
-                    }
                     if streaming_usage.total_tokens > 0 {
                         emit_token_usage(
                             stream_tx,
@@ -635,61 +496,6 @@ impl ReactEngine {
                     outer_iteration = 0;
                     session.persist_to_disk();
                     continue 'outer;
-                }
-
-                if agent_routed_during_stream {
-                    let sub_result = self
-                        .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                        .await;
-                    accumulated_usage.accumulate(&sub_result.usage);
-                    if sub_result.cancelled {
-                        let completed_usage = response_result
-                            .as_ref()
-                            .map(|response| response.usage.clone())
-                            .unwrap_or_else(|_| streaming_usage.clone());
-                        accumulated_usage.accumulate(&completed_usage);
-                        if completed_usage.total_tokens > 0 {
-                            emit_token_usage(
-                                stream_tx,
-                                &completed_usage,
-                                None,
-                                self.engine.context_limit,
-                                "react-routed-cancelled",
-                                None,
-                            );
-                        }
-                        session.persist_to_disk();
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
-                    self.flush_deferred_tool_injections(session, stream_tx);
-                    let mut next_input = sub_result.current_agent_input;
-                    let delegated_input = self.inject_main_agent_messages(session, stream_tx);
-                    if next_input.is_none() {
-                        next_input = delegated_input;
-                    }
-                    if let Some(input) = next_input {
-                        let completed_usage = response_result
-                            .as_ref()
-                            .map(|response| response.usage.clone())
-                            .unwrap_or_else(|_| streaming_usage.clone());
-                        accumulated_usage.accumulate(&completed_usage);
-                        if completed_usage.total_tokens > 0 {
-                            emit_token_usage(
-                                stream_tx,
-                                &completed_usage,
-                                None,
-                                self.engine.context_limit,
-                                "react-routed-interrupted",
-                                None,
-                            );
-                        }
-                        user_input = input;
-                        round = 0;
-                        outer_iteration = 0;
-                        session.persist_to_disk();
-                        continue 'outer;
-                    }
                 }
 
                 let response = match response_result {
@@ -953,7 +759,7 @@ impl ReactEngine {
                         session,
                         &self.engine,
                         &self.agent_id,
-                        self.team.as_ref(),
+                        None,
                         stream_tx,
                         cmd_rx,
                     ) {
@@ -967,26 +773,12 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                         PendingCommandEffect::MessagesInjected {
-                            mut current_agent_input,
-                            agent_routed,
+                            current_agent_input,
+                            ..
                         } => {
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
-                            if agent_routed {
-                                let sub_result = self
-                                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                                    .await;
-                                accumulated_usage.accumulate(&sub_result.usage);
-                                if sub_result.cancelled {
-                                    session.persist_to_disk();
-                                    merge_plugin_usage(&mut accumulated_usage);
-                                    return accumulated_usage;
-                                }
-                                if current_agent_input.is_none() {
-                                    current_agent_input = sub_result.current_agent_input;
-                                }
-                            }
                             if let Some(input) = current_agent_input {
                                 user_input = input;
                                 round = 0;
@@ -1037,82 +829,6 @@ impl ReactEngine {
                         failed_tool_call_keys.insert(tool_call_key, provider_text);
                         failed_tool_names.insert(call.name.clone());
                         need_failure_recovery_prompt = true;
-                        continue;
-                    }
-
-                    // 团队协作工具拦截
-                    if crate::agent_team::lifecycle::is_team_tool(&call.name) {
-                        let args_summary = format_call_args_summary(call);
-                        let _ = stream_tx.send(StreamEvent::ToolStart {
-                            name: call.name.clone(),
-                            args_summary: args_summary.clone(),
-                        });
-                        let tool_start_time = std::time::Instant::now();
-                        let result = if let Some(team) = self.team.as_ref() {
-                            if let Ok(mut team) = team.lock() {
-                                crate::agent_team::lifecycle::execute_team_tool(
-                                    &mut team,
-                                    &self.agent_id,
-                                    call,
-                                    session,
-                                    &self.tools,
-                                    stream_tx,
-                                )
-                            } else {
-                                crate::agent_team::lifecycle::error_tool_result(
-                                    &call.name,
-                                    "团队状态锁定失败",
-                                )
-                            }
-                        } else {
-                            crate::agent_team::lifecycle::error_tool_result(
-                                &call.name,
-                                "团队功能未启用",
-                            )
-                        };
-                        let _ = stream_tx.send(StreamEvent::ToolResult {
-                            name: call.name.clone(),
-                            tool_call_id: Some(call.id.clone()),
-                            ok: result.ok,
-                            output: tool_result_stream_output(&result),
-                            full_output: Some(tool_result_full_output(&result)),
-                            duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
-                        });
-                        append_tool_result_message(
-                            session,
-                            &call.id,
-                            &call.name,
-                            if result.ok {
-                                tool_result_provider_text(&call.name, &result, false)
-                            } else {
-                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                    &call.name,
-                                    &call.id,
-                                    args_summary.clone(),
-                                    classify_tool_result_failure(&result),
-                                    tool_result_full_output(&result),
-                                ))
-                            },
-                            !result.ok,
-                        );
-                        if result.ok {
-                            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                            successful_tool_call_keys.insert(tool_call_key);
-                        } else {
-                            let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
-                            failed_tool_call_keys.insert(
-                                tool_call_key,
-                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                    &call.name,
-                                    &call.id,
-                                    args_summary.clone(),
-                                    classify_tool_result_failure(&result),
-                                    tool_result_full_output(&result),
-                                )),
-                            );
-                            failed_tool_names.insert(call.name.clone());
-                            need_failure_recovery_prompt = true;
-                        }
                         continue;
                     }
 
@@ -1282,7 +998,7 @@ impl ReactEngine {
                                     }) => {
                                         match accept_runtime_user_message(
                                             &self.agent_id,
-                                            self.team.as_ref(),
+                                            None,
                                             session,
                                             stream_tx,
                                             message_id,
@@ -1294,34 +1010,7 @@ impl ReactEngine {
                                             )) => {
                                                 break ApprovalWaitOutcome::CurrentInput(input);
                                             }
-                                            Ok(RuntimeMessageDisposition::RoutedToAgent) => {
-                                                let sub_result = self
-                                                    .drain_sub_agent_inboxes(
-                                                        session, stream_tx, cmd_rx,
-                                                    )
-                                                    .await;
-                                                accumulated_usage.accumulate(&sub_result.usage);
-                                                if sub_result.cancelled {
-                                                    crate::approval_store::remove_pending(
-                                                        &session.id,
-                                                        &request_id,
-                                                    );
-                                                    session.persist_to_disk();
-                                                    merge_plugin_usage(&mut accumulated_usage);
-                                                    return accumulated_usage;
-                                                }
-                                                if let Some(input) = sub_result.current_agent_input
-                                                {
-                                                    break ApprovalWaitOutcome::CurrentInput(input);
-                                                }
-                                                if let Some((_, approved)) = sub_result
-                                                    .approval_responses
-                                                    .into_iter()
-                                                    .find(|(rid, _)| rid == &request_id)
-                                                {
-                                                    break ApprovalWaitOutcome::Decision(approved);
-                                                }
-                                            }
+                                            Ok(RuntimeMessageDisposition::RoutedToAgent) => {}
                                             Err(err) => tracing::warn!(
                                                 error = %err,
                                                 "审批等待阶段追加用户消息持久化失败"
@@ -1451,59 +1140,6 @@ impl ReactEngine {
                             });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
-                        }
-                    }
-
-                    // 文件编辑锁检查
-                    if matches!(call.name.as_str(), "write_file" | "replace_in_file")
-                        && let Some(team) = self.team.as_ref()
-                    {
-                        let file_path = call
-                            .arguments
-                            .as_object()
-                            .and_then(|o| o.get("path").and_then(|v| v.as_str()).map(String::from));
-                        if let Some(ref path) = file_path {
-                            let path_buf = std::path::PathBuf::from(path);
-                            let now = chrono::Local::now().naive_local();
-                            let lock_error = team
-                                .lock()
-                                .map_err(|_| "团队状态锁定失败".to_string())
-                                .and_then(|mut team| {
-                                    team.file_locks.ensure_can_write(
-                                        &path_buf,
-                                        &self.agent_id,
-                                        &now,
-                                    )
-                                });
-                            if let Err(message) = lock_error {
-                                let failure =
-                                    structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                        &call.name,
-                                        &call.id,
-                                        args_summary.clone(),
-                                        ToolFailureKind::PermissionDenied,
-                                        message.clone(),
-                                    ));
-                                let _ = stream_tx.send(StreamEvent::ToolResult {
-                                    name: call.name.clone(),
-                                    tool_call_id: Some(call.id.clone()),
-                                    ok: false,
-                                    output: message.clone(),
-                                    full_output: None,
-                                    duration_ms: None,
-                                });
-                                append_tool_result_message(
-                                    session,
-                                    &call.id,
-                                    &call.name,
-                                    failure.clone(),
-                                    true,
-                                );
-                                failed_tool_call_keys.insert(tool_call_key, failure);
-                                failed_tool_names.insert(call.name.clone());
-                                need_failure_recovery_prompt = true;
-                                continue;
-                            }
                         }
                     }
 
@@ -1666,7 +1302,7 @@ impl ReactEngine {
                         session,
                         &self.engine,
                         &self.agent_id,
-                        self.team.as_ref(),
+                        None,
                         stream_tx,
                         cmd_rx,
                     ) {
@@ -1680,26 +1316,12 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                         PendingCommandEffect::MessagesInjected {
-                            mut current_agent_input,
-                            agent_routed,
+                            current_agent_input,
+                            ..
                         } => {
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
                             failed_tool_names.clear();
-                            if agent_routed {
-                                let sub_result = self
-                                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                                    .await;
-                                accumulated_usage.accumulate(&sub_result.usage);
-                                if sub_result.cancelled {
-                                    session.persist_to_disk();
-                                    merge_plugin_usage(&mut accumulated_usage);
-                                    return accumulated_usage;
-                                }
-                                if current_agent_input.is_none() {
-                                    current_agent_input = sub_result.current_agent_input;
-                                }
-                            }
                             if let Some(input) = current_agent_input {
                                 user_input = input;
                                 round = 0;
@@ -1745,47 +1367,6 @@ impl ReactEngine {
                     session.messages.push(reminder);
                     session.persist_to_disk();
                     continue 'react_loop;
-                }
-
-                // 执行有待处理任务的 Sub Agent
-                let sub_result = self
-                    .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                    .await;
-                accumulated_usage.accumulate(&sub_result.usage);
-                if sub_result.cancelled {
-                    session.persist_to_disk();
-                    {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
-                }
-
-                let had_main_messages = self
-                    .inject_main_agent_messages(session, stream_tx)
-                    .is_some();
-
-                if let Some(input) = sub_result.current_agent_input {
-                    successful_tool_call_keys.clear();
-                    failed_tool_call_keys.clear();
-                    failed_tool_names.clear();
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                    session.persist_to_disk();
-                    continue 'outer;
-                }
-
-                if had_main_messages {
-                    continue 'react_loop;
-                }
-
-                if sub_result.ran {
-                    session.persist_to_disk();
-                    merge_plugin_usage(&mut accumulated_usage);
-                    let _ = stream_tx.send(StreamEvent::Done {
-                        usage: Some(accumulated_usage.clone()),
-                    });
-                    return accumulated_usage;
                 }
 
                 session.persist_to_disk();
@@ -1896,46 +1477,9 @@ pub(super) fn tools_for_current_turn(
     filter_background_task_tools(tools.to_vec(), &intent_text)
 }
 
-fn route_initial_prepared_user_message(
-    team: Option<&Arc<Mutex<TeamContext>>>,
-    session: &Session,
-    initial_user_message: Option<(&str, &[ContentBlock])>,
-    stream_tx: &StdSender<StreamEvent>,
-) -> bool {
-    initial_user_message
-        .and_then(|(message_id, _prepared)| {
-            team.and_then(|team| {
-                team.lock().ok().map(|mut team| {
-                    crate::agent_team::lifecycle::dispatch_pending_agent_deliveries(
-                        &mut team, session, message_id, stream_tx,
-                    )
-                })
-            })
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn prepared_resource_mention() -> Vec<ContentBlock> {
-        let asset = tiangong_types::StoredAsset {
-            asset_id: "asset-1".to_string(),
-            local_path: "/tmp/report.pdf".to_string(),
-            original_name: "report.pdf".to_string(),
-            mime_type: "application/pdf".to_string(),
-            size: 12,
-            kind: tiangong_types::MediaKind::File,
-        };
-        vec![
-            tiangong_types::ContentBlock::text("@dev 检查附件"),
-            tiangong_types::ContentBlock::asset_reference(asset),
-            tiangong_types::ContentBlock::model_instruction(
-                "使用 message_id=source-message、attachment_index=0",
-            ),
-        ]
-    }
 
     fn tool(name: &str) -> ToolSpec {
         ToolSpec {
@@ -1988,53 +1532,5 @@ mod tests {
         let names = tool_names(tools_for_current_turn(&tools, &session, ""));
 
         assert_eq!(names, vec!["run_shell", "spawn_task", "wait_tasks"]);
-    }
-
-    #[test]
-    fn initial_turn_routes_ready_content_with_original_message_id() {
-        let mut team = TeamContext::new();
-        team.registry.register_with_session(
-            crate::agent_team::descriptor::AgentDescriptor {
-                agent_id: "dev-agent".to_string(),
-                role: "dev".to_string(),
-                label: "Developer".to_string(),
-                system_prompt: "agent".to_string(),
-                tools: Vec::new(),
-                status: crate::agent_team::descriptor::AgentStatus::Idle,
-            },
-            Session::new("child"),
-        );
-        let team = Arc::new(Mutex::new(team));
-        let prepared = prepared_resource_mention();
-        let mut expected_content = prepared.clone();
-        expected_content[0] = tiangong_types::ContentBlock::text("检查附件");
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        assert!(route_initial_prepared_user_message(
-            Some(&team),
-            &{
-                let mut session = Session::new("parent");
-                let deliveries = crate::agent_team::lifecycle::plan_user_mention_deliveries(
-                    &team.lock().unwrap(),
-                    "source-message",
-                    &prepared,
-                );
-                session.replace_pending_agent_deliveries("source-message", deliveries);
-                session
-            },
-            Some(("source-message", &prepared)),
-            &tx,
-        ));
-
-        let entry = team
-            .lock()
-            .unwrap()
-            .registry
-            .drain_inbox("dev-agent")
-            .pop()
-            .expect("mention should enter the idle agent inbox");
-        assert_eq!(entry.session_message_id.as_deref(), Some("source-message"));
-        assert_eq!(entry.additional_content, expected_content);
-        assert_eq!(entry.content, "检查附件");
     }
 }
