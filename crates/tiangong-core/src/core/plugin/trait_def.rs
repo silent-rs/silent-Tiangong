@@ -86,7 +86,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 供 command 插件在执行子进程时注入。
     ///
     /// 默认返回空——不贡献环境变量的插件（fs / fetch / memory / scheduler 等）
-    /// 无需覆写。需要贡献 env 的插件（如 mcp server 的 env、skill 的 .env.local）
+    /// 无需覆写。需要贡献 env 的插件（如注入外部服务 env、读取 .env.local 等）
     /// 覆写此方法返回自己的环境变量。
     fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
         std::collections::BTreeMap::new()
@@ -97,10 +97,10 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// core 在「所有插件注册完成时」以及「配置变化导致 engine rebuild 时」统一
     /// 遍历所有插件调用此方法，合并结果写入 process-level 的允许根目录表，
     /// 供 tool/common.rs 的 `write_allowed_roots_with` 读取——避免 core 硬编码
-    /// 任何领域目录（如 `~/.tiangong/skills`）。
+    /// 任何领域目录（如插件自管的存储目录）。
     ///
-    /// 默认返回空——不贡献额外文件根的插件无需覆写。需要贡献的插件（如
-    /// skill plugin 贡献 skills 存储目录）覆写此方法。
+    /// 默认返回空——不贡献额外文件根的插件无需覆写。需要贡献的插件
+    /// 覆写此方法返回自己的领域存储目录。
     fn allowed_file_roots(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
@@ -109,8 +109,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// core 在「所有插件注册完成时」统一遍历所有插件调用此方法，合并到
     /// `PermissionGate` 的覆盖表——避免 core 的 `classify_tool` 硬编码任何插件
-    /// 工具名（如 `get_skill_detail` / `recall_memory`）。插件工具名未命中覆盖表
-    /// 时走 core 的默认分类（按工具名前缀/特征推断）。
+    /// 工具名。插件工具名未命中覆盖表时走 core 的默认分类（按工具名前缀/特征推断）。
     ///
     /// 默认返回空——不贡献权限覆盖的插件无需覆写。
     fn tool_permission_overrides(
@@ -125,7 +124,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// worker_loop 在首次 build engine 以及 config generation 变化导致 engine rebuild 时
     /// 调用（在 [`Plugin::register`] 之后、[`Plugin::on_engine_rebuilt`] 之前）。插件可
-    /// 按需读取模型配置、memory 配置、MCP 配置等，执行热更新（如 reconfigure memory actor）。
+    /// 按需读取模型配置、memory 配置等，执行热更新（如 reconfigure memory actor）。
     /// 默认实现为空。
     fn on_config_updated(&self, _config: &crate::core_config::CoreConfig) {}
 

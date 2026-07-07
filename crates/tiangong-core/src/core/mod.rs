@@ -380,7 +380,7 @@ async fn worker_loop_async(
             // 再调 Plugin::register 初始化插件内部状态或注入 engine 依赖（如克隆
             // models_config），最后才收集 tool_specs 并注册 override handler——保证
             // handler 注册到正确的工具名上。返回的 specs 累积到 plugin_specs，供后续
-            // MCP 冲突避让与 tools 合并使用。
+            // 同名工具冲突避让与 tools 合并使用。
             let e = engine.as_ref().unwrap();
             let workspace = std::path::Path::new(&session.cwd);
             let workspace = if workspace.is_dir() {
@@ -418,7 +418,7 @@ async fn worker_loop_async(
             for plugin in &plugins {
                 plugin.on_config_updated(&cfg);
             }
-            // 汇总所有插件贡献的子进程环境变量（mcp server env / skill .env.local 等），
+            // 汇总所有插件贡献的子进程环境变量，
             // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。
             // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
             {
@@ -430,7 +430,7 @@ async fn worker_loop_async(
                 }
                 e.set_runtime_env(exec_env);
             }
-            // 汇总插件贡献的允许文件根目录（如 skill 的 ~/.tiangong/skills），
+            // 汇总插件贡献的允许文件根目录，
             // 写入 process-level 允许表供 tool/common.rs 写权限校验，避免 core 硬编码。
             {
                 let mut extra_roots: Vec<std::path::PathBuf> = Vec::new();
@@ -443,7 +443,7 @@ async fn worker_loop_async(
                 }
                 tiangong_toolkit::set_extra_allowed_roots(extra_roots);
             }
-            // 汇总插件贡献的工具权限覆盖（如 get_skill_detail -> Safe），
+            // 汇总插件贡献的工具权限覆盖，
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
             {
                 let mut overrides = std::collections::BTreeMap::new();
@@ -454,13 +454,13 @@ async fn worker_loop_async(
                 }
                 e.permission_gate().set_plugin_overrides(overrides);
             }
-            // 各插件（含 MCP 等动态工具插件）的工具规格经 tool_specs() 声明，
+            // 各插件（含动态工具插件）的工具规格经 tool_specs() 声明，
             // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
             let injection_spec = crate::core::plugin::injection_tool_spec();
             let mut new_tools: Vec<ToolSpec> = Vec::new();
             // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
             new_tools.push(injection_spec);
-            // 合并 plugin 注册的工具规格（含 MCP 插件动态收集的 MCP 工具）
+            // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
             new_tools.extend(plugin_specs);
             inject_enhanced_tools(&mut new_tools);
             tools = new_tools;
