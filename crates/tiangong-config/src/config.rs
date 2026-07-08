@@ -173,6 +173,9 @@ pub struct TiangongConfig {
     pub trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
     pub custom_system_prompt: String,
+    /// context window 上限（加载时按 chat model 从 context_windows.json 解析，
+    /// 避免转换阶段再找目录——见 load_tiangong_config_from_dir）
+    pub context_limit: usize,
 
     // ===== 应用层配置 =====
     /// Server 配置
@@ -187,21 +190,14 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
-        let llm = tiangong_core::core_config::LlmConfig::from_models_config(&self.models);
-        // context_limit 由 config 层在转换时解析注入（core 不做配置磁盘 IO）。
-        let dir = crate::io::storage_root();
-        let context_limit = if llm.chat.model.is_empty() {
-            tiangong_core::core_config::default_context_limit()
-        } else {
-            crate::io::resolve_context_limit_at(&dir, &llm.chat.model)
-        };
         CoreConfig {
-            llm,
+            llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
-            context_limit,
+            // context_limit 在加载时已按 chat model 从对应目录解析（见 loader）
+            context_limit: self.context_limit,
         }
     }
 

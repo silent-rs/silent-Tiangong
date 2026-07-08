@@ -59,8 +59,8 @@ impl TiangongApp {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         // 注入 storage_root：必须在任何 core 持久化读取之前完成。
-        // load_tiangong_config 内部会调 ModelsConfig::load 读取 models.json，
-        // 先于 TiangongState::load_or_default，故在此显式注入。
+        // load_tiangong_config 经 tiangong_config::io::load_models_config_at 读取
+        // models.json，先于 TiangongState::load_or_default，故在此显式注入。
         let storage_root = tiangong_app_state::app_state::storage_root();
         tiangong_core::storage::set_storage_root(storage_root.clone());
 

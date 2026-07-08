@@ -1,36 +1,12 @@
 use super::super::*;
 
-/// 用户主目录（兼容 HOME / USERPROFILE / HOMEDRIVE+HOMEPATH）。
+/// 天工存储根目录（`~/.tiangong`）。
 ///
-/// 路径计算归 app 层所有；core 的 `storage` 模块不做环境变量计算，
-/// 由 app 层解析后注入。
-pub(crate) fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
-}
-
-/// 天工存储根目录（`~/.tiangong`），由 app 层统一计算。
-///
-/// 主目录不可用时回退到当前目录。这是 storage_root 的**唯一对外来源**——
-/// 外部（plugin / entry / tauri）取存储根目录都应走本函数，不应依赖 core 注入态。
+/// 复用 `tiangong_config::io::storage_root()` 作为唯一来源，避免重复实现
+/// HOME / USERPROFILE / HOMEDRIVE+HOMEPATH 解析逻辑。本函数保留作为 app-state
+/// 的对外便捷入口（`tiangong_app_state::app_state::storage_root`）。
 pub fn storage_root() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
+    tiangong_config::io::storage_root()
 }
 
 /// 把解析好的存储根目录注入 core，作为 core 内所有持久化点的唯一来源。
