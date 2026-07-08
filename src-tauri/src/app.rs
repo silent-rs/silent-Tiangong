@@ -58,12 +58,6 @@ impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        // 注入 storage_root：必须在任何 core 持久化读取之前完成。
-        // load_tiangong_config 经 tiangong_config::io::load_models_config_at 读取
-        // models.json，先于 TiangongState::load_or_default，故在此显式注入。
-        let storage_root = tiangong_app_state::app_state::storage_root();
-        tiangong_core::storage::set_storage_root(storage_root.clone());
-
         let app_config = load_tiangong_config();
         // models 一次性加载，供后续 plugin 能力判断派生访问（不再重读盘）。
         let models = app_config.models.clone();
@@ -72,7 +66,9 @@ impl TiangongApp {
 
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // 先构造 state（storage_root 已在上面注入）。
+        // 构造 state：load_or_default 经 RuntimeEngine::new 注入 storage_root 到 core
+        //（core 运行时持久化需要）。config 加载走自己的 dir，不依赖 core cell。
+        let storage_root = tiangong_app_state::app_state::storage_root();
         let state = std::sync::Arc::new(AsyncMutex::new(
             tiangong_app_state::app_state::TiangongState::load_or_default(),
         ));

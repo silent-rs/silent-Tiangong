@@ -21,7 +21,7 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    default_app_storage_path, default_sessions_dir_path, default_workspace_dir, init_storage_root,
+    default_app_storage_path, default_sessions_dir_path, default_workspace_dir,
     normalize_model_list, validate_agent_config,
 };
 use self::services::AppTurnService;

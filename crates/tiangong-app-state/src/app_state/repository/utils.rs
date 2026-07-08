@@ -9,13 +9,6 @@ pub fn storage_root() -> PathBuf {
     tiangong_config::io::storage_root()
 }
 
-/// 把解析好的存储根目录注入 core，作为 core 内所有持久化点的唯一来源。
-///
-/// 在 `TiangongState::load_or_default` 启动时调用。可重复 set（供单测隔离）。
-pub(crate) fn init_storage_root() {
-    tiangong_core::storage::set_storage_root(storage_root());
-}
-
 pub(in crate::app_state) fn default_storage_root() -> PathBuf {
     storage_root()
 }
