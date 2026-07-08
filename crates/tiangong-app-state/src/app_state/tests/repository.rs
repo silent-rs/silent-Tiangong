@@ -190,7 +190,7 @@ fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()>
 /// 避免后续 refactor 误把外部配置写回 core app state。
 #[test]
 fn persist_strips_legacy_external_config_fields_and_keeps_runtime_fields() -> Result<()> {
-    use crate::permission::TrustMode;
+    use tiangong_core::permission::TrustMode;
 
     with_isolated_state("tiangong-persist-strip-external-config", |paths, state| {
         // 1. 设置非默认的 agent runtime 字段，确保后续能验证它们被保留。

@@ -1,4 +1,4 @@
-use crate::models_config::ModelsConfig;
+use tiangong_core::models_config::ModelsConfig;
 
 use super::super::*;
 
@@ -22,7 +22,8 @@ impl TiangongState {
         // 从 models_config 生成内部 ModelProviderConfig
         let model_config = models_config.to_chat_provider_config();
 
-        let context_limit = crate::core_config::resolve_context_limit(&model_config.api_model);
+        let context_limit =
+            tiangong_core::core_config::resolve_context_limit(&model_config.api_model);
         let runtime = RuntimeEngine::new(
             SingleProviderClient::new(model_config.clone()),
             context_limit,

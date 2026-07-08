@@ -1,9 +1,9 @@
 //! CLI REPL — 类似 codex/claude code 风格交互
 
 use anyhow::Result;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_config::load_tiangong_config;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::TiangongCore;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 

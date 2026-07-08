@@ -15,14 +15,14 @@ use tracing::debug;
 /// 使用 TiangongApp 共享的 state 和 config，维护独立的定时任务 core map。
 /// 定时任务 core 运行在 FullTrust 模式下，与 UI 核心隔离。
 pub struct DesktopSchedulerContext {
-    state: Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
+    state: Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     config: CoreConfigProvider,
     scheduler_cores: std::sync::Mutex<HashMap<String, TiangongCore>>,
 }
 
 impl DesktopSchedulerContext {
     pub fn new(
-        state: Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
+        state: Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
         config: CoreConfigProvider,
     ) -> Self {
         Self {

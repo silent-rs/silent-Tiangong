@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use super::*;
+use std::process::Command;
+
+use crate::planner::{PlanStepStatus, TaskPlan};
+use crate::runtime::{LlmOutputRecord, TurnExecution, VerifyExecutionRecord};
+use crate::tool::{ToolExecutionRecord, ToolResult};
 
 pub(super) fn merge_tool_result_text(
     base: Option<String>,

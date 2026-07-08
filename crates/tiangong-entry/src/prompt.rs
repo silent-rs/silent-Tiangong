@@ -2,7 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 
 use crate::args::{PromptArgs, PromptSubcommand};
 

@@ -57,42 +57,44 @@ fn prepare_active_user_message_ingress_persists_message_immediately() -> Result<
 #[test]
 fn trust_mode_is_session_scoped_and_default_only_initializes_new_sessions() -> Result<()> {
     with_isolated_state("tiangong-state-session-trust-mode", |_paths, state| {
-        state.store.agent.agent_config.default_trust_mode = crate::permission::TrustMode::FullTrust;
+        state.store.agent.agent_config.default_trust_mode =
+            tiangong_core::permission::TrustMode::FullTrust;
         state.create_session();
         let first_id = state.active_session_id().to_string();
         assert_eq!(
             state.active_session_trust_mode(),
-            crate::permission::TrustMode::FullTrust
+            tiangong_core::permission::TrustMode::FullTrust
         );
 
-        state.set_trust_mode(crate::permission::TrustMode::Supervised)?;
+        state.set_trust_mode(tiangong_core::permission::TrustMode::Supervised)?;
         assert_eq!(
             state
                 .sessions()
                 .iter()
                 .find(|session| session.id == first_id)
                 .map(|session| session.trust_mode),
-            Some(crate::permission::TrustMode::Supervised)
+            Some(tiangong_core::permission::TrustMode::Supervised)
         );
 
-        state.store.agent.agent_config.default_trust_mode = crate::permission::TrustMode::FullTrust;
+        state.store.agent.agent_config.default_trust_mode =
+            tiangong_core::permission::TrustMode::FullTrust;
         state.create_session();
         let second_id = state.active_session_id().to_string();
         assert_ne!(first_id, second_id);
         assert_eq!(
             state.active_session_trust_mode(),
-            crate::permission::TrustMode::FullTrust
+            tiangong_core::permission::TrustMode::FullTrust
         );
 
         state.switch_session(&first_id);
         assert_eq!(
             state.active_session_trust_mode(),
-            crate::permission::TrustMode::Supervised
+            tiangong_core::permission::TrustMode::Supervised
         );
         state.switch_session(&second_id);
         assert_eq!(
             state.active_session_trust_mode(),
-            crate::permission::TrustMode::FullTrust
+            tiangong_core::permission::TrustMode::FullTrust
         );
         Ok(())
     })

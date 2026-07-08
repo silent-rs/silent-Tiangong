@@ -74,7 +74,7 @@ impl TiangongState {
     /// 更新新版 ModelsConfig 并持久化到 models.json，同时同步内部状态
     pub fn save_models_config(
         &mut self,
-        new_config: crate::models_config::ModelsConfig,
+        new_config: tiangong_core::models_config::ModelsConfig,
     ) -> Result<()> {
         new_config.save()?;
         self.store.provider.models_config = new_config;

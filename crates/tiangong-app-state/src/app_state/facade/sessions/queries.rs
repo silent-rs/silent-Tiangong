@@ -21,7 +21,7 @@ impl TiangongState {
             .find(|session| session.id == self.store.session.active_session_id)
     }
 
-    pub fn active_session_trust_mode(&self) -> crate::permission::TrustMode {
+    pub fn active_session_trust_mode(&self) -> tiangong_core::permission::TrustMode {
         self.active_session()
             .map(|session| session.trust_mode)
             .unwrap_or(self.store.agent.agent_config.default_trust_mode)
@@ -75,17 +75,17 @@ impl TiangongState {
         self.services.runtime.provider_label()
     }
 
-    pub fn models_config(&self) -> &crate::models_config::ModelsConfig {
+    pub fn models_config(&self) -> &tiangong_core::models_config::ModelsConfig {
         &self.store.provider.models_config
     }
 
     /// 根据当前应用状态构建供 TiangongCore 使用的最小配置快照
     pub fn build_core_config_from_base(
         &self,
-        _base: &crate::core_config::CoreConfig,
-    ) -> crate::core_config::CoreConfig {
-        crate::core_config::CoreConfig {
-            llm: crate::core_config::LlmConfig::from_models_config(self.models_config()),
+        _base: &tiangong_core::core_config::CoreConfig,
+    ) -> tiangong_core::core_config::CoreConfig {
+        tiangong_core::core_config::CoreConfig {
+            llm: tiangong_core::core_config::LlmConfig::from_models_config(self.models_config()),
             trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
@@ -113,7 +113,7 @@ impl TiangongState {
     pub fn update_workspace_dir(&mut self, workspace_dir: String) -> Result<()> {
         self.store.session.workspace_dir = workspace_dir;
         for session in &mut self.store.session.sessions {
-            if session.cwd_mode == crate::session::SessionCwdMode::Inherit
+            if session.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit
                 && !session.has_user_messages()
             {
                 session.cwd = self.store.session.workspace_dir.clone();
@@ -140,7 +140,7 @@ impl TiangongState {
             .find(|s| s.id == active_id)
         {
             // Isolated 模式不允许修改工作目录
-            if session.cwd_mode == crate::session::SessionCwdMode::Isolated {
+            if session.cwd_mode == tiangong_core::session::SessionCwdMode::Isolated {
                 return Err(anyhow::anyhow!("隔离模式会话不允许修改工作目录"));
             }
             // 已有对话的会话不允许切换工作目录
@@ -148,7 +148,7 @@ impl TiangongState {
                 return Err(anyhow::anyhow!("已有对话的会话不允许切换工作目录"));
             }
             session.cwd = cwd;
-            session.cwd_mode = crate::session::SessionCwdMode::Custom;
+            session.cwd_mode = tiangong_core::session::SessionCwdMode::Custom;
         }
         self.persist_session_and_app(&active_id)
     }

@@ -9581,6 +9581,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-runtime",
  "tauri-runtime-wry",
+ "tiangong-app-state",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
@@ -9611,6 +9612,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-app-state"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-core",
+ "tiangong-media-archive",
+ "tiangong-types",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-cli"
 version = "0.12.0"
 dependencies = [
@@ -9618,6 +9636,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "termimad",
+ "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
  "tiangong-memory",
@@ -9708,6 +9727,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tiangong-app-state",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
@@ -10058,6 +10078,7 @@ dependencies = [
  "silent",
  "subtle",
  "tempfile",
+ "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
  "tiangong-media",

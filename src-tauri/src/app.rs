@@ -17,7 +17,7 @@ use tracing::warn;
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
-    pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
+    pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
@@ -63,7 +63,7 @@ impl TiangongApp {
 
         Self {
             state: std::sync::Arc::new(AsyncMutex::new(
-                tiangong_core::app_state::TiangongState::load_or_default(),
+                tiangong_app_state::app_state::TiangongState::load_or_default(),
             )),
             cores: Mutex::new(HashMap::new()),
             config,
@@ -252,7 +252,7 @@ impl TiangongApp {
 
     pub async fn with_state<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&mut tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&mut tiangong_app_state::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         let mut guard = self.state.lock().await;
         f(&mut guard).map_err(|e| e.to_string())
@@ -260,7 +260,7 @@ impl TiangongApp {
 
     pub async fn with_state_read<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&tiangong_app_state::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         let guard = self.state.lock().await;
         f(&guard).map_err(|e| e.to_string())

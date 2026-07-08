@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::core_config::CoreConfigProvider;
 
 use crate::completion;

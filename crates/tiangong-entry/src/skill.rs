@@ -1,4 +1,4 @@
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_plugin_skill::{InstalledSkillConfig, SkillPlugin, init_tiangong_skill_scaffold};
 
 use crate::args::{SkillArgs, SkillSubcommand};

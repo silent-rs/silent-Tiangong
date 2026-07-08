@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::models_config::ModelsConfig;
+use tiangong_core::models_config::ModelsConfig;
 
 #[derive(Debug)]
 pub struct ProviderState {

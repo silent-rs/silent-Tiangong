@@ -425,7 +425,7 @@ fn parse_model_capability(
 }
 
 fn has_capability_in_state(
-    core_state: &tiangong_core::app_state::TiangongState,
+    core_state: &tiangong_app_state::app_state::TiangongState,
     capability: tiangong_core::models_config::ModelCapability,
 ) -> bool {
     core_state.models_config().has_capability(capability)
@@ -436,7 +436,7 @@ fn has_capability_in_state(
 // ============================================================================
 
 pub fn build_full_snapshot_with_status(
-    core_state: &tiangong_core::app_state::TiangongState,
+    core_state: &tiangong_app_state::app_state::TiangongState,
     is_executing: bool,
 ) -> RunSnapshotView {
     let sid = core_state.active_session_id();
@@ -444,7 +444,7 @@ pub fn build_full_snapshot_with_status(
 }
 
 fn build_session_snapshot(
-    core_state: &tiangong_core::app_state::TiangongState,
+    core_state: &tiangong_app_state::app_state::TiangongState,
     session_id: &str,
     is_session_executing: bool,
 ) -> RunSnapshotView {

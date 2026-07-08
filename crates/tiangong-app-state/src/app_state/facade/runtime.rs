@@ -15,8 +15,9 @@ impl TiangongState {
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
-        let context_limit =
-            crate::core_config::resolve_context_limit(&self.store.provider.model_config.api_model);
+        let context_limit = tiangong_core::core_config::resolve_context_limit(
+            &self.store.provider.model_config.api_model,
+        );
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(config),
             context_limit,

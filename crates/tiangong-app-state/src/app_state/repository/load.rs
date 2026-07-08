@@ -117,8 +117,8 @@ impl AppRepository {
         let mut agent_config = legacy_agent_config;
         if let Some(config) = &mut agent_config {
             let legacy_prompt = config.custom_system_prompt.clone();
-            let prompt =
-                crate::custom_prompt::load_custom_prompt(&legacy_prompt).unwrap_or(legacy_prompt);
+            let prompt = tiangong_core::custom_prompt::load_custom_prompt(&legacy_prompt)
+                .unwrap_or(legacy_prompt);
             config.custom_system_prompt = prompt;
         }
         Ok(agent_config)
@@ -127,7 +127,7 @@ impl AppRepository {
     pub(in crate::app_state) fn load_session_from_disk(
         &self,
         session_id: &str,
-        missing_trust_mode: crate::permission::TrustMode,
+        missing_trust_mode: tiangong_core::permission::TrustMode,
     ) -> Result<Option<Session>> {
         let session_path = session_storage_path(&self.paths.sessions_dir_path, session_id);
         if !session_path.exists() {
