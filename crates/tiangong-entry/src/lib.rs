@@ -18,6 +18,12 @@ use clap::error::ErrorKind;
 use self::args::{MainArgs, MainCommand};
 
 pub fn run() -> anyhow::Result<()> {
+    // 注入 storage_root：必须在任何子命令触达持久化之前完成。
+    // 许多子命令（model/config/doctor 等）直接读 models.json / custom-prompt.md，
+    // 不经 TiangongState::load_or_default，故不能依赖 load_or_default 来注入。
+    // 路径计算归 app-state；core::storage 只接收注入值。
+    tiangong_core::storage::set_storage_root(tiangong_app_state::app_state::storage_root());
+
     let args = match MainArgs::try_parse() {
         Ok(args) => args,
         Err(err) => {
