@@ -55,32 +55,20 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         config.clone(),
         stream_tx,
         {
-            use tiangong_core::models_config::ModelCapability;
+            // 媒体插件由 app 层构造时从 ModelsConfig 解析能力端点注入，
+            // 未配置的能力 default_plugins 返回空 Vec（内部含能力判定）。
             let mut plugins = tiangong_plugin_fs::default_plugins();
             plugins.extend(tiangong_plugin_index::default_plugins());
-            // 媒体插件按 ModelsConfig 能力路由条件注册：未配置的能力不暴露工具。
-            if models.has_capability(ModelCapability::ImageGeneration) {
-                plugins.extend(tiangong_plugin_generate_image::default_plugins());
-            }
-            if models.has_capability(ModelCapability::VideoGeneration) {
-                plugins.extend(tiangong_plugin_generate_video::default_plugins());
-            }
-            if models.has_capability(ModelCapability::Tts) {
-                plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
-            }
-            if models.has_capability(ModelCapability::Stt) {
-                plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
-            }
+            plugins.extend(tiangong_plugin_generate_image::default_plugins(&models));
+            plugins.extend(tiangong_plugin_generate_video::default_plugins(&models));
+            plugins.extend(tiangong_plugin_text_to_speech::default_plugins(&models));
+            plugins.extend(tiangong_plugin_speech_to_text::default_plugins(&models));
             plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_scheduler::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
-            // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
-            // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-            if tiangong_plugin_analyze_attachment::should_register(&models) {
-                plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
-            }
+            plugins.extend(tiangong_plugin_analyze_attachment::default_plugins(&models));
             // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
             // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
             plugins.push(skill_plugin.clone());

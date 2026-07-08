@@ -343,29 +343,17 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
-        // 媒体插件按 ModelsConfig 能力路由条件注册：未配置的能力不暴露工具。
-        use tiangong_core::models_config::ModelCapability;
+        // 媒体插件由 app 层构造时从 ModelsConfig 解析能力端点注入，
+        // 未配置的能力 default_plugins 返回空 Vec（内部含能力判定）。
         let models = &self.models;
-        if models.has_capability(ModelCapability::ImageGeneration) {
-            plugins.push(tiangong_plugin_generate_image::build_plugin());
-        }
-        if models.has_capability(ModelCapability::VideoGeneration) {
-            plugins.push(tiangong_plugin_generate_video::build_plugin());
-        }
-        if models.has_capability(ModelCapability::Tts) {
-            plugins.push(tiangong_plugin_text_to_speech::build_plugin());
-        }
-        if models.has_capability(ModelCapability::Stt) {
-            plugins.push(tiangong_plugin_speech_to_text::build_plugin());
-        }
+        plugins.extend(tiangong_plugin_generate_image::default_plugins(models));
+        plugins.extend(tiangong_plugin_generate_video::default_plugins(models));
+        plugins.extend(tiangong_plugin_text_to_speech::default_plugins(models));
+        plugins.extend(tiangong_plugin_speech_to_text::default_plugins(models));
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
         plugins.push(tiangong_plugin_task::build_plugin());
-        // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
-        // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-        if tiangong_plugin_analyze_attachment::should_register(models) {
-            plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
-        }
+        plugins.extend(tiangong_plugin_analyze_attachment::default_plugins(models));
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
         // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
         plugins.push(self.skill_plugin.clone());

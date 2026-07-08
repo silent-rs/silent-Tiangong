@@ -14,27 +14,31 @@ pub use plugin::AnalyzeAttachmentPlugin;
 
 use std::sync::Arc;
 use tiangong_core::core::Plugin;
+use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::model::SingleProviderClient;
 use tiangong_core::models_config::{ModelCapability, ModelsConfig};
 
 /// 判断入口层是否应注册附件分析插件。
 ///
 /// 仅当配置了独立 multimodal 路由、且 chat 主模型本身非 multimodal 时才需要本工具
-/// （否则附件直接随主模型请求发送）。判断基于 [`ModelsConfig`] 路由，与 engine 的
-/// `chat_is_multimodal()` 同源，避免入口层与 engine 判断不一致。
-///
-/// 入口层（CLI / Server / Tauri）统一调用本函数，避免三处复制复杂判断。
+/// （否则附件直接随主模型请求发送）。
 pub fn should_register(models: &ModelsConfig) -> bool {
     models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal()
 }
 
-/// 构造附件分析插件实例，返回 `Arc<dyn Plugin>` 供入口注册。
-pub fn build_plugin() -> Arc<dyn Plugin> {
-    Arc::new(AnalyzeAttachmentPlugin::new())
+/// 构造附件分析插件实例，接收已解析的 multimodal 客户端（None 表示不启用）。
+pub fn build_plugin(client: Option<SingleProviderClient>) -> Arc<dyn Plugin> {
+    Arc::new(AnalyzeAttachmentPlugin::new(client))
 }
 
-/// 构造默认的附件分析插件列表，供各入口（CLI / Server / Tauri）注入 core 时使用。
-///
-/// 入口层应先用 [`should_register`] 判断能力是否存在，满足条件才调用本函数。
-pub fn default_plugins() -> Vec<Arc<dyn Plugin>> {
-    vec![build_plugin()]
+/// 构造默认的附件分析插件列表：从 ModelsConfig 解析 multimodal 能力，
+/// 仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册（内部含 should_register 判定）。
+pub fn default_plugins(models: &ModelsConfig) -> Vec<Arc<dyn Plugin>> {
+    if !should_register(models) {
+        return Vec::new();
+    }
+    let client = models
+        .resolve_for_capability(ModelCapability::Multimodal)
+        .map(|resolved| SingleProviderClient::new(ModelEndpoint::from_resolved(resolved)));
+    vec![build_plugin(client)]
 }

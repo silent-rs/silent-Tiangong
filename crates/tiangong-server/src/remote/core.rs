@@ -169,33 +169,20 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
-                use tiangong_core::models_config::ModelCapability;
-                // 媒体插件按 ModelsConfig 能力路由条件注册（复用启动时加载的配置）。
+                // 媒体插件由 app 层构造时从 ModelsConfig 解析能力端点注入（复用启动时加载的配置）。
                 let models = &self.models;
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                if models.has_capability(ModelCapability::ImageGeneration) {
-                    plugins.extend(tiangong_plugin_generate_image::default_plugins());
-                }
-                if models.has_capability(ModelCapability::VideoGeneration) {
-                    plugins.extend(tiangong_plugin_generate_video::default_plugins());
-                }
-                if models.has_capability(ModelCapability::Tts) {
-                    plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
-                }
-                if models.has_capability(ModelCapability::Stt) {
-                    plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
-                }
+                plugins.extend(tiangong_plugin_generate_image::default_plugins(models));
+                plugins.extend(tiangong_plugin_generate_video::default_plugins(models));
+                plugins.extend(tiangong_plugin_text_to_speech::default_plugins(models));
+                plugins.extend(tiangong_plugin_speech_to_text::default_plugins(models));
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins.extend(tiangong_plugin_task::default_plugins());
-                // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
-                // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-                if tiangong_plugin_analyze_attachment::should_register(models) {
-                    plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
-                }
+                plugins.extend(tiangong_plugin_analyze_attachment::default_plugins(models));
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
                 plugins.extend(tiangong_plugin_skill::default_plugins());
