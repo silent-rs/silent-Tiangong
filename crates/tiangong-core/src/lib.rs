@@ -7,7 +7,6 @@ pub mod browser_trait;
 pub mod context;
 pub mod core;
 pub mod core_config;
-pub mod custom_prompt;
 pub(crate) mod formatting;
 pub mod media;
 pub mod model;

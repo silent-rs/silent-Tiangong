@@ -20,7 +20,9 @@ impl TiangongState {
             .provider
             .models_config
             .update_chat_model(api_model.to_string());
-        let _ = self.store.provider.models_config.save();
+        let dir = tiangong_config::io::storage_root();
+        let _ =
+            tiangong_config::io::save_models_config_at(&dir, &self.store.provider.models_config);
 
         // 重新生成内部 model_config
         self.store.provider.model_config =
@@ -58,7 +60,11 @@ impl TiangongState {
                 .provider
                 .models_config
                 .update_chat_model(first.clone());
-            let _ = self.store.provider.models_config.save();
+            let dir = tiangong_config::io::storage_root();
+            let _ = tiangong_config::io::save_models_config_at(
+                &dir,
+                &self.store.provider.models_config,
+            );
             self.store.provider.model_config =
                 self.store.provider.models_config.to_chat_provider_config();
         }
@@ -76,7 +82,8 @@ impl TiangongState {
         &mut self,
         new_config: tiangong_core::models_config::ModelsConfig,
     ) -> Result<()> {
-        new_config.save()?;
+        let dir = tiangong_config::io::storage_root();
+        tiangong_config::io::save_models_config_at(&dir, &new_config)?;
         self.store.provider.models_config = new_config;
         self.store.provider.model_config =
             self.store.provider.models_config.to_chat_provider_config();

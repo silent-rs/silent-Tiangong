@@ -1,8 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -392,14 +389,6 @@ pub struct ResolvedModel {
 }
 
 // ---------------------------------------------------------------------------
-// 路径工具
-// ---------------------------------------------------------------------------
-
-fn models_config_path() -> PathBuf {
-    crate::storage::storage_root().join("models.json")
-}
-
-// ---------------------------------------------------------------------------
 // 实现
 // ---------------------------------------------------------------------------
 
@@ -434,56 +423,6 @@ impl ModelsConfig {
             .copied()
             .filter(|cap| self.has_capability(*cap))
             .collect()
-    }
-
-    /// 从 ~/.tiangong/models.json 加载，不存在则返回空配置
-    pub fn load() -> Self {
-        let path = models_config_path();
-        if !path.exists() {
-            return Self::default();
-        }
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
-    }
-
-    /// 保存到 ~/.tiangong/models.json
-    ///
-    /// 保存前自动将 routing 中未在 models 注册表里的条目补入 models，
-    /// 确保序列化时 routing 值能写为字符串引用（旧版本兼容）。
-    pub fn save(&self) -> Result<()> {
-        let mut cfg = self.clone();
-        cfg.ensure_routing_models_registered();
-
-        let path = models_config_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("创建目录失败：{}", parent.display()))?;
-        }
-        let content =
-            serde_json::to_string_pretty(&cfg).with_context(|| "序列化 ModelsConfig 失败")?;
-        fs::write(&path, content)
-            .with_context(|| format!("写入 models.json 失败：{}", path.display()))?;
-        Ok(())
-    }
-
-    /// 将 routing 中未在 models 注册表中的条目自动补入 models
-    fn ensure_routing_models_registered(&mut self) {
-        for entry in self.routing.values() {
-            let exists = self
-                .models
-                .iter()
-                .any(|(_, m)| m.provider == entry.provider && m.model == entry.model);
-            if !exists {
-                let key = format!("{}-{}", entry.provider, entry.model);
-                if self.models.contains_key(&key) {
-                    // 名称冲突时追加 slot 后缀
-                    continue;
-                }
-                self.models.insert(key, entry.clone());
-            }
-        }
     }
 
     /// 从旧版 ModelProviderConfig 迁移
@@ -1130,33 +1069,6 @@ mod tests {
                 .unwrap(),
             &serde_json::json!(0.7)
         );
-    }
-
-    #[test]
-    fn save_auto_registers_routing_entries_to_models() {
-        let mut config = ModelsConfig::default();
-        config.providers.insert(
-            "p".to_string(),
-            ProviderConfig {
-                base_url: "https://api.test.com".to_string(),
-                api_key: "k".to_string(),
-                timeout_ms: 60_000,
-                protocol: ProviderProtocol::OpenAiChatCompletions,
-            },
-        );
-        config.routing.insert(
-            RoutingSlot::Chat,
-            ModelEntry {
-                provider: "p".to_string(),
-                model: "gpt-4".to_string(),
-                capabilities: vec![ModelCapability::Chat],
-                options: serde_json::json!({}),
-            },
-        );
-
-        let mut cfg = config.clone();
-        cfg.ensure_routing_models_registered();
-        assert!(cfg.models.values().any(|m| m.model == "gpt-4"));
     }
 
     // ── CLI 友好方法测试（RFC 0015 §6.1） ──

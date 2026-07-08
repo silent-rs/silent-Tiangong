@@ -187,13 +187,21 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
+        let llm = tiangong_core::core_config::LlmConfig::from_models_config(&self.models);
+        // context_limit 由 config 层在转换时解析注入（core 不做配置磁盘 IO）。
+        let dir = crate::io::storage_root();
+        let context_limit = if llm.chat.model.is_empty() {
+            tiangong_core::core_config::default_context_limit()
+        } else {
+            crate::io::resolve_context_limit_at(&dir, &llm.chat.model)
+        };
         CoreConfig {
-            llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
+            llm,
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
-            context_limit: 0, // 0 表示自动根据模型名称解析
+            context_limit,
         }
     }
 
@@ -325,11 +333,8 @@ mod tests {
         fs::write(dir.path().join("custom-prompt.md"), "测试 Prompt 内容").unwrap();
 
         // 直接验证 load_custom_prompt_at 行为（与 load_tiangong_config_from_dir 一致）
-        let prompt = tiangong_core::custom_prompt::load_custom_prompt_at(
-            &dir.path().join("custom-prompt.md"),
-            "",
-        )
-        .unwrap();
+        let prompt =
+            crate::io::load_custom_prompt_at(&dir.path().join("custom-prompt.md"), "").unwrap();
         assert_eq!(prompt, "测试 Prompt 内容");
     }
 }

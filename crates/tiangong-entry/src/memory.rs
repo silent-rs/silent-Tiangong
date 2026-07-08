@@ -45,7 +45,8 @@ fn run_config(command: MemoryConfigSubcommand) -> Result<()> {
                 return Err(anyhow!("请至少指定 --llm / --embedding / --rerank 之一"));
             }
             let mut config = config;
-            let models = ModelsConfig::load();
+            let models =
+                tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
 
             if let Some(name) = llm {
                 config.model = Some(resolve_to_llm_endpoint(&name, &models)?);

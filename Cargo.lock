@@ -9621,6 +9621,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-media-archive",
  "tiangong-types",

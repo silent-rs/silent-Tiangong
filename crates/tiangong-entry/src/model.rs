@@ -6,7 +6,8 @@ use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, Ro
 use crate::args::{ModelArgs, ModelSubcommand, RouteSubcommand};
 
 pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
-    let mut config = ModelsConfig::load();
+    let dir = tiangong_config::io::storage_root();
+    let mut config = tiangong_config::io::load_models_config_at(&dir);
     match args.command {
         ModelSubcommand::List { scope } => {
             print_list(&config, scope.as_deref());
@@ -29,7 +30,7 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
                 }
             };
             config.upsert_provider(&name, &base_url, &api_key, protocol, timeout_ms);
-            config.save()?;
+            tiangong_config::io::save_models_config_at(&dir, &config)?;
             println!("已保存供应商 {name}");
         }
         ModelSubcommand::RemoveProvider { name, force } => {
@@ -49,12 +50,12 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
                     return Err(anyhow!("请使用 --force 强制删除，或先移除引用"));
                 }
                 let removed = config.remove_provider_force(&name);
-                config.save()?;
+                tiangong_config::io::save_models_config_at(&dir, &config)?;
                 println!("已强制删除供应商 {name}（连带移除 {removed} 项）");
                 return Ok(());
             }
             config.providers.remove(&name);
-            config.save()?;
+            tiangong_config::io::save_models_config_at(&dir, &config)?;
             println!("已删除供应商 {name}");
         }
         ModelSubcommand::AddModel {
@@ -70,7 +71,7 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
             }
             let capabilities = parse_capabilities(&capability)?;
             config.upsert_model(&name, &provider, &model_id, capabilities.clone());
-            config.save()?;
+            tiangong_config::io::save_models_config_at(&dir, &config)?;
             let cap_str = if capabilities.is_empty() {
                 "（无显式能力）".to_string()
             } else {
@@ -89,7 +90,7 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
             if !removed {
                 return Err(anyhow!("模型 {name} 不存在"));
             }
-            config.save()?;
+            tiangong_config::io::save_models_config_at(&dir, &config)?;
             if dangling.is_empty() {
                 println!("已删除模型 {name}");
             } else {
@@ -109,7 +110,7 @@ pub(crate) fn run_model_command(args: ModelArgs) -> Result<()> {
                 config
                     .set_route_by_name(slot, &model)
                     .map_err(|e| anyhow!(e))?;
-                config.save()?;
+                tiangong_config::io::save_models_config_at(&dir, &config)?;
                 println!("已设置路由 {capability} -> {model}");
             }
         },

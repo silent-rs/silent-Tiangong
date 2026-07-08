@@ -99,11 +99,11 @@ impl TiangongState {
         let trimmed = prompt.trim();
         if trimmed.is_empty() {
             // 清空：删除 custom-prompt.md 并清空旧字段
-            tiangong_core::custom_prompt::clear_custom_prompt()?;
+            tiangong_config::io::clear_custom_prompt()?;
             self.store.agent.agent_config.custom_system_prompt = String::new();
         } else {
             // 写入 custom-prompt.md 作为唯一事实来源，并清空 app.json 旧字段
-            tiangong_core::custom_prompt::save_custom_prompt(&prompt)?;
+            tiangong_config::io::save_custom_prompt(&prompt)?;
             self.store.agent.agent_config.custom_system_prompt = String::new();
         }
         self.rebuild_runtime_from_current_config();
@@ -117,7 +117,7 @@ impl TiangongState {
 
     /// 获取自定义 Prompt 独立存储路径（~/.tiangong/custom-prompt.md）。
     pub fn custom_prompt_path(&self) -> std::path::PathBuf {
-        tiangong_core::custom_prompt::custom_prompt_path()
+        tiangong_config::io::custom_prompt_path()
     }
 
     pub fn set_reasoning_effort(&mut self, effort: String) -> Result<()> {

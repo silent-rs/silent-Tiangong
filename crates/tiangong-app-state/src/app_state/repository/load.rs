@@ -117,8 +117,8 @@ impl AppRepository {
         let mut agent_config = legacy_agent_config;
         if let Some(config) = &mut agent_config {
             let legacy_prompt = config.custom_system_prompt.clone();
-            let prompt = tiangong_core::custom_prompt::load_custom_prompt(&legacy_prompt)
-                .unwrap_or(legacy_prompt);
+            let prompt =
+                tiangong_config::io::load_custom_prompt(&legacy_prompt).unwrap_or(legacy_prompt);
             config.custom_system_prompt = prompt;
         }
         Ok(agent_config)

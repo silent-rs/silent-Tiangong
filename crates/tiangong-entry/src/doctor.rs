@@ -1,9 +1,9 @@
 use anyhow::Result;
 
 use tiangong_config::default_tiangong_dir;
+use tiangong_config::io::custom_prompt_path;
 use tiangong_config::load_server_config;
-use tiangong_core::custom_prompt::custom_prompt_path;
-use tiangong_core::models_config::{ModelsConfig, RoutingSlot};
+use tiangong_core::models_config::RoutingSlot;
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::DoctorArgs;
@@ -83,7 +83,7 @@ fn check_config_dir(report: &mut DoctorReport) {
 }
 
 fn check_models(report: &mut DoctorReport, deep: bool) {
-    let models = ModelsConfig::load();
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
     let chat = models.resolve_slot(RoutingSlot::Chat);
 
     match &chat {
@@ -145,7 +145,7 @@ fn check_server(report: &mut DoctorReport) {
 
 /// 检查模型与 Memory 配置中 `${ENV}` 形式的密钥是否可解析。
 fn check_model_secrets(report: &mut DoctorReport) {
-    let models = ModelsConfig::load();
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
     let mut checked = 0usize;
     let mut missing: Vec<String> = Vec::new();
 

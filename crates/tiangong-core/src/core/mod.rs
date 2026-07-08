@@ -846,7 +846,8 @@ fn build_engine_from_config(
             });
         });
 
-    let context_limit = crate::core_config::resolve_context_limit(&config.llm.chat.model);
+    // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
+    let context_limit = config.context_limit;
     let mut engine = RuntimeEngine::with_shared_trust_mode(
         SingleProviderClient::new(model_config).with_on_retry(on_retry.clone()),
         context_limit,

@@ -14,13 +14,14 @@ impl TiangongState {
         let default_agent_config = AgentConfig::default();
 
         // ModelsConfig 为主配置源
-        let mut models_config = ModelsConfig::load();
+        let storage_dir = tiangong_config::io::storage_root();
+        let mut models_config = tiangong_config::io::load_models_config_at(&storage_dir);
         if models_config.is_empty() {
             // 从环境变量生成默认 ModelsConfig
             let env_config = ModelProviderConfig::from_env();
             if !env_config.api_auth_token.is_empty() {
                 models_config = ModelsConfig::from_legacy(&env_config);
-                let _ = models_config.save();
+                let _ = tiangong_config::io::save_models_config_at(&storage_dir, &models_config);
             }
         }
 
@@ -28,7 +29,7 @@ impl TiangongState {
         let model_config = models_config.to_chat_provider_config();
 
         let context_limit =
-            tiangong_core::core_config::resolve_context_limit(&model_config.api_model);
+            tiangong_config::io::resolve_context_limit_at(&storage_dir, &model_config.api_model);
         let runtime = RuntimeEngine::new(
             SingleProviderClient::new(model_config.clone()),
             context_limit,
