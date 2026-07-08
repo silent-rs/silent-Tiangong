@@ -21,7 +21,7 @@ mod tests;
 
 // Private imports
 use self::repository::{
-    default_app_storage_path, default_sessions_dir_path, default_workspace_dir,
+    default_app_storage_path, default_sessions_dir_path, default_workspace_dir, init_storage_root,
     normalize_model_list, validate_agent_config,
 };
 use self::services::AppTurnService;
@@ -30,6 +30,7 @@ use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
+pub use self::repository::storage_root;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };

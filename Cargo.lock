@@ -9685,6 +9685,7 @@ dependencies = [
  "backoff",
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "futures-util",
  "http",
  "reqwest 0.13.4",

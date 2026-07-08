@@ -23,6 +23,7 @@ impl TiangongState {
             context_limit,
             self.store.agent.agent_config.clone(),
             shared_trust_mode,
+            crate::app_state::repository::storage_root(),
         )
         .with_models_config(self.store.provider.models_config.clone());
         if let Some(fetcher) = page_fetcher {

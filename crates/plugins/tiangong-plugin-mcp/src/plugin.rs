@@ -54,6 +54,15 @@ impl McpPlugin {
         )
     }
 
+    /// 用应用层注入的存储根目录（`~/.tiangong/`）构造插件。
+    ///
+    /// 由 entry 层在启动序列中调用，把统一解析的 storage root 注入进来，
+    /// 避免 plugin 各自重复解析 `~/.tiangong`。无 app 上下文的场景（doctor /
+    /// 孤立子命令）仍用 [`new`](Self::new) 走 plugin 自治回退。
+    pub fn with_storage_root(root: PathBuf) -> Self {
+        Self::with_paths(root.join("mcp.json"), root.join("mcp-tools-cache.json"))
+    }
+
     /// 用显式路径构造（主要供测试使用，capability 状态实例隔离）。
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Self {
         let mcp_config = load_mcp_config_from_path(&mcp_config_path);

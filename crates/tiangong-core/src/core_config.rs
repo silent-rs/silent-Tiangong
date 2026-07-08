@@ -317,11 +317,7 @@ pub fn default_context_windows_json() -> &'static str {
 pub fn resolve_context_limit(model_name: &str) -> usize {
     const DEFAULT_MAP: &str = include_str!("context/context_windows.json");
 
-    let path = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".tiangong")
-        .join("context_windows.json");
+    let path = crate::storage::storage_root().join("context_windows.json");
 
     let content = if path.exists() {
         std::fs::read_to_string(&path).unwrap_or_else(|_| DEFAULT_MAP.to_string())

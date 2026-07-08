@@ -289,10 +289,7 @@ impl Session {
         let id = new_id();
         let now = now_text();
         // 在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let workspace_dir = home.join(".tiangong").join("workspaces").join(&id);
+        let workspace_dir = crate::storage::storage_root().join("workspaces").join(&id);
         let _ = std::fs::create_dir_all(&workspace_dir);
         Self {
             id,
@@ -327,10 +324,7 @@ impl Session {
     ///
     /// Core 在工具调用等关键节点调用此方法，确保中间数据不会因崩溃丢失。
     pub fn persist_to_disk(&self) {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let sessions_dir = home.join(".tiangong").join("sessions");
+        let sessions_dir = crate::storage::storage_root().join("sessions");
         if std::fs::create_dir_all(&sessions_dir).is_err() {
             tracing::warn!("创建 sessions 目录失败");
             return;

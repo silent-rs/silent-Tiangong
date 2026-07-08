@@ -127,7 +127,11 @@ impl RuntimeEngine {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
+        storage_root: std::path::PathBuf,
     ) -> Self {
+        // 收敛 storage_root 注入：RuntimeEngine 是 core 的硬入口，任何正确使用
+        // core 的代码都必然先构造 runtime，从而必然先注入 root。详见 storage 模块文档。
+        crate::storage::set_storage_root(storage_root);
         let permission_gate =
             crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
                 trust_mode: agent_config.trust_mode,
@@ -158,7 +162,9 @@ impl RuntimeEngine {
         context_limit: usize,
         agent_config: AgentConfig,
         shared_trust_mode: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
+        crate::storage::set_storage_root(storage_root);
         let permission_gate = crate::permission::PermissionGate::with_shared_trust_mode(
             crate::permission::PermissionPolicy {
                 trust_mode: agent_config.trust_mode,

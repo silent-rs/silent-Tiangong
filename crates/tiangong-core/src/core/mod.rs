@@ -52,8 +52,9 @@ impl TiangongCore {
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins)
+        Self::new_for_process(config, stream_tx, plugins, storage_root)
     }
 
     /// 创建 CLI 入口 core。
@@ -61,17 +62,19 @@ impl TiangongCore {
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins)
+        Self::new_for_process(config, stream_tx, plugins, storage_root)
     }
 
     pub fn new_for_process(
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     /// 从已有 session 创建（CLI 便捷入口）。
@@ -80,8 +83,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     pub fn with_session_for_gui(
@@ -89,8 +93,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     pub fn with_session_for_server(
@@ -98,8 +103,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     /// 从已有 session 创建，并显式标记入口进程类型。
@@ -112,6 +118,7 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
         // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
         // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
@@ -139,6 +146,7 @@ impl TiangongCore {
                 worker_trust_mode,
                 plugins,
                 worker_cmd_tx,
+                storage_root,
             )
         });
 
@@ -258,6 +266,7 @@ fn worker_loop(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
@@ -277,6 +286,7 @@ fn worker_loop(
         shared_trust_mode,
         plugins,
         cmd_tx,
+        storage_root,
     ))
 }
 
@@ -290,6 +300,7 @@ async fn worker_loop_async(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -372,6 +383,7 @@ async fn worker_loop_async(
                 &cfg,
                 &stream_tx,
                 shared_trust_mode.clone(),
+                storage_root.clone(),
             ));
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
@@ -806,6 +818,7 @@ fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    storage_root: std::path::PathBuf,
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
@@ -839,6 +852,7 @@ fn build_engine_from_config(
         context_limit,
         agent_config,
         shared_trust_mode,
+        storage_root,
     )
     .with_models_config(models_config)
     .with_core_config(config.clone());

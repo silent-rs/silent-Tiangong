@@ -54,3 +54,7 @@ llm-debug-log = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+dirs = { workspace = true }
+
+[[example]]
+name = "test_core"

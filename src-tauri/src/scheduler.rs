@@ -97,6 +97,7 @@ impl DesktopSchedulerContext {
             session,
             stream_tx,
             tiangong_plugin_scheduler::default_plugins(),
+            tiangong_app_state::app_state::storage_root(),
         );
         core.set_trust_mode(TrustMode::FullTrust);
 

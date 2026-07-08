@@ -61,14 +61,23 @@ impl TiangongApp {
 
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // 先构造 state：load_or_default 会把 storage_root 注入 core。
+        let state = std::sync::Arc::new(AsyncMutex::new(
+            tiangong_app_state::app_state::TiangongState::load_or_default(),
+        ));
+        // plugin 由 app 注入同一根目录（storage_root 由 app-state 统一计算）。
+        let storage_root = tiangong_app_state::app_state::storage_root();
+
         Self {
-            state: std::sync::Arc::new(AsyncMutex::new(
-                tiangong_app_state::app_state::TiangongState::load_or_default(),
-            )),
+            state,
             cores: Mutex::new(HashMap::new()),
             config,
-            skill_plugin: std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new()),
-            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::new()),
+            skill_plugin: std::sync::Arc::new(
+                tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
+            ),
+            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+                storage_root,
+            )),
             embedded_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
@@ -355,8 +364,13 @@ impl TiangongApp {
         plugins.push(self.mcp_plugin.clone());
 
         // 4. 创建 Core 并插入（重新拿锁）。
-        let core =
-            TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
+        let core = TiangongCore::with_session_for_gui(
+            self.config.clone(),
+            session,
+            stream_tx,
+            plugins,
+            tiangong_app_state::app_state::storage_root(),
+        );
         let id = core.session_id().to_string();
         {
             let mut cores = self.lock_cores();

@@ -20,36 +20,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// 获取用户 home 目录（与 app_state::repository::utils 保持一致）。
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
-}
-
-/// 天工存储根目录：~/.tiangong/
-fn storage_root() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
-}
-
 /// 自定义 Prompt 独立文件路径：~/.tiangong/custom-prompt.md
 pub fn custom_prompt_path() -> PathBuf {
-    storage_root().join("custom-prompt.md")
+    crate::storage::storage_root().join("custom-prompt.md")
 }
 
 /// 读取自定义 Prompt，优先 `custom-prompt.md`，回退 `legacy`（旧字段值）。

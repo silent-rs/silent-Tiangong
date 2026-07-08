@@ -34,36 +34,8 @@ impl AuditEntry {
     }
 }
 
-/// 审计日志的存储根目录（`~/.tiangong`），与 app_state::repository::utils 保持一致。
-fn storage_root() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
-}
-
 fn audit_log_path() -> PathBuf {
-    storage_root().join("audit.jsonl")
+    crate::storage::storage_root().join("audit.jsonl")
 }
 
 pub fn append_audit_log(entry: &AuditEntry) {

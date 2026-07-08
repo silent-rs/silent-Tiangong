@@ -4,6 +4,11 @@ use super::super::*;
 
 impl TiangongState {
     pub fn load_or_default() -> Self {
+        // 注入存储根目录到 core（core 不自行计算路径，必须由 app 先 set）。
+        // 必须在 default_app_storage_path 等读取注入值之前完成；同时把同一值
+        // 下传给 RuntimeEngine::new（构造时会再次 set，幂等，作为编译期契约锚点）。
+        init_storage_root();
+        let storage_root = crate::app_state::repository::storage_root();
         let app_storage_path = default_app_storage_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_agent_config = AgentConfig::default();
@@ -28,6 +33,7 @@ impl TiangongState {
             SingleProviderClient::new(model_config.clone()),
             context_limit,
             default_agent_config.clone(),
+            storage_root,
         )
         .with_models_config(models_config.clone());
 

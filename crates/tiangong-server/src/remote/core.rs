@@ -201,6 +201,7 @@ impl ServerCoreManager {
                 plugins.push(self.mcp_plugin.clone());
                 plugins
             },
+            tiangong_app_state::app_state::storage_root(),
         );
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
