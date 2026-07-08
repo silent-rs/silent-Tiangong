@@ -2,7 +2,7 @@
 //!
 //! [`register_plugin`] 把一个 [`Plugin`] 的全部能力（工具规格 / 工具覆盖 / Prompt 段落
 //! / 外部能力 / 工作目录 / 信任模式 / 反馈通道）按统一顺序注册到 [`RuntimeEngine`]，
-//! 并返回该插件声明的工具规格，供调用方（worker_loop）做全局编排（MCP 冲突避让、
+//! 并返回该插件声明的工具规格，供调用方（worker_loop）做全局编排（同名工具冲突避让、
 //! tools 合并等）。
 //!
 //! 编排顺序（由 worker_loop 在 engine 创建/重建时逐个插件调用）：
@@ -40,7 +40,7 @@ use super::trait_def::Plugin;
 /// 发送端，会包装成 [`PluginFeedbackTx`] 注入给插件（复用同一通道，避免新增 channel）。
 ///
 /// 返回值是该插件经 `register` 初始化后、由 `tool_specs()` 产出的工具规格快照，
-/// 供调用方做全局编排（构建 reserved_names 避让 MCP 同名工具、合并到最终 tools 列表）。
+/// 供调用方做全局编排（构建 reserved_names 避让同名工具冲突、合并到最终 tools 列表）。
 /// 注入与编排顺序见[模块文档]。
 ///
 /// [模块文档]: self

@@ -20,8 +20,7 @@
 //! - [`injection`]：插件事件注入通道（synthetic tool）的工具规格。
 //! - [`tool_spec`]：插件基础设施相关的工具名常量集中点。
 //!
-//! 注意：本模块与根 `crate::plugin`（外部清单驱动插件，MCP/skill）是两套不同的机制，
-//! 不要混淆。
+//! 注意：本模块与根 `crate::plugin`（外部清单驱动插件）是两套不同的机制，不要混淆。
 
 mod feedback;
 mod injection;

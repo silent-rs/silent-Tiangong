@@ -79,7 +79,7 @@ pub struct RuntimeEngine {
     lite_client: Option<SingleProviderClient>,
     /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
     multimodal_client: Option<SingleProviderClient>,
-    /// MCP / skills 收集的环境变量（供子进程执行注入，原 LocalToolExecutor.runtime_env）
+    /// 各插件贡献的子进程环境变量（供子进程执行注入）
     runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     pub context_limit: usize,
     agent_config: AgentConfig,
@@ -270,7 +270,7 @@ impl RuntimeEngine {
         }
     }
 
-    /// 获取 MCP / skills 收集的环境变量快照（供 command 插件注入子进程）。
+    /// 获取各插件贡献的环境变量快照（供 command 插件注入子进程）。
     pub fn runtime_env(&self) -> std::collections::BTreeMap<String, String> {
         self.runtime_env
             .lock()
@@ -304,7 +304,7 @@ impl RuntimeEngine {
     ///
     /// 若该工具名已被其他插件注册，保留先注册者，跳过当前注册。
     /// 这保证了内置业务插件（fs/fetch/command 等）的工具优先于后注册的动态工具
-    ///（如 MCP server 暴露的同名工具），对齐原 `execution_function_tools` 的
+    ///（如其他插件暴露的同名工具），对齐原 `execution_function_tools` 的
     /// `reserved_names` 冲突消解语义。
     pub fn register_tool_override(&self, name: &str, handler: Arc<dyn ToolOverrideHandler>) {
         if let Ok(mut guard) = self.tool_overrides.lock() {
@@ -389,8 +389,7 @@ impl RuntimeEngine {
     /// 注意：权限检查已由调用方（core/mod.rs）在执行前完成，
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
     ///
-    /// MCP 工具已迁移至独立插件 crate（tiangong-plugin-mcp），由 tool_overrides
-    /// 统一分发，此方法不再持有 mcp_targets / mcp_config 参数。
+    /// 所有工具均由各插件经 tool_overrides 统一分发，此方法不再持有具体领域参数。
     pub(crate) async fn execute_tool_call(&self, call: &ToolCall, session: &Session) -> ToolResult {
         // 权限检查
         use crate::permission::PermissionDecision;
@@ -411,20 +410,9 @@ impl RuntimeEngine {
             }
         }
 
-        // 后台任务管理（spawn_task / query_task / list_tasks / cancel_task / wait_tasks）
-        // 已迁移至独立插件 crate（tiangong-plugin-task），由 tool_overrides 统一分发。
+        // 后台任务、多媒体、扩展能力查询等均由各插件经 tool_overrides 统一分发。
 
-        // Skill 详情查询（get_skill_detail）已迁移至独立插件 crate
-        // （tiangong-plugin-skill），由 tool_overrides 统一分发。
-
-        // 多媒体工具（generate_image / generate_video / text_to_speech / speech_to_text）
-        // 已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
-        // text-to-speech,speech-to-text}），由 tool_overrides 统一分发。
-
-        // MCP 工具已迁移至独立插件 crate（tiangong-plugin-mcp），
-        // 由 tool_overrides 按 mcp__server__tool 显式工具名统一分发。
-
-        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal / mcp 等）
+        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal 等）
         if let Some(handler) = self
             .tool_overrides
             .lock()
@@ -451,27 +439,11 @@ impl RuntimeEngine {
     }
 }
 
-/// 注入增强工具定义（后台任务、MCP 管理）。
+/// 注入增强工具定义（团队协作等 core 内置增强工具）。
 ///
-/// 注：多媒体/附件分析工具规格已迁移至独立插件 crate；Skill 详情查询
-/// （get_skill_detail）与 system prompt 中的 Skills 段落已迁移至
-/// `tiangong-plugin-skill`；install/remove/set_skill_enabled 不再作为 LLM 工具暴露。
+/// 注：多媒体、附件分析、扩展能力查询、后台任务、扩展工具管理等功能均由各自
+/// 插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
 pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
-    // 多媒体能力（图片/视频/TTS/STT）与附件分析（analyze_attachment）的工具规格与
-    // 分发已迁移至独立插件 crate（tiangong-plugin-{generate-image,generate-video,
-    // text-to-speech,speech-to-text,analyze-attachment}），由 tool_overrides 统一分发。
-
-    // Skill 详情查询（get_skill_detail）与 system prompt 中的「已安装 Skills」段落
-    // 已迁移至独立插件 crate（tiangong-plugin-skill），由 tool_overrides 统一分发。
-    // install_skill / remove_skill / set_skill_enabled 不再作为 LLM 工具暴露——它们
-    // 是 app 层（Tauri 命令 / CLI modal / app_state facade）使用的管理 API。
-
-    // 后台任务管理（spawn_task / query_task / list_tasks / cancel_task / wait_tasks）
-    // 已迁移至独立插件 crate（tiangong-plugin-task），由 ToolSpecProvider 提供 spec。
-
-    // MCP 管理（register/remove/set_mcp_enabled）已迁移至独立插件 crate
-    // （tiangong-plugin-mcp），是 app 层管理 API，不再作为 LLM 工具暴露。
-
     // 多智能体团队工具
     crate::agent_team::tools::inject_agent_team_tools(tools);
 }

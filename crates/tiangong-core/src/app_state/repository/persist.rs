@@ -32,15 +32,14 @@ impl AppRepository {
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
         };
-        let content = self.serialize_app_payload_without_mcp(&payload)?;
+        let content = self.serialize_app_payload_stripped_external_configs(&payload)?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {
             format!(
                 "写入应用存储失败：{}",
                 self.paths.app_storage_path.display()
             )
         })?;
-        // 注意：不再调用 persist_agent_configs / sync_mcp_dependency_lock。
-        // agent 配置（skills.json、mcp.json）仅由显式修改它们的操作写入，
+        // 注意：扩展能力配置仅由显式修改它们的插件写入，
         // 避免多进程共享数据目录时互相覆盖。
         Ok(())
     }
@@ -68,23 +67,28 @@ impl AppRepository {
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
         };
-        let content = self.serialize_app_payload_without_mcp(&payload)?;
+        let content = self.serialize_app_payload_stripped_external_configs(&payload)?;
         fs::write(&self.paths.app_storage_path, content).with_context(|| {
             format!(
                 "写入应用存储失败：{}",
                 self.paths.app_storage_path.display()
             )
         })?;
-        // 注意：不再调用 persist_agent_configs / sync_mcp_dependency_lock，理由同 persist_app_only。
+        // 注意：扩展能力配置由各自插件写入，理由同 persist_app_only。
         Ok(())
     }
 
-    fn serialize_app_payload_without_mcp(&self, payload: &PersistedAppState) -> Result<String> {
+    fn serialize_app_payload_stripped_external_configs(
+        &self,
+        payload: &PersistedAppState,
+    ) -> Result<String> {
         let mut value = serde_json::to_value(payload).context("序列化应用存储失败")?;
         if let Some(agent_config) = value
             .get_mut("agent_config")
             .and_then(serde_json::Value::as_object_mut)
         {
+            // 剥离遗留的扩展能力字段（"mcp" 等磁盘格式契约字段名）——旧版 app.json
+            // 可能写入过这些字段，加载/回写时统一剔除，保证 core 持久化纯净。
             agent_config.remove("mcp");
         }
         serde_json::to_string_pretty(&value).context("序列化应用存储失败")

@@ -1,10 +1,8 @@
 //! 子进程环境变量加载工具。
 //!
-//! `collect_runtime_env()` 的 skills 扫描逻辑已迁入 skill plugin 的 `collect_exec_env`
-//! 实现；MCP server 的 env 由 mcp plugin 的 `collect_exec_env` 贡献。core 在所有插件
-//! 注册完成后统一汇总各插件的 `collect_exec_env` 写入 RuntimeEngine。
-//!
-//! 本模块仅保留 `.env` / `.env.local` 文件解析工具，供 skill plugin 复用。
+//! 插件通过 [`crate::core::Plugin::collect_exec_env`] 贡献子进程环境变量，core 在
+//! 所有插件注册完成后统一汇总写入 RuntimeEngine。本模块仅保留 `.env` / `.env.local`
+//! 文件解析工具，供插件复用。
 
 use std::path::Path;
 

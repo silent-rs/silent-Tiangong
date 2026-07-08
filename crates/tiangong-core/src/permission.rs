@@ -26,7 +26,7 @@ pub enum PermissionLevel {
     Standard,
     /// 高级：命令执行（run_command）
     Elevated,
-    /// 关键：补丁应用、MCP 工具、后台任务
+    /// 关键：补丁应用、动态工具、后台任务
     Critical,
 }
 
@@ -312,8 +312,7 @@ fn network_matches(pattern: &str, target: &str) -> bool {
 
 /// 根据工具名分类风险等级（pub(crate) 供测试访问）
 ///
-/// 仅维护 core 内置/通用工具的风险等级。各插件工具（如 get_skill_detail /
-/// recall_memory / web_form_extract）的权限等级由插件经
+/// 仅维护 core 内置/通用工具的风险等级。各插件工具的权限等级由插件经
 /// [`crate::core::Plugin::tool_permission_overrides`] 贡献，PermissionGate.check
 /// 优先查覆盖表，未命中才走此函数。
 pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
@@ -330,7 +329,7 @@ pub(crate) fn classify_tool(tool_name: &str) -> PermissionLevel {
         // 关键：补丁应用（spawn_task/cancel_task 等后台任务工具已由
         // tiangong-plugin-task 经 tool_permission_overrides 声明，不再在此中心化维护）
         "apply_patch" => PermissionLevel::Critical,
-        // MCP 工具和未知工具默认为关键
+        // 未知工具默认为关键
         _ => PermissionLevel::Critical,
     }
 }
@@ -702,8 +701,7 @@ mod tests {
     fn classify_tool_levels() {
         assert_eq!(classify_tool("read_file"), PermissionLevel::Safe);
         assert_eq!(classify_tool("tree_dir"), PermissionLevel::Safe);
-        // web_form_extract / get_skill_detail / recall_memory 已改由各插件经
-        // tool_permission_overrides 贡献，不在 classify_tool 中心化维护。
+        // 各插件工具经 tool_permission_overrides 贡献，不在 classify_tool 中心化维护。
         assert_eq!(classify_tool("write_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("replace_in_file"), PermissionLevel::Standard);
         assert_eq!(classify_tool("run_command"), PermissionLevel::Elevated);

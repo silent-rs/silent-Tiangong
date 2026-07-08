@@ -104,10 +104,16 @@ pub(in crate::app_state) fn normalize_model_list(
     list
 }
 
+/// 校验 AgentConfig（core 维护的 agent runtime 配置）。
+///
+/// 稳定契约（请勿依赖此方法做更多校验）：
+/// - 当前无可失败项——`trust_mode` / `custom_system_prompt` / `reasoning_effort`
+///   均有合法默认值，反序列化后始终有效，故恒返回 `Ok(())`；
+/// - 扩展能力配置（外部工具、技能等）不在此校验，由各 plugin 在自己的管理
+///   方法内提供校验逻辑；
+/// - 保留此入口供 `agent_config_facade` 调用点兼容与未来扩展（如新增可失败
+///   的 runtime 字段时在此补充）。
 pub fn validate_agent_config(_config: &AgentConfig) -> Result<()> {
-    // MCP 配置校验已随 MCP 管理插件化迁出（由 mcp plugin 在管理方法内调用
-    // validate_mcp_config）。AgentConfig 现仅含 trust_mode / prompt / reasoning，
-    // 无需额外校验。保留方法供 facade 调用点兼容。
     Ok(())
 }
 

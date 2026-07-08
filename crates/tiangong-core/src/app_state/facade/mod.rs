@@ -1,5 +1,5 @@
+mod agent_config_facade;
 mod lifecycle;
-mod mcp_settings;
 mod provider_settings;
 mod runtime;
 mod sessions;

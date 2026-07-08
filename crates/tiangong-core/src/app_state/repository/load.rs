@@ -111,7 +111,7 @@ impl AppRepository {
         &self,
         legacy_agent_config: Option<AgentConfig>,
     ) -> Result<Option<AgentConfig>> {
-        // MCP 配置已脱离 AgentConfig（由 mcp plugin 自管 ~/.tiangong/mcp.json），
+        // AgentConfig 不再承载扩展能力配置（由各自 plugin 自管），
         // 此处仅用 custom-prompt.md 加载优先级回填 custom_system_prompt
         //（custom-prompt.md 优先，回退 legacy 旧字段）。
         let mut agent_config = legacy_agent_config;

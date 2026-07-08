@@ -54,7 +54,7 @@ pub fn build_system_context(session: &Session) -> Vec<String> {
 
     let workspace = session_working_directory(session);
     ctx.push(format!("当前工作目录：{}", workspace));
-    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录（如 skills 目录）
+    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录
     // 由各插件经 prompt section 自行注入，core 不再硬编码。
     ctx.push(format!("允许文件操作目录：{}", workspace));
 
@@ -114,7 +114,7 @@ pub struct SystemPromptConfig {
     pub custom_prompt: String,
     pub media_text: String,
     pub team_text: String,
-    /// Plugin 注入的额外段落（如终端交互引导、浏览器使用规范、Skill 摘要等）
+    /// Plugin 注入的额外段落。
     pub plugin_sections: Vec<String>,
     /// 文档附件解析规则段（PDF/Office 处理引导，issue #149）
     pub attachment_rules_text: String,

@@ -1,19 +1,8 @@
 //! Agent 运行时配置。
 //!
-//! Skill / MCP 相关配置类型已迁出：
-//! - Skill 类型（SkillsConfig / InstalledSkillConfig 等）→ `tiangong-plugin-skill::skill_config`
-//! - MCP 类型（McpConfig 等）→ `tiangong-plugin-mcp::config`
-//!
-//! 本模块仅保留 AgentConfig（信任模式 / 自定义 prompt / reasoning effort）。
+//! AgentConfig 仅保留 agent runtime 配置；扩展能力配置由各插件自管。
 
 use serde::{Deserialize, Serialize};
-
-/// MCP 相关配置类型（`McpConfig` / `McpServerConfig` / `McpTransportMode` 等）
-/// 已迁出至 `tiangong-plugin-mcp` crate，core 不再持有 MCP 概念。
-/// `~/.tiangong/mcp.json` 由 MCP 插件自托管读写。
-///
-/// Skill 相关配置类型（`SkillsConfig` / `InstalledSkillConfig` 等）已迁出至
-/// `tiangong-plugin-skill` crate。`~/.tiangong/skills/` 由 Skill 插件自托管。
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {

@@ -69,12 +69,12 @@ impl TiangongState {
         } else if let Ok(Some(legacy_loaded)) = state.load_from_legacy_disk() {
             state.apply_loaded_state(legacy_loaded);
             let _ = state.persist_to_disk();
-            // mcp-lock 同步已迁至 tiangong-plugin-skill（入口层在 skill 管理时调用）。
+            // 扩展能力依赖锁同步已由对应插件在管理操作时自管。
         }
 
         if loaded_from_disk && !state.services.repository.paths().app_storage_path.exists() {
             // 首次安装（app.json 不存在）：持久化初始 app 状态。
-            // skill/mcp 配置已由各自 plugin 自管，core 不再判断其文件是否存在。
+            // 扩展能力配置已由各自 plugin 自管，core 不再判断其文件是否存在。
             let _ = state.persist_app_only();
         }
 
@@ -143,9 +143,8 @@ impl TiangongState {
         state.store.runtime.run.updated_at = now_text();
         // EventLoop 状态恢复已移除（TiangongCore 统一管理执行状态）
 
-        // skills / MCP 均已脱离 core（由各自 plugin 自治）：
-        // - skill 依赖锁（mcp-lock.json）由 tiangong-plugin-skill 在管理操作时同步
-        // - MCP capability 缓存 + 后台调度器由 tiangong-plugin-mcp 在 register 时自管
+        // 扩展能力均已脱离 core，由各自 plugin 自治：
+        // - 依赖锁 / 工具能力缓存 / 后台调度器由对应插件在管理操作 / register 时自管
 
         state
     }
@@ -165,7 +164,7 @@ impl TiangongState {
     #[allow(dead_code)]
     pub(in crate::app_state) fn rebuild_runtime_for_agent_config(&mut self) {
         self.rebuild_runtime_from_current_config();
-        // MCP capability scheduler 由 mcp plugin 在 on_engine_rebuilt 时自管，
-        // core 不再触发 capability 刷新。
+        // 动态工具能力调度器由对应插件在 on_engine_rebuilt 时自管，
+        // core 不再触发能力刷新。
     }
 }
