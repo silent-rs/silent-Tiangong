@@ -424,11 +424,35 @@ pub fn is_allowed_command(cmd: &str) -> bool {
     )
 }
 
+/// 命令校验结果。
+///
+/// 白名单机制不做硬性拦截——白名单外的命令不再直接拒绝，而是返回
+/// [`CommandValidation::NeedsApproval`]，由上层 PermissionGate 审批网关决定
+/// 是否放行（Supervised 模式下走用户审批）。硬性拒绝（forbidden tokens、
+/// 路径越界、shell 形式不合法）仍通过 `Err` 返回。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandValidation {
+    /// 命令在内置白名单或用户扩展白名单内，校验通过。
+    Allowed,
+    /// 命令不在白名单内，但未命中硬性拒绝条件，需走审批流程。
+    NeedsApproval { cmd: String },
+}
+
+/// 判断命令是否在允许列表内（内置白名单 + 用户扩展）。
+pub fn is_command_allowed(cmd: &str, extra_allowed: &[String]) -> bool {
+    is_allowed_command(cmd) || extra_allowed.iter().any(|c| c == cmd)
+}
+
+/// 校验 shell 脚本命令（`bash -lc`/`sh -c`/`powershell -Command` 形式）。
+///
+/// 返回 [`CommandValidation`] 表示白名单校验结果；`Err` 仅用于硬性拒绝
+///（forbidden tokens、重定向、shell 形式不合法、路径越界）。
 pub fn validate_shell_command_args(
     shell_cmd: &str,
     args: &[String],
     base_dir: &Path,
-) -> Result<()> {
+    extra_allowed: &[String],
+) -> Result<CommandValidation> {
     let (expected_flag, flag_label) = match shell_cmd {
         "bash" => ("-lc", "bash -lc"),
         "sh" => ("-c", "sh -c"),
@@ -453,14 +477,18 @@ pub fn validate_shell_command_args(
             "shell 脚本不允许使用重定向写入，请改用受控文件工具"
         ));
     }
-    validate_shell_script(script, base_dir)
+    validate_shell_script(script, base_dir, extra_allowed)
 }
 
 fn script_contains_write_redirection(script: &str) -> bool {
     script.contains(">>") || script.contains('>') || script.contains("<<")
 }
 
-fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
+fn validate_shell_script(
+    script: &str,
+    base_dir: &Path,
+    extra_allowed: &[String],
+) -> Result<CommandValidation> {
     let lowered = script.to_ascii_lowercase();
     if contains_forbidden_shell_tokens(&lowered) {
         return Err(anyhow!("shell 脚本包含不允许的高风险控制符或命令"));
@@ -468,6 +496,7 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
 
     // 按 &&、||、; 分割为子命令，逐个验证
     let sub_commands = split_shell_commands(script);
+    let mut needs_approval_cmd: Option<String> = None;
     for sub in &sub_commands {
         let sub = sub.trim();
         if sub.is_empty() {
@@ -499,8 +528,11 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
             continue;
         }
 
-        if !is_allowed_shell_head_command(cmd) {
-            return Err(anyhow!("shell 脚本命令不在允许列表：{cmd}"));
+        // 白名单（内置 + 用户扩展）内的命令直接通过；白名单外的不报错，
+        // 记录下需要审批的命令名，最终返回 NeedsApproval。
+        if !is_shell_head_allowed(cmd, extra_allowed) {
+            needs_approval_cmd = Some(cmd.to_string());
+            continue;
         }
 
         // 检查路径参数是否在允许范围内
@@ -511,7 +543,10 @@ fn validate_shell_script(script: &str, base_dir: &Path) -> Result<()> {
             .collect();
         validate_command_args_in_allowed_roots(cmd, &args, base_dir)?;
     }
-    Ok(())
+    Ok(match needs_approval_cmd {
+        Some(cmd) => CommandValidation::NeedsApproval { cmd },
+        None => CommandValidation::Allowed,
+    })
 }
 
 /// 按 &&、||、;、换行 分割 shell 命令
@@ -566,7 +601,11 @@ fn extract_shell_head_command(script: &str) -> Option<&str> {
     script.split_whitespace().next()
 }
 
-fn is_allowed_shell_head_command(cmd: &str) -> bool {
+/// 判断 shell 脚本首命令是否在允许列表内（内置 shell head 白名单 + 用户扩展）。
+///
+/// shell head 白名单比 [`is_allowed_command`] 多了控制流关键字（`for`/`while`/`if`）
+/// 和 shell 内建（`cd`/`test`/`[`/`nohup`/`screen`/`tmux`/`tar`/`unzip`）。
+fn is_shell_head_allowed(cmd: &str, extra_allowed: &[String]) -> bool {
     // shell 脚本首命令白名单（与 is_allowed_command 保持一致）
     is_allowed_command(cmd)
         || matches!(
@@ -584,6 +623,7 @@ fn is_allowed_shell_head_command(cmd: &str) -> bool {
                 | "while"
                 | "if"
         )
+        || extra_allowed.iter().any(|c| c == cmd)
 }
 
 pub fn derive_shell_exec_args(script: &str, shell: Option<&str>) -> Result<(String, Vec<String>)> {
