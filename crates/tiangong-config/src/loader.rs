@@ -11,7 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_plugin_skill::SkillsConfig;
 
@@ -67,16 +66,9 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     }
 }
 
-/// 加载模型配置（优先 models.json，回退环境变量）
+/// 加载模型配置（仅从 `models.json` 读取；环境变量回退已移除）
 fn load_models_config(dir: &Path) -> ModelsConfig {
-    let mut models = io::load_models_config_at(dir);
-    if models.is_empty() {
-        let env_config = ModelProviderConfig::from_env();
-        if !env_config.api_auth_token.is_empty() {
-            models = ModelsConfig::from_legacy(&env_config);
-        }
-    }
-    models
+    io::load_models_config_at(dir)
 }
 
 /// 通用 JSON 配置文件加载

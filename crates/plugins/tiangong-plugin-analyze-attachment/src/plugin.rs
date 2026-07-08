@@ -13,7 +13,8 @@ use std::sync::RwLock;
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
-use tiangong_core::model::{ModelProviderConfig, SingleProviderClient};
+use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::model::SingleProviderClient;
 use tiangong_core::models_config::ModelCapability;
 use tiangong_core::runtime::RuntimeEngine;
 use tiangong_core::tool_override::PromptSectionProvider;
@@ -79,17 +80,7 @@ impl Plugin for AnalyzeAttachmentPlugin {
         let client = if !models.chat_is_multimodal() {
             models
                 .resolve_for_capability(ModelCapability::Multimodal)
-                .map(|resolved| {
-                    let config = ModelProviderConfig {
-                        api_auth_token: resolved.api_key,
-                        api_base_url: resolved.base_url,
-                        api_timeout_ms: resolved.timeout_ms.to_string(),
-                        api_protocol: resolved.protocol,
-                        api_model: resolved.model,
-                        api_lite_model: String::new(),
-                    };
-                    SingleProviderClient::new(config)
-                })
+                .map(|resolved| SingleProviderClient::new(ModelEndpoint::from_resolved(resolved)))
         } else {
             None
         };

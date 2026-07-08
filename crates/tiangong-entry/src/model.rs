@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 
+use tiangong_core::core_config::ModelEndpoint;
 use tiangong_core::model::SingleProviderClient;
 use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, RoutingSlot};
 
@@ -241,19 +242,12 @@ fn validate(config: &ModelsConfig) -> Result<()> {
 fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
     // target 为 capability/槽位（如 chat）或模型名；默认 chat
     let target = target.unwrap_or("chat");
-    let provider_config = if let Some(slot) = RoutingSlot::from_key(target) {
-        // 作为路由槽位解析
-        match slot {
-            RoutingSlot::Chat => config.to_chat_provider_config(),
-            RoutingSlot::Lite => config.to_lite_provider_config(),
-            _ => {
-                // 其他槽位（multimodal/embedding 等）尝试按槽位解析
-                let resolved = config
-                    .resolve_slot(slot)
-                    .ok_or_else(|| anyhow!("路由槽位 {target} 未配置"))?;
-                build_provider_config_from_resolved(&resolved)
-            }
-        }
+    let endpoint = if let Some(slot) = RoutingSlot::from_key(target) {
+        // 作为路由槽位解析（chat/lite/multimodal/embedding 等统一走 resolve_slot）
+        let resolved = config
+            .resolve_slot(slot)
+            .ok_or_else(|| anyhow!("路由槽位 {target} 未配置"))?;
+        ModelEndpoint::from_resolved(resolved)
     } else {
         // 作为模型名解析
         let entry: &ModelEntry = config
@@ -265,54 +259,30 @@ fn test_model(config: &ModelsConfig, target: Option<&str>) -> Result<()> {
             .get(&entry.provider)
             .ok_or_else(|| anyhow!("模型 {target} 的 provider {} 不存在", entry.provider))?;
         let resolved_api_key = ModelsConfig::resolve_api_key(&provider.api_key);
-        build_provider_config(provider, entry, resolved_api_key)
+        ModelEndpoint {
+            base_url: provider.base_url.clone(),
+            api_key: resolved_api_key,
+            model: entry.model.clone(),
+            protocol: provider.protocol,
+            timeout_ms: provider.timeout_ms,
+            options: entry.options.clone(),
+        }
     };
 
     println!("正在测试 {target} 连通性...");
     // 请求前检查 API Key 非空（${ENV} 未设置会解析为空串，避免无效请求）
-    if provider_config.api_auth_token.trim().is_empty() {
+    if endpoint.api_key.trim().is_empty() {
         return Err(anyhow!(
             "API Key 为空，可能是环境变量未设置。请检查 models.json 中的 api_key 或设置对应环境变量"
         ));
     }
-    let models =
-        SingleProviderClient::list_models(&provider_config).context("模型连通性测试失败")?;
+    let models = SingleProviderClient::list_models(&endpoint).context("模型连通性测试失败")?;
     println!("✅ 连通成功，返回 {} 个模型", models.len());
     if !models.is_empty() {
         let preview: Vec<&str> = models.iter().take(10).map(|s| s.as_str()).collect();
         println!("前 {} 个：{}", preview.len(), preview.join(", "));
     }
     Ok(())
-}
-
-/// 从 ProviderConfig + ModelEntry 构建单次测试用的 ModelProviderConfig。
-fn build_provider_config(
-    provider: &tiangong_core::models_config::ProviderConfig,
-    entry: &ModelEntry,
-    api_key: String,
-) -> tiangong_core::model::ModelProviderConfig {
-    tiangong_core::model::ModelProviderConfig {
-        api_auth_token: api_key,
-        api_base_url: provider.base_url.clone(),
-        api_timeout_ms: provider.timeout_ms.to_string(),
-        api_protocol: provider.protocol,
-        api_model: entry.model.clone(),
-        api_lite_model: String::new(),
-    }
-}
-
-/// 从 ResolvedModel 构建 ModelProviderConfig。
-fn build_provider_config_from_resolved(
-    resolved: &tiangong_core::models_config::ResolvedModel,
-) -> tiangong_core::model::ModelProviderConfig {
-    tiangong_core::model::ModelProviderConfig {
-        api_auth_token: resolved.api_key.clone(),
-        api_base_url: resolved.base_url.clone(),
-        api_timeout_ms: resolved.timeout_ms.to_string(),
-        api_protocol: resolved.protocol,
-        api_model: resolved.model.clone(),
-        api_lite_model: String::new(),
-    }
 }
 
 fn parse_capabilities(raw: &[String]) -> Result<Vec<ModelCapability>> {

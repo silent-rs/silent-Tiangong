@@ -1,9 +1,18 @@
+use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::models_config::RoutingSlot;
+
 use super::super::*;
 
 impl TiangongState {
     pub(in crate::app_state) fn rebuild_runtime_from_current_config(&mut self) {
-        let config = self.store.provider.models_config.to_chat_provider_config();
-        self.store.provider.model_config = config.clone();
+        let endpoint = self
+            .store
+            .provider
+            .models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .map(ModelEndpoint::from_resolved)
+            .unwrap_or_default();
+        self.store.provider.model_endpoint = endpoint.clone();
         // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher、terminal_provider 和 tool_overrides
         let shared_trust_mode = self
             .services
@@ -18,10 +27,10 @@ impl TiangongState {
         let storage_dir = tiangong_config::io::storage_root();
         let context_limit = tiangong_config::io::resolve_context_limit_at(
             &storage_dir,
-            &self.store.provider.model_config.api_model,
+            &self.store.provider.model_endpoint.model,
         );
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
-            SingleProviderClient::new(config),
+            SingleProviderClient::new(endpoint),
             context_limit,
             self.store.agent.agent_config.clone(),
             shared_trust_mode,

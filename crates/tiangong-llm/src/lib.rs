@@ -1,9 +1,12 @@
 pub mod client;
 pub mod embedding;
+pub mod endpoint;
 pub mod error;
 pub mod message;
 pub mod model;
+pub mod models_config;
 pub mod provider;
+pub mod provider_client;
 pub mod providers;
 pub mod request;
 pub mod rerank;
@@ -12,6 +15,12 @@ pub mod stream;
 pub mod text;
 pub mod tool;
 pub mod usage;
+
+pub use endpoint::ModelEndpoint;
+pub use provider_client::{
+    ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
+    OnRetryCallback, SingleProviderClient,
+};
 
 pub use client::rerank_provider_from_config;
 pub use embedding::{

@@ -16,8 +16,8 @@ pub(in crate::app_state) struct PersistedAppState {
 pub(in crate::app_state) struct LegacyPersistedState {
     pub(in crate::app_state) sessions: Vec<Session>,
     pub(in crate::app_state) active_session_id: String,
-    #[serde(default)]
-    pub(in crate::app_state) model_config: Option<ModelProviderConfig>,
+    // model_config（旧版 ModelProviderConfig）已随 ModelProviderConfig 一并移除；
+    // 旧 app.json 中残留的同名字段会被 serde 默认忽略。
     #[serde(default)]
     pub(in crate::app_state) model_list: Vec<String>,
 }

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use tiangong_core::agent_config::AgentConfig;
-use tiangong_core::model::{ModelProviderConfig, SingleProviderClient};
+use tiangong_core::model::SingleProviderClient;
 use tiangong_core::runtime::{RunSnapshot, RunStatus, RuntimeEngine};
 use tiangong_core::session::{MessageRole, Session, SessionTaskPlan, now_text};
 

@@ -1441,7 +1441,16 @@ pub(crate) fn start_stream_consumer(
                                     .store
                                     .provider
                                     .models_config
-                                    .to_lite_provider_config();
+                                    .resolve_slot(tiangong_core::models_config::RoutingSlot::Lite)
+                                    .or_else(|| {
+                                        core_state.store.provider.models_config.resolve_slot(
+                                            tiangong_core::models_config::RoutingSlot::Chat,
+                                        )
+                                    })
+                                    .map(tiangong_core::core_config::ModelEndpoint::from_resolved)
+                                    .unwrap_or_else(|| {
+                                        core_state.store.provider.model_endpoint.clone()
+                                    });
                                 return Ok(Some((input, provider_config)));
                             }
                         }
@@ -3233,22 +3242,23 @@ pub async fn fetch_provider_models(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<Vec<String>, String> {
-    use tiangong_core::model::{ModelProviderConfig, ProviderProtocol, SingleProviderClient};
+    use tiangong_core::core_config::ModelEndpoint;
+    use tiangong_core::model::{ProviderProtocol, SingleProviderClient};
     use tiangong_core::models_config::ModelsConfig;
 
     let resolved_key = ModelsConfig::resolve_api_key(&api_key);
-    let config = ModelProviderConfig {
-        api_auth_token: resolved_key,
-        api_base_url: base_url,
-        api_timeout_ms: timeout_ms.unwrap_or(60_000).to_string(),
-        api_protocol: protocol
+    let endpoint = ModelEndpoint {
+        base_url,
+        api_key: resolved_key,
+        model: String::new(),
+        protocol: protocol
             .as_deref()
             .and_then(|value| value.parse::<ProviderProtocol>().ok())
             .unwrap_or_default(),
-        api_model: String::new(),
-        api_lite_model: String::new(),
+        timeout_ms: timeout_ms.unwrap_or(60_000),
+        options: serde_json::Value::Object(serde_json::Map::new()),
     };
-    SingleProviderClient::list_models_async(&config)
+    SingleProviderClient::list_models_async(&endpoint)
         .await
         .map_err(|e| e.to_string())
 }

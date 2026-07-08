@@ -117,16 +117,9 @@ fn check_models(report: &mut DoctorReport, deep: bool) {
                     "API Key 为空（${ENV} 环境变量可能未设置），跳过请求",
                 );
             } else {
-                let cfg = tiangong_core::model::ModelProviderConfig {
-                    api_auth_token: resolved.api_key,
-                    api_base_url: resolved.base_url,
-                    api_timeout_ms: resolved.timeout_ms.to_string(),
-                    api_protocol: resolved.protocol,
-                    api_model: resolved.model.clone(),
-                    api_lite_model: String::new(),
-                };
-                match tiangong_core::model::SingleProviderClient::list_models(&cfg) {
-                    Ok(_) => report.ok("模型连通性", format!("{} 请求成功", resolved.model)),
+                let endpoint = tiangong_core::core_config::ModelEndpoint::from_resolved(resolved);
+                match tiangong_core::model::SingleProviderClient::list_models(&endpoint) {
+                    Ok(_) => report.ok("模型连通性", format!("{} 请求成功", endpoint.model)),
                     Err(e) => report.err("模型连通性", format!("{e:#}")),
                 }
             }

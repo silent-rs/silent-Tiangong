@@ -822,11 +822,60 @@ fn build_engine_from_config(
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
-    use crate::models_config::ModelsConfig;
+    use crate::models_config::{
+        ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
+    };
 
-    let models_config = ModelsConfig::from_llm_config(&config.llm);
-    let model_config = models_config.to_chat_provider_config();
-    let chat_is_multimodal = models_config.chat_is_multimodal();
+    // CoreConfig.llm 只含 chat + lite 扁平端点；此处重建一个最小 ModelsConfig
+    // 供 engine.models_config() / chat_is_multimodal() 使用。
+    // 注意：LlmConfig 不携带 capability 信息，因此重建结果只声明 Chat 能力
+    //（与原 from_llm_config 行为一致）——chat_is_multimodal 在此路径恒为 false。
+    // GUI/Server 入口不经此函数，它们直接用完整 ModelsConfig 构造 RuntimeEngine。
+    let mut providers = std::collections::HashMap::new();
+    let mut routing = std::collections::HashMap::new();
+    providers.insert(
+        "chat-provider".to_string(),
+        ProviderConfig {
+            base_url: config.llm.chat.base_url.clone(),
+            api_key: config.llm.chat.api_key.clone(),
+            timeout_ms: config.llm.chat.timeout_ms,
+            protocol: config.llm.chat.protocol,
+        },
+    );
+    routing.insert(
+        RoutingSlot::Chat,
+        ModelEntry {
+            provider: "chat-provider".to_string(),
+            model: config.llm.chat.model.clone(),
+            capabilities: vec![ModelCapability::Chat],
+            options: config.llm.chat.options.clone(),
+        },
+    );
+    if let Some(ref lite) = config.llm.lite {
+        providers.insert(
+            "lite-provider".to_string(),
+            ProviderConfig {
+                base_url: lite.base_url.clone(),
+                api_key: lite.api_key.clone(),
+                timeout_ms: lite.timeout_ms,
+                protocol: lite.protocol,
+            },
+        );
+        routing.insert(
+            RoutingSlot::Lite,
+            ModelEntry {
+                provider: "lite-provider".to_string(),
+                model: lite.model.clone(),
+                capabilities: vec![ModelCapability::Chat],
+                options: lite.options.clone(),
+            },
+        );
+    }
+    let models_config = ModelsConfig {
+        providers,
+        models: std::collections::HashMap::new(),
+        routing,
+    };
 
     let agent_config = AgentConfig {
         trust_mode: config.trust_mode,
@@ -849,7 +898,7 @@ fn build_engine_from_config(
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
     let mut engine = RuntimeEngine::with_shared_trust_mode(
-        SingleProviderClient::new(model_config).with_on_retry(on_retry.clone()),
+        SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
         shared_trust_mode,
@@ -858,26 +907,14 @@ fn build_engine_from_config(
     .with_models_config(models_config)
     .with_core_config(config.clone());
 
-    // 如果配置了独立的 lite 端点，构建 lite client
+    // 如果配置了独立的 lite 端点，构建 lite client（直接吃 lite ModelEndpoint）
     if let Some(ref lite_endpoint) = config.llm.lite {
-        let lite_config = crate::model::ModelProviderConfig {
-            api_auth_token: lite_endpoint.api_key.clone(),
-            api_base_url: lite_endpoint.base_url.clone(),
-            api_timeout_ms: lite_endpoint.timeout_ms.to_string(),
-            api_protocol: lite_endpoint.protocol,
-            api_model: lite_endpoint.model.clone(),
-            api_lite_model: lite_endpoint.model.clone(),
-        };
         engine = engine.with_lite_client(
-            SingleProviderClient::new(lite_config).with_on_retry(on_retry.clone()),
+            SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()),
         );
     }
     // multimodal_client 已随 LlmConfig 裁剪移除：附件分析插件（analyze-attachment）
     // 改为自行从 ModelsConfig 路由解析 multimodal 端点并构造 SingleProviderClient。
-
-    // chat_is_multimodal 现仅供 analyze-attachment 经 engine.models_config() 判断，
-    // 不再在此触发 fallback client 构造。
-    let _ = chat_is_multimodal;
 
     engine
 }

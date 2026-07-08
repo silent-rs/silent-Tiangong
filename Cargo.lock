@@ -9747,6 +9747,7 @@ dependencies = [
  "async-openai",
  "async-trait",
  "backoff",
+ "base64 0.22.1",
  "futures-util",
  "reqwest 0.13.4",
  "serde",

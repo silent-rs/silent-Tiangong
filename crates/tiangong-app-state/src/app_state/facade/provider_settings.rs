@@ -1,3 +1,6 @@
+use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::models_config::RoutingSlot;
+
 use super::super::*;
 
 impl TiangongState {
@@ -6,7 +9,7 @@ impl TiangongState {
     }
 
     pub fn current_model(&self) -> &str {
-        &self.store.provider.model_config.api_model
+        &self.store.provider.model_endpoint.model
     }
 
     pub fn select_model(&mut self, model: &str) -> Result<()> {
@@ -24,34 +27,39 @@ impl TiangongState {
         let _ =
             tiangong_config::io::save_models_config_at(&dir, &self.store.provider.models_config);
 
-        // 重新生成内部 model_config
-        self.store.provider.model_config =
-            self.store.provider.models_config.to_chat_provider_config();
+        // 重新生成内部 model_endpoint
+        self.store.provider.model_endpoint = self
+            .store
+            .provider
+            .models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .map(ModelEndpoint::from_resolved)
+            .unwrap_or_default();
         self.store.provider.model_list = normalize_model_list(
             self.store.provider.model_list.clone(),
-            &self.store.provider.model_config.api_model,
+            &self.store.provider.model_endpoint.model,
         );
         self.rebuild_runtime_from_current_config();
         self.replace_run_snapshot(
             RunStatus::Idle,
-            format!("模型已切换：{}", self.store.provider.model_config.api_model),
+            format!("模型已切换：{}", self.store.provider.model_endpoint.model),
             None,
         );
         self.persist_app_only()
     }
 
     pub fn refresh_model_list(&mut self) -> Result<usize> {
-        let config = self.store.provider.models_config.to_chat_provider_config();
-        let models = SingleProviderClient::list_models(&config)?;
-        self.store.provider.model_list = models;
-
-        let current = self
+        let endpoint = self
             .store
             .provider
-            .model_config
-            .api_model
-            .trim()
-            .to_string();
+            .models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .map(ModelEndpoint::from_resolved)
+            .unwrap_or_default();
+        let models = SingleProviderClient::list_models(&endpoint)?;
+        self.store.provider.model_list = models;
+
+        let current = self.store.provider.model_endpoint.model.trim().to_string();
         let need_fill_default =
             current.is_empty() || !self.store.provider.model_list.iter().any(|m| m == &current);
         if need_fill_default && let Some(first) = self.store.provider.model_list.first() {
@@ -65,12 +73,17 @@ impl TiangongState {
                 &dir,
                 &self.store.provider.models_config,
             );
-            self.store.provider.model_config =
-                self.store.provider.models_config.to_chat_provider_config();
+            self.store.provider.model_endpoint = self
+                .store
+                .provider
+                .models_config
+                .resolve_slot(RoutingSlot::Chat)
+                .map(ModelEndpoint::from_resolved)
+                .unwrap_or_default();
         }
         self.store.provider.model_list = normalize_model_list(
             self.store.provider.model_list.clone(),
-            self.store.provider.model_config.api_model.trim(),
+            self.store.provider.model_endpoint.model.trim(),
         );
         self.persist_app_only()?;
 
@@ -85,8 +98,13 @@ impl TiangongState {
         let dir = tiangong_config::io::storage_root();
         tiangong_config::io::save_models_config_at(&dir, &new_config)?;
         self.store.provider.models_config = new_config;
-        self.store.provider.model_config =
-            self.store.provider.models_config.to_chat_provider_config();
+        self.store.provider.model_endpoint = self
+            .store
+            .provider
+            .models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .map(ModelEndpoint::from_resolved)
+            .unwrap_or_default();
         self.rebuild_runtime_from_current_config();
         self.replace_run_snapshot(
             RunStatus::Idle,
