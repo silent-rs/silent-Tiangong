@@ -57,20 +57,24 @@ impl Drop for EnvGuard {
 }
 
 fn embedding_config_from_tiangong_config() -> Option<EmbeddingEndpointConfig> {
+    use tiangong_core::models_config::ModelCapability;
     let config = tiangong_config::load_tiangong_config();
-    let endpoint = config.to_core_config().llm.embedding?;
-    let dimension = endpoint
+    // embedding 端点从 ModelsConfig 路由解析（不再经 LlmConfig 中转）。
+    let resolved = config
+        .models
+        .resolve_for_capability(ModelCapability::Embedding)?;
+    let dimension = resolved
         .options
         .get("dimension")
         .and_then(|value| value.as_u64())
         .and_then(|value| usize::try_from(value).ok())?;
 
     Some(EmbeddingEndpointConfig {
-        base_url: endpoint.base_url,
-        api_key: endpoint.api_key,
-        model: endpoint.model,
-        protocol: endpoint.protocol,
-        timeout: Duration::from_millis(endpoint.timeout_ms),
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout: Duration::from_millis(resolved.timeout_ms),
         dimension,
     })
 }

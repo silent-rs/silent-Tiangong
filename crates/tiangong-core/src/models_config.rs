@@ -476,19 +476,18 @@ impl ModelsConfig {
 
     /// 从 LlmConfig 构建兼容的 ModelsConfig
     ///
-    /// 将扁平的 LlmConfig 端点映射为 Provider + Routing 结构。
-    /// 当多个能力使用相同端点时，合并 capabilities 到已有的路由条目。
+    /// LlmConfig 现仅含 chat + lite 端点；其他能力（image/video/tts/stt/multimodal/
+    /// embedding/rerank）由各 plugin 自行从 ModelsConfig 路由解析，不经此函数中转。
     pub fn from_llm_config(llm: &crate::core_config::LlmConfig) -> Self {
         let mut providers: HashMap<String, ProviderConfig> = HashMap::new();
         let mut routing: HashMap<RoutingSlot, ModelEntry> = HashMap::new();
 
-        // 跟踪已注册的端点签名，用于合并相同端点的能力
-        let mut seen: HashMap<(String, String), RoutingSlot> = HashMap::new();
-
-        let mut register = |name: &str,
-                            endpoint: &crate::core_config::ModelEndpoint,
-                            slot: RoutingSlot,
-                            cap: ModelCapability| {
+        let register = |name: &str,
+                        endpoint: &crate::core_config::ModelEndpoint,
+                        slot: RoutingSlot,
+                        cap: ModelCapability,
+                        providers: &mut HashMap<String, ProviderConfig>,
+                        routing: &mut HashMap<RoutingSlot, ModelEntry>| {
             let provider_key = format!("{name}-provider");
             providers.insert(
                 provider_key.clone(),
@@ -499,88 +498,37 @@ impl ModelsConfig {
                     protocol: endpoint.protocol,
                 },
             );
-
-            let sig = (endpoint.base_url.clone(), endpoint.model.clone());
-
-            if let Some(&first_slot) = seen.get(&sig) {
-                // 相同端点已注册 — 合并能力到已有条目
-                if let Some(entry) = routing.get_mut(&first_slot)
-                    && !entry.capabilities.contains(&cap)
-                {
-                    entry.capabilities.push(cap);
-                }
-                // 为当前槽位创建带完整能力的条目
-                let merged_caps = routing
-                    .get(&first_slot)
-                    .map(|e| e.capabilities.clone())
-                    .unwrap_or_default();
-                routing.insert(
-                    slot,
-                    ModelEntry {
-                        provider: provider_key,
-                        model: endpoint.model.clone(),
-                        capabilities: merged_caps,
-                        options: endpoint.options.clone(),
-                    },
-                );
-            } else {
-                routing.insert(
-                    slot,
-                    ModelEntry {
-                        provider: provider_key,
-                        model: endpoint.model.clone(),
-                        capabilities: vec![cap],
-                        options: endpoint.options.clone(),
-                    },
-                );
-                seen.insert(sig, slot);
-            }
+            routing.insert(
+                slot,
+                ModelEntry {
+                    provider: provider_key,
+                    model: endpoint.model.clone(),
+                    capabilities: vec![cap],
+                    options: endpoint.options.clone(),
+                },
+            );
         };
 
         // Chat（必须）
-        register("chat", &llm.chat, RoutingSlot::Chat, ModelCapability::Chat);
+        register(
+            "chat",
+            &llm.chat,
+            RoutingSlot::Chat,
+            ModelCapability::Chat,
+            &mut providers,
+            &mut routing,
+        );
 
-        // 可选能力
-        if let Some(ref ep) = llm.image_generation {
+        // Lite（可选）
+        if let Some(ref ep) = llm.lite {
             register(
-                "image",
+                "lite",
                 ep,
-                RoutingSlot::ImageGeneration,
-                ModelCapability::ImageGeneration,
+                RoutingSlot::Lite,
+                ModelCapability::Chat,
+                &mut providers,
+                &mut routing,
             );
-        }
-        if let Some(ref ep) = llm.tts {
-            register("tts", ep, RoutingSlot::Tts, ModelCapability::Tts);
-        }
-        if let Some(ref ep) = llm.stt {
-            register("stt", ep, RoutingSlot::Stt, ModelCapability::Stt);
-        }
-        if let Some(ref ep) = llm.video_generation {
-            register(
-                "video",
-                ep,
-                RoutingSlot::VideoGeneration,
-                ModelCapability::VideoGeneration,
-            );
-        }
-        if let Some(ref ep) = llm.multimodal {
-            register(
-                "multimodal",
-                ep,
-                RoutingSlot::Multimodal,
-                ModelCapability::Multimodal,
-            );
-        }
-        if let Some(ref ep) = llm.embedding {
-            register(
-                "embedding",
-                ep,
-                RoutingSlot::Embedding,
-                ModelCapability::Embedding,
-            );
-        }
-        if let Some(ref ep) = llm.rerank {
-            register("rerank", ep, RoutingSlot::Rerank, ModelCapability::Rerank);
         }
 
         Self {

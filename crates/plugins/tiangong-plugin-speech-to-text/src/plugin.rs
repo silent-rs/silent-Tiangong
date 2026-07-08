@@ -1,14 +1,15 @@
 //! 语音转文本插件结构体定义与生命周期实现。
 //!
-//! [`SpeechToTextPlugin`] 通过 [`Plugin::register`] 从 [`RuntimeEngine`] 克隆
-//! [`ModelEndpoint`] 私有持有，供 handler 调用 media facade。是否注册本插件由入口层
-//! 根据 [`LlmConfig`] 的能力配置决定（未配置语音转文本能力则不注册）。
+//! [`SpeechToTextPlugin`] 通过 [`Plugin::register`] 从 [`RuntimeEngine`] 的
+//! [`ModelsConfig`] 路由解析 STT 端点，转换为 [`ModelEndpoint`] 私有持有，
+//! 供 handler 调用 media facade。端点不再经 `LlmConfig` 字段中转。
 
 use std::path::PathBuf;
 use std::sync::RwLock;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::models_config::ModelCapability;
 use tiangong_core::runtime::RuntimeEngine;
 use tiangong_core::tool_override::PromptSectionProvider;
 
@@ -16,7 +17,7 @@ use tiangong_core::tool_override::PromptSectionProvider;
 pub struct SpeechToTextPlugin {
     /// 当前会话工作目录（由 core 注入，STT 当前未强依赖，保持一致性预留）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 克隆自 engine 的 STT 模型端点配置，供 handler 调用 media facade。
+    /// 从 ModelsConfig 路由解析的 STT 模型端点配置，供 handler 调用 media facade。
     endpoint: RwLock<Option<ModelEndpoint>>,
 }
 
@@ -53,9 +54,12 @@ impl Plugin for SpeechToTextPlugin {
     }
 
     fn register(&self, engine: &RuntimeEngine) {
-        if let Some(endpoint) = engine.llm_config().and_then(|c| c.stt.clone()) {
+        if let Some(resolved) = engine
+            .models_config()
+            .resolve_for_capability(ModelCapability::Stt)
+        {
             if let Ok(mut guard) = self.endpoint.write() {
-                *guard = Some(endpoint);
+                *guard = Some(ModelEndpoint::from_resolved(resolved));
             }
         }
     }

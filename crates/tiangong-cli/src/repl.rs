@@ -17,10 +17,10 @@ use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
     let app_config = load_tiangong_config();
+    // 媒体插件注册按 ModelsConfig 能力路由条件判断：未配置的能力不暴露工具。
+    // app_config 随后会 move 进 to_core_config，故先克隆 models 供 plugins 构造使用。
+    let models = app_config.models.clone();
     let core_config = app_config.to_core_config();
-    // 媒体插件注册需要读取能力配置；core_config 随后会 move 进 CoreConfigProvider，
-    // 故在此先克隆 llm 供 plugins 构造使用。
-    let llm_config = core_config.llm.clone();
 
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 
@@ -55,20 +55,20 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         config.clone(),
         stream_tx,
         {
-            let llm = &llm_config;
+            use tiangong_core::models_config::ModelCapability;
             let mut plugins = tiangong_plugin_fs::default_plugins();
             plugins.extend(tiangong_plugin_index::default_plugins());
-            // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-            if llm.has_image_generation() {
+            // 媒体插件按 ModelsConfig 能力路由条件注册：未配置的能力不暴露工具。
+            if models.has_capability(ModelCapability::ImageGeneration) {
                 plugins.extend(tiangong_plugin_generate_image::default_plugins());
             }
-            if llm.has_video_generation() {
+            if models.has_capability(ModelCapability::VideoGeneration) {
                 plugins.extend(tiangong_plugin_generate_video::default_plugins());
             }
-            if llm.has_tts() {
+            if models.has_capability(ModelCapability::Tts) {
                 plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
             }
-            if llm.has_stt() {
+            if models.has_capability(ModelCapability::Stt) {
                 plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
             }
             plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
@@ -76,9 +76,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_scheduler::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
-            // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
+            // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
             // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-            if tiangong_plugin_analyze_attachment::should_register(llm) {
+            if tiangong_plugin_analyze_attachment::should_register(&models) {
                 plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
             }
             // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，

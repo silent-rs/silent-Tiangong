@@ -37,7 +37,12 @@ pub struct ServerAppContext {
 }
 
 impl ServerAppContext {
-    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(
+        state: SharedState,
+        config: CoreConfigProvider,
+        models: tiangong_core::models_config::ModelsConfig,
+        event_bus: Arc<EventBus>,
+    ) -> Self {
         // storage_root 由 app-state 统一计算；plugin 由 app 注入同一根目录，
         // 避免各自重复解析 ~/.tiangong。
         let storage_root = tiangong_app_state::app_state::storage_root();
@@ -47,6 +52,7 @@ impl ServerAppContext {
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             config.clone(),
+            models,
             event_bus.clone(),
             mcp_plugin.clone(),
         ));

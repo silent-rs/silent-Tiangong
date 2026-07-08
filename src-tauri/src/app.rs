@@ -20,6 +20,9 @@ pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
+    /// 启动时一次性加载的模型配置（含完整能力路由），供 plugin 能力判断派生访问，
+    /// 避免每次 ensure_core 重复读盘。
+    pub models: tiangong_core::models_config::ModelsConfig,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -62,6 +65,8 @@ impl TiangongApp {
         tiangong_core::storage::set_storage_root(storage_root.clone());
 
         let app_config = load_tiangong_config();
+        // models 一次性加载，供后续 plugin 能力判断派生访问（不再重读盘）。
+        let models = app_config.models.clone();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
 
@@ -76,6 +81,7 @@ impl TiangongApp {
             state,
             cores: Mutex::new(HashMap::new()),
             config,
+            models,
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
             ),
@@ -337,27 +343,27 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
-        // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-        let cfg = self.config.snapshot();
-        let llm = &cfg.llm;
-        if llm.has_image_generation() {
+        // 媒体插件按 ModelsConfig 能力路由条件注册：未配置的能力不暴露工具。
+        use tiangong_core::models_config::ModelCapability;
+        let models = &self.models;
+        if models.has_capability(ModelCapability::ImageGeneration) {
             plugins.push(tiangong_plugin_generate_image::build_plugin());
         }
-        if llm.has_video_generation() {
+        if models.has_capability(ModelCapability::VideoGeneration) {
             plugins.push(tiangong_plugin_generate_video::build_plugin());
         }
-        if llm.has_tts() {
+        if models.has_capability(ModelCapability::Tts) {
             plugins.push(tiangong_plugin_text_to_speech::build_plugin());
         }
-        if llm.has_stt() {
+        if models.has_capability(ModelCapability::Stt) {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin());
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
         plugins.push(tiangong_plugin_task::build_plugin());
-        // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
+        // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
         // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-        if tiangong_plugin_analyze_attachment::should_register(llm) {
+        if tiangong_plugin_analyze_attachment::should_register(models) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
         }
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
@@ -508,6 +514,7 @@ impl TiangongApp {
             token,
             self.state.clone(),
             self.config.clone(),
+            self.models.clone(),
         )
         .map_err(|e| e.to_string())?;
         *guard = Some(handle);

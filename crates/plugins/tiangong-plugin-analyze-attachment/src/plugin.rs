@@ -1,18 +1,20 @@
 //! 附件分析插件结构体定义与生命周期实现。
 //!
-//! [`AnalyzeAttachmentPlugin`] 通过 [`Plugin::register`] 从 [`RuntimeEngine`] 克隆
-//! multimodal 客户端私有持有，供 handler 按需调用。
+//! [`AnalyzeAttachmentPlugin`] 通过 [`Plugin::register`] 从 [`RuntimeEngine`] 的
+//! [`ModelsConfig`] 路由解析 multimodal 端点，自建 [`SingleProviderClient`] 私有持有，
+//! 供 handler 按需调用。不再依赖 core 的 `multimodal_client`（该字段随 LlmConfig
+//! 裁剪一并移除）。
 //!
 //! 注册模式与其他媒体插件一致：入口层经 [`crate::should_register`] 判断能力是否存在、
-//! 满足条件才注册本插件。插件内部不再维护 `enabled` 标志，`tool_specs()` 以
-//! `client().is_some()` 作为防御兜底（入口层已保证满足条件时才注册）。
+//! 满足条件才注册本插件。
 
 use std::path::PathBuf;
 use std::sync::RwLock;
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
-use tiangong_core::model::SingleProviderClient;
+use tiangong_core::model::{ModelProviderConfig, SingleProviderClient};
+use tiangong_core::models_config::ModelCapability;
 use tiangong_core::runtime::RuntimeEngine;
 use tiangong_core::tool_override::PromptSectionProvider;
 
@@ -20,7 +22,7 @@ use tiangong_core::tool_override::PromptSectionProvider;
 pub struct AnalyzeAttachmentPlugin {
     /// 当前会话工作目录（由 core 注入，附件分析当前未强依赖，保持一致性预留）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 克隆自 engine 的 multimodal 客户端，供 handler 按需调用。
+    /// 从 ModelsConfig 路由解析并自建的 multimodal 客户端，供 handler 按需调用。
     client: RwLock<Option<SingleProviderClient>>,
     /// 状态反馈通道（转发 multimodal 调用的 token 用量，由 set_feedback_tx 注入）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
@@ -72,14 +74,27 @@ impl Plugin for AnalyzeAttachmentPlugin {
 
     fn register(&self, engine: &RuntimeEngine) {
         // 入口层已通过 should_register 保证满足条件才注册；此处保留防御性判定，
-        // 仅当配置了 multimodal 客户端、且对话模型本身非 multimodal 时才缓存 client。
-        // engine 重建后 multimodal 配置变更时也会清空旧 client。
+        // 仅当配置了独立 multimodal 路由、且对话模型本身非 multimodal 时才自建 client。
+        let models = engine.models_config();
+        let client = if !models.chat_is_multimodal() {
+            models
+                .resolve_for_capability(ModelCapability::Multimodal)
+                .map(|resolved| {
+                    let config = ModelProviderConfig {
+                        api_auth_token: resolved.api_key,
+                        api_base_url: resolved.base_url,
+                        api_timeout_ms: resolved.timeout_ms.to_string(),
+                        api_protocol: resolved.protocol,
+                        api_model: resolved.model,
+                        api_lite_model: String::new(),
+                    };
+                    SingleProviderClient::new(config)
+                })
+        } else {
+            None
+        };
         if let Ok(mut guard) = self.client.write() {
-            *guard = if engine.has_multimodal_client() && !engine.chat_is_multimodal() {
-                Some(engine.multimodal_client().clone())
-            } else {
-                None
-            };
+            *guard = client;
         }
     }
 }

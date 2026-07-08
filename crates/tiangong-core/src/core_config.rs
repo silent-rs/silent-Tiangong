@@ -62,6 +62,21 @@ impl Default for ModelEndpoint {
 }
 
 impl ModelEndpoint {
+    /// 从 [`ResolvedModel`] 构造（路由解析结果 → 扁平端点）。
+    ///
+    /// 供 plugin 从 `ModelsConfig::resolve_for_capability` 的结果构造端点，
+    /// 不依赖 `LlmConfig` 的端点字段。
+    pub fn from_resolved(resolved: crate::models_config::ResolvedModel) -> Self {
+        Self {
+            base_url: resolved.base_url,
+            api_key: resolved.api_key,
+            model: resolved.model,
+            protocol: resolved.protocol,
+            timeout_ms: resolved.timeout_ms,
+            options: resolved.options,
+        }
+    }
+
     /// 转为 [`ResolvedModel`]，供 media facade 等需要路由解析结果的调用方使用。
     ///
     /// `ModelEndpoint` 与 `ResolvedModel` 字段一一对应（仅 `provider` 缺失，置空），
@@ -79,9 +94,11 @@ impl ModelEndpoint {
     }
 }
 
-/// LLM 配置 — TiangongCore 所需的模型端点
+/// LLM 配置 — TiangongCore 运行所需的模型端点
 ///
-/// 扁平结构，直接描述端点，无需解析 Provider/Model/Routing。
+/// core 只关心它运行必需的 chat（主对话）与 lite（轻量任务）端点；
+/// 其他能力（image/video/tts/stt/multimodal/embedding/rerank）由各 plugin
+/// 自行从 `ModelsConfig` 路由解析，不经此配置中转。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmConfig {
     /// 主 Chat 端点（必须）
@@ -89,31 +106,10 @@ pub struct LlmConfig {
     /// 轻量级文本端点（标题生成、意图分类等简单任务，未配置时回退到 chat）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lite: Option<ModelEndpoint>,
-    /// 图片生成端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_generation: Option<ModelEndpoint>,
-    /// 语音合成端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tts: Option<ModelEndpoint>,
-    /// 语音识别端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stt: Option<ModelEndpoint>,
-    /// 视频生成端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_generation: Option<ModelEndpoint>,
-    /// 多模态理解端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multimodal: Option<ModelEndpoint>,
-    /// 向量嵌入端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding: Option<ModelEndpoint>,
-    /// 结果重排端点
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rerank: Option<ModelEndpoint>,
 }
 
 impl LlmConfig {
-    /// 从 ModelsConfig 解析出 Core 运行所需的扁平端点配置
+    /// 从 ModelsConfig 解析出 core 运行所需的 chat + lite 端点。
     pub fn from_models_config(models: &ModelsConfig) -> Self {
         use crate::models_config::RoutingSlot;
 
@@ -132,39 +128,12 @@ impl LlmConfig {
         Self {
             chat: resolve(RoutingSlot::Chat).unwrap_or_default(),
             lite: resolve(RoutingSlot::Lite),
-            image_generation: resolve(RoutingSlot::ImageGeneration),
-            tts: resolve(RoutingSlot::Tts),
-            stt: resolve(RoutingSlot::Stt),
-            video_generation: resolve(RoutingSlot::VideoGeneration),
-            multimodal: resolve(RoutingSlot::Multimodal),
-            embedding: resolve(RoutingSlot::Embedding),
-            rerank: resolve(RoutingSlot::Rerank),
         }
     }
 
     /// 检查是否有有效的 Chat 端点
     pub fn is_valid(&self) -> bool {
         !self.chat.base_url.is_empty() && !self.chat.api_key.is_empty()
-    }
-
-    /// 图片生成能力是否已配置。
-    pub fn has_image_generation(&self) -> bool {
-        self.image_generation.is_some()
-    }
-
-    /// 视频生成能力是否已配置。
-    pub fn has_video_generation(&self) -> bool {
-        self.video_generation.is_some()
-    }
-
-    /// 语音合成（TTS）能力是否已配置。
-    pub fn has_tts(&self) -> bool {
-        self.tts.is_some()
-    }
-
-    /// 语音识别（STT）能力是否已配置。
-    pub fn has_stt(&self) -> bool {
-        self.stt.is_some()
     }
 }
 
@@ -363,21 +332,6 @@ mod tests {
         assert!(config.llm.is_valid());
         assert_eq!(config.trust_mode, TrustMode::FullTrust);
         assert_eq!(config.context_limit, 65536);
-    }
-
-    #[test]
-    fn llm_config_capabilities() {
-        let mut llm = LlmConfig::default();
-        assert!(llm.image_generation.is_none());
-        assert!(llm.tts.is_none());
-
-        llm.image_generation = Some(ModelEndpoint {
-            base_url: "https://api.example.com/v1".into(),
-            api_key: "sk-test".into(),
-            model: "dall-e-3".into(),
-            ..Default::default()
-        });
-        assert!(llm.image_generation.is_some());
     }
 
     #[test]

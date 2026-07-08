@@ -14,19 +14,17 @@ pub use plugin::AnalyzeAttachmentPlugin;
 
 use std::sync::Arc;
 use tiangong_core::core::Plugin;
-use tiangong_core::core_config::LlmConfig;
+use tiangong_core::models_config::{ModelCapability, ModelsConfig};
 
 /// 判断入口层是否应注册附件分析插件。
 ///
-/// 与原 runtime `inject_enhanced_tools` 的注入条件、以及 `RuntimeEngine` 的 multimodal
-/// fallback 判定保持一致：仅当配置了 multimodal 端点、且 chat 主模型本身非 multimodal
-/// 时才需要本工具（否则附件直接随主模型请求发送）。判断基于 [`ModelsConfig`] 重建，
-/// 与 engine 的 `chat_is_multimodal()` 同源，避免入口层与 engine 判断不一致。
+/// 仅当配置了独立 multimodal 路由、且 chat 主模型本身非 multimodal 时才需要本工具
+/// （否则附件直接随主模型请求发送）。判断基于 [`ModelsConfig`] 路由，与 engine 的
+/// `chat_is_multimodal()` 同源，避免入口层与 engine 判断不一致。
 ///
 /// 入口层（CLI / Server / Tauri）统一调用本函数，避免三处复制复杂判断。
-pub fn should_register(llm: &LlmConfig) -> bool {
-    let models_config = tiangong_core::models_config::ModelsConfig::from_llm_config(llm);
-    llm.multimodal.is_some() && !models_config.chat_is_multimodal()
+pub fn should_register(models: &ModelsConfig) -> bool {
+    models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal()
 }
 
 /// 构造附件分析插件实例，返回 `Arc<dyn Plugin>` 供入口注册。

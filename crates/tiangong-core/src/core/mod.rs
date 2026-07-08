@@ -872,27 +872,12 @@ fn build_engine_from_config(
             SingleProviderClient::new(lite_config).with_on_retry(on_retry.clone()),
         );
     }
-    if let Some(ref multimodal_endpoint) = config.llm.multimodal {
-        let multimodal_config = crate::model::ModelProviderConfig {
-            api_auth_token: multimodal_endpoint.api_key.clone(),
-            api_base_url: multimodal_endpoint.base_url.clone(),
-            api_timeout_ms: multimodal_endpoint.timeout_ms.to_string(),
-            api_protocol: multimodal_endpoint.protocol,
-            api_model: multimodal_endpoint.model.clone(),
-            api_lite_model: String::new(),
-        };
-        engine = engine.with_multimodal_client(
-            SingleProviderClient::new(multimodal_config).with_on_retry(on_retry),
-        );
-    }
+    // multimodal_client 已随 LlmConfig 裁剪移除：附件分析插件（analyze-attachment）
+    // 改为自行从 ModelsConfig 路由解析 multimodal 端点并构造 SingleProviderClient。
 
-    // 当 chat 模型自带 multimodal 能力但没有独立 multimodal 端点时，
-    // 用 chat client 充当 multimodal_client（用于 ensure_multimodal_enabled 等检查）
-    let needs_fallback_multimodal = !engine.has_multimodal_client() && chat_is_multimodal;
-    if needs_fallback_multimodal {
-        let chat_client = engine.client().clone();
-        engine = engine.with_multimodal_client(chat_client);
-    }
+    // chat_is_multimodal 现仅供 analyze-attachment 经 engine.models_config() 判断，
+    // 不再在此触发 fallback client 构造。
+    let _ = chat_is_multimodal;
 
     engine
 }

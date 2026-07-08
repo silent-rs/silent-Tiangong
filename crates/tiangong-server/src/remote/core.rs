@@ -19,6 +19,8 @@ use tiangong_types::{
 pub struct ServerCoreManager {
     state: SharedState,
     config: CoreConfigProvider,
+    /// 启动时一次性加载的模型配置（含完整能力路由），供 plugin 能力判断派生访问。
+    models: tiangong_core::models_config::ModelsConfig,
     event_bus: Arc<EventBus>,
     /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
     /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
@@ -32,12 +34,14 @@ impl ServerCoreManager {
     pub fn new(
         state: SharedState,
         config: CoreConfigProvider,
+        models: tiangong_core::models_config::ModelsConfig,
         event_bus: Arc<EventBus>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     ) -> Self {
         Self {
             state,
             config,
+            models,
             event_bus,
             mcp_plugin,
             cores: Arc::new(Mutex::new(HashMap::new())),
@@ -165,21 +169,21 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
-                let cfg = self.config.snapshot();
-                let llm = &cfg.llm;
+                use tiangong_core::models_config::ModelCapability;
+                // 媒体插件按 ModelsConfig 能力路由条件注册（复用启动时加载的配置）。
+                let models = &self.models;
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-                if llm.has_image_generation() {
+                if models.has_capability(ModelCapability::ImageGeneration) {
                     plugins.extend(tiangong_plugin_generate_image::default_plugins());
                 }
-                if llm.has_video_generation() {
+                if models.has_capability(ModelCapability::VideoGeneration) {
                     plugins.extend(tiangong_plugin_generate_video::default_plugins());
                 }
-                if llm.has_tts() {
+                if models.has_capability(ModelCapability::Tts) {
                     plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
                 }
-                if llm.has_stt() {
+                if models.has_capability(ModelCapability::Stt) {
                     plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
                 }
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
@@ -187,9 +191,9 @@ impl ServerCoreManager {
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins.extend(tiangong_plugin_task::default_plugins());
-                // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
+                // 附件分析（analyze_attachment）：仅当配置了 multimodal 路由、且 chat 主模型
                 // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-                if tiangong_plugin_analyze_attachment::should_register(llm) {
+                if tiangong_plugin_analyze_attachment::should_register(models) {
                     plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
                 }
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在

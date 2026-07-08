@@ -77,8 +77,6 @@ pub struct RuntimeEngine {
     client: SingleProviderClient,
     /// 轻量级文本模型客户端（标题生成等简单任务，未配置时为 None，回退到 client）
     lite_client: Option<SingleProviderClient>,
-    /// 多模态模型客户端（由主模型通过附件解析工具按需调用）
-    multimodal_client: Option<SingleProviderClient>,
     /// 各插件贡献的子进程环境变量（供子进程执行注入）
     runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     pub context_limit: usize,
@@ -140,7 +138,6 @@ impl RuntimeEngine {
         Self {
             client,
             lite_client: None,
-            multimodal_client: None,
             runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
@@ -175,7 +172,6 @@ impl RuntimeEngine {
         Self {
             client,
             lite_client: None,
-            multimodal_client: None,
             runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             context_limit,
             agent_config,
@@ -194,11 +190,6 @@ impl RuntimeEngine {
     /// 设置轻量级文本模型客户端
     pub fn with_lite_client(mut self, client: SingleProviderClient) -> Self {
         self.lite_client = Some(client);
-        self
-    }
-
-    pub fn with_multimodal_client(mut self, client: SingleProviderClient) -> Self {
-        self.multimodal_client = Some(client);
         self
     }
 
@@ -224,12 +215,6 @@ impl RuntimeEngine {
     /// 获取轻量级模型客户端（未配置时回退到主客户端）
     pub fn lite_client(&self) -> &SingleProviderClient {
         self.lite_client.as_ref().unwrap_or(&self.client)
-    }
-    pub fn multimodal_client(&self) -> &SingleProviderClient {
-        self.multimodal_client.as_ref().unwrap_or(&self.client)
-    }
-    pub fn has_multimodal_client(&self) -> bool {
-        self.multimodal_client.is_some()
     }
     /// 对话模型本身是否具备 multimodal 能力（multimodal 路由与 chat 路由指向同一模型）
     pub fn chat_is_multimodal(&self) -> bool {
