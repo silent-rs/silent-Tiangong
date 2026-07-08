@@ -418,10 +418,10 @@ mod tests {
         }
     }
 
-    fn setup_job_store(dir: &TempDir) -> (JobStore, Job) {
+    fn setup_job_store(dir: &TempDir, job_id: &str) -> (JobStore, Job) {
         let store = JobStore::open_at(dir.path().to_path_buf()).unwrap();
         let job = Job {
-            id: "test-job-1".to_string(),
+            id: job_id.to_string(),
             name: "测试任务".to_string(),
             description: "测试".to_string(),
             trigger_type: crate::model::TriggerType::Cron,
@@ -439,14 +439,14 @@ mod tests {
     #[tokio::test]
     async fn execute_succeeds_and_records_run() {
         let dir = TempDir::new().unwrap();
-        let (store, _job) = setup_job_store(&dir);
+        let (store, _job) = setup_job_store(&dir, "test-job-succeed");
         let store_path = dir.path().to_path_buf();
 
         let ctx = Arc::new(MockContext {
             sessions: StdMutex::new(vec![]),
         });
         let params = ExecuteParams {
-            trigger_id: "test-job-1".to_string(),
+            trigger_id: "test-job-succeed".to_string(),
             trigger_name: "测试任务".to_string(),
             trigger_description: "测试".to_string(),
             session_id: None,
@@ -462,7 +462,7 @@ mod tests {
         .await;
 
         let reader = JobStore::open_at(store_path).unwrap();
-        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        let runs = reader.list_job_runs("test-job-succeed", 10).unwrap();
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0].status, JobRunStatus::Succeeded));
         assert!(runs[0].finished_at.is_some());
@@ -471,14 +471,14 @@ mod tests {
     #[tokio::test]
     async fn execute_failure_records_run_as_failed() {
         let dir = TempDir::new().unwrap();
-        let (store, _) = setup_job_store(&dir);
+        let (store, _) = setup_job_store(&dir, "test-job-failure");
         let store_path = dir.path().to_path_buf();
 
         let ctx = Arc::new(MockContext {
             sessions: StdMutex::new(vec![]),
         });
         let params = ExecuteParams {
-            trigger_id: "test-job-1".to_string(),
+            trigger_id: "test-job-failure".to_string(),
             trigger_name: "测试任务".to_string(),
             trigger_description: "测试".to_string(),
             session_id: None,
@@ -494,7 +494,7 @@ mod tests {
         .await;
 
         let reader = JobStore::open_at(store_path).unwrap();
-        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        let runs = reader.list_job_runs("test-job-failure", 10).unwrap();
         assert_eq!(runs.len(), 1);
         assert!(matches!(runs[0].status, JobRunStatus::Failed));
         assert!(
@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_execution_is_skipped() {
         let dir = TempDir::new().unwrap();
-        let (_store, _) = setup_job_store(&dir);
+        let (_store, _) = setup_job_store(&dir, "test-job-concurrent");
         let store_path = dir.path().to_path_buf();
 
         let slow_sender: MessageSender = Box::new(|_sid, _msg| {
@@ -524,14 +524,14 @@ mod tests {
         });
 
         let params1 = ExecuteParams {
-            trigger_id: "test-job-1".to_string(),
+            trigger_id: "test-job-concurrent".to_string(),
             trigger_name: "测试任务".to_string(),
             trigger_description: "测试".to_string(),
             session_id: None,
             payload: "hello".to_string(),
         };
         let params2 = ExecuteParams {
-            trigger_id: "test-job-1".to_string(),
+            trigger_id: "test-job-concurrent".to_string(),
             trigger_name: "测试任务".to_string(),
             trigger_description: "测试".to_string(),
             session_id: None,
@@ -569,7 +569,7 @@ mod tests {
         h2.await.unwrap();
 
         let reader = JobStore::open_at(store_path).unwrap();
-        let runs = reader.list_job_runs("test-job-1", 10).unwrap();
+        let runs = reader.list_job_runs("test-job-concurrent", 10).unwrap();
         assert_eq!(runs.len(), 1, "并发执行应被跳过，只有一条记录");
     }
 }
