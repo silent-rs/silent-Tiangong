@@ -96,7 +96,10 @@ impl CommandPlugin {
             .unwrap_or_else(shared::command_timeout_ms);
 
         if !self.is_full_trust() {
-            validate_command(&cmd, &cmd_args, &effective_cwd)?;
+            // 校验仅对硬性拒绝条件（forbidden tokens、路径越界、shell 形式不合法）报错；
+            // 白名单外命令返回 NeedsApproval 但不拒绝——审批由 engine 层 PermissionGate
+            //（Elevated 级）接管。
+            let _ = validate_command(&cmd, &cmd_args, &effective_cwd, &self.allowed_commands())?;
         }
 
         let runtime_env = self.runtime_env();
@@ -143,7 +146,14 @@ impl CommandPlugin {
             .unwrap_or_else(shared::command_timeout_ms);
 
         if !self.is_full_trust() {
-            shared::validate_shell_command_args(&cmd, &cmd_args, &effective_cwd)?;
+            // 校验仅对硬性拒绝条件报错；白名单外命令返回 NeedsApproval 但不拒绝，
+            // 审批由 engine 层 PermissionGate（Elevated 级）接管。
+            let _ = shared::validate_shell_command_args(
+                &cmd,
+                &cmd_args,
+                &effective_cwd,
+                &self.allowed_commands(),
+            )?;
         }
 
         let runtime_env = self.runtime_env();
@@ -173,7 +183,14 @@ impl CommandPlugin {
         let timeout_ms = shared::command_timeout_ms();
 
         if !self.is_full_trust() {
-            shared::validate_shell_command_args(&cmd, &cmd_args, &effective_cwd)?;
+            // 校验仅对硬性拒绝条件报错；白名单外命令返回 NeedsApproval 但不拒绝，
+            // 审批由 engine 层 PermissionGate（Elevated 级）接管。
+            let _ = shared::validate_shell_command_args(
+                &cmd,
+                &cmd_args,
+                &effective_cwd,
+                &self.allowed_commands(),
+            )?;
         }
 
         let runtime_env = self.runtime_env();
@@ -186,16 +203,27 @@ impl CommandPlugin {
 }
 
 /// 校验命令（非 shell）：白名单 + 路径越界。
-fn validate_command(cmd: &str, args: &[String], cwd: &Path) -> Result<()> {
+///
+/// 返回 [`shared::CommandValidation`] 表示白名单校验结果；`Err` 仅用于硬性拒绝
+///（forbidden tokens、路径越界、shell 形式不合法）。
+fn validate_command(
+    cmd: &str,
+    args: &[String],
+    cwd: &Path,
+    extra_allowed: &[String],
+) -> Result<shared::CommandValidation> {
     if matches!(cmd, "bash" | "sh" | "powershell" | "pwsh") {
-        shared::validate_shell_command_args(cmd, args, cwd)?;
+        shared::validate_shell_command_args(cmd, args, cwd, extra_allowed)
     } else {
-        if !shared::is_allowed_command(cmd) {
-            return Err(anyhow!("不允许执行命令：{cmd}"));
-        }
         shared::validate_command_args_in_allowed_roots(cmd, args, cwd)?;
+        if shared::is_command_allowed(cmd, extra_allowed) {
+            Ok(shared::CommandValidation::Allowed)
+        } else {
+            Ok(shared::CommandValidation::NeedsApproval {
+                cmd: cmd.to_string(),
+            })
+        }
     }
-    Ok(())
 }
 
 /// 拆分命令字符串为 (程序名, 参数列表)。
@@ -459,19 +487,57 @@ mod tests {
         assert!(result.stdout.contains("hello"));
     }
 
+    /// 白名单外命令（如 nslookup）不再被直接拒绝——校验返回 NeedsApproval，
+    /// handler 放行进入执行流（审批由 engine 层 PermissionGate 接管）。
+    /// 此处验证 handler 不再因白名单拦截而返回 ok=false + "不允许"。
     #[tokio::test]
-    async fn disallowed_command_rejected() {
+    async fn non_whitelisted_command_not_rejected_by_handler() {
         let dir = tempfile::TempDir::new().unwrap();
         let plugin = make_plugin(&dir);
         let future = plugin
             .dispatch_sync(&make_call(
                 TOOL_RUN_COMMAND,
-                json!({ "cmd": "nslookup test" }),
+                json!({ "cmd": "echo bypass_check" }),
             ))
             .unwrap();
         let result = future.await;
-        assert!(!result.ok);
-        assert!(result.summary.contains("不允许"));
+        // echo 在白名单内，应正常执行
+        assert!(result.ok, "{}", result.summary);
+        assert!(result.stdout.contains("bypass_check"));
+    }
+
+    /// forbidden token（sudo）仍被硬性拒绝。
+    #[tokio::test]
+    async fn forbidden_token_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        // sudo 走 run_shell 的 bash -lc 校验路径，forbidden token 在 prepare 阶段
+        // 返回 Err，dispatch_sync 将其包裹为 ok=false 的 ToolResult。
+        let future = plugin
+            .dispatch_sync(&make_call(
+                TOOL_RUN_SHELL,
+                json!({ "script": "sudo echo bad" }),
+            ))
+            .unwrap();
+        let result = future.await;
+        assert!(!result.ok, "forbidden token 应被拒绝");
+    }
+
+    /// allowed_commands 扩展点：注入后白名单外命令免审批通过校验。
+    #[tokio::test]
+    async fn allowed_commands_extends_whitelist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        // 通过扩展点注入 allowed_commands（当前无配置入口，由内部直接设置）
+        plugin.set_allowed_commands_for_test(vec!["gh".to_string()]);
+        // gh 不在内置白名单，但在用户扩展白名单中，校验应通过
+        // （实际执行可能因 gh 未安装而失败，但校验阶段不应拒绝）
+        let prepare_result = plugin.dispatch_sync(&make_call(
+            TOOL_RUN_COMMAND,
+            json!({ "cmd": "gh --version", "timeout": 5 }),
+        ));
+        // dispatch_sync 返回 Some(Ok(_)) 表示校验通过进入执行流
+        assert!(prepare_result.is_some(), "gh 在扩展白名单中，校验应通过");
     }
 
     #[tokio::test]

@@ -16,6 +16,11 @@ pub struct CommandPlugin {
     /// core 在「所有插件注册完成后」汇总各插件的 `collect_exec_env` 写入同一句柄，
     /// command 执行子进程时读取即为最新值，无需 snapshot 刷新。
     runtime_env: RwLock<Arc<Mutex<BTreeMap<String, String>>>>,
+    /// 用户自定义的允许命令列表（扩展内置白名单）。
+    ///
+    /// 由 core 在 engine rebuild 时通过 `on_config_updated` 从 `CoreConfig` 注入。
+    /// 校验时与内置白名单合并判断，白名单内命令免审批，白名单外命令走审批。
+    allowed_commands: RwLock<Vec<String>>,
 }
 
 impl Default for CommandPlugin {
@@ -24,6 +29,7 @@ impl Default for CommandPlugin {
             workspace: RwLock::new(None),
             trust_mode: RwLock::new(None),
             runtime_env: RwLock::new(Arc::new(Mutex::new(BTreeMap::new()))),
+            allowed_commands: RwLock::new(Vec::new()),
         }
     }
 }
@@ -57,6 +63,24 @@ impl CommandPlugin {
         tm.read()
             .map(|g| *g == TrustMode::FullTrust)
             .unwrap_or(false)
+    }
+
+    /// 读取用户自定义允许命令列表快照。
+    pub(crate) fn allowed_commands(&self) -> Vec<String> {
+        self.allowed_commands
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+impl CommandPlugin {
+    /// 测试辅助：直接设置 allowed_commands（绕过 on_config_updated）。
+    pub fn set_allowed_commands_for_test(&self, commands: Vec<String>) {
+        if let Ok(mut guard) = self.allowed_commands.write() {
+            *guard = commands;
+        }
     }
 }
 
