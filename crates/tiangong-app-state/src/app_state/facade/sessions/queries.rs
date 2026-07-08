@@ -84,13 +84,21 @@ impl TiangongState {
         &self,
         _base: &tiangong_core::core_config::CoreConfig,
     ) -> tiangong_core::core_config::CoreConfig {
+        let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
+        // context_limit 由 config 层解析注入（core 不做配置磁盘 IO）。
+        let dir = tiangong_config::io::storage_root();
+        let context_limit = if llm.chat.model.is_empty() {
+            tiangong_core::core_config::default_context_limit()
+        } else {
+            tiangong_config::io::resolve_context_limit_at(&dir, &llm.chat.model)
+        };
         tiangong_core::core_config::CoreConfig {
-            llm: tiangong_core::core_config::LlmConfig::from_models_config(self.models_config()),
+            llm,
             trust_mode: self.active_session_trust_mode(),
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
             reasoning_effort: self.active_session_reasoning_effort(),
-            context_limit: 0,
+            context_limit,
         }
     }
 
