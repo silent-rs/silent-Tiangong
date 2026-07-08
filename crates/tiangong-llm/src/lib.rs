@@ -17,6 +17,10 @@ pub mod tool;
 pub mod usage;
 
 pub use endpoint::ModelEndpoint;
+pub use models_config::{
+    ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, ProviderReferences, ResolvedModel,
+    RoutingSlot,
+};
 pub use provider_client::{
     ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
     OnRetryCallback, SingleProviderClient,

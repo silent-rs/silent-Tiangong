@@ -55,20 +55,40 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         config.clone(),
         stream_tx,
         {
-            // 媒体插件由 app 层构造时从 ModelsConfig 解析能力端点注入，
-            // 未配置的能力 default_plugins 返回空 Vec（内部含能力判定）。
+            // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+            let resolve_ep = |cap: ModelCapability| {
+                models
+                    .resolve_for_capability(cap)
+                    .map(ModelEndpoint::from_resolved)
+            };
             let mut plugins = tiangong_plugin_fs::default_plugins();
             plugins.extend(tiangong_plugin_index::default_plugins());
-            plugins.extend(tiangong_plugin_generate_image::default_plugins(&models));
-            plugins.extend(tiangong_plugin_generate_video::default_plugins(&models));
-            plugins.extend(tiangong_plugin_text_to_speech::default_plugins(&models));
-            plugins.extend(tiangong_plugin_speech_to_text::default_plugins(&models));
+            if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+                plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+                plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+                plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+                plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+            }
             plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_scheduler::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
-            plugins.extend(tiangong_plugin_analyze_attachment::default_plugins(&models));
+            // analyze-attachment：仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册。
+            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
+                if let Some(client) =
+                    resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
+                {
+                    plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                }
+            }
             // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
             // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
             plugins.push(skill_plugin.clone());

@@ -7,6 +7,7 @@ license = "Apache-2.0"
 [dependencies]
 # 引用核心库 crate
 tiangong-core = { workspace = true }
+tiangong-llm = { workspace = true }
 tiangong-app-state = { workspace = true }
 tiangong-types = { workspace = true }
 tiangong-cli = { workspace = true }

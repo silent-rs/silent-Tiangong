@@ -169,20 +169,42 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
-                // 媒体插件由 app 层构造时从 ModelsConfig 解析能力端点注入（复用启动时加载的配置）。
+                // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+                use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
                 let models = &self.models;
+                let resolve_ep = |cap: ModelCapability| {
+                    models
+                        .resolve_for_capability(cap)
+                        .map(ModelEndpoint::from_resolved)
+                };
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                plugins.extend(tiangong_plugin_generate_image::default_plugins(models));
-                plugins.extend(tiangong_plugin_generate_video::default_plugins(models));
-                plugins.extend(tiangong_plugin_text_to_speech::default_plugins(models));
-                plugins.extend(tiangong_plugin_speech_to_text::default_plugins(models));
+                if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+                    plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+                }
+                if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+                    plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                }
+                if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+                    plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                }
+                if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+                    plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                }
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins.extend(tiangong_plugin_task::default_plugins());
-                plugins.extend(tiangong_plugin_analyze_attachment::default_plugins(models));
+                if models.has_capability(ModelCapability::Multimodal)
+                    && !models.chat_is_multimodal()
+                {
+                    if let Some(client) =
+                        resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
+                    {
+                        plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                    }
+                }
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
                 plugins.extend(tiangong_plugin_skill::default_plugins());

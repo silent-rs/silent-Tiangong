@@ -9,22 +9,22 @@ use std::sync::RwLock;
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
-use tiangong_core::model::SingleProviderClient;
 use tiangong_core::tool_override::PromptSectionProvider;
+use tiangong_llm::SingleProviderClient;
 
 /// 附件分析插件。
 pub struct AnalyzeAttachmentPlugin {
     /// 当前会话工作目录（由 core 注入，附件分析当前未强依赖，保持一致性预留）。
     workspace: RwLock<Option<PathBuf>>,
     /// 构造时注入的 multimodal 客户端，供 handler 按需调用。
-    client: Option<SingleProviderClient>,
+    client: SingleProviderClient,
     /// 状态反馈通道（转发 multimodal 调用的 token 用量，由 set_feedback_tx 注入）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
 }
 
 impl AnalyzeAttachmentPlugin {
-    /// 构造插件实例：接收 app 层解析的 multimodal 客户端（None 表示不启用）。
-    pub fn new(client: Option<SingleProviderClient>) -> Self {
+    /// 构造插件实例：接收 app 层已解析的 multimodal 客户端。
+    pub fn new(client: SingleProviderClient) -> Self {
         Self {
             workspace: RwLock::new(None),
             client,
@@ -32,8 +32,8 @@ impl AnalyzeAttachmentPlugin {
         }
     }
 
-    /// 取 multimodal 客户端的克隆快照（供 handler 使用，也作为 tool_specs 防御兜底）。
-    pub(crate) fn client(&self) -> Option<SingleProviderClient> {
+    /// 取 multimodal 客户端的克隆快照（供 handler 使用）。
+    pub(crate) fn client(&self) -> SingleProviderClient {
         self.client.clone()
     }
 

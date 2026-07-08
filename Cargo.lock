@@ -9586,6 +9586,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-entry",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
@@ -9640,6 +9641,7 @@ dependencies = [
  "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
@@ -9820,6 +9822,7 @@ dependencies = [
  "anyhow",
  "serde_json",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-types",
  "tokio",
 ]
@@ -9893,6 +9896,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -9903,6 +9907,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-media",
  "tracing",
 ]
@@ -9997,6 +10002,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -10039,6 +10045,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -10084,6 +10091,7 @@ dependencies = [
  "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
