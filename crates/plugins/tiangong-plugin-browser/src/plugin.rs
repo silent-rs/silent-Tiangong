@@ -21,6 +21,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 
 /// 浏览器插件：聚合页面获取能力与工具覆盖处理器。
 pub struct BrowserPlugin {
+    fetcher: Arc<BrowserPageFetcher>,
     override_handler: BrowserToolOverride,
     watcher: Arc<BrowserWatcher>,
 }
@@ -32,13 +33,14 @@ impl BrowserPlugin {
     /// 「自注册」入口。返回 `None` 表示插件 state 未就绪（与旧 `get_*` 工厂一致）。
     pub fn from_app_handle(app: &tauri::AppHandle<Wry>) -> Option<Self> {
         let state = app.state::<crate::BrowserPluginState>();
-        let fetcher: Arc<dyn PageFetcher> = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
-        let override_handler = BrowserToolOverride::new(fetcher.clone());
+        let fetcher = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
+        let override_handler = BrowserToolOverride::new(fetcher.clone() as Arc<dyn PageFetcher>);
         // 创建 session-scoped watcher：随本 plugin/Core 生命周期存在，只向当前 session
         // 的 feedback channel 注入 browser_data（#225）。构造时不 spawn，待
         // set_feedback_tx 注入通道后懒启动，同一实例只启动一次。
-        let watcher = Arc::new(BrowserWatcher::new(fetcher));
+        let watcher = Arc::new(BrowserWatcher::new(fetcher.clone() as Arc<dyn PageFetcher>));
         Some(Self {
+            fetcher,
             override_handler,
             watcher,
         })
@@ -57,6 +59,11 @@ impl Plugin for BrowserPlugin {
     /// observe 到的页面变化只注入到本通道（session 隔离，不跨 session 广播）。
     fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
         self.watcher.set_feedback_tx(tx);
+    }
+
+    /// session 就绪后注入 session_id 到 fetcher（命令带 session_id 路由）。
+    fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
+        self.fetcher.set_session_id(&session.id);
     }
 
     fn tool_permission_overrides(

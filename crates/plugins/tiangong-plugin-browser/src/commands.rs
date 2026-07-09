@@ -162,7 +162,10 @@ pub async fn browser_annotation_extract(
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     state
         .cmd_tx
-        .send(crate::types::BrowserCommand::AnnotationExtract { response_tx })
+        .send(crate::types::BrowserCommand::AnnotationExtract {
+            session_id: String::new(),
+            response_tx,
+        })
         .await
         .map_err(|e| e.to_string())?;
     tokio::time::timeout(std::time::Duration::from_secs(10), response_rx)

@@ -107,6 +107,7 @@ pub async fn browser_command_handler(
     while let Some(cmd) = rx.recv().await {
         match cmd {
             BrowserCommand::FetchPage {
+                session_id: _,
                 url,
                 max_chars,
                 response_tx,
@@ -139,7 +140,7 @@ pub async fn browser_command_handler(
                 });
                 let _ = response_tx.send(response);
             }
-            BrowserCommand::OpenUrl { url } => {
+            BrowserCommand::OpenUrl { session_id: _, url } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -151,7 +152,10 @@ pub async fn browser_command_handler(
                 let _ = manager.navigate_with_app(&app, &url);
                 let _ = app.emit("browser:tab_updated", ());
             }
-            BrowserCommand::ObservePage { response_tx } => {
+            BrowserCommand::ObservePage {
+                session_id: _,
+                response_tx,
+            } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None
                 {
                     let active = registry
@@ -242,7 +246,10 @@ pub async fn browser_command_handler(
                 );
                 let _ = response_tx.send(snapshot);
             }
-            BrowserCommand::FormExtract { response_tx } => {
+            BrowserCommand::FormExtract {
+                session_id: _,
+                response_tx,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -259,6 +266,7 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::FormFill {
+                session_id: _,
                 selector,
                 value,
                 strategy,
@@ -361,6 +369,7 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::ClickElement {
+                session_id: _,
                 selector,
                 wait_for,
                 response_tx,
@@ -441,7 +450,11 @@ pub async fn browser_command_handler(
                 });
                 let _ = response_tx.send(result);
             }
-            BrowserCommand::LoadHtml { html, response_tx } => {
+            BrowserCommand::LoadHtml {
+                session_id: _,
+                html,
+                response_tx,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -459,7 +472,10 @@ pub async fn browser_command_handler(
                     .unwrap_or(Err("加载 HTML 任务失败".to_string()));
                 let _ = response_tx.send(result);
             }
-            BrowserCommand::TabList { response_tx } => {
+            BrowserCommand::TabList {
+                session_id: _,
+                response_tx,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -468,7 +484,7 @@ pub async fn browser_command_handler(
                 let tabs = manager.tab_list();
                 let _ = response_tx.send(tabs);
             }
-            BrowserCommand::TabNew { url } => {
+            BrowserCommand::TabNew { session_id: _, url } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -487,7 +503,10 @@ pub async fn browser_command_handler(
                     })
                     .await;
             }
-            BrowserCommand::TabSwitch { tab_id } => {
+            BrowserCommand::TabSwitch {
+                session_id: _,
+                tab_id,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -506,7 +525,10 @@ pub async fn browser_command_handler(
                 })
                 .await;
             }
-            BrowserCommand::TabClose { tab_id } => {
+            BrowserCommand::TabClose {
+                session_id: _,
+                tab_id,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -525,7 +547,10 @@ pub async fn browser_command_handler(
                 })
                 .await;
             }
-            BrowserCommand::AnnotationExtract { response_tx } => {
+            BrowserCommand::AnnotationExtract {
+                session_id: _,
+                response_tx,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -549,7 +574,11 @@ pub async fn browser_command_handler(
                 });
                 let _ = response_tx.send(result);
             }
-            BrowserCommand::LocateElement { query, response_tx } => {
+            BrowserCommand::LocateElement {
+                session_id: _,
+                query,
+                response_tx,
+            } => {
                 let manager = BrowserManager::from_state(
                     registry
                         .active_state()
@@ -582,6 +611,7 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::QueryDom {
+                session_id: _,
                 selector,
                 max_results,
                 response_tx,
@@ -616,6 +646,7 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::TabHistory {
+                session_id: _,
                 tab_id,
                 response_tx,
             } => {
@@ -632,6 +663,7 @@ pub async fn browser_command_handler(
                 }));
             }
             BrowserCommand::GlobalHistory {
+                session_id: _,
                 offset,
                 limit,
                 response_tx,

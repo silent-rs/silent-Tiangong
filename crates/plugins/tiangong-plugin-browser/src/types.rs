@@ -46,22 +46,26 @@ pub struct TabHistoryResult {
 pub enum BrowserCommand {
     /// 获取网页内容（替代 web_fetch）
     FetchPage {
+        session_id: String,
         url: String,
         max_chars: usize,
         response_tx: oneshot::Sender<BrowserResponse>,
     },
     /// 打开 URL（用于链接点击等场景）
-    OpenUrl { url: String },
+    OpenUrl { session_id: String, url: String },
     /// 获取当前浏览器页面的快照
     ObservePage {
+        session_id: String,
         response_tx: oneshot::Sender<BrowserPageSnapshot>,
     },
     /// 提取页面表单结构
     FormExtract {
+        session_id: String,
         response_tx: oneshot::Sender<FormExtractResult>,
     },
     /// 填写表单字段
     FormFill {
+        session_id: String,
         selector: String,
         value: String,
         strategy: String,
@@ -70,47 +74,55 @@ pub enum BrowserCommand {
     },
     /// 点击页面元素
     ClickElement {
+        session_id: String,
         selector: String,
         wait_for: Option<String>,
         response_tx: oneshot::Sender<ClickElementResult>,
     },
     /// 加载本地 HTML 内容
     LoadHtml {
+        session_id: String,
         html: String,
         response_tx: oneshot::Sender<Result<(), String>>,
     },
     /// 获取标签列表
     TabList {
+        session_id: String,
         response_tx: oneshot::Sender<Vec<BrowserTab>>,
     },
     /// 新建标签
-    TabNew { url: String },
+    TabNew { session_id: String, url: String },
     /// 切换标签
-    TabSwitch { tab_id: String },
+    TabSwitch { session_id: String, tab_id: String },
     /// 关闭标签
-    TabClose { tab_id: String },
+    TabClose { session_id: String, tab_id: String },
     /// 提取批注区域的元素信息
     AnnotationExtract {
+        session_id: String,
         response_tx: oneshot::Sender<AnnotationExtractResult>,
     },
     /// 智能元素定位（不执行操作，仅查询候选）
     LocateElement {
+        session_id: String,
         query: String,
         response_tx: oneshot::Sender<LocateElementResult>,
     },
     /// 用 CSS 选择器查询 DOM 元素
     QueryDom {
+        session_id: String,
         selector: String,
         max_results: usize,
         response_tx: oneshot::Sender<QueryDomResult>,
     },
     /// 获取标签页浏览历史
     TabHistory {
+        session_id: String,
         tab_id: Option<String>,
         response_tx: oneshot::Sender<TabHistoryResult>,
     },
     /// 获取全局浏览历史（分页）
     GlobalHistory {
+        session_id: String,
         offset: usize,
         limit: usize,
         response_tx: oneshot::Sender<Vec<HistoryEntry>>,
