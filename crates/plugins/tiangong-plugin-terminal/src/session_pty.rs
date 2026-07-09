@@ -250,21 +250,7 @@ impl SessionPtyRegistry {
 
         let log_path = terminal_log_path(session_id, tab_id);
         if let Some(logger) = output_processor::OutputLogger::open(log_path) {
-            let legacy_log_path = legacy_terminal_log_path(session_id);
-            let tail_path = if logger.path().exists()
-                && logger
-                    .path()
-                    .metadata()
-                    .map(|metadata| metadata.len() > 0)
-                    .unwrap_or(false)
-            {
-                logger.path()
-            } else if tab_id == DEFAULT_TERMINAL_TAB_ID && legacy_log_path.exists() {
-                legacy_log_path.as_path()
-            } else {
-                logger.path()
-            };
-            let tail = output_processor::read_log_tail(tail_path, DEFAULT_LOG_TAIL_LINES);
+            let tail = output_processor::read_log_tail(logger.path(), DEFAULT_LOG_TAIL_LINES);
             if !tail.is_empty() {
                 let mut state = manager.state.lock().unwrap();
                 for line in &tail {
@@ -628,7 +614,6 @@ impl SessionPtyRegistry {
             for (tab_id, slot) in tabs.iter() {
                 let new_instance_id = terminal_instance_id(persistent_id, tab_id);
                 slot.manager.set_session_id(new_instance_id);
-                migrate_terminal_log(draft_id, persistent_id, tab_id);
             }
         }
 
@@ -768,46 +753,6 @@ fn terminal_log_path(session_id: &str, tab_id: &str) -> std::path::PathBuf {
         .join("sessions")
         .join(sanitize_path_segment(session_id))
         .join(format!("terminal-{}.log", sanitize_path_segment(tab_id)))
-}
-
-fn legacy_terminal_log_path(session_id: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".tiangong")
-        .join("sessions")
-        .join(sanitize_path_segment(session_id))
-        .join("terminal.log")
-}
-
-fn migrate_terminal_log(draft_id: &str, persistent_id: &str, tab_id: &str) {
-    let draft_log = terminal_log_path(draft_id, tab_id);
-    let real_log = terminal_log_path(persistent_id, tab_id);
-    if !draft_log.exists() {
-        return;
-    }
-    if let Some(parent) = real_log.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            error!(
-                draft_id, persistent_id, tab_id, error = %e,
-                "迁移终端日志：创建真实 session 目录失败"
-            );
-        }
-    }
-    if let Err(rename_err) = std::fs::rename(&draft_log, &real_log) {
-        match std::fs::copy(&draft_log, &real_log).and_then(|_| std::fs::remove_file(&draft_log)) {
-            Ok(()) => {}
-            Err(fallback_err) => error!(
-                draft_id,
-                persistent_id,
-                tab_id,
-                rename_error = %rename_err,
-                fallback_error = %fallback_err,
-                "迁移终端日志文件失败（PTY 已迁移，日志保留在草稿目录）"
-            ),
-        }
-    }
 }
 
 // ===== TerminalProvider trait 实现 =====
