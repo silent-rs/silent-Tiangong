@@ -96,6 +96,11 @@ impl BrowserState {
     /// [`BrowserSessionRegistry`](crate::session_registry::BrowserSessionRegistry)
     /// 持有与加载，T2 起 BrowserManager 从 registry 读取。
     pub(crate) fn new_empty(session_id: String) -> Self {
+        // global_history/zoom 是进程级共享数据，从磁盘加载（各 session 副本一致）。
+        // 写入时 persist 到同一文件（~/.tiangong/browser-{history,zoom}.json）。
+        // 详见 RFC 0016 D2：全局历史/缩放保持进程级。
+        let global_history = load_global_history();
+        let zoom_factor = load_zoom();
         Self {
             webviews: HashMap::new(),
             page_loaded_signals: HashMap::new(),
@@ -109,10 +114,10 @@ impl BrowserState {
             tabs: Vec::new(),
             active_tab_id: None,
             browser_rect: (0.0, 0.0, 0.0, 0.0),
-            global_history: Vec::new(),
+            global_history,
             tab_histories: HashMap::new(),
             tab_history_indices: HashMap::new(),
-            zoom_factor: 1.0,
+            zoom_factor,
             session_id,
             active_session_id: None,
         }
