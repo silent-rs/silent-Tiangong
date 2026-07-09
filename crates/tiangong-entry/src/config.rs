@@ -69,7 +69,7 @@ fn print_overview() {
 
     // 模型
     let chat_model = models
-        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
         .map(|r| r.model);
     match &chat_model {
         Some(m) => println!("模型配置：✅ 已配置 chat={m}"),

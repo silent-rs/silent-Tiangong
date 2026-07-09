@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 
-use tiangong_core::models_config::{ModelCapability, ModelsConfig, ProviderConfig};
+use tiangong_llm::models_config::{ModelCapability, ModelsConfig, ProviderConfig};
 use tiangong_memory::{
     MemoryConfig, MemoryEmbeddingConfig, MemoryLlmConfig, MemoryRerankConfig, disable_memory,
     enable_memory, is_memory_disabled,

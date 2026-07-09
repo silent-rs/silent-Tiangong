@@ -57,7 +57,7 @@ impl Drop for EnvGuard {
 }
 
 fn embedding_config_from_tiangong_config() -> Option<EmbeddingEndpointConfig> {
-    use tiangong_core::models_config::ModelCapability;
+    use tiangong_llm::models_config::ModelCapability;
     let config = tiangong_config::load_tiangong_config();
     // embedding 端点从 ModelsConfig 路由解析（不再经 LlmConfig 中转）。
     let resolved = config
