@@ -19,9 +19,6 @@ use tiangong_types::{
 pub struct ServerCoreManager {
     state: SharedState,
     config: CoreConfigProvider,
-    /// 模型配置缓存（含完整能力路由），供 ensure_core 构造插件时解析端点。
-    /// 配置变更时经 reload_models 同步更新，确保不 stale。
-    models: Arc<Mutex<tiangong_core::models_config::ModelsConfig>>,
     event_bus: Arc<EventBus>,
     /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
     /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
@@ -35,38 +32,17 @@ impl ServerCoreManager {
     pub fn new(
         state: SharedState,
         config: CoreConfigProvider,
-        models: tiangong_core::models_config::ModelsConfig,
         event_bus: Arc<EventBus>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     ) -> Self {
         Self {
             state,
             config,
-            models: Arc::new(Mutex::new(models)),
             event_bus,
             mcp_plugin,
             cores: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    /// 模型能力路由变化时同步更新缓存并清空已有 core（插件列表构造时固定，无法热更新）。
-    /// 下次 ensure_core 用最新 models 重建。其他配置变更走 CoreConfigProvider + reload_config。
-    pub fn reload_models(&self, new_models: tiangong_core::models_config::ModelsConfig) {
-        let changed = self
-            .models
-            .lock()
-            .map(|mut g| {
-                let c = *g != new_models;
-                *g = new_models;
-                c
-            })
-            .unwrap_or(false);
-        if changed {
-            if let Ok(mut cores) = self.cores.lock() {
-                cores.clear();
-            }
         }
     }
 
@@ -190,8 +166,9 @@ impl ServerCoreManager {
             stream_tx,
             {
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+                // models 从 config 内存单例读取。
                 use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-                let models = self.models.lock().map(|g| g.clone()).unwrap_or_default();
+                let models = tiangong_config::registry::models();
                 let resolve_ep = |cap: ModelCapability| {
                     models
                         .resolve_for_capability(cap)

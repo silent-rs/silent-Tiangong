@@ -31,9 +31,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
         let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
-        let models = tiangong_core::models_config::ModelsConfig::default();
         let event_bus = Arc::new(EventBus::default());
-        let app_ctx = Arc::new(ServerAppContext::new(state, config, models, event_bus));
+        let app_ctx = Arc::new(ServerAppContext::new(state, config, event_bus));
         (dir, app_ctx)
     }
 

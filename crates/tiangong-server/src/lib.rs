@@ -13,7 +13,6 @@ use anyhow::Result;
 use silent::Scheduler;
 use silent::prelude::*;
 use tiangong_app_state::app_state::TiangongState;
-use tiangong_config::load_tiangong_config;
 use tiangong_core::permission::TrustMode;
 use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
@@ -31,10 +30,10 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
         .build()?;
     let _runtime_guard = runtime.enter();
 
-    let mut app_config = load_tiangong_config();
+    // 初始化 config 内存单例（从磁盘加载一次）。
+    tiangong_config::registry::init();
+    let mut app_config = tiangong_config::registry::config();
     app_config.trust_mode = TrustMode::FullTrust;
-    // models 一次性加载，供后续 plugin 能力判断派生访问（不再重读盘）。
-    let models = app_config.models.clone();
     let core_config = app_config.to_core_config();
 
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
@@ -47,12 +46,7 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     }
 
     let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(
-        state,
-        config,
-        models,
-        event_bus.clone(),
-    ));
+    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
 
     tracing::info!("构建路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
@@ -118,17 +112,11 @@ pub fn run_embedded(
     token: Option<String>,
     state: SharedState,
     config: tiangong_core::core_config::CoreConfigProvider,
-    models: tiangong_core::models_config::ModelsConfig,
 ) -> Result<EmbeddedServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
     let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(
-        state,
-        config,
-        models,
-        event_bus.clone(),
-    ));
+    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
 
     tracing::info!("构建嵌入式 Server 路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);

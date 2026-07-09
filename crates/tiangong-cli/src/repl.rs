@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use tiangong_app_state::app_state::TiangongState;
-use tiangong_config::load_tiangong_config;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -16,11 +15,10 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
-    let app_config = load_tiangong_config();
-    // 媒体插件注册按 ModelsConfig 能力路由条件判断：未配置的能力不暴露工具。
-    // app_config 随后会 move 进 to_core_config，故先克隆 models 供 plugins 构造使用。
-    let models = app_config.models.clone();
-    let core_config = app_config.to_core_config();
+    // 初始化 config 内存单例（从磁盘加载一次）。
+    tiangong_config::registry::init();
+    let core_config = tiangong_config::registry::config().to_core_config();
+    let models = tiangong_config::registry::models();
 
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 

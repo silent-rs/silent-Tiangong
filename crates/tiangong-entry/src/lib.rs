@@ -18,9 +18,8 @@ use clap::error::ErrorKind;
 use self::args::{MainArgs, MainCommand};
 
 pub fn run() -> anyhow::Result<()> {
-    // 子命令（model/config/doctor 等）经 tiangong_config::io 读配置，不依赖 core cell。
-    // core 运行时持久化的 storage_root 由 RuntimeEngine::new 注入（cli/server 经
-    // load_or_default → RuntimeEngine::new 完成）。
+    // 初始化 config 内存单例（从磁盘加载一次），子命令从内存读配置。
+    tiangong_config::registry::init();
     let args = match MainArgs::try_parse() {
         Ok(args) => args,
         Err(err) => {

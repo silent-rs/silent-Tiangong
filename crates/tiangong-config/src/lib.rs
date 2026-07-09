@@ -22,6 +22,7 @@ mod config;
 pub mod io;
 mod loader;
 pub mod logging;
+pub mod registry;
 
 pub use config::{
     ConnectorConfig, ConnectorType, ServerConfig, TiangongConfig, generate_token,
