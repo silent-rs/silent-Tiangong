@@ -250,20 +250,19 @@ impl TiangongApp {
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        let (next, plugin_set_changed) = self
+        // old_sig 从 registry 旧值算（set_models 之前），new_sig 从 app-state 新值算。
+        let old_sig =
+            tiangong_config::registry::plugin_set_signature(&tiangong_config::registry::models());
+        let (next, new_sig) = self
             .with_state_read(|core_state| {
-                let old_sig =
-                    tiangong_config::registry::plugin_set_signature(core_state.models_config());
+                let new_models = core_state.models_config().clone();
+                let new_sig = tiangong_config::registry::plugin_set_signature(&new_models);
                 // 同步 app-state 的最新 models 到 config 内存单例。
-                tiangong_config::registry::set_models(core_state.models_config().clone());
-                let new_sig =
-                    tiangong_config::registry::plugin_set_signature(core_state.models_config());
-                Ok((
-                    core_state.build_core_config_from_base(&base),
-                    old_sig != new_sig,
-                ))
+                tiangong_config::registry::set_models(new_models);
+                Ok((core_state.build_core_config_from_base(&base), new_sig))
             })
             .await?;
+        let plugin_set_changed = old_sig != new_sig;
         self.config.replace(next);
         let cores = self.lock_cores();
         if plugin_set_changed {
