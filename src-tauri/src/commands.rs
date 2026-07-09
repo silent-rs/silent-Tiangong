@@ -533,9 +533,30 @@ pub async fn get_session_tabs(
                 .iter()
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
+
+            // 合并浏览器插件自管持久化的 browser tabs（应用重启后 session.tabs 可能滞后）
+            let mut tabs = session.tabs.clone();
+            let persisted =
+                tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id);
+            for browser_tab in &persisted.tabs {
+                let exists = tabs.iter().any(|t| t.id == browser_tab.id);
+                if !exists {
+                    tabs.push(tiangong_core::session::TabState {
+                        id: browser_tab.id.clone(),
+                        kind: tiangong_core::session::TabKind::Browser,
+                        title: browser_tab.title.clone(),
+                        url: browser_tab.url.clone(),
+                        created_at: String::new(),
+                    });
+                }
+            }
+
+            // active_tab_id：优先 session 已有的，其次 browser store 的
+            let active_tab_id = session.active_tab_id.clone().or(persisted.active_tab_id);
+
             Ok(SessionTabsView {
-                tabs: session.tabs.clone(),
-                active_tab_id: session.active_tab_id.clone(),
+                tabs,
+                active_tab_id,
             })
         })
         .await

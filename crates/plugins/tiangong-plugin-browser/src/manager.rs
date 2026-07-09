@@ -348,6 +348,17 @@ impl BrowserManager {
                                         if !title.is_empty() {
                                             tab.title = title.clone();
                                         }
+                                        // 页面加载完成更新了 tab url/title，持久化以便重启恢复
+                                        let sid = state.session_id.clone();
+                                        let tabs_snapshot = state.tabs.clone();
+                                        let active_snapshot = state.active_tab_id.clone();
+                                        crate::session_store::BrowserSessionStore::save(
+                                            &sid,
+                                            &crate::session_store::BrowserSessionPersisted {
+                                                tabs: tabs_snapshot,
+                                                active_tab_id: active_snapshot,
+                                            },
+                                        );
                                     }
                                     // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
                                     let should_persist = {
@@ -689,6 +700,17 @@ impl BrowserManager {
                                     tab.url = current_url.clone();
                                 }
                             }
+                            // url_poll 检测到 URL 变化，持久化以便重启恢复
+                            let sid = s.session_id.clone();
+                            let tabs_snapshot = s.tabs.clone();
+                            let active_snapshot = s.active_tab_id.clone();
+                            crate::session_store::BrowserSessionStore::save(
+                                &sid,
+                                &crate::session_store::BrowserSessionPersisted {
+                                    tabs: tabs_snapshot,
+                                    active_tab_id: active_snapshot,
+                                },
+                            );
                         }
                         let _ = app.emit(
                             "browser:page_loaded",

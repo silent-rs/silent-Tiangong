@@ -68,27 +68,8 @@ impl Plugin for BrowserPlugin {
         // session_id 就绪后启动 watcher（之前 set_feedback_tx 只存通道不启动，
         // 避免 observe 带空 session_id 污染 bootstrap/active session）
         self.watcher.start();
-        // 恢复持久化的浏览器 tab（应用重启后）
-        let persisted = crate::session_store::BrowserSessionStore::load(&session.id);
-        if !persisted.tabs.is_empty() {
-            // 注入恢复的 tab 到 session（前端 hydrate 时会读 session.tabs 并回灌浏览器）
-            for tab in &persisted.tabs {
-                // 避免重复添加：仅当 session.tabs 无该 browser tab 时补入
-                let exists = session.tabs.iter().any(|t| t.id == tab.id);
-                if !exists {
-                    session.tabs.push(tiangong_core::session::TabState {
-                        id: tab.id.clone(),
-                        kind: tiangong_core::session::TabKind::Browser,
-                        title: tab.title.clone(),
-                        url: tab.url.clone(),
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis().to_string())
-                            .unwrap_or_else(|_| "0".to_string()),
-                    });
-                }
-            }
-        }
+        // browser tab 的恢复由 get_session_tabs 命令在 hydrate 时合并 browser
+        // session store（on_session_ready 时序晚于前端 hydrate，在此注入不可靠）。
     }
 
     fn tool_permission_overrides(
