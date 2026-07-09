@@ -65,6 +65,9 @@ impl Plugin for BrowserPlugin {
     /// 并从持久化恢复该 session 上次的浏览器 tab（若有）。
     fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
         self.fetcher.set_session_id(&session.id);
+        // session_id 就绪后启动 watcher（之前 set_feedback_tx 只存通道不启动，
+        // 避免 observe 带空 session_id 污染 bootstrap/active session）
+        self.watcher.start();
         // 恢复持久化的浏览器 tab（应用重启后）
         let persisted = crate::session_store::BrowserSessionStore::load(&session.id);
         if !persisted.tabs.is_empty() {

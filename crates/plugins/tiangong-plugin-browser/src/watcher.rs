@@ -72,10 +72,15 @@ impl BrowserWatcher {
     ///
     /// 可重复调用（如 engine 重建后重新注入通道）：仅更新通道引用，后台任务
     /// 持有的是 watcher 的 `Arc`，会自动读到新通道；`started` 保证只 spawn 一次。
-    pub fn set_feedback_tx(self: &Arc<Self>, tx: PluginFeedbackTx) {
+    /// 注入 feedback 通道（不启动后台任务，待 session_id 就绪后调 start）。
+    pub fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
         if let Ok(mut guard) = self.feedback_tx.write() {
             *guard = Some(tx);
         }
+    }
+
+    /// 启动后台观察任务（on_session_ready 注入 session_id 后调用）。
+    pub fn start(self: &Arc<Self>) {
         self.ensure_started();
     }
 
@@ -103,6 +108,7 @@ impl BrowserWatcher {
                 .unwrap_or(true);
             if closed {
                 tracing::debug!("browser watcher: feedback channel closed, stopping");
+                self.started.store(false, Ordering::SeqCst);
                 break;
             }
             self.maybe_observe_and_inject().await;

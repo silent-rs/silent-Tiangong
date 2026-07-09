@@ -173,6 +173,16 @@ pub async fn browser_command_handler(
                     if s.webviews.is_empty()
                         || !s.visible.load(std::sync::atomic::Ordering::Relaxed)
                     {
+                        // 浏览器未打开/不可见：返回空 snapshot，避免调用方无意义等待 timeout
+                        let _ = response_tx.send(BrowserPageSnapshot {
+                            title: String::new(),
+                            url: String::new(),
+                            text: String::new(),
+                            status: PageStatus::Error("浏览器未打开或不可见".to_string()),
+                            tabs: Vec::new(),
+                            active_tab_id: None,
+                            events: Vec::new(),
+                        });
                         continue;
                     }
                 }
