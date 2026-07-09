@@ -5,6 +5,7 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
+tiangong-app-state = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
 tiangong-plugin-mcp = { workspace = true }

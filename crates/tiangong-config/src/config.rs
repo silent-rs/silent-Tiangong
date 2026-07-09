@@ -173,6 +173,9 @@ pub struct TiangongConfig {
     pub trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
     pub custom_system_prompt: String,
+    /// context window 上限（加载时按 chat model 从 context_windows.json 解析，
+    /// 避免转换阶段再找目录——见 load_tiangong_config_from_dir）
+    pub context_limit: usize,
 
     // ===== 应用层配置 =====
     /// Server 配置
@@ -187,13 +190,19 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
+        // context_limit == 0（Default 或未解析）时兜底为默认值
+        let context_limit = if self.context_limit == 0 {
+            tiangong_core::core_config::default_context_limit()
+        } else {
+            self.context_limit
+        };
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
-            context_limit: 0, // 0 表示自动根据模型名称解析
+            context_limit,
         }
     }
 
@@ -325,11 +334,8 @@ mod tests {
         fs::write(dir.path().join("custom-prompt.md"), "测试 Prompt 内容").unwrap();
 
         // 直接验证 load_custom_prompt_at 行为（与 load_tiangong_config_from_dir 一致）
-        let prompt = tiangong_core::custom_prompt::load_custom_prompt_at(
-            &dir.path().join("custom-prompt.md"),
-            "",
-        )
-        .unwrap();
+        let prompt =
+            crate::io::load_custom_prompt_at(&dir.path().join("custom-prompt.md"), "").unwrap();
         assert_eq!(prompt, "测试 Prompt 内容");
     }
 }

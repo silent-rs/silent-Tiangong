@@ -2,23 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_config::AgentConfig;
-use crate::model::{ModelProviderConfig, SingleProviderClient};
-use crate::planner::{PlanStepStatus, TaskPlan};
-use crate::runtime::{
-    LlmOutputRecord, RunSnapshot, RunStatus, RuntimeEngine, TurnExecution, VerifyExecutionRecord,
-};
-use crate::session::{MessageRole, Session, SessionTaskPlan, now_text};
-use crate::tool::{ToolExecutionRecord, ToolResult};
+use tiangong_core::agent_config::AgentConfig;
+use tiangong_core::model::SingleProviderClient;
+use tiangong_core::runtime::{RunSnapshot, RunStatus, RuntimeEngine};
+use tiangong_core::session::{MessageRole, Session, SessionTaskPlan, now_text};
 
-pub mod audit;
 mod facade;
-pub(crate) mod formatting;
 pub(crate) mod repository;
 mod services;
 mod store;
@@ -37,6 +30,7 @@ use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 
 // Public re-exports for Tauri API
 pub use self::repository::AppRepository;
+pub use self::repository::storage_root;
 pub use self::store::{
     AgentState, AppStore, PendingTurnStub, ProviderState, RuntimeState, SessionState,
 };
@@ -74,7 +68,7 @@ impl TiangongState {
         Vec::new()
     }
 
-    pub fn set_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
+    pub fn set_trust_mode(&mut self, mode: tiangong_core::permission::TrustMode) -> Result<()> {
         let active_id = self.store.session.active_session_id.clone();
         let Some(session) = self
             .store
@@ -93,7 +87,10 @@ impl TiangongState {
         self.persist_session_and_app(&active_id)
     }
 
-    pub fn set_default_trust_mode(&mut self, mode: crate::permission::TrustMode) -> Result<()> {
+    pub fn set_default_trust_mode(
+        &mut self,
+        mode: tiangong_core::permission::TrustMode,
+    ) -> Result<()> {
         self.store.agent.agent_config.default_trust_mode = mode;
         self.persist_app_only()
     }
@@ -102,11 +99,11 @@ impl TiangongState {
         let trimmed = prompt.trim();
         if trimmed.is_empty() {
             // 清空：删除 custom-prompt.md 并清空旧字段
-            crate::custom_prompt::clear_custom_prompt()?;
+            tiangong_config::io::clear_custom_prompt()?;
             self.store.agent.agent_config.custom_system_prompt = String::new();
         } else {
             // 写入 custom-prompt.md 作为唯一事实来源，并清空 app.json 旧字段
-            crate::custom_prompt::save_custom_prompt(&prompt)?;
+            tiangong_config::io::save_custom_prompt(&prompt)?;
             self.store.agent.agent_config.custom_system_prompt = String::new();
         }
         self.rebuild_runtime_from_current_config();
@@ -120,7 +117,7 @@ impl TiangongState {
 
     /// 获取自定义 Prompt 独立存储路径（~/.tiangong/custom-prompt.md）。
     pub fn custom_prompt_path(&self) -> std::path::PathBuf {
-        crate::custom_prompt::custom_prompt_path()
+        tiangong_config::io::custom_prompt_path()
     }
 
     pub fn set_reasoning_effort(&mut self, effort: String) -> Result<()> {

@@ -9581,10 +9581,12 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-runtime",
  "tauri-runtime-wry",
+ "tiangong-app-state",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
  "tiangong-entry",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
@@ -9611,6 +9613,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-app-state"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-config",
+ "tiangong-core",
+ "tiangong-media-archive",
+ "tiangong-types",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-cli"
 version = "0.12.0"
 dependencies = [
@@ -9618,8 +9638,10 @@ dependencies = [
  "crossterm",
  "ratatui",
  "termimad",
+ "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
@@ -9666,6 +9688,7 @@ dependencies = [
  "backoff",
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "futures-util",
  "http",
  "reqwest 0.13.4",
@@ -9708,6 +9731,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "tiangong-app-state",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
@@ -9725,6 +9749,7 @@ dependencies = [
  "async-openai",
  "async-trait",
  "backoff",
+ "base64 0.22.1",
  "futures-util",
  "reqwest 0.13.4",
  "serde",
@@ -9796,7 +9821,9 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-types",
  "tokio",
 ]
@@ -9869,7 +9896,9 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -9879,7 +9908,9 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-media",
  "tracing",
 ]
@@ -9973,7 +10004,9 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -10015,7 +10048,9 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tracing",
 ]
 
@@ -10058,8 +10093,10 @@ dependencies = [
  "silent",
  "subtle",
  "tempfile",
+ "tiangong-app-state",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-media",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use tiangong_core::app_state::audit::{AuditEntry, append_audit_log};
+use tiangong_core::audit::{AuditEntry, append_audit_log};
 
 use crate::capability::McpServerHealthStatus;
 use crate::client::McpToolMeta;

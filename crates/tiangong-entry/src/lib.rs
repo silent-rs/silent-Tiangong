@@ -18,6 +18,8 @@ use clap::error::ErrorKind;
 use self::args::{MainArgs, MainCommand};
 
 pub fn run() -> anyhow::Result<()> {
+    // 初始化 config 内存单例（从磁盘加载一次），子命令从内存读配置。
+    tiangong_config::registry::init();
     let args = match MainArgs::try_parse() {
         Ok(args) => args,
         Err(err) => {

@@ -52,8 +52,9 @@ impl TiangongCore {
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins)
+        Self::new_for_process(config, stream_tx, plugins, storage_root)
     }
 
     /// 创建 CLI 入口 core。
@@ -61,17 +62,19 @@ impl TiangongCore {
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins)
+        Self::new_for_process(config, stream_tx, plugins, storage_root)
     }
 
     pub fn new_for_process(
         config: CoreConfigProvider,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
         let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     /// 从已有 session 创建（CLI 便捷入口）。
@@ -80,8 +83,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     pub fn with_session_for_gui(
@@ -89,8 +93,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     pub fn with_session_for_server(
@@ -98,8 +103,9 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins)
+        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
     }
 
     /// 从已有 session 创建，并显式标记入口进程类型。
@@ -112,6 +118,7 @@ impl TiangongCore {
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
+        storage_root: std::path::PathBuf,
     ) -> Self {
         // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
         // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
@@ -139,6 +146,7 @@ impl TiangongCore {
                 worker_trust_mode,
                 plugins,
                 worker_cmd_tx,
+                storage_root,
             )
         });
 
@@ -258,6 +266,7 @@ fn worker_loop(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
@@ -277,6 +286,7 @@ fn worker_loop(
         shared_trust_mode,
         plugins,
         cmd_tx,
+        storage_root,
     ))
 }
 
@@ -290,6 +300,7 @@ async fn worker_loop_async(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
     let mut last_cfg_gen = 0u64;
@@ -372,6 +383,7 @@ async fn worker_loop_async(
                 &cfg,
                 &stream_tx,
                 shared_trust_mode.clone(),
+                storage_root.clone(),
             ));
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
@@ -389,6 +401,11 @@ async fn worker_loop_async(
                 None
             };
             let mut plugin_specs: Vec<ToolSpec> = Vec::new();
+            // 配置快照更新通知：在 register 之前调 on_config_updated，使插件先刷新
+            // 内部 endpoint/client，再收集 tool_specs / register——保证 specs 基于最新配置。
+            for plugin in &plugins {
+                plugin.on_config_updated(&cfg);
+            }
             // 追踪已注册的工具名，用于跨插件工具名冲突消解：
             // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
             // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
@@ -412,11 +429,6 @@ async fn worker_loop_async(
                         );
                     }
                 }
-            }
-            // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
-            // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
-            for plugin in &plugins {
-                plugin.on_config_updated(&cfg);
             }
             // 汇总所有插件贡献的子进程环境变量，
             // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。
@@ -806,14 +818,64 @@ fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    storage_root: std::path::PathBuf,
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
-    use crate::models_config::ModelsConfig;
+    use crate::models_config::{
+        ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
+    };
 
-    let models_config = ModelsConfig::from_llm_config(&config.llm);
-    let model_config = models_config.to_chat_provider_config();
-    let chat_is_multimodal = models_config.chat_is_multimodal();
+    // CoreConfig.llm 只含 chat + lite 扁平端点；此处重建一个最小 ModelsConfig
+    // 供 engine.models_config() / chat_is_multimodal() 使用。
+    // 注意：LlmConfig 不携带 capability 信息，因此重建结果只声明 Chat 能力
+    //（与原 from_llm_config 行为一致）——chat_is_multimodal 在此路径恒为 false。
+    // GUI/Server 入口不经此函数，它们直接用完整 ModelsConfig 构造 RuntimeEngine。
+    let mut providers = std::collections::HashMap::new();
+    let mut routing = std::collections::HashMap::new();
+    providers.insert(
+        "chat-provider".to_string(),
+        ProviderConfig {
+            base_url: config.llm.chat.base_url.clone(),
+            api_key: config.llm.chat.api_key.clone(),
+            timeout_ms: config.llm.chat.timeout_ms,
+            protocol: config.llm.chat.protocol,
+        },
+    );
+    routing.insert(
+        RoutingSlot::Chat,
+        ModelEntry {
+            provider: "chat-provider".to_string(),
+            model: config.llm.chat.model.clone(),
+            capabilities: vec![ModelCapability::Chat],
+            options: config.llm.chat.options.clone(),
+        },
+    );
+    if let Some(ref lite) = config.llm.lite {
+        providers.insert(
+            "lite-provider".to_string(),
+            ProviderConfig {
+                base_url: lite.base_url.clone(),
+                api_key: lite.api_key.clone(),
+                timeout_ms: lite.timeout_ms,
+                protocol: lite.protocol,
+            },
+        );
+        routing.insert(
+            RoutingSlot::Lite,
+            ModelEntry {
+                provider: "lite-provider".to_string(),
+                model: lite.model.clone(),
+                capabilities: vec![ModelCapability::Chat],
+                options: lite.options.clone(),
+            },
+        );
+    }
+    let models_config = ModelsConfig {
+        providers,
+        models: std::collections::HashMap::new(),
+        routing,
+    };
 
     let agent_config = AgentConfig {
         trust_mode: config.trust_mode,
@@ -833,51 +895,26 @@ fn build_engine_from_config(
             });
         });
 
-    let context_limit = crate::core_config::resolve_context_limit(&config.llm.chat.model);
+    // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
+    let context_limit = config.context_limit;
     let mut engine = RuntimeEngine::with_shared_trust_mode(
-        SingleProviderClient::new(model_config).with_on_retry(on_retry.clone()),
+        SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
         shared_trust_mode,
+        storage_root,
     )
     .with_models_config(models_config)
     .with_core_config(config.clone());
 
-    // 如果配置了独立的 lite 端点，构建 lite client
+    // 如果配置了独立的 lite 端点，构建 lite client（直接吃 lite ModelEndpoint）
     if let Some(ref lite_endpoint) = config.llm.lite {
-        let lite_config = crate::model::ModelProviderConfig {
-            api_auth_token: lite_endpoint.api_key.clone(),
-            api_base_url: lite_endpoint.base_url.clone(),
-            api_timeout_ms: lite_endpoint.timeout_ms.to_string(),
-            api_protocol: lite_endpoint.protocol,
-            api_model: lite_endpoint.model.clone(),
-            api_lite_model: lite_endpoint.model.clone(),
-        };
         engine = engine.with_lite_client(
-            SingleProviderClient::new(lite_config).with_on_retry(on_retry.clone()),
+            SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()),
         );
     }
-    if let Some(ref multimodal_endpoint) = config.llm.multimodal {
-        let multimodal_config = crate::model::ModelProviderConfig {
-            api_auth_token: multimodal_endpoint.api_key.clone(),
-            api_base_url: multimodal_endpoint.base_url.clone(),
-            api_timeout_ms: multimodal_endpoint.timeout_ms.to_string(),
-            api_protocol: multimodal_endpoint.protocol,
-            api_model: multimodal_endpoint.model.clone(),
-            api_lite_model: String::new(),
-        };
-        engine = engine.with_multimodal_client(
-            SingleProviderClient::new(multimodal_config).with_on_retry(on_retry),
-        );
-    }
-
-    // 当 chat 模型自带 multimodal 能力但没有独立 multimodal 端点时，
-    // 用 chat client 充当 multimodal_client（用于 ensure_multimodal_enabled 等检查）
-    let needs_fallback_multimodal = !engine.has_multimodal_client() && chat_is_multimodal;
-    if needs_fallback_multimodal {
-        let chat_client = engine.client().clone();
-        engine = engine.with_multimodal_client(chat_client);
-    }
+    // multimodal_client 已随 LlmConfig 裁剪移除：附件分析插件（analyze-attachment）
+    // 改为自行从 ModelsConfig 路由解析 multimodal 端点并构造 SingleProviderClient。
 
     engine
 }

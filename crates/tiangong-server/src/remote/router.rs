@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::session::MessageRole;
 use tiangong_media::agent::MediaAgent;
 use tiangong_media::stt::TranscribeRequest;

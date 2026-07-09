@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::app_state::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::context::assembler::filter_background_task_tools;
 use crate::core::command::{Command, PendingCommandEffect};
+use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{ModelRequest, TokenUsage, ToolSpec};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::permission::{

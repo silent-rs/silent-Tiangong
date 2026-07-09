@@ -1053,11 +1053,7 @@ fn create_child_session(parent: &Session, title: &str) -> Session {
 
 /// 持久化 child_session 到磁盘
 pub fn persist_child_session(parent_session: &Session, agent_id: &str, session: &Session) {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let agents_dir = home
-        .join(".tiangong")
+    let agents_dir = crate::storage::storage_root()
         .join("sessions")
         .join(&parent_session.id)
         .join("agents");
@@ -1080,11 +1076,7 @@ pub fn persist_child_session(parent_session: &Session, agent_id: &str, session: 
 
 /// 从磁盘加载 child_session
 pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Session> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let path = home
-        .join(".tiangong")
+    let path = crate::storage::storage_root()
         .join("sessions")
         .join(&parent_session.id)
         .join("agents")
@@ -1100,6 +1092,14 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// 把 storage_root 注入为临时目录，供触及持久化的用例使用。
+    /// 返回的 TempDir 须保持存活到用例结束。
+    fn isolated_storage_root() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        crate::storage::set_storage_root(dir.path().to_path_buf());
+        dir
+    }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -1439,6 +1439,7 @@ mod tests {
 
     #[test]
     fn restored_agent_from_session_history_can_be_dismissed() {
+        let _root = isolated_storage_root();
         let (tx, _rx) = mpsc::channel();
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");

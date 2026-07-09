@@ -6,6 +6,7 @@ members = [
     "crates/tiangong-deepseek",
     "crates/tiangong-llm",
     "crates/tiangong-memory",
+    "crates/tiangong-app-state",
     "crates/tiangong-core",
     "crates/tiangong-cli",
     "crates/tiangong-entry",
@@ -39,6 +40,7 @@ version = "0.12.0"
 
 [workspace.dependencies]
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
+tiangong-app-state = { path = "crates/tiangong-app-state" }
 tiangong-cli = { path = "crates/tiangong-cli" }
 tiangong-deepseek = { path = "crates/tiangong-deepseek" }
 tiangong-config = { path = "crates/tiangong-config" }

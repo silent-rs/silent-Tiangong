@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 
 /// 打开会话管理 modal，返回切换到的会话 ID（如果有）
 pub fn open(state: &mut TiangongState) -> Result<Option<String>> {

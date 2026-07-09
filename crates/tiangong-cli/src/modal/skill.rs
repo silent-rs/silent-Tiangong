@@ -6,7 +6,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_plugin_mcp::McpPlugin;
 use tiangong_plugin_skill::SkillPlugin;
 

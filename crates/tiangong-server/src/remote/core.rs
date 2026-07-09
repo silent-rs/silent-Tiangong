@@ -46,6 +46,15 @@ impl ServerCoreManager {
         }
     }
 
+    /// 通知所有活跃 core reload_config（plugin 经 on_config_updated 热更新端点）。
+    pub fn notify_reload_config(&self) {
+        if let Ok(cores) = self.cores.lock() {
+            for core in cores.values() {
+                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
+            }
+        }
+    }
+
     pub async fn send_connector_message_and_wait(
         &self,
         connector: &str,
@@ -165,32 +174,40 @@ impl ServerCoreManager {
             session.clone(),
             stream_tx,
             {
-                let cfg = self.config.snapshot();
-                let llm = &cfg.llm;
+                // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+                // models 从 config 内存单例读取。
+                use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+                let models = tiangong_config::registry::models();
+                let resolve_ep = |cap: ModelCapability| {
+                    models
+                        .resolve_for_capability(cap)
+                        .map(ModelEndpoint::from_resolved)
+                };
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-                if llm.has_image_generation() {
-                    plugins.extend(tiangong_plugin_generate_image::default_plugins());
+                if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+                    plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                 }
-                if llm.has_video_generation() {
-                    plugins.extend(tiangong_plugin_generate_video::default_plugins());
+                if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+                    plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
                 }
-                if llm.has_tts() {
-                    plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
+                if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+                    plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
                 }
-                if llm.has_stt() {
-                    plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
+                if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+                    plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                 }
                 plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins.extend(tiangong_plugin_task::default_plugins());
-                // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
-                // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-                if tiangong_plugin_analyze_attachment::should_register(llm) {
-                    plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
+                if models.has_capability(ModelCapability::Multimodal)
+                    && !models.chat_is_multimodal()
+                    && let Some(client) =
+                        resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
+                {
+                    plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
                 }
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
@@ -201,6 +218,7 @@ impl ServerCoreManager {
                 plugins.push(self.mcp_plugin.clone());
                 plugins
             },
+            tiangong_app_state::app_state::storage_root(),
         );
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();

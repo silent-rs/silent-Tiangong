@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::repository::default_storage_root;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub timestamp: String,
@@ -37,7 +35,7 @@ impl AuditEntry {
 }
 
 fn audit_log_path() -> PathBuf {
-    default_storage_root().join("audit.jsonl")
+    crate::storage::storage_root().join("audit.jsonl")
 }
 
 pub fn append_audit_log(entry: &AuditEntry) {

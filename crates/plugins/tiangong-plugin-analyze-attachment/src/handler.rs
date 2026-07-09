@@ -53,18 +53,8 @@ impl AnalyzeAttachmentPlugin {
         let started = Instant::now();
         let tool_name = TOOL_ANALYZE_ATTACHMENT.to_string();
 
-        // 未配置 multimodal 客户端（理论上不会进入：register 时未启用即不暴露工具，
-        // 这里做防御性检查）。
-        let Some(client) = self.client() else {
-            return Box::pin(async move {
-                attachment_error(
-                    &tool_name,
-                    "未配置多模态模型",
-                    "multimodal model is not configured",
-                    started,
-                )
-            });
-        };
+        // app 层已保证满足条件才构造插件，client 必然就绪。
+        let client = self.client();
 
         let instruction = call
             .arguments
@@ -204,11 +194,7 @@ impl AnalyzeAttachmentPlugin {
 
 impl ToolSpecProvider for AnalyzeAttachmentPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        // 入口层已通过 should_register 保证满足条件才注册；此处以 client 是否就绪
-        // 作为防御兜底，避免误注册时暴露无效工具。
-        if self.client().is_none() {
-            return Vec::new();
-        }
+        // app 层已保证满足条件才构造插件，无条件暴露工具规格。
         vec![ToolSpec {
             name: TOOL_ANALYZE_ATTACHMENT.to_string(),
             description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),

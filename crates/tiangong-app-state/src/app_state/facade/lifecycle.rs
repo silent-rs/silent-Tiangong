@@ -1,32 +1,35 @@
-use crate::models_config::ModelsConfig;
+use tiangong_core::core_config::ModelEndpoint;
+use tiangong_core::models_config::RoutingSlot;
 
 use super::super::*;
 
 impl TiangongState {
     pub fn load_or_default() -> Self {
+        // storage_root 经 RuntimeEngine::new 注入 core cell（core 运行时持久化用）。
+        // app-state 自身的路径计算直接用 tiangong_config::io::storage_root()，不读 cell。
+        let storage_root = crate::app_state::repository::storage_root();
         let app_storage_path = default_app_storage_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_agent_config = AgentConfig::default();
 
-        // ModelsConfig 为主配置源
-        let mut models_config = ModelsConfig::load();
-        if models_config.is_empty() {
-            // 从环境变量生成默认 ModelsConfig
-            let env_config = ModelProviderConfig::from_env();
-            if !env_config.api_auth_token.is_empty() {
-                models_config = ModelsConfig::from_legacy(&env_config);
-                let _ = models_config.save();
-            }
-        }
+        // ModelsConfig 为主配置源（仅从 models.json 读取；环境变量回退已移除）。
+        let storage_dir = tiangong_config::io::storage_root();
+        let models_config = tiangong_config::io::load_models_config_at(&storage_dir);
 
-        // 从 models_config 生成内部 ModelProviderConfig
-        let model_config = models_config.to_chat_provider_config();
+        // 从 models_config 解析 chat 端点（路由解析结果 → 扁平 ModelEndpoint），
+        // 未配置 chat 路由时得到 ModelEndpoint::default()（字段为空）。
+        let model_endpoint = models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .map(ModelEndpoint::from_resolved)
+            .unwrap_or_default();
 
-        let context_limit = crate::core_config::resolve_context_limit(&model_config.api_model);
+        let context_limit =
+            tiangong_config::io::resolve_context_limit_at(&storage_dir, &model_endpoint.model);
         let runtime = RuntimeEngine::new(
-            SingleProviderClient::new(model_config.clone()),
+            SingleProviderClient::new(model_endpoint.clone()),
             context_limit,
             default_agent_config.clone(),
+            storage_root,
         )
         .with_models_config(models_config.clone());
 
@@ -41,7 +44,7 @@ impl TiangongState {
                 },
                 provider: ProviderState {
                     models_config,
-                    model_config,
+                    model_endpoint,
                     model_list: Vec::new(),
                 },
                 agent: AgentState {
@@ -117,7 +120,7 @@ impl TiangongState {
         state.rebuild_runtime_from_current_config();
         state.store.provider.model_list = normalize_model_list(
             state.store.provider.model_list.clone(),
-            &state.store.provider.model_config.api_model,
+            &state.store.provider.model_endpoint.model,
         );
 
         let recovered_count = state.recover_interrupted_tasks();

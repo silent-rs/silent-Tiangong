@@ -37,7 +37,7 @@ impl TiangongState {
         self.persist_session_and_app(&session_id)?;
         let session = self.store.session.sessions[idx].clone();
         self.store.session.input_draft.clear();
-        self.store.runtime.run.status = crate::runtime::RunStatus::Executing;
+        self.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
         self.store.runtime.run.last_session_id = Some(session.id.clone());
         let usage = session.total_usage();

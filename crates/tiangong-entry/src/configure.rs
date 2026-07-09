@@ -33,7 +33,8 @@ pub fn run_model_configure(config: &mut ModelsConfig) -> Result<()> {
     println!();
 
     // ── 落盘 ──
-    config.save()?;
+    let dir = tiangong_config::io::storage_root();
+    tiangong_config::io::save_models_config_at(&dir, config)?;
     println!("✅ 模型配置已保存");
     println!("提示：可用 `tiangong model test chat` 验证连通性，或 `tiangong doctor` 检查整体环境");
     Ok(())
@@ -277,7 +278,7 @@ pub fn run_memory_configure() -> Result<()> {
         return Ok(());
     }
 
-    let models = ModelsConfig::load();
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
     if models.models.is_empty() {
         println!("⚠️  models.json 中没有已注册模型，请先运行 `tiangong model configure`");
         println!("（Memory 端点引用 models.json 中的模型）");

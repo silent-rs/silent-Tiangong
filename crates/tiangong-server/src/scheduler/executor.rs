@@ -23,8 +23,8 @@ mod tests {
     use crate::scheduler::context::ServerSchedulerContext;
     use std::sync::Arc;
     use tempfile::TempDir;
+    use tiangong_app_state::app_state::TiangongState;
     use tiangong_config::CoreConfigProvider;
-    use tiangong_core::app_state::TiangongState;
     use tokio::sync::Mutex;
 
     fn setup_app_ctx() -> (TempDir, Arc<ServerAppContext>) {

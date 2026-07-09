@@ -19,8 +19,10 @@
 //! 第三方开发者可直接构造 CoreConfig，无需依赖此 crate。
 
 mod config;
+pub mod io;
 mod loader;
 pub mod logging;
+pub mod registry;
 
 pub use config::{
     ConnectorConfig, ConnectorType, ServerConfig, TiangongConfig, generate_token,

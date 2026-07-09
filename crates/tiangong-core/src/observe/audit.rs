@@ -6,8 +6,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::app_state::audit::AuditEntry;
-use crate::app_state::audit::append_audit_log;
+use crate::audit::AuditEntry;
+use crate::audit::append_audit_log;
 
 /// 审计事件类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,7 +124,7 @@ impl AuditRecord {
         self
     }
 
-    /// 写入审计日志（复用 app_state::audit 的 JSONL 追加机制）
+    /// 写入审计日志（复用 crate::audit 的 JSONL 追加机制）
     pub fn write(&self) {
         let action = format!("{:?}", self.event_type);
         let target = self

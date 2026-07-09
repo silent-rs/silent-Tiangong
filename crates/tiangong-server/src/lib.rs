@@ -12,8 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use silent::Scheduler;
 use silent::prelude::*;
-use tiangong_config::load_tiangong_config;
-use tiangong_core::app_state::TiangongState;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::permission::TrustMode;
 use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
@@ -31,7 +30,9 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
         .build()?;
     let _runtime_guard = runtime.enter();
 
-    let mut app_config = load_tiangong_config();
+    // 初始化 config 内存单例（从磁盘加载一次）。
+    tiangong_config::registry::init();
+    let mut app_config = tiangong_config::registry::config();
     app_config.trust_mode = TrustMode::FullTrust;
     let core_config = app_config.to_core_config();
 

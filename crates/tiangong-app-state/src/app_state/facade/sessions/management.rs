@@ -18,7 +18,7 @@ impl TiangongState {
             let existing_cwd_mode = existing.cwd_mode.clone();
             let existing_trust_mode = existing.trust_mode;
             *existing = session;
-            if existing_cwd_mode == crate::session::SessionCwdMode::Inherit {
+            if existing_cwd_mode == tiangong_core::session::SessionCwdMode::Inherit {
                 existing.cwd = existing_cwd;
                 existing.cwd_mode = existing_cwd_mode;
             }

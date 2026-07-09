@@ -11,11 +11,11 @@
 
 use std::path::{Path, PathBuf};
 
-use tiangong_core::model::ModelProviderConfig;
 use tiangong_core::models_config::ModelsConfig;
 use tiangong_plugin_skill::SkillsConfig;
 
 use crate::config::{ConnectorConfig, TiangongConfig};
+use crate::io;
 
 /// Connector 配置文件结构
 #[derive(serde::Deserialize)]
@@ -39,7 +39,7 @@ pub fn load_tiangong_config() -> TiangongConfig {
 
 /// 从指定目录加载完整配置
 pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
-    let models = load_models_config();
+    let models = load_models_config(dir);
     let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
     let server = crate::config::load_server_config_from_dir(dir);
     let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
@@ -48,11 +48,22 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
 
     // 自定义 Prompt：从 custom-prompt.md 加载（兼容 app.json 旧字段为空回退）
     let custom_system_prompt =
-        tiangong_core::custom_prompt::load_custom_prompt_at(&dir.join("custom-prompt.md"), "")
-            .unwrap_or_default();
+        io::load_custom_prompt_at(&dir.join("custom-prompt.md"), "").unwrap_or_default();
 
     // 首次安装：释放默认 context_windows.json
-    ensure_context_windows(dir);
+    io::ensure_context_windows(dir);
+
+    // context_limit 在加载阶段按 chat model 从「同一目录」的 context_windows.json
+    // 解析，避免 to_core_config 转换时误读默认 ~/.tiangong（自定义目录场景出错）。
+    let chat_model = models
+        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+        .map(|r| r.model.clone())
+        .unwrap_or_default();
+    let context_limit = if chat_model.is_empty() {
+        tiangong_core::core_config::default_context_limit()
+    } else {
+        io::resolve_context_limit_at(dir, &chat_model)
+    };
 
     // MCP 配置（mcp.json）与 capability 缓存由 tiangong-plugin-mcp 自管：
     // plugin 在 register 时加载缓存 + 启动后台调度器 + 预热探测，config 不再参与。
@@ -61,22 +72,16 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         models,
         skills,
         custom_system_prompt,
+        context_limit,
         server,
         connectors,
         ..Default::default()
     }
 }
 
-/// 加载模型配置（优先 models.json，回退环境变量）
-fn load_models_config() -> ModelsConfig {
-    let mut models = ModelsConfig::load();
-    if models.is_empty() {
-        let env_config = ModelProviderConfig::from_env();
-        if !env_config.api_auth_token.is_empty() {
-            models = ModelsConfig::from_legacy(&env_config);
-        }
-    }
-    models
+/// 加载模型配置（仅从 `models.json` 读取；环境变量回退已移除）
+fn load_models_config(dir: &Path) -> ModelsConfig {
+    io::load_models_config_at(dir)
 }
 
 /// 通用 JSON 配置文件加载
@@ -98,20 +103,5 @@ fn load_json_config<T: serde::de::DeserializeOwned>(dir: &Path, filename: &str) 
             tracing::warn!("解析 {filename} 失败：{err}");
             None
         }
-    }
-}
-
-/// 如果用户目录下不存在 context_windows.json，则从内嵌默认内容创建
-fn ensure_context_windows(dir: &Path) {
-    let path = dir.join("context_windows.json");
-    if path.exists() {
-        return;
-    }
-    let default_content = tiangong_core::core_config::default_context_windows_json();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(err) = std::fs::write(&path, default_content) {
-        tracing::warn!("写入 context_windows.json 失败：{err}");
     }
 }

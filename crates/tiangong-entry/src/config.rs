@@ -1,8 +1,7 @@
 use anyhow::{Result, anyhow};
 
+use tiangong_config::io::{custom_prompt_path, load_custom_prompt};
 use tiangong_config::{default_tiangong_dir, load_server_config};
-use tiangong_core::custom_prompt::{custom_prompt_path, load_custom_prompt};
-use tiangong_core::models_config::ModelsConfig;
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::{ConfigArgs, ConfigSubcommand};
@@ -64,7 +63,7 @@ fn count_skill_dirs(root: &std::path::Path) -> usize {
 
 fn print_overview() {
     let root = default_tiangong_dir();
-    let models = ModelsConfig::load();
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
     let server = load_server_config();
     let memory = MemoryConfig::load_or_default();
 
@@ -122,7 +121,7 @@ fn validate() -> Result<()> {
     let mut issues = Vec::new();
 
     // 模型配置
-    let models = ModelsConfig::load();
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
     if models.is_empty() {
         issues.push("models.json 为空（未配置任何 provider 或路由）".to_string());
     } else {

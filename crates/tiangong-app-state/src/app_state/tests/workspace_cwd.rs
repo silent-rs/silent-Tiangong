@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::super::*;
 use super::common::with_isolated_state;
-use crate::session::{MessageRole, SessionCwdMode};
+use tiangong_core::session::{MessageRole, SessionCwdMode};
 
 #[test]
 fn has_user_messages_returns_false_for_empty_session() -> Result<()> {

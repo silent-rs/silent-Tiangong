@@ -13,8 +13,8 @@ pub mod ws;
 use std::sync::Arc;
 
 use silent::prelude::*;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_config::CoreConfigProvider;
-use tiangong_core::app_state::TiangongState;
 use tokio::sync::Mutex;
 
 use crate::remote::core::ServerCoreManager;
@@ -38,7 +38,12 @@ pub struct ServerAppContext {
 
 impl ServerAppContext {
     pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
-        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::new());
+        // storage_root 由 app-state 统一计算；plugin 由 app 注入同一根目录，
+        // 避免各自重复解析 ~/.tiangong。
+        let storage_root = tiangong_app_state::app_state::storage_root();
+        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+            storage_root,
+        ));
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             config.clone(),
@@ -59,11 +64,15 @@ impl ServerAppContext {
         let base = self.config.snapshot();
         let next = {
             let state = self.state.lock().await;
+            // 同步最新 models 到 config 内存单例（与 Tauri 一致）。
+            tiangong_config::registry::set_models(state.models_config().clone());
             let mut next = state.build_core_config_from_base(&base);
             next.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
             next
         };
         self.config.replace(next);
+        // 通知所有活跃 core reload_config（plugin 经 on_config_updated 热更新端点）。
+        self.cores.notify_reload_config();
     }
 }
 

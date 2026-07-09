@@ -1,7 +1,16 @@
 use super::super::*;
 
+/// 天工存储根目录（`~/.tiangong`）。
+///
+/// 复用 `tiangong_config::io::storage_root()` 作为唯一来源，避免重复实现
+/// HOME / USERPROFILE / HOMEDRIVE+HOMEPATH 解析逻辑。本函数保留作为 app-state
+/// 的对外便捷入口（`tiangong_app_state::app_state::storage_root`）。
+pub fn storage_root() -> PathBuf {
+    tiangong_config::io::storage_root()
+}
+
 pub(in crate::app_state) fn default_storage_root() -> PathBuf {
-    user_storage_root()
+    storage_root()
 }
 
 pub(in crate::app_state) fn default_app_storage_path() -> PathBuf {
@@ -20,33 +29,6 @@ pub(in crate::app_state) fn default_sessions_dir_path() -> PathBuf {
 
 pub(in crate::app_state) fn default_legacy_storage_path() -> PathBuf {
     default_storage_root().join("sessions.json")
-}
-
-fn user_storage_root() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
-}
-
-pub(in crate::app_state) fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-    match (drive, path) {
-        (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
-        }
-        _ => None,
-    }
 }
 
 pub(in crate::app_state) fn session_storage_path(sessions_dir: &Path, session_id: &str) -> PathBuf {

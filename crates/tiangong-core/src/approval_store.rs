@@ -17,10 +17,7 @@ struct ApprovalStoreData {
 }
 
 fn store_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".tiangong").join("pending-approvals.json")
+    crate::storage::storage_root().join("pending-approvals.json")
 }
 
 fn load_store() -> ApprovalStoreData {

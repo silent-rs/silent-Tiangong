@@ -1,9 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use tauri::Manager;
 
-use tiangong_config::load_tiangong_config;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
@@ -17,9 +16,11 @@ use tracing::warn;
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
-    pub state: std::sync::Arc<AsyncMutex<tiangong_core::app_state::TiangongState>>,
+    pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
+    /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
+    plugin_dirty_sessions: Mutex<HashSet<String>>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -55,20 +56,31 @@ impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let app_config = load_tiangong_config();
-        let core_config = app_config.to_core_config();
+        // 初始化 config 内存单例（从磁盘加载一次，后续读内存）。
+        tiangong_config::registry::init();
+        let core_config = tiangong_config::registry::config().to_core_config();
         let config = CoreConfigProvider::new(core_config);
 
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // 构造 state：load_or_default 经 RuntimeEngine::new 注入 storage_root 到 core
+        //（core 运行时持久化需要）。config 加载走自己的 dir，不依赖 core cell。
+        let storage_root = tiangong_app_state::app_state::storage_root();
+        let state = std::sync::Arc::new(AsyncMutex::new(
+            tiangong_app_state::app_state::TiangongState::load_or_default(),
+        ));
+
         Self {
-            state: std::sync::Arc::new(AsyncMutex::new(
-                tiangong_core::app_state::TiangongState::load_or_default(),
-            )),
+            state,
             cores: Mutex::new(HashMap::new()),
             config,
-            skill_plugin: std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new()),
-            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::new()),
+            plugin_dirty_sessions: Mutex::new(HashSet::new()),
+            skill_plugin: std::sync::Arc::new(
+                tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
+            ),
+            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+                storage_root,
+            )),
             embedded_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
@@ -238,11 +250,32 @@ impl TiangongApp {
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        let next = self
-            .with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))
+        // old_sig 从 registry 旧值算（set_models 之前），new_sig 从 app-state 新值算。
+        let old_sig =
+            tiangong_config::registry::plugin_set_signature(&tiangong_config::registry::models());
+        let (next, new_sig) = self
+            .with_state_read(|core_state| {
+                let new_models = core_state.models_config().clone();
+                let new_sig = tiangong_config::registry::plugin_set_signature(&new_models);
+                // 同步 app-state 的最新 models 到 config 内存单例。
+                tiangong_config::registry::set_models(new_models);
+                Ok((core_state.build_core_config_from_base(&base), new_sig))
+            })
             .await?;
+        let plugin_set_changed = old_sig != new_sig;
         self.config.replace(next);
-        if let Ok(cores) = self.cores.lock() {
+        let cores = self.lock_cores();
+        if plugin_set_changed {
+            // 能力集合变化（新增/删除）：plugin 列表构造时固定，无法热更新。
+            // 标记 dirty，下次 ensure_core 时移除旧 core 重建（不打断当前 turn）。
+            for session_id in cores.keys().cloned().collect::<Vec<_>>() {
+                self.plugin_dirty_sessions
+                    .lock()
+                    .map(|mut g| g.insert(session_id))
+                    .ok();
+            }
+        } else {
+            // 仅 endpoint 变化：reload_config + on_config_updated 热更新端点。
             for core in cores.values() {
                 let _ = core.deliver(AgentInputKind::reload_config());
             }
@@ -252,7 +285,7 @@ impl TiangongApp {
 
     pub async fn with_state<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&mut tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&mut tiangong_app_state::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         let mut guard = self.state.lock().await;
         f(&mut guard).map_err(|e| e.to_string())
@@ -260,7 +293,7 @@ impl TiangongApp {
 
     pub async fn with_state_read<F, R>(&self, f: F) -> Result<R, String>
     where
-        F: FnOnce(&tiangong_core::app_state::TiangongState) -> Result<R, anyhow::Error>,
+        F: FnOnce(&tiangong_app_state::app_state::TiangongState) -> Result<R, anyhow::Error>,
     {
         let guard = self.state.lock().await;
         f(&guard).map_err(|e| e.to_string())
@@ -288,7 +321,17 @@ impl TiangongApp {
         // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
         {
             let mut cores = self.lock_cores();
-            if let Some(core) = cores.get(session_id) {
+            // 插件集合变化（能力新增/删除）时移除旧 core，用最新 models 重建。
+            let dirty = self
+                .plugin_dirty_sessions
+                .lock()
+                .map(|mut g| g.remove(session_id))
+                .unwrap_or(false);
+            if dirty {
+                if cores.remove(session_id).is_some() {
+                    tracing::info!(session_id, "插件集合变化，移除旧 core 待重建");
+                }
+            } else if let Some(core) = cores.get(session_id) {
                 if core.is_running() {
                     let _ = core.deliver(AgentInputKind::reload_config());
                     let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
@@ -324,28 +367,36 @@ impl TiangongApp {
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
-        // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-        let cfg = self.config.snapshot();
-        let llm = &cfg.llm;
-        if llm.has_image_generation() {
-            plugins.push(tiangong_plugin_generate_image::build_plugin());
+        // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+        // models 从 config 内存单例读取（sync_core_config_from_state 时已同步）。
+        use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+        let models = tiangong_config::registry::models();
+        let resolve_ep = |cap: ModelCapability| {
+            models
+                .resolve_for_capability(cap)
+                .map(ModelEndpoint::from_resolved)
+        };
+        if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+            plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
         }
-        if llm.has_video_generation() {
-            plugins.push(tiangong_plugin_generate_video::build_plugin());
+        if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+            plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
         }
-        if llm.has_tts() {
-            plugins.push(tiangong_plugin_text_to_speech::build_plugin());
+        if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+            plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
         }
-        if llm.has_stt() {
-            plugins.push(tiangong_plugin_speech_to_text::build_plugin());
+        if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+            plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
         plugins.push(tiangong_plugin_task::build_plugin());
-        // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
-        // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-        if tiangong_plugin_analyze_attachment::should_register(llm) {
-            plugins.push(tiangong_plugin_analyze_attachment::build_plugin());
+        if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
+            if let Some(client) =
+                resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
+            {
+                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+            }
         }
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
         // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
@@ -355,8 +406,13 @@ impl TiangongApp {
         plugins.push(self.mcp_plugin.clone());
 
         // 4. 创建 Core 并插入（重新拿锁）。
-        let core =
-            TiangongCore::with_session_for_gui(self.config.clone(), session, stream_tx, plugins);
+        let core = TiangongCore::with_session_for_gui(
+            self.config.clone(),
+            session,
+            stream_tx,
+            plugins,
+            tiangong_app_state::app_state::storage_root(),
+        );
         let id = core.session_id().to_string();
         {
             let mut cores = self.lock_cores();

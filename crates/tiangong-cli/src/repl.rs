@@ -1,9 +1,8 @@
 //! CLI REPL — 类似 codex/claude code 风格交互
 
 use anyhow::Result;
-use tiangong_config::load_tiangong_config;
+use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::app_state::TiangongState;
 use tiangong_core::core::TiangongCore;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
@@ -16,22 +15,25 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
-    let app_config = load_tiangong_config();
-    let core_config = app_config.to_core_config();
-    // 媒体插件注册需要读取能力配置；core_config 随后会 move 进 CoreConfigProvider，
-    // 故在此先克隆 llm 供 plugins 构造使用。
-    let llm_config = core_config.llm.clone();
+    // 初始化 config 内存单例（从磁盘加载一次）。
+    tiangong_config::registry::init();
+    let core_config = tiangong_config::registry::config().to_core_config();
+    let models = tiangong_config::registry::models();
 
     let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
 
     let mut state = TiangongState::load_or_default();
-    let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> =
-        std::sync::Arc::new(tiangong_plugin_skill::SkillPlugin::new());
+    // storage_root 由 app-state 统一计算；plugin 由 app 注入同一根目录。
+    let storage_root = tiangong_app_state::app_state::storage_root();
+    let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> = std::sync::Arc::new(
+        tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
+    );
     // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
     // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
     // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
-    let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> =
-        std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::new());
+    let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> = std::sync::Arc::new(
+        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+    );
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     // CLI 入口是同步函数，用临时 tokio runtime block_on。
@@ -47,41 +49,54 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             None
         });
 
-    let core = TiangongCore::new_for_cli(config.clone(), stream_tx, {
-        let llm = &llm_config;
-        let mut plugins = tiangong_plugin_fs::default_plugins();
-        plugins.extend(tiangong_plugin_index::default_plugins());
-        // 媒体插件按 LlmConfig 能力配置条件注册：未配置的能力不暴露工具。
-        if llm.has_image_generation() {
-            plugins.extend(tiangong_plugin_generate_image::default_plugins());
-        }
-        if llm.has_video_generation() {
-            plugins.extend(tiangong_plugin_generate_video::default_plugins());
-        }
-        if llm.has_tts() {
-            plugins.extend(tiangong_plugin_text_to_speech::default_plugins());
-        }
-        if llm.has_stt() {
-            plugins.extend(tiangong_plugin_speech_to_text::default_plugins());
-        }
-        plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
-        plugins.extend(tiangong_plugin_fetch::default_plugins());
-        plugins.extend(tiangong_plugin_command::default_plugins());
-        plugins.extend(tiangong_plugin_scheduler::default_plugins());
-        plugins.extend(tiangong_plugin_task::default_plugins());
-        // 附件分析（analyze_attachment）：仅当配置了 multimodal 端点、且 chat 主模型
-        // 非 multimodal 时才注册（与其他媒体插件一致的入口层条件注册模式）。
-        if tiangong_plugin_analyze_attachment::should_register(llm) {
-            plugins.extend(tiangong_plugin_analyze_attachment::default_plugins());
-        }
-        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
-        // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
-        plugins.push(skill_plugin.clone());
-        // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
-        // CLI 侧经 mcp_plugin 做管理。
-        plugins.push(mcp_plugin.clone());
-        plugins
-    });
+    let core = TiangongCore::new_for_cli(
+        config.clone(),
+        stream_tx,
+        {
+            // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+            let resolve_ep = |cap: ModelCapability| {
+                models
+                    .resolve_for_capability(cap)
+                    .map(ModelEndpoint::from_resolved)
+            };
+            let mut plugins = tiangong_plugin_fs::default_plugins();
+            plugins.extend(tiangong_plugin_index::default_plugins());
+            if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+                plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+                plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+                plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+            }
+            if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+                plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+            }
+            plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
+            plugins.extend(tiangong_plugin_fetch::default_plugins());
+            plugins.extend(tiangong_plugin_command::default_plugins());
+            plugins.extend(tiangong_plugin_scheduler::default_plugins());
+            plugins.extend(tiangong_plugin_task::default_plugins());
+            // analyze-attachment：仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册。
+            if models.has_capability(ModelCapability::Multimodal)
+                && !models.chat_is_multimodal()
+                && let Some(client) =
+                    resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
+            {
+                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+            }
+            // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
+            // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
+            plugins.push(skill_plugin.clone());
+            // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
+            // CLI 侧经 mcp_plugin 做管理。
+            plugins.push(mcp_plugin.clone());
+            plugins
+        },
+        storage_root,
+    );
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {
