@@ -123,8 +123,6 @@ pub(super) fn drain_pending_commands_async(
     }
 }
 
-/// 节流（≥5s）地观察浏览器当前页面，发生变化时把快照注入会话上下文。
-
 /// 非阻塞检查是否有取消或关闭命令待处理。
 pub(super) fn check_cancel(
     session: &mut Session,
