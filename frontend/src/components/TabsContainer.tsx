@@ -484,6 +484,8 @@ export function TabsContainer({
         if (activeSessionId) {
           void api.setSessionTabs(activeSessionId, [], null).catch(console.error);
         }
+        // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
+        void api.browserHide().catch(console.error);
         void api.browserSwitchSession(terminalSessionId, [], null).catch(console.error);
         onClose();
         return [];

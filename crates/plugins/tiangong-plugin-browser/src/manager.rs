@@ -1635,13 +1635,19 @@ impl BrowserManager {
         if was_active {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if state.tabs.is_empty() {
-                // 最后一个 tab 关闭，完全关闭浏览器
+                // 最后一个 tab 关闭：隐藏浏览器面板（webview 已在上面 remove+close），
+                // 停轮询，清运行时 state，visible=false 让前端感知浏览器已无内容。
                 state
                     .poll_stop
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 state
                     .event_poll_stop
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // 隐藏残留 webview（理论上 tabs 空时 webviews 也空，兜底）
+                for wv in state.webviews.values() {
+                    let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
+                    let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
+                }
                 state.page_loaded_signals.clear();
                 state.latest_snapshots.clear();
                 state.last_known_url.clear();
@@ -1650,6 +1656,9 @@ impl BrowserManager {
                 state.active_tab_id = None;
                 state.tab_histories.clear();
                 state.tab_history_indices.clear();
+                state
+                    .visible
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
             } else {
                 // 切换到关闭位置处的相邻标签
                 let new_pos = closed_pos.min(state.tabs.len().saturating_sub(1));
