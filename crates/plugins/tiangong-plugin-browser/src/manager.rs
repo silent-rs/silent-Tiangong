@@ -212,6 +212,7 @@ impl BrowserManager {
     }
 
     /// 为指定标签创建独立的 WebView 实例
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_webview_for_tab(
         app: &AppHandle<Wry>,
         session_id: &str,

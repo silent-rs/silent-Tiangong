@@ -64,6 +64,7 @@ pub trait PageFetcher: Send + Sync + 'static {
     }
 
     /// 加载 HTML 内容到浏览器。
+    #[allow(clippy::type_complexity)]
     fn load_html(
         &self,
         _html: &str,
