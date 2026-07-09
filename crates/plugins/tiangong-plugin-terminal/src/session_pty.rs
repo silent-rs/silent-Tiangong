@@ -987,7 +987,9 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
-        let tx = match self.tx(session_id) {
+        // 优先路由到处于 AgentInteractive 态的 tab（即使它已不是 active tab），
+        // 保证交互程序的后续输入发到正确的终端；找不到才回退到 active/first tab。
+        let tx = match self.interactive_tx(session_id) {
             Some(tx) => tx,
             None => return Box::pin(async { None }),
         };

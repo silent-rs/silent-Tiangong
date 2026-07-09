@@ -11,14 +11,15 @@
 //! 节流策略沿用原 core 逻辑：首次检测无间隔；后续至少间隔 5 秒；URL 变化 / 文本差
 //! >500 字符 / 有用户操作 feedback 时才投递，避免无变化刷屏。
 //!
-//! ## 多 session 广播
+//! ## session 隔离
 //!
-//! GUI 入口为每个 Core（session）构造独立的 [`BrowserPlugin`](crate::plugin::BrowserPlugin)，
-//! 但它们共享同一个内嵌浏览器。为避免多个 watcher 重复 observe 同一页面，
-//! 观察任务通过 [`BROWSER_WATCHER`] 进程级单例保证只 spawn 一次；各 session 的
-//! feedback 通道注册到同一个 watcher，observe 到的变化广播给全部活跃通道。
+//! [`BrowserWatcher`](crate::watcher::BrowserWatcher) 是 session-scoped，随
+//! [`BrowserPlugin`](crate::plugin::BrowserPlugin) 生命周期存在：每个 Core/session 构造
+//! 自己的 watcher，只向当前 plugin 持有的 feedback channel 注入 `browser_data`。
+//! 不做跨 session 广播——后台/历史 session 不会被无关页面污染。
 
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -37,21 +38,19 @@ const TEXT_DIFF_THRESHOLD: u64 = 500;
 /// 后台轮询的 tick 间隔（实际 observe 仍受 MIN_OBSERVE_INTERVAL 节流）。
 const POLL_TICK: Duration = Duration::from_secs(2);
 
-/// 进程级单例 watcher：保证全局只有一个后台 observe 任务。
+/// 浏览器页面观察器：持有 fetcher 与当前 session 的 feedback 通道，后台周期性观察，
+/// 变化时只向自己的通道投递 `browser_data`。
 ///
-/// 首次 [`BrowserWatcher::ensure_started`] 时初始化并 spawn；后续调用复用同一实例，
-/// 仅把新的 feedback 通道追加到广播列表。这样多 session 共享一个浏览器时不会重复 observe。
-static BROWSER_WATCHER: OnceLock<RwLock<Option<Arc<BrowserWatcher>>>> = OnceLock::new();
-
-fn watcher_slot() -> &'static RwLock<Option<Arc<BrowserWatcher>>> {
-    BROWSER_WATCHER.get_or_init(|| RwLock::new(None))
-}
-
-/// 浏览器页面观察器：持有 fetcher，后台周期性观察，变化时向全部注册通道广播。
+/// 生命周期由 [`BrowserPlugin`](crate::plugin::BrowserPlugin) 管理：
+/// - 构造时创建，但不立即 spawn；
+/// - `set_feedback_tx` 注入当前 session 通道时懒启动后台任务（同一实例只启动一次）；
+/// - 通道关闭后后台任务检测到并自然跳过（空转等待下次注入）。
 pub struct BrowserWatcher {
     fetcher: Arc<dyn PageFetcher>,
-    /// 已注册的 feedback 通道列表（每个 session/Core 一个）。通道关闭后从列表移除。
-    channels: RwLock<Vec<PluginFeedbackTx>>,
+    /// 当前 session 的 feedback 通道；未注入时为 None，后台任务空转跳过。
+    feedback_tx: RwLock<Option<PluginFeedbackTx>>,
+    /// 后台任务是否已启动（防止 set_feedback_tx 重复调用时重复 spawn）。
+    started: AtomicBool,
     /// 上一次观察到的快照（url + 文本长度），用于变化检测。
     last_snapshot: RwLock<Option<(String, usize)>>,
     /// 上一次观察时间，用于节流。
@@ -59,59 +58,55 @@ pub struct BrowserWatcher {
 }
 
 impl BrowserWatcher {
-    /// 获取或创建进程级单例，并确保后台任务已启动。
-    ///
-    /// 首次调用时用传入的 fetcher 初始化；后续调用（其他 session 构造 BrowserPlugin 时）
-    /// 复用已有实例——fetcher 参数被忽略（浏览器全局唯一，fetcher 等价）。
-    /// 返回单例 Arc，供 [`BrowserWatcher::register_channel`] 注册当前 session 通道。
-    pub fn ensure_started(fetcher: Arc<dyn PageFetcher>) -> Arc<Self> {
-        // 快速路径：已存在
-        if let Ok(read) = watcher_slot().read() {
-            if let Some(existing) = read.as_ref() {
-                return existing.clone();
-            }
-        }
-        // 慢速路径：加写锁创建
-        let mut write = watcher_slot()
-            .write()
-            .expect("browser watcher slot poisoned");
-        if let Some(existing) = write.as_ref() {
-            return existing.clone();
-        }
-        let watcher = Arc::new(BrowserWatcher {
+    pub fn new(fetcher: Arc<dyn PageFetcher>) -> Self {
+        Self {
             fetcher,
-            channels: RwLock::new(Vec::new()),
+            feedback_tx: RwLock::new(None),
+            started: AtomicBool::new(false),
             last_snapshot: RwLock::new(None),
             last_check: RwLock::new(None),
-        });
-        let cloned = watcher.clone();
-        tokio::spawn(async move {
-            cloned.run_loop().await;
-        });
-        *write = Some(watcher.clone());
-        watcher
+        }
     }
 
-    /// 注册一个 feedback 通道（每个 session 在 `set_feedback_tx` 时调用）。
-    pub fn register_channel(&self, tx: PluginFeedbackTx) {
-        if let Ok(mut guard) = self.channels.write() {
-            guard.push(tx);
+    /// 注入当前 session 的 feedback 通道并懒启动后台观察任务。
+    ///
+    /// 可重复调用（如 engine 重建后重新注入通道）：仅更新通道引用，后台任务
+    /// 持有的是 watcher 的 `Arc`，会自动读到新通道；`started` 保证只 spawn 一次。
+    pub fn set_feedback_tx(self: &Arc<Self>, tx: PluginFeedbackTx) {
+        if let Ok(mut guard) = self.feedback_tx.write() {
+            *guard = Some(tx);
         }
+        self.ensure_started();
+    }
+
+    /// 确保后台任务已启动（同一实例只 spawn 一次）。
+    fn ensure_started(self: &Arc<Self>) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            watcher.run_loop().await;
+        });
     }
 
     async fn run_loop(&self) {
         tracing::debug!("browser watcher started");
         loop {
             sleep(POLL_TICK).await;
-            self.maybe_observe_and_broadcast().await;
+            self.maybe_observe_and_inject().await;
         }
     }
 
-    /// 执行一次节流检查 + observe + 变化检测 + 向全部活跃通道广播。
-    async fn maybe_observe_and_broadcast(&self) {
-        // 无注册通道时跳过（没有会话需要通知）
-        let channel_count = self.channels.read().map(|g| g.len()).unwrap_or(0);
-        if channel_count == 0 {
+    /// 执行一次节流检查 + observe + 变化检测 + 向当前 session 通道投递。
+    async fn maybe_observe_and_inject(&self) {
+        // 通道未注入或已关闭时跳过（没有会话需要通知）
+        let tx = match self.feedback_tx.read() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        let Some(tx) = tx else { return };
+        if tx.is_closed() {
             return;
         }
 
@@ -185,39 +180,26 @@ impl BrowserWatcher {
             .iter()
             .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
             .collect();
-        let payload = json!({
-            "title": snapshot.title,
-            "url": snapshot.url,
-            "text": snapshot.text,
-            "tabs": tabs,
-            "active_tab_id": snapshot.active_tab_id,
-            "feedback": feedback,
-        });
-
-        // 广播给全部活跃通道，清理已关闭的
-        let channels: Vec<PluginFeedbackTx> =
-            self.channels.read().map(|g| g.clone()).unwrap_or_default();
-        let mut alive = Vec::with_capacity(channels.len());
-        for tx in channels {
-            if tx.is_closed() {
-                continue;
-            }
-            tx.inject_tool("browser_data", payload.clone());
-            alive.push(tx);
-        }
+        tx.inject_tool(
+            "browser_data",
+            json!({
+                "title": snapshot.title,
+                "url": snapshot.url,
+                "text": snapshot.text,
+                "tabs": tabs,
+                "active_tab_id": snapshot.active_tab_id,
+                "feedback": feedback,
+            }),
+        );
         tracing::info!(
             url = %snapshot.url,
             title = %snapshot.title,
             text_len = snapshot.text.len(),
             events_len = snapshot.events.len(),
             has_feedback,
-            broadcast_to = alive.len(),
             "browser watcher injected browser_data"
         );
 
-        if let Ok(mut g) = self.channels.write() {
-            *g = alive;
-        }
         if let Ok(mut g) = self.last_snapshot.write() {
             *g = Some(new_state);
         }

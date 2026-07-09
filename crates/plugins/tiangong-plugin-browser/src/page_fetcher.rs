@@ -728,11 +728,8 @@ impl BrowserToolOverride {
                 };
                 lines.push(format!("元素 {}: <{}>{}", el.index, el.tag, attrs_str));
                 if !el.text.is_empty() {
-                    let text_preview = if el.text.len() > 200 {
-                        format!("{}...", &el.text[..200])
-                    } else {
-                        el.text.clone()
-                    };
+                    // char-safe 截断：len() 是字节数，按字节切片会切到 UTF-8 字符中间导致 panic。
+                    let text_preview = Self::truncate_text(&el.text, 200);
                     for line in text_preview.split('\n') {
                         if !line.trim().is_empty() {
                             lines.push(format!("  {}", line.trim()));
@@ -873,5 +870,51 @@ impl tiangong_core::agent_input::ToolInput for BrowserContent {
             "active_tab_id": self.active_tab_id,
             "feedback": self.feedback,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_text_ascii_short() {
+        assert_eq!(BrowserToolOverride::truncate_text("hello", 200), "hello");
+    }
+
+    #[test]
+    fn truncate_text_ascii_long() {
+        let s = "a".repeat(300);
+        let out = BrowserToolOverride::truncate_text(&s, 200);
+        assert_eq!(out.chars().count(), 201); // 200 chars + 省略号
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_text_multibyte_no_panic() {
+        // 中文：每个字符 3 字节，200 字符 = 600 字节。旧的字节切片 [&s[..200]]
+        // 会切到 UTF-8 字符中间导致 panic；char-safe 截断不应 panic。
+        let s = "中".repeat(300);
+        let out = BrowserToolOverride::truncate_text(&s, 200);
+        assert_eq!(out.chars().count(), 201);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_text_emoji_no_panic() {
+        // emoji：每个字符 4 字节。验证不会因字节边界 panic。
+        let s = "😀".repeat(300);
+        let out = BrowserToolOverride::truncate_text(&s, 10);
+        assert_eq!(out.chars().count(), 11); // 10 emoji + 省略号
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_text_exact_boundary() {
+        // 刚好等于阈值：不应追加省略号
+        let s = "a".repeat(200);
+        let out = BrowserToolOverride::truncate_text(&s, 200);
+        assert_eq!(out.chars().count(), 200);
+        assert!(!out.ends_with('…'));
     }
 }

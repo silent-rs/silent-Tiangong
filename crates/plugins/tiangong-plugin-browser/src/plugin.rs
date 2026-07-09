@@ -34,10 +34,10 @@ impl BrowserPlugin {
         let state = app.state::<crate::BrowserPluginState>();
         let fetcher: Arc<dyn PageFetcher> = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
         let override_handler = BrowserToolOverride::new(fetcher.clone());
-        // 获取进程级单例 watcher 并确保后台观察任务已启动（#225）。
-        // 多 session 共享一个浏览器：watcher 只 spawn 一次，各 session 的 feedback
-        // 通道在 set_feedback_tx 时注册到同一 watcher，observe 到的变化广播给全部通道。
-        let watcher = BrowserWatcher::ensure_started(fetcher);
+        // 创建 session-scoped watcher：随本 plugin/Core 生命周期存在，只向当前 session
+        // 的 feedback channel 注入 browser_data（#225）。构造时不 spawn，待
+        // set_feedback_tx 注入通道后懒启动，同一实例只启动一次。
+        let watcher = Arc::new(BrowserWatcher::new(fetcher));
         Some(Self {
             override_handler,
             watcher,
@@ -53,9 +53,10 @@ impl Plugin for BrowserPlugin {
     // register 不再注入 PageFetcher：浏览器能力是插件内部状态，
     // 由 BrowserToolOverride / watcher 直接持有 fetcher 调用（#225 能力下沉）。
 
-    /// 注入 feedback 通道给 watcher：注册到单例，observe 到的页面变化会广播到本通道。
+    /// 注入当前 session 的 feedback 通道给 watcher：懒启动后台观察任务，
+    /// observe 到的页面变化只注入到本通道（session 隔离，不跨 session 广播）。
     fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
-        self.watcher.register_channel(tx);
+        self.watcher.set_feedback_tx(tx);
     }
 
     fn tool_permission_overrides(
