@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -19,6 +19,8 @@ pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
+    /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
+    plugin_dirty_sessions: Mutex<HashSet<String>>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -72,6 +74,7 @@ impl TiangongApp {
             state,
             cores: Mutex::new(HashMap::new()),
             config,
+            plugin_dirty_sessions: Mutex::new(HashSet::new()),
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
             ),
@@ -247,17 +250,33 @@ impl TiangongApp {
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        let next = self
+        let (next, plugin_set_changed) = self
             .with_state_read(|core_state| {
+                let old_sig =
+                    tiangong_config::registry::plugin_set_signature(core_state.models_config());
                 // 同步 app-state 的最新 models 到 config 内存单例。
                 tiangong_config::registry::set_models(core_state.models_config().clone());
-                Ok(core_state.build_core_config_from_base(&base))
+                let new_sig =
+                    tiangong_config::registry::plugin_set_signature(core_state.models_config());
+                Ok((
+                    core_state.build_core_config_from_base(&base),
+                    old_sig != new_sig,
+                ))
             })
             .await?;
-        // CoreConfig replace 后所有 core 经 reload_config 触发 engine rebuild，
-        // plugin 经 on_config_updated 从 config 单例取最新 models 热更新端点。
         self.config.replace(next);
-        if let Ok(cores) = self.cores.lock() {
+        let cores = self.lock_cores();
+        if plugin_set_changed {
+            // 能力集合变化（新增/删除）：plugin 列表构造时固定，无法热更新。
+            // 标记 dirty，下次 ensure_core 时移除旧 core 重建（不打断当前 turn）。
+            for session_id in cores.keys().cloned().collect::<Vec<_>>() {
+                self.plugin_dirty_sessions
+                    .lock()
+                    .map(|mut g| g.insert(session_id))
+                    .ok();
+            }
+        } else {
+            // 仅 endpoint 变化：reload_config + on_config_updated 热更新端点。
             for core in cores.values() {
                 let _ = core.deliver(AgentInputKind::reload_config());
             }
@@ -303,7 +322,17 @@ impl TiangongApp {
         // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
         {
             let mut cores = self.lock_cores();
-            if let Some(core) = cores.get(session_id) {
+            // 插件集合变化（能力新增/删除）时移除旧 core，用最新 models 重建。
+            let dirty = self
+                .plugin_dirty_sessions
+                .lock()
+                .map(|mut g| g.remove(session_id))
+                .unwrap_or(false);
+            if dirty {
+                if cores.remove(session_id).is_some() {
+                    tracing::info!(session_id, "插件集合变化，移除旧 core 待重建");
+                }
+            } else if let Some(core) = cores.get(session_id) {
                 if core.is_running() {
                     let _ = core.deliver(AgentInputKind::reload_config());
                     let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));

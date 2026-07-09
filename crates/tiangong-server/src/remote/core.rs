@@ -46,6 +46,15 @@ impl ServerCoreManager {
         }
     }
 
+    /// 通知所有活跃 core reload_config（plugin 经 on_config_updated 热更新端点）。
+    pub fn notify_reload_config(&self) {
+        if let Ok(cores) = self.cores.lock() {
+            for core in cores.values() {
+                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
+            }
+        }
+    }
+
     pub async fn send_connector_message_and_wait(
         &self,
         connector: &str,

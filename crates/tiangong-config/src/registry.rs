@@ -58,10 +58,19 @@ pub fn update(new_config: TiangongConfig) {
 }
 
 /// 仅更新内存（不落盘），供内部同步使用（如 app-state 改了 models 后同步到单例）。
+/// 同步按新 chat model 重新解析 context_limit。
 pub fn set_models(new_models: tiangong_core::models_config::ModelsConfig) {
+    let dir = crate::io::storage_root();
+    let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
+    let context_limit = if llm.chat.model.is_empty() {
+        tiangong_core::core_config::default_context_limit()
+    } else {
+        crate::io::resolve_context_limit_at(&dir, &llm.chat.model)
+    };
     if let Ok(mut guard) = config_cell().write() {
         if let Some(cfg) = guard.as_mut() {
             cfg.models = new_models;
+            cfg.context_limit = context_limit;
         }
     }
 }
@@ -76,5 +85,31 @@ impl TiangongConfig {
         } else {
             let _ = crate::io::save_custom_prompt(&self.custom_system_prompt);
         }
+    }
+}
+
+/// 插件能力集合签名——用于检测配置变化是否影响插件注册集合
+/// （新增/删除能力 vs 仅 endpoint 变更）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PluginSetSignature {
+    pub image: bool,
+    pub video: bool,
+    pub tts: bool,
+    pub stt: bool,
+    pub analyze_attachment: bool,
+}
+
+/// 从 ModelsConfig 计算插件能力集合签名。
+pub fn plugin_set_signature(
+    models: &tiangong_core::models_config::ModelsConfig,
+) -> PluginSetSignature {
+    use tiangong_core::models_config::ModelCapability;
+    PluginSetSignature {
+        image: models.has_capability(ModelCapability::ImageGeneration),
+        video: models.has_capability(ModelCapability::VideoGeneration),
+        tts: models.has_capability(ModelCapability::Tts),
+        stt: models.has_capability(ModelCapability::Stt),
+        analyze_attachment: models.has_capability(ModelCapability::Multimodal)
+            && !models.chat_is_multimodal(),
     }
 }

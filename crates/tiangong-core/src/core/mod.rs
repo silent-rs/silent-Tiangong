@@ -401,6 +401,11 @@ async fn worker_loop_async(
                 None
             };
             let mut plugin_specs: Vec<ToolSpec> = Vec::new();
+            // 配置快照更新通知：在 register 之前调 on_config_updated，使插件先刷新
+            // 内部 endpoint/client，再收集 tool_specs / register——保证 specs 基于最新配置。
+            for plugin in &plugins {
+                plugin.on_config_updated(&cfg);
+            }
             // 追踪已注册的工具名，用于跨插件工具名冲突消解：
             // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
             // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
@@ -424,11 +429,6 @@ async fn worker_loop_async(
                         );
                     }
                 }
-            }
-            // 配置快照更新通知：插件可据此执行热更新（如 memory actor reconfigure）。
-            // 在 register 之后（workspace/trust/feedback 已注入）、on_engine_rebuilt 之前。
-            for plugin in &plugins {
-                plugin.on_config_updated(&cfg);
             }
             // 汇总所有插件贡献的子进程环境变量，
             // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。

@@ -190,14 +190,19 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
+        // context_limit == 0（Default 或未解析）时兜底为默认值
+        let context_limit = if self.context_limit == 0 {
+            tiangong_core::core_config::default_context_limit()
+        } else {
+            self.context_limit
+        };
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
             trust_mode: self.trust_mode,
             default_trust_mode: self.trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
-            // context_limit 在加载时已按 chat model 从对应目录解析（见 loader）
-            context_limit: self.context_limit,
+            context_limit,
         }
     }
 
