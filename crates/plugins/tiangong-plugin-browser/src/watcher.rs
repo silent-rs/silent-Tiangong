@@ -94,6 +94,17 @@ impl BrowserWatcher {
         tracing::debug!("browser watcher started");
         loop {
             sleep(POLL_TICK).await;
+            // feedback channel 关闭时退出，避免 session 结束后 task 泄漏
+            let closed = self
+                .feedback_tx
+                .read()
+                .ok()
+                .and_then(|g| g.as_ref().map(|tx| tx.is_closed()))
+                .unwrap_or(true);
+            if closed {
+                tracing::debug!("browser watcher: feedback channel closed, stopping");
+                break;
+            }
             self.maybe_observe_and_inject().await;
         }
     }

@@ -328,9 +328,10 @@ fn run_gui() {
                     }
                     let title = data["title"].as_str().unwrap_or("").to_string();
                     let text = data["text"].as_str().unwrap_or("").to_string();
+                    let inj_session_id = browser_state.registry.active_session_id();
                     use tiangong_plugin_browser::page_fetcher::BrowserContent;
                     let _ = tx1.send(tiangong_app::ToolInjection {
-                        session_id: None,
+                        session_id: inj_session_id,
                         tool: Box::new(BrowserContent {
                             title,
                             url,
