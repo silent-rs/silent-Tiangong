@@ -1841,12 +1841,11 @@ fn use_stream_mode() -> bool {
 /// - 否则取 `base_timeout_ms` 与 120s 的较小值——工具调用阶段默认用更保守的超时，
 ///   避免长时间卡住导致后续 plan 看似不执行。
 fn function_timeout_ms(base_timeout_ms: u64) -> u64 {
-    if let Ok(custom) = std::env::var("API_FUNCTION_TIMEOUT_MS") {
-        if let Ok(parsed) = custom.trim().parse::<u64>() {
-            if parsed > 0 {
-                return parsed;
-            }
-        }
+    if let Ok(custom) = std::env::var("API_FUNCTION_TIMEOUT_MS")
+        && let Ok(parsed) = custom.trim().parse::<u64>()
+        && parsed > 0
+    {
+        return parsed;
     }
     base_timeout_ms.min(120_000)
 }
