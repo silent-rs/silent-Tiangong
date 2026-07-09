@@ -7,18 +7,16 @@ use tracing::{debug, warn};
 
 use crate::manager::{default_browser_rect, BrowserManager};
 
-/// 按 session_id 解析目标 session 的 state：非空用指定 session，空回退 active。
-fn resolve_state(
+/// Agent 命令严格按 session_id 解析：空 session_id 返回 None（调用方应跳过/报错）。
+/// 不 fallback active/bootstrap——空 session_id 是调用方错误。
+fn resolve_agent_state(
     registry: &Arc<crate::session_registry::BrowserSessionRegistry>,
     session_id: &str,
-) -> Arc<std::sync::Mutex<crate::manager::BrowserState>> {
-    if !session_id.is_empty() {
-        registry.session_state(session_id)
-    } else {
-        registry
-            .active_state()
-            .unwrap_or_else(|| registry.session_state("__bootstrap__"))
+) -> Option<Arc<std::sync::Mutex<crate::manager::BrowserState>>> {
+    if session_id.trim().is_empty() {
+        return None;
     }
+    Some(registry.session_state(session_id))
 }
 
 use crate::types::{
@@ -128,7 +126,10 @@ pub async fn browser_command_handler(
                 response_tx,
             } => {
                 let url_for_error = url.clone();
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
 
                 let was_open = manager.is_open();
                 if !was_open {
@@ -152,7 +153,10 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(response);
             }
             BrowserCommand::OpenUrl { session_id, url } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 if !manager.is_open() {
                     let _ = app.emit("browser:open", &url);
                 }
@@ -165,7 +169,10 @@ pub async fn browser_command_handler(
             } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None
                 {
-                    let active = resolve_state(&registry, &session_id);
+                    let active = match resolve_agent_state(&registry, &session_id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
                     let s = match active.lock() {
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
@@ -186,7 +193,10 @@ pub async fn browser_command_handler(
                         continue;
                     }
                 }
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let snapshot = tokio::task::spawn_blocking(move || {
                     let events = manager.drain_events();
                     manager
@@ -227,7 +237,10 @@ pub async fn browser_command_handler(
                 });
                 // 补充标签信息
                 let tabs = {
-                    let active = resolve_state(&registry, &session_id);
+                    let active = match resolve_agent_state(&registry, &session_id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
                     let s = match active.lock() {
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
@@ -259,7 +272,10 @@ pub async fn browser_command_handler(
                 session_id,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result("window.__tiangong_bridge.extractForms()")
@@ -278,7 +294,10 @@ pub async fn browser_command_handler(
                 wait_for,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
@@ -375,7 +394,10 @@ pub async fn browser_command_handler(
                 wait_for,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
@@ -452,7 +474,10 @@ pub async fn browser_command_handler(
                 html,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 // 浏览器未打开时先打开，再加载 HTML
                 if !manager.is_open() {
                     if let Some((x, y, w, h)) = default_browser_rect(&app) {
@@ -469,12 +494,18 @@ pub async fn browser_command_handler(
                 session_id,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let tabs = manager.tab_list();
                 let _ = response_tx.send(tabs);
             }
             BrowserCommand::TabNew { session_id, url } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
                 let _ =
                     tokio::task::spawn_blocking(move || match manager.tab_new(&app_clone, &url) {
@@ -489,7 +520,10 @@ pub async fn browser_command_handler(
                     .await;
             }
             BrowserCommand::TabSwitch { session_id, tab_id } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_switch(&tab_id) {
@@ -504,7 +538,10 @@ pub async fn browser_command_handler(
                 .await;
             }
             BrowserCommand::TabClose { session_id, tab_id } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_close(&tab_id) {
@@ -522,7 +559,10 @@ pub async fn browser_command_handler(
                 session_id,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result(
@@ -546,7 +586,10 @@ pub async fn browser_command_handler(
                 query,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     let js = format!(
                         "JSON.stringify(window.__tiangong_bridge.locateElement({{query:{}}}))",
@@ -579,7 +622,10 @@ pub async fn browser_command_handler(
                 max_results,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = tokio::task::spawn_blocking(move || {
                     let js = format!(
                         "JSON.stringify(window.__tiangong_bridge.queryDom({},{max_results}))",
@@ -609,7 +655,10 @@ pub async fn browser_command_handler(
                 tab_id,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let result = manager.get_tab_history(tab_id.as_deref());
                 let _ = response_tx.send(result.unwrap_or(TabHistoryResult {
                     tab_id: String::new(),
@@ -623,7 +672,10 @@ pub async fn browser_command_handler(
                 limit,
                 response_tx,
             } => {
-                let manager = BrowserManager::from_state(resolve_state(&registry, &session_id));
+                let Some(agent_state) = resolve_agent_state(&registry, &session_id) else {
+                    continue;
+                };
+                let manager = BrowserManager::from_state(agent_state);
                 let entries = manager.get_global_history(offset, limit);
                 let _ = response_tx.send(entries);
             }

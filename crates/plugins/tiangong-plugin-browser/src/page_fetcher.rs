@@ -32,11 +32,13 @@ impl BrowserPageFetcher {
         }
     }
 
-    fn session_id(&self) -> String {
-        self.session_id
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+    fn session_id(&self) -> Option<String> {
+        let id = self.session_id.read().ok()?.clone();
+        if id.trim().is_empty() {
+            None
+        } else {
+            Some(id)
+        }
     }
 
     pub fn cmd_tx(&self) -> mpsc::Sender<BrowserCommand> {
@@ -63,7 +65,9 @@ impl PageFetcher for BrowserPageFetcher {
         max_chars: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<BrowserResponse>> + Send>> {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let url = url.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -87,7 +91,9 @@ impl PageFetcher for BrowserPageFetcher {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<BrowserPageSnapshot>> + Send>>
     {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let snapshot: BrowserPageSnapshot = send_and_wait!(
@@ -109,7 +115,9 @@ impl PageFetcher for BrowserPageFetcher {
         Box<dyn std::future::Future<Output = Option<Vec<crate::types::BrowserTab>>> + Send>,
     > {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let tabs: Vec<crate::types::BrowserTab> = send_and_wait!(
@@ -130,7 +138,9 @@ impl PageFetcher for BrowserPageFetcher {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FormExtractResult>> + Send>>
     {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let result: FormExtractResult = send_and_wait!(
@@ -154,7 +164,9 @@ impl PageFetcher for BrowserPageFetcher {
         wait_for: Option<&str>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FillFieldResult>> + Send>> {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let selector = selector.to_string();
         let value = value.to_string();
         let strategy = strategy.to_string();
@@ -185,7 +197,9 @@ impl PageFetcher for BrowserPageFetcher {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ClickElementResult>> + Send>>
     {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let selector = selector.to_string();
         let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
@@ -212,7 +226,9 @@ impl PageFetcher for BrowserPageFetcher {
         Box<dyn std::future::Future<Output = Option<std::result::Result<(), String>>> + Send>,
     > {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let html = html.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -240,7 +256,9 @@ impl PageFetcher for BrowserPageFetcher {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<LocateElementResult>> + Send>>
     {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let query = query.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -264,7 +282,9 @@ impl PageFetcher for BrowserPageFetcher {
         max_results: usize,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<QueryDomResult>> + Send>> {
         let tx = self.cmd_tx.clone();
-        let session_id = self.session_id();
+        let Some(session_id) = self.session_id() else {
+            return Box::pin(async { None });
+        };
         let selector = selector.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();

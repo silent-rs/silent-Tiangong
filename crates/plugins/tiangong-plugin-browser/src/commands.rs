@@ -160,7 +160,7 @@ pub async fn browser_annotation_extract(
     state
         .cmd_tx
         .send(crate::types::BrowserCommand::AnnotationExtract {
-            session_id: String::new(),
+            session_id: state.registry.active_session_id().unwrap_or_default(),
             response_tx,
         })
         .await
