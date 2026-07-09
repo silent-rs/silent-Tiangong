@@ -70,6 +70,33 @@ pub struct BrowserState {
 }
 
 impl BrowserState {
+    /// 构造一个空的 per-session 状态（不含 webview/tab/历史）。
+    ///
+    /// `global_history`/`zoom_factor` 此处给默认空值；进程级共享数据由
+    /// [`BrowserSessionRegistry`](crate::session_registry::BrowserSessionRegistry)
+    /// 持有与加载，T2 起 BrowserManager 从 registry 读取。
+    pub(crate) fn new_empty() -> Self {
+        Self {
+            webviews: HashMap::new(),
+            page_loaded_signals: HashMap::new(),
+            latest_snapshots: HashMap::new(),
+            last_known_url: String::new(),
+            last_known_text_signature: String::new(),
+            poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            event_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            pending_events: Vec::new(),
+            tabs: Vec::new(),
+            active_tab_id: None,
+            browser_rect: (0.0, 0.0, 0.0, 0.0),
+            global_history: Vec::new(),
+            tab_histories: HashMap::new(),
+            tab_history_indices: HashMap::new(),
+            zoom_factor: 1.0,
+            active_session_id: None,
+        }
+    }
+
     fn active_webview(&self) -> Option<&Webview<Wry>> {
         let active_id = self.active_tab_id.as_ref()?;
         self.webviews.get(active_id)
@@ -1792,7 +1819,7 @@ fn global_history_path() -> PathBuf {
         .join("browser-history.json")
 }
 
-fn load_global_history() -> Vec<HistoryEntry> {
+pub(crate) fn load_global_history() -> Vec<HistoryEntry> {
     let path = global_history_path();
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
@@ -1823,7 +1850,7 @@ fn zoom_path() -> PathBuf {
         .join("browser-zoom.json")
 }
 
-fn load_zoom() -> f64 {
+pub(crate) fn load_zoom() -> f64 {
     let path = zoom_path();
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str::<f64>(&content).unwrap_or(1.0),

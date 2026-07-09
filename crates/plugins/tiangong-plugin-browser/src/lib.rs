@@ -17,6 +17,7 @@ pub mod handler;
 pub mod manager;
 pub mod page_fetcher;
 pub mod plugin;
+pub mod session_registry;
 pub mod types;
 pub mod watcher;
 
