@@ -238,7 +238,7 @@ impl ModelCapability {
 }
 
 /// Provider 连接配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String, // 支持 ${ENV_VAR} 引用
@@ -253,7 +253,7 @@ fn default_timeout_ms() -> u64 {
 }
 
 /// 单个模型配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub provider: String,
     pub model: String,
@@ -286,7 +286,7 @@ fn default_options() -> Value {
 ///
 /// 序列化时优先将 routing 值写为字符串引用（确保旧版本也能读取），
 /// 仅当 models 中找不到匹配条目时才内联写入 ModelEntry。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelsConfig {
     pub providers: HashMap<String, ProviderConfig>,
     /// 模型注册表 — 存储所有已定义的模型，routing 从中选择

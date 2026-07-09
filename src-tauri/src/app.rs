@@ -20,9 +20,9 @@ pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
     pub config: CoreConfigProvider,
-    /// 启动时一次性加载的模型配置（含完整能力路由），供 plugin 能力判断派生访问，
-    /// 避免每次 ensure_core 重复读盘。
-    pub models: tiangong_core::models_config::ModelsConfig,
+    /// 模型配置缓存（含完整能力路由），供 ensure_core 构造插件时解析端点。
+    /// sync_core_config_from_state 时从 app-state 同步更新，确保不 stale。
+    pub models: Mutex<tiangong_core::models_config::ModelsConfig>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -59,8 +59,6 @@ impl TiangongApp {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let app_config = load_tiangong_config();
-        // models 一次性加载，供后续 plugin 能力判断派生访问（不再重读盘）。
-        let models = app_config.models.clone();
         let core_config = app_config.to_core_config();
         let config = CoreConfigProvider::new(core_config);
 
@@ -72,12 +70,17 @@ impl TiangongApp {
         let state = std::sync::Arc::new(AsyncMutex::new(
             tiangong_app_state::app_state::TiangongState::load_or_default(),
         ));
+        // models 缓存：从 app-state 读取最新值（启动时与 load_tiangong_config 一致）。
+        let models = {
+            let guard = state.blocking_lock();
+            guard.models_config().clone()
+        };
 
         Self {
             state,
             cores: Mutex::new(HashMap::new()),
             config,
-            models,
+            models: Mutex::new(models),
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
             ),
@@ -253,11 +256,30 @@ impl TiangongApp {
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        let next = self
-            .with_state_read(|core_state| Ok(core_state.build_core_config_from_base(&base)))
+        let (next, new_models) = self
+            .with_state_read(|core_state| {
+                let next = core_state.build_core_config_from_base(&base);
+                let new_models = core_state.models_config().clone();
+                Ok((next, new_models))
+            })
             .await?;
+        // 模型能力路由变化时，已有 core 的插件列表/endpoint 无法热更新（构造时固定），
+        // 直接清空 core，下次 ensure_core 用最新 models 重建。
+        // 其他配置（chat/lite/context_limit/trust_mode/prompt/reasoning）走 reload_config 热更新。
+        let models_changed = self
+            .models
+            .lock()
+            .map(|mut g| {
+                let changed = *g != new_models;
+                *g = new_models;
+                changed
+            })
+            .unwrap_or(false);
         self.config.replace(next);
-        if let Ok(cores) = self.cores.lock() {
+        let mut cores = self.lock_cores();
+        if models_changed {
+            cores.clear();
+        } else {
             for core in cores.values() {
                 let _ = core.deliver(AgentInputKind::reload_config());
             }
@@ -340,8 +362,9 @@ impl TiangongApp {
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+        // models 从缓存读取（sync_core_config_from_state 时已从 app-state 同步）。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-        let models = &self.models;
+        let models = self.models.lock().map(|g| g.clone()).unwrap_or_default();
         let resolve_ep = |cap: ModelCapability| {
             models
                 .resolve_for_capability(cap)
@@ -517,7 +540,7 @@ impl TiangongApp {
             token,
             self.state.clone(),
             self.config.clone(),
-            self.models.clone(),
+            self.models.lock().map(|g| g.clone()).unwrap_or_default(),
         )
         .map_err(|e| e.to_string())?;
         *guard = Some(handle);
