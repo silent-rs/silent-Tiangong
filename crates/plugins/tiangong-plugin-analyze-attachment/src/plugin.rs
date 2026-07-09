@@ -1,8 +1,7 @@
 //! 附件分析插件结构体定义与生命周期实现。
 //!
-//! [`AnalyzeAttachmentPlugin`] 在构造时接收已解析的 multimodal 客户端私有持有，
-//! 供 handler 按需调用。客户端由 app 层从 `ModelsConfig` 路由解析后注入，
-//! 不再依赖 core runtime 的 `register` 注入。
+//! multimodal 客户端构造时注入，配置变更时经 `on_config_updated` 从 config 内存
+//! 单例取最新 models 路由解析热更新——无需重建 engine/core。
 
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -10,34 +9,32 @@ use std::sync::RwLock;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::tool_override::PromptSectionProvider;
-use tiangong_llm::SingleProviderClient;
+use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
 
 /// 附件分析插件。
 pub struct AnalyzeAttachmentPlugin {
-    /// 当前会话工作目录（由 core 注入，附件分析当前未强依赖，保持一致性预留）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 构造时注入的 multimodal 客户端，供 handler 按需调用。
-    client: SingleProviderClient,
-    /// 状态反馈通道（转发 multimodal 调用的 token 用量，由 set_feedback_tx 注入）。
+    /// multimodal 客户端，构造时注入、配置变更时热更新。
+    client: RwLock<SingleProviderClient>,
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
 }
 
 impl AnalyzeAttachmentPlugin {
-    /// 构造插件实例：接收 app 层已解析的 multimodal 客户端。
     pub fn new(client: SingleProviderClient) -> Self {
         Self {
             workspace: RwLock::new(None),
-            client,
+            client: RwLock::new(client),
             feedback_tx: RwLock::new(None),
         }
     }
 
-    /// 取 multimodal 客户端的克隆快照（供 handler 使用）。
     pub(crate) fn client(&self) -> SingleProviderClient {
-        self.client.clone()
+        self.client
+            .read()
+            .map(|g| g.clone())
+            .expect("client mutex poisoned")
     }
 
-    /// 读取反馈通道的 clone（供 handler 发 token 用量用）。
     pub(crate) fn feedback_tx(&self) -> Option<PluginFeedbackTx> {
         self.feedback_tx.read().ok()?.as_ref().cloned()
     }
@@ -59,7 +56,17 @@ impl Plugin for AnalyzeAttachmentPlugin {
             *guard = Some(tx);
         }
     }
+
+    fn on_config_updated(&self, _config: &tiangong_core::core_config::CoreConfig) {
+        let models = tiangong_config::registry::models();
+        if !models.chat_is_multimodal() {
+            if let Some(resolved) = models.resolve_for_capability(ModelCapability::Multimodal) {
+                if let Ok(mut guard) = self.client.write() {
+                    *guard = SingleProviderClient::new(ModelEndpoint::from_resolved(resolved));
+                }
+            }
+        }
+    }
 }
 
-// 附件分析工具无需注入 Prompt 段落，使用空实现满足 supertrait 约束。
 impl PromptSectionProvider for AnalyzeAttachmentPlugin {}

@@ -47,9 +47,7 @@ impl TextToSpeechPlugin {
             return Box::pin(async { missing_arg("text 不能为空") });
         }
 
-        let Some(endpoint) = self.endpoint() else {
-            return Box::pin(async { media_unavailable() });
-        };
+        let endpoint = self.endpoint();
 
         let voice = call
             .arguments
@@ -193,6 +191,7 @@ fn missing_arg(message: &str) -> ToolResult {
 }
 
 /// 媒体能力未就绪（配置未注入）时的错误结果。
+#[allow(dead_code)]
 fn media_unavailable() -> ToolResult {
     ToolResult {
         ok: false,

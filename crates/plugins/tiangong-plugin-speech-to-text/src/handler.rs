@@ -47,9 +47,7 @@ impl SpeechToTextPlugin {
             return Box::pin(async { missing_arg("file_path 不能为空") });
         }
 
-        let Some(endpoint) = self.endpoint() else {
-            return Box::pin(async { media_unavailable() });
-        };
+        let endpoint = self.endpoint();
 
         // 安全限制：仅允许读取 ~/.tiangong/media/ 目录内的音频文件。
         // 校验扩展名为已知音频类型，canonicalize 后确认未逃逸媒体目录。
@@ -207,6 +205,7 @@ fn missing_arg(message: &str) -> ToolResult {
 }
 
 /// 媒体能力未就绪（配置未注入）时的错误结果。
+#[allow(dead_code)]
 fn media_unavailable() -> ToolResult {
     ToolResult {
         ok: false,

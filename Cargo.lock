@@ -9821,6 +9821,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tiangong-types",
@@ -9895,6 +9896,7 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tracing",
@@ -9906,6 +9908,7 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media",
@@ -10001,6 +10004,7 @@ version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tracing",
@@ -10044,6 +10048,7 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tracing",
