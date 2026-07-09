@@ -7,8 +7,9 @@ use std::time::Duration;
 use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_memory::{
-    Episode, EpisodeOutcome, LeaderState, ManagedMemory, MemoryHandle, ProcessType, RecallAnchors,
-    memory_service_name, read_leader_info, start_or_connect,
+    Episode, EpisodeOutcome, LeaderState, ManagedMemory, MemoryHandle, MemoryOptions,
+    MemoryVectorMode, ProcessType, RecallAnchors, memory_service_name, read_leader_info,
+    start_or_connect_with_options,
 };
 
 const MULTIPROCESS_CHILD_ROLE_ENV: &str = "TIANGONG_MEMORY_MULTIPROCESS_CHILD_ROLE";
@@ -62,14 +63,14 @@ async fn follower_continues_memory_after_leader_disappears() {
         home.path().display()
     ));
 
-    let leader = start_or_connect(ProcessType::Cli)
+    let leader = start_or_connect_test(ProcessType::Cli)
         .await
         .expect("启动 leader 失败");
     log_state("leader 启动后", &leader);
     log_leader_info("leader 启动后");
     assert!(leader.is_leader(), "首个 memory 实例应成为 leader");
 
-    let follower = start_or_connect(ProcessType::Server)
+    let follower = start_or_connect_test(ProcessType::Server)
         .await
         .expect("启动 follower 失败");
     log_state("follower 启动后", &follower);
@@ -177,7 +178,7 @@ async fn multiprocess_memory_actor_child_entry() {
     let workspace_id =
         std::env::var(MULTIPROCESS_CHILD_WORKSPACE_ENV).expect("子进程缺少 workspace 环境变量");
     let process_type = process_type_for_role(&role);
-    let memory = start_or_connect(process_type)
+    let memory = start_or_connect_test(process_type)
         .await
         .expect("子进程启动或连接 Memory 失败");
 
@@ -200,6 +201,16 @@ async fn multiprocess_memory_actor_child_entry() {
     println!("{MULTIPROCESS_READY_PREFIX} role={role} state={state} title={title}");
     std::io::stdout().flush().expect("刷新子进程输出失败");
     tokio::time::sleep(Duration::from_secs(30)).await;
+}
+
+/// 以「向量层禁用」的 MemoryOptions 执行选举，与 registry / election 单测保持一致。
+///
+/// failover 集成测试只验证 leader/follower 自动接续，不涉及向量检索。
+/// 用 `Disabled` 跳过 lancedb（C++ FFI）初始化，从根上消除测试进程 teardown
+/// 时 Actor 线程析构 lancedb 与进程 C++ 静态析构的竞态（Linux 偶发 SIGSEGV）。
+async fn start_or_connect_test(process_type: ProcessType) -> anyhow::Result<ManagedMemory> {
+    let options = MemoryOptions::new().with_vector_mode(MemoryVectorMode::Disabled);
+    start_or_connect_with_options(options, process_type).await
 }
 
 fn make_episode(session_id: &str, title: &str, summary: &str, keywords: Vec<String>) -> Episode {

@@ -1,5 +1,5 @@
-use tiangong_core::core_config::ModelEndpoint;
-use tiangong_core::models_config::RoutingSlot;
+use tiangong_llm::ModelEndpoint;
+use tiangong_llm::models_config::RoutingSlot;
 
 use super::super::*;
 
@@ -93,7 +93,7 @@ impl TiangongState {
     /// 更新新版 ModelsConfig 并持久化到 models.json，同时同步内部状态
     pub fn save_models_config(
         &mut self,
-        new_config: tiangong_core::models_config::ModelsConfig,
+        new_config: tiangong_llm::models_config::ModelsConfig,
     ) -> Result<()> {
         let dir = tiangong_config::io::storage_root();
         tiangong_config::io::save_models_config_at(&dir, &new_config)?;

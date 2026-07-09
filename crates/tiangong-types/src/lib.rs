@@ -11,6 +11,7 @@ pub mod session;
 pub mod status;
 pub mod stream;
 pub mod token;
+pub mod trust_mode;
 
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
 pub use message::{
@@ -23,6 +24,7 @@ pub use session::Session;
 pub use status::RunStatus;
 pub use stream::{MemoryRecallHitSummary, SessionStreamEvent, StreamEvent, StreamToolCall};
 pub use token::TokenUsage;
+pub use trust_mode::TrustMode;
 
 #[cfg(test)]
 mod tests;

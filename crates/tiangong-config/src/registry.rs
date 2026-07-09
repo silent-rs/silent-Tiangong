@@ -45,7 +45,7 @@ pub fn config() -> TiangongConfig {
 }
 
 /// 读取内存中的模型配置克隆（未 init 时 panic）。
-pub fn models() -> tiangong_core::models_config::ModelsConfig {
+pub fn models() -> tiangong_llm::models_config::ModelsConfig {
     config().models
 }
 
@@ -59,7 +59,7 @@ pub fn update(new_config: TiangongConfig) {
 
 /// 仅更新内存（不落盘），供内部同步使用（如 app-state 改了 models 后同步到单例）。
 /// 同步按新 chat model 重新解析 context_limit。
-pub fn set_models(new_models: tiangong_core::models_config::ModelsConfig) {
+pub fn set_models(new_models: tiangong_llm::models_config::ModelsConfig) {
     let dir = crate::io::storage_root();
     let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
     let context_limit = if llm.chat.model.is_empty() {
@@ -101,9 +101,9 @@ pub struct PluginSetSignature {
 
 /// 从 ModelsConfig 计算插件能力集合签名。
 pub fn plugin_set_signature(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
 ) -> PluginSetSignature {
-    use tiangong_core::models_config::ModelCapability;
+    use tiangong_llm::models_config::ModelCapability;
     PluginSetSignature {
         image: models.has_capability(ModelCapability::ImageGeneration),
         video: models.has_capability(ModelCapability::VideoGeneration),
@@ -118,7 +118,7 @@ pub fn plugin_set_signature(
 mod tests {
     use super::*;
     use tiangong_core::model::ProviderProtocol;
-    use tiangong_core::models_config::{
+    use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
 

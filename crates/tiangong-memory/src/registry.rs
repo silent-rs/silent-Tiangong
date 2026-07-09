@@ -322,6 +322,7 @@ fn memory_config_can_update_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     static MEMORY_REGISTRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     fn memory_config_summary(_config: &CoreConfig) -> MemoryConfigSummary {
@@ -337,6 +338,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn memory_config_summary_tracks_memory_relevant_fields() {
         let _lock = memory_registry_test_lock();
         let _env = MemoryRegistryEnvGuard::enter();
@@ -376,6 +378,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[serial]
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_reuses_global_handle_regardless_of_workspace() {
         let _lock = memory_registry_test_lock();
@@ -406,6 +409,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[serial]
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_async_path_starts_or_connects_inside_runtime() {
         let _lock = memory_registry_test_lock();
@@ -429,6 +433,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[serial]
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_hot_updates_memory_config_in_place() {
         let _lock = memory_registry_test_lock();
@@ -464,6 +469,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[serial]
     #[allow(clippy::await_holding_lock)]
     async fn memory_registry_reacts_to_core_config_provider_hot_reload() {
         let _lock = memory_registry_test_lock();
