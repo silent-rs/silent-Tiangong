@@ -184,6 +184,24 @@ impl BrowserManager {
         Self { state }
     }
 
+    /// 持久化当前 session 的 tab 状态（tab/url/title/active 变化时调用）。
+    ///
+    /// 从 state 读出 session_id + tabs + active_tab_id，写入 per-session store。
+    /// 用于应用重启后恢复各 session 上次的浏览器页面（review #6）。
+    pub(crate) fn persist_session_tabs(&self) {
+        if let Ok(s) = self.state.lock() {
+            if !s.session_id.is_empty() {
+                crate::session_store::BrowserSessionStore::save(
+                    &s.session_id,
+                    &crate::session_store::BrowserSessionPersisted {
+                        tabs: s.tabs.clone(),
+                        active_tab_id: s.active_tab_id.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     /// 浏览器是否已初始化（有标签即为已打开，包括 about:blank 延迟创建 WebView 的情况）
     pub fn is_open(&self) -> bool {
         self.state
@@ -1552,6 +1570,7 @@ impl BrowserManager {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab_id.clone(), webview);
         }
+        self.persist_session_tabs();
         Ok(tab_id)
     }
 
@@ -1585,6 +1604,8 @@ impl BrowserManager {
         }
 
         state.active_tab_id = Some(tab_id.to_string());
+        drop(state);
+        self.persist_session_tabs();
         Ok(())
     }
 
@@ -1643,6 +1664,7 @@ impl BrowserManager {
                 state.active_tab_id = Some(new_id);
             }
         }
+        self.persist_session_tabs();
         Ok(())
     }
 
