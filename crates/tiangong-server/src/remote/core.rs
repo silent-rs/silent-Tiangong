@@ -204,12 +204,10 @@ impl ServerCoreManager {
                 plugins.extend(tiangong_plugin_task::default_plugins());
                 if models.has_capability(ModelCapability::Multimodal)
                     && !models.chat_is_multimodal()
-                {
-                    if let Some(client) =
+                    && let Some(client) =
                         resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
-                    {
-                        plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                    }
+                {
+                    plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
                 }
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
                 // 已启用 skill 决定是否暴露工具与注入 prompt 段落。

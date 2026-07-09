@@ -80,12 +80,12 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             plugins.extend(tiangong_plugin_scheduler::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
             // analyze-attachment：仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册。
-            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-                if let Some(client) =
+            if models.has_capability(ModelCapability::Multimodal)
+                && !models.chat_is_multimodal()
+                && let Some(client) =
                     resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
-                {
-                    plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
+            {
+                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
             }
             // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
             // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
