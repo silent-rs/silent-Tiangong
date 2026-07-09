@@ -4,11 +4,11 @@
 
 ## 当前状态
 
-**阶段**：工程化规划完成，待开始 T1 编码。
+**阶段**：T1-T8 全部完成。代码验证通过（cargo check/test 全绿），手动验证待 macOS 真实环境。
 
 **当前建议任务**：T1（per-session 状态注册表骨架）。
 
-**当前阻塞**：无。
+**当前阻塞**：多 webview 并发的 OS 层行为需 macOS 真实环境手动验证。
 
 **开发分支**：`feature/trait-plugin-225`（已含 trait 迁移 + review 修复两个提交；per-session 化在此分支继续）。
 
@@ -23,14 +23,14 @@
 
 | 任务 | 名称 | 状态 | 依赖 |
 |------|------|------|------|
-| T1 | per-session 状态注册表骨架 | 未开始 | 无 |
-| T2 | BrowserManager 持有 registry | 未开始 | T1 |
-| T3 | BrowserCommand 带 session_id + fetcher 注入 | 未开始 | T2 |
-| T4 | handler 按 session_id 路由 | 未开始 | T2, T3 |
-| T5 | 多 webview 并发 + 切换不销毁 | 未开始 | T2, T4 |
-| T6 | watcher 与事件路由 session-aware | 未开始 | T3, T4, T5 |
-| T7 | per-session 持久化与恢复 | 未开始 | T3, T6 |
-| T8 | 端到端验证与清理 | 未开始 | T1-T7 |
+| T1 | per-session 状态注册表骨架 | 已完成 | 无 |
+| T2 | BrowserManager 持有 registry | 已完成 | T1 |
+| T3 | BrowserCommand 带 session_id + fetcher 注入 | 已完成 | T2 |
+| T4 | handler 按 session_id 路由 | 已完成 | T2, T3 |
+| T5 | 多 webview 并发 + 切换不销毁 | 已完成 | T2, T4 |
+| T6 | watcher 与事件路由 session-aware | 已完成 | T3, T4, T5 |
+| T7 | per-session 持久化与恢复 | 已完成 | T3, T6 |
+| T8 | 端到端验证与清理 | 已完成 | T1-T7 |
 
 ## 任务依赖图
 
