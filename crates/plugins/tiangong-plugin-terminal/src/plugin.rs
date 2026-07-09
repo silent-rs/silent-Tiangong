@@ -12,16 +12,19 @@ use serde_json::json;
 use tauri::{Manager, Wry};
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::terminal_trait::TerminalProvider;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler};
 
+use crate::capability::TerminalProvider;
 use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
 use crate::session_pty::SessionAwareTerminalProvider;
+use tiangong_core::permission::TrustMode;
 
 /// 终端插件：聚合终端能力、工具覆盖处理器与 Prompt 段落提供者。
+///
+/// `provider` 不作为字段持有——终端能力是插件内部状态，由 `TerminalToolOverride`
+/// 在构造时捕获并独占使用，插件外壳无需再保留一份（#225 能力下沉）。
 pub struct TerminalPlugin {
-    provider: Arc<dyn TerminalProvider>,
     override_handler: TerminalToolOverride,
     prompt_provider: TerminalPromptSectionProvider,
 }
@@ -36,10 +39,9 @@ impl TerminalPlugin {
         let state = app.state::<crate::TerminalPluginState>();
         let provider: Arc<dyn TerminalProvider> =
             Arc::new(SessionAwareTerminalProvider::new(state.registry.clone()));
-        let override_handler = TerminalToolOverride::new(provider.clone());
+        let override_handler = TerminalToolOverride::new(provider);
         let prompt_provider = TerminalPromptSectionProvider;
         Some(Self {
-            provider,
             override_handler,
             prompt_provider,
         })
@@ -51,11 +53,12 @@ impl Plugin for TerminalPlugin {
         "terminal"
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        // 注入终端能力（校验通过后可通过 PTY 执行命令）
-        engine.set_terminal_provider(self.provider.clone());
-        // 工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集，
-        // 此处仅注入 TerminalProvider 能力。
+    // register 留空：终端能力是插件内部状态，由 handler 直接持有 provider 调用，
+    // 不再经 RuntimeEngine 中转注入（#225 能力下沉）。
+
+    /// 注入共享信任模式引用：透传给 handler，FullTrust 时跳过 run_command 校验。
+    fn set_trust_mode(&self, trust: std::sync::Arc<std::sync::RwLock<TrustMode>>) {
+        self.override_handler.set_trust_mode(trust);
     }
 }
 

@@ -29,10 +29,7 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 use crate::agent_team::lifecycle::TeamContext;
 
 use super::cancel::{CancelSignal, CancelStrategy, emit_cancel_usage};
-use super::helpers::{
-    check_cancel, drain_pending_commands_async, looks_like_final_answer,
-    maybe_inject_browser_update,
-};
+use super::helpers::{check_cancel, drain_pending_commands_async, looks_like_final_answer};
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
 /// 单个 turn 内的执行阶段。
@@ -169,8 +166,6 @@ impl ReactEngine {
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
-        let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
-        let mut last_browser_check: Option<std::time::Instant> = None;
 
         if self.agent_id == "main" {
             let routed = self
@@ -236,19 +231,6 @@ impl ReactEngine {
                         failed_tool_names.clear();
                     }
                     PendingCommandEffect::None => {}
-                }
-
-                // 首轮：主动获取浏览器当前状态并注入上下文
-                if round == 0 {
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        false,
-                    )
-                    .await;
                 }
 
                 // 内层工具执行阶段轮次上限：达到即结束工具阶段，进入总结。
@@ -657,17 +639,6 @@ impl ReactEngine {
                         }
                         PendingCommandEffect::None => {}
                     }
-
-                    // 工具执行间隙：检测浏览器状态变化
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        false,
-                    )
-                    .await;
 
                     if let Some(parse_error) = call
                         .arguments
@@ -1218,17 +1189,6 @@ impl ReactEngine {
                         }
                         PendingCommandEffect::None => {}
                     }
-
-                    // 工具执行后：检测浏览器状态变化
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        true,
-                    )
-                    .await;
                 }
 
                 if need_failure_recovery_prompt {

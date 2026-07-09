@@ -11,12 +11,14 @@ use crate::manager::BrowserManager;
 use crate::types::BrowserCommand;
 
 pub mod bridge;
+pub mod capability;
 pub mod commands;
 pub mod handler;
 pub mod manager;
 pub mod page_fetcher;
 pub mod plugin;
 pub mod types;
+pub mod watcher;
 
 /// 构造浏览器进程内插件（issue #156 自注册架构）。
 ///

@@ -459,7 +459,7 @@ impl SessionPtyRegistry {
     pub fn select_for_command(
         &self,
         session_id: &str,
-    ) -> Option<tiangong_core::terminal_trait::TerminalSelection> {
+    ) -> Option<crate::capability::TerminalSelection> {
         let route = parse_terminal_id(session_id)?;
         let session_tabs = self.session_tabs(&route.session_id);
 
@@ -475,13 +475,12 @@ impl SessionPtyRegistry {
                             Some(tab_id.clone()),
                             "agent_command",
                         );
-                        return Some(tiangong_core::terminal_trait::TerminalSelection {
+                        return Some(crate::capability::TerminalSelection {
                             session_id: route.session_id,
                             tab_id,
                             terminal_id,
                             created_new: false,
-                            reason:
-                                tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle,
+                            reason: crate::capability::TerminalSelectionReason::ReusedIdle,
                         });
                     }
                     // 指定 Tab 存活但正在忙，避开它，后续走空闲 Tab / 新建 Tab。
@@ -491,12 +490,12 @@ impl SessionPtyRegistry {
                     }
                     session_tabs.set_active_tab(tab_id.clone());
                     self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                    return Some(tiangong_core::terminal_trait::TerminalSelection {
+                    return Some(crate::capability::TerminalSelection {
                         session_id: route.session_id,
                         tab_id,
                         terminal_id,
                         created_new: true,
-                        reason: tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal,
+                        reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
                     });
                 }
             } else {
@@ -505,13 +504,12 @@ impl SessionPtyRegistry {
                 }
                 session_tabs.set_active_tab(tab_id.clone());
                 self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                return Some(tiangong_core::terminal_trait::TerminalSelection {
+                return Some(crate::capability::TerminalSelection {
                     session_id: route.session_id,
                     tab_id,
                     terminal_id,
                     created_new: true,
-                    reason:
-                        tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal,
+                    reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
                 });
             }
         }
@@ -544,19 +542,19 @@ impl SessionPtyRegistry {
         if let Some(tab_id) = idle_tab_id {
             session_tabs.set_active_tab(tab_id.clone());
             self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-            return Some(tiangong_core::terminal_trait::TerminalSelection {
+            return Some(crate::capability::TerminalSelection {
                 session_id: route.session_id.clone(),
                 tab_id: tab_id.clone(),
                 terminal_id: terminal_instance_id(&route.session_id, &tab_id),
                 created_new: false,
-                reason: tiangong_core::terminal_trait::TerminalSelectionReason::ReusedIdle,
+                reason: crate::capability::TerminalSelectionReason::ReusedIdle,
             });
         }
 
         let reason = if had_live_terminal {
-            tiangong_core::terminal_trait::TerminalSelectionReason::AllBusy
+            crate::capability::TerminalSelectionReason::AllBusy
         } else {
-            tiangong_core::terminal_trait::TerminalSelectionReason::NoAvailableTerminal
+            crate::capability::TerminalSelectionReason::NoAvailableTerminal
         };
         let tab_id = scru128::new().to_string();
         let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
@@ -565,7 +563,7 @@ impl SessionPtyRegistry {
         }
         session_tabs.set_active_tab(tab_id.clone());
         self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-        Some(tiangong_core::terminal_trait::TerminalSelection {
+        Some(crate::capability::TerminalSelection {
             session_id: route.session_id,
             tab_id,
             terminal_id,
@@ -827,16 +825,12 @@ macro_rules! send_and_wait {
     }};
 }
 
-impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalProvider {
+impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
     fn select_for_command(
         &self,
         session_id: &str,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalSelection>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalSelection>> + Send>,
     > {
         let selection = self.registry.select_for_command(session_id);
         Box::pin(async move { selection })
@@ -848,11 +842,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         command: &str,
         timeout_secs: Option<u64>,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
         let tx = match self.interactive_tx(session_id) {
             Some(tx) => tx,
@@ -882,11 +872,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         args: &[String],
         timeout_secs: Option<u64>,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
         // 拼装命令字符串
         let mut parts = vec![cmd.to_string()];
@@ -903,11 +889,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         command: &str,
         wait_secs: u64,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
         let tx = match self.tx(session_id) {
             Some(tx) => tx,
@@ -937,11 +919,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         args: &[String],
         wait_secs: u64,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
         // 拼装命令字符串，委托给 exec_interactive
         let mut parts = vec![cmd.to_string()];
@@ -1007,11 +985,7 @@ impl tiangong_core::terminal_trait::TerminalProvider for SessionAwareTerminalPro
         input: &str,
         wait_secs: u64,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::terminal_trait::TerminalExecResult>,
-                > + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
         let tx = match self.tx(session_id) {
             Some(tx) => tx,

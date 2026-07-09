@@ -10,7 +10,7 @@
 //! 2. `set_trust_mode` — 注入共享信任模式引用；
 //! 3. `set_feedback_tx` — 注入状态反馈通道（复用 worker 命令通道）；
 //! 4. `Plugin::register` — 让插件初始化内部状态或注入 engine 依赖
-//!    （如克隆 models_config、注入 PageFetcher / TerminalProvider 等）。必须在收集
+//!    （如克隆 models_config、初始化插件内部状态等）。必须在收集
 //!    tool_specs 前，确保插件已就绪；
 //! 5. 收集 `tool_specs` 并注册为 `ToolSpecProvider`；
 //! 6. 按 spec.name 逐个注册 `ToolOverrideHandler`（基于 register 之后的正确 specs）；

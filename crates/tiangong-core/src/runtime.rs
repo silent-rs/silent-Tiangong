@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::agent_config::AgentConfig;
-use crate::browser_trait::PageFetcher;
 use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::ModelsConfig;
@@ -84,10 +83,6 @@ pub struct RuntimeEngine {
     models_config: ModelsConfig,
     core_config: Option<crate::core_config::CoreConfig>,
     permission_gate: crate::permission::PermissionGate,
-    /// 浏览器页面获取能力（GUI 模式下注入）
-    page_fetcher: Arc<Mutex<Option<Arc<dyn PageFetcher>>>>,
-    /// 终端能力（GUI 模式下注入）
-    terminal_provider: Arc<Mutex<Option<Arc<dyn crate::terminal_trait::TerminalProvider>>>>,
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的工具规格提供者
@@ -104,14 +99,6 @@ impl std::fmt::Debug for RuntimeEngine {
         f.debug_struct("RuntimeEngine")
             .field("client", &self.client)
             .field("context_limit", &self.context_limit)
-            .field(
-                "page_fetcher",
-                &self
-                    .page_fetcher
-                    .lock()
-                    .map(|g| g.is_some())
-                    .unwrap_or(false),
-            )
             .field(
                 "tool_overrides",
                 &self.tool_overrides.lock().map(|g| g.len()).unwrap_or(0),
@@ -144,8 +131,6 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
-            page_fetcher: Arc::new(Mutex::new(None)),
-            terminal_provider: Arc::new(Mutex::new(None)),
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
@@ -178,8 +163,6 @@ impl RuntimeEngine {
             models_config: ModelsConfig::default(),
             core_config: None,
             permission_gate,
-            page_fetcher: Arc::new(Mutex::new(None)),
-            terminal_provider: Arc::new(Mutex::new(None)),
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
@@ -239,28 +222,6 @@ impl RuntimeEngine {
         &self.turn_usage_sink
     }
 
-    /// 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
-    pub fn set_page_fetcher(&self, fetcher: Arc<dyn PageFetcher>) {
-        if let Ok(mut guard) = self.page_fetcher.lock() {
-            *guard = Some(fetcher);
-        }
-    }
-
-    /// 获取 page_fetcher 的克隆（用于 runtime 重建时保留）
-    pub fn page_fetcher(&self) -> Option<Arc<dyn PageFetcher>> {
-        self.page_fetcher.lock().ok()?.clone()
-    }
-
-    /// 注入终端能力（GUI 模式下由 terminal 插件提供，PTY 执行）
-    pub fn set_terminal_provider(
-        &self,
-        provider: Arc<dyn crate::terminal_trait::TerminalProvider>,
-    ) {
-        if let Ok(mut guard) = self.terminal_provider.lock() {
-            *guard = Some(provider);
-        }
-    }
-
     /// 获取各插件贡献的环境变量快照（供 command 插件注入子进程）。
     pub fn runtime_env(&self) -> std::collections::BTreeMap<String, String> {
         self.runtime_env
@@ -284,11 +245,6 @@ impl RuntimeEngine {
         if let Ok(mut guard) = self.runtime_env.lock() {
             *guard = env;
         }
-    }
-
-    /// 获取 terminal_provider 的克隆
-    pub fn terminal_provider(&self) -> Option<Arc<dyn crate::terminal_trait::TerminalProvider>> {
-        self.terminal_provider.lock().ok()?.clone()
     }
 
     /// 注册工具覆盖处理器（first-writer-wins）。

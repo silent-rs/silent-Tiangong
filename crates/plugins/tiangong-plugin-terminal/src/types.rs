@@ -88,20 +88,6 @@ pub struct TerminalExecResponse {
     pub interactive_mode: bool,
 }
 
-impl From<TerminalExecResponse> for tiangong_core::terminal_trait::TerminalExecResult {
-    fn from(r: TerminalExecResponse) -> Self {
-        Self {
-            exit_code: r.exit_code,
-            stdout: r.stdout,
-            stderr: r.stderr,
-            timed_out: r.timed_out,
-            cwd_after: r.cwd_after,
-            interrupted_by_user: r.interrupted_by_user,
-            interactive_mode: r.interactive_mode,
-        }
-    }
-}
-
 /// 终端输出事件（推送到前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalOutputEvent {

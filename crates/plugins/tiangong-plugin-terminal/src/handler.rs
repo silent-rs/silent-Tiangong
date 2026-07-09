@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tiangong_core::terminal_trait::TerminalProvider;
 use tiangong_core::tool::ToolResult;
 
+use crate::capability::TerminalProvider;
 use crate::util::shell_quote;
+use tiangong_core::permission::TrustMode;
 
 const OUTPUT_THRESHOLD: usize = 2000;
 
@@ -14,11 +15,35 @@ const OUTPUT_THRESHOLD: usize = 2000;
 /// run_shell 直接执行脚本（保持原有语义）。
 pub struct TerminalToolOverride {
     provider: Arc<dyn TerminalProvider>,
+    /// 共享信任模式引用（由 Plugin::set_trust_mode 注入）。FullTrust 时跳过命令校验。
+    trust_mode: RwLock<Option<Arc<RwLock<TrustMode>>>>,
 }
 
 impl TerminalToolOverride {
     pub fn new(provider: Arc<dyn TerminalProvider>) -> Self {
-        Self { provider }
+        Self {
+            provider,
+            trust_mode: RwLock::new(None),
+        }
+    }
+
+    /// 注入共享信任模式引用（供 FullTrust 下跳过 run_command 校验）。
+    pub fn set_trust_mode(&self, trust: Arc<RwLock<TrustMode>>) {
+        if let Ok(mut guard) = self.trust_mode.write() {
+            *guard = Some(trust);
+        }
+    }
+
+    fn is_full_trust(&self) -> bool {
+        let Ok(handle) = self.trust_mode.read() else {
+            return false;
+        };
+        let Some(tm) = handle.as_ref() else {
+            return false;
+        };
+        tm.read()
+            .map(|g| *g == TrustMode::FullTrust)
+            .unwrap_or(false)
     }
 
     fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -35,6 +60,7 @@ impl TerminalToolOverride {
         provider: &Arc<dyn TerminalProvider>,
         call: &tiangong_core::model::ToolCall,
         session_id: &str,
+        full_trust: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let raw_cmd = match call.arguments.get("cmd").and_then(|v| v.as_str()) {
             Some(c) => c.trim().to_string(),
@@ -89,20 +115,22 @@ impl TerminalToolOverride {
             })
             .filter(|v| *v > 0);
 
-        // 命令白名单 / 路径校验（FullTrust 时跳过——由 engine 的 trust_mode 决定，
-        // 此处保守校验；终端插件无 trust_mode 引用，始终校验）
-        if let Err(e) = validate_terminal_command(&cmd, &args, cwd.as_deref()) {
-            let msg = e.to_string();
-            return Box::pin(async move {
-                Some(ToolResult {
-                    ok: false,
-                    summary: format!("run_command 校验失败：{msg}"),
-                    stdout: String::new(),
-                    stderr: msg,
-                    exit_code: 1,
-                    execution: None,
-                })
-            });
+        // 命令白名单 / 路径校验：FullTrust 时跳过（信任用户已授权全部命令），
+        // 否则按白名单 + 路径越界保守校验。
+        if !full_trust {
+            if let Err(e) = validate_terminal_command(&cmd, &args, cwd.as_deref()) {
+                let msg = e.to_string();
+                return Box::pin(async move {
+                    Some(ToolResult {
+                        ok: false,
+                        summary: format!("run_command 校验失败：{msg}"),
+                        stdout: String::new(),
+                        stderr: msg,
+                        exit_code: 1,
+                        execution: None,
+                    })
+                });
+            }
         }
 
         // 拼装 PTY 命令字符串：cmd + quoted args
@@ -311,7 +339,7 @@ impl TerminalToolOverride {
     /// "发送输入 → 等待屏幕变化 → 返回新快照"的原子操作，Agent 据此观察程序
     /// 反应并决定下一步输入，形成持续交互闭环。
     fn handle_terminal_send(
-        provider: &std::sync::Arc<dyn tiangong_core::terminal_trait::TerminalProvider>,
+        provider: &std::sync::Arc<dyn TerminalProvider>,
         call: &tiangong_core::model::ToolCall,
         session_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
@@ -380,7 +408,10 @@ impl tiangong_core::tool_override::ToolOverrideHandler for TerminalToolOverride 
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let session_id = session.id.as_str();
         match call.name.as_str() {
-            "run_command" => Self::handle_run_command(&self.provider, call, session_id),
+            "run_command" => {
+                let full_trust = self.is_full_trust();
+                Self::handle_run_command(&self.provider, call, session_id, full_trust)
+            }
             "run_shell" => Self::handle_run_shell(&self.provider, call, session_id),
             "terminal_send" => Self::handle_terminal_send(&self.provider, call, session_id),
             _ => Box::pin(async { None }),

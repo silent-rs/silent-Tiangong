@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::types::BrowserCommand;
-use tiangong_core::browser_trait::{ElementCandidate, PageFetcher};
+use crate::capability::PageFetcher;
+use crate::types::{
+    BrowserCommand, BrowserPageSnapshot, BrowserResponse, ClickElementResult, ElementCandidate,
+    FillFieldResult, FormExtractResult, LocateElementResult, QueryDomResult,
+};
 
 /// 通过 BrowserCommand channel 实现 PageFetcher trait
 pub struct BrowserPageFetcher {
@@ -38,17 +41,12 @@ impl PageFetcher for BrowserPageFetcher {
         &self,
         url: &str,
         max_chars: usize,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::FetchResult>>
-                + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<BrowserResponse>> + Send>> {
         let tx = self.cmd_tx.clone();
         let url = url.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let resp: crate::types::BrowserResponse = send_and_wait!(
+            let resp: BrowserResponse = send_and_wait!(
                 tx,
                 BrowserCommand::FetchPage {
                     url,
@@ -58,77 +56,55 @@ impl PageFetcher for BrowserPageFetcher {
                 response_rx,
                 30
             );
-            Some(resp.into())
+            Some(resp)
         })
     }
 
     fn observe_page(
         &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::PageSnapshot>>
-                + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<BrowserPageSnapshot>> + Send>>
+    {
         let tx = self.cmd_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let snapshot: crate::types::BrowserPageSnapshot = send_and_wait!(
+            let snapshot: BrowserPageSnapshot = send_and_wait!(
                 tx,
                 BrowserCommand::ObservePage { response_tx },
                 response_rx,
                 10
             );
-            Some(tiangong_core::browser_trait::PageSnapshot {
-                title: snapshot.title,
-                url: snapshot.url,
-                text: snapshot.text,
-                tabs: snapshot.tabs.into_iter().map(Into::into).collect(),
-                active_tab_id: snapshot.active_tab_id,
-                events: snapshot.events.into_iter().map(Into::into).collect(),
-            })
+            Some(snapshot)
         })
     }
 
     fn list_tabs(
         &self,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::TabListResult>>
-                + Send,
-        >,
+        Box<dyn std::future::Future<Output = Option<Vec<crate::types::BrowserTab>>> + Send>,
     > {
         let tx = self.cmd_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let tabs: Vec<crate::types::BrowserTab> =
                 send_and_wait!(tx, BrowserCommand::TabList { response_tx }, response_rx, 10);
-            Some(tiangong_core::browser_trait::TabListResult {
-                tabs: tabs.into_iter().map(Into::into).collect(),
-                active_tab_id: None,
-            })
+            Some(tabs)
         })
     }
 
     fn form_extract(
         &self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::browser_trait::FormExtractResult>,
-                > + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FormExtractResult>> + Send>>
+    {
         let tx = self.cmd_tx.clone();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let result: crate::types::FormExtractResult = send_and_wait!(
+            let result: FormExtractResult = send_and_wait!(
                 tx,
                 BrowserCommand::FormExtract { response_tx },
                 response_rx,
                 10
             );
-            Some(result.into())
+            Some(result)
         })
     }
 
@@ -138,12 +114,7 @@ impl PageFetcher for BrowserPageFetcher {
         value: &str,
         strategy: &str,
         wait_for: Option<&str>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::FillFieldResult>>
-                + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FillFieldResult>> + Send>> {
         let tx = self.cmd_tx.clone();
         let selector = selector.to_string();
         let value = value.to_string();
@@ -151,7 +122,7 @@ impl PageFetcher for BrowserPageFetcher {
         let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let result: crate::types::FillFieldResult = send_and_wait!(
+            let result: FillFieldResult = send_and_wait!(
                 tx,
                 BrowserCommand::FormFill {
                     selector,
@@ -163,7 +134,7 @@ impl PageFetcher for BrowserPageFetcher {
                 response_rx,
                 15
             );
-            Some(result.into())
+            Some(result)
         })
     }
 
@@ -171,19 +142,14 @@ impl PageFetcher for BrowserPageFetcher {
         &self,
         selector: &str,
         wait_for: Option<&str>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::browser_trait::ClickElementResult>,
-                > + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ClickElementResult>> + Send>>
+    {
         let tx = self.cmd_tx.clone();
         let selector = selector.to_string();
         let wait_for = wait_for.map(|s| s.to_string());
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let result: crate::types::ClickElementResult = send_and_wait!(
+            let result: ClickElementResult = send_and_wait!(
                 tx,
                 BrowserCommand::ClickElement {
                     selector,
@@ -193,7 +159,7 @@ impl PageFetcher for BrowserPageFetcher {
                 response_rx,
                 15
             );
-            Some(result.into())
+            Some(result)
         })
     }
 
@@ -224,24 +190,19 @@ impl PageFetcher for BrowserPageFetcher {
     fn locate_element(
         &self,
         query: &str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<tiangong_core::browser_trait::LocateElementResult>,
-                > + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<LocateElementResult>> + Send>>
+    {
         let tx = self.cmd_tx.clone();
         let query = query.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let resp: crate::types::LocateElementResult = send_and_wait!(
+            let resp: LocateElementResult = send_and_wait!(
                 tx,
                 BrowserCommand::LocateElement { query, response_tx },
                 response_rx,
                 15
             );
-            Some(resp.into())
+            Some(resp)
         })
     }
 
@@ -249,17 +210,12 @@ impl PageFetcher for BrowserPageFetcher {
         &self,
         selector: &str,
         max_results: usize,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Option<tiangong_core::browser_trait::QueryDomResult>>
-                + Send,
-        >,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<QueryDomResult>> + Send>> {
         let tx = self.cmd_tx.clone();
         let selector = selector.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let result: crate::types::QueryDomResult = send_and_wait!(
+            let result: QueryDomResult = send_and_wait!(
                 tx,
                 BrowserCommand::QueryDom {
                     selector,
@@ -269,12 +225,12 @@ impl PageFetcher for BrowserPageFetcher {
                 response_rx,
                 10
             );
-            Some(result.into())
+            Some(result)
         })
     }
 }
 
-/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_load_html / web_query_dom）
+/// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_query_dom / web_locate_element）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
 }
@@ -435,15 +391,32 @@ impl BrowserToolOverride {
                     execution: None,
                 });
             }
-            // 桌面模式：浏览器已导航到目标 URL，页面内容由 observe_page 自动推送。
-            // 只返回摘要信息，避免与浏览器推送数据重复。
+            // 浏览器已导航到目标 URL。立即 observe_page 取渲染后的页面快照放入 ToolResult，
+            // 保证本次工具调用直接返回正文（后台 watcher 仍会持续观察后续变化）。
+            // observe 失败或超时时回退到 fetch_page 已拿到的 title/url。
+            let (title, url_out, text) = match fetcher.observe_page().await {
+                Some(snap) if !snap.url.is_empty() => {
+                    let text = Self::truncate_text(&snap.text, max_chars);
+                    (snap.title, snap.url, text)
+                }
+                _ => (
+                    result.title.clone(),
+                    result.final_url.clone(),
+                    String::new(),
+                ),
+            };
+            let stdout = if text.is_empty() {
+                format!(
+                    "已在浏览器中打开页面\n标题：{}\nURL：{}\n\n（页面内容将通过浏览器自动推送）",
+                    title, url_out
+                )
+            } else {
+                format!("标题：{}\nURL：{}\n\n{}", title, url_out, text)
+            };
             Some(tiangong_core::tool::ToolResult {
                 ok: true,
-                summary: format!("浏览器已打开：{}", result.title),
-                stdout: format!(
-                    "已在浏览器中打开页面\n标题：{}\nURL：{}\n\n页面内容将通过浏览器自动推送。",
-                    result.title, result.final_url
-                ),
+                summary: format!("浏览器已打开：{}", title),
+                stdout,
                 stderr: String::new(),
                 exit_code: 0,
                 execution: None,

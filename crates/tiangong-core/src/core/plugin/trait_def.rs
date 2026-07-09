@@ -28,7 +28,7 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 /// 1. [`set_workspace`](Plugin::set_workspace) 注入会话工作目录；
 /// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入共享信任模式引用；
 /// 3. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入状态反馈通道；
-/// 4. [`register`](Plugin::register) 让插件注入外部能力（如 PageFetcher）。
+/// 4. [`register`](Plugin::register) 让插件初始化内部状态（如克隆配置）。
 ///
 /// 工具规格 / 工具覆盖 / Prompt 段落由 core 根据 supertrait 自动收集，无需插件手动注册。
 ///
@@ -39,7 +39,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 插件唯一标识（日志/调试用）。
     fn id(&self) -> &str;
 
-    /// 在 engine 创建/重建时调用，插件注入外部能力（如 PageFetcher / TerminalProvider）。
+    /// 在 engine 创建/重建时调用，插件初始化内部状态（如克隆配置）。
     ///
     /// 工具规格、工具覆盖、Prompt 段落由 core 通过 supertrait 自动收集，无需在此手动注册。
     /// 调用此方法前，core 已通过 [`set_workspace`](Plugin::set_workspace)、

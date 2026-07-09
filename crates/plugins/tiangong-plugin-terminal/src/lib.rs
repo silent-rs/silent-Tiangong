@@ -7,6 +7,7 @@ use tauri::{
 
 use crate::session_pty::SessionPtyRegistry;
 
+pub mod capability;
 pub mod collaboration;
 pub mod command_protocol;
 pub mod commands;

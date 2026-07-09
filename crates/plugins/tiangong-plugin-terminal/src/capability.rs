@@ -1,5 +1,18 @@
+//! 终端会话能力抽象。
+//!
+//! 原 `tiangong-core::terminal_trait`，随能力下沉重构迁入本插件（#225）。
+//! `TerminalProvider` 的唯一定义方、实现方、调用方都在本插件内：
+//! - 定义：本模块
+//! - 实现：[`crate::session_pty::SessionAwareTerminalProvider`]
+//! - 调用：[`crate::handler::TerminalToolOverride`]
+//!
+//! core 不再感知终端能力——终端能力是插件内部状态，由 handler 直接持有 provider 调用，
+//! 无需经 RuntimeEngine 中转注入。
+
 use std::future::Future;
 use std::pin::Pin;
+
+use crate::types::TerminalExecResponse;
 
 /// 终端选择结果。
 ///
@@ -40,8 +53,6 @@ impl TerminalSelection {
 }
 
 /// 终端会话能力抽象。
-///
-/// GUI 模式下由 tiangong-plugin-terminal 实现，CLI/Server 模式下为 None（回退到独立进程）。
 ///
 /// 所有方法都显式接收 `session_id`，按对话路由到对应对话的 PTY。
 /// 这样避免了全局 mutable state 在并发工具调用时的竞态。
@@ -112,7 +123,7 @@ pub trait TerminalProvider: Send + Sync + 'static {
 
     /// 获取指定对话终端的当前工作目录。
     fn current_cwd(&self, session_id: &str)
-    -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
+        -> Pin<Box<dyn Future<Output = Option<String>> + Send>>;
 
     /// 向指定对话终端的 stdin 发送输入。
     fn send_input(
@@ -138,7 +149,10 @@ pub trait TerminalProvider: Send + Sync + 'static {
     fn reset(&self, session_id: &str) -> Pin<Box<dyn Future<Output = Option<()>> + Send>>;
 }
 
-/// 终端命令执行结果
+/// 终端命令执行结果。
+///
+/// 与 [`crate::types::TerminalExecResponse`] 字段一致，后者是 Tauri command 层的
+/// 序列化形态；两者之间可直接转换。
 #[derive(Debug, Clone)]
 pub struct TerminalExecResult {
     pub exit_code: i32,
@@ -150,4 +164,18 @@ pub struct TerminalExecResult {
     pub interrupted_by_user: bool,
     /// 命令进入交互模式（如 vi、python REPL），前台进程仍在运行
     pub interactive_mode: bool,
+}
+
+impl From<TerminalExecResponse> for TerminalExecResult {
+    fn from(r: TerminalExecResponse) -> Self {
+        Self {
+            exit_code: r.exit_code,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            timed_out: r.timed_out,
+            cwd_after: r.cwd_after,
+            interrupted_by_user: r.interrupted_by_user,
+            interactive_mode: r.interactive_mode,
+        }
+    }
 }

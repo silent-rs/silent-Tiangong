@@ -8,19 +8,21 @@
 
 use std::sync::Arc;
 
+use crate::capability::PageFetcher;
 use tauri::{Manager, Wry};
-use tiangong_core::browser_trait::PageFetcher;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::ToolOverrideHandler;
 
 use crate::page_fetcher::{BrowserPageFetcher, BrowserToolOverride};
+use crate::watcher::BrowserWatcher;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 
 /// 浏览器插件：聚合页面获取能力与工具覆盖处理器。
 pub struct BrowserPlugin {
-    fetcher: Arc<dyn PageFetcher>,
     override_handler: BrowserToolOverride,
+    watcher: Arc<BrowserWatcher>,
 }
 
 impl BrowserPlugin {
@@ -32,9 +34,13 @@ impl BrowserPlugin {
         let state = app.state::<crate::BrowserPluginState>();
         let fetcher: Arc<dyn PageFetcher> = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
         let override_handler = BrowserToolOverride::new(fetcher.clone());
+        // 获取进程级单例 watcher 并确保后台观察任务已启动（#225）。
+        // 多 session 共享一个浏览器：watcher 只 spawn 一次，各 session 的 feedback
+        // 通道在 set_feedback_tx 时注册到同一 watcher，observe 到的变化广播给全部通道。
+        let watcher = BrowserWatcher::ensure_started(fetcher);
         Some(Self {
-            fetcher,
             override_handler,
+            watcher,
         })
     }
 }
@@ -44,11 +50,12 @@ impl Plugin for BrowserPlugin {
         "browser"
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        // 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
-        engine.set_page_fetcher(self.fetcher.clone());
-        // 工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集，
-        // 此处仅注入 PageFetcher 能力。
+    // register 不再注入 PageFetcher：浏览器能力是插件内部状态，
+    // 由 BrowserToolOverride / watcher 直接持有 fetcher 调用（#225 能力下沉）。
+
+    /// 注入 feedback 通道给 watcher：注册到单例，observe 到的页面变化会广播到本通道。
+    fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
+        self.watcher.register_channel(tx);
     }
 
     fn tool_permission_overrides(
@@ -76,7 +83,7 @@ impl ToolOverrideHandler for BrowserPlugin {
 
 impl tiangong_core::tool_override::ToolSpecProvider for BrowserPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        // 浏览器覆盖的 7 个工具规格：这些工具的执行全部路由到本插件的 handle，
+        // 浏览器覆盖的 6 个工具规格：这些工具的执行全部路由到本插件的 handle，
         // 必须由本插件提供 spec（core 才能按 spec.name 注册 override）。
         // 与 basic_file_function_tools 中浏览器工具的 schema 保持一致。
         use serde_json::json;

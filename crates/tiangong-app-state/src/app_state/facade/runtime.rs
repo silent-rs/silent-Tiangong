@@ -13,14 +13,12 @@ impl TiangongState {
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
         self.store.provider.model_endpoint = endpoint.clone();
-        // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher、terminal_provider 和 tool_overrides
+        // 保留旧 RuntimeEngine 的共享信任模式引用和 tool_overrides
         let shared_trust_mode = self
             .services
             .runtime
             .permission_gate()
             .shared_trust_mode_ref();
-        let page_fetcher = self.services.runtime.page_fetcher();
-        let terminal_provider = self.services.runtime.terminal_provider();
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
@@ -37,12 +35,6 @@ impl TiangongState {
             crate::app_state::repository::storage_root(),
         )
         .with_models_config(self.store.provider.models_config.clone());
-        if let Some(fetcher) = page_fetcher {
-            new_runtime.set_page_fetcher(fetcher);
-        }
-        if let Some(provider) = terminal_provider {
-            new_runtime.set_terminal_provider(provider);
-        }
         for (name, handler) in tool_overrides {
             new_runtime.register_tool_override(&name, handler);
         }
