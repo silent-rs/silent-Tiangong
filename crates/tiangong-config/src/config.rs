@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tiangong_core::core_config::CoreConfig;
-use tiangong_core::permission::TrustMode;
 use tiangong_llm::models_config::ModelsConfig;
 use tiangong_plugin_skill::SkillsConfig;
+use tiangong_types::TrustMode;
 
 /// Server 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]

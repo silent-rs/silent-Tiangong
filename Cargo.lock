@@ -9675,6 +9675,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-plugin-skill",
+ "tiangong-types",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
