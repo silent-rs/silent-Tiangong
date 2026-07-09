@@ -8,7 +8,7 @@
 //! 然后将 Handle 显式传给上层运行时。
 //!
 //! ```no_run
-//! let handle = tiangong_memory::start(None).expect("Memory 系统启动失败");
+//! let handle = tiangong_memory::start().expect("Memory 系统启动失败");
 //! let injections = tiangong_memory::load_injection_sync("session-1", None);
 //! ```
 
