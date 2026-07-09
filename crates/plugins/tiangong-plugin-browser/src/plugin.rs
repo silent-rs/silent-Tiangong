@@ -61,9 +61,31 @@ impl Plugin for BrowserPlugin {
         self.watcher.set_feedback_tx(tx);
     }
 
-    /// session 就绪后注入 session_id 到 fetcher（命令带 session_id 路由）。
+    /// session 就绪后注入 session_id 到 fetcher（命令带 session_id 路由），
+    /// 并从持久化恢复该 session 上次的浏览器 tab（若有）。
     fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
         self.fetcher.set_session_id(&session.id);
+        // 恢复持久化的浏览器 tab（应用重启后）
+        let persisted = crate::session_store::BrowserSessionStore::load(&session.id);
+        if !persisted.tabs.is_empty() {
+            // 注入恢复的 tab 到 session（前端 hydrate 时会读 session.tabs 并回灌浏览器）
+            for tab in &persisted.tabs {
+                // 避免重复添加：仅当 session.tabs 无该 browser tab 时补入
+                let exists = session.tabs.iter().any(|t| t.id == tab.id);
+                if !exists {
+                    session.tabs.push(tiangong_core::session::TabState {
+                        id: tab.id.clone(),
+                        kind: tiangong_core::session::TabKind::Browser,
+                        title: tab.title.clone(),
+                        url: tab.url.clone(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis().to_string())
+                            .unwrap_or_else(|_| "0".to_string()),
+                    });
+                }
+            }
+        }
     }
 
     fn tool_permission_overrides(
