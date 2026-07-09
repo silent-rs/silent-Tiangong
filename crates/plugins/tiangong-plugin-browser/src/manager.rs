@@ -212,8 +212,9 @@ impl BrowserManager {
     }
 
     /// 为指定标签创建独立的 WebView 实例
-    fn create_webview_for_tab(
+    pub(crate) fn create_webview_for_tab(
         app: &AppHandle<Wry>,
+        session_id: &str,
         tab_id: &str,
         url: &str,
         x: f64,
@@ -226,7 +227,7 @@ impl BrowserManager {
             .ok_or_else(|| "主窗口未找到".to_string())?;
 
         let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-        let data_dir = browser_data_directory();
+        let data_dir = browser_data_directory(session_id);
         let label = webview_label(tab_id);
         let tab_id_for_closure = tab_id.to_string();
 
@@ -300,9 +301,9 @@ impl BrowserManager {
                                             tab.title = title.clone();
                                         }
                                     }
-                                    // 记录浏览历史
+                                    // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
                                     let should_persist = {
-                                        let active_id = state.active_tab_id.clone();
+                                        let active_id = Some(tab_id_in_closure.clone());
                                         if !page_url.starts_with("about:") {
                                             // 写入标签历史
                                             if let Some(active_id) = active_id {
@@ -481,7 +482,7 @@ impl BrowserManager {
 
         if let Some(webview_to_create) = existing_tab_webview_to_create {
             if let Some(tab_id) = webview_to_create {
-                let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+                let webview = Self::create_webview_for_tab(app, "", &tab_id, url, x, y, w, h)?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id, webview);
                 drop(state);
@@ -496,7 +497,7 @@ impl BrowserManager {
         let is_blank = url == "about:blank";
 
         if !is_blank {
-            let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+            let webview = Self::create_webview_for_tab(app, "", &tab_id, url, x, y, w, h)?;
             if let Ok(mut state) = self.state.lock() {
                 state.webviews.insert(tab_id.clone(), webview);
             }
@@ -550,7 +551,7 @@ impl BrowserManager {
     }
 
     /// 启动后台轮询线程，检测 webview URL 变化并发射 browser:page_loaded 事件
-    fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
+    pub(crate) fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
         let state = self.state.clone();
         let app = app.clone();
         let stop = {
@@ -703,6 +704,25 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// 显示 active tab 的 webview（切换 session 回来时，把 webview 重新定位到可见区域）。
+    pub fn show_active_webview(
+        &self,
+        _app: &AppHandle<Wry>,
+        rect: &(f64, f64, f64, f64),
+    ) -> Result<(), String> {
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        if let Some(active_id) = state.active_tab_id.as_ref() {
+            if let Some(wv) = state.webviews.get(active_id) {
+                let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
+                let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
+            }
+        }
+        state
+            .visible
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn go_back(&self) -> Result<(), String> {
         self.eval("history.back()")
     }
@@ -723,7 +743,7 @@ impl BrowserManager {
     }
 
     /// 启动事件消费线程
-    fn start_event_poll(&self, app: &AppHandle<Wry>) {
+    pub(crate) fn start_event_poll(&self, app: &AppHandle<Wry>) {
         let state = self.state.clone();
         let app = app.clone();
         let stop = {
@@ -881,7 +901,7 @@ impl BrowserManager {
         if needs_create {
             if let Some(tab_id) = active_id {
                 let webview = Self::create_webview_for_tab(
-                    app, &tab_id, url, rect.0, rect.1, rect.2, rect.3,
+                    app, "", &tab_id, url, rect.0, rect.1, rect.2, rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id.clone(), webview);
@@ -1258,7 +1278,7 @@ impl BrowserManager {
             if let Some(tab) = active_tab {
                 drop(state);
                 let webview = Self::create_webview_for_tab(
-                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                    app, "", &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab.id.clone(), webview);
@@ -1319,7 +1339,7 @@ impl BrowserManager {
 
         for tab in tabs_needing_webview {
             let webview = Self::create_webview_for_tab(
-                app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                app, "", &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
             )?;
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab.id.clone(), webview);
@@ -1457,8 +1477,9 @@ impl BrowserManager {
         // about:blank 不创建 WebView（WKWebView 对 about:blank 的 URL() 返回 None，
         // 会导致 Tauri 权限检查内部 panic），延迟到 navigate 时按需创建
         if !is_blank {
-            let webview =
-                Self::create_webview_for_tab(app, &tab_id, url, rect.0, rect.1, rect.2, rect.3)?;
+            let webview = Self::create_webview_for_tab(
+                app, "", &tab_id, url, rect.0, rect.1, rect.2, rect.3,
+            )?;
 
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab_id.clone(), webview);
@@ -1879,11 +1900,21 @@ fn persist_zoom(state: &Arc<Mutex<BrowserState>>) {
     }
 }
 
-fn browser_data_directory() -> PathBuf {
+fn browser_data_directory(session_id: &str) -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".tiangong").join("browser-data")
+    // per-session data 目录隔离 cookie/storage；空 session_id 回退全局目录（兼容）
+    let dir = if session_id.is_empty() {
+        PathBuf::from(home).join(".tiangong").join("browser-data")
+    } else {
+        PathBuf::from(home)
+            .join(".tiangong")
+            .join("browser-data")
+            .join(session_id)
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {
