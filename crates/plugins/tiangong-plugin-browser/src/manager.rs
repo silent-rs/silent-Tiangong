@@ -65,7 +65,10 @@ pub struct BrowserState {
     pub tab_history_indices: HashMap<String, usize>,
     /// 当前页面缩放比例，clamp 到 [0.25, 5.0]，持久化在 ~/.tiangong/browser-zoom.json
     pub zoom_factor: f64,
-    /// 当前浏览器运行时绑定的对话会话 ID
+    /// 该 state 所属的 session id（registry 创建时注入，不可变，作为可靠标识）。
+    /// 用于 create_webview 的 data_dir、webview label、持久化、global_history 路由。
+    pub session_id: String,
+    /// 当前浏览器运行时绑定的对话会话 ID（兼容旧字段，T5 后由 registry.active_session_id 取代）
     pub active_session_id: Option<String>,
 }
 
@@ -75,7 +78,7 @@ impl BrowserState {
     /// `global_history`/`zoom_factor` 此处给默认空值；进程级共享数据由
     /// [`BrowserSessionRegistry`](crate::session_registry::BrowserSessionRegistry)
     /// 持有与加载，T2 起 BrowserManager 从 registry 读取。
-    pub(crate) fn new_empty() -> Self {
+    pub(crate) fn new_empty(session_id: String) -> Self {
         Self {
             webviews: HashMap::new(),
             page_loaded_signals: HashMap::new(),
@@ -93,6 +96,7 @@ impl BrowserState {
             tab_histories: HashMap::new(),
             tab_history_indices: HashMap::new(),
             zoom_factor: 1.0,
+            session_id,
             active_session_id: None,
         }
     }
@@ -141,6 +145,7 @@ impl BrowserManager {
                 tab_histories: HashMap::new(),
                 tab_history_indices: HashMap::new(),
                 zoom_factor,
+                session_id: String::new(),
                 active_session_id: None,
             })),
         }

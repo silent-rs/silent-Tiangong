@@ -50,7 +50,9 @@ impl BrowserSessionRegistry {
         let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
         sessions
             .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(BrowserState::new_empty())))
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(BrowserState::new_empty(session_id.to_string())))
+            })
             .clone()
     }
 
