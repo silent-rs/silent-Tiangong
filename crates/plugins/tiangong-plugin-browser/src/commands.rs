@@ -16,12 +16,12 @@ pub async fn browser_open(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.open(&app, &url, x, y, width, height)
+    state.manager().open(&app, &url, x, y, width, height)
 }
 
 #[tauri::command]
 pub async fn browser_close(state: State<'_, BrowserPluginState>) -> Result<(), String> {
-    state.manager.close()
+    state.manager().close()
 }
 
 #[tauri::command]
@@ -32,8 +32,8 @@ pub async fn browser_set_position(
     height: f64,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.set_position(x, y)?;
-    state.manager.set_size(width, height)
+    state.manager().set_position(x, y)?;
+    state.manager().set_size(width, height)
 }
 
 #[tauri::command]
@@ -42,29 +42,29 @@ pub async fn browser_navigate(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.navigate_with_app(&app, &url)?;
+    state.manager().navigate_with_app(&app, &url)?;
     let _ = app.emit("browser:tab_updated", ());
     Ok(())
 }
 
 #[tauri::command]
 pub async fn browser_eval(js: String, state: State<'_, BrowserPluginState>) -> Result<(), String> {
-    state.manager.eval(&js)
+    state.manager().eval(&js)
 }
 
 #[tauri::command]
 pub async fn browser_hide(state: State<'_, BrowserPluginState>) -> Result<(), String> {
-    state.manager.hide()
+    state.manager().hide()
 }
 
 #[tauri::command]
 pub async fn browser_go_back(state: State<'_, BrowserPluginState>) -> Result<(), String> {
-    state.manager.go_back()
+    state.manager().go_back()
 }
 
 #[tauri::command]
 pub async fn browser_go_forward(state: State<'_, BrowserPluginState>) -> Result<(), String> {
-    state.manager.go_forward()
+    state.manager().go_forward()
 }
 
 #[tauri::command]
@@ -72,31 +72,31 @@ pub async fn browser_set_zoom(
     scale: f64,
     state: State<'_, BrowserPluginState>,
 ) -> Result<f64, String> {
-    state.manager.set_zoom(scale)
+    state.manager().set_zoom(scale)
 }
 
 #[tauri::command]
 pub async fn browser_get_zoom(state: State<'_, BrowserPluginState>) -> Result<f64, String> {
-    Ok(state.manager.zoom())
+    Ok(state.manager().zoom())
 }
 
 #[tauri::command]
 pub async fn browser_reset_zoom(state: State<'_, BrowserPluginState>) -> Result<f64, String> {
-    state.manager.reset_zoom()
+    state.manager().reset_zoom()
 }
 
 #[tauri::command]
 pub async fn browser_tab_list(
     state: State<'_, BrowserPluginState>,
 ) -> Result<TabListResponse, String> {
-    Ok(state.manager.tab_list_with_active())
+    Ok(state.manager().tab_list_with_active())
 }
 
 #[tauri::command]
 pub async fn browser_snapshot_tabs(
     state: State<'_, BrowserPluginState>,
 ) -> Result<BrowserTabsSnapshot, String> {
-    Ok(state.manager.snapshot_tabs())
+    Ok(state.manager().snapshot_tabs())
 }
 
 #[tauri::command]
@@ -109,7 +109,7 @@ pub async fn browser_switch_session(
 ) -> Result<BrowserTabsSnapshot, String> {
     let snapshot =
         state
-            .manager
+            .manager()
             .switch_session(&app, &session_id, tabs_to_restore, active_tab_id)?;
     let _ = app.emit(
         "browser:tab_updated",
@@ -128,7 +128,7 @@ pub async fn browser_tab_new(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<String, String> {
-    let result = state.manager.tab_new(&app, &url);
+    let result = state.manager().tab_new(&app, &url);
     let _ = app.emit("browser:tab_updated", ());
     result
 }
@@ -139,7 +139,7 @@ pub async fn browser_tab_switch(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.tab_switch(&tab_id)?;
+    state.manager().tab_switch(&tab_id)?;
     let _ = app.emit("browser:tab_updated", ());
     Ok(())
 }
@@ -150,7 +150,7 @@ pub async fn browser_tab_close(
     app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.tab_close(&tab_id)?;
+    state.manager().tab_close(&tab_id)?;
     let _ = app.emit("browser:tab_updated", ());
     Ok(())
 }
@@ -177,7 +177,7 @@ pub async fn browser_tab_history(
     state: State<'_, BrowserPluginState>,
 ) -> Result<TabHistoryResult, String> {
     Ok(state
-        .manager
+        .manager()
         .get_tab_history(tab_id.as_deref())
         .unwrap_or(TabHistoryResult {
             tab_id: String::new(),
@@ -192,14 +192,14 @@ pub async fn browser_global_history(
     limit: usize,
     state: State<'_, BrowserPluginState>,
 ) -> Result<Vec<HistoryEntry>, String> {
-    Ok(state.manager.get_global_history(offset, limit))
+    Ok(state.manager().get_global_history(offset, limit))
 }
 
 #[tauri::command]
 pub async fn browser_global_history_clear(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.clear_global_history();
+    state.manager().clear_global_history();
     Ok(())
 }
 
@@ -208,6 +208,6 @@ pub async fn browser_global_history_delete(
     url: String,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager.delete_global_history_entry(&url);
+    state.manager().delete_global_history_entry(&url);
     Ok(())
 }

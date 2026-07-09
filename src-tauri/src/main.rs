@@ -39,7 +39,7 @@ async fn observe_browser_snapshot_for_injection(
 ) -> Option<tiangong_plugin_browser::types::BrowserPageSnapshot> {
     let manager = {
         let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-        state.manager.clone()
+        state.manager().clone()
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -57,7 +57,7 @@ async fn ack_browser_events(
 ) {
     let removed = {
         let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-        state.manager.ack_events(&events)
+        state.manager().ack_events(&events)
     };
     debug!(
         ack_count = events.len(),
@@ -323,7 +323,7 @@ fn run_gui() {
                     }
                     let browser_state =
                         inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                    if !browser_state.manager.is_visible() {
+                    if !browser_state.manager().is_visible() {
                         return;
                     }
                     let title = data["title"].as_str().unwrap_or("").to_string();
@@ -350,7 +350,7 @@ fn run_gui() {
             app.listen("browser:events", move |event| {
                 let browser_state =
                     event_inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                if !browser_state.manager.is_visible() {
+                if !browser_state.manager().is_visible() {
                     return;
                 }
                 let payload = event.payload().to_string();
@@ -407,7 +407,7 @@ fn run_gui() {
                         // 尝试从活跃标签的 WebView 获取当前页面 URL
                         let browser_state =
                             app_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                        page_url = browser_state.manager.current_url().unwrap_or_default();
+                        page_url = browser_state.manager().current_url().unwrap_or_default();
                     }
                     if page_url.is_empty() {
                         warn!(
@@ -470,7 +470,7 @@ fn run_gui() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let plugin_state = window.state::<tiangong_plugin_browser::BrowserPluginState>();
-                plugin_state.manager.set_visible(false);
+                plugin_state.manager().set_visible(false);
                 let _ = window.hide();
             }
         })
@@ -816,7 +816,7 @@ fn show_main_window(app: &tauri::AppHandle) {
     use tauri::Manager;
 
     let browser_state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-    browser_state.manager.set_visible(true);
+    browser_state.manager().set_visible(true);
 
     let Some(window) = app.get_webview_window("main") else {
         // 尝试用 get_window 作为后备

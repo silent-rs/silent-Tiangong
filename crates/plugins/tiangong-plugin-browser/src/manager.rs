@@ -150,6 +150,13 @@ impl BrowserManager {
         self.state.clone()
     }
 
+    /// 绑定到指定 session state 构造 manager（per-session 路由用）。
+    ///
+    /// manager 的全部方法操作该 state；多 manager 可并存，各绑各的 session。
+    pub fn from_state(state: Arc<Mutex<BrowserState>>) -> Self {
+        Self { state }
+    }
+
     /// 浏览器是否已初始化（有标签即为已打开，包括 about:blank 延迟创建 WebView 的情况）
     pub fn is_open(&self) -> bool {
         self.state
@@ -226,7 +233,7 @@ impl BrowserManager {
         let state_clone_holder = {
             // 获取 manager state 用于 on_page_load 回调
             let plugin_state = app.state::<crate::BrowserPluginState>();
-            plugin_state.manager.clone_state()
+            plugin_state.manager().clone_state()
         };
         // 在 state_clone_holder 被 move 进 on_page_load 闭包前读出当前缩放，用于新建 webview 即时应用
         let initial_zoom = state_clone_holder

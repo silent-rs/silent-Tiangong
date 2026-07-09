@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::handler::browser_command_handler;
 use crate::manager::BrowserManager;
+use crate::session_registry::BrowserSessionRegistry;
 use crate::types::BrowserCommand;
 
 pub mod bridge;
@@ -30,9 +31,27 @@ pub fn build_plugin(app: &tauri::AppHandle<Wry>) -> Option<Arc<plugin::BrowserPl
 }
 
 /// 浏览器 Plugin 共享状态
+///
+/// `registry` 持有所有 session 的 `BrowserState`；`manager` 绑定到当前 active session，
+/// 前端命令经它操作（行为同旧的全局单例）。切换 session 时经 registry 切换 active，
+/// manager 重新绑定（T5 实现；当前 manager 绑定首个注册 session 兼容旧路径）。
 pub struct BrowserPluginState {
-    pub manager: BrowserManager,
+    pub registry: Arc<BrowserSessionRegistry>,
     pub cmd_tx: mpsc::Sender<BrowserCommand>,
+}
+
+impl BrowserPluginState {
+    /// 返回绑定到当前 active session 的 manager。
+    ///
+    /// 前端命令经此获取 manager（行为同旧的全局单例）。每次调用都取最新 active session。
+    /// 无 active session 时懒创建一个 bootstrap session（兼容早期启动）。
+    pub fn manager(&self) -> BrowserManager {
+        let state = self
+            .registry
+            .active_state()
+            .unwrap_or_else(|| self.registry.session_state("__bootstrap__"));
+        BrowserManager::from_state(state)
+    }
 }
 
 pub fn init() -> TauriPlugin<Wry> {
@@ -63,22 +82,18 @@ pub fn init() -> TauriPlugin<Wry> {
         ])
         .setup(|app, _api| {
             let (tx, rx) = mpsc::channel::<BrowserCommand>(16);
-            let manager = BrowserManager::new();
+            let registry = Arc::new(BrowserSessionRegistry::new());
             let state = BrowserPluginState {
-                manager,
+                registry,
                 cmd_tx: tx,
             };
             app.manage(state);
 
             let browser_state = app.state::<BrowserPluginState>();
-            let browser_manager_state = browser_state.manager.clone_state();
+            let browser_registry = browser_state.registry.clone();
             let app_handle: tauri::AppHandle<Wry> = app.clone();
 
-            tauri::async_runtime::spawn(browser_command_handler(
-                rx,
-                browser_manager_state,
-                app_handle,
-            ));
+            tauri::async_runtime::spawn(browser_command_handler(rx, browser_registry, app_handle));
 
             Ok(())
         })

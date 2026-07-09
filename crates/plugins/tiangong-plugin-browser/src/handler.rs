@@ -1,11 +1,11 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::manager::{default_browser_rect, BrowserManager, BrowserState};
+use crate::manager::{default_browser_rect, BrowserManager};
 use crate::types::{
     format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent,
     BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult, FormExtractResult,
@@ -101,7 +101,7 @@ fn merge_diff_and_events(page_diff: &Option<String>, events: &[BrowserEvent]) ->
 /// 浏览器命令处理循环
 pub async fn browser_command_handler(
     mut rx: mpsc::Receiver<BrowserCommand>,
-    browser_state: Arc<Mutex<BrowserState>>,
+    registry: Arc<crate::session_registry::BrowserSessionRegistry>,
     app: AppHandle<Wry>,
 ) {
     while let Some(cmd) = rx.recv().await {
@@ -112,9 +112,11 @@ pub async fn browser_command_handler(
                 response_tx,
             } => {
                 let url_for_error = url.clone();
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
 
                 let was_open = manager.is_open();
                 if !was_open {
@@ -138,9 +140,11 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(response);
             }
             BrowserCommand::OpenUrl { url } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 if !manager.is_open() {
                     let _ = app.emit("browser:open", &url);
                 }
@@ -150,7 +154,10 @@ pub async fn browser_command_handler(
             BrowserCommand::ObservePage { response_tx } => {
                 // 浏览器未打开时不返回响应，让 observe_page() 返回 None
                 {
-                    let s = match browser_state.lock() {
+                    let active = registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__"));
+                    let s = match active.lock() {
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
@@ -160,9 +167,11 @@ pub async fn browser_command_handler(
                         continue;
                     }
                 }
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let snapshot = tokio::task::spawn_blocking(move || {
                     let events = manager.drain_events();
                     manager
@@ -203,7 +212,10 @@ pub async fn browser_command_handler(
                 });
                 // 补充标签信息
                 let tabs = {
-                    let s = match browser_state.lock() {
+                    let active = registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__"));
+                    let s = match active.lock() {
                         Ok(s) => s,
                         Err(e) => e.into_inner(),
                     };
@@ -231,9 +243,11 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(snapshot);
             }
             BrowserCommand::FormExtract { response_tx } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result("window.__tiangong_bridge.extractForms()")
@@ -251,9 +265,11 @@ pub async fn browser_command_handler(
                 wait_for,
                 response_tx,
             } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
@@ -349,9 +365,11 @@ pub async fn browser_command_handler(
                 wait_for,
                 response_tx,
             } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     // 操作前 digest
                     let before_digest = manager
@@ -424,9 +442,11 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::LoadHtml { html, response_tx } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 // 浏览器未打开时先打开，再加载 HTML
                 if !manager.is_open() {
                     if let Some((x, y, w, h)) = default_browser_rect(&app) {
@@ -440,16 +460,20 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::TabList { response_tx } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let tabs = manager.tab_list();
                 let _ = response_tx.send(tabs);
             }
             BrowserCommand::TabNew { url } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let app_clone = app.clone();
                 let _ =
                     tokio::task::spawn_blocking(move || match manager.tab_new(&app_clone, &url) {
@@ -464,9 +488,11 @@ pub async fn browser_command_handler(
                     .await;
             }
             BrowserCommand::TabSwitch { tab_id } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_switch(&tab_id) {
@@ -481,9 +507,11 @@ pub async fn browser_command_handler(
                 .await;
             }
             BrowserCommand::TabClose { tab_id } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let app_clone = app.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_close(&tab_id) {
@@ -498,9 +526,11 @@ pub async fn browser_command_handler(
                 .await;
             }
             BrowserCommand::AnnotationExtract { response_tx } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     manager
                         .eval_with_result(
@@ -520,9 +550,11 @@ pub async fn browser_command_handler(
                 let _ = response_tx.send(result);
             }
             BrowserCommand::LocateElement { query, response_tx } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     let js = format!(
                         "JSON.stringify(window.__tiangong_bridge.locateElement({{query:{}}}))",
@@ -554,9 +586,11 @@ pub async fn browser_command_handler(
                 max_results,
                 response_tx,
             } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = tokio::task::spawn_blocking(move || {
                     let js = format!(
                         "JSON.stringify(window.__tiangong_bridge.queryDom({},{max_results}))",
@@ -585,9 +619,11 @@ pub async fn browser_command_handler(
                 tab_id,
                 response_tx,
             } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let result = manager.get_tab_history(tab_id.as_deref());
                 let _ = response_tx.send(result.unwrap_or(TabHistoryResult {
                     tab_id: String::new(),
@@ -600,9 +636,11 @@ pub async fn browser_command_handler(
                 limit,
                 response_tx,
             } => {
-                let manager = BrowserManager {
-                    state: browser_state.clone(),
-                };
+                let manager = BrowserManager::from_state(
+                    registry
+                        .active_state()
+                        .unwrap_or_else(|| registry.session_state("__bootstrap__")),
+                );
                 let entries = manager.get_global_history(offset, limit);
                 let _ = response_tx.send(entries);
             }
