@@ -67,11 +67,11 @@ pub fn set_models(new_models: tiangong_core::models_config::ModelsConfig) {
     } else {
         crate::io::resolve_context_limit_at(&dir, &llm.chat.model)
     };
-    if let Ok(mut guard) = config_cell().write() {
-        if let Some(cfg) = guard.as_mut() {
-            cfg.models = new_models;
-            cfg.context_limit = context_limit;
-        }
+    if let Ok(mut guard) = config_cell().write()
+        && let Some(cfg) = guard.as_mut()
+    {
+        cfg.models = new_models;
+        cfg.context_limit = context_limit;
     }
 }
 
@@ -111,5 +111,78 @@ pub fn plugin_set_signature(
         stt: models.has_capability(ModelCapability::Stt),
         analyze_attachment: models.has_capability(ModelCapability::Multimodal)
             && !models.chat_is_multimodal(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_core::model::ProviderProtocol;
+    use tiangong_core::models_config::{
+        ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
+    };
+
+    fn models_with(cap: ModelCapability) -> ModelsConfig {
+        let mut m = ModelsConfig::default();
+        m.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "k".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
+            },
+        );
+        m.routing.insert(
+            RoutingSlot::from_capability(cap),
+            ModelEntry {
+                provider: "p".to_string(),
+                model: "test-model".to_string(),
+                capabilities: vec![cap],
+                options: serde_json::json!({}),
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn plugin_set_signature_detects_capability_add() {
+        let empty = ModelsConfig::default();
+        let with_image = models_with(ModelCapability::ImageGeneration);
+
+        let old = plugin_set_signature(&empty);
+        let new = plugin_set_signature(&with_image);
+
+        assert_ne!(old, new, "新增 image 能力后签名应变化");
+        assert!(!old.image);
+        assert!(new.image);
+    }
+
+    #[test]
+    fn plugin_set_signature_unchanged_when_only_endpoint_diff() {
+        let m1 = models_with(ModelCapability::ImageGeneration);
+        let mut m2 = m1.clone();
+        if let Some(entry) = m2.routing.get_mut(&RoutingSlot::ImageGeneration) {
+            entry.model = "different-model".to_string();
+        }
+
+        let sig1 = plugin_set_signature(&m1);
+        let sig2 = plugin_set_signature(&m2);
+
+        assert_eq!(sig1, sig2, "仅 endpoint 变化时签名应不变");
+    }
+
+    #[test]
+    fn plugin_set_signature_detects_analyze_attachment_toggle() {
+        // chat 是 multimodal → analyze_attachment 不需要
+        let mut chat_multimodal = models_with(ModelCapability::Chat);
+        if let Some(entry) = chat_multimodal.routing.get_mut(&RoutingSlot::Chat) {
+            entry.capabilities.push(ModelCapability::Multimodal);
+        }
+        assert!(!plugin_set_signature(&chat_multimodal).analyze_attachment);
+
+        // chat 不是 multimodal + 有独立 multimodal 路由 → analyze_attachment 需要
+        let with_independent_multimodal = models_with(ModelCapability::Multimodal);
+        assert!(plugin_set_signature(&with_independent_multimodal).analyze_attachment);
     }
 }
