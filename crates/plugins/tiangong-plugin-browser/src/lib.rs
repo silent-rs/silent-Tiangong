@@ -96,7 +96,7 @@ impl BrowserPluginState {
         }
 
         // 3. 显示新 session 的 active tab webview（若缺则创建）
-        let new_mgr = BrowserManager::from_state(new_state);
+        let new_mgr = BrowserManager::from_state(new_state.clone());
         let (rect, active_tab) = {
             let s = new_mgr.state.lock().map_err(|e| e.to_string())?;
             let tab = s
@@ -112,7 +112,14 @@ impl BrowserPluginState {
             };
             if needs_webview {
                 let webview = BrowserManager::create_webview_for_tab(
-                    app, session_id, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                    app,
+                    new_state.clone(),
+                    &tab.id,
+                    &tab.url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
                 )?;
                 let mut s = new_mgr.state.lock().map_err(|e| e.to_string())?;
                 s.webviews.insert(tab.id.clone(), webview);

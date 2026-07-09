@@ -16,8 +16,25 @@ use crate::types::{
     HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
-fn webview_label(tab_id: &str) -> String {
-    format!("browser-webview-{tab_id}")
+/// 规范化标识符用于 webview label（避免特殊字符）。
+fn sanitize_path_segment(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn webview_label(session_id: &str, tab_id: &str) -> String {
+    format!(
+        "browser-webview-{}-{}",
+        sanitize_path_segment(session_id),
+        sanitize_path_segment(tab_id)
+    )
 }
 
 /// 缩放下限：避免内容过小不可读
@@ -220,7 +237,7 @@ impl BrowserManager {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_webview_for_tab(
         app: &AppHandle<Wry>,
-        session_id: &str,
+        state: Arc<Mutex<BrowserState>>,
         tab_id: &str,
         url: &str,
         x: f64,
@@ -232,16 +249,18 @@ impl BrowserManager {
             .get_window("main")
             .ok_or_else(|| "主窗口未找到".to_string())?;
 
+        // 从目标 session 的 state 读出 session_id（R1 保证可靠）
+        let session_id = {
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.session_id.clone()
+        };
         let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-        let data_dir = browser_data_directory(session_id);
-        let label = webview_label(tab_id);
+        let data_dir = browser_data_directory(&session_id);
+        let label = webview_label(&session_id, tab_id);
         let tab_id_for_closure = tab_id.to_string();
 
-        let state_clone_holder = {
-            // 获取 manager state 用于 on_page_load 回调
-            let plugin_state = app.state::<crate::BrowserPluginState>();
-            plugin_state.manager().clone_state()
-        };
+        // on_page_load 回调直接写入目标 session 的 state（不再经 app.state().manager() 串台）
+        let state_clone_holder = state.clone();
         // 在 state_clone_holder 被 move 进 on_page_load 闭包前读出当前缩放，用于新建 webview 即时应用
         let initial_zoom = state_clone_holder
             .lock()
@@ -488,7 +507,16 @@ impl BrowserManager {
 
         if let Some(webview_to_create) = existing_tab_webview_to_create {
             if let Some(tab_id) = webview_to_create {
-                let webview = Self::create_webview_for_tab(app, "", &tab_id, url, x, y, w, h)?;
+                let webview = Self::create_webview_for_tab(
+                    app,
+                    self.state.clone(),
+                    &tab_id,
+                    url,
+                    x,
+                    y,
+                    w,
+                    h,
+                )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id, webview);
                 drop(state);
@@ -503,7 +531,8 @@ impl BrowserManager {
         let is_blank = url == "about:blank";
 
         if !is_blank {
-            let webview = Self::create_webview_for_tab(app, "", &tab_id, url, x, y, w, h)?;
+            let webview =
+                Self::create_webview_for_tab(app, self.state.clone(), &tab_id, url, x, y, w, h)?;
             if let Ok(mut state) = self.state.lock() {
                 state.webviews.insert(tab_id.clone(), webview);
             }
@@ -907,7 +936,14 @@ impl BrowserManager {
         if needs_create {
             if let Some(tab_id) = active_id {
                 let webview = Self::create_webview_for_tab(
-                    app, "", &tab_id, url, rect.0, rect.1, rect.2, rect.3,
+                    app,
+                    self.state.clone(),
+                    &tab_id,
+                    url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id.clone(), webview);
@@ -1284,7 +1320,14 @@ impl BrowserManager {
             if let Some(tab) = active_tab {
                 drop(state);
                 let webview = Self::create_webview_for_tab(
-                    app, "", &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                    app,
+                    self.state.clone(),
+                    &tab.id,
+                    &tab.url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab.id.clone(), webview);
@@ -1345,7 +1388,14 @@ impl BrowserManager {
 
         for tab in tabs_needing_webview {
             let webview = Self::create_webview_for_tab(
-                app, "", &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                app,
+                self.state.clone(),
+                &tab.id,
+                &tab.url,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
             )?;
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab.id.clone(), webview);
@@ -1484,7 +1534,14 @@ impl BrowserManager {
         // 会导致 Tauri 权限检查内部 panic），延迟到 navigate 时按需创建
         if !is_blank {
             let webview = Self::create_webview_for_tab(
-                app, "", &tab_id, url, rect.0, rect.1, rect.2, rect.3,
+                app,
+                self.state.clone(),
+                &tab_id,
+                url,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
             )?;
 
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
