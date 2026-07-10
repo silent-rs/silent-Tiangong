@@ -538,24 +538,12 @@ fn sync_stream_event_to_state(
             content,
         } => append_assistant_reasoning(session, message_id, content),
         StreamEvent::ToolCalls {
-            message_id,
-            names,
-            calls,
-            ..
+            message_id, calls, ..
         } => {
             finalize_assistant_tool_calls(session, message_id, calls);
-            session.append_message(
-                MessageRole::System,
-                format!("LLM 输出\ntool_calls: {}", names.join(", ")),
-            );
         }
-        StreamEvent::ToolStart { name, args_summary } => {
-            let summary = if args_summary.trim().is_empty() {
-                format!("正在执行工具：{name}")
-            } else {
-                format!("正在执行工具：{name} {args_summary}")
-            };
-            session.append_message(MessageRole::System, summary);
+        StreamEvent::ToolStart { .. } => {
+            // 工具开始不再写 System 摘要——避免运行记录污染系统规则
         }
         StreamEvent::ToolResult {
             name,
@@ -567,7 +555,7 @@ fn sync_stream_event_to_state(
             duration_ms: _,
         } => {
             let persisted_output = full_output.as_deref().unwrap_or(output);
-            let status = if *ok { "成功" } else { "失败" };
+
             if *ok && !media.is_empty() {
                 session.append_message_with_media(
                     MessageRole::Assistant,
@@ -584,10 +572,6 @@ fn sync_stream_event_to_state(
                     );
                 }
             }
-            session.append_message(
-                MessageRole::System,
-                format!("工具 {name} 执行{status}\n{persisted_output}"),
-            );
             append_tool_result_message(
                 session,
                 tool_call_id.as_deref(),

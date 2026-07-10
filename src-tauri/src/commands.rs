@@ -957,7 +957,7 @@ pub(crate) fn start_stream_consumer(
                         }
                         StreamEvent::ToolCalls {
                             message_id,
-                            names,
+                            names: _,
                             calls,
                             usage: _,
                         } => {
@@ -966,10 +966,6 @@ pub(crate) fn start_stream_consumer(
                                 &mut assistant_msg_id,
                                 message_id,
                                 calls,
-                            );
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("LLM 输出\ntool_calls: {}", names.join(", ")),
                             );
                         }
                         StreamEvent::TokenUsage {
@@ -1005,7 +1001,6 @@ pub(crate) fn start_stream_consumer(
                             duration_ms: _,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
-                            let status = if *ok { "ok=true" } else { "ok=false" };
 
                             // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
                             if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
@@ -1028,34 +1023,10 @@ pub(crate) fn start_stream_consumer(
                                     !*ok,
                                 );
                             } else {
-                                // 正常工具结果：System 摘要 + Tool result
-                                let mut lines = vec![format!("工具执行 [{name}]")];
-                                if !last_tool_args_summary.is_empty() {
-                                    lines.push(format!("命令: {last_tool_args_summary}"));
-                                }
-                                lines.push(format!("{status} exit_code=0"));
-                                lines.push(format!("summary: {name}"));
+                                // 正常工具结果：只存标准 Tool result（不再写 System 摘要，避免重复）
                                 if !media.is_empty() {
-                                    let media_desc = media
-                                        .iter()
-                                        .map(|a| match a.kind {
-                                            tiangong_types::MediaKind::Image => "图片",
-                                            tiangong_types::MediaKind::Video => "视频",
-                                            tiangong_types::MediaKind::Audio => "音频",
-                                            _ => "文件",
-                                        })
-                                        .next()
-                                        .unwrap_or("媒体");
-                                    let count = media.len();
-                                    lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
                                     append_assistant_media(session, media.clone());
-                                } else if !persisted_output.trim().is_empty() {
-                                    lines.push(format!("stdout:\n{persisted_output}"));
                                 }
-                                session.append_message(
-                                    tiangong_types::MessageRole::System,
-                                    lines.join("\n"),
-                                );
                                 append_tool_result_message(
                                     session,
                                     tool_call_id.as_deref(),
