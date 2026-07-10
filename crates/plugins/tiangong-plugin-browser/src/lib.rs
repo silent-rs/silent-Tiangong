@@ -163,6 +163,7 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_set_position,
             commands::browser_navigate,
             commands::browser_open_url,
+            commands::browser_attach_session,
             commands::browser_eval,
             commands::browser_go_back,
             commands::browser_go_forward,

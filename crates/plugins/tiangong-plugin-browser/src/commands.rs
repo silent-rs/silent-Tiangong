@@ -275,3 +275,16 @@ pub async fn browser_global_history_delete(
     state.manager().delete_global_history_entry(&url);
     Ok(())
 }
+
+/// 草稿 session 转正：迁移 BrowserState 的 registry key + 持久化文件。
+#[tauri::command]
+pub async fn browser_attach_session(
+    draft_session_id: String,
+    persistent_session_id: String,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    state
+        .registry
+        .attach_session(&draft_session_id, &persistent_session_id);
+    Ok(())
+}

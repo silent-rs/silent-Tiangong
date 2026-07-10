@@ -534,41 +534,34 @@ pub async fn get_session_tabs(
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
 
-            // 浏览器 store 是 browser tab 元数据的真相源；Session.tabs 仅保留统一工作区顺序。
-            let mut tabs = session.tabs.clone();
+            // Browser tabs 只从 BrowserSessionStore 读取（唯一真相源）；
+            // Terminal tabs 从 Session.tabs 读取（terminal 暂无独立 store）。
             let persisted =
                 tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id);
-            for browser_tab in &persisted.tabs {
-                if let Some(existing) = tabs.iter_mut().find(|tab| tab.id == browser_tab.id) {
-                    if matches!(existing.kind, tiangong_core::session::TabKind::Browser) {
-                        existing.title = browser_tab.title.clone();
-                        existing.url = browser_tab.url.clone();
-                    }
-                } else {
-                    tabs.push(tiangong_core::session::TabState {
-                        id: browser_tab.id.clone(),
-                        kind: tiangong_core::session::TabKind::Browser,
-                        title: browser_tab.title.clone(),
-                        url: browser_tab.url.clone(),
-                        created_at: String::new(),
-                    });
-                }
-            }
-
-            // 统一工作区最后停留在终端时保留终端；否则以 browser store 的活动标签为准。
-            let session_active_is_terminal = session.active_tab_id.as_ref().is_some_and(|id| {
-                tabs.iter().any(|tab| {
-                    tab.id == *id && matches!(tab.kind, tiangong_core::session::TabKind::Terminal)
+            let browser_tabs: Vec<_> = persisted
+                .tabs
+                .iter()
+                .map(|tab| tiangong_core::session::TabState {
+                    id: tab.id.clone(),
+                    kind: tiangong_core::session::TabKind::Browser,
+                    title: tab.title.clone(),
+                    url: tab.url.clone(),
+                    created_at: String::new(),
                 })
-            });
+                .collect();
+            let terminal_tabs: Vec<_> = session
+                .tabs
+                .iter()
+                .filter(|tab| matches!(tab.kind, tiangong_core::session::TabKind::Terminal))
+                .cloned()
+                .collect();
+            let tabs: Vec<_> = terminal_tabs.into_iter().chain(browser_tabs).collect();
+
+            // active_tab_id：browser store 的 active 优先，其次 session 的 terminal active
             let persisted_active = persisted
                 .active_tab_id
                 .filter(|id| tabs.iter().any(|tab| tab.id == *id));
-            let active_tab_id = if session_active_is_terminal {
-                session.active_tab_id.clone()
-            } else {
-                persisted_active.or_else(|| session.active_tab_id.clone())
-            };
+            let active_tab_id = persisted_active.or_else(|| session.active_tab_id.clone());
 
             Ok(SessionTabsView {
                 tabs,

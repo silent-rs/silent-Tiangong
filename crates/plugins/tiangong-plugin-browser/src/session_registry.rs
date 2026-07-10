@@ -106,6 +106,41 @@ impl BrowserSessionRegistry {
     /// 销毁指定 session 的全部状态（关闭 webview、清理）。
     ///
     /// session 被删除时调用。webview 的实际关闭由调用方在 drop 前显式处理。
+    /// 草稿 session 转正：迁移 BrowserState 的 registry key + 持久化文件。
+    ///
+    /// webview 的 on_page_load closure 仍捕获旧 session_id——运行时事件经
+    /// registry 查找能容忍（draft key 不再存在，事件会被忽略）。若需严格正确，
+    /// 可后续改为重建 webview（见 RFC 0016 draft→persistent 策略）。
+    pub fn attach_session(&self, draft_id: &str, persistent_id: &str) {
+        if draft_id == persistent_id || draft_id.is_empty() || persistent_id.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
+        if let Some(state_arc) = sessions.remove(draft_id) {
+            // 更新 state 内的 session_id
+            {
+                let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
+                s.session_id = persistent_id.to_string();
+            }
+            sessions.insert(persistent_id.to_string(), state_arc);
+        }
+        drop(sessions);
+        // 迁移持久化文件
+        let persisted = crate::session_store::BrowserSessionStore::load(draft_id);
+        if !persisted.tabs.is_empty() {
+            crate::session_store::BrowserSessionStore::save(persistent_id, &persisted);
+        }
+        crate::session_store::BrowserSessionStore::remove(draft_id);
+        // 更新 active
+        let mut active = self
+            .active_session_id
+            .lock()
+            .expect("active_session_id poisoned");
+        if active.as_deref() == Some(draft_id) {
+            *active = Some(persistent_id.to_string());
+        }
+    }
+
     /// 销毁指定 session：停轮询、关闭 webview、清理 state、删持久化文件。
     pub fn destroy_session(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
