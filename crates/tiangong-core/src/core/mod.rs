@@ -110,11 +110,15 @@ impl TiangongCore {
         TiangongCoreBuilder::default()
     }
 
-    fn send_cmd(&self, cmd: Command) -> bool {
+    fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
         let Some(ref tx) = self.cmd_tx else {
-            return false;
+            return Err(CoreError::WorkerStopped);
         };
-        tx.send(cmd).is_ok()
+        if tx.send(cmd).is_ok() {
+            Ok(())
+        } else {
+            Err(CoreError::WorkerStopped)
+        }
     }
 
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -125,11 +129,26 @@ impl TiangongCore {
         &self.session_id
     }
 
-    pub fn is_running(&self) -> bool {
+    /// 是否已停止（worker 已结束或命令通道已关闭）。
+    ///
+    /// 已停止的 core 无法再接收命令，调用方应移除并按需重建。
+    pub fn is_stopped(&self) -> bool {
+        if self.cmd_tx.is_none() {
+            return true;
+        }
         self.worker
             .as_ref()
-            .map(|worker| !worker.is_finished())
-            .unwrap_or(false)
+            .map(|worker| worker.is_finished())
+            .unwrap_or(true)
+    }
+
+    /// 是否可接收命令（worker 存活且通道未关闭）。
+    ///
+    /// 注意：当前实现无法准确反映"是否正在执行 Agent Turn"（执行状态在 worker
+    /// 线程内部，无共享标志），此处仅表达"可投递命令"，即 `!is_stopped()`。
+    /// 真正的 busy 语义需后续 worker 状态上报完善。
+    pub fn is_busy(&self) -> bool {
+        !self.is_stopped()
     }
 
     /// 设置信任模式（实时生效，当前对话下一次工具调用立即感知）
@@ -139,22 +158,25 @@ impl TiangongCore {
         }
     }
 
-    /// 关闭并获取最终 session
-    pub fn into_session(mut self) -> Session {
+    /// 关闭并获取最终 session。
+    ///
+    /// worker panic 时返回 [`CoreError::WorkerPanicked`]，不再静默兜底为
+    /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
+    pub fn into_session(mut self) -> Result<Session, CoreError> {
         let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
         if let Some(w) = self.worker.take() {
             match w.join() {
-                Ok(session) => return session,
+                Ok(session) => return Ok(session),
                 Err(_) => tracing::warn!("TiangongCore worker panic"),
             }
         }
-        Session::new("recovered")
+        Err(CoreError::WorkerPanicked)
     }
 }
 
 impl crate::agent_input::AgentInput for TiangongCore {
-    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> bool {
+    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
         // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。

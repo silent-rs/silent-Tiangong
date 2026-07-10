@@ -164,7 +164,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        core.deliver(AgentInputKind::message(trimmed.to_string()));
+        let _ = core.deliver(AgentInputKind::message(trimmed.to_string()));
 
         // 处理响应流
         handle_response(&stream_rx, &core);
@@ -174,9 +174,13 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
     output::status("再见！");
     // 获取 Core 的最终 session 并持久化
-    let final_session = core.into_session();
-    if !final_session.messages.is_empty() {
-        state.save_core_session(final_session);
+    // worker panic 时无法取回会话，记录告警后跳过持久化（避免丢失提示）。
+    match core.into_session() {
+        Ok(final_session) if !final_session.messages.is_empty() => {
+            state.save_core_session(final_session);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "获取最终 session 失败，跳过持久化"),
     }
     tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())
@@ -319,7 +323,7 @@ impl ResponseState {
                         }
                     }
                 };
-                core.deliver(AgentInputKind::approval(request_id.clone(), approved));
+                let _ = core.deliver(AgentInputKind::approval(request_id.clone(), approved));
                 if approved {
                     output::status("已允许");
                 } else {

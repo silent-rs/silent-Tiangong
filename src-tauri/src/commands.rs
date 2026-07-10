@@ -827,11 +827,14 @@ async fn send_message_inner(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.deliver(AgentInputKind::message_with_id(
-                content.clone(),
-                user_message_id,
-                command_media,
-            )) {
+            if core
+                .deliver(AgentInputKind::message_with_id(
+                    content.clone(),
+                    user_message_id,
+                    command_media,
+                ))
+                .is_err()
+            {
                 return Err("会话 core 已停止，请重试发送".to_string());
             }
         }
@@ -1631,11 +1634,14 @@ pub async fn edit_and_resend(
     {
         let cores = state.cores.lock().map_err(|e| e.to_string())?;
         if let Some(core) = cores.get(&sid) {
-            if !core.deliver(AgentInputKind::message_with_id(
-                new_content.clone(),
-                message_id.clone(),
-                message_media.clone(),
-            )) {
+            if core
+                .deliver(AgentInputKind::message_with_id(
+                    new_content.clone(),
+                    message_id.clone(),
+                    message_media.clone(),
+                ))
+                .is_err()
+            {
                 return Err("会话 core 已停止，请重试".to_string());
             }
         }

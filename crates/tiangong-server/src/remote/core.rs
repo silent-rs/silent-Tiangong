@@ -84,7 +84,7 @@ impl ServerCoreManager {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+        let _ = core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
         Ok(())
     }
 
@@ -109,7 +109,7 @@ impl ServerCoreManager {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+            let _ = core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
         }
 
         let tracker_for_wait = tracker.clone();

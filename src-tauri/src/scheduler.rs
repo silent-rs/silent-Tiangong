@@ -49,7 +49,7 @@ impl SchedulerContext for DesktopSchedulerContext {
         let core = cores
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("定时任务 core 不存在：{session_id}"))?;
-        if !core.deliver(AgentInputKind::message(content)) {
+        if core.deliver(AgentInputKind::message(content)).is_err() {
             return Err(anyhow::anyhow!("定时任务 core 命令通道已关闭"));
         }
         Ok(())

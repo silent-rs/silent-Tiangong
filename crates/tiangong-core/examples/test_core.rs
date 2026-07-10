@@ -25,7 +25,7 @@ fn main() {
         .expect("Builder 必填字段已齐");
 
     println!("=== 发送: 你好 ===");
-    core.deliver(AgentInputKind::message("你好"));
+    let _ = core.deliver(AgentInputKind::message("你好"));
 
     let mut got_done = false;
     loop {
@@ -59,7 +59,7 @@ fn main() {
 
     if got_done {
         println!("\n=== 发送: 1+1=? ===");
-        core.deliver(AgentInputKind::message("1+1=?"));
+        let _ = core.deliver(AgentInputKind::message("1+1=?"));
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
@@ -85,7 +85,7 @@ fn main() {
     }
 
     println!("\n=== shutdown ===");
-    let session = core.into_session();
+    let session = core.into_session().expect("worker 应正常退出");
     println!("消息数: {}", session.messages.len());
     for (i, m) in session.messages.iter().enumerate() {
         let text = m.text_content();

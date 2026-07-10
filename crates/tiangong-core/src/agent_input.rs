@@ -11,8 +11,11 @@
 
 /// 外部与 Agent 交互的统一通道。
 pub trait AgentInput: Send + Sync {
-    /// 投递一个外部输入到 Agent，返回是否成功进入通道。
-    fn deliver(&self, input: AgentInputKind) -> bool;
+    /// 投递一个外部输入到 Agent。
+    ///
+    /// 成功进入命令通道返回 `Ok(())`；worker 已停止、通道关闭时返回
+    /// [`crate::core::CoreError::WorkerStopped`]，调用方据此清理僵尸 core。
+    fn deliver(&self, input: AgentInputKind) -> Result<(), crate::core::CoreError>;
 }
 
 /// 外部输入的顶层分类，按交互语义分四层。
