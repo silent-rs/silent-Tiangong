@@ -50,7 +50,11 @@ impl ServerCoreManager {
     pub fn notify_reload_config(&self) {
         if let Ok(cores) = self.cores.lock() {
             for core in cores.values() {
-                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
+                if let Err(e) =
+                    core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config())
+                {
+                    tracing::warn!(error = %e, "reload_config 投递失败（worker 可能已停止）");
+                }
             }
         }
     }
@@ -84,7 +88,8 @@ impl ServerCoreManager {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        let _ = core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+        core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
+            .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         Ok(())
     }
 
@@ -109,7 +114,8 @@ impl ServerCoreManager {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            let _ = core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+            core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
+                .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         }
 
         let tracker_for_wait = tracker.clone();

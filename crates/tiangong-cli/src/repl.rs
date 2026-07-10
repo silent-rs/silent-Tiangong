@@ -15,6 +15,16 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
+    // 初始化日志：输出到 stderr（不污染 stdout 的流式对话/交互输出）。
+    // 默认 warn 级别以上，可用 RUST_LOG 覆盖。多次调用（如测试）安全忽略。
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     // 初始化 config 内存单例（从磁盘加载一次）。
     tiangong_config::registry::init();
     let core_config = tiangong_config::registry::config().to_core_config();
@@ -164,7 +174,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        let _ = core.deliver(AgentInputKind::message(trimmed.to_string()));
+        if let Err(e) = core.deliver(AgentInputKind::message(trimmed.to_string())) {
+            tracing::warn!(error = %e, "消息投递失败（worker 可能已停止）");
+        }
 
         // 处理响应流
         handle_response(&stream_rx, &core);
@@ -323,7 +335,10 @@ impl ResponseState {
                         }
                     }
                 };
-                let _ = core.deliver(AgentInputKind::approval(request_id.clone(), approved));
+                if let Err(e) = core.deliver(AgentInputKind::approval(request_id.clone(), approved))
+                {
+                    tracing::warn!(error = %e, "审批响应投递失败（worker 可能已停止）");
+                }
                 if approved {
                     output::status("已允许");
                 } else {
