@@ -301,6 +301,7 @@ export interface ModelEntryView {
   model: string;
   capabilities: string[];
   options: Record<string, unknown>;
+  context_window?: number;
 }
 
 export interface ModelsConfigView {

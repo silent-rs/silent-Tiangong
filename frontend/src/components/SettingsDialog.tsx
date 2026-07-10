@@ -840,7 +840,7 @@ function ProviderModelsView({
   const [modelModalMode, setModelModalMode] = useState<'add' | 'edit' | null>(null);
   const [editingModelKey, setEditingModelKey] = useState('');
   const [modelDraft, setModelDraft] = useState<ModelEntryView>({
-    provider: '', model: '', capabilities: [], options: {},
+    provider: '', model: '', capabilities: [], options: {}, context_window: undefined,
   });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
@@ -1300,6 +1300,22 @@ function ProviderModelsView({
                 ))}
               </div>
             </div>
+            {(modelDraft.capabilities.includes('chat') || modelDraft.capabilities.includes('multimodal')) && (
+              <div>
+                <Label className="text-xs">上下文窗口 (context_window)</Label>
+                <Input
+                  type="number"
+                  className="h-8 text-sm mt-1"
+                  placeholder="留空使用模型默认值"
+                  value={modelDraft.context_window ?? ''}
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    setModelDraft({ ...modelDraft, context_window: v === '' ? undefined : Math.max(0, parseInt(v, 10) || 0) });
+                  }}
+                />
+                <p className="text-xs text-muted-foreground mt-0.5">单位：token。留空时从 context_windows.json 映射表取默认值。</p>
+              </div>
+            )}
             {modelDraft.capabilities.includes('tts') && (
               <div>
                 <div className="flex items-center justify-between">

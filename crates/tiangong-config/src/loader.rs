@@ -55,14 +55,16 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
 
     // context_limit 在加载阶段按 chat model 从「同一目录」的 context_windows.json
     // 解析，避免 to_core_config 转换时误读默认 ~/.tiangong（自定义目录场景出错）。
-    let chat_model = models
-        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+    let chat_resolved = models.resolve_slot(tiangong_core::models_config::RoutingSlot::Chat);
+    let chat_model = chat_resolved
+        .as_ref()
         .map(|r| r.model.clone())
         .unwrap_or_default();
+    let override_ctx = chat_resolved.and_then(|r| r.context_window);
     let context_limit = if chat_model.is_empty() {
         tiangong_core::core_config::default_context_limit()
     } else {
-        io::resolve_context_limit_at(dir, &chat_model)
+        io::resolve_context_limit_with_override(dir, &chat_model, override_ctx)
     };
 
     // MCP 配置（mcp.json）与 capability 缓存由 tiangong-plugin-mcp 自管：

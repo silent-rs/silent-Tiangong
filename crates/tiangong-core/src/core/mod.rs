@@ -849,6 +849,7 @@ fn build_engine_from_config(
             model: config.llm.chat.model.clone(),
             capabilities: vec![ModelCapability::Chat],
             options: config.llm.chat.options.clone(),
+            context_window: None,
         },
     );
     if let Some(ref lite) = config.llm.lite {
@@ -868,6 +869,7 @@ fn build_engine_from_config(
                 model: lite.model.clone(),
                 capabilities: vec![ModelCapability::Chat],
                 options: lite.options.clone(),
+                context_window: None,
             },
         );
     }

@@ -261,6 +261,10 @@ pub struct ModelEntry {
     pub capabilities: Vec<ModelCapability>,
     #[serde(default = "default_options")]
     pub options: Value,
+    /// 模型上下文窗口（token 数）。仅 Chat / Multimodal 模型适用。
+    /// None 或 0 时从 context_windows.json 映射表取默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 impl Default for ModelEntry {
@@ -270,6 +274,7 @@ impl Default for ModelEntry {
             model: String::new(),
             capabilities: vec![],
             options: default_options(),
+            context_window: None,
         }
     }
 }
@@ -366,6 +371,7 @@ impl<'de> serde::Deserialize<'de> for ModelsConfig {
                                 model: key.clone(),
                                 capabilities: vec![],
                                 options: default_options(),
+                                context_window: None,
                             }
                         })
                     }
@@ -393,6 +399,8 @@ pub struct ResolvedModel {
     pub protocol: ProviderProtocol,
     pub model: String,
     pub options: Value,
+    /// 模型上下文窗口（透传自 ModelEntry，None 表示用映射表默认）
+    pub context_window: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +474,7 @@ impl ModelsConfig {
             protocol: provider.protocol,
             model: entry.model.clone(),
             options: entry.options.clone(),
+            context_window: entry.context_window,
         })
     }
 
@@ -491,6 +500,7 @@ impl ModelsConfig {
                     model,
                     capabilities: vec![ModelCapability::Chat],
                     options: default_options(),
+                    context_window: None,
                 },
             );
         }
@@ -580,6 +590,7 @@ impl ModelsConfig {
                 model: model_id.to_string(),
                 capabilities,
                 options: default_options(),
+                context_window: None,
             },
         );
     }
@@ -685,6 +696,7 @@ impl ModelsConfig {
                     model: model_id.to_string(),
                     capabilities: vec![],
                     options: default_options(),
+                    context_window: None,
                 },
             );
         }

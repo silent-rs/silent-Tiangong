@@ -23,9 +23,16 @@ impl TiangongState {
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
         let storage_dir = tiangong_config::io::storage_root();
-        let context_limit = tiangong_config::io::resolve_context_limit_at(
+        let chat_override = self
+            .store
+            .provider
+            .models_config
+            .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+            .and_then(|r| r.context_window);
+        let context_limit = tiangong_config::io::resolve_context_limit_with_override(
             &storage_dir,
             &self.store.provider.model_endpoint.model,
+            chat_override,
         );
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(endpoint),

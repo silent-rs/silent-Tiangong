@@ -62,10 +62,14 @@ pub fn update(new_config: TiangongConfig) {
 pub fn set_models(new_models: tiangong_core::models_config::ModelsConfig) {
     let dir = crate::io::storage_root();
     let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
+    // 取 Chat 路由模型的 context_window override（仅 Chat/Multimodal 模型适用）
+    let override_ctx = new_models
+        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+        .and_then(|r| r.context_window);
     let context_limit = if llm.chat.model.is_empty() {
         tiangong_core::core_config::default_context_limit()
     } else {
-        crate::io::resolve_context_limit_at(&dir, &llm.chat.model)
+        crate::io::resolve_context_limit_with_override(&dir, &llm.chat.model, override_ctx)
     };
     if let Ok(mut guard) = config_cell().write()
         && let Some(cfg) = guard.as_mut()

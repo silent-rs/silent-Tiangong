@@ -181,6 +181,23 @@ pub fn ensure_context_windows(dir: &Path) {
     }
 }
 
+/// 解析 context_window，优先使用模型配置的 override。
+///
+/// - `override` 非空非 0：直接返回（用户显式配置优先）
+/// - 否则走 `resolve_context_limit_at`（context_windows.json 映射）
+pub fn resolve_context_limit_with_override(
+    dir: &Path,
+    model_name: &str,
+    override_value: Option<usize>,
+) -> usize {
+    if let Some(ctx) = override_value
+        && ctx > 0
+    {
+        return ctx;
+    }
+    resolve_context_limit_at(dir, model_name)
+}
+
 /// 根据模型名称从映射表解析 context_window。
 ///
 /// 读取 `dir/context_windows.json`（不存在则用内嵌默认表），
