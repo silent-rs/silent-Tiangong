@@ -1002,6 +1002,7 @@ pub(crate) fn start_stream_consumer(
                             ref output,
                             ref full_output,
                             ref media,
+                            duration_ms: _,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
                             let status = if *ok { "ok=true" } else { "ok=false" };

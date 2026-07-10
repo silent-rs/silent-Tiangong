@@ -564,6 +564,7 @@ fn sync_stream_event_to_state(
             output,
             full_output,
             media,
+            duration_ms: _,
         } => {
             let persisted_output = full_output.as_deref().unwrap_or(output);
             let status = if *ok { "成功" } else { "失败" };
