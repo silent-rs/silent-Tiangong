@@ -188,6 +188,39 @@ impl BrowserManager {
     ///
     /// 从 state 读出 session_id + tabs + active_tab_id，写入 per-session store。
     /// 用于应用重启后恢复各 session 上次的浏览器页面（review #6）。
+    /// 从 BrowserState 持久化（静态 helper，供闭包/轮询线程使用）。
+    /// 与 persist_session_tabs 走同一套过滤逻辑。
+    pub(crate) fn persist_from_state(state: &BrowserState) {
+        if state.session_id.is_empty() {
+            return;
+        }
+        let tabs: Vec<_> = state
+            .tabs
+            .iter()
+            .filter(|tab| {
+                let url = tab.url.trim();
+                !url.is_empty() && !url.starts_with("about:")
+            })
+            .cloned()
+            .collect();
+        let active_tab_id = state
+            .active_tab_id
+            .as_ref()
+            .filter(|id| tabs.iter().any(|t| &t.id == *id))
+            .cloned();
+        if tabs.is_empty() {
+            crate::session_store::BrowserSessionStore::remove(&state.session_id);
+        } else {
+            crate::session_store::BrowserSessionStore::save(
+                &state.session_id,
+                &crate::session_store::BrowserSessionPersisted {
+                    tabs,
+                    active_tab_id,
+                },
+            );
+        }
+    }
+
     pub(crate) fn persist_session_tabs(&self) {
         if let Ok(s) = self.state.lock() {
             if s.session_id.is_empty() {
@@ -370,17 +403,8 @@ impl BrowserManager {
                                         if !title.is_empty() {
                                             tab.title = title.clone();
                                         }
-                                        // 页面加载完成更新了 tab url/title，持久化以便重启恢复
-                                        let sid = state.session_id.clone();
-                                        let tabs_snapshot = state.tabs.clone();
-                                        let active_snapshot = state.active_tab_id.clone();
-                                        crate::session_store::BrowserSessionStore::save(
-                                            &sid,
-                                            &crate::session_store::BrowserSessionPersisted {
-                                                tabs: tabs_snapshot,
-                                                active_tab_id: active_snapshot,
-                                            },
-                                        );
+                                        // 页面加载完成更新了 tab url/title，走统一过滤持久化
+                                        Self::persist_from_state(&state);
                                     }
                                     // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
                                     let should_persist = {
@@ -722,17 +746,8 @@ impl BrowserManager {
                                     tab.url = current_url.clone();
                                 }
                             }
-                            // url_poll 检测到 URL 变化，持久化以便重启恢复
-                            let sid = s.session_id.clone();
-                            let tabs_snapshot = s.tabs.clone();
-                            let active_snapshot = s.active_tab_id.clone();
-                            crate::session_store::BrowserSessionStore::save(
-                                &sid,
-                                &crate::session_store::BrowserSessionPersisted {
-                                    tabs: tabs_snapshot,
-                                    active_tab_id: active_snapshot,
-                                },
-                            );
+                            // url_poll 检测到 URL 变化，走统一过滤持久化
+                            Self::persist_from_state(&s);
                         }
                         let _ = app.emit(
                             "browser:page_loaded",

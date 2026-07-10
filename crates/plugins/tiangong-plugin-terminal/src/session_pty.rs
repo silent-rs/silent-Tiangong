@@ -18,8 +18,6 @@ use crate::output_processor;
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
-const DEFAULT_TERMINAL_TAB_ID: &str = "__default__";
-
 /// 单个对话的 PTY 槽位
 #[derive(Clone)]
 pub struct SessionPty {
@@ -91,11 +89,7 @@ fn parse_terminal_id(value: &str) -> Option<TerminalRoute> {
 }
 
 fn terminal_instance_id(session_id: &str, tab_id: &str) -> String {
-    if tab_id == DEFAULT_TERMINAL_TAB_ID {
-        session_id.to_string()
-    } else {
-        format!("{session_id}:{tab_id}")
-    }
+    format!("{session_id}:{tab_id}")
 }
 
 fn sanitize_path_segment(value: &str) -> String {
@@ -202,7 +196,7 @@ impl SessionPtyRegistry {
             .tab_id
             .clone()
             .or_else(|| session_tabs.active_or_first_tab_id())
-            .unwrap_or_else(|| DEFAULT_TERMINAL_TAB_ID.to_string());
+            .unwrap_or_else(|| scru128::new().to_string());
 
         {
             let mut tabs = session_tabs.tabs.lock().unwrap();
@@ -695,7 +689,7 @@ impl SessionAwareTerminalProvider {
 
     /// 获取指定 session 的 cmd_tx（懒创建）
     fn tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
-        if session_id.is_empty() {
+        if session_id.trim().is_empty() {
             return None;
         }
         // 懒创建：若不存在则用 default cwd 创建
@@ -713,7 +707,7 @@ impl SessionAwareTerminalProvider {
 
     /// 获取指定 session 的 manager（懒创建）
     fn manager(&self, session_id: &str) -> Option<Arc<TerminalManager>> {
-        if session_id.is_empty() {
+        if session_id.trim().is_empty() {
             return None;
         }
         if self.registry.get(session_id).is_none() {
@@ -733,10 +727,10 @@ impl SessionAwareTerminalProvider {
         if route.tab_id.is_some() {
             return self.tx(session_id);
         }
+        // 只返回处于 AgentInteractive 态的 tab；找不到返回 None（不 fallback active/first）
         self.registry
             .interactive_slot_for_session(&route.session_id)
             .map(|slot| slot.cmd_tx)
-            .or_else(|| self.tx(session_id))
     }
 }
 
