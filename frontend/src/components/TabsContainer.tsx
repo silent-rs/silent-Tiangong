@@ -98,8 +98,8 @@ export function TabsContainer({
   const requestedTerminalTabIdRef = useRef<string | null>(requestedTerminalTabId ?? null);
   const isVisibleRef = useRef(isVisible);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
-  const lastHydratedSessionRef = useRef<string | null>(null);
-  const hydratingRef = useRef(false);
+  const hydratingSessionRef = useRef<string | null>(null);
+  const hydratedSessionRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const transferVersionRef = useRef<number | null>(null);
   const terminalSessionId = activeSessionId || draftTerminalId || DRAFT_TERMINAL_ID;
@@ -284,8 +284,8 @@ export function TabsContainer({
 
     const sessionId = activeSessionIdRef.current;
     const currentTabs = tabsRef.current;
-    if (hydratingRef.current || !sessionId || currentTabs.length === 0) return;
-    if (lastHydratedSessionRef.current !== sessionId) return;
+    if (hydratingSessionRef.current !== null || !sessionId || currentTabs.length === 0) return;
+    if (hydratedSessionRef.current !== sessionId) return;
 
     const activeId = activeTabIdRef.current || currentTabs[0]?.id || null;
     void api.setSessionTabs(sessionId, currentTabs, activeId).catch(console.error);
@@ -293,8 +293,8 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!activeSessionId) {
-      if (lastHydratedSessionRef.current !== DRAFT_TERMINAL_ID) {
-        lastHydratedSessionRef.current = DRAFT_TERMINAL_ID;
+      if (hydratedSessionRef.current !== DRAFT_TERMINAL_ID) {
+        hydratedSessionRef.current = DRAFT_TERMINAL_ID;
         setTabs([]);
         setActiveTabId('');
       }
@@ -310,48 +310,59 @@ export function TabsContainer({
       return;
     }
 
-    if (lastHydratedSessionRef.current === activeSessionId) return;
-    lastHydratedSessionRef.current = activeSessionId;
-    hydratingRef.current = true;
+    if (hydratedSessionRef.current === activeSessionId) return;
+    if (hydratingSessionRef.current === activeSessionId) return;
+
+    const sessionId = activeSessionId;
+    hydratingSessionRef.current = sessionId;
 
     let cancelled = false;
     const hydrate = async () => {
       try {
-        const sessionTabs = await api.getSessionTabs(activeSessionId);
+        const sessionTabs = await api.getSessionTabs(sessionId);
         if (cancelled) return;
         const nextTabs = sessionTabs.tabs;
         const nextActiveTabId = normalizeActiveTabId(nextTabs, sessionTabs.active_tab_id);
+        await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
+        if (cancelled) return;
+
         tabsRef.current = nextTabs;
         activeTabIdRef.current = nextActiveTabId;
         setTabs(nextTabs);
         setActiveTabId(nextActiveTabId);
-        await syncBrowserRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId);
+
+        // await runtime 恢复完成后再标记已 hydrate（避免 activateOrCreateTab 竞态）
+        await restoreRuntimeForTabs(sessionId, nextTabs, nextActiveTabId, isVisibleRef.current, true);
         if (cancelled) return;
-        hydratingRef.current = false;
+
+        // 只有完整成功后才标记已恢复
+        hydratingSessionRef.current = null;
+        hydratedSessionRef.current = sessionId;
         setHydrateVersion((version) => version + 1);
         setActivationRetryVersion((version) => version + 1);
-        void restoreRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId, isVisible, true);
       } catch (err) {
+        if (cancelled) return;
         console.error('恢复会话 Tab 失败：', err);
-        if (!cancelled) {
-          setTabs([]);
-          setActiveTabId('');
-          await api.browserSwitchSession(activeSessionId, null).catch(console.error);
+        setTabs([]);
+        setActiveTabId('');
+        await api.browserSwitchSession(sessionId, null).catch(console.error);
+        // 失败时清除 hydrating，允许下次重试
+        if (hydratingSessionRef.current === sessionId) {
+          hydratingSessionRef.current = null;
         }
-      } finally {
-        if (!cancelled && hydratingRef.current) {
-          hydratingRef.current = false;
-          setHydrateVersion((version) => version + 1);
-          setActivationRetryVersion((version) => version + 1);
-        }
+        setActivationRetryVersion((version) => version + 1);
       }
     };
 
     void hydrate();
     return () => {
       cancelled = true;
+      // cleanup：本次未完成，清除 hydrating 允许重试
+      if (hydratingSessionRef.current === sessionId) {
+        hydratingSessionRef.current = null;
+      }
     };
-  }, [activeSessionId, isVisible, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
+  }, [activeSessionId, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
     const sessionId = terminalSessionId;
@@ -404,18 +415,18 @@ export function TabsContainer({
       return;
     }
 
-    // terminal：先尝试合并 runtime（切换到已有 terminal tab）
-    if (await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
-      return;
-    }
-
-    // 已有 terminal tab → 切换
+    // terminal：先检查 workspace 已有 tab（避免每次都查 runtime）
     const existingTerminalTab = currentTabs.find((tab) => tab.kind === 'terminal');
     if (existingTerminalTab) {
       await api.browserHide(sessionId).catch(console.error);
       await api.terminalTabSwitch(sessionId, existingTerminalTab.id).catch(console.error);
       activeTabIdRef.current = existingTerminalTab.id;
       setActiveTabId(existingTerminalTab.id);
+      return;
+    }
+
+    // workspace 没有 → 从 runtime 查一次
+    if (await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
       return;
     }
 
@@ -426,7 +437,7 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!isVisible) return;
-    if (hydratingRef.current) {
+    if (hydratingSessionRef.current !== null) {
       return;
     }
     const activationKey = `${terminalSessionId}:${hydrateVersion}:${initialTabKind}:${openRequestVersion}`;
@@ -471,6 +482,7 @@ export function TabsContainer({
     } else if (nextTab?.kind === 'browser') {
       void api.browserTabSwitch(terminalSessionId, tabId).catch(console.error);
     }
+    activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
   }, [tabs, terminalSessionId]);
 
@@ -533,8 +545,8 @@ export function TabsContainer({
       persistTimerRef.current = null;
     }
 
-    if (hydratingRef.current || !activeSessionId) return;
-    if (lastHydratedSessionRef.current !== activeSessionId) return;
+    if (hydratingSessionRef.current !== null || !activeSessionId) return;
+    if (hydratedSessionRef.current !== activeSessionId) return;
     if (tabs.length === 0) return;
 
     const tabsToPersist = tabs;
@@ -580,8 +592,8 @@ export function TabsContainer({
     if (currentTabs.length === 0) return;
 
     const nextActiveTabId = normalizeActiveTabId(currentTabs, activeTabId);
-    lastHydratedSessionRef.current = toSessionId;
-    hydratingRef.current = true;
+    hydratedSessionRef.current = toSessionId;
+    hydratingSessionRef.current = toSessionId;
 
     const transfer = async () => {
       try {
@@ -600,7 +612,7 @@ export function TabsContainer({
         }
         await api.setSessionTabs(toSessionId, currentTabs, nextActiveTabId || null);
       } finally {
-        hydratingRef.current = false;
+        hydratingSessionRef.current = null;
         setActivationRetryVersion((version) => version + 1);
       }
     };
