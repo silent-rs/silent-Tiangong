@@ -78,7 +78,16 @@ pub async fn browser_open_url(
     let mgr = session_manager(&state, &session_id)?;
     mgr.navigate_with_app(&app, &url)?;
     mgr.persist_session_tabs();
-    Ok(mgr.snapshot_tabs())
+    let snapshot = mgr.snapshot_tabs();
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({
+            "action": "open_url",
+            "session_id": session_id,
+            "active_tab_id": snapshot.active_tab_id.clone(),
+        }),
+    );
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -263,7 +272,13 @@ pub async fn browser_global_history(
 pub async fn browser_global_history_clear(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager().clear_global_history();
+    if let Some(arc) = state
+        .registry
+        .active_state()
+        .or_else(|| state.registry.sessions_count_checked())
+    {
+        BrowserManager::from_state(arc).clear_global_history();
+    }
     Ok(())
 }
 
@@ -272,7 +287,13 @@ pub async fn browser_global_history_delete(
     url: String,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    state.manager().delete_global_history_entry(&url);
+    if let Some(arc) = state
+        .registry
+        .active_state()
+        .or_else(|| state.registry.sessions_count_checked())
+    {
+        BrowserManager::from_state(arc).delete_global_history_entry(&url);
+    }
     Ok(())
 }
 

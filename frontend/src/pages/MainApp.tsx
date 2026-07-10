@@ -459,12 +459,18 @@ export function MainApp() {
 
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
-      if (typeof url === 'string') {
-        await openWorkspacePanel('browser');
-        // 等待面板渲染和位置同步后再导航
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        // 导航已由 onOpenBrowser 的 browserOpenUrl 完成
+      if (typeof url !== 'string' || !url.trim()) return;
+      const store = useStore.getState();
+      const sessionId = store.activeSessionId || store.draftTerminalId;
+      if (!sessionId) {
+        console.error('无法打开浏览器：缺少 session_id');
+        return;
       }
+      // 后端原子完成导航（避免面板 hydrate 与导航竞争），再打开面板
+      await api.browserOpenUrl(sessionId, url).catch(error =>
+        console.error('打开浏览器地址失败:', error)
+      );
+      await openWorkspacePanel('browser');
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 

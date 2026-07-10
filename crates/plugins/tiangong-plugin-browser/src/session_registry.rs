@@ -64,6 +64,17 @@ impl BrowserSessionRegistry {
             .cloned()
     }
 
+    /// 获取任意一个已注册 session 的 state（不创建）。
+    /// 供进程级操作（global history）使用——不依赖 active session，不创建 bootstrap。
+    pub fn sessions_count_checked(&self) -> Option<Arc<Mutex<BrowserState>>> {
+        self.sessions
+            .lock()
+            .expect("browser sessions poisoned")
+            .values()
+            .next()
+            .cloned()
+    }
+
     /// 获取当前 active session 的 state。
     ///
     /// 无 active session 时，返回首个已注册 session 的 state（兼容早期单 session 启动
@@ -106,30 +117,57 @@ impl BrowserSessionRegistry {
     /// 销毁指定 session 的全部状态（关闭 webview、清理）。
     ///
     /// session 被删除时调用。webview 的实际关闭由调用方在 drop 前显式处理。
-    /// 草稿 session 转正：迁移 BrowserState 的 registry key + 持久化文件。
+    /// 草稿 session 转正：关闭 draft WebViews，迁移 tabs 到 persistent store，
+    /// 删除 draft state。persistent session 后续 hydrate 时从 store 重建 WebViews。
     ///
-    /// webview 的 on_page_load closure 仍捕获旧 session_id——运行时事件经
-    /// registry 查找能容忍（draft key 不再存在，事件会被忽略）。若需严格正确，
-    /// 可后续改为重建 webview（见 RFC 0016 draft→persistent 策略）。
+    /// 不直接迁移存活 WebView（其 on_page_load closure 捕获了 draft session_id，
+    /// data directory / label 也按 draft id 创建）。转正后切换到该 session 时
+    /// 由 switch_session 从 store 重新创建。
     pub fn attach_session(&self, draft_id: &str, persistent_id: &str) {
         if draft_id == persistent_id || draft_id.is_empty() || persistent_id.is_empty() {
             return;
         }
-        let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
-        if let Some(state_arc) = sessions.remove(draft_id) {
-            // 更新 state 内的 session_id
-            {
-                let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
-                s.session_id = persistent_id.to_string();
+        let removed = {
+            let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
+            sessions.remove(draft_id)
+        };
+        if let Some(state_arc) = removed {
+            let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
+            // 停 draft 轮询
+            s.poll_stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            s.event_poll_stop
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // 关闭 draft WebViews
+            for (_, wv) in s.webviews.drain() {
+                let _ = wv.close();
             }
-            sessions.insert(persistent_id.to_string(), state_arc);
+            // 保存有效 tabs 到 persistent store
+            let tabs: Vec<_> = s
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    let url = tab.url.trim();
+                    !url.is_empty() && !url.starts_with("about:")
+                })
+                .cloned()
+                .collect();
+            let active_tab_id = s
+                .active_tab_id
+                .as_ref()
+                .filter(|id| tabs.iter().any(|t| &t.id == *id))
+                .cloned();
+            if !tabs.is_empty() {
+                crate::session_store::BrowserSessionStore::save(
+                    persistent_id,
+                    &crate::session_store::BrowserSessionPersisted {
+                        tabs,
+                        active_tab_id,
+                    },
+                );
+            }
         }
-        drop(sessions);
-        // 迁移持久化文件
-        let persisted = crate::session_store::BrowserSessionStore::load(draft_id);
-        if !persisted.tabs.is_empty() {
-            crate::session_store::BrowserSessionStore::save(persistent_id, &persisted);
-        }
+        // 删除 draft store
         crate::session_store::BrowserSessionStore::remove(draft_id);
         // 更新 active
         let mut active = self

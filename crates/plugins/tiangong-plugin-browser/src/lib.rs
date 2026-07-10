@@ -94,10 +94,16 @@ impl BrowserPluginState {
                     s.tabs = persisted.tabs;
                 }
             }
-            // active_tab_id：优先参数传入，其次已有，否则首个
+            // active_tab_id：优先参数传入（校验确实属于 browser tabs），其次已有，否则首个
             if let Some(id) = &active_tab_id {
-                s.active_tab_id = Some(id.clone());
-            } else if s.active_tab_id.is_none() {
+                if s.tabs.iter().any(|tab| &tab.id == id) {
+                    s.active_tab_id = Some(id.clone());
+                }
+            }
+            if s.active_tab_id
+                .as_ref()
+                .is_none_or(|id| !s.tabs.iter().any(|tab| &tab.id == id))
+            {
                 s.active_tab_id = s.tabs.first().map(|t| t.id.clone());
             }
             s.active_session_id = Some(session_id.to_string());

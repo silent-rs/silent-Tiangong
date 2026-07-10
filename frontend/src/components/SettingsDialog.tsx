@@ -89,7 +89,8 @@ export function SettingsDialog() {
       return;
     }
 
-    api.browserHide('').catch(console.error);
+    const sid = useStore.getState().activeSessionId || useStore.getState().draftTerminalId;
+    if (sid) api.browserHide(sid).catch(console.error);
   }, [open]);
 
   return (

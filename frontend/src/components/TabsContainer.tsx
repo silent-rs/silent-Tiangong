@@ -119,12 +119,14 @@ export function TabsContainer({
 
   const syncBrowserRuntimeForTabs = useCallback(async (
     sessionId: string,
+    nextTabs: TabState[],
     nextActiveTabId: string,
   ) => {
-    await api.browserSwitchSession(
-      sessionId,
-      nextActiveTabId || null,
-    ).catch(console.error);
+    // 只传属于 browser tab 的 active id（terminal tab id 不能作为 browser active）
+    const browserActiveId = nextTabs.some(
+      tab => tab.kind === 'browser' && tab.id === nextActiveTabId
+    ) ? nextActiveTabId : null;
+    await api.browserSwitchSession(sessionId, browserActiveId).catch(console.error);
   }, []);
 
   const restoreRuntimeForTabs = useCallback(async (
@@ -135,7 +137,7 @@ export function TabsContainer({
     browserRuntimeSynced = false,
   ) => {
     if (!browserRuntimeSynced) {
-      await syncBrowserRuntimeForTabs(sessionId, nextActiveTabId);
+      await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
     }
 
     const terminalTabs = nextTabs.filter((tab) => tab.kind === 'terminal');
@@ -345,7 +347,7 @@ export function TabsContainer({
         activeTabIdRef.current = nextActiveTabId;
         setTabs(nextTabs);
         setActiveTabId(nextActiveTabId);
-        await syncBrowserRuntimeForTabs(activeSessionId, nextActiveTabId);
+        await syncBrowserRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId);
         if (cancelled) return;
         hydratingRef.current = false;
         setHydrateVersion((version) => version + 1);
