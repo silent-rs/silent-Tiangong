@@ -218,30 +218,12 @@ export function MainApp() {
   // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
   // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
   // 避免依赖 TabsContainer 的隐式激活 effect（首次挂载时被 hydration 短路）。
-  const ensureBrowserVisible = useCallback(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    try {
-      const sid = useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId;
-      if (!sid) return;
-      const result = await api.browserTabList(sid);
-      if (result.tabs.length > 0) {
-        const activeId = result.active_tab_id || result.tabs[0]?.id;
-        if (activeId) {
-          await api.browserTabSwitch(sid, activeId).catch(console.error);
-          return;
-        }
-      }
-    } catch {
-      // 浏览器运行时可能尚未初始化，按空白 Tab 创建。
-    }
-    const sid = useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId;
-    if (sid) await api.browserTabNew(sid, 'about:blank').catch(console.error);
-  }, []);
 
   const handleToggleBrowser = useCallback(async () => {
+    // 标题栏按钮只表达"打开 browser 意图"——Tab 的查找/切换/创建统一由
+    // TabsContainer.activateOrCreateTab 执行（不再调 ensureBrowserVisible）
     await openWorkspacePanel('browser');
-    await ensureBrowserVisible();
-  }, [ensureBrowserVisible, openWorkspacePanel]);
+  }, [openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
     void openWorkspacePanel('terminal');

@@ -266,29 +266,7 @@ export function TabsContainer({
     }
   }, [terminalSessionId]);
 
-  const refreshTabsFromSession = useCallback(async (preserveActive: boolean) => {
-    if (!activeSessionId) return;
-    try {
-      const sessionTabs = await api.getSessionTabs(activeSessionId);
-      const preservedActiveId = preserveActive
-        && activeTabIdRef.current
-        && sessionTabs.tabs.some((tab) => tab.id === activeTabIdRef.current)
-          ? activeTabIdRef.current
-          : null;
-      const nextActiveTabId = preservedActiveId
-        || normalizeActiveTabId(sessionTabs.tabs, sessionTabs.active_tab_id);
-      tabsRef.current = sessionTabs.tabs;
-      activeTabIdRef.current = nextActiveTabId;
-      setTabs(sessionTabs.tabs);
-      setActiveTabId(nextActiveTabId);
-    } catch (err) {
-      console.error('刷新会话 Tab 失败：', err);
-    }
-  }, [activeSessionId]);
 
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
 
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
@@ -376,25 +354,30 @@ export function TabsContainer({
   }, [activeSessionId, isVisible, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
-    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
-      return;
-    }
+    const sessionId = terminalSessionId;
+    if (!sessionId) return;
 
-    const existing = tabsRef.current.find((tab) => tab.kind === kind);
-    if (existing) {
-      if (existing.kind === 'terminal') {
-        void api.browserHide(terminalSessionId).catch(console.error);
-        void api.terminalTabSwitch(terminalSessionId, existing.id).catch(console.error);
-      } else {
-        void api.browserTabSwitch(terminalSessionId, existing.id).catch(console.error);
-      }
-      setActiveTabId(existing.id);
+    const currentTabs = tabsRef.current;
+    const currentActiveId = activeTabIdRef.current;
+    const currentActiveTab = currentTabs.find((tab) => tab.id === currentActiveId);
+
+    // 当前已是目标类型：no-op（面板可见性由 openWorkspacePanel 保证）
+    if (currentActiveTab?.kind === kind) {
       return;
     }
 
     if (kind === 'browser') {
+      // 已有 browser tab → 切换，不创建
+      const existingBrowserTab = currentTabs.find((tab) => tab.kind === 'browser');
+      if (existingBrowserTab) {
+        await api.browserTabSwitch(sessionId, existingBrowserTab.id).catch(console.error);
+        activeTabIdRef.current = existingBrowserTab.id;
+        setActiveTabId(existingBrowserTab.id);
+        return;
+      }
+      // 无 browser tab → 从 runtime 查一次（可能有未同步的）
       try {
-        const result = await api.browserTabList(terminalSessionId);
+        const result = await api.browserTabList(sessionId);
         if (result.tabs.length > 0) {
           const browserTabs = result.tabs.map(createBrowserTabFromBackend);
           const activeId = result.active_tab_id || browserTabs[0]?.id || '';
@@ -405,18 +388,41 @@ export function TabsContainer({
               const backendTab = browserTabs.find((item) => item.id === tab.id);
               return backendTab ? { ...tab, title: backendTab.title, url: backendTab.url } : tab;
             });
-            return [...updatedTabs, ...newTabs];
+            const merged = [...updatedTabs, ...newTabs];
+            tabsRef.current = merged;
+            return merged;
           });
+          activeTabIdRef.current = activeId;
           setActiveTabId(activeId);
           return;
         }
       } catch {
-        // 浏览器运行时可能尚未初始化，继续按空白 Tab 创建。
+        // 运行时未初始化，继续创建
       }
+      // 创建新 browser tab
+      await handleNewTab(kind);
+      return;
     }
 
+    // terminal：先尝试合并 runtime（切换到已有 terminal tab）
+    if (await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
+      return;
+    }
+
+    // 已有 terminal tab → 切换
+    const existingTerminalTab = currentTabs.find((tab) => tab.kind === 'terminal');
+    if (existingTerminalTab) {
+      await api.browserHide(sessionId).catch(console.error);
+      await api.terminalTabSwitch(sessionId, existingTerminalTab.id).catch(console.error);
+      activeTabIdRef.current = existingTerminalTab.id;
+      setActiveTabId(existingTerminalTab.id);
+      return;
+    }
+
+    // 创建新 terminal tab
+    await api.browserHide(sessionId).catch(console.error);
     await handleNewTab(kind);
-  }, [handleNewTab, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
+  }, [handleNewTab, mergeTerminalRuntimeTabs, requestedTerminalTabId, terminalSessionId]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -453,8 +459,9 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!activeSessionId || terminalSyncVersion === 0) return;
-    void refreshTabsFromSession(true);
-  }, [activeSessionId, refreshTabsFromSession, terminalSyncVersion]);
+    // 终端 tab 更新只合并 terminal tabs，保留 browser tabs（不全量 refresh 覆盖）
+    void mergeTerminalRuntimeTabs();
+  }, [activeSessionId, mergeTerminalRuntimeTabs, terminalSyncVersion]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
