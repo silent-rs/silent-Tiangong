@@ -190,6 +190,7 @@ impl ServerCoreManager {
                         .map(ModelEndpoint::from_resolved)
                 };
                 let mut plugins = tiangong_plugin_fs::default_plugins();
+                plugins.push(tiangong_plugin_media_archive::build_plugin());
                 plugins.extend(tiangong_plugin_index::default_plugins());
                 if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
                     plugins.push(tiangong_plugin_generate_image::build_plugin(ep));

@@ -22,7 +22,6 @@ impl TiangongState {
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
         let content = content.into();
-        let media = tiangong_media_archive::archive_input_media_assets(media);
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
         let session_id = self.store.session.sessions[idx].id.clone();

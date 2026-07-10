@@ -366,6 +366,7 @@ impl TiangongApp {
             warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
         }
         plugins.push(tiangong_plugin_fs::build_plugin());
+        plugins.push(tiangong_plugin_media_archive::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
         // models 从 config 内存单例读取（sync_core_config_from_state 时已同步）。

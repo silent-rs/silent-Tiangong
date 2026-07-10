@@ -9596,6 +9596,7 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
+ "tiangong-plugin-media-archive",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9625,7 +9626,6 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-media-archive",
  "tiangong-types",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -9652,6 +9652,7 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
+ "tiangong-plugin-media-archive",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
@@ -9703,7 +9704,6 @@ dependencies = [
  "tempfile",
  "tiangong-llm",
  "tiangong-media",
- "tiangong-media-archive",
  "tiangong-toolkit",
  "tiangong-types",
  "tokio",
@@ -9958,6 +9958,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-media-archive"
+version = "0.12.1"
+dependencies = [
+ "tiangong-core",
+ "tiangong-media-archive",
+ "tiangong-types",
+ "tracing",
+]
+
+[[package]]
 name = "tiangong-plugin-memory"
 version = "0.12.1"
 dependencies = [
@@ -10112,6 +10122,7 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
+ "tiangong-plugin-media-archive",
  "tiangong-plugin-memory",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",

@@ -506,9 +506,9 @@ async fn worker_loop_async(
                 continue;
             }
             Command::Message {
-                content,
+                mut content,
                 message_id,
-                media,
+                mut media,
             } => {
                 let turn_start_idx = session.messages.len();
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -518,10 +518,11 @@ async fn worker_loop_async(
                 if let Ok(mut slot) = turn_outcome.lock() {
                     *slot = None;
                 }
-                // 归档附件到本地（图片→images/，PDF/Office→files/）。
-                // 必须在 append 之前归档，否则 attachment_notice 引用的是 data URL
-                // 而非本地路径，agent 无法读取文件（issue #149）。
-                let media = tiangong_media_archive::archive_input_media_assets(media);
+                // 插件接管输入附件归档：必须在 append 之前完成，否则
+                // attachment_notice 引用的是 data URL 而非本地路径（issue #149）。
+                for plugin in &plugins {
+                    plugin.on_message_ingress(&mut content, &mut media);
+                }
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);
@@ -533,7 +534,7 @@ async fn worker_loop_async(
                         .messages
                         .iter()
                         .find(|message| message.id == user_msg_id)
-                        .map(|message| message.media.clone())
+                        .map(|message| message.extract_media_assets())
                         .unwrap_or_default(),
                 });
 
@@ -551,6 +552,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
+                    &plugins,
                 )
                 .await;
 
@@ -770,6 +772,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
+    plugins: &[Arc<dyn Plugin>],
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -777,7 +780,8 @@ async fn execute_turn_async(
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
     )
-    .with_shared_team(team_context, "main".to_string());
+    .with_shared_team(team_context, "main".to_string())
+    .with_plugins(plugins.to_vec());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;

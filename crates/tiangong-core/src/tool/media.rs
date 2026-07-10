@@ -1,8 +1,33 @@
-//! Memory Turn 媒体产物解析：工具结果中的图片/视频资源提取与归档。
+//! 工具结果中的媒体产物解析与插件化本地化分发。
 //!
-//! 记忆轮次提取（候选评估、产物提取、摘要构建）已迁移到 memory 插件的
-//! `turn_extract` 模块。本模块仅保留工具结果的媒体解析与图片归档能力，
-//! 供 ReactEngine 在工具执行完毕后调用。
+//! 图片/视频资源提取（`parse_media_assets_from_tool_result`）保留在 core，
+//! 供 ReactEngine 在工具执行后解析工具产出的媒体。工具输出图片的**本地化归档**
+//! 已迁移到 `tiangong-plugin-media-archive` 插件，经 [`localize_tool_result_via_plugins`]
+//! 分发 egress 钩子；core 不再直接调用 `tiangong-media-archive`。
+
+use std::sync::Arc;
+
+use crate::core::Plugin;
+use crate::tool::ToolResult;
+
+// ── 插件化本地化分发 ──
+
+/// 通过插件分发工具输出本地化钩子（`on_tool_result_localize`）。
+///
+/// 仅当工具执行成功时分发——保持原 `localize_tool_result_images` 的 `result.ok`
+/// 守卫语义。具体归档实现（图片 URL → 本地路径）由 media-archive 插件接管。
+pub(crate) fn localize_tool_result_via_plugins(
+    plugins: &[Arc<dyn Plugin>],
+    tool_name: &str,
+    result: &mut ToolResult,
+) {
+    if !result.ok {
+        return;
+    }
+    for plugin in plugins {
+        plugin.on_tool_result_localize(tool_name, &mut result.stdout);
+    }
+}
 
 // ── 媒体产物解析函数 ──
 
@@ -25,17 +50,6 @@ pub(crate) fn parse_media_assets_from_tool_result(
     } else {
         Vec::new()
     }
-}
-
-/// 将工具结果中的图片 URL 归档到本地存储。
-///
-/// 仅当工具执行成功且输出可能包含生成的图片时才执行归档，
-/// 归档后替换 `result.stdout` 中的远程 URL 为本地路径。
-pub(crate) fn localize_tool_result_images(tool_name: &str, result: &mut crate::tool::ToolResult) {
-    if !result.ok || !output_may_contain_generated_images(tool_name, &result.stdout) {
-        return;
-    }
-    result.stdout = archive_image_markdown_output(&result.stdout);
 }
 
 /// 判断工具输出是否可能包含生成的图片。
@@ -61,43 +75,6 @@ fn looks_like_pure_image_markdown(output: &str) -> bool {
             line.is_empty()
                 || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
         })
-}
-
-/// 将图片 Markdown 输出中的 URL 归档到本地存储。
-///
-/// 逐行扫描输出文本，对每行 Markdown 图片调用 `archive_image_reference` 归档，
-/// 归档成功则替换为本地路径，失败则保留原始 URL 并打印警告日志。
-fn archive_image_markdown_output(output: &str) -> String {
-    output
-        .lines()
-        .map(|line| {
-            let Some((alt, url)) = parse_markdown_image_line(line.trim()) else {
-                return line.to_string();
-            };
-            match tiangong_media_archive::archive_image_reference(url, None) {
-                Ok(archived) => format!("![{alt}]({})", archived.path()),
-                Err(err) => {
-                    tracing::warn!(url = %url, error = %err, "图片归档到本地失败，保留原始 URL");
-                    line.to_string()
-                }
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 解析单行 Markdown 图片语法，提取 alt 文本和 URL。
-///
-/// 匹配格式 `![alt](url)`，返回 `(alt, url)` 元组。
-/// 如果行不符合图片 Markdown 格式或 URL 为空，返回 None。
-fn parse_markdown_image_line(line: &str) -> Option<(&str, &str)> {
-    if !line.starts_with("![") || !line.ends_with(')') {
-        return None;
-    }
-    let close_alt = line.find("](")?;
-    let alt = line[2..close_alt].trim();
-    let url = line[close_alt + 2..line.len() - 1].trim();
-    (!url.is_empty()).then_some((alt, url))
 }
 
 /// 从输出文本中解析所有图片类型的 MediaAsset。

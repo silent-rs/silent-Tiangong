@@ -120,7 +120,7 @@ impl ReactEngine {
                                 .messages
                                 .iter()
                                 .find(|message| message.id == mid)
-                                .map(|message| message.media.clone())
+                                .map(|message| message.extract_media_assets())
                                 .unwrap_or_default();
                             let _ = stream_tx.send(StreamEvent::UserMessage {
                                 message_id: mid,
@@ -693,8 +693,6 @@ impl ReactEngine {
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
             tool_calls: Vec::new(),

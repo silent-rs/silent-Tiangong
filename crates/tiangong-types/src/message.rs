@@ -140,13 +140,12 @@ impl MediaAsset {
 }
 
 /// 对话消息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Message {
     pub id: String,
     pub role: MessageRole,
     /// 消息内容，支持文本、图片、视频、音频、文件等多种类型混合排列。
     /// 向后兼容：旧格式 content 为 String 时自动包装为 `vec![ContentBlock::Text(string)]`。
-    #[serde(deserialize_with = "deserialize_content")]
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub reasoning_content: String,
@@ -155,13 +154,6 @@ pub struct Message {
     /// 多 Worker 模式下标识消息所属 Worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<String>,
-    /// 旧格式 media 字段，反序列化时自动合并到 content。不再序列化。
-    #[serde(
-        default,
-        deserialize_with = "deserialize_legacy_media",
-        skip_serializing
-    )]
-    pub media: Vec<MediaAsset>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<MessageToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,9 +169,6 @@ pub struct Message {
     #[serde(default)]
     pub phase: MessagePhase,
     pub created_at: String,
-    /// 标记 media 是否已迁移到 content（避免重复迁移）
-    #[serde(default, skip)]
-    pub media_migrated: bool,
     /// 该用户消息所属轮次的执行时长（毫秒）。仅持久化到用户消息（turn 锚点），
     /// 前端据此展示「执行总时长」，历史会话重新打开同样可见。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,13 +210,87 @@ where
     deserializer.deserialize_any(ContentVisitor)
 }
 
-/// 旧格式 media 反序列化：正常读取但不做额外处理。
-/// 迁移逻辑在 `migrate_legacy_media` 中处理。
-fn deserialize_legacy_media<'de, D>(deserializer: D) -> Result<Vec<MediaAsset>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Vec::<MediaAsset>::deserialize(deserializer)
+/// 向后兼容的 Message 反序列化：
+/// - content 同时支持旧 String 格式与新 content blocks 数组（见 deserialize_content）；
+/// - 旧 session 的顶层 `media` 数组在反序列化时直接并入 content 末尾（不再保留为独立字段）。
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(default)]
+        struct MessageRaw {
+            id: String,
+            role: MessageRole,
+            #[serde(deserialize_with = "deserialize_content")]
+            content: Vec<ContentBlock>,
+            reasoning_content: String,
+            reasoning_signature: Option<String>,
+            worker_id: Option<String>,
+            /// 旧格式 media 字段：反序列化时捕获，随即并入 content，不保留为结构字段。
+            #[serde(default)]
+            media: Vec<MediaAsset>,
+            tool_calls: Vec<MessageToolCall>,
+            tool_call_id: Option<String>,
+            tool_name: Option<String>,
+            tool_result_is_error: bool,
+            compact: bool,
+            phase: MessagePhase,
+            created_at: String,
+            elapsed_ms: Option<u64>,
+            turn_status: Option<TurnStatus>,
+        }
+
+        impl Default for MessageRaw {
+            fn default() -> Self {
+                Self {
+                    id: String::new(),
+                    role: MessageRole::User,
+                    content: Vec::new(),
+                    reasoning_content: String::new(),
+                    reasoning_signature: None,
+                    worker_id: None,
+                    media: Vec::new(),
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    tool_name: None,
+                    tool_result_is_error: false,
+                    compact: false,
+                    phase: MessagePhase::Normal,
+                    created_at: String::new(),
+                    elapsed_ms: None,
+                    turn_status: None,
+                }
+            }
+        }
+
+        let mut raw = MessageRaw::deserialize(deserializer)?;
+        // 旧格式 media 数组合并到 content 末尾（迁移），不再作为独立字段存在。
+        if !raw.media.is_empty() {
+            for asset in raw.media.drain(..) {
+                raw.content.push(asset.to_content_block());
+            }
+        }
+
+        Ok(Message {
+            id: raw.id,
+            role: raw.role,
+            content: raw.content,
+            reasoning_content: raw.reasoning_content,
+            reasoning_signature: raw.reasoning_signature,
+            worker_id: raw.worker_id,
+            tool_calls: raw.tool_calls,
+            tool_call_id: raw.tool_call_id,
+            tool_name: raw.tool_name,
+            tool_result_is_error: raw.tool_result_is_error,
+            compact: raw.compact,
+            phase: raw.phase,
+            created_at: raw.created_at,
+            elapsed_ms: raw.elapsed_ms,
+            turn_status: raw.turn_status,
+        })
+    }
 }
 
 impl Message {
@@ -239,8 +302,6 @@ impl Message {
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -266,8 +327,6 @@ impl Message {
             reasoning_content: reasoning.into(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -345,17 +404,29 @@ impl Message {
         })
     }
 
-    /// 将旧格式 media 字段迁移到 content 数组。
-    /// 加载旧 session 后调用此方法完成自动升级。
-    pub fn migrate_legacy_media(&mut self) {
-        if self.media_migrated || self.media.is_empty() {
-            self.media_migrated = true;
-            return;
-        }
-        for asset in self.media.drain(..) {
-            self.content.push(asset.to_content_block());
-        }
-        self.media_migrated = true;
+    /// 从 content blocks 提取媒体资产（content blocks 是媒体的唯一真相源）。
+    ///
+    /// `append_message_with_*_media` 把附件存进 `content` 的 `ContentBlock::Media`，
+    /// 不再保留独立的 media 字段。任何需要 media 列表的地方都必须经此提取。
+    pub fn extract_media_assets(&self) -> Vec<MediaAsset> {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Media {
+                    kind,
+                    url,
+                    mime_type,
+                    title,
+                } => Some(MediaAsset {
+                    kind: *kind,
+                    url: url.clone(),
+                    mime_type: mime_type.clone(),
+                    title: title.clone(),
+                    capability: None,
+                }),
+                ContentBlock::Text { .. } => None,
+            })
+            .collect()
     }
 }
 

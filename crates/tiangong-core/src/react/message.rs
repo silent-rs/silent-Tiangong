@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::session::{Message, MessageRole, MessageToolCall, Session};
+use crate::session::{ContentBlock, Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{MediaAsset, StreamEvent};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
@@ -19,13 +19,24 @@ pub(crate) fn append_or_reuse_user_message(
             .iter_mut()
             .find(|message| message.id == message_id)
         {
-            let has_media = message.content.iter().any(|b| !b.is_text());
-            if !has_media && !media.is_empty() {
-                for asset in &media {
-                    message.content.push(asset.to_content_block());
-                }
-                message.media_migrated = true;
+            // 消息已存在（GUI 路径：app_state 已先持久化）：用归档后的 media
+            // 重建 content blocks，确保 core session 的 media 引用为本地路径
+            //（issue #149：attachment_notice 必须引用本地路径而非 data URL）。
+            let text = message
+                .content
+                .iter()
+                .filter_map(|b| b.as_text().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+                .join("");
+            let mut blocks = vec![ContentBlock::text(if text.is_empty() {
+                content.to_string()
+            } else {
+                text
+            })];
+            for asset in &media {
+                blocks.push(asset.to_content_block());
             }
+            message.content = blocks;
         } else {
             session.append_message_with_id_and_media(
                 message_id.clone(),

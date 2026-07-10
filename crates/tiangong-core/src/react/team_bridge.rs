@@ -55,8 +55,6 @@ fn sub_agent_stream_message(
         reasoning_content: reasoning_content.into(),
         reasoning_signature: None,
         worker_id: None,
-        media: Vec::new(),
-        media_migrated: true,
         elapsed_ms: None,
         turn_status: None,
         tool_calls: Vec::new(),
@@ -662,7 +660,7 @@ impl ReactEngine {
                                 .messages
                                 .iter()
                                 .find(|message| message.id == message_id)
-                                .map(|message| message.media.clone())
+                                .map(|message| message.extract_media_assets())
                                 .unwrap_or_default();
                             let _ = stream_tx.send(StreamEvent::UserMessage {
                                 message_id,

@@ -46,7 +46,6 @@ toml = { workspace = true }
 tracing = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
 tiangong-media = { workspace = true }
-tiangong-media-archive = { workspace = true }
 
 [features]
 default = []

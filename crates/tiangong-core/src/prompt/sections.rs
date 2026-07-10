@@ -225,8 +225,6 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         reasoning_content: String::new(),
         reasoning_signature: None,
         worker_id: None,
-        media: Vec::new(),
-        media_migrated: true,
         elapsed_ms: None,
         turn_status: None,
         tool_calls: Vec::new(),

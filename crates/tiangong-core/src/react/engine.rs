@@ -55,6 +55,8 @@ pub(crate) struct ReactEngine {
     pub(super) max_outer_iterations: u32,
     pub(super) team: Option<Arc<Mutex<TeamContext>>>,
     pub(super) agent_id: String,
+    /// 会话级插件引用：用于在工具执行后分发 egress 钩子（如图片本地化）。
+    pub(super) plugins: Vec<Arc<dyn crate::core::Plugin>>,
 }
 
 impl ReactEngine {
@@ -71,7 +73,14 @@ impl ReactEngine {
             max_outer_iterations,
             team: None,
             agent_id: "main".to_string(),
+            plugins: Vec::new(),
         }
+    }
+
+    /// 注入会话级插件，供 egress 钩子（工具输出本地化等）分发。
+    pub(crate) fn with_plugins(mut self, plugins: Vec<Arc<dyn crate::core::Plugin>>) -> Self {
+        self.plugins = plugins;
+        self
     }
 
     fn build_thinking_config(
@@ -315,7 +324,7 @@ impl ReactEngine {
                                         .messages
                                         .iter()
                                         .find(|message| message.id == mid)
-                                        .map(|message| message.media.clone())
+                                        .map(|message| message.extract_media_assets())
                                         .unwrap_or_default();
                                     let _ = stream_tx.send(StreamEvent::UserMessage {
                                         message_id: mid,
@@ -919,7 +928,7 @@ impl ReactEngine {
                                             .messages
                                             .iter()
                                             .find(|message| message.id == mid)
-                                            .map(|message| message.media.clone())
+                                            .map(|message| message.extract_media_assets())
                                             .unwrap_or_default();
                                         let _ = stream_tx.send(StreamEvent::UserMessage {
                                             message_id: mid,
@@ -1087,7 +1096,11 @@ impl ReactEngine {
                                 "",
                             )
                         };
-                        crate::tool::media::localize_tool_result_images(&call.name, &mut result);
+                        crate::tool::media::localize_tool_result_via_plugins(
+                            &self.plugins,
+                            &call.name,
+                            &mut result,
+                        );
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };
                     accumulated_usage.accumulate(&tool_llm_usage);

@@ -114,38 +114,6 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
     .to_string()
 }
 
-/// 从消息的 content blocks 提取 media 资产（新格式）。
-///
-/// `append_message_with_id_and_media` 把附件存进 `content` 的 `ContentBlock::Media`，
-/// 而非旧的 `media` 字段。提取时必须从 content blocks 取，否则附件会丢失。
-fn extract_media_from_content(
-    message: &tiangong_types::Message,
-) -> Vec<tiangong_types::MediaAsset> {
-    message
-        .content
-        .iter()
-        .filter_map(|block| {
-            if let tiangong_types::message::ContentBlock::Media {
-                kind,
-                url,
-                mime_type,
-                title,
-            } = block
-            {
-                Some(tiangong_types::MediaAsset {
-                    kind: *kind,
-                    url: url.clone(),
-                    mime_type: mime_type.clone(),
-                    title: title.clone(),
-                    capability: None,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 async fn ensure_multimodal_enabled(state: &State<'_, TiangongApp>) -> Result<(), String> {
     state
         .with_state_read(|core_state| {
@@ -808,14 +776,12 @@ async fn send_message_inner(
             core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
         })
         .await?;
-    // 从 content blocks 提取 media（新格式），而非旧 media 字段。
-    // append_message_with_id_and_media 把 media 存进 content blocks，
-    // 旧 media 字段为空。若取旧字段会导致附件丢失（issue #149）。
+    // 从 content blocks 提取 media（媒体唯一真相源，不再有独立 media 字段）。
     let command_media = session_snapshot
         .messages
         .iter()
         .find(|message| message.id == user_message_id)
-        .map(extract_media_from_content)
+        .map(|message| message.extract_media_assets())
         .unwrap_or_default();
 
     // 获取或创建 TiangongCore
@@ -907,8 +873,22 @@ pub(crate) fn start_stream_consumer(
                             content,
                             media,
                         } => {
-                            // Core 已记录用户消息，同步到 TiangongState session
-                            if !session.messages.iter().any(|msg| msg.id == *message_id) {
+                            // Core 已记录用户消息（media 已由插件归档为本地路径），
+                            // 同步到 TiangongState session：用归档后的 media 重建
+                            // content blocks，使 app_state 落盘也持本地路径（issue #149）。
+                            if let Some(message) = session
+                                .messages
+                                .iter_mut()
+                                .find(|msg| msg.id == *message_id)
+                            {
+                                let mut blocks = vec![tiangong_types::message::ContentBlock::text(
+                                    content.clone(),
+                                )];
+                                for asset in media {
+                                    blocks.push(asset.to_content_block());
+                                }
+                                message.content = blocks;
+                            } else {
                                 session.append_message_with_id_and_media(
                                     message_id.clone(),
                                     tiangong_core::session::MessageRole::User,
@@ -916,16 +896,6 @@ pub(crate) fn start_stream_consumer(
                                     String::new(),
                                     media.clone(),
                                 );
-                            } else if !media.is_empty() {
-                                if let Some(message) = session
-                                    .messages
-                                    .iter_mut()
-                                    .find(|msg| msg.id == *message_id)
-                                {
-                                    if message.media.is_empty() {
-                                        message.media = media.clone();
-                                    }
-                                }
                             }
                         }
                         StreamEvent::Delta {
@@ -1588,28 +1558,7 @@ pub async fn edit_and_resend(
                 .messages
                 .iter()
                 .find(|message| message.id == message_id)
-                .map(|message| {
-                    let mut assets = Vec::new();
-                    for block in &message.content {
-                        if let tiangong_types::message::ContentBlock::Media {
-                            kind,
-                            url,
-                            mime_type,
-                            title,
-                        } = block
-                        {
-                            assets.push(tiangong_types::MediaAsset {
-                                kind: *kind,
-                                url: url.clone(),
-                                mime_type: mime_type.clone(),
-                                title: title.clone(),
-                                capability: None,
-                            });
-                        }
-                    }
-                    assets.extend(message.media.clone());
-                    assets
-                })
+                .map(|message| message.extract_media_assets())
                 .unwrap_or_default();
 
             let mut runtime_session = session.clone();

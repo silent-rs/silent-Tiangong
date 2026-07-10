@@ -83,7 +83,7 @@ pub(super) fn drain_pending_commands_async(
                     .messages
                     .iter()
                     .find(|message| message.id == mid)
-                    .map(|message| message.media.clone())
+                    .map(|message| message.extract_media_assets())
                     .unwrap_or_default();
                 let _ = stream_tx.send(StreamEvent::UserMessage {
                     message_id: mid,
