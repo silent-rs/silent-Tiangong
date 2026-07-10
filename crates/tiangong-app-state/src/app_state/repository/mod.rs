@@ -5,7 +5,6 @@ mod persist;
 pub(crate) mod utils;
 
 /// storage_root 是 storage 路径的唯一对外来源（路径计算归 app 层）。
-pub use utils::storage_root;
 pub(in crate::app_state) use utils::*;
 
 #[derive(Debug)]
