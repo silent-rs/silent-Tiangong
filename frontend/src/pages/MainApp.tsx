@@ -185,7 +185,7 @@ export function MainApp() {
     setChatPanelWidth(MIN_CHAT_WIDTH);
 
     if (kind === 'terminal') {
-      await api.browserHide().catch(console.error);
+      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
@@ -196,7 +196,7 @@ export function MainApp() {
     savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
-    await api.browserHide().catch(console.error);
+    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
     if (restoreSize && workspaceExpandedForBrowserRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -218,27 +218,12 @@ export function MainApp() {
   // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
   // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
   // 避免依赖 TabsContainer 的隐式激活 effect（首次挂载时被 hydration 短路）。
-  const ensureBrowserVisible = useCallback(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    try {
-      const result = await api.browserTabList();
-      if (result.tabs.length > 0) {
-        const activeId = result.active_tab_id || result.tabs[0]?.id;
-        if (activeId) {
-          await api.browserTabSwitch(activeId).catch(console.error);
-          return;
-        }
-      }
-    } catch {
-      // 浏览器运行时可能尚未初始化，按空白 Tab 创建。
-    }
-    await api.browserTabNew('about:blank').catch(console.error);
-  }, []);
 
   const handleToggleBrowser = useCallback(async () => {
+    // 标题栏按钮只表达"打开 browser 意图"——Tab 的查找/切换/创建统一由
+    // TabsContainer.activateOrCreateTab 执行（不再调 ensureBrowserVisible）
     await openWorkspacePanel('browser');
-    await ensureBrowserVisible();
-  }, [ensureBrowserVisible, openWorkspacePanel]);
+  }, [openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
     void openWorkspacePanel('terminal');
@@ -368,11 +353,12 @@ export function MainApp() {
         }
       });
 
-      const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
-        const url = event.payload;
+      const unlistenBrowserOpen = await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
+        const { session_id } = event.payload;
+        if (!session_id || useStore.getState().activeSessionId !== session_id) return;
         await openWorkspacePanel('browser');
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        await api.browserNavigate(url).catch(console.error);
+        // browser:open 已在后端完成导航，前端不再重复 navigate
       });
       const unlistenTerminalTabUpdated = await listen<{
         session_id: string;
@@ -455,12 +441,18 @@ export function MainApp() {
 
     const onOpenBrowser = async (e: Event) => {
       const url = (e as CustomEvent).detail;
-      if (typeof url === 'string') {
-        await openWorkspacePanel('browser');
-        // 等待面板渲染和位置同步后再导航
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        await api.browserNavigate(url).catch(console.error);
+      if (typeof url !== 'string' || !url.trim()) return;
+      const store = useStore.getState();
+      const sessionId = store.activeSessionId || store.draftTerminalId;
+      if (!sessionId) {
+        console.error('无法打开浏览器：缺少 session_id');
+        return;
       }
+      // 后端原子完成导航（避免面板 hydrate 与导航竞争），再打开面板
+      await api.browserOpenUrl(sessionId, url).catch(error =>
+        console.error('打开浏览器地址失败:', error)
+      );
+      await openWorkspacePanel('browser');
     };
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 

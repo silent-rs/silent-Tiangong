@@ -83,6 +83,7 @@ impl ModelEndpoint {
             protocol: self.protocol,
             model: self.model.clone(),
             options: self.options.clone(),
+            context_window: None,
         }
     }
 }

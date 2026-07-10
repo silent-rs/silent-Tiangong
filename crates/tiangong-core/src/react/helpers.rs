@@ -3,9 +3,11 @@
 //! 这些函数不依赖 `ReactEngine` 自身状态（无 `&self`），而是操作传入的
 //! `Session` / `RuntimeEngine` / 命令通道，属于与主状态机解耦的纯过程性逻辑：
 //! - 命令排空（`drain_pending_commands_async`）
-//! - 浏览器页面自动观察注入（`maybe_inject_browser_update`）
 //! - 非阻塞取消检查（`check_cancel`）
 //! - 最终回答启发式判断（`looks_like_final_answer`）
+//!
+//! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
+//! core 不再感知浏览器快照注入。
 
 use std::sync::mpsc::Sender as StdSender;
 
@@ -119,129 +121,6 @@ pub(super) fn drain_pending_commands_async(
     } else {
         PendingCommandEffect::None
     }
-}
-
-/// 节流（≥5s）地观察浏览器当前页面，发生变化时把快照注入会话上下文。
-pub(super) async fn maybe_inject_browser_update(
-    engine: &RuntimeEngine,
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    last_snapshot: &mut Option<crate::browser_trait::PageSnapshot>,
-    last_check: &mut Option<std::time::Instant>,
-    force_check: bool,
-) {
-    let fetcher = match engine.page_fetcher() {
-        Some(f) => f,
-        None => {
-            tracing::debug!(
-                session_id = %session.id,
-                force_check,
-                "skip browser auto observe: no page fetcher"
-            );
-            return;
-        }
-    };
-    // 首次检测无间隔限制；后续检测至少间隔 5 秒，避免频繁 observe_page 拖慢执行
-    let now = std::time::Instant::now();
-    if last_snapshot.is_some() && !force_check {
-        let min_interval = std::time::Duration::from_secs(5);
-        if let Some(prev) = last_check
-            && now.duration_since(*prev) < min_interval
-        {
-            tracing::debug!(
-                session_id = %session.id,
-                elapsed_ms = now.duration_since(*prev).as_millis() as u64,
-                "skip browser auto observe: throttled"
-            );
-            return;
-        }
-    }
-    *last_check = Some(now);
-    let snapshot =
-        match tokio::time::timeout(std::time::Duration::from_secs(3), fetcher.observe_page()).await
-        {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                tracing::debug!(
-                    session_id = %session.id,
-                    "skip browser auto observe: no snapshot"
-                );
-                return;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    session_id = %session.id,
-                    "browser auto observe timeout"
-                );
-                return;
-            }
-        };
-    if snapshot.url.is_empty() {
-        tracing::debug!(
-            session_id = %session.id,
-            "skip browser auto observe: empty url"
-        );
-        return;
-    }
-
-    let feedback = crate::browser_trait::format_browser_events(&snapshot.events);
-    let has_feedback = feedback.is_some();
-    tracing::debug!(
-        session_id = %session.id,
-        url = %snapshot.url,
-        title = %snapshot.title,
-        text_len = snapshot.text.len(),
-        events_len = snapshot.events.len(),
-        has_feedback,
-        force_check,
-        "browser auto observe snapshot"
-    );
-    let should_inject = match last_snapshot {
-        None => true,
-        Some(prev) => {
-            has_feedback
-                || prev.url != snapshot.url
-                || (snapshot.text.len() as i64 - prev.text.len() as i64).unsigned_abs() > 500
-        }
-    };
-    if !should_inject {
-        tracing::debug!(
-            session_id = %session.id,
-            url = %snapshot.url,
-            text_len = snapshot.text.len(),
-            "skip browser auto inject: unchanged"
-        );
-        *last_snapshot = Some(snapshot);
-        return;
-    }
-
-    let tabs: Vec<(String, String, String)> = snapshot
-        .tabs
-        .iter()
-        .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
-        .collect();
-    crate::react::message::inject_tool_to_session(
-        session,
-        stream_tx,
-        "browser_data",
-        &serde_json::json!({
-            "title": snapshot.title,
-            "url": snapshot.url,
-            "text": snapshot.text,
-            "tabs": tabs,
-            "active_tab_id": snapshot.active_tab_id,
-            "feedback": feedback,
-        }),
-    );
-    tracing::info!(
-        session_id = %session.id,
-        url = %snapshot.url,
-        text_len = snapshot.text.len(),
-        events_len = snapshot.events.len(),
-        has_feedback,
-        "browser auto content injected"
-    );
-    *last_snapshot = Some(snapshot);
 }
 
 /// 非阻塞检查是否有取消或关闭命令待处理。

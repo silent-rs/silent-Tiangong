@@ -8,15 +8,20 @@ use tokio::sync::mpsc;
 
 use crate::handler::browser_command_handler;
 use crate::manager::BrowserManager;
-use crate::types::BrowserCommand;
+use crate::session_registry::BrowserSessionRegistry;
+use crate::types::{BrowserCommand, BrowserTabsSnapshot};
 
 pub mod bridge;
+pub mod capability;
 pub mod commands;
 pub mod handler;
 pub mod manager;
 pub mod page_fetcher;
 pub mod plugin;
+pub mod session_registry;
+pub mod session_store;
 pub mod types;
+pub mod watcher;
 
 /// 构造浏览器进程内插件（issue #156 自注册架构）。
 ///
@@ -27,9 +32,132 @@ pub fn build_plugin(app: &tauri::AppHandle<Wry>) -> Option<Arc<plugin::BrowserPl
 }
 
 /// 浏览器 Plugin 共享状态
+///
+/// `registry` 持有所有 session 的 `BrowserState`；`manager` 绑定到当前 active session，
+/// 前端命令经它操作（行为同旧的全局单例）。切换 session 时经 registry 切换 active，
+/// manager 重新绑定（T5 实现；当前 manager 绑定首个注册 session 兼容旧路径）。
 pub struct BrowserPluginState {
-    pub manager: BrowserManager,
+    pub registry: Arc<BrowserSessionRegistry>,
     pub cmd_tx: mpsc::Sender<BrowserCommand>,
+}
+
+impl BrowserPluginState {
+    /// 返回绑定到当前 active session 的 manager。
+    ///
+    /// 前端命令经此获取 manager（行为同旧的全局单例）。每次调用都取最新 active session。
+    /// 无 active session 时懒创建一个 bootstrap session（兼容早期启动）。
+    pub fn manager(&self) -> BrowserManager {
+        let state = self
+            .registry
+            .active_state()
+            .unwrap_or_else(|| self.registry.session_state("__bootstrap__"));
+        BrowserManager::from_state(state)
+    }
+
+    /// 切换 active session：隐藏旧 session 的 webview（不销毁），激活新 session，
+    /// 显示其 active tab 的 webview。支持多 session webview 并发存活（T5）。
+    pub fn switch_session(
+        &self,
+        app: &tauri::AppHandle<Wry>,
+        session_id: &str,
+        active_tab_id: Option<String>,
+    ) -> Result<BrowserTabsSnapshot, String> {
+        // 1. 隐藏旧 active session 的全部 webview（不销毁，保留在各自 state 里）
+        if let Some(old_id) = self.registry.active_session_id() {
+            if old_id != session_id {
+                if let Some(old_state) = self.registry.existing_session_state(&old_id) {
+                    let old_mgr = BrowserManager::from_state(old_state);
+                    let _ = old_mgr.hide();
+                    // 停旧 session 轮询
+                    {
+                        let arc = old_mgr.clone_state();
+                        let s = arc.lock().unwrap_or_else(|e| e.into_inner());
+                        s.poll_stop
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        s.event_poll_stop
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        // 2. 激活新 session。已有 state 保留 tabs/webviews（只切可见性）；
+        //    无 tabs 时从 BrowserSessionStore 加载恢复。
+        let new_state = self.registry.session_state(session_id);
+        self.registry.set_active(session_id);
+        {
+            let mut s = new_state.lock().map_err(|e| e.to_string())?;
+            // 只在 state 无 tabs 时从 store 恢复（不覆盖已有 runtime state）
+            if s.tabs.is_empty() {
+                let persisted = crate::session_store::BrowserSessionStore::load(session_id);
+                if !persisted.tabs.is_empty() {
+                    s.tabs = persisted.tabs;
+                }
+            }
+            // active_tab_id：优先参数传入（校验确实属于 browser tabs），其次已有，否则首个
+            if let Some(id) = &active_tab_id {
+                if s.tabs.iter().any(|tab| &tab.id == id) {
+                    s.active_tab_id = Some(id.clone());
+                }
+            }
+            if s.active_tab_id
+                .as_ref()
+                .is_none_or(|id| !s.tabs.iter().any(|tab| &tab.id == id))
+            {
+                s.active_tab_id = s.tabs.first().map(|t| t.id.clone());
+            }
+            s.active_session_id = Some(session_id.to_string());
+            s.visible.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // 3. 显示新 session 的 active tab webview（若缺则创建）
+        let new_mgr = BrowserManager::from_state(new_state.clone());
+        let (rect, active_tab) = {
+            let s = new_mgr.state.lock().map_err(|e| e.to_string())?;
+            let tab = s
+                .active_tab_id
+                .as_ref()
+                .and_then(|id| s.tabs.iter().find(|t| &t.id == id).cloned());
+            (s.browser_rect, tab)
+        };
+        if let Some(tab) = active_tab {
+            let needs_webview = {
+                let s = new_mgr.state.lock().map_err(|e| e.to_string())?;
+                !tab.url.starts_with("about:") && !s.webviews.contains_key(&tab.id)
+            };
+            if needs_webview {
+                let webview = BrowserManager::create_webview_for_tab(
+                    app,
+                    new_state.clone(),
+                    &tab.id,
+                    &tab.url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
+                )?;
+                let mut s = new_mgr.state.lock().map_err(|e| e.to_string())?;
+                s.webviews.insert(tab.id.clone(), webview);
+                drop(s);
+                new_mgr.start_url_poll(app, &tab.url);
+                new_mgr.start_event_poll(app);
+            } else {
+                // webview 已存在：重新定位到可见区域
+                new_mgr.show_active_webview(app, &rect)?;
+                new_mgr.start_url_poll(app, &tab.url);
+                new_mgr.start_event_poll(app);
+            }
+        }
+
+        // 4. 持久化该 session 的浏览器状态 + 返回快照
+        let s = new_mgr.state.lock().map_err(|e| e.to_string())?;
+        BrowserManager::persist_from_state(&s);
+        Ok(BrowserTabsSnapshot {
+            session_id: Some(session_id.to_string()),
+            tabs: s.tabs.clone(),
+            active_tab_id: s.active_tab_id.clone(),
+        })
+    }
 }
 
 pub fn init() -> TauriPlugin<Wry> {
@@ -40,6 +168,8 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_hide,
             commands::browser_set_position,
             commands::browser_navigate,
+            commands::browser_open_url,
+            commands::browser_attach_session,
             commands::browser_eval,
             commands::browser_go_back,
             commands::browser_go_forward,
@@ -60,22 +190,18 @@ pub fn init() -> TauriPlugin<Wry> {
         ])
         .setup(|app, _api| {
             let (tx, rx) = mpsc::channel::<BrowserCommand>(16);
-            let manager = BrowserManager::new();
+            let registry = Arc::new(BrowserSessionRegistry::new());
             let state = BrowserPluginState {
-                manager,
+                registry,
                 cmd_tx: tx,
             };
             app.manage(state);
 
             let browser_state = app.state::<BrowserPluginState>();
-            let browser_manager_state = browser_state.manager.clone_state();
+            let browser_registry = browser_state.registry.clone();
             let app_handle: tauri::AppHandle<Wry> = app.clone();
 
-            tauri::async_runtime::spawn(browser_command_handler(
-                rx,
-                browser_manager_state,
-                app_handle,
-            ));
+            tauri::async_runtime::spawn(browser_command_handler(rx, browser_registry, app_handle));
 
             Ok(())
         })

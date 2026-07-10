@@ -37,7 +37,7 @@ impl tiangong_core::core::Plugin for SchedulerPlugin {
 
     // 工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集
     // （见下方的 ToolSpecProvider / ToolOverrideHandler 实现）。
-    // scheduler 无外部能力（PageFetcher 等）需要注入，register 留空。
+    // scheduler 无内部状态需要初始化，register 留空。
 }
 
 // PromptSectionProvider 使用默认空实现（scheduler 不注入 prompt 段落）

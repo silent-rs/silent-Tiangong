@@ -344,6 +344,9 @@ pub struct ModelEntryView {
     pub model: String,
     pub capabilities: Vec<String>,
     pub options: serde_json::Value,
+    /// 模型上下文窗口（仅 Chat/Multimodal 适用，None 表示用映射默认）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 }
 
 /// 模型配置（前端使用）
@@ -390,6 +393,7 @@ impl ModelsConfigView {
                             .map(|v| v.as_str().unwrap_or_default().to_string())
                             .collect(),
                         options: v.options.clone(),
+                        context_window: v.context_window,
                     },
                 )
             })
@@ -413,6 +417,7 @@ impl ModelsConfigView {
                             .map(|v| v.as_str().unwrap_or_default().to_string())
                             .collect(),
                         options: v.options.clone(),
+                        context_window: v.context_window,
                     },
                 )
             })
@@ -465,6 +470,7 @@ impl ModelsConfigView {
                         model: v.model.clone(),
                         capabilities,
                         options: v.options.clone(),
+                        context_window: v.context_window,
                     },
                 )
             })
@@ -494,6 +500,7 @@ impl ModelsConfigView {
                         model: v.model.clone(),
                         capabilities,
                         options: v.options.clone(),
+                        context_window: v.context_window,
                     },
                 ))
             })
@@ -588,6 +595,7 @@ fn resolved_model_by_key(
             api_key: tiangong_llm::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
             timeout_ms: provider.timeout_ms,
             protocol: provider.protocol,
+            context_window: entry.context_window,
             model: entry.model.clone(),
             options: entry.options.clone(),
         })

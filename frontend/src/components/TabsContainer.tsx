@@ -98,8 +98,8 @@ export function TabsContainer({
   const requestedTerminalTabIdRef = useRef<string | null>(requestedTerminalTabId ?? null);
   const isVisibleRef = useRef(isVisible);
   const lastInitialActivationKeyRef = useRef<string | null>(null);
-  const lastHydratedSessionRef = useRef<string | null>(null);
-  const hydratingRef = useRef(false);
+  const hydratingSessionRef = useRef<string | null>(null);
+  const hydratedSessionRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
   const transferVersionRef = useRef<number | null>(null);
   const terminalSessionId = activeSessionId || draftTerminalId || DRAFT_TERMINAL_ID;
@@ -122,12 +122,11 @@ export function TabsContainer({
     nextTabs: TabState[],
     nextActiveTabId: string,
   ) => {
-    const browserTabs = browserRuntimeTabs(nextTabs);
-    await api.browserSwitchSession(
-      sessionId,
-      browserTabs,
-      browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
-    ).catch(console.error);
+    // 只传属于 browser tab 的 active id（terminal tab id 不能作为 browser active）
+    const browserActiveId = nextTabs.some(
+      tab => tab.kind === 'browser' && tab.id === nextActiveTabId
+    ) ? nextActiveTabId : null;
+    await api.browserSwitchSession(sessionId, browserActiveId).catch(console.error);
   }, []);
 
   const restoreRuntimeForTabs = useCallback(async (
@@ -160,23 +159,23 @@ export function TabsContainer({
     }
 
     if (!visible) {
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
       return;
     }
 
     const activeTab = nextTabs.find((tab) => tab.id === nextActiveTabId);
     if (activeTab?.kind === 'terminal') {
       await api.terminalTabSwitch(sessionId, activeTab.id).catch(console.error);
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
     } else if (!activeTab || activeTab.kind !== 'browser') {
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
     }
   }, [syncBrowserRuntimeForTabs]);
 
   const handleNewTab = useCallback(async (kind: TabKind) => {
     if (kind === 'browser') {
       try {
-        const tabId = await api.browserTabNew(DEFAULT_BROWSER_URL);
+        const tabId = await api.browserTabNew(terminalSessionId, DEFAULT_BROWSER_URL);
         const nextTab = createLocalTab(kind, tabId);
         setTabs((currentTabs) => [...currentTabs, nextTab]);
         setActiveTabId(nextTab.id);
@@ -187,7 +186,7 @@ export function TabsContainer({
     }
 
     try {
-      void api.browserHide().catch(console.error);
+      void api.browserHide(terminalSessionId).catch(console.error);
       const tabId = await api.terminalTabNew(terminalSessionId, '终端', sessionCwd || workspaceDir || null);
       const nextTab = createLocalTab(kind, tabId);
       setTabs((currentTabs) => {
@@ -247,7 +246,7 @@ export function TabsContainer({
         );
 
       if (nextActiveId && shouldActivate) {
-        void api.browserHide().catch(console.error);
+        void api.browserHide(terminalSessionId).catch(console.error);
         if (result.active_tab_id !== nextActiveId) {
           void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);
         }
@@ -267,29 +266,7 @@ export function TabsContainer({
     }
   }, [terminalSessionId]);
 
-  const refreshTabsFromSession = useCallback(async (preserveActive: boolean) => {
-    if (!activeSessionId) return;
-    try {
-      const sessionTabs = await api.getSessionTabs(activeSessionId);
-      const preservedActiveId = preserveActive
-        && activeTabIdRef.current
-        && sessionTabs.tabs.some((tab) => tab.id === activeTabIdRef.current)
-          ? activeTabIdRef.current
-          : null;
-      const nextActiveTabId = preservedActiveId
-        || normalizeActiveTabId(sessionTabs.tabs, sessionTabs.active_tab_id);
-      tabsRef.current = sessionTabs.tabs;
-      activeTabIdRef.current = nextActiveTabId;
-      setTabs(sessionTabs.tabs);
-      setActiveTabId(nextActiveTabId);
-    } catch (err) {
-      console.error('刷新会话 Tab 失败：', err);
-    }
-  }, [activeSessionId]);
 
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
 
   useEffect(() => {
     activeTabIdRef.current = activeTabId;
@@ -307,8 +284,8 @@ export function TabsContainer({
 
     const sessionId = activeSessionIdRef.current;
     const currentTabs = tabsRef.current;
-    if (hydratingRef.current || !sessionId || currentTabs.length === 0) return;
-    if (lastHydratedSessionRef.current !== sessionId) return;
+    if (hydratingSessionRef.current !== null || !sessionId || currentTabs.length === 0) return;
+    if (hydratedSessionRef.current !== sessionId) return;
 
     const activeId = activeTabIdRef.current || currentTabs[0]?.id || null;
     void api.setSessionTabs(sessionId, currentTabs, activeId).catch(console.error);
@@ -316,8 +293,8 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!activeSessionId) {
-      if (lastHydratedSessionRef.current !== DRAFT_TERMINAL_ID) {
-        lastHydratedSessionRef.current = DRAFT_TERMINAL_ID;
+      if (hydratedSessionRef.current !== DRAFT_TERMINAL_ID) {
+        hydratedSessionRef.current = DRAFT_TERMINAL_ID;
         setTabs([]);
         setActiveTabId('');
       }
@@ -333,69 +310,85 @@ export function TabsContainer({
       return;
     }
 
-    if (lastHydratedSessionRef.current === activeSessionId) return;
-    lastHydratedSessionRef.current = activeSessionId;
-    hydratingRef.current = true;
+    if (hydratedSessionRef.current === activeSessionId) return;
+    if (hydratingSessionRef.current === activeSessionId) return;
+
+    const sessionId = activeSessionId;
+    hydratingSessionRef.current = sessionId;
 
     let cancelled = false;
     const hydrate = async () => {
       try {
-        const sessionTabs = await api.getSessionTabs(activeSessionId);
+        const sessionTabs = await api.getSessionTabs(sessionId);
         if (cancelled) return;
         const nextTabs = sessionTabs.tabs;
         const nextActiveTabId = normalizeActiveTabId(nextTabs, sessionTabs.active_tab_id);
+        await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
+        if (cancelled) return;
+
         tabsRef.current = nextTabs;
         activeTabIdRef.current = nextActiveTabId;
         setTabs(nextTabs);
         setActiveTabId(nextActiveTabId);
-        await syncBrowserRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId);
+
+        // await runtime 恢复完成后再标记已 hydrate（避免 activateOrCreateTab 竞态）
+        await restoreRuntimeForTabs(sessionId, nextTabs, nextActiveTabId, isVisibleRef.current, true);
         if (cancelled) return;
-        hydratingRef.current = false;
+
+        // 只有完整成功后才标记已恢复
+        hydratingSessionRef.current = null;
+        hydratedSessionRef.current = sessionId;
         setHydrateVersion((version) => version + 1);
         setActivationRetryVersion((version) => version + 1);
-        void restoreRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId, isVisible, true);
       } catch (err) {
+        if (cancelled) return;
         console.error('恢复会话 Tab 失败：', err);
-        if (!cancelled) {
-          setTabs([]);
-          setActiveTabId('');
-          await api.browserSwitchSession(activeSessionId, [], null).catch(console.error);
+        setTabs([]);
+        setActiveTabId('');
+        await api.browserSwitchSession(sessionId, null).catch(console.error);
+        // 失败时清除 hydrating，允许下次重试
+        if (hydratingSessionRef.current === sessionId) {
+          hydratingSessionRef.current = null;
         }
-      } finally {
-        if (!cancelled && hydratingRef.current) {
-          hydratingRef.current = false;
-          setHydrateVersion((version) => version + 1);
-          setActivationRetryVersion((version) => version + 1);
-        }
+        setActivationRetryVersion((version) => version + 1);
       }
     };
 
     void hydrate();
     return () => {
       cancelled = true;
+      // cleanup：本次未完成，清除 hydrating 允许重试
+      if (hydratingSessionRef.current === sessionId) {
+        hydratingSessionRef.current = null;
+      }
     };
-  }, [activeSessionId, isVisible, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
+  }, [activeSessionId, restoreRuntimeForTabs, syncBrowserRuntimeForTabs, workspaceTabsTransfer]);
 
   const activateOrCreateTab = useCallback(async (kind: TabKind) => {
-    if (kind === 'terminal' && await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
-      return;
-    }
+    const sessionId = terminalSessionId;
+    if (!sessionId) return;
 
-    const existing = tabsRef.current.find((tab) => tab.kind === kind);
-    if (existing) {
-      if (existing.kind === 'terminal') {
-        void api.browserHide().catch(console.error);
-        void api.terminalTabSwitch(terminalSessionId, existing.id).catch(console.error);
-      } else {
-        void api.browserTabSwitch(existing.id).catch(console.error);
-      }
-      setActiveTabId(existing.id);
+    const currentTabs = tabsRef.current;
+    const currentActiveId = activeTabIdRef.current;
+    const currentActiveTab = currentTabs.find((tab) => tab.id === currentActiveId);
+
+    // 当前已是目标类型：no-op（面板可见性由 openWorkspacePanel 保证）
+    if (currentActiveTab?.kind === kind) {
       return;
     }
 
     if (kind === 'browser') {
+      // 已有 browser tab → 切换，不创建
+      const existingBrowserTab = currentTabs.find((tab) => tab.kind === 'browser');
+      if (existingBrowserTab) {
+        await api.browserTabSwitch(sessionId, existingBrowserTab.id).catch(console.error);
+        activeTabIdRef.current = existingBrowserTab.id;
+        setActiveTabId(existingBrowserTab.id);
+        return;
+      }
+      // 无 browser tab → 从 runtime 查一次（可能有未同步的）
       try {
-        const result = await api.browserTabList();
+        const result = await api.browserTabList(sessionId);
         if (result.tabs.length > 0) {
           const browserTabs = result.tabs.map(createBrowserTabFromBackend);
           const activeId = result.active_tab_id || browserTabs[0]?.id || '';
@@ -406,22 +399,45 @@ export function TabsContainer({
               const backendTab = browserTabs.find((item) => item.id === tab.id);
               return backendTab ? { ...tab, title: backendTab.title, url: backendTab.url } : tab;
             });
-            return [...updatedTabs, ...newTabs];
+            const merged = [...updatedTabs, ...newTabs];
+            tabsRef.current = merged;
+            return merged;
           });
+          activeTabIdRef.current = activeId;
           setActiveTabId(activeId);
           return;
         }
       } catch {
-        // 浏览器运行时可能尚未初始化，继续按空白 Tab 创建。
+        // 运行时未初始化，继续创建
       }
+      // 创建新 browser tab
+      await handleNewTab(kind);
+      return;
     }
 
+    // terminal：先检查 workspace 已有 tab（避免每次都查 runtime）
+    const existingTerminalTab = currentTabs.find((tab) => tab.kind === 'terminal');
+    if (existingTerminalTab) {
+      await api.browserHide(sessionId).catch(console.error);
+      await api.terminalTabSwitch(sessionId, existingTerminalTab.id).catch(console.error);
+      activeTabIdRef.current = existingTerminalTab.id;
+      setActiveTabId(existingTerminalTab.id);
+      return;
+    }
+
+    // workspace 没有 → 从 runtime 查一次
+    if (await mergeTerminalRuntimeTabs(requestedTerminalTabId)) {
+      return;
+    }
+
+    // 创建新 terminal tab
+    await api.browserHide(sessionId).catch(console.error);
     await handleNewTab(kind);
-  }, [handleNewTab, mergeTerminalRuntimeTabs, requestedTerminalTabId]);
+  }, [handleNewTab, mergeTerminalRuntimeTabs, requestedTerminalTabId, terminalSessionId]);
 
   useEffect(() => {
     if (!isVisible) return;
-    if (hydratingRef.current) {
+    if (hydratingSessionRef.current !== null) {
       return;
     }
     const activationKey = `${terminalSessionId}:${hydrateVersion}:${initialTabKind}:${openRequestVersion}`;
@@ -454,17 +470,19 @@ export function TabsContainer({
 
   useEffect(() => {
     if (!activeSessionId || terminalSyncVersion === 0) return;
-    void refreshTabsFromSession(true);
-  }, [activeSessionId, refreshTabsFromSession, terminalSyncVersion]);
+    // 终端 tab 更新只合并 terminal tabs，保留 browser tabs（不全量 refresh 覆盖）
+    void mergeTerminalRuntimeTabs();
+  }, [activeSessionId, mergeTerminalRuntimeTabs, terminalSyncVersion]);
 
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
     if (nextTab?.kind === 'terminal') {
-      void api.browserHide().catch(console.error);
+      void api.browserHide(terminalSessionId).catch(console.error);
       void api.terminalTabSwitch(terminalSessionId, tabId).catch(console.error);
     } else if (nextTab?.kind === 'browser') {
-      void api.browserTabSwitch(tabId).catch(console.error);
+      void api.browserTabSwitch(terminalSessionId, tabId).catch(console.error);
     }
+    activeTabIdRef.current = tabId;
     setActiveTabId(tabId);
   }, [tabs, terminalSessionId]);
 
@@ -474,7 +492,7 @@ export function TabsContainer({
       if (closedIndex === -1) return currentTabs;
       const closingTab = currentTabs[closedIndex];
       if (closingTab.kind === 'browser') {
-        void api.browserTabClose(tabId).catch(console.error);
+        void api.browserTabClose(terminalSessionId, tabId).catch(console.error);
       } else {
         void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
       }
@@ -484,7 +502,9 @@ export function TabsContainer({
         if (activeSessionId) {
           void api.setSessionTabs(activeSessionId, [], null).catch(console.error);
         }
-        void api.browserSwitchSession(terminalSessionId, [], null).catch(console.error);
+        // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
+        void api.browserHide(terminalSessionId).catch(console.error);
+        void api.browserSwitchSession(terminalSessionId, null).catch(console.error);
         onClose();
         return [];
       }
@@ -492,7 +512,7 @@ export function TabsContainer({
         const nextActiveId = pickNextActiveTab(nextTabs, closedIndex) ?? '';
         const nextActiveTab = nextTabs.find((tab) => tab.id === nextActiveId);
         if (nextActiveTab?.kind !== 'browser') {
-          void api.browserHide().catch(console.error);
+          void api.browserHide(terminalSessionId).catch(console.error);
         }
         setActiveTabId(nextActiveId);
       }
@@ -501,7 +521,7 @@ export function TabsContainer({
   }, [activeTabId, onClose, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
-    void api.browserHide().catch(console.error);
+    void api.browserHide(terminalSessionId).catch(console.error);
     onClose();
   }, [onClose]);
 
@@ -525,8 +545,8 @@ export function TabsContainer({
       persistTimerRef.current = null;
     }
 
-    if (hydratingRef.current || !activeSessionId) return;
-    if (lastHydratedSessionRef.current !== activeSessionId) return;
+    if (hydratingSessionRef.current !== null || !activeSessionId) return;
+    if (hydratedSessionRef.current !== activeSessionId) return;
     if (tabs.length === 0) return;
 
     const tabsToPersist = tabs;
@@ -572,8 +592,8 @@ export function TabsContainer({
     if (currentTabs.length === 0) return;
 
     const nextActiveTabId = normalizeActiveTabId(currentTabs, activeTabId);
-    lastHydratedSessionRef.current = toSessionId;
-    hydratingRef.current = true;
+    hydratedSessionRef.current = toSessionId;
+    hydratingSessionRef.current = toSessionId;
 
     const transfer = async () => {
       try {
@@ -588,15 +608,11 @@ export function TabsContainer({
           }));
         const browserTabs = browserRuntimeTabs(currentTabs);
         if (browserTabs.length > 0) {
-          await api.browserSwitchSession(
-            toSessionId,
-            browserTabs,
-            browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
-          ).catch(console.error);
+          await api.browserSwitchSession(toSessionId).catch(console.error);
         }
         await api.setSessionTabs(toSessionId, currentTabs, nextActiveTabId || null);
       } finally {
-        hydratingRef.current = false;
+        hydratingSessionRef.current = null;
         setActivationRetryVersion((version) => version + 1);
       }
     };
@@ -690,6 +706,7 @@ export function TabsContainer({
           ) : (
             <BrowserTabContent
               key={`${terminalSessionId}:${tab.id}`}
+              sessionId={terminalSessionId}
               tabId={tab.id}
               initialUrl={tab.url}
               isActive={isVisible && tab.id === activeTab?.id}

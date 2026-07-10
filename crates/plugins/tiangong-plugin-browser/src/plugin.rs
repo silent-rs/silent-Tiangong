@@ -8,19 +8,22 @@
 
 use std::sync::Arc;
 
+use crate::capability::PageFetcher;
 use tauri::{Manager, Wry};
-use tiangong_core::browser_trait::PageFetcher;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::ToolOverrideHandler;
 
 use crate::page_fetcher::{BrowserPageFetcher, BrowserToolOverride};
+use crate::watcher::BrowserWatcher;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 
 /// 浏览器插件：聚合页面获取能力与工具覆盖处理器。
 pub struct BrowserPlugin {
-    fetcher: Arc<dyn PageFetcher>,
+    fetcher: Arc<BrowserPageFetcher>,
     override_handler: BrowserToolOverride,
+    watcher: Arc<BrowserWatcher>,
 }
 
 impl BrowserPlugin {
@@ -30,11 +33,16 @@ impl BrowserPlugin {
     /// 「自注册」入口。返回 `None` 表示插件 state 未就绪（与旧 `get_*` 工厂一致）。
     pub fn from_app_handle(app: &tauri::AppHandle<Wry>) -> Option<Self> {
         let state = app.state::<crate::BrowserPluginState>();
-        let fetcher: Arc<dyn PageFetcher> = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
-        let override_handler = BrowserToolOverride::new(fetcher.clone());
+        let fetcher = Arc::new(BrowserPageFetcher::new(state.cmd_tx.clone()));
+        let override_handler = BrowserToolOverride::new(fetcher.clone() as Arc<dyn PageFetcher>);
+        // 创建 session-scoped watcher：随本 plugin/Core 生命周期存在，只向当前 session
+        // 的 feedback channel 注入 browser_data（#225）。构造时不 spawn，待
+        // set_feedback_tx 注入通道后懒启动，同一实例只启动一次。
+        let watcher = Arc::new(BrowserWatcher::new(fetcher.clone() as Arc<dyn PageFetcher>));
         Some(Self {
             fetcher,
             override_handler,
+            watcher,
         })
     }
 }
@@ -44,11 +52,24 @@ impl Plugin for BrowserPlugin {
         "browser"
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        // 注入页面获取能力（GUI 模式下由 Tauri Plugin 提供）
-        engine.set_page_fetcher(self.fetcher.clone());
-        // 工具规格 / 工具覆盖 / Prompt 段落由 core 通过 supertrait 自动收集，
-        // 此处仅注入 PageFetcher 能力。
+    // register 不再注入 PageFetcher：浏览器能力是插件内部状态，
+    // 由 BrowserToolOverride / watcher 直接持有 fetcher 调用（#225 能力下沉）。
+
+    /// 注入当前 session 的 feedback 通道给 watcher：懒启动后台观察任务，
+    /// observe 到的页面变化只注入到本通道（session 隔离，不跨 session 广播）。
+    fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
+        self.watcher.set_feedback_tx(tx);
+    }
+
+    /// session 就绪后注入 session_id 到 fetcher（命令带 session_id 路由），
+    /// 并从持久化恢复该 session 上次的浏览器 tab（若有）。
+    fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
+        self.fetcher.set_session_id(&session.id);
+        // session_id 就绪后启动 watcher（之前 set_feedback_tx 只存通道不启动，
+        // 避免 observe 带空 session_id 污染 bootstrap/active session）
+        self.watcher.start();
+        // browser tab 的恢复由 get_session_tabs 命令在 hydrate 时合并 browser
+        // session store（on_session_ready 时序晚于前端 hydrate，在此注入不可靠）。
     }
 
     fn tool_permission_overrides(
@@ -76,7 +97,7 @@ impl ToolOverrideHandler for BrowserPlugin {
 
 impl tiangong_core::tool_override::ToolSpecProvider for BrowserPlugin {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        // 浏览器覆盖的 7 个工具规格：这些工具的执行全部路由到本插件的 handle，
+        // 浏览器覆盖的 6 个工具规格：这些工具的执行全部路由到本插件的 handle，
         // 必须由本插件提供 spec（core 才能按 spec.name 注册 override）。
         // 与 basic_file_function_tools 中浏览器工具的 schema 保持一致。
         use serde_json::json;

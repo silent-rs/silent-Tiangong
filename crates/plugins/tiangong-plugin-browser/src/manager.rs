@@ -12,12 +12,29 @@ use tauri::{
 
 use crate::bridge::BRIDGE_SCRIPT;
 use crate::types::{
-    BrowserEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabsSnapshot,
-    HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
+    BrowserEvent, BrowserEventsEvent, BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse,
+    BrowserTab, BrowserTabsSnapshot, HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
-fn webview_label(tab_id: &str) -> String {
-    format!("browser-webview-{tab_id}")
+/// 规范化标识符用于 webview label（避免特殊字符）。
+fn sanitize_path_segment(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn webview_label(session_id: &str, tab_id: &str) -> String {
+    format!(
+        "browser-webview-{}-{}",
+        sanitize_path_segment(session_id),
+        sanitize_path_segment(tab_id)
+    )
 }
 
 /// 缩放下限：避免内容过小不可读
@@ -57,19 +74,61 @@ pub struct BrowserState {
     pub active_tab_id: Option<String>,
     /// 当前可见区域 (x, y, w, h)，用于标签切换时定位新 WebView
     pub browser_rect: (f64, f64, f64, f64),
-    /// 全局浏览历史（所有标签页共享，持久化）
-    pub global_history: Vec<HistoryEntry>,
+    /// 进程级共享的浏览历史和缩放设置。
+    pub(crate) shared: Arc<BrowserSharedState>,
     /// 每个标签页的浏览历史栈
     pub tab_histories: HashMap<String, Vec<HistoryEntry>>,
     /// 每个标签页当前在历史栈中的位置
     pub tab_history_indices: HashMap<String, usize>,
-    /// 当前页面缩放比例，clamp 到 [0.25, 5.0]，持久化在 ~/.tiangong/browser-zoom.json
-    pub zoom_factor: f64,
-    /// 当前浏览器运行时绑定的对话会话 ID
+    /// 该 state 所属的 session id（registry 创建时注入，不可变，作为可靠标识）。
+    /// 用于 create_webview 的 data_dir、webview label、持久化、global_history 路由。
+    pub session_id: String,
+    /// 当前浏览器运行时绑定的对话会话 ID（兼容旧字段，T5 后由 registry.active_session_id 取代）
     pub active_session_id: Option<String>,
 }
 
+/// 浏览器进程级共享状态。所有 session 通过同一个实例读写，避免磁盘共享但内存分叉。
+pub(crate) struct BrowserSharedState {
+    global_history: Mutex<Vec<HistoryEntry>>,
+    zoom_factor: Mutex<f64>,
+}
+
+impl BrowserSharedState {
+    pub(crate) fn load() -> Self {
+        Self {
+            global_history: Mutex::new(load_global_history()),
+            zoom_factor: Mutex::new(load_zoom()),
+        }
+    }
+}
+
 impl BrowserState {
+    /// 构造一个空的 per-session 状态（不含 webview/tab/历史）。
+    ///
+    /// `shared` 由 [`BrowserSessionRegistry`](crate::session_registry::BrowserSessionRegistry)
+    /// 创建并注入，所有 session 共用同一份全局历史和缩放设置。
+    pub(crate) fn new_empty(session_id: String, shared: Arc<BrowserSharedState>) -> Self {
+        Self {
+            webviews: HashMap::new(),
+            page_loaded_signals: HashMap::new(),
+            latest_snapshots: HashMap::new(),
+            last_known_url: String::new(),
+            last_known_text_signature: String::new(),
+            poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            event_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            pending_events: Vec::new(),
+            tabs: Vec::new(),
+            active_tab_id: None,
+            browser_rect: (0.0, 0.0, 0.0, 0.0),
+            shared,
+            tab_histories: HashMap::new(),
+            tab_history_indices: HashMap::new(),
+            session_id,
+            active_session_id: None,
+        }
+    }
+
     fn active_webview(&self) -> Option<&Webview<Wry>> {
         let active_id = self.active_tab_id.as_ref()?;
         self.webviews.get(active_id)
@@ -94,8 +153,7 @@ impl Default for BrowserManager {
 
 impl BrowserManager {
     pub fn new() -> Self {
-        let global_history = load_global_history();
-        let zoom_factor = load_zoom();
+        let shared = Arc::new(BrowserSharedState::load());
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webviews: HashMap::new(),
@@ -110,10 +168,10 @@ impl BrowserManager {
                 tabs: Vec::new(),
                 active_tab_id: None,
                 browser_rect: (0.0, 0.0, 0.0, 0.0),
-                global_history,
+                shared,
                 tab_histories: HashMap::new(),
                 tab_history_indices: HashMap::new(),
-                zoom_factor,
+                session_id: String::new(),
                 active_session_id: None,
             })),
         }
@@ -121,6 +179,94 @@ impl BrowserManager {
 
     pub fn clone_state(&self) -> Arc<Mutex<BrowserState>> {
         self.state.clone()
+    }
+
+    fn shared_state(&self) -> Arc<BrowserSharedState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shared
+            .clone()
+    }
+
+    /// 绑定到指定 session state 构造 manager（per-session 路由用）。
+    ///
+    /// manager 的全部方法操作该 state；多 manager 可并存，各绑各的 session。
+    pub fn from_state(state: Arc<Mutex<BrowserState>>) -> Self {
+        Self { state }
+    }
+
+    /// 持久化当前 session 的 tab 状态（tab/url/title/active 变化时调用）。
+    ///
+    /// 从 state 读出 session_id + tabs + active_tab_id，写入 per-session store。
+    /// 用于应用重启后恢复各 session 上次的浏览器页面（review #6）。
+    /// 从 BrowserState 持久化（静态 helper，供闭包/轮询线程使用）。
+    /// 与 persist_session_tabs 走同一套过滤逻辑。
+    pub(crate) fn persist_from_state(state: &BrowserState) {
+        if state.session_id.is_empty() {
+            return;
+        }
+        let tabs: Vec<_> = state
+            .tabs
+            .iter()
+            .filter(|tab| {
+                let url = tab.url.trim();
+                !url.is_empty() && !url.starts_with("about:")
+            })
+            .cloned()
+            .collect();
+        let active_tab_id = state
+            .active_tab_id
+            .as_ref()
+            .filter(|id| tabs.iter().any(|t| &t.id == *id))
+            .cloned();
+        if tabs.is_empty() {
+            crate::session_store::BrowserSessionStore::remove(&state.session_id);
+        } else {
+            crate::session_store::BrowserSessionStore::save(
+                &state.session_id,
+                &crate::session_store::BrowserSessionPersisted {
+                    tabs,
+                    active_tab_id,
+                },
+            );
+        }
+    }
+
+    pub(crate) fn persist_session_tabs(&self) {
+        if let Ok(s) = self.state.lock() {
+            if s.session_id.is_empty() {
+                return;
+            }
+            // 过滤空页面/about:blank，只持久化有真实 URL 的 tab
+            let tabs: Vec<_> = s
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    let url = tab.url.trim();
+                    !url.is_empty() && !url.starts_with("about:")
+                })
+                .cloned()
+                .collect();
+            // active_tab_id 只保留仍存在于过滤后 tabs 的 id
+            let active_tab_id = s
+                .active_tab_id
+                .as_ref()
+                .filter(|id| tabs.iter().any(|t| &t.id == *id))
+                .cloned();
+            if tabs.is_empty() {
+                // 无有效 tab：删除 store（不保留空状态）
+                crate::session_store::BrowserSessionStore::remove(&s.session_id);
+            } else {
+                crate::session_store::BrowserSessionStore::save(
+                    &s.session_id,
+                    &crate::session_store::BrowserSessionPersisted {
+                        tabs,
+                        active_tab_id,
+                    },
+                );
+            }
+        }
     }
 
     /// 浏览器是否已初始化（有标签即为已打开，包括 about:blank 延迟创建 WebView 的情况）
@@ -147,28 +293,37 @@ impl BrowserManager {
 
     /// 当前页面缩放比例（来自持久化状态）
     pub fn zoom(&self) -> f64 {
-        self.state.lock().map(|s| s.zoom_factor).unwrap_or(1.0)
+        let shared = self.shared_state();
+        let zoom = shared.zoom_factor.lock().unwrap_or_else(|e| e.into_inner());
+        *zoom
     }
 
     /// 设置缩放：clamp 到 [MIN_ZOOM, MAX_ZOOM]，同步到所有 webview 并持久化，返回生效值
     pub fn set_zoom(&self, scale: f64) -> Result<f64, String> {
         let clamped = scale.clamp(MIN_ZOOM, MAX_ZOOM);
+        let shared = self.shared_state();
         {
-            let mut s = self
+            let mut zoom = shared
+                .zoom_factor
+                .lock()
+                .map_err(|e| format!("锁浏览器缩放设置失败：{e}"))?;
+            if (*zoom - clamped).abs() < f64::EPSILON {
+                return Ok(clamped);
+            }
+            *zoom = clamped;
+        }
+        {
+            let s = self
                 .state
                 .lock()
                 .map_err(|e| format!("锁 BrowserState 失败：{e}"))?;
-            if (s.zoom_factor - clamped).abs() < f64::EPSILON {
-                return Ok(clamped);
-            }
-            s.zoom_factor = clamped;
             for webview in s.webviews.values() {
                 if let Err(e) = webview.set_zoom(clamped) {
                     warn!(error = %e, "webview set_zoom 失败");
                 }
             }
         }
-        persist_zoom(&self.state);
+        persist_zoom(&shared);
         Ok(clamped)
     }
 
@@ -178,8 +333,10 @@ impl BrowserManager {
     }
 
     /// 为指定标签创建独立的 WebView 实例
-    fn create_webview_for_tab(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_webview_for_tab(
         app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
         tab_id: &str,
         url: &str,
         x: f64,
@@ -191,21 +348,25 @@ impl BrowserManager {
             .get_window("main")
             .ok_or_else(|| "主窗口未找到".to_string())?;
 
-        let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-        let data_dir = browser_data_directory();
-        let label = webview_label(tab_id);
-        let tab_id_for_closure = tab_id.to_string();
-
-        let state_clone_holder = {
-            // 获取 manager state 用于 on_page_load 回调
-            let plugin_state = app.state::<crate::BrowserPluginState>();
-            plugin_state.manager.clone_state()
+        // 从目标 session 的 state 读出 session_id（R1 保证可靠）
+        let session_id = {
+            let s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.session_id.clone()
         };
+        let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
+        let data_dir = browser_data_directory(&session_id);
+        let label = webview_label(&session_id, tab_id);
+        let tab_id_for_closure = tab_id.to_string();
+        let session_id_for_page_load = session_id.clone();
+
+        // on_page_load 回调直接写入目标 session 的 state（不再经 app.state().manager() 串台）
+        let state_clone_holder = state.clone();
         // 在 state_clone_holder 被 move 进 on_page_load 闭包前读出当前缩放，用于新建 webview 即时应用
-        let initial_zoom = state_clone_holder
+        let shared = state_clone_holder
             .lock()
-            .map(|s| s.zoom_factor)
-            .unwrap_or(1.0);
+            .map(|s| s.shared.clone())
+            .unwrap_or_else(|e| e.into_inner().shared.clone());
+        let initial_zoom = *shared.zoom_factor.lock().unwrap_or_else(|e| e.into_inner());
         let app_clone = app.clone();
 
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
@@ -236,6 +397,7 @@ impl BrowserManager {
                     let state_clone2 = state_clone_holder.clone();
                     let tab_id_in_closure = tab_id_for_closure.clone();
                     let app_for_event = app_clone.clone();
+                    let session_id_for_event = session_id_for_page_load.clone();
                     let _ = webview.eval_with_callback(
                         "window.__tiangong_bridge.getFullText(12000)",
                         move |result| {
@@ -265,10 +427,13 @@ impl BrowserManager {
                                         if !title.is_empty() {
                                             tab.title = title.clone();
                                         }
+                                        // 页面加载完成更新了 tab url/title，走统一过滤持久化
+                                        Self::persist_from_state(&state);
                                     }
-                                    // 记录浏览历史
+                                    let shared = state.shared.clone();
+                                    // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
                                     let should_persist = {
-                                        let active_id = state.active_tab_id.clone();
+                                        let active_id = Some(tab_id_in_closure.clone());
                                         if !page_url.starts_with("about:") {
                                             // 写入标签历史
                                             if let Some(active_id) = active_id {
@@ -301,32 +466,11 @@ impl BrowserManager {
                                                 }
                                             }
                                             // 写入全局历史（去重：移到末尾并更新时间戳）
-                                            let pos = state.global_history.iter().position(|e| e.url == page_url);
-                                            match pos {
-                                                Some(i) => {
-                                                    state.global_history[i].title = if title.is_empty() { page_url.clone() } else { title.clone() };
-                                                    state.global_history[i].timestamp = std::time::SystemTime::now()
-                                                        .duration_since(std::time::UNIX_EPOCH)
-                                                        .unwrap_or_default()
-                                                        .as_millis() as u64;
-                                                    let entry = state.global_history.remove(i);
-                                                    state.global_history.push(entry);
-                                                }
-                                                None => {
-                                                    state.global_history.push(HistoryEntry {
-                                                        url: page_url.clone(),
-                                                        title: if title.is_empty() { page_url.clone() } else { title.clone() },
-                                                        timestamp: std::time::SystemTime::now()
-                                                            .duration_since(std::time::UNIX_EPOCH)
-                                                            .unwrap_or_default()
-                                                            .as_millis() as u64,
-                                                    });
-                                                }
-                                            }
-                                            if state.global_history.len() > 1000 {
-                                                let keep = state.global_history.len() - 800;
-                                                state.global_history.drain(0..keep);
-                                            }
+                                            let mut history = shared
+                                                .global_history
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            upsert_global_history(&mut history, &page_url, &title);
                                             true
                                         } else {
                                             false
@@ -334,17 +478,18 @@ impl BrowserManager {
                                     };
                                     drop(state);
                                     if should_persist {
-                                        persist_global_history(&state_clone2);
+                                        persist_global_history(&shared);
                                     }
                                 }
                                 let summary: String = text.chars().take(2000).collect();
                                 let _ = app_for_event.emit(
                                     "browser:page_loaded",
-                                    serde_json::json!({
-                                        "title": title,
-                                        "url": page_url,
-                                        "text": summary,
-                                    }),
+                                    BrowserPageLoadedEvent {
+                                        session_id: session_id_for_event.clone(),
+                                        title,
+                                        url: page_url,
+                                        text: summary,
+                                    },
                                 );
                             }
                         },
@@ -447,7 +592,16 @@ impl BrowserManager {
 
         if let Some(webview_to_create) = existing_tab_webview_to_create {
             if let Some(tab_id) = webview_to_create {
-                let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+                let webview = Self::create_webview_for_tab(
+                    app,
+                    self.state.clone(),
+                    &tab_id,
+                    url,
+                    x,
+                    y,
+                    w,
+                    h,
+                )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id, webview);
                 drop(state);
@@ -462,7 +616,8 @@ impl BrowserManager {
         let is_blank = url == "about:blank";
 
         if !is_blank {
-            let webview = Self::create_webview_for_tab(app, &tab_id, url, x, y, w, h)?;
+            let webview =
+                Self::create_webview_for_tab(app, self.state.clone(), &tab_id, url, x, y, w, h)?;
             if let Ok(mut state) = self.state.lock() {
                 state.webviews.insert(tab_id.clone(), webview);
             }
@@ -516,7 +671,7 @@ impl BrowserManager {
     }
 
     /// 启动后台轮询线程，检测 webview URL 变化并发射 browser:page_loaded 事件
-    fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
+    pub(crate) fn start_url_poll(&self, app: &AppHandle<Wry>, initial_url: &str) {
         let state = self.state.clone();
         let app = app.clone();
         let stop = {
@@ -526,9 +681,9 @@ impl BrowserManager {
             s.last_known_url = initial_url.to_string();
             s.poll_stop.clone()
         };
-        let visible = {
+        let (visible, session_id) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            s.visible.clone()
+            (s.visible.clone(), s.session_id.clone())
         };
 
         std::thread::Builder::new()
@@ -596,12 +751,17 @@ impl BrowserManager {
                                     tab.url = current_url.clone();
                                 }
                             }
+                            // url_poll 检测到 URL 变化，走统一过滤持久化
+                            Self::persist_from_state(&s);
                         }
                         let _ = app.emit(
                             "browser:page_loaded",
-                            serde_json::json!({
-                                "url": current_url,
-                            }),
+                            BrowserPageLoadedEvent {
+                                session_id: session_id.clone(),
+                                title: String::new(),
+                                url: current_url,
+                                text: String::new(),
+                            },
                         );
                     }
 
@@ -640,11 +800,12 @@ impl BrowserManager {
                                             data["text"].as_str().unwrap_or("").chars().take(2000).collect();
                                         let _ = app.emit(
                                             "browser:page_loaded",
-                                            serde_json::json!({
-                                                "title": title,
-                                                "url": url,
-                                                "text": text,
-                                            }),
+                                            BrowserPageLoadedEvent {
+                                                session_id: session_id.clone(),
+                                                title,
+                                                url,
+                                                text,
+                                            },
                                         );
                                     }
                                 }
@@ -669,6 +830,29 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// 显示 active tab 的 webview（切换 session 回来时，把 webview 重新定位到可见区域）。
+    pub fn show_active_webview(
+        &self,
+        _app: &AppHandle<Wry>,
+        rect: &(f64, f64, f64, f64),
+    ) -> Result<(), String> {
+        let zoom = self.zoom();
+        let state = self.state.lock().map_err(|e| e.to_string())?;
+        for webview in state.webviews.values() {
+            let _ = webview.set_zoom(zoom);
+        }
+        if let Some(active_id) = state.active_tab_id.as_ref() {
+            if let Some(wv) = state.webviews.get(active_id) {
+                let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
+                let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
+            }
+        }
+        state
+            .visible
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn go_back(&self) -> Result<(), String> {
         self.eval("history.back()")
     }
@@ -689,7 +873,7 @@ impl BrowserManager {
     }
 
     /// 启动事件消费线程
-    fn start_event_poll(&self, app: &AppHandle<Wry>) {
+    pub(crate) fn start_event_poll(&self, app: &AppHandle<Wry>) {
         let state = self.state.clone();
         let app = app.clone();
         let stop = {
@@ -699,9 +883,9 @@ impl BrowserManager {
             s.event_poll_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             s.event_poll_stop.clone()
         };
-        let visible = {
+        let (visible, session_id) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            s.visible.clone()
+            (s.visible.clone(), s.session_id.clone())
         };
 
         std::thread::Builder::new()
@@ -736,7 +920,13 @@ impl BrowserManager {
                                         s.pending_events.drain(0..keep_from);
                                     }
                                 }
-                                let _ = app.emit("browser:events", &events);
+                                let _ = app.emit(
+                                    "browser:events",
+                                    BrowserEventsEvent {
+                                        session_id: session_id.clone(),
+                                        events,
+                                    },
+                                );
                             }
                         }
                     }
@@ -847,7 +1037,14 @@ impl BrowserManager {
         if needs_create {
             if let Some(tab_id) = active_id {
                 let webview = Self::create_webview_for_tab(
-                    app, &tab_id, url, rect.0, rect.1, rect.2, rect.3,
+                    app,
+                    self.state.clone(),
+                    &tab_id,
+                    url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id.clone(), webview);
@@ -1224,7 +1421,14 @@ impl BrowserManager {
             if let Some(tab) = active_tab {
                 drop(state);
                 let webview = Self::create_webview_for_tab(
-                    app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                    app,
+                    self.state.clone(),
+                    &tab.id,
+                    &tab.url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab.id.clone(), webview);
@@ -1285,7 +1489,14 @@ impl BrowserManager {
 
         for tab in tabs_needing_webview {
             let webview = Self::create_webview_for_tab(
-                app, &tab.id, &tab.url, rect.0, rect.1, rect.2, rect.3,
+                app,
+                self.state.clone(),
+                &tab.id,
+                &tab.url,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
             )?;
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab.id.clone(), webview);
@@ -1423,12 +1634,21 @@ impl BrowserManager {
         // about:blank 不创建 WebView（WKWebView 对 about:blank 的 URL() 返回 None，
         // 会导致 Tauri 权限检查内部 panic），延迟到 navigate 时按需创建
         if !is_blank {
-            let webview =
-                Self::create_webview_for_tab(app, &tab_id, url, rect.0, rect.1, rect.2, rect.3)?;
+            let webview = Self::create_webview_for_tab(
+                app,
+                self.state.clone(),
+                &tab_id,
+                url,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+            )?;
 
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             state.webviews.insert(tab_id.clone(), webview);
         }
+        self.persist_session_tabs();
         Ok(tab_id)
     }
 
@@ -1462,6 +1682,8 @@ impl BrowserManager {
         }
 
         state.active_tab_id = Some(tab_id.to_string());
+        drop(state);
+        self.persist_session_tabs();
         Ok(())
     }
 
@@ -1491,13 +1713,19 @@ impl BrowserManager {
         if was_active {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if state.tabs.is_empty() {
-                // 最后一个 tab 关闭，完全关闭浏览器
+                // 最后一个 tab 关闭：隐藏浏览器面板（webview 已在上面 remove+close），
+                // 停轮询，清运行时 state，visible=false 让前端感知浏览器已无内容。
                 state
                     .poll_stop
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 state
                     .event_poll_stop
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // 隐藏残留 webview（理论上 tabs 空时 webviews 也空，兜底）
+                for wv in state.webviews.values() {
+                    let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
+                    let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
+                }
                 state.page_loaded_signals.clear();
                 state.latest_snapshots.clear();
                 state.last_known_url.clear();
@@ -1506,6 +1734,9 @@ impl BrowserManager {
                 state.active_tab_id = None;
                 state.tab_histories.clear();
                 state.tab_history_indices.clear();
+                state
+                    .visible
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
             } else {
                 // 切换到关闭位置处的相邻标签
                 let new_pos = closed_pos.min(state.tabs.len().saturating_sub(1));
@@ -1520,6 +1751,7 @@ impl BrowserManager {
                 state.active_tab_id = Some(new_id);
             }
         }
+        self.persist_session_tabs();
         Ok(())
     }
 
@@ -1550,7 +1782,7 @@ impl BrowserManager {
 
     /// 记录 URL 访问到活跃标签历史和全局历史
     pub fn record_history(&self, url: &str, title: &str) {
-        let should_persist = {
+        let shared = {
             let mut state = match self.state.lock() {
                 Ok(s) => s,
                 Err(e) => e.into_inner(),
@@ -1591,30 +1823,16 @@ impl BrowserManager {
                     .unwrap_or(0);
                 state.tab_history_indices.insert(aid.clone(), idx);
             }
-
-            // 写入全局历史（去重：移到末尾并更新时间戳）
-            let pos = state.global_history.iter().position(|e| e.url == url);
-            match pos {
-                Some(i) => {
-                    state.global_history[i].title = entry.title.clone();
-                    state.global_history[i].timestamp = entry.timestamp;
-                    let moved = state.global_history.remove(i);
-                    state.global_history.push(moved);
-                    true
-                }
-                None => {
-                    state.global_history.push(entry);
-                    if state.global_history.len() > 1000 {
-                        let keep_from = state.global_history.len() - 800;
-                        state.global_history.drain(0..keep_from);
-                    }
-                    true
-                }
-            }
+            state.shared.clone()
         };
-        if should_persist {
-            persist_global_history(&self.state);
+        {
+            let mut history = shared
+                .global_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            upsert_global_history(&mut history, url, title);
         }
+        persist_global_history(&shared);
     }
 
     /// 获取标签页浏览历史
@@ -1638,45 +1856,48 @@ impl BrowserManager {
 
     /// 获取全局浏览历史（分页，最新在前）
     pub fn get_global_history(&self, offset: usize, limit: usize) -> Vec<HistoryEntry> {
-        let state = match self.state.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        let total = state.global_history.len();
+        let shared = self.shared_state();
+        let history = shared
+            .global_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let total = history.len();
         if offset >= total {
             return Vec::new();
         }
         // 倒序切片：offset=0 取最后 limit 条
         let end = total.saturating_sub(offset);
         let start = end.saturating_sub(limit);
-        state.global_history[start..end]
-            .iter()
-            .rev()
-            .cloned()
-            .collect()
+        history[start..end].iter().rev().cloned().collect()
     }
 
     /// 清空全局浏览历史
     pub fn clear_global_history(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.global_history.clear();
+        let shared = self.shared_state();
+        {
+            let mut history = shared
+                .global_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            history.clear();
         }
-        persist_global_history(&self.state);
+        persist_global_history(&shared);
     }
 
     /// 删除全局历史中指定 URL 的条目
     pub fn delete_global_history_entry(&self, url: &str) {
+        let shared = self.shared_state();
         let should_persist = {
-            let mut state = match self.state.lock() {
-                Ok(s) => s,
-                Err(e) => e.into_inner(),
-            };
-            let before = state.global_history.len();
-            state.global_history.retain(|e| e.url != url);
-            before != state.global_history.len()
+            let mut history = shared
+                .global_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let before = history.len();
+            history.retain(|entry| entry.url != url);
+            before != history.len()
         };
         if should_persist {
-            persist_global_history(&self.state);
+            persist_global_history(&shared);
         }
     }
 
@@ -1792,7 +2013,30 @@ fn global_history_path() -> PathBuf {
         .join("browser-history.json")
 }
 
-fn load_global_history() -> Vec<HistoryEntry> {
+fn upsert_global_history(history: &mut Vec<HistoryEntry>, url: &str, title: &str) {
+    let entry = HistoryEntry {
+        url: url.to_string(),
+        title: if title.is_empty() {
+            url.to_string()
+        } else {
+            title.to_string()
+        },
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    };
+    if let Some(index) = history.iter().position(|item| item.url == url) {
+        history.remove(index);
+    }
+    history.push(entry);
+    if history.len() > 1000 {
+        let keep_from = history.len() - 800;
+        history.drain(0..keep_from);
+    }
+}
+
+pub(crate) fn load_global_history() -> Vec<HistoryEntry> {
     let path = global_history_path();
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
@@ -1800,16 +2044,13 @@ fn load_global_history() -> Vec<HistoryEntry> {
     }
 }
 
-fn persist_global_history(state: &Arc<Mutex<BrowserState>>) {
-    let entries = {
-        let state = match state.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        state.global_history.clone()
-    };
+fn persist_global_history(shared: &Arc<BrowserSharedState>) {
+    let entries = shared
+        .global_history
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let path = global_history_path();
-    if let Ok(content) = serde_json::to_string(&entries) {
+    if let Ok(content) = serde_json::to_string(&*entries) {
         let _ = std::fs::write(path, content);
     }
 }
@@ -1823,7 +2064,7 @@ fn zoom_path() -> PathBuf {
         .join("browser-zoom.json")
 }
 
-fn load_zoom() -> f64 {
+pub(crate) fn load_zoom() -> f64 {
     let path = zoom_path();
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str::<f64>(&content).unwrap_or(1.0),
@@ -1831,25 +2072,29 @@ fn load_zoom() -> f64 {
     }
 }
 
-fn persist_zoom(state: &Arc<Mutex<BrowserState>>) {
-    let zoom = {
-        let state = match state.lock() {
-            Ok(s) => s,
-            Err(e) => e.into_inner(),
-        };
-        state.zoom_factor
-    };
+fn persist_zoom(shared: &Arc<BrowserSharedState>) {
+    let zoom = shared.zoom_factor.lock().unwrap_or_else(|e| e.into_inner());
     let path = zoom_path();
-    if let Ok(content) = serde_json::to_string(&zoom) {
+    if let Ok(content) = serde_json::to_string(&*zoom) {
         let _ = std::fs::write(path, content);
     }
 }
 
-fn browser_data_directory() -> PathBuf {
+fn browser_data_directory(session_id: &str) -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".tiangong").join("browser-data")
+    // per-session data 目录隔离 cookie/storage；空 session_id 回退全局目录（兼容）
+    let dir = if session_id.is_empty() {
+        PathBuf::from(home).join(".tiangong").join("browser-data")
+    } else {
+        PathBuf::from(home)
+            .join(".tiangong")
+            .join("browser-data")
+            .join(session_id)
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 pub fn default_browser_rect(app: &AppHandle<Wry>) -> Option<(f64, f64, f64, f64)> {

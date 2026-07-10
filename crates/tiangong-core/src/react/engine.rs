@@ -29,10 +29,7 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 use crate::agent_team::lifecycle::TeamContext;
 
 use super::cancel::{CancelSignal, CancelStrategy, emit_cancel_usage};
-use super::helpers::{
-    check_cancel, drain_pending_commands_async, looks_like_final_answer,
-    maybe_inject_browser_update,
-};
+use super::helpers::{check_cancel, drain_pending_commands_async, looks_like_final_answer};
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
 /// 单个 turn 内的执行阶段。
@@ -169,8 +166,6 @@ impl ReactEngine {
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
-        let mut last_browser_snapshot: Option<crate::browser_trait::PageSnapshot> = None;
-        let mut last_browser_check: Option<std::time::Instant> = None;
 
         if self.agent_id == "main" {
             let routed = self
@@ -238,17 +233,13 @@ impl ReactEngine {
                     PendingCommandEffect::None => {}
                 }
 
-                // 首轮：主动获取浏览器当前状态并注入上下文
-                if round == 0 {
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        false,
-                    )
-                    .await;
+                // 工具执行完进入下一轮模型请求前，通知前端"正在分析工具结果"，
+                // 避免前端把模型等待时间算到最后一个工具上。
+                if round > 0 {
+                    let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                        phase: "analyzing".to_string(),
+                        iteration: (round + 1) as u32,
+                    });
                 }
 
                 // 内层工具执行阶段轮次上限：达到即结束工具阶段，进入总结。
@@ -658,17 +649,6 @@ impl ReactEngine {
                         PendingCommandEffect::None => {}
                     }
 
-                    // 工具执行间隙：检测浏览器状态变化
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        false,
-                    )
-                    .await;
-
                     if let Some(parse_error) = call
                         .arguments
                         .get("__parse_error")
@@ -690,6 +670,7 @@ impl ReactEngine {
                             output: message.clone(),
                             full_output: Some(message.clone()),
                             media: vec![],
+                            duration_ms: None,
                         });
                         append_tool_result_message(
                             session,
@@ -717,6 +698,7 @@ impl ReactEngine {
                             name: call.name.clone(),
                             args_summary: args_summary.clone(),
                         });
+                        let tool_start_time = std::time::Instant::now();
                         let result = if let Some(team) = self.team.as_ref() {
                             if let Ok(mut team) = team.lock() {
                                 crate::agent_team::lifecycle::execute_team_tool(
@@ -746,6 +728,7 @@ impl ReactEngine {
                             output: tool_result_stream_output(&result),
                             full_output: Some(tool_result_full_output(&result)),
                             media: vec![],
+                            duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                         });
                         append_tool_result_message(
                             session,
@@ -853,6 +836,7 @@ impl ReactEngine {
                                 output: format!("权限拒绝：{reason}"),
                                 full_output: None,
                                 media: vec![],
+                                duration_ms: None,
                             });
                             append_tool_result_message(
                                 session,
@@ -1013,6 +997,7 @@ impl ReactEngine {
                                     output: "用户拒绝执行".to_string(),
                                     full_output: None,
                                     media: vec![],
+                                    duration_ms: None,
                                 });
                                 merge_plugin_usage(&mut accumulated_usage);
                                 let _ = stream_tx.send(StreamEvent::Done {
@@ -1067,6 +1052,7 @@ impl ReactEngine {
                                     output: message.clone(),
                                     full_output: None,
                                     media: vec![],
+                                    duration_ms: None,
                                 });
                                 append_tool_result_message(
                                     session,
@@ -1087,6 +1073,7 @@ impl ReactEngine {
                         name: call.name.clone(),
                         args_summary: args_summary.clone(),
                     });
+                    let tool_start_time = std::time::Instant::now();
 
                     let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                         // analyze_attachment 已迁移至独立插件（tiangong-plugin-analyze-
@@ -1138,6 +1125,7 @@ impl ReactEngine {
                         output: tool_result_stream_output(&result),
                         full_output: Some(tool_result_full_output(&result)),
                         media: tool_media.clone(),
+                        duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                     });
                     // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
                     if !tool_media.is_empty() {
@@ -1218,17 +1206,6 @@ impl ReactEngine {
                         }
                         PendingCommandEffect::None => {}
                     }
-
-                    // 工具执行后：检测浏览器状态变化
-                    maybe_inject_browser_update(
-                        &self.engine,
-                        session,
-                        stream_tx,
-                        &mut last_browser_snapshot,
-                        &mut last_browser_check,
-                        true,
-                    )
-                    .await;
                 }
 
                 if need_failure_recovery_prompt {

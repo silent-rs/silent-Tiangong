@@ -10,8 +10,9 @@
 //!   mutability，`&self` 即可修改），core 在调用前会先通过 [`Plugin::set_workspace`]
 //!   注入当前会话工作目录、通过 [`Plugin::set_trust_mode`] 注入共享信任模式引用、
 //!   并通过 [`Plugin::set_feedback_tx`] 注入反馈通道。
-//! - 能力 trait（`PageFetcher` / `TerminalProvider`）不消除，需要注入外部能力的插件
-//!   仍在 [`Plugin::register`] 中调 engine 的 `set_*` 方法。
+//! - `PageFetcher` / `TerminalProvider` 等外部能力 trait 已随能力下沉重构（#225）
+//!   迁入对应插件 crate，core 不再持有这些 trait；插件经 [`Plugin::set_feedback_tx`]
+//!   注入的通道自行向会话投递外部事件（如浏览器页面快照）。
 //!
 //! 模块组织：
 //! - [`trait_def`]：`Plugin` trait 定义与信任模式/反馈默认能力。

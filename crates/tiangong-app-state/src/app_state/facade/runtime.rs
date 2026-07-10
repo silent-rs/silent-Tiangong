@@ -13,21 +13,26 @@ impl TiangongState {
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
         self.store.provider.model_endpoint = endpoint.clone();
-        // 保留旧 RuntimeEngine 的共享信任模式引用、page_fetcher、terminal_provider 和 tool_overrides
+        // 保留旧 RuntimeEngine 的共享信任模式引用和 tool_overrides
         let shared_trust_mode = self
             .services
             .runtime
             .permission_gate()
             .shared_trust_mode_ref();
-        let page_fetcher = self.services.runtime.page_fetcher();
-        let terminal_provider = self.services.runtime.terminal_provider();
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
         let storage_dir = tiangong_config::io::storage_root();
-        let context_limit = tiangong_config::io::resolve_context_limit_at(
+        let chat_override = self
+            .store
+            .provider
+            .models_config
+            .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+            .and_then(|r| r.context_window);
+        let context_limit = tiangong_config::io::resolve_context_limit_with_override(
             &storage_dir,
             &self.store.provider.model_endpoint.model,
+            chat_override,
         );
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(endpoint),
@@ -37,12 +42,6 @@ impl TiangongState {
             crate::app_state::repository::storage_root(),
         )
         .with_models_config(self.store.provider.models_config.clone());
-        if let Some(fetcher) = page_fetcher {
-            new_runtime.set_page_fetcher(fetcher);
-        }
-        if let Some(provider) = terminal_provider {
-            new_runtime.set_terminal_provider(provider);
-        }
         for (name, handler) in tool_overrides {
             new_runtime.register_tool_override(&name, handler);
         }

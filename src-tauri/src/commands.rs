@@ -533,9 +533,39 @@ pub async fn get_session_tabs(
                 .iter()
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
+
+            // Browser tabs 只从 BrowserSessionStore 读取（唯一真相源）；
+            // Terminal tabs 从 Session.tabs 读取（terminal 暂无独立 store）。
+            let persisted =
+                tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id);
+            let browser_tabs: Vec<_> = persisted
+                .tabs
+                .iter()
+                .map(|tab| tiangong_core::session::TabState {
+                    id: tab.id.clone(),
+                    kind: tiangong_core::session::TabKind::Browser,
+                    title: tab.title.clone(),
+                    url: tab.url.clone(),
+                    created_at: String::new(),
+                })
+                .collect();
+            let terminal_tabs: Vec<_> = session
+                .tabs
+                .iter()
+                .filter(|tab| matches!(tab.kind, tiangong_core::session::TabKind::Terminal))
+                .cloned()
+                .collect();
+            let tabs: Vec<_> = terminal_tabs.into_iter().chain(browser_tabs).collect();
+
+            // active_tab_id：browser store 的 active 优先，其次 session 的 terminal active
+            let persisted_active = persisted
+                .active_tab_id
+                .filter(|id| tabs.iter().any(|tab| tab.id == *id));
+            let active_tab_id = persisted_active.or_else(|| session.active_tab_id.clone());
+
             Ok(SessionTabsView {
-                tabs: session.tabs.clone(),
-                active_tab_id: session.active_tab_id.clone(),
+                tabs,
+                active_tab_id,
             })
         })
         .await
@@ -683,8 +713,11 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
             Ok::<String, anyhow::Error>(id)
         })
         .await?;
-    // 删除对话后销毁其交互 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）
+    // 删除对话后同步销毁终端和浏览器运行时。
     tiangong_plugin_terminal::destroy_session_pty(&app, &deleted_id);
+    app.state::<tiangong_plugin_browser::BrowserPluginState>()
+        .registry
+        .destroy_session(&deleted_id);
     Ok(())
 }
 
@@ -701,9 +734,11 @@ pub async fn delete_sessions_by_cwd(
             Ok::<Vec<String>, anyhow::Error>(ids)
         })
         .await?;
-    // 逐个销毁被删会话的交互 PTY
+    // 逐个销毁被删会话的终端和浏览器运行时。
+    let browser_state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
     for id in &deleted_ids {
         tiangong_plugin_terminal::destroy_session_pty(&app, id);
+        browser_state.registry.destroy_session(id);
     }
     Ok(())
 }
@@ -922,7 +957,7 @@ pub(crate) fn start_stream_consumer(
                         }
                         StreamEvent::ToolCalls {
                             message_id,
-                            names,
+                            names: _,
                             calls,
                             usage: _,
                         } => {
@@ -931,10 +966,6 @@ pub(crate) fn start_stream_consumer(
                                 &mut assistant_msg_id,
                                 message_id,
                                 calls,
-                            );
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("LLM 输出\ntool_calls: {}", names.join(", ")),
                             );
                         }
                         StreamEvent::TokenUsage {
@@ -967,9 +998,9 @@ pub(crate) fn start_stream_consumer(
                             ref output,
                             ref full_output,
                             ref media,
+                            duration_ms: _,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
-                            let status = if *ok { "ok=true" } else { "ok=false" };
 
                             // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
                             if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
@@ -992,34 +1023,10 @@ pub(crate) fn start_stream_consumer(
                                     !*ok,
                                 );
                             } else {
-                                // 正常工具结果：System 摘要 + Tool result
-                                let mut lines = vec![format!("工具执行 [{name}]")];
-                                if !last_tool_args_summary.is_empty() {
-                                    lines.push(format!("命令: {last_tool_args_summary}"));
-                                }
-                                lines.push(format!("{status} exit_code=0"));
-                                lines.push(format!("summary: {name}"));
+                                // 正常工具结果：只存标准 Tool result（不再写 System 摘要，避免重复）
                                 if !media.is_empty() {
-                                    let media_desc = media
-                                        .iter()
-                                        .map(|a| match a.kind {
-                                            tiangong_types::MediaKind::Image => "图片",
-                                            tiangong_types::MediaKind::Video => "视频",
-                                            tiangong_types::MediaKind::Audio => "音频",
-                                            _ => "文件",
-                                        })
-                                        .next()
-                                        .unwrap_or("媒体");
-                                    let count = media.len();
-                                    lines.push(format!("stdout: 已生成 {count} 个{media_desc}"));
                                     append_assistant_media(session, media.clone());
-                                } else if !persisted_output.trim().is_empty() {
-                                    lines.push(format!("stdout:\n{persisted_output}"));
                                 }
-                                session.append_message(
-                                    tiangong_types::MessageRole::System,
-                                    lines.join("\n"),
-                                );
                                 append_tool_result_message(
                                     session,
                                     tool_call_id.as_deref(),
@@ -3622,4 +3629,12 @@ mod tests {
         };
         assert!(!done_event_keeps_turn_running(&event, true));
     }
+}
+
+/// 按模型名从 context_windows.json 映射表解析默认 context_window（token 数）。
+/// 供前端在编辑模型时预填默认值。
+#[tauri::command]
+pub async fn resolve_model_context_window(model: String) -> Result<usize, String> {
+    let dir = tiangong_config::io::storage_root();
+    Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
 }

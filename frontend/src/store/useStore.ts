@@ -498,6 +498,10 @@ export const useStore = create<AppState>((set, get) => ({
         await api
           .terminalAttachSession(draftId, session.id)
           .catch(e => console.error('草稿终端 PTY 转正迁移失败:', e));
+        // 浏览器 state 同步转正（registry key + store 文件迁移）
+        await api
+          .browserAttachSession(draftId, session.id)
+          .catch(e => console.error('草稿浏览器 state 转正迁移失败:', e));
         set(state => ({
           sessions: [session, ...state.sessions],
           activeSessionId: session.id,
