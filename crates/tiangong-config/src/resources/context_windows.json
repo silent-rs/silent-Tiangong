@@ -2,7 +2,11 @@
   "_comment": "模型 context_window 映射表（token 数）。首次安装时释放到 ~/.tiangong/context_windows.json，用户可自行修改。匹配规则：精确匹配 > 前缀匹配 > 默认 200000",
   "_default": 200000,
 
-  "gpt-5.4": 1050000,
+  "gpt-5.6-sol": 1000000,
+  "gpt-5.6-terra": 1000000,
+  "gpt-5.6-luna": 1000000,
+  "gpt-5.5": 1000000,
+  "gpt-5.4": 1000000,
   "gpt-5": 1000000,
   "gpt-4.1": 1000000,
   "gpt-4.1-mini": 1000000,

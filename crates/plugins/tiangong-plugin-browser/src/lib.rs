@@ -136,13 +136,7 @@ impl BrowserPluginState {
 
         // 4. 持久化该 session 的浏览器状态 + 返回快照
         let s = new_mgr.state.lock().map_err(|e| e.to_string())?;
-        crate::session_store::BrowserSessionStore::save(
-            session_id,
-            &crate::session_store::BrowserSessionPersisted {
-                tabs: s.tabs.clone(),
-                active_tab_id: s.active_tab_id.clone(),
-            },
-        );
+        BrowserManager::persist_from_state(&s);
         Ok(BrowserTabsSnapshot {
             session_id: Some(session_id.to_string()),
             tabs: s.tabs.clone(),

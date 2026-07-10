@@ -21,6 +21,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
 
 interface BrowserTabContentProps {
+  sessionId: string;
   tabId: string;
   initialUrl?: string;
   isActive: boolean;
@@ -39,6 +40,7 @@ interface TabHistory {
 }
 
 interface BrowserPageEvent {
+  session_id: string;
   url?: string;
   title?: string;
   text?: string;
@@ -84,6 +86,7 @@ function formatTime(ts: number): string {
 }
 
 export function BrowserTabContent({
+  sessionId,
   tabId,
   initialUrl,
   isActive,
@@ -459,13 +462,15 @@ export function BrowserTabContent({
     let cancelled = false;
 
     const setup = async () => {
-      unlistenTab = await listen('browser:tab_updated', () => {
+      unlistenTab = await listen<{ session_id?: string }>('browser:tab_updated', (event) => {
         if (cancelled || !isActiveRef.current) return;
+        if (event.payload?.session_id && event.payload.session_id !== sessionId) return;
         void refreshBackendTabState();
       });
       unlistenPage = await listen('browser:page_loaded', (event) => {
         if (cancelled || !isActiveRef.current) return;
         const payload = event.payload as BrowserPageEvent;
+        if (payload?.session_id !== sessionId) return;
         if (payload?.url) {
           setUrl(displayUrl(payload.url));
           publishMetadata(payload.url, payload.title);
@@ -480,7 +485,7 @@ export function BrowserTabContent({
       unlistenTab?.();
       unlistenPage?.();
     };
-  }, [publishMetadata, refreshBackendTabState, refreshTabHistory]);
+  }, [publishMetadata, refreshBackendTabState, refreshTabHistory, sessionId]);
 
   return (
     <div className={`h-full flex-col bg-background ${isActive ? 'flex' : 'hidden'}`}>

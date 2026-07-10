@@ -20,7 +20,7 @@ fn resolve_agent_state(
 }
 
 use crate::types::{
-    format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent,
+    format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent, BrowserOpenEvent,
     BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult, FormExtractResult,
     LocateElementResult, PageStatus, QueryDomResult, TabHistoryResult,
 };
@@ -133,10 +133,19 @@ pub async fn browser_command_handler(
 
                 let was_open = manager.is_open();
                 if !was_open {
-                    let _ = app.emit("browser:open", &url);
+                    let _ = app.emit(
+                        "browser:open",
+                        BrowserOpenEvent {
+                            session_id: session_id.clone(),
+                            url: url.clone(),
+                        },
+                    );
                 }
                 let _ = manager.navigate_with_app(&app, &url);
-                let _ = app.emit("browser:tab_updated", ());
+                let _ = app.emit(
+                    "browser:tab_updated",
+                    serde_json::json!({ "session_id": session_id }),
+                );
 
                 let should_navigate = false;
                 let result = tokio::task::spawn_blocking(move || {
@@ -158,10 +167,19 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
                 if !manager.is_open() {
-                    let _ = app.emit("browser:open", &url);
+                    let _ = app.emit(
+                        "browser:open",
+                        BrowserOpenEvent {
+                            session_id: session_id.clone(),
+                            url: url.clone(),
+                        },
+                    );
                 }
                 let _ = manager.navigate_with_app(&app, &url);
-                let _ = app.emit("browser:tab_updated", ());
+                let _ = app.emit(
+                    "browser:tab_updated",
+                    serde_json::json!({ "session_id": session_id }),
+                );
             }
             BrowserCommand::ObservePage {
                 session_id,
@@ -483,7 +501,13 @@ pub async fn browser_command_handler(
                     if let Some((x, y, w, h)) = default_browser_rect(&app) {
                         let _ = manager.open(&app, "about:blank", x, y, w, h);
                     }
-                    let _ = app.emit("browser:open", "about:blank");
+                    let _ = app.emit(
+                        "browser:open",
+                        BrowserOpenEvent {
+                            session_id: session_id.clone(),
+                            url: "about:blank".to_string(),
+                        },
+                    );
                 }
                 let result = tokio::task::spawn_blocking(move || manager.load_html(&html))
                     .await
@@ -507,13 +531,19 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
+                let event_session_id = session_id.clone();
                 let _ =
                     tokio::task::spawn_blocking(move || match manager.tab_new(&app_clone, &url) {
                         Ok(tab_id) => {
                             let _ = app_clone.emit(
-                            "browser:tab_updated",
-                            serde_json::json!({ "action": "new", "tab_id": tab_id, "url": url }),
-                        );
+                                "browser:tab_updated",
+                                serde_json::json!({
+                                    "session_id": event_session_id,
+                                    "action": "new",
+                                    "tab_id": tab_id,
+                                    "url": url,
+                                }),
+                            );
                         }
                         Err(e) => warn!(error = %e, "tab_new error"),
                     })
@@ -525,13 +555,18 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
+                let event_session_id = session_id.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_switch(&tab_id) {
                         warn!(error = %e, "tab_switch error");
                     } else {
                         let _ = app_clone.emit(
                             "browser:tab_updated",
-                            serde_json::json!({ "action": "switch", "tab_id": tab_id }),
+                            serde_json::json!({
+                                "session_id": event_session_id,
+                                "action": "switch",
+                                "tab_id": tab_id,
+                            }),
                         );
                     }
                 })
@@ -543,13 +578,18 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
                 let app_clone = app.clone();
+                let event_session_id = session_id.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if let Err(e) = manager.tab_close(&tab_id) {
                         warn!(error = %e, "tab_close error");
                     } else {
                         let _ = app_clone.emit(
                             "browser:tab_updated",
-                            serde_json::json!({ "action": "close", "tab_id": tab_id }),
+                            serde_json::json!({
+                                "session_id": event_session_id,
+                                "action": "close",
+                                "tab_id": tab_id,
+                            }),
                         );
                     }
                 })

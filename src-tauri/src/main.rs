@@ -36,10 +36,12 @@ fn browser_events_to_feedback(
 
 async fn observe_browser_snapshot_for_injection(
     app: tauri::AppHandle,
+    session_id: String,
 ) -> Option<tiangong_plugin_browser::types::BrowserPageSnapshot> {
     let manager = {
         let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-        state.manager().clone()
+        let browser_state = state.registry.existing_session_state(&session_id)?;
+        tiangong_plugin_browser::manager::BrowserManager::from_state(browser_state)
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -53,15 +55,23 @@ async fn observe_browser_snapshot_for_injection(
 
 async fn ack_browser_events(
     app: tauri::AppHandle,
+    session_id: String,
     events: Vec<tiangong_plugin_browser::types::BrowserEvent>,
 ) {
     let removed = {
         let state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-        state.manager().ack_events(&events)
+        state
+            .registry
+            .existing_session_state(&session_id)
+            .map(tiangong_plugin_browser::manager::BrowserManager::from_state)
+            .map(|manager| manager.ack_events(&events))
+            .unwrap_or(0)
     };
     debug!(
+        session_id,
         ack_count = events.len(),
-        removed, "browser events acknowledged after session injection"
+        removed,
+        "browser events acknowledged after session injection"
     );
 }
 
@@ -316,51 +326,70 @@ fn run_gui() {
             let inject_handle = app.handle().clone();
             app.listen("browser:page_loaded", move |event| {
                 let payload = event.payload().to_string();
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&payload) {
-                    let url = data["url"].as_str().unwrap_or("").to_string();
-                    if url.is_empty() {
-                        return;
-                    }
-                    let browser_state =
-                        inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                    if !browser_state.manager().is_visible() {
-                        return;
-                    }
-                    let title = data["title"].as_str().unwrap_or("").to_string();
-                    let text = data["text"].as_str().unwrap_or("").to_string();
-                    let inj_session_id = browser_state.registry.active_session_id();
-                    use tiangong_plugin_browser::page_fetcher::BrowserContent;
-                    let _ = tx1.send(tiangong_app::ToolInjection {
-                        session_id: inj_session_id,
-                        tool: Box::new(BrowserContent {
-                            title,
-                            url,
-                            text,
-                            tabs: vec![],
-                            active_tab_id: None,
-                            feedback: None,
-                        }),
-                        refresh_frontend: false,
-                    });
+                let Ok(data) = serde_json::from_str::<
+                    tiangong_plugin_browser::types::BrowserPageLoadedEvent,
+                >(&payload) else {
+                    warn!("浏览器页面事件 payload 解析失败");
+                    return;
+                };
+                if data.session_id.trim().is_empty() || data.url.is_empty() {
+                    return;
                 }
+                let browser_state =
+                    inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                let Some(source_state) = browser_state
+                    .registry
+                    .existing_session_state(&data.session_id)
+                else {
+                    return;
+                };
+                if !tiangong_plugin_browser::manager::BrowserManager::from_state(source_state)
+                    .is_visible()
+                {
+                    return;
+                }
+                use tiangong_plugin_browser::page_fetcher::BrowserContent;
+                let _ = tx1.send(tiangong_app::ToolInjection {
+                    session_id: Some(data.session_id),
+                    tool: Box::new(BrowserContent {
+                        title: data.title,
+                        url: data.url,
+                        text: data.text,
+                        tabs: vec![],
+                        active_tab_id: None,
+                        feedback: None,
+                    }),
+                    refresh_frontend: false,
+                });
             });
 
             // 监听浏览器网络响应事件，push 到注入 channel（消费者统一处理）。
             // 这覆盖页面 JS 自行发起 XHR/fetch、且 DOM 没有明显变化的场景。
             let event_inject_handle = app.handle().clone();
+            let tx2 = injection_tx.clone();
             app.listen("browser:events", move |event| {
-                let browser_state =
-                    event_inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                if !browser_state.manager().is_visible() {
-                    return;
-                }
                 let payload = event.payload().to_string();
-                let Ok(events) = serde_json::from_str::<
-                    Vec<tiangong_plugin_browser::types::BrowserEvent>,
+                let Ok(payload) = serde_json::from_str::<
+                    tiangong_plugin_browser::types::BrowserEventsEvent,
                 >(&payload) else {
                     warn!("浏览器事件 payload 解析失败");
                     return;
                 };
+                let browser_state =
+                    event_inject_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
+                let Some(source_state) = browser_state
+                    .registry
+                    .existing_session_state(&payload.session_id)
+                else {
+                    return;
+                };
+                if !tiangong_plugin_browser::manager::BrowserManager::from_state(source_state)
+                    .is_visible()
+                {
+                    return;
+                }
+                let session_id = payload.session_id;
+                let events = payload.events;
                 let total_count = events.len();
                 let Some((network_events, feedback)) = browser_events_to_feedback(events) else {
                     debug!(total_count, "浏览器事件无网络响应，跳过主动注入");
@@ -368,8 +397,13 @@ fn run_gui() {
                 };
                 let network_count = network_events.len();
                 let app_handle = event_inject_handle.clone();
+                let injection_tx = tx2.clone();
                 tauri::async_runtime::spawn(async move {
-                    let snapshot = observe_browser_snapshot_for_injection(app_handle.clone()).await;
+                    let snapshot = observe_browser_snapshot_for_injection(
+                        app_handle.clone(),
+                        session_id.clone(),
+                    )
+                    .await;
                     let title = snapshot
                         .as_ref()
                         .map(|s| s.title.clone())
@@ -408,7 +442,12 @@ fn run_gui() {
                         // 尝试从活跃标签的 WebView 获取当前页面 URL
                         let browser_state =
                             app_handle.state::<tiangong_plugin_browser::BrowserPluginState>();
-                        page_url = browser_state.manager().current_url().unwrap_or_default();
+                        page_url = browser_state
+                            .registry
+                            .existing_session_state(&session_id)
+                            .map(tiangong_plugin_browser::manager::BrowserManager::from_state)
+                            .and_then(|manager| manager.current_url())
+                            .unwrap_or_default();
                     }
                     if page_url.is_empty() {
                         warn!(
@@ -418,24 +457,28 @@ fn run_gui() {
                         return;
                     }
 
-                    let state = app_handle.state::<tiangong_app::TiangongApp>();
                     use tiangong_plugin_browser::page_fetcher::BrowserContent;
-                    let injected = state
-                        .inject_tool(Box::new(BrowserContent {
-                            title,
-                            url: page_url.clone(),
-                            text,
-                            tabs,
-                            active_tab_id,
-                            feedback: Some(feedback),
-                        }))
-                        .await;
+                    let queued = injection_tx
+                        .send(tiangong_app::ToolInjection {
+                            session_id: Some(session_id.clone()),
+                            tool: Box::new(BrowserContent {
+                                title,
+                                url: page_url.clone(),
+                                text,
+                                tabs,
+                                active_tab_id,
+                                feedback: Some(feedback),
+                            }),
+                            refresh_frontend: false,
+                        })
+                        .is_ok();
                     info!(
+                        session_id,
                         url = %page_url,
-                        total_count, network_count, injected, "浏览器网络事件注入检查完成"
+                        total_count, network_count, queued, "浏览器网络事件注入检查完成"
                     );
-                    if injected {
-                        ack_browser_events(app_handle, network_events).await;
+                    if queued {
+                        ack_browser_events(app_handle, session_id, network_events).await;
                     }
                 });
             });

@@ -692,6 +692,7 @@ export function TabsContainer({
           ) : (
             <BrowserTabContent
               key={`${terminalSessionId}:${tab.id}`}
+              sessionId={terminalSessionId}
               tabId={tab.id}
               initialUrl={tab.url}
               isActive={isVisible && tab.id === activeTab?.id}

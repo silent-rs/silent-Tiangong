@@ -26,6 +26,31 @@ pub struct BrowserTabsSnapshot {
     pub active_tab_id: Option<String>,
 }
 
+/// Agent 请求在前端显示浏览器时携带的来源会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserOpenEvent {
+    pub session_id: String,
+    pub url: String,
+}
+
+/// 页面加载事件。所有消费者必须按 `session_id` 路由，不能回退到当前活动会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserPageLoadedEvent {
+    pub session_id: String,
+    #[serde(default)]
+    pub title: String,
+    pub url: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// 浏览器事件队列及其来源会话。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserEventsEvent {
+    pub session_id: String,
+    pub events: Vec<BrowserEvent>,
+}
+
 /// 浏览历史条目
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {

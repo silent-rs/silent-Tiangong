@@ -13,19 +13,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::manager::BrowserState;
+use crate::manager::{BrowserSharedState, BrowserState};
 
 /// 浏览器 per-session 状态注册表。
 ///
 /// 持有所有 session 的 `BrowserState`，以及当前 active session id。
 /// 由 `BrowserPluginState` 单例持有，`BrowserManager` / handler / commands 经它路由。
 ///
-/// global_history / zoom 通过磁盘文件共享，每个 BrowserState 内是运行时副本。
+/// global_history / zoom 由 `shared` 在进程内共享并统一持久化。
 pub struct BrowserSessionRegistry {
     /// session_id -> 该 session 的浏览器状态（懒创建）
     sessions: Mutex<HashMap<String, Arc<Mutex<BrowserState>>>>,
     /// 当前可见的 session id（前端正在查看的对话）
     active_session_id: Mutex<Option<String>>,
+    /// 所有 session 共用的全局浏览历史和缩放设置。
+    shared: Arc<BrowserSharedState>,
 }
 
 impl BrowserSessionRegistry {
@@ -33,6 +35,7 @@ impl BrowserSessionRegistry {
         Self {
             sessions: Mutex::new(HashMap::new()),
             active_session_id: Mutex::new(None),
+            shared: Arc::new(BrowserSharedState::load()),
         }
     }
 
@@ -44,7 +47,10 @@ impl BrowserSessionRegistry {
         sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
-                Arc::new(Mutex::new(BrowserState::new_empty(session_id.to_string())))
+                Arc::new(Mutex::new(BrowserState::new_empty(
+                    session_id.to_string(),
+                    self.shared.clone(),
+                )))
             })
             .clone()
     }

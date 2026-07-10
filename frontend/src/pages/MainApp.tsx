@@ -368,8 +368,9 @@ export function MainApp() {
         }
       });
 
-      const unlistenBrowserOpen = await listen<string>('browser:open', async (event) => {
-        const url = event.payload;
+      const unlistenBrowserOpen = await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
+        const { session_id, url } = event.payload;
+        if (!session_id || useStore.getState().activeSessionId !== session_id) return;
         await openWorkspacePanel('browser');
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         await api.browserNavigate(url).catch(console.error);
