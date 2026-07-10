@@ -289,6 +289,7 @@ mod tests {
                 model: "claude-sonnet-4".into(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
 

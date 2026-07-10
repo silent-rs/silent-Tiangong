@@ -119,14 +119,11 @@ export function TabsContainer({
 
   const syncBrowserRuntimeForTabs = useCallback(async (
     sessionId: string,
-    nextTabs: TabState[],
     nextActiveTabId: string,
   ) => {
-    const browserTabs = browserRuntimeTabs(nextTabs);
     await api.browserSwitchSession(
       sessionId,
-      browserTabs,
-      browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
+      nextActiveTabId || null,
     ).catch(console.error);
   }, []);
 
@@ -138,7 +135,7 @@ export function TabsContainer({
     browserRuntimeSynced = false,
   ) => {
     if (!browserRuntimeSynced) {
-      await syncBrowserRuntimeForTabs(sessionId, nextTabs, nextActiveTabId);
+      await syncBrowserRuntimeForTabs(sessionId, nextActiveTabId);
     }
 
     const terminalTabs = nextTabs.filter((tab) => tab.kind === 'terminal');
@@ -160,23 +157,23 @@ export function TabsContainer({
     }
 
     if (!visible) {
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
       return;
     }
 
     const activeTab = nextTabs.find((tab) => tab.id === nextActiveTabId);
     if (activeTab?.kind === 'terminal') {
       await api.terminalTabSwitch(sessionId, activeTab.id).catch(console.error);
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
     } else if (!activeTab || activeTab.kind !== 'browser') {
-      await api.browserHide().catch(console.error);
+      await api.browserHide(sessionId).catch(console.error);
     }
   }, [syncBrowserRuntimeForTabs]);
 
   const handleNewTab = useCallback(async (kind: TabKind) => {
     if (kind === 'browser') {
       try {
-        const tabId = await api.browserTabNew(DEFAULT_BROWSER_URL);
+        const tabId = await api.browserTabNew(terminalSessionId, DEFAULT_BROWSER_URL);
         const nextTab = createLocalTab(kind, tabId);
         setTabs((currentTabs) => [...currentTabs, nextTab]);
         setActiveTabId(nextTab.id);
@@ -187,7 +184,7 @@ export function TabsContainer({
     }
 
     try {
-      void api.browserHide().catch(console.error);
+      void api.browserHide(terminalSessionId).catch(console.error);
       const tabId = await api.terminalTabNew(terminalSessionId, '终端', sessionCwd || workspaceDir || null);
       const nextTab = createLocalTab(kind, tabId);
       setTabs((currentTabs) => {
@@ -247,7 +244,7 @@ export function TabsContainer({
         );
 
       if (nextActiveId && shouldActivate) {
-        void api.browserHide().catch(console.error);
+        void api.browserHide(terminalSessionId).catch(console.error);
         if (result.active_tab_id !== nextActiveId) {
           void api.terminalTabSwitch(terminalSessionId, nextActiveId).catch(console.error);
         }
@@ -348,7 +345,7 @@ export function TabsContainer({
         activeTabIdRef.current = nextActiveTabId;
         setTabs(nextTabs);
         setActiveTabId(nextActiveTabId);
-        await syncBrowserRuntimeForTabs(activeSessionId, nextTabs, nextActiveTabId);
+        await syncBrowserRuntimeForTabs(activeSessionId, nextActiveTabId);
         if (cancelled) return;
         hydratingRef.current = false;
         setHydrateVersion((version) => version + 1);
@@ -359,7 +356,7 @@ export function TabsContainer({
         if (!cancelled) {
           setTabs([]);
           setActiveTabId('');
-          await api.browserSwitchSession(activeSessionId, [], null).catch(console.error);
+          await api.browserSwitchSession(activeSessionId, null).catch(console.error);
         }
       } finally {
         if (!cancelled && hydratingRef.current) {
@@ -384,10 +381,10 @@ export function TabsContainer({
     const existing = tabsRef.current.find((tab) => tab.kind === kind);
     if (existing) {
       if (existing.kind === 'terminal') {
-        void api.browserHide().catch(console.error);
+        void api.browserHide(terminalSessionId).catch(console.error);
         void api.terminalTabSwitch(terminalSessionId, existing.id).catch(console.error);
       } else {
-        void api.browserTabSwitch(existing.id).catch(console.error);
+        void api.browserTabSwitch(terminalSessionId, existing.id).catch(console.error);
       }
       setActiveTabId(existing.id);
       return;
@@ -395,7 +392,7 @@ export function TabsContainer({
 
     if (kind === 'browser') {
       try {
-        const result = await api.browserTabList();
+        const result = await api.browserTabList(terminalSessionId);
         if (result.tabs.length > 0) {
           const browserTabs = result.tabs.map(createBrowserTabFromBackend);
           const activeId = result.active_tab_id || browserTabs[0]?.id || '';
@@ -460,10 +457,10 @@ export function TabsContainer({
   const handleSwitchTab = useCallback((tabId: string) => {
     const nextTab = tabs.find((tab) => tab.id === tabId);
     if (nextTab?.kind === 'terminal') {
-      void api.browserHide().catch(console.error);
+      void api.browserHide(terminalSessionId).catch(console.error);
       void api.terminalTabSwitch(terminalSessionId, tabId).catch(console.error);
     } else if (nextTab?.kind === 'browser') {
-      void api.browserTabSwitch(tabId).catch(console.error);
+      void api.browserTabSwitch(terminalSessionId, tabId).catch(console.error);
     }
     setActiveTabId(tabId);
   }, [tabs, terminalSessionId]);
@@ -474,7 +471,7 @@ export function TabsContainer({
       if (closedIndex === -1) return currentTabs;
       const closingTab = currentTabs[closedIndex];
       if (closingTab.kind === 'browser') {
-        void api.browserTabClose(tabId).catch(console.error);
+        void api.browserTabClose(terminalSessionId, tabId).catch(console.error);
       } else {
         void api.terminalTabClose(terminalSessionId, tabId).catch(console.error);
       }
@@ -485,8 +482,8 @@ export function TabsContainer({
           void api.setSessionTabs(activeSessionId, [], null).catch(console.error);
         }
         // 最后一个 tab 关闭：显式隐藏浏览器面板（webview off-screen + visible=false）
-        void api.browserHide().catch(console.error);
-        void api.browserSwitchSession(terminalSessionId, [], null).catch(console.error);
+        void api.browserHide(terminalSessionId).catch(console.error);
+        void api.browserSwitchSession(terminalSessionId, null).catch(console.error);
         onClose();
         return [];
       }
@@ -494,7 +491,7 @@ export function TabsContainer({
         const nextActiveId = pickNextActiveTab(nextTabs, closedIndex) ?? '';
         const nextActiveTab = nextTabs.find((tab) => tab.id === nextActiveId);
         if (nextActiveTab?.kind !== 'browser') {
-          void api.browserHide().catch(console.error);
+          void api.browserHide(terminalSessionId).catch(console.error);
         }
         setActiveTabId(nextActiveId);
       }
@@ -503,7 +500,7 @@ export function TabsContainer({
   }, [activeTabId, onClose, terminalSessionId]);
 
   const handleCloseWorkspace = useCallback(() => {
-    void api.browserHide().catch(console.error);
+    void api.browserHide(terminalSessionId).catch(console.error);
     onClose();
   }, [onClose]);
 
@@ -590,11 +587,7 @@ export function TabsContainer({
           }));
         const browserTabs = browserRuntimeTabs(currentTabs);
         if (browserTabs.length > 0) {
-          await api.browserSwitchSession(
-            toSessionId,
-            browserTabs,
-            browserTabs.some((tab) => tab.id === nextActiveTabId) ? nextActiveTabId : null,
-          ).catch(console.error);
+          await api.browserSwitchSession(toSessionId).catch(console.error);
         }
         await api.setSessionTabs(toSessionId, currentTabs, nextActiveTabId || null);
       } finally {

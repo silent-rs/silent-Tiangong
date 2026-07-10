@@ -89,7 +89,7 @@ export function SettingsDialog() {
       return;
     }
 
-    api.browserHide().catch(console.error);
+    api.browserHide('').catch(console.error);
   }, [open]);
 
   return (

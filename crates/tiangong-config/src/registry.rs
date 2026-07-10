@@ -144,6 +144,7 @@ mod tests {
                 model: "test-model".to_string(),
                 capabilities: vec![cap],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
         m

@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::handler::browser_command_handler;
 use crate::manager::BrowserManager;
 use crate::session_registry::BrowserSessionRegistry;
-use crate::types::{BrowserCommand, BrowserTab, BrowserTabsSnapshot};
+use crate::types::{BrowserCommand, BrowserTabsSnapshot};
 
 pub mod bridge;
 pub mod capability;
@@ -60,7 +60,6 @@ impl BrowserPluginState {
         &self,
         app: &tauri::AppHandle<Wry>,
         session_id: &str,
-        tabs_to_restore: Vec<BrowserTab>,
         active_tab_id: Option<String>,
     ) -> Result<BrowserTabsSnapshot, String> {
         // 1. 隐藏旧 active session 的全部 webview（不销毁，保留在各自 state 里）
@@ -82,15 +81,25 @@ impl BrowserPluginState {
             }
         }
 
-        // 2. 激活新 session（懒创建 state），填充 tab 元数据
+        // 2. 激活新 session。已有 state 保留 tabs/webviews（只切可见性）；
+        //    无 tabs 时从 BrowserSessionStore 加载恢复。
         let new_state = self.registry.session_state(session_id);
         self.registry.set_active(session_id);
         {
             let mut s = new_state.lock().map_err(|e| e.to_string())?;
-            s.tabs = tabs_to_restore.clone();
-            s.active_tab_id = active_tab_id
-                .clone()
-                .or_else(|| s.tabs.first().map(|t| t.id.clone()));
+            // 只在 state 无 tabs 时从 store 恢复（不覆盖已有 runtime state）
+            if s.tabs.is_empty() {
+                let persisted = crate::session_store::BrowserSessionStore::load(session_id);
+                if !persisted.tabs.is_empty() {
+                    s.tabs = persisted.tabs;
+                }
+            }
+            // active_tab_id：优先参数传入，其次已有，否则首个
+            if let Some(id) = &active_tab_id {
+                s.active_tab_id = Some(id.clone());
+            } else if s.active_tab_id.is_none() {
+                s.active_tab_id = s.tabs.first().map(|t| t.id.clone());
+            }
             s.active_session_id = Some(session_id.to_string());
             s.visible.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -153,6 +162,7 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_hide,
             commands::browser_set_position,
             commands::browser_navigate,
+            commands::browser_open_url,
             commands::browser_eval,
             commands::browser_go_back,
             commands::browser_go_forward,

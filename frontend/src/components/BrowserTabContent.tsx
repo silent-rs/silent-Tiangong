@@ -128,12 +128,12 @@ export function BrowserTabContent({
     if (!isActiveRef.current || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
-    await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
+    await api.browserSetPosition(sessionId, rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
   const refreshTabHistory = useCallback(async () => {
     try {
-      const result = await api.browserTabHistory(tabId);
+      const result = await api.browserTabHistory(sessionId, tabId);
       setHistory({
         entries: result.entries,
         currentIndex: result.current_index,
@@ -145,7 +145,7 @@ export function BrowserTabContent({
 
   const refreshBackendTabState = useCallback(async () => {
     try {
-      const result = await api.browserTabList();
+      const result = await api.browserTabList(sessionId, );
       const tab = result.tabs.find((item) => item.id === tabId);
       if (!tab) return;
       setUrl(displayUrl(tab.url));
@@ -161,7 +161,7 @@ export function BrowserTabContent({
 
   const activateBackendTab = useCallback(async () => {
     if (!isActiveRef.current) return;
-    await api.browserTabSwitch(tabId);
+    await api.browserTabSwitch(sessionId, tabId);
     await syncPosition();
     await refreshBackendTabState();
   }, [refreshBackendTabState, syncPosition, tabId]);
@@ -171,7 +171,7 @@ export function BrowserTabContent({
     if (!nextUrl) return;
 
     try {
-      await api.browserTabSwitch(tabId);
+      await api.browserTabSwitch(sessionId, tabId);
       await syncPosition();
 
       if (isBlankBrowserUrl(nextUrl)) {
@@ -180,7 +180,7 @@ export function BrowserTabContent({
         return;
       }
 
-      await api.browserNavigate(nextUrl);
+      await api.browserNavigate(sessionId, nextUrl);
       setUrl(nextUrl);
       publishMetadata(nextUrl);
       await refreshTabHistory();
@@ -199,8 +199,8 @@ export function BrowserTabContent({
   const handleGoBack = useCallback(async () => {
     if (!canGoBack) return;
     try {
-      await api.browserTabSwitch(tabId);
-      await api.browserGoBack();
+      await api.browserTabSwitch(sessionId, tabId);
+      await api.browserGoBack(sessionId, );
     } catch (err) {
       console.error('后退失败：', err);
     }
@@ -209,8 +209,8 @@ export function BrowserTabContent({
   const handleGoForward = useCallback(async () => {
     if (!canGoForward) return;
     try {
-      await api.browserTabSwitch(tabId);
-      await api.browserGoForward();
+      await api.browserTabSwitch(sessionId, tabId);
+      await api.browserGoForward(sessionId, );
     } catch (err) {
       console.error('前进失败：', err);
     }
@@ -218,13 +218,13 @@ export function BrowserTabContent({
 
   const handleReload = useCallback(async () => {
     if (!url) return;
-    await api.browserEval('location.reload()').catch(console.error);
+    await api.browserEval(sessionId, 'location.reload()').catch(console.error);
   }, [url]);
 
   const dismissAnnotationBeforeZoom = useCallback(async () => {
     if (!annotationActive) return;
     try {
-      await api.browserEval('window.__tiangong_bridge && window.__tiangong_bridge.annotation && window.__tiangong_bridge.annotation.stop();');
+      await api.browserEval(sessionId, 'window.__tiangong_bridge && window.__tiangong_bridge.annotation && window.__tiangong_bridge.annotation.stop();');
     } catch (err) {
       console.error('关闭批注失败：', err);
     }
@@ -234,7 +234,7 @@ export function BrowserTabContent({
   const handleZoomIn = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserSetZoom(+(zoom + 0.1).toFixed(2));
+      const next = await api.browserSetZoom(sessionId, +(zoom + 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('放大失败：', err);
@@ -244,7 +244,7 @@ export function BrowserTabContent({
   const handleZoomOut = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserSetZoom(+(zoom - 0.1).toFixed(2));
+      const next = await api.browserSetZoom(sessionId, +(zoom - 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('缩小失败：', err);
@@ -254,7 +254,7 @@ export function BrowserTabContent({
   const handleZoomReset = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserResetZoom();
+      const next = await api.browserResetZoom(sessionId, );
       setZoom(next);
     } catch (err) {
       console.error('重置缩放失败：', err);
@@ -264,10 +264,10 @@ export function BrowserTabContent({
   const handleToggleAnnotation = useCallback(async () => {
     try {
       if (annotationActive) {
-        await api.browserEval('window.__tiangong_bridge.annotation.stop()');
+        await api.browserEval(sessionId, 'window.__tiangong_bridge.annotation.stop()');
         setAnnotationActive(false);
       } else {
-        await api.browserEval('window.__tiangong_bridge.annotation.start("rect")');
+        await api.browserEval(sessionId, 'window.__tiangong_bridge.annotation.start("rect")');
         setAnnotationActive(true);
       }
     } catch (err) {
@@ -277,7 +277,7 @@ export function BrowserTabContent({
 
   const handleAnnotationExtract = useCallback(async () => {
     try {
-      const result = await api.browserAnnotationExtract();
+      const result = await api.browserAnnotationExtract(sessionId, );
       const allElements = result.elements.flatMap((entry) => entry.elements);
       setExtractedElements(allElements);
     } catch (err) {
@@ -308,7 +308,7 @@ export function BrowserTabContent({
     try {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
+        await api.browserSetPosition(sessionId, -10000, -10000, rect.width, rect.height);
       }
     } catch {
       // WebView 可能尚未创建。
@@ -352,7 +352,7 @@ export function BrowserTabContent({
   }, [initialUrl]);
 
   useEffect(() => {
-    api.browserGetZoom().then(setZoom).catch((err) => {
+    api.browserGetZoom(sessionId, ).then(setZoom).catch((err) => {
       console.error('读取缩放失败：', err);
     });
   }, []);

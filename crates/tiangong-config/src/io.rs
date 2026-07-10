@@ -274,6 +274,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
 

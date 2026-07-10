@@ -735,6 +735,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
         config.routing.insert(
@@ -744,6 +745,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
 
@@ -773,6 +775,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({}),
+                context_window: None,
             },
         );
 
@@ -862,6 +865,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({"temperature": 0.7}),
+                context_window: None,
             },
         );
         config.routing.insert(
@@ -871,6 +875,7 @@ mod tests {
                 model: "gpt-4".to_string(),
                 capabilities: vec![ModelCapability::Chat],
                 options: serde_json::json!({"temperature": 0.7}),
+                context_window: None,
             },
         );
 

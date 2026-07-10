@@ -7,6 +7,7 @@ import { Input } from './ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 
 interface BrowserPanelProps {
+  sessionId?: string;
   initialUrl?: string;
   currentUrl?: string;
   onClose?: () => void;
@@ -59,7 +60,7 @@ function isBlankBrowserUrl(url: string): boolean {
   return !url || url === DEFAULT_URL;
 }
 
-export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelProps) {
+export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }: BrowserPanelProps) {
   const [url, setUrl] = useState(initialUrl || '');
   const [tabs, setTabs] = useState<TabInfo[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
@@ -90,7 +91,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
 
   const refreshTabs = useCallback(async () => {
     try {
-      const result = await api.browserTabList();
+      const result = await api.browserTabList(sessionId, );
       if (result.tabs.length === 0) {
         // 所有 tab 已关闭，关闭浏览器面板
         browserOpenedRef.current = false;
@@ -173,7 +174,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     try {
       if (containerRef.current && browserOpenedRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        await api.browserSetPosition(-10000, -10000, rect.width, rect.height);
+        await api.browserSetPosition(sessionId, -10000, -10000, rect.width, rect.height);
       }
     } catch { /* WebView 可能不存在，忽略 */ }
     setGlobalHistoryEntries([]);
@@ -270,14 +271,14 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height).catch(console.error);
+    await api.browserSetPosition(sessionId, rect.x, rect.y, rect.width, rect.height).catch(console.error);
   }, []);
 
   const ensureBlankTabMetadata = useCallback(async (rect: DOMRect) => {
-    await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
-    const result = await api.browserTabList();
+    await api.browserSetPosition(sessionId, rect.x, rect.y, rect.width, rect.height);
+    const result = await api.browserTabList(sessionId, );
     if (result.tabs.length === 0) {
-      const tabId = await api.browserTabNew(DEFAULT_URL);
+      const tabId = await api.browserTabNew(sessionId, DEFAULT_URL);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
       setUrl('');
@@ -307,9 +308,9 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
     try {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
-        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
+        await api.browserSetPosition(sessionId, rect.x, rect.y, rect.width, rect.height);
       }
-      await api.browserNavigate(nextUrl);
+      await api.browserNavigate(sessionId, nextUrl);
       browserOpenedRef.current = true;
     } catch (err) {
       console.error('打开浏览器失败：', err);
@@ -319,17 +320,17 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleGoBack = useCallback(async () => {
     if (!activeTabId || !canGoBack(activeTabId)) return;
     navigationIntentRef.current = 'back';
-    await api.browserGoBack().catch(console.error);
+    await api.browserGoBack(sessionId, ).catch(console.error);
   }, [activeTabId, canGoBack]);
 
   const handleGoForward = useCallback(async () => {
     if (!activeTabId || !canGoForward(activeTabId)) return;
     navigationIntentRef.current = 'forward';
-    await api.browserGoForward().catch(console.error);
+    await api.browserGoForward(sessionId, ).catch(console.error);
   }, [activeTabId, canGoForward]);
 
   const handleReload = useCallback(async () => {
-    await api.browserEval('location.reload()').catch(console.error);
+    await api.browserEval(sessionId, 'location.reload()').catch(console.error);
   }, []);
 
   // 缩放前关闭批注：批注 canvas 是 webview 内 DOM，set_zoom 会等比缩放整个 webview，
@@ -337,7 +338,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const dismissAnnotationBeforeZoom = useCallback(async () => {
     if (!annotationActive) return;
     try {
-      await api.browserEval('window.__tiangong_bridge && window.__tiangong_bridge.annotation && window.__tiangong_bridge.annotation.stop();');
+      await api.browserEval(sessionId, 'window.__tiangong_bridge && window.__tiangong_bridge.annotation && window.__tiangong_bridge.annotation.stop();');
     } catch (err) {
       console.error('关闭批注失败：', err);
     }
@@ -347,7 +348,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleZoomIn = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserSetZoom(+(zoom + 0.1).toFixed(2));
+      const next = await api.browserSetZoom(sessionId, +(zoom + 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('放大失败：', err);
@@ -357,7 +358,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleZoomOut = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserSetZoom(+(zoom - 0.1).toFixed(2));
+      const next = await api.browserSetZoom(sessionId, +(zoom - 0.1).toFixed(2));
       setZoom(next);
     } catch (err) {
       console.error('缩小失败：', err);
@@ -367,7 +368,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleZoomReset = useCallback(async () => {
     await dismissAnnotationBeforeZoom();
     try {
-      const next = await api.browserResetZoom();
+      const next = await api.browserResetZoom(sessionId, );
       setZoom(next);
     } catch (err) {
       console.error('重置缩放失败：', err);
@@ -376,7 +377,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
 
   // 初始化：读取持久化的缩放比例
   useEffect(() => {
-    api.browserGetZoom().then(setZoom).catch((err) => {
+    api.browserGetZoom(sessionId, ).then(setZoom).catch((err) => {
       console.error('读取缩放失败：', err);
     });
   }, []);
@@ -404,10 +405,10 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleToggleAnnotation = useCallback(async () => {
     try {
       if (annotationActive) {
-        await api.browserEval('window.__tiangong_bridge.annotation.stop()');
+        await api.browserEval(sessionId, 'window.__tiangong_bridge.annotation.stop()');
         setAnnotationActive(false);
       } else {
-        await api.browserEval('window.__tiangong_bridge.annotation.start("rect")');
+        await api.browserEval(sessionId, 'window.__tiangong_bridge.annotation.start("rect")');
         setAnnotationActive(true);
       }
     } catch (err) {
@@ -417,7 +418,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
 
   const handleAnnotationExtract = useCallback(async () => {
     try {
-      const result = await api.browserAnnotationExtract();
+      const result = await api.browserAnnotationExtract(sessionId, );
       const allElements = result.elements.flatMap(r => r.elements);
       setExtractedElements(allElements);
     } catch (err) {
@@ -427,7 +428,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
 
   const handleTabNew = useCallback(async () => {
     try {
-      const tabId = await api.browserTabNew(DEFAULT_URL);
+      const tabId = await api.browserTabNew(sessionId, DEFAULT_URL);
       setActiveTabId(tabId);
       setUrl('');
       // 初始化空历史
@@ -445,7 +446,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
       navigationIntentRef.current = null;
-      await api.browserTabSwitch(tabId);
+      await api.browserTabSwitch(sessionId, tabId);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
       const tab = tabs.find(t => t.id === tabId);
@@ -460,7 +461,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
   const handleTabClose = useCallback(async (tabId: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await api.browserTabClose(tabId);
+      await api.browserTabClose(sessionId, tabId);
       // 清除该 tab 的历史
       setTabHistories(prev => {
         const next = new Map(prev);
@@ -481,10 +482,10 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
       if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       if (browserOpenedRef.current) {
-        await api.browserSetPosition(rect.x, rect.y, rect.width, rect.height);
-        await api.browserNavigate(targetUrl);
+        await api.browserSetPosition(sessionId, rect.x, rect.y, rect.width, rect.height);
+        await api.browserNavigate(sessionId, targetUrl);
       } else {
-        await api.browserOpen(targetUrl, rect.x, rect.y, rect.width, rect.height);
+        await api.browserOpen(sessionId, targetUrl, rect.x, rect.y, rect.width, rect.height);
         browserOpenedRef.current = true;
       }
       setUrl(targetUrl);
@@ -557,7 +558,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
         const normalizedInitialUrl = normalizeBrowserUrl(initialUrl || '');
         const openPromise = isBlankBrowserUrl(normalizedInitialUrl)
           ? ensureBlankTabMetadata(rect)
-          : api.browserOpen(normalizedInitialUrl, rect.x, rect.y, rect.width, rect.height)
+          : api.browserOpen(sessionId, normalizedInitialUrl, rect.x, rect.y, rect.width, rect.height)
             .then(() => {
               browserOpenedRef.current = true;
               setUrl(normalizedInitialUrl);
@@ -568,7 +569,7 @@ export function BrowserPanel({ initialUrl, currentUrl, onClose }: BrowserPanelPr
             if (containerRef.current) {
               const r = containerRef.current.getBoundingClientRect();
               if (r.width > 0 && r.height > 0) {
-                return api.browserSetPosition(r.x, r.y, r.width, r.height);
+                return api.browserSetPosition(sessionId, r.x, r.y, r.width, r.height);
               }
             }
           })

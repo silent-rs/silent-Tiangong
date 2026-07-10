@@ -875,52 +875,58 @@ export const api = {
   // ----------------------------------------------------------------
   // 浏览器面板（通过 plugin:browser）
   // ----------------------------------------------------------------
-  browserOpen: (url: string, x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('plugin:browser|browser_open', { url, x, y, width, height }),
+  browserOpen: (sessionId: string, url: string, x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('plugin:browser|browser_open', { sessionId, url, x, y, width, height }),
 
-  browserClose: (): Promise<void> =>
-    invoke('plugin:browser|browser_close'),
+  browserClose: (sessionId: string): Promise<void> =>
+    invoke('plugin:browser|browser_close', { sessionId }),
 
-  browserSetPosition: (x: number, y: number, width: number, height: number): Promise<void> =>
-    invoke('plugin:browser|browser_set_position', { x, y, width, height }),
+  browserSetPosition: (sessionId: string, x: number, y: number, width: number, height: number): Promise<void> =>
+    invoke('plugin:browser|browser_set_position', { sessionId, x, y, width, height }),
 
-  browserNavigate: (url: string): Promise<void> =>
-    invoke('plugin:browser|browser_navigate', { url }),
+  browserNavigate: (sessionId: string, url: string): Promise<void> =>
+    invoke('plugin:browser|browser_navigate', { sessionId, url }),
 
-  browserEval: (js: string): Promise<void> =>
-    invoke('plugin:browser|browser_eval', { js }),
-
-  browserHide: (): Promise<void> =>
-    invoke('plugin:browser|browser_hide'),
-
-  browserGoBack: (): Promise<void> =>
-    invoke('plugin:browser|browser_go_back'),
-
-  browserGoForward: (): Promise<void> =>
-    invoke('plugin:browser|browser_go_forward'),
-
-  browserSetZoom: (scale: number): Promise<number> =>
-    invoke('plugin:browser|browser_set_zoom', { scale }),
-
-  browserGetZoom: (): Promise<number> =>
-    invoke('plugin:browser|browser_get_zoom'),
-
-  browserResetZoom: (): Promise<number> =>
-    invoke('plugin:browser|browser_reset_zoom'),
-
-  browserTabList: (): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
-    invoke('plugin:browser|browser_tab_list'),
-
-  browserSnapshotTabs: (): Promise<{
+  browserOpenUrl: (sessionId: string, url: string): Promise<{
     session_id: string | null;
     tabs: Array<{ id: string; url: string; title: string }>;
     active_tab_id: string | null;
   }> =>
-    invoke('plugin:browser|browser_snapshot_tabs'),
+    invoke('plugin:browser|browser_open_url', { sessionId, url }),
+
+  browserEval: (sessionId: string, js: string): Promise<void> =>
+    invoke('plugin:browser|browser_eval', { sessionId, js }),
+
+  browserHide: (sessionId: string): Promise<void> =>
+    invoke('plugin:browser|browser_hide', { sessionId }),
+
+  browserGoBack: (sessionId: string): Promise<void> =>
+    invoke('plugin:browser|browser_go_back', { sessionId }),
+
+  browserGoForward: (sessionId: string): Promise<void> =>
+    invoke('plugin:browser|browser_go_forward', { sessionId }),
+
+  browserSetZoom: (sessionId: string, scale: number): Promise<number> =>
+    invoke('plugin:browser|browser_set_zoom', { sessionId, scale }),
+
+  browserGetZoom: (sessionId: string): Promise<number> =>
+    invoke('plugin:browser|browser_get_zoom', { sessionId }),
+
+  browserResetZoom: (sessionId: string): Promise<number> =>
+    invoke('plugin:browser|browser_reset_zoom', { sessionId }),
+
+  browserTabList: (sessionId: string): Promise<{ tabs: Array<{ id: string; url: string; title: string }>; active_tab_id: string | null }> =>
+    invoke('plugin:browser|browser_tab_list', { sessionId }),
+
+  browserSnapshotTabs: (sessionId: string): Promise<{
+    session_id: string | null;
+    tabs: Array<{ id: string; url: string; title: string }>;
+    active_tab_id: string | null;
+  }> =>
+    invoke('plugin:browser|browser_snapshot_tabs', { sessionId }),
 
   browserSwitchSession: (
     sessionId: string,
-    tabsToRestore: Array<{ id: string; url: string; title: string }>,
     activeTabId?: string | null,
   ): Promise<{
     session_id: string | null;
@@ -929,20 +935,19 @@ export const api = {
   }> =>
     invoke('plugin:browser|browser_switch_session', {
       sessionId,
-      tabsToRestore,
       activeTabId: activeTabId ?? null,
     }),
 
-  browserTabNew: (url: string): Promise<string> =>
-    invoke('plugin:browser|browser_tab_new', { url }),
+  browserTabNew: (sessionId: string, url: string): Promise<string> =>
+    invoke('plugin:browser|browser_tab_new', { sessionId, url }),
 
-  browserTabSwitch: (tabId: string): Promise<void> =>
-    invoke('plugin:browser|browser_tab_switch', { tabId }),
+  browserTabSwitch: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_switch', { sessionId, tabId }),
 
-  browserTabClose: (tabId: string): Promise<void> =>
-    invoke('plugin:browser|browser_tab_close', { tabId }),
+  browserTabClose: (sessionId: string, tabId: string): Promise<void> =>
+    invoke('plugin:browser|browser_tab_close', { sessionId, tabId }),
 
-  browserAnnotationExtract: (): Promise<{
+  browserAnnotationExtract: (sessionId: string): Promise<{
     elements: Array<{
       annotation_index: number;
       rect: { x: number; y: number; width: number; height: number };
@@ -958,14 +963,14 @@ export const api = {
     }>;
     count: number;
   }> =>
-    invoke('plugin:browser|browser_annotation_extract'),
+    invoke('plugin:browser|browser_annotation_extract', { sessionId }),
 
-  browserTabHistory: (tabId?: string): Promise<{
+  browserTabHistory: (sessionId: string, tabId?: string): Promise<{
     tab_id: string;
     entries: Array<{ url: string; title: string; timestamp: number }>;
     current_index: number;
   }> =>
-    invoke('plugin:browser|browser_tab_history', { tabId: tabId ?? null }),
+    invoke('plugin:browser|browser_tab_history', { sessionId, tabId: tabId ?? null }),
 
   browserGlobalHistory: (offset: number, limit: number): Promise<
     Array<{ url: string; title: string; timestamp: number }>
