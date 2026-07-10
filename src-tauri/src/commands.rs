@@ -151,7 +151,7 @@ async fn ensure_multimodal_enabled(state: &State<'_, TiangongApp>) -> Result<(),
         .with_state_read(|core_state| {
             let enabled = has_capability_in_state(
                 core_state,
-                tiangong_core::models_config::ModelCapability::Multimodal,
+                tiangong_llm::models_config::ModelCapability::Multimodal,
             );
             if enabled {
                 Ok(())
@@ -419,14 +419,14 @@ fn record_session_token_usage(
 
 fn parse_model_capability(
     capability: &str,
-) -> Result<tiangong_core::models_config::ModelCapability, String> {
-    tiangong_core::models_config::ModelCapability::from_key(capability)
+) -> Result<tiangong_llm::models_config::ModelCapability, String> {
+    tiangong_llm::models_config::ModelCapability::from_key(capability)
         .ok_or_else(|| format!("不支持的能力类型：{capability}"))
 }
 
 fn has_capability_in_state(
     core_state: &tiangong_app_state::app_state::TiangongState,
-    capability: tiangong_core::models_config::ModelCapability,
+    capability: tiangong_llm::models_config::ModelCapability,
 ) -> bool {
     core_state.models_config().has_capability(capability)
 }
@@ -1448,13 +1448,13 @@ pub(crate) fn start_stream_consumer(
                                     .store
                                     .provider
                                     .models_config
-                                    .resolve_slot(tiangong_core::models_config::RoutingSlot::Lite)
+                                    .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
                                     .or_else(|| {
                                         core_state.store.provider.models_config.resolve_slot(
-                                            tiangong_core::models_config::RoutingSlot::Chat,
+                                            tiangong_llm::models_config::RoutingSlot::Chat,
                                         )
                                     })
-                                    .map(tiangong_core::core_config::ModelEndpoint::from_resolved)
+                                    .map(tiangong_llm::ModelEndpoint::from_resolved)
                                     .unwrap_or_else(|| {
                                         core_state.store.provider.model_endpoint.clone()
                                     });
@@ -1953,7 +1953,7 @@ pub async fn get_provider_balance(
                 .get(&provider_name)
                 .ok_or_else(|| anyhow::anyhow!("Provider '{provider_name}' 不存在"))?;
             let resolved_key =
-                tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
+                tiangong_llm::models_config::ModelsConfig::resolve_api_key(&provider.api_key);
             if resolved_key.trim().is_empty() {
                 return Err(anyhow::anyhow!(
                     "Provider '{provider_name}' 的 API Key 未设置"
@@ -2129,7 +2129,7 @@ pub async fn has_model_capability(
 pub async fn get_available_capabilities(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<CapabilityAvailabilityInfo>, String> {
-    use tiangong_core::models_config::ModelCapability;
+    use tiangong_llm::models_config::ModelCapability;
 
     state
         .with_state_read(|core_state| {
@@ -3218,7 +3218,7 @@ pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
 /// 获取所有可用的模型能力列表
 #[tauri::command]
 pub async fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {
-    use tiangong_core::models_config::ModelCapability;
+    use tiangong_llm::models_config::ModelCapability;
 
     let caps = ModelCapability::all()
         .iter()
@@ -3249,9 +3249,9 @@ pub async fn fetch_provider_models(
     timeout_ms: Option<u64>,
     protocol: Option<String>,
 ) -> Result<Vec<String>, String> {
-    use tiangong_core::core_config::ModelEndpoint;
     use tiangong_core::model::{ProviderProtocol, SingleProviderClient};
-    use tiangong_core::models_config::ModelsConfig;
+    use tiangong_llm::models_config::ModelsConfig;
+    use tiangong_llm::ModelEndpoint;
 
     let resolved_key = ModelsConfig::resolve_api_key(&api_key);
     let endpoint = ModelEndpoint {
@@ -3298,7 +3298,7 @@ pub async fn probe_embedding_dimension(
     protocol: Option<String>,
 ) -> Result<usize, String> {
     use tiangong_core::model::ProviderProtocol;
-    use tiangong_core::models_config::ModelsConfig;
+    use tiangong_llm::models_config::ModelsConfig;
 
     let protocol = protocol
         .as_deref()

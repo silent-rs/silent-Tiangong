@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tiangong_core::models_config::ModelsConfig;
+use tiangong_llm::models_config::ModelsConfig;
 use tiangong_plugin_skill::SkillsConfig;
 
 use crate::config::{ConnectorConfig, TiangongConfig};
@@ -55,7 +55,7 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
 
     // context_limit 在加载阶段按 chat model 从「同一目录」的 context_windows.json
     // 解析，避免 to_core_config 转换时误读默认 ~/.tiangong（自定义目录场景出错）。
-    let chat_resolved = models.resolve_slot(tiangong_core::models_config::RoutingSlot::Chat);
+    let chat_resolved = models.resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat);
     let chat_model = chat_resolved
         .as_ref()
         .map(|r| r.model.clone())

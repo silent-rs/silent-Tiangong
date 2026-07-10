@@ -358,8 +358,8 @@ pub struct ModelsConfigView {
 }
 
 impl ModelsConfigView {
-    pub fn from_core(config: &tiangong_core::models_config::ModelsConfig) -> Self {
-        use tiangong_core::models_config::RoutingSlot;
+    pub fn from_core(config: &tiangong_llm::models_config::ModelsConfig) -> Self {
+        use tiangong_llm::models_config::RoutingSlot;
 
         let providers = config
             .providers
@@ -430,8 +430,8 @@ impl ModelsConfigView {
         }
     }
 
-    pub fn to_core(&self) -> tiangong_core::models_config::ModelsConfig {
-        use tiangong_core::models_config::{
+    pub fn to_core(&self) -> tiangong_llm::models_config::ModelsConfig {
+        use tiangong_llm::models_config::{
             ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
         };
 
@@ -529,7 +529,7 @@ pub struct MemoryConfigView {
 impl MemoryConfigView {
     pub fn from_memory(
         config: &tiangong_memory::MemoryConfig,
-        models: &tiangong_core::models_config::ModelsConfig,
+        models: &tiangong_llm::models_config::ModelsConfig,
     ) -> Self {
         Self {
             model_key: config
@@ -550,7 +550,7 @@ impl MemoryConfigView {
 
     pub fn to_memory(
         &self,
-        models: &tiangong_core::models_config::ModelsConfig,
+        models: &tiangong_llm::models_config::ModelsConfig,
     ) -> Result<tiangong_memory::MemoryConfig, String> {
         Ok(tiangong_memory::MemoryConfig {
             model: self
@@ -577,22 +577,22 @@ impl MemoryConfigView {
 }
 
 fn resolved_model_by_key(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     model_key: &str,
-) -> Result<tiangong_core::models_config::ResolvedModel, String> {
+) -> Result<tiangong_llm::models_config::ResolvedModel, String> {
     // 优先按路由槽位 key 查找
-    if let Some(slot) = tiangong_core::models_config::RoutingSlot::from_key(model_key) {
+    if let Some(slot) = tiangong_llm::models_config::RoutingSlot::from_key(model_key) {
         if let Some(resolved) = models.resolve_slot(slot) {
             return Ok(resolved);
         }
     }
     // 从模型注册表查找
-    let resolve_entry = |entry: &tiangong_core::models_config::ModelEntry| {
+    let resolve_entry = |entry: &tiangong_llm::models_config::ModelEntry| {
         let provider = models.providers.get(&entry.provider)?;
-        Some(tiangong_core::models_config::ResolvedModel {
+        Some(tiangong_llm::models_config::ResolvedModel {
             provider: entry.provider.clone(),
             base_url: provider.base_url.clone(),
-            api_key: tiangong_core::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
+            api_key: tiangong_llm::models_config::ModelsConfig::resolve_api_key(&provider.api_key),
             timeout_ms: provider.timeout_ms,
             protocol: provider.protocol,
             context_window: entry.context_window,
@@ -619,7 +619,7 @@ fn resolved_model_by_key(
 }
 
 fn resolve_memory_llm(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     model_key: &str,
 ) -> Result<tiangong_memory::MemoryLlmConfig, String> {
     let resolved = resolved_model_by_key(models, model_key)?;
@@ -634,7 +634,7 @@ fn resolve_memory_llm(
 }
 
 fn resolve_memory_embedding(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     model_key: &str,
 ) -> Result<tiangong_memory::MemoryEmbeddingConfig, String> {
     let resolved = resolved_model_by_key(models, model_key)?;
@@ -657,7 +657,7 @@ fn resolve_memory_embedding(
 }
 
 fn resolve_memory_rerank(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     model_key: &str,
 ) -> Result<tiangong_memory::MemoryRerankConfig, String> {
     let resolved = resolved_model_by_key(models, model_key)?;
@@ -672,7 +672,7 @@ fn resolve_memory_rerank(
 }
 
 fn find_model_key_for_endpoint(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryLlmConfig,
 ) -> Option<String> {
     find_model_key(
@@ -684,7 +684,7 @@ fn find_model_key_for_endpoint(
 }
 
 fn find_embedding_key_for_endpoint(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryEmbeddingConfig,
 ) -> Option<String> {
     find_model_key(
@@ -696,7 +696,7 @@ fn find_embedding_key_for_endpoint(
 }
 
 fn find_rerank_key_for_endpoint(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     endpoint: &tiangong_memory::MemoryRerankConfig,
 ) -> Option<String> {
     find_model_key(
@@ -708,7 +708,7 @@ fn find_rerank_key_for_endpoint(
 }
 
 fn find_model_key(
-    models: &tiangong_core::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
     base_url: &str,
     model_name: &str,
     protocol: tiangong_core::model::ProviderProtocol,

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tiangong_core::models_config::ModelsConfig;
+use tiangong_llm::models_config::ModelsConfig;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
@@ -249,7 +249,7 @@ pub fn resolve_context_limit_at(dir: &Path, model_name: &str) -> usize {
 mod tests {
     use super::*;
     use tiangong_core::model::ProviderProtocol;
-    use tiangong_core::models_config::{
+    use tiangong_llm::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
 

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 
-use tiangong_core::core_config::ModelEndpoint;
 use tiangong_core::model::SingleProviderClient;
-use tiangong_core::models_config::{ModelCapability, ModelEntry, ModelsConfig, RoutingSlot};
+use tiangong_llm::ModelEndpoint;
+use tiangong_llm::models_config::{ModelCapability, ModelEntry, ModelsConfig, RoutingSlot};
 
 use crate::args::{ModelArgs, ModelSubcommand, RouteSubcommand};
 

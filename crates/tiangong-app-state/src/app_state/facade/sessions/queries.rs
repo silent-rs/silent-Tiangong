@@ -75,7 +75,7 @@ impl TiangongState {
         self.services.runtime.provider_label()
     }
 
-    pub fn models_config(&self) -> &tiangong_core::models_config::ModelsConfig {
+    pub fn models_config(&self) -> &tiangong_llm::models_config::ModelsConfig {
         &self.store.provider.models_config
     }
 

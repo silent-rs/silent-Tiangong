@@ -1,5 +1,5 @@
-use tiangong_core::core_config::ModelEndpoint;
-use tiangong_core::models_config::RoutingSlot;
+use tiangong_llm::ModelEndpoint;
+use tiangong_llm::models_config::RoutingSlot;
 
 use super::super::*;
 

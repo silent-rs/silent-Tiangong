@@ -539,6 +539,7 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::MemoryVectorMode;
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -650,12 +651,12 @@ mod tests {
         let home = TempDir::new().expect("创建 fake home 失败");
         let _env = EnvGuard::enter(home.path());
 
-        let leader = start_or_connect(ProcessType::Cli)
+        let leader = start_or_connect_test(ProcessType::Cli)
             .await
             .expect("启动 leader 失败");
         assert!(leader.is_leader(), "首个进程应成为 leader");
 
-        let follower = start_or_connect(ProcessType::Server)
+        let follower = start_or_connect_test(ProcessType::Server)
             .await
             .expect("连接 follower 失败");
         assert!(
@@ -690,10 +691,10 @@ mod tests {
         let home = TempDir::new().expect("创建 fake home 失败");
         let _env = EnvGuard::enter(home.path());
 
-        let leader = start_or_connect(ProcessType::Cli)
+        let leader = start_or_connect_test(ProcessType::Cli)
             .await
             .expect("启动 leader 失败");
-        let follower = start_or_connect(ProcessType::Server)
+        let follower = start_or_connect_test(ProcessType::Server)
             .await
             .expect("连接 follower 失败");
 
@@ -732,6 +733,16 @@ mod tests {
                 .any(|hit| hit.title.contains("promote follower")),
             "自动接替后的 leader 应能继续写入与召回"
         );
+    }
+
+    /// 以「向量层禁用」的 MemoryOptions 执行选举，与 registry 测试保持一致。
+    ///
+    /// 这些测试只验证 leader/follower 选举与 failover 逻辑，不涉及向量检索。
+    /// 用 `Disabled` 跳过 lancedb（C++ FFI）初始化，从根上消除测试进程 teardown
+    /// 时 Actor 线程析构 lancedb 与进程 C++ 静态析构的竞态（Linux 偶发 SIGSEGV）。
+    async fn start_or_connect_test(process_type: ProcessType) -> Result<ManagedMemory> {
+        let options = MemoryOptions::new().with_vector_mode(MemoryVectorMode::Disabled);
+        start_or_connect_with_options(options, process_type).await
     }
 
     async fn wait_for_recall_hit(

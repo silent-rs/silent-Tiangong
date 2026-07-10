@@ -7,15 +7,10 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
 /// 信任模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrustMode {
-    /// 完全信任：所有工具自动放行，不弹审批
-    FullTrust,
-    /// 监督模式：高风险操作需要用户确认
-    #[default]
-    Supervised,
-}
+///
+/// 定义已下沉至 [`tiangong_types::TrustMode`]，此处 re-export 保持
+/// `tiangong_core::permission::TrustMode` 路径稳定，core 内部用法无需改动。
+pub use tiangong_types::TrustMode;
 
 /// 工具风险等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

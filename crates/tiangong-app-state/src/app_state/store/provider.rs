@@ -1,5 +1,5 @@
-use tiangong_core::core_config::ModelEndpoint;
-use tiangong_core::models_config::ModelsConfig;
+use tiangong_llm::ModelEndpoint;
+use tiangong_llm::models_config::ModelsConfig;
 
 #[derive(Debug)]
 pub struct ProviderState {
