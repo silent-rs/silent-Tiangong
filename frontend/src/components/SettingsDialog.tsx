@@ -907,7 +907,7 @@ function ProviderModelsView({
   // ---- Model handlers ----
   const openAddModel = () => {
     setModelModalMode('add');
-    setModelDraft({ provider: activeProvider, model: '', capabilities: [], options: {} });
+    setModelDraft({ provider: activeProvider, model: '', capabilities: [], options: {}, context_window: undefined });
     setAvailableModels([]);
     setTtsVoices([]);
   };
@@ -951,6 +951,20 @@ function ProviderModelsView({
     next.routing = newRouting;
     onChange(next);
   };
+
+  // 模型名变化时，若 context_window 未设且有 chat/multimodal 能力，查映射默认值填入
+  useEffect(() => {
+    const model = modelDraft.model.trim();
+    const hasCtxCapability = modelDraft.capabilities.includes('chat') || modelDraft.capabilities.includes('multimodal');
+    if (!model || !hasCtxCapability || modelDraft.context_window !== undefined) return;
+    let cancelled = false;
+    api.resolveModelContextWindow(model).then((defaultCtx) => {
+      if (!cancelled && defaultCtx > 0) {
+        setModelDraft((prev) => prev.context_window === undefined ? { ...prev, context_window: defaultCtx } : prev);
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [modelDraft.model, modelDraft.capabilities, modelDraft.context_window]);
 
   const toggleCapability = (cap: string) => {
     if (modelDraft.capabilities.includes(cap)) {

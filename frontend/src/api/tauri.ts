@@ -746,6 +746,9 @@ export const api = {
   ): Promise<number> =>
     invoke('probe_embedding_dimension', { baseUrl, apiKey, model, timeoutMs, protocol }),
 
+  resolveModelContextWindow: (model: string): Promise<number> =>
+    invoke('resolve_model_context_window', { model }),
+
   // ----------------------------------------------------------------
   // @提及补全
   // ----------------------------------------------------------------

@@ -3665,3 +3665,11 @@ mod tests {
         assert!(!done_event_keeps_turn_running(&event, true));
     }
 }
+
+/// 按模型名从 context_windows.json 映射表解析默认 context_window（token 数）。
+/// 供前端在编辑模型时预填默认值。
+#[tauri::command]
+pub async fn resolve_model_context_window(model: String) -> Result<usize, String> {
+    let dir = tiangong_config::io::storage_root();
+    Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
+}

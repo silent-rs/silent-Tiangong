@@ -619,6 +619,7 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
+            tiangong_app::commands::resolve_model_context_window,
         ])
         .plugin(tiangong_plugin_browser::init())
         .plugin(tiangong_plugin_terminal::init(
