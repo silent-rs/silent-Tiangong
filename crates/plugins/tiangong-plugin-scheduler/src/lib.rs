@@ -27,7 +27,7 @@ pub fn build_plugin() -> Arc<dyn Plugin> {
 /// 构造默认的定时任务插件列表，供各入口（CLI / Server）注入 core 时使用。
 ///
 /// GUI 入口已在 `main.rs` 显式注册；CLI / Server 入口调用此函数获取插件并传入
-/// `TiangongCore::with_session_for_process` 的 plugins 参数。
+/// `TiangongCore::builder().plugins(...)`。
 pub fn default_plugins() -> Vec<Arc<dyn Plugin>> {
     vec![build_plugin()]
 }

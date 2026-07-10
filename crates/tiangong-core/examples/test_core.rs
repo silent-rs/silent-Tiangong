@@ -1,7 +1,8 @@
 use std::sync::mpsc;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::TiangongCore;
+use tiangong_core::core::{CoreStorageLocation, TiangongCore};
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+use tiangong_core::session::Session;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 fn main() {
@@ -13,10 +14,18 @@ fn main() {
     let storage_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".tiangong");
-    let core = TiangongCore::new(config, tx, Vec::new(), storage_root);
+    // session 由调用方创建后传入，core 不再持有产品文案。
+    let core = TiangongCore::builder()
+        .config(config)
+        .session(Session::new("测试"))
+        .event_sender(tx)
+        .plugins(Vec::new())
+        .storage(CoreStorageLocation::new(storage_root))
+        .build()
+        .expect("Builder 必填字段已齐");
 
     println!("=== 发送: 你好 ===");
-    core.deliver(AgentInputKind::message("你好"));
+    let _ = core.deliver(AgentInputKind::message("你好"));
 
     let mut got_done = false;
     loop {
@@ -50,7 +59,7 @@ fn main() {
 
     if got_done {
         println!("\n=== 发送: 1+1=? ===");
-        core.deliver(AgentInputKind::message("1+1=?"));
+        let _ = core.deliver(AgentInputKind::message("1+1=?"));
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
@@ -76,7 +85,7 @@ fn main() {
     }
 
     println!("\n=== shutdown ===");
-    let session = core.into_session();
+    let session = core.into_session().expect("worker 应正常退出");
     println!("消息数: {}", session.messages.len());
     for (i, m) in session.messages.iter().enumerate() {
         let text = m.text_content();

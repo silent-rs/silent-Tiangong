@@ -15,6 +15,16 @@ use crate::input::InputReader;
 use crate::output;
 
 pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<()> {
+    // 初始化日志：输出到 stderr（不污染 stdout 的流式对话/交互输出）。
+    // 默认 warn 级别以上，可用 RUST_LOG 覆盖。多次调用（如测试）安全忽略。
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     // 初始化 config 内存单例（从磁盘加载一次）。
     tiangong_config::registry::init();
     let core_config = tiangong_config::registry::config().to_core_config();
@@ -49,10 +59,11 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             None
         });
 
-    let core = TiangongCore::new_for_cli(
-        config.clone(),
-        stream_tx,
-        {
+    let core = TiangongCore::builder()
+        .config(config.clone())
+        .session(tiangong_core::session::Session::new("新对话"))
+        .event_sender(stream_tx)
+        .plugins({
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
             let resolve_ep = |cap: ModelCapability| {
@@ -94,9 +105,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             // CLI 侧经 mcp_plugin 做管理。
             plugins.push(mcp_plugin.clone());
             plugins
-        },
-        storage_root,
-    );
+        })
+        .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
+        .build()?;
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {
@@ -163,7 +174,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         }
 
         // 发送消息
-        core.deliver(AgentInputKind::message(trimmed.to_string()));
+        if let Err(e) = core.deliver(AgentInputKind::message(trimmed.to_string())) {
+            tracing::warn!(error = %e, "消息投递失败（worker 可能已停止）");
+        }
 
         // 处理响应流
         handle_response(&stream_rx, &core);
@@ -173,9 +186,13 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
     output::status("再见！");
     // 获取 Core 的最终 session 并持久化
-    let final_session = core.into_session();
-    if !final_session.messages.is_empty() {
-        state.save_core_session(final_session);
+    // worker panic 时无法取回会话，记录告警后跳过持久化（避免丢失提示）。
+    match core.into_session() {
+        Ok(final_session) if !final_session.messages.is_empty() => {
+            state.save_core_session(final_session);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "获取最终 session 失败，跳过持久化"),
     }
     tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())
@@ -318,7 +335,10 @@ impl ResponseState {
                         }
                     }
                 };
-                core.deliver(AgentInputKind::approval(request_id.clone(), approved));
+                if let Err(e) = core.deliver(AgentInputKind::approval(request_id.clone(), approved))
+                {
+                    tracing::warn!(error = %e, "审批响应投递失败（worker 可能已停止）");
+                }
                 if approved {
                     output::status("已允许");
                 } else {

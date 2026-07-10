@@ -49,7 +49,7 @@ impl SchedulerContext for DesktopSchedulerContext {
         let core = cores
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("定时任务 core 不存在：{session_id}"))?;
-        if !core.deliver(AgentInputKind::message(content)) {
+        if core.deliver(AgentInputKind::message(content)).is_err() {
             return Err(anyhow::anyhow!("定时任务 core 命令通道已关闭"));
         }
         Ok(())
@@ -92,13 +92,15 @@ impl DesktopSchedulerContext {
 
         let (stream_tx, stream_rx) =
             std::sync::mpsc::channel::<tiangong_types::SessionStreamEvent>();
-        let core = TiangongCore::with_session_for_gui(
-            self.config.clone(),
-            session,
-            stream_tx,
-            tiangong_plugin_scheduler::default_plugins(),
-            tiangong_app_state::app_state::storage_root(),
-        );
+        let core = TiangongCore::builder()
+            .config(self.config.clone())
+            .session(session)
+            .event_sender(stream_tx)
+            .plugins(tiangong_plugin_scheduler::default_plugins())
+            .storage(tiangong_core::core::CoreStorageLocation::new(
+                tiangong_app_state::app_state::storage_root(),
+            ))
+            .build()?;
         core.set_trust_mode(TrustMode::FullTrust);
 
         {

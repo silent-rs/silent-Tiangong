@@ -50,7 +50,11 @@ impl ServerCoreManager {
     pub fn notify_reload_config(&self) {
         if let Ok(cores) = self.cores.lock() {
             for core in cores.values() {
-                let _ = core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config());
+                if let Err(e) =
+                    core.deliver(tiangong_core::agent_input::AgentInputKind::reload_config())
+                {
+                    tracing::warn!(error = %e, "reload_config 投递失败（worker 可能已停止）");
+                }
             }
         }
     }
@@ -84,7 +88,8 @@ impl ServerCoreManager {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+        core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
+            .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         Ok(())
     }
 
@@ -109,7 +114,8 @@ impl ServerCoreManager {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            core.deliver(AgentInputKind::message_with_id(content, msg_id, media));
+            core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
+                .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         }
 
         let tracker_for_wait = tracker.clone();
@@ -169,11 +175,11 @@ impl ServerCoreManager {
         )
         .await;
 
-        let core = tiangong_core::core::TiangongCore::with_session_for_server(
-            self.config.clone(),
-            session.clone(),
-            stream_tx,
-            {
+        let core = tiangong_core::core::TiangongCore::builder()
+            .config(self.config.clone())
+            .session(session.clone())
+            .event_sender(stream_tx)
+            .plugins({
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
                 // models 从 config 内存单例读取。
                 use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
@@ -217,9 +223,11 @@ impl ServerCoreManager {
                 //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
                 plugins.push(self.mcp_plugin.clone());
                 plugins
-            },
-            tiangong_app_state::app_state::storage_root(),
-        );
+            })
+            .storage(tiangong_core::core::CoreStorageLocation::new(
+                tiangong_app_state::app_state::storage_root(),
+            ))
+            .build()?;
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);

@@ -8,10 +8,6 @@ use crate::manager::TerminalManager;
 use crate::types::{contains_marker, PtyState, TerminalExecResponse, TerminalOutputEvent};
 
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
-/// start marker 出现后无 end marker 的兜底检测阈值（秒）
-const INTERACTIVE_FALLBACK_SECS: u64 = 8;
-/// 识别到等待输入提示后，输出稳定多久即可返回给 Agent 继续交互。
-const INTERACTIVE_PROMPT_STABLE_MS: u64 = 700;
 
 /// 发送命令到 PTY
 fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyhow::Result<()> {
@@ -278,12 +274,6 @@ pub(crate) async fn handle_exec(
     let timeout = timeout_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
     let start_time = std::time::Instant::now();
     let timeout_dur = std::time::Duration::from_secs(timeout);
-    let interactive_dur = std::time::Duration::from_secs(INTERACTIVE_FALLBACK_SECS);
-    let interactive_output_stable_dur =
-        std::time::Duration::from_millis(INTERACTIVE_PROMPT_STABLE_MS);
-    let mut start_marker_time: Option<std::time::Instant> = None;
-    let mut last_visible_snapshot = String::new();
-    let mut last_visible_change = std::time::Instant::now();
     // 跨轮询持久状态：start marker 已出现
     let mut start_seen = false;
     let mut cwd_value = String::new();
@@ -316,9 +306,6 @@ pub(crate) async fn handle_exec(
                             rc_value = rest.trim().parse().ok();
                         }
                     }
-                }
-                if start_seen && start_marker_time.is_none() {
-                    start_marker_time = Some(std::time::Instant::now());
                 }
                 last_seen_pushed = pushed;
                 if found_end && start_seen {
@@ -371,53 +358,6 @@ pub(crate) async fn handle_exec(
                 interactive_mode: false,
             });
             return;
-        }
-
-        // 兜底交互检测：start marker 已出现但 end marker 未出现，且终端已经有可见输出。
-        if let Some(smt) = start_marker_time {
-            let fallback_idx = {
-                let state = manager.state.lock().unwrap();
-                buf_idx_from_pushed(&state, fallback_start_pushed)
-            };
-            let (stdout_text, interrupted) = collect_command_output(
-                manager,
-                &start_marker,
-                &end_marker,
-                &cwd_marker,
-                &rc_marker,
-                true,
-                Some(fallback_idx),
-            );
-            if stdout_text != last_visible_snapshot {
-                last_visible_snapshot = stdout_text.clone();
-                last_visible_change = std::time::Instant::now();
-            }
-            let has_visible_output = !stdout_text.trim().is_empty();
-            let fallback_ready = has_visible_output
-                && last_visible_change.elapsed() >= interactive_output_stable_dur
-                && smt.elapsed() >= interactive_dur;
-
-            if fallback_ready {
-                let tracker_interrupted =
-                    activity.map(|t| t.take_user_intervened()).unwrap_or(false);
-                if let Some(tracker) = activity {
-                    tracker.set_busy_state(
-                        crate::collaboration::TerminalBusyState::AgentInteractive {
-                            command_id: command_id.clone(),
-                        },
-                    );
-                }
-                let _ = response_tx.send(TerminalExecResponse {
-                    exit_code: 0,
-                    stdout: stdout_text,
-                    stderr: "命令未返回结束标记且输出已稳定，可能在等待交互输入；可继续使用 terminal_send 向同一终端发送按键或文本".to_string(),
-                    timed_out: false,
-                    cwd_after: manager.cwd(),
-                    interrupted_by_user: interrupted || tracker_interrupted,
-                    interactive_mode: true,
-                });
-                return;
-            }
         }
 
         if start_time.elapsed() >= timeout_dur {

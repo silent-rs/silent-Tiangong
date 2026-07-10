@@ -29,6 +29,13 @@ pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
+pub mod builder;
+pub mod error;
+pub mod storage_location;
+
+pub use builder::TiangongCoreBuilder;
+pub use error::CoreError;
+pub use storage_location::CoreStorageLocation;
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -45,80 +52,16 @@ pub struct TiangongCore {
 }
 
 impl TiangongCore {
-    /// 创建新对话（CLI 便捷入口）。
+    /// Builder 的实际装配实现（私有）。
     ///
-    /// `plugins` 为进程内自注册插件（如定时任务插件），传 `Vec::new()` 表示不启用。
-    pub fn new(
-        config: CoreConfigProvider,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins, storage_root)
-    }
-
-    /// 创建 CLI 入口 core。
-    pub fn new_for_cli(
-        config: CoreConfigProvider,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        Self::new_for_process(config, stream_tx, plugins, storage_root)
-    }
-
-    pub fn new_for_process(
-        config: CoreConfigProvider,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        let session = Session::new("新对话");
-        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
-    }
-
-    /// 从已有 session 创建（CLI 便捷入口）。
-    pub fn with_session(
+    /// 所有入口最终汇聚到这里。worker 线程由 `thread::spawn` 创建，
+    /// 构造期不会失败；`build()` 的 `Result` 仅承载必填字段缺失的检查。
+    fn assemble(
         config: CoreConfigProvider,
         session: Session,
         stream_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
-    }
-
-    pub fn with_session_for_gui(
-        config: CoreConfigProvider,
-        session: Session,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
-    }
-
-    pub fn with_session_for_server(
-        config: CoreConfigProvider,
-        session: Session,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
-    ) -> Self {
-        Self::with_session_for_process(config, session, stream_tx, plugins, storage_root)
-    }
-
-    /// 从已有 session 创建，并显式标记入口进程类型。
-    ///
-    /// `plugins` 为进程内自注册插件（[`Plugin`]），在 worker_loop 的 engine
-    /// 创建/重建时遍历调用 `Plugin::register`，向 engine 注入能力。
-    /// 不需要插件能力的入口传 `Vec::new()`。
-    pub fn with_session_for_process(
-        config: CoreConfigProvider,
-        session: Session,
-        stream_tx: Sender<SessionStreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-        storage_root: std::path::PathBuf,
+        storage: CoreStorageLocation,
     ) -> Self {
         // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
         // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
@@ -128,6 +71,7 @@ impl TiangongCore {
                 "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
             );
         }
+        let storage_root = storage.into_root();
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -159,11 +103,22 @@ impl TiangongCore {
         }
     }
 
-    fn send_cmd(&self, cmd: Command) -> bool {
+    /// Builder 入口：与宿主入口（GUI/CLI/Server）解耦的构造方式。
+    ///
+    /// session 为必填字段，新会话由调用方创建后传入。
+    pub fn builder() -> TiangongCoreBuilder {
+        TiangongCoreBuilder::default()
+    }
+
+    fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
         let Some(ref tx) = self.cmd_tx else {
-            return false;
+            return Err(CoreError::WorkerStopped);
         };
-        tx.send(cmd).is_ok()
+        if tx.send(cmd).is_ok() {
+            Ok(())
+        } else {
+            Err(CoreError::WorkerStopped)
+        }
     }
 
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -174,11 +129,26 @@ impl TiangongCore {
         &self.session_id
     }
 
-    pub fn is_running(&self) -> bool {
+    /// 是否已停止（worker 已结束或命令通道已关闭）。
+    ///
+    /// 已停止的 core 无法再接收命令，调用方应移除并按需重建。
+    pub fn is_stopped(&self) -> bool {
+        if self.cmd_tx.is_none() {
+            return true;
+        }
         self.worker
             .as_ref()
-            .map(|worker| !worker.is_finished())
-            .unwrap_or(false)
+            .map(|worker| worker.is_finished())
+            .unwrap_or(true)
+    }
+
+    /// 是否可接收命令（worker 存活且通道未关闭）。
+    ///
+    /// 注意：当前实现无法准确反映"是否正在执行 Agent Turn"（执行状态在 worker
+    /// 线程内部，无共享标志），此处仅表达"可投递命令"，即 `!is_stopped()`。
+    /// 真正的 busy 语义需后续 worker 状态上报完善。
+    pub fn is_busy(&self) -> bool {
+        !self.is_stopped()
     }
 
     /// 设置信任模式（实时生效，当前对话下一次工具调用立即感知）
@@ -188,22 +158,25 @@ impl TiangongCore {
         }
     }
 
-    /// 关闭并获取最终 session
-    pub fn into_session(mut self) -> Session {
+    /// 关闭并获取最终 session。
+    ///
+    /// worker panic 时返回 [`CoreError::WorkerPanicked`]，不再静默兜底为
+    /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
+    pub fn into_session(mut self) -> Result<Session, CoreError> {
         let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
         if let Some(w) = self.worker.take() {
             match w.join() {
-                Ok(session) => return session,
+                Ok(session) => return Ok(session),
                 Err(_) => tracing::warn!("TiangongCore worker panic"),
             }
         }
-        Session::new("recovered")
+        Err(CoreError::WorkerPanicked)
     }
 }
 
 impl crate::agent_input::AgentInput for TiangongCore {
-    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> bool {
+    fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
         // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。
