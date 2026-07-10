@@ -49,10 +49,11 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             None
         });
 
-    let core = TiangongCore::new_for_cli(
-        config.clone(),
-        stream_tx,
-        {
+    let core = TiangongCore::builder()
+        .config(config.clone())
+        .session(tiangong_core::session::Session::new("新对话"))
+        .event_sender(stream_tx)
+        .plugins({
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
             let resolve_ep = |cap: ModelCapability| {
@@ -94,9 +95,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             // CLI 侧经 mcp_plugin 做管理。
             plugins.push(mcp_plugin.clone());
             plugins
-        },
-        storage_root,
-    );
+        })
+        .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
+        .build()?;
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {

@@ -169,11 +169,11 @@ impl ServerCoreManager {
         )
         .await;
 
-        let core = tiangong_core::core::TiangongCore::with_session_for_server(
-            self.config.clone(),
-            session.clone(),
-            stream_tx,
-            {
+        let core = tiangong_core::core::TiangongCore::builder()
+            .config(self.config.clone())
+            .session(session.clone())
+            .event_sender(stream_tx)
+            .plugins({
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
                 // models 从 config 内存单例读取。
                 use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
@@ -217,9 +217,11 @@ impl ServerCoreManager {
                 //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
                 plugins.push(self.mcp_plugin.clone());
                 plugins
-            },
-            tiangong_app_state::app_state::storage_root(),
-        );
+            })
+            .storage(tiangong_core::core::CoreStorageLocation::new(
+                tiangong_app_state::app_state::storage_root(),
+            ))
+            .build()?;
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let tracker = self.tracker_for(&actual_session_id);

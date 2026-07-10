@@ -1,7 +1,8 @@
 use std::sync::mpsc;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::TiangongCore;
+use tiangong_core::core::{CoreStorageLocation, TiangongCore};
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+use tiangong_core::session::Session;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
 
 fn main() {
@@ -13,7 +14,15 @@ fn main() {
     let storage_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".tiangong");
-    let core = TiangongCore::new(config, tx, Vec::new(), storage_root);
+    // session 由调用方创建后传入，core 不再持有产品文案。
+    let core = TiangongCore::builder()
+        .config(config)
+        .session(Session::new("测试"))
+        .event_sender(tx)
+        .plugins(Vec::new())
+        .storage(CoreStorageLocation::new(storage_root))
+        .build()
+        .expect("Builder 必填字段已齐");
 
     println!("=== 发送: 你好 ===");
     core.deliver(AgentInputKind::message("你好"));

@@ -406,13 +406,16 @@ impl TiangongApp {
         plugins.push(self.mcp_plugin.clone());
 
         // 4. 创建 Core 并插入（重新拿锁）。
-        let core = TiangongCore::with_session_for_gui(
-            self.config.clone(),
-            session,
-            stream_tx,
-            plugins,
-            tiangong_app_state::app_state::storage_root(),
-        );
+        let core = TiangongCore::builder()
+            .config(self.config.clone())
+            .session(session)
+            .event_sender(stream_tx)
+            .plugins(plugins)
+            .storage(tiangong_core::core::CoreStorageLocation::new(
+                tiangong_app_state::app_state::storage_root(),
+            ))
+            .build()
+            .expect("Builder 必填字段已齐");
         let id = core.session_id().to_string();
         {
             let mut cores = self.lock_cores();
