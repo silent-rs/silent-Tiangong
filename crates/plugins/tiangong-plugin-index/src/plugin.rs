@@ -80,16 +80,37 @@ impl IndexPlugin {
     }
 
     /// 对工作区做全量扫描（用于 on_session_ready / on_cwd_changed）。
+    ///
+    /// - 索引不存在：同步全量扫描（首次使用，阻塞直到完成）。
+    /// - 索引过期（>1 小时）：后台重建，不阻塞当前搜索。
+    /// - 索引新鲜：跳过。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
             return;
         }
-        // 仅在索引不存在时扫描，避免重复全量扫描（与原 core 逻辑一致）。
         if !crate::index::workspace_index_exists(&root) {
+            // 首次：同步全量扫描
             self.with_index_manager(|im| match im.full_scan(&root) {
                 Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
                 Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
+            });
+            return;
+        }
+        // 检查索引年龄，过期则后台重建（不阻塞搜索）
+        const STALE_THRESHOLD_SECS: u64 = 3600; // 1 小时
+        if let Some(age) = crate::index::workspace_index_age_secs(&root)
+            && age > STALE_THRESHOLD_SECS
+        {
+            tracing::info!(age_secs = age, "Workspace 索引过期，后台重建");
+            let im = self.index_manager();
+            let root_clone = root.clone();
+            std::thread::spawn(move || {
+                if let Some(im) = im
+                    && let Err(e) = im.full_scan(&root_clone)
+                {
+                    tracing::warn!("Workspace 索引后台重建失败: {e}");
+                }
             });
         }
     }

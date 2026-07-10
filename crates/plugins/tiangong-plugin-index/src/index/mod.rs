@@ -346,6 +346,16 @@ pub fn workspace_index_exists(root: &Path) -> bool {
     tantivy_dir.is_dir()
 }
 
+/// 索引年龄（秒）。返回 None 表示索引不存在。
+/// 用于判断索引是否过期（文件已修改但索引未更新）。
+pub fn workspace_index_age_secs(root: &Path) -> Option<u64> {
+    let tantivy_dir = workspace_index_dir(root);
+    let meta = tantivy_dir.metadata().ok()?;
+    let modified = meta.modified().ok()?;
+    let elapsed = std::time::SystemTime::now().duration_since(modified).ok()?;
+    Some(elapsed.as_secs())
+}
+
 /// 检查 session 索引是否已存在
 pub fn session_index_exists(session_id: &str) -> bool {
     let base_dir = default_base_dir();
