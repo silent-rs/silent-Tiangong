@@ -29,6 +29,13 @@ pub(crate) mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
+pub mod builder;
+pub mod error;
+pub mod storage_location;
+
+pub use builder::TiangongCoreBuilder;
+pub use error::CoreError;
+pub use storage_location::CoreStorageLocation;
 
 /// 天工智能体核心
 pub struct TiangongCore {
@@ -120,6 +127,26 @@ impl TiangongCore {
         plugins: Vec<Arc<dyn Plugin>>,
         storage_root: std::path::PathBuf,
     ) -> Self {
+        Self::assemble(
+            config,
+            session,
+            stream_tx,
+            plugins,
+            CoreStorageLocation::new(storage_root),
+        )
+    }
+
+    /// Builder 的实际装配实现（私有）。
+    ///
+    /// 所有入口最终汇聚到这里。worker 线程由 `thread::spawn` 创建，
+    /// 构造期不会失败；`build()` 的 `Result` 仅承载必填字段缺失的检查。
+    fn assemble(
+        config: CoreConfigProvider,
+        session: Session,
+        stream_tx: Sender<SessionStreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
+        storage: CoreStorageLocation,
+    ) -> Self {
         // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
         // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
         if !session.cwd.is_empty() && !std::path::Path::new(&session.cwd).is_dir() {
@@ -128,6 +155,7 @@ impl TiangongCore {
                 "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
             );
         }
+        let storage_root = storage.into_root();
         let initial_trust_mode = session.trust_mode;
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
@@ -157,6 +185,13 @@ impl TiangongCore {
             shared_trust_mode,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Builder 入口：与宿主入口（GUI/CLI/Server）解耦的构造方式。
+    ///
+    /// session 为必填字段，新会话由调用方创建后传入。
+    pub fn builder() -> TiangongCoreBuilder {
+        TiangongCoreBuilder::default()
     }
 
     fn send_cmd(&self, cmd: Command) -> bool {
