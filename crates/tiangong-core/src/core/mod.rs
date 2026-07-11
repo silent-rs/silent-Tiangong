@@ -9,12 +9,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::core_config::CoreConfigProvider;
+use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::{append_or_reuse_user_message, append_runtime_tool_message};
+use crate::react::message::{accept_prepared_user_message, append_runtime_tool_message};
 use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{MessageRole, Session};
-use tiangong_types::{SessionStreamEvent, StreamEvent};
+use tiangong_types::{PreparedUserMessage, SessionStreamEvent, StreamEvent};
 
 /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
 ///
@@ -45,10 +45,41 @@ pub struct TiangongCore {
     worker: Option<JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
+    /// 当前 Core 独立的配置提供者。
+    ///
+    /// 宿主可以按会话原子替换配置，不会影响同进程中的其他 Core。
+    config: CoreConfigProvider,
     /// 独立的信任模式（共享引用，实时生效）
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
     cancel_flag: Arc<AtomicBool>,
+}
+
+/// Prepared 消息入队后返回的持久化确认句柄。
+///
+/// 宿主可在持有 Core 容器锁时同步入队，随后释放锁，再异步等待该句柄。
+pub struct PreparedMessageReceipt {
+    receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+impl PreparedMessageReceipt {
+    pub async fn await_persisted(self) -> Result<(), CoreError> {
+        match self.receiver.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(CoreError::MessagePersistenceFailed(message)),
+            Err(_) => Err(CoreError::PersistenceConfirmationDropped),
+        }
+    }
+}
+
+impl std::future::IntoFuture for PreparedMessageReceipt {
+    type Output = Result<(), CoreError>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'static>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.await_persisted())
+    }
 }
 
 impl TiangongCore {
@@ -80,12 +111,13 @@ impl TiangongCore {
 
         let worker_trust_mode = shared_trust_mode.clone();
         let worker_cancel_flag = cancel_flag.clone();
+        let worker_config = config.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
         let worker = thread::spawn(move || {
             worker_loop(
-                config,
+                worker_config,
                 session,
                 stream_tx,
                 cmd_rx,
@@ -101,6 +133,7 @@ impl TiangongCore {
             cmd_tx: Some(cmd_tx),
             worker: Some(worker),
             session_id,
+            config,
             shared_trust_mode,
             cancel_flag,
         }
@@ -124,12 +157,43 @@ impl TiangongCore {
         }
     }
 
+    /// 同步入队 Prepared 用户消息并返回可在释放外部锁后等待的确认句柄。
+    pub fn enqueue_prepared_with_receipt(
+        &self,
+        message_id: impl Into<String>,
+        prepared: PreparedUserMessage,
+    ) -> Result<PreparedMessageReceipt, CoreError> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.send_cmd(Command::Message {
+            prepared,
+            message_id: Some(message_id.into()),
+            persistence_ack: Some(sender),
+        })?;
+        Ok(PreparedMessageReceipt { receiver })
+    }
+
+    /// 入队 Prepared 用户消息并等待其稳定内容成功持久化。
+    pub async fn deliver_prepared_and_wait(
+        &self,
+        message_id: impl Into<String>,
+        prepared: PreparedUserMessage,
+    ) -> Result<(), CoreError> {
+        self.enqueue_prepared_with_receipt(message_id, prepared)?
+            .await
+    }
+
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 替换该 Core 的独立配置，并通知 worker 在下一个外层命令边界重载。
+    pub fn replace_config(&self, config: CoreConfig) -> Result<(), CoreError> {
+        self.config.replace(config);
+        self.send_cmd(Command::ReloadConfig)
     }
 
     /// 是否已停止（worker 已结束或命令通道已关闭）。
@@ -191,13 +255,12 @@ impl crate::agent_input::AgentInput for TiangongCore {
 
         match input {
             AgentInputKind::Message(MessageInput::UserMessage {
-                content,
+                prepared,
                 message_id,
-                media,
             }) => self.send_cmd(Command::Message {
-                content,
+                prepared,
                 message_id,
-                media,
+                persistence_ack: None,
             }),
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
                 tool_name: tool.tool_name().to_string(),
@@ -513,13 +576,12 @@ async fn worker_loop_async(
                 continue;
             }
             Command::Message {
-                content,
+                prepared,
                 message_id,
-                media,
+                persistence_ack,
             } => {
                 // 新一轮开始：清除上一轮的取消信号。
                 cancel_flag.store(false, Ordering::Release);
-                let turn_start_idx = session.messages.len();
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
                 let turn_started = std::time::Instant::now();
@@ -527,23 +589,26 @@ async fn worker_loop_async(
                 if let Ok(mut slot) = turn_outcome.lock() {
                     *slot = None;
                 }
-                // 输入附件归档由各入口层在 deliver 前完成（GUI: app_state ingress；
-                // Server: remote/core.rs；CLI 无 media）。core 只接收已归档的 media，
-                // 不再参与 ingress 归档。
-                // 记录用户消息
-                let user_msg_id =
-                    append_or_reuse_user_message(&mut session, &content, message_id, media);
-                // 通知消费端：用户消息已记录（携带 session 中的 message_id）
-                let _ = stream_tx.send(StreamEvent::UserMessage {
-                    message_id: user_msg_id.clone(),
-                    content: content.clone(),
-                    media: session
-                        .messages
-                        .iter()
-                        .find(|message| message.id == user_msg_id)
-                        .map(|message| message.extract_media_assets())
-                        .unwrap_or_default(),
-                });
+                // 宿主入口已完成附件保存与处理方案规划。Core 只接收 Prepared 消息，
+                // 先持久化稳定引用并确认，再进入 Agent Loop。
+                let accepted = match accept_prepared_user_message(
+                    &mut session,
+                    &stream_tx,
+                    message_id,
+                    prepared,
+                    persistence_ack,
+                ) {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
+                        let _ = stream_tx.send(StreamEvent::Error {
+                            message: format!("用户消息持久化失败：{err}"),
+                        });
+                        continue;
+                    }
+                };
+                let turn_start_idx = accepted.turn_start_idx;
+                let user_msg_id = accepted.message_id;
+                let content = accepted.text;
 
                 // Turn 开始前：回调插件生命周期钩子（用户消息已写入 session）
                 for plugin in &plugins {
@@ -562,6 +627,9 @@ async fn worker_loop_async(
                     &cancel_flag,
                 )
                 .await;
+
+                // base64 等运行内容只服务本轮；历史图片由 Provider 按稳定本地引用重编码。
+                session.clear_runtime_content();
 
                 // 轮次结束：将执行时长与终态写入用户消息（turn 锚点）并落盘。
                 // 所有终态分支（成功/失败/取消）都会回到这里，故统一处理。
@@ -643,6 +711,9 @@ async fn worker_loop_async(
         }
     }
 
+    // RuntimeEngine 的重试回调持有 stream_tx clone；先释放 engine，确保内部通道
+    // 能在 drop(stream_tx) 后真正关闭，避免 Shutdown/into_session 永久等待转发线程。
+    drop(engine);
     // 关闭内部通道，等待转发线程结束
     drop(stream_tx);
     tokio::task::spawn_blocking(|| ()).await.ok(); // yield，让 forward_handle 有机会 drain

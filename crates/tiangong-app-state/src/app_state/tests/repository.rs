@@ -50,6 +50,65 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
 }
 
 #[test]
+fn repository_atomically_replaces_files_from_each_write_entry_point() -> Result<()> {
+    with_isolated_state("tiangong-repository-atomic-replace", |paths, state| {
+        let session_id = state.active_session_id().to_string();
+        let sessions_dir = paths.fake_home.join(".tiangong").join("sessions");
+        let session_path = sessions_dir.join(format!("{session_id}.json"));
+        let app_path = paths.fake_home.join(".tiangong").join("app.json");
+        fs::create_dir_all(&sessions_dir)?;
+
+        fs::write(&session_path, "incomplete session")?;
+        fs::write(&app_path, "incomplete app")?;
+        state
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .expect("活动会话应存在")
+            .title = "全量持久化".to_string();
+        state.persist_to_disk()?;
+
+        let persisted_session: Session = serde_json::from_str(&fs::read_to_string(&session_path)?)?;
+        assert_eq!(persisted_session.title, "全量持久化");
+        let persisted_app: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&app_path)?)?;
+        assert_eq!(persisted_app["active_session_id"], session_id);
+
+        fs::write(&session_path, "incomplete session")?;
+        state
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .expect("活动会话应存在")
+            .title = "单会话持久化".to_string();
+        state.persist_session(&session_id)?;
+        let persisted_session: Session = serde_json::from_str(&fs::read_to_string(&session_path)?)?;
+        assert_eq!(persisted_session.title, "单会话持久化");
+
+        fs::write(&app_path, "incomplete app")?;
+        state.set_session_input_draft(
+            &session_id,
+            SessionInputDraft {
+                text: "仅应用状态持久化".to_string(),
+                revision: 1,
+                ..SessionInputDraft::default()
+            },
+        )?;
+        let persisted_app: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&app_path)?)?;
+        assert_eq!(
+            persisted_app["input_drafts"][&session_id]["text"],
+            "仅应用状态持久化"
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Result<()> {
     with_isolated_state(
         "tiangong-repository-recover-latest-without-app",

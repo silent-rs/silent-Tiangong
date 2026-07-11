@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -18,6 +19,24 @@ use tracing::warn;
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub cores: Mutex<HashMap<String, TiangongCore>>,
+    /// 覆盖单个会话从附件准备到 Core 持久化确认的完整串行区间。
+    /// 不同会话使用不同锁，可以并行发送；同一会话不会并发创建 Core 或抢占草稿。
+    session_send_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
+    /// 草稿归档/持久化串行锁。与发送锁分离，使用户等待发送期间的新输入能立即写入
+    /// 新 revision，而不会等旧发送结束后才落盘。
+    draft_update_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
+    /// 临时草稿 ID 转正后的运行时重定向。迟到的旧 ID 写入会跟随到
+    /// 真实会话，避免迁移后又复活一份孤立草稿。
+    draft_redirects: Mutex<HashMap<String, String>>,
+    /// 已成功投递的最新草稿 revision，用于防止双击或迟到请求重复发送。
+    delivered_draft_revisions: Mutex<HashMap<String, u64>>,
+    /// 前端冻结发送快照后、真正进入 send_message 前的附件租约。
+    /// 该租约让草稿清理不会删掉已被本次发送冻结的归档路径。
+    draft_send_claims: Mutex<HashMap<String, DraftSendClaim>>,
+    /// 当前进程已明确丢弃/删除的草稿 ID，阻止早已发出的迟到写入复活。
+    discarded_drafts: Mutex<HashSet<String>>,
+    /// 活动会话变更代数，用于草稿转正后的条件激活。
+    active_session_epoch: AtomicU64,
     pub config: CoreConfigProvider,
     /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
     plugin_dirty_sessions: Mutex<HashSet<String>>,
@@ -52,6 +71,12 @@ pub struct ToolInjection {
     pub refresh_frontend: bool,
 }
 
+#[derive(Debug, Clone)]
+struct DraftSendClaim {
+    revision: u64,
+    attachment_paths: Vec<String>,
+}
+
 impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
@@ -73,6 +98,13 @@ impl TiangongApp {
         Self {
             state,
             cores: Mutex::new(HashMap::new()),
+            session_send_locks: Mutex::new(HashMap::new()),
+            draft_update_locks: Mutex::new(HashMap::new()),
+            draft_redirects: Mutex::new(HashMap::new()),
+            delivered_draft_revisions: Mutex::new(HashMap::new()),
+            draft_send_claims: Mutex::new(HashMap::new()),
+            discarded_drafts: Mutex::new(HashSet::new()),
+            active_session_epoch: AtomicU64::new(0),
             config,
             plugin_dirty_sessions: Mutex::new(HashSet::new()),
             skill_plugin: std::sync::Arc::new(
@@ -236,6 +268,262 @@ impl TiangongApp {
         }
     }
 
+    pub fn session_send_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
+        let mut locks = match self.session_send_locks.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                warn!(error = %err, "session_send_locks 锁已污染，尝试恢复");
+                err.into_inner()
+            }
+        };
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    pub fn active_session_epoch(&self) -> u64 {
+        self.active_session_epoch.load(Ordering::Acquire)
+    }
+
+    pub fn mark_active_session_changed(&self) -> u64 {
+        self.active_session_epoch.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub fn remove_session_send_lock(&self, session_id: &str) {
+        // 不从锁表删除 Arc：若旧 guard/等待者仍存活，新请求创建另一把锁
+        // 会直接破坏互斥。这些小锁保留到进程结束。
+        let mut delivered = match self.delivered_draft_revisions.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        delivered.remove(session_id);
+        drop(delivered);
+        let mut claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        claims.remove(session_id);
+        drop(claims);
+        let mut redirects = match self.draft_redirects.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        let discarded_aliases = redirects
+            .iter()
+            .filter(|(from, to)| from.as_str() == session_id || to.as_str() == session_id)
+            .map(|(from, _)| from.clone())
+            .collect::<Vec<_>>();
+        redirects.retain(|from, to| from != session_id && to != session_id);
+        drop(redirects);
+        let mut discarded = match self.discarded_drafts.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        discarded.insert(session_id.to_string());
+        discarded.extend(discarded_aliases);
+    }
+
+    pub fn resolve_draft_session_id(&self, session_id: &str) -> String {
+        let redirects = match self.draft_redirects.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        let mut resolved = session_id.to_string();
+        let mut seen = HashSet::new();
+        while seen.insert(resolved.clone()) {
+            let Some(next) = redirects.get(&resolved) else {
+                break;
+            };
+            resolved = next.clone();
+        }
+        resolved
+    }
+
+    pub fn redirect_input_draft(&self, from_session_id: &str, to_session_id: &str) {
+        if from_session_id == to_session_id {
+            return;
+        }
+        let resolved_target = self.resolve_draft_session_id(to_session_id);
+        let mut redirects = match self.draft_redirects.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        redirects.insert(from_session_id.to_string(), resolved_target.clone());
+        for target in redirects.values_mut() {
+            if target == from_session_id {
+                *target = resolved_target.clone();
+            }
+        }
+        drop(redirects);
+        let mut delivered = match self.delivered_draft_revisions.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        if let Some(from_revision) = delivered.remove(from_session_id) {
+            delivered
+                .entry(resolved_target.clone())
+                .and_modify(|current| *current = (*current).max(from_revision))
+                .or_insert(from_revision);
+        }
+        drop(delivered);
+        let mut claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        if let Some(from_claim) = claims.remove(from_session_id) {
+            let should_replace = claims
+                .get(&resolved_target)
+                .map(|target| target.revision <= from_claim.revision)
+                .unwrap_or(true);
+            if should_replace {
+                claims.insert(resolved_target, from_claim);
+            }
+        }
+        drop(claims);
+        let mut discarded = match self.discarded_drafts.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        discarded.remove(from_session_id);
+        discarded.remove(to_session_id);
+    }
+
+    pub fn mark_draft_discarded(&self, session_id: &str) {
+        let mut discarded = match self.discarded_drafts.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        discarded.insert(session_id.to_string());
+    }
+
+    pub fn draft_was_discarded(&self, session_id: &str) -> bool {
+        let discarded = match self.discarded_drafts.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        discarded.contains(session_id)
+    }
+
+    pub fn draft_revision_was_delivered(&self, session_id: &str, revision: u64) -> bool {
+        let delivered = match self.delivered_draft_revisions.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        delivered
+            .get(session_id)
+            .is_some_and(|current| revision <= *current)
+    }
+
+    pub fn mark_draft_revision_delivered(&self, session_id: &str, revision: u64) {
+        let mut delivered = match self.delivered_draft_revisions.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        delivered
+            .entry(session_id.to_string())
+            .and_modify(|current| *current = (*current).max(revision))
+            .or_insert(revision);
+    }
+
+    /// 冻结一版已归档草稿用于发送。返回被更新 revision 替换的旧租约路径。
+    pub fn register_draft_send_claim(
+        &self,
+        session_id: &str,
+        revision: u64,
+        attachment_paths: Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        let mut claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        if let Some(existing) = claims.get(session_id) {
+            if existing.revision > revision {
+                return Err("该草稿已有更新版本正在准备发送".to_string());
+            }
+            if existing.revision == revision {
+                if existing.attachment_paths == attachment_paths {
+                    return Ok(Vec::new());
+                }
+                return Err("同一草稿版本的附件快照不一致".to_string());
+            }
+        }
+        let replaced = claims
+            .insert(
+                session_id.to_string(),
+                DraftSendClaim {
+                    revision,
+                    attachment_paths,
+                },
+            )
+            .map(|claim| claim.attachment_paths)
+            .unwrap_or_default();
+        Ok(replaced)
+    }
+
+    pub fn has_draft_send_claim(&self, session_id: &str, revision: u64) -> bool {
+        let claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        claims
+            .get(session_id)
+            .is_some_and(|claim| claim.revision == revision)
+    }
+
+    pub fn release_draft_send_claim(&self, session_id: &str, revision: u64) -> Vec<String> {
+        let mut claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        if claims
+            .get(session_id)
+            .is_some_and(|claim| claim.revision == revision)
+        {
+            return claims
+                .remove(session_id)
+                .map(|claim| claim.attachment_paths)
+                .unwrap_or_default();
+        }
+        Vec::new()
+    }
+
+    pub fn release_any_draft_send_claim(&self, session_id: &str) -> Vec<String> {
+        let mut claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        claims
+            .remove(session_id)
+            .map(|claim| claim.attachment_paths)
+            .unwrap_or_default()
+    }
+
+    pub fn claimed_draft_attachment_paths(&self) -> HashSet<String> {
+        let claims = match self.draft_send_claims.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        claims
+            .values()
+            .flat_map(|claim| claim.attachment_paths.iter().cloned())
+            .collect()
+    }
+
+    pub fn draft_update_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
+        let mut locks = match self.draft_update_locks.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                warn!(error = %err, "draft_update_locks 锁已污染，尝试恢复");
+                err.into_inner()
+            }
+        };
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
     fn lock_embedded_server(
         &self,
     ) -> std::sync::MutexGuard<'_, Option<tiangong_server::EmbeddedServerHandle>> {
@@ -253,17 +541,30 @@ impl TiangongApp {
         // old_sig 从 registry 旧值算（set_models 之前），new_sig 从 app-state 新值算。
         let old_sig =
             tiangong_config::registry::plugin_set_signature(&tiangong_config::registry::models());
-        let (next, new_sig) = self
+        let (template, session_configs, new_sig) = self
             .with_state_read(|core_state| {
                 let new_models = core_state.models_config().clone();
                 let new_sig = tiangong_config::registry::plugin_set_signature(&new_models);
                 // 同步 app-state 的最新 models 到 config 内存单例。
                 tiangong_config::registry::set_models(new_models);
-                Ok((core_state.build_core_config_from_base(&base), new_sig))
+                let template = core_state.build_core_config_for_session_from_base(&base, "");
+                let session_configs = core_state
+                    .sessions()
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.id.clone(),
+                            core_state.build_core_config_for_session_from_base(&base, &session.id),
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                Ok((template, session_configs, new_sig))
             })
             .await?;
         let plugin_set_changed = old_sig != new_sig;
-        self.config.replace(next);
+        // 这份 provider 只作全局模板和新 Core 构造辅助，不承载任一会话的
+        // trust/reasoning 覆盖。已存在 Core 使用各自独立的 provider。
+        self.config.replace(template);
         let cores = self.lock_cores();
         if plugin_set_changed {
             // 能力集合变化（新增/删除）：plugin 列表构造时固定，无法热更新。
@@ -275,9 +576,13 @@ impl TiangongApp {
                     .ok();
             }
         } else {
-            // 仅 endpoint 变化：reload_config + on_config_updated 热更新端点。
-            for core in cores.values() {
-                let _ = core.deliver(AgentInputKind::reload_config());
+            // 仅 endpoint 或会话配置变化：按 session 替换独立 provider，
+            // 避免并行会话互相覆盖 trust/reasoning。
+            for (session_id, core) in cores.iter() {
+                if let Some(config) = session_configs.get(session_id) {
+                    let _ = core.replace_config(config.clone());
+                    core.set_trust_mode(config.trust_mode);
+                }
             }
         }
         Ok(())
@@ -318,6 +623,12 @@ impl TiangongApp {
         // 因此这里可以在 await 初始化 memory handle 后直接创建并插入。
         // 如未来允许同 session 并发入口，需要在 await 后增加二次检查。
 
+        let base = self.config.snapshot();
+        let session_config = {
+            let core_state = self.state.lock().await;
+            core_state.build_core_config_for_session_from_base(&base, session_id)
+        };
+
         // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
         {
             let mut cores = self.lock_cores();
@@ -333,7 +644,7 @@ impl TiangongApp {
                 }
             } else if let Some(core) = cores.get(session_id) {
                 if !core.is_stopped() {
-                    let _ = core.deliver(AgentInputKind::reload_config());
+                    let _ = core.replace_config(session_config.clone());
                     let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
                     core.set_trust_mode(session.trust_mode);
                     return (session_id.to_string(), false); // 已存在，复用
@@ -407,7 +718,7 @@ impl TiangongApp {
 
         // 4. 创建 Core 并插入（重新拿锁）。
         let core = TiangongCore::builder()
-            .config(self.config.clone())
+            .config(CoreConfigProvider::new(session_config))
             .session(session)
             .event_sender(stream_tx)
             .plugins(plugins)
@@ -419,6 +730,14 @@ impl TiangongApp {
         let id = core.session_id().to_string();
         {
             let mut cores = self.lock_cores();
+            // Memory/plugin 初始化包含 await；期间另一个入口可能已为同一会话创建 Core。
+            // 二次检查避免后创建者覆盖正在运行的实例。
+            if cores
+                .get(session_id)
+                .is_some_and(|existing| !existing.is_stopped())
+            {
+                return (session_id.to_string(), false);
+            }
             cores.insert(id.clone(), core);
         }
         (id, true) // 新创建
@@ -436,29 +755,16 @@ impl TiangongApp {
         content: String,
         message_id: Option<String>,
     ) -> bool {
-        self.send_to_core_with_media(session_id, content, message_id, Vec::new())
-    }
-
-    /// 向 Core 投递用户消息（携带已归档的媒体附件）。
-    pub fn send_to_core_with_media(
-        &self,
-        session_id: &str,
-        content: String,
-        message_id: Option<String>,
-        media: Vec<tiangong_types::MediaAsset>,
-    ) -> bool {
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
-                core.deliver(AgentInputKind::message_with_id(content, message_id, media))
-                    .is_ok()
-            } else {
-                core.deliver(AgentInputKind::message_with_id(
-                    content,
-                    scru128::new().to_string(),
-                    media,
+                core.deliver(AgentInputKind::prepared_with_id(
+                    message_id,
+                    tiangong_types::PreparedUserMessage::text(content),
                 ))
                 .is_ok()
+            } else {
+                core.deliver(AgentInputKind::message(content)).is_ok()
             };
             if !sent {
                 warn!(session_id, "TiangongCore 命令通道已关闭，移除僵尸 core");

@@ -40,7 +40,7 @@ impl TiangongState {
                     active_session_id: String::new(),
                     workspace_dir: default_workspace_dir(),
                     session_title_draft: DEFAULT_SESSION_TITLE.to_string(),
-                    input_draft: String::new(),
+                    input_drafts: HashMap::new(),
                 },
                 provider: ProviderState {
                     models_config,
@@ -105,6 +105,14 @@ impl TiangongState {
                 .map(|session| session.id.clone())
                 .unwrap_or_default();
         }
+        if !state.store.session.active_session_id.is_empty() {
+            state
+                .store
+                .session
+                .input_drafts
+                .entry(state.store.session.active_session_id.clone())
+                .or_default();
+        }
 
         state.store.session.session_title_draft = state
             .active_session()
@@ -156,6 +164,7 @@ impl TiangongState {
         self.store.session.sessions = loaded.sessions;
         self.store.session.active_session_id = loaded.active_session_id;
         self.store.session.workspace_dir = loaded.workspace_dir;
+        self.store.session.input_drafts = loaded.input_drafts;
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;

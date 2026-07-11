@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -8,8 +11,32 @@ use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
     ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
-    now_text,
+    PreparedAttachment, PreparedUserMessage, RuntimeContent, now_text,
 };
+
+/// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。
+static PERSISTENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 在目标文件所在目录写入临时文件，并原子替换目标文件。
+///
+/// 所有调用共享同一把进程内锁。临时文件与目标文件位于同一文件系统，
+/// `NamedTempFile::persist` 会在 Windows、macOS 与 Linux 上替换已有目标文件。
+pub fn atomic_replace_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let _write_guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
+    temp_file.as_file_mut().write_all(content)?;
+    temp_file.as_file().sync_all()?;
+    temp_file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +72,11 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub messages: Vec<Message>,
+    /// 仅供当前轮模型请求使用的运行内容，以消息 ID 隔离。
+    ///
+    /// 该映射不会进入会话 JSON；`context()` 只把对应内容注入克隆出的请求上下文。
+    #[serde(skip)]
+    pub(crate) runtime_content_by_message: HashMap<String, Vec<RuntimeContent>>,
     /// 当前会话累计 token 用量。
     ///
     /// `RunSnapshot.last_usage` 是运行时快照字段，不能跨会话复用；会话级累计值
@@ -252,6 +284,7 @@ impl Session {
             id: new_id(),
             title: title.into(),
             messages: Vec::new(),
+            runtime_content_by_message: HashMap::new(),
             token_usage: TokenUsage::default(),
             current_tokens: 0,
             compression_threshold_tokens: 0,
@@ -288,6 +321,7 @@ impl Session {
             id,
             title: title.into(),
             messages: Vec::new(),
+            runtime_content_by_message: HashMap::new(),
             token_usage: TokenUsage::default(),
             current_tokens: 0,
             compression_threshold_tokens: 0,
@@ -317,22 +351,31 @@ impl Session {
     ///
     /// Core 在工具调用等关键节点调用此方法，确保中间数据不会因崩溃丢失。
     pub fn persist_to_disk(&self) {
-        let sessions_dir = crate::storage::storage_root().join("sessions");
-        if std::fs::create_dir_all(&sessions_dir).is_err() {
-            tracing::warn!("创建 sessions 目录失败");
-            return;
+        if let Err(err) = self.try_persist_to_disk() {
+            tracing::warn!(error = %err, "session 持久化失败");
         }
-        let path = sessions_dir.join(format!("{}.json", self.id));
-        match serde_json::to_string_pretty(self) {
-            Ok(content) => {
-                if let Err(err) = std::fs::write(&path, content) {
-                    tracing::warn!(error = %err, "session 持久化写入失败");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "session 序列化失败");
-            }
+    }
+
+    /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
+    ///
+    /// 运行图片只能存在于 `runtime_content_by_message`；若调用方错误地把运行块写进
+    /// `messages`，这里会拒绝落盘，防止 base64 污染会话文件。
+    pub fn try_persist_to_disk(&self) -> Result<(), String> {
+        if self.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::RuntimeInlineImage { .. }))
+        }) {
+            return Err("会话消息包含仅供运行时使用的图片内容".to_string());
         }
+        let path = crate::storage::storage_root()
+            .join("sessions")
+            .join(format!("{}.json", self.id));
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|err| format!("session 序列化失败：{err}"))?;
+        atomic_replace_file(&path, content.as_bytes())
+            .map_err(|err| format!("session 持久化写入失败：{err}"))
     }
 
     pub fn append_message(&mut self, role: MessageRole, content: impl Into<String>) {
@@ -434,6 +477,92 @@ impl Session {
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
+    }
+
+    /// 使用预生成 ID 追加只含稳定附件引用的用户消息。
+    pub fn append_prepared_user_message_with_id(
+        &mut self,
+        id: String,
+        prepared: PreparedUserMessage,
+    ) {
+        let PreparedUserMessage {
+            text,
+            persistent_attachments,
+            runtime_content,
+        } = prepared;
+        let mut blocks = vec![ContentBlock::text(text)];
+        blocks.extend(
+            persistent_attachments
+                .into_iter()
+                .map(ContentBlock::attachment),
+        );
+        self.messages.push(Message {
+            id: id.clone(),
+            role: MessageRole::User,
+            content: blocks,
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            elapsed_ms: None,
+            turn_status: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            phase: crate::session::MessagePhase::Normal,
+            created_at: now_text(),
+        });
+        self.set_runtime_content(id, runtime_content);
+        self.updated_at = now_text();
+    }
+
+    /// 用 Prepared 消息替换已有用户消息的稳定内容与本轮运行内容。
+    pub fn update_prepared_user_message(
+        &mut self,
+        message_id: &str,
+        prepared: PreparedUserMessage,
+    ) -> bool {
+        let PreparedUserMessage {
+            text,
+            persistent_attachments,
+            runtime_content,
+        } = prepared;
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id && message.role == MessageRole::User)
+        else {
+            return false;
+        };
+        let mut blocks = vec![ContentBlock::text(text)];
+        blocks.extend(
+            persistent_attachments
+                .into_iter()
+                .map(ContentBlock::attachment),
+        );
+        message.content = blocks;
+        self.set_runtime_content(message_id.to_string(), runtime_content);
+        self.updated_at = now_text();
+        true
+    }
+
+    fn set_runtime_content(&mut self, message_id: String, runtime_content: Vec<RuntimeContent>) {
+        if runtime_content.is_empty() {
+            self.runtime_content_by_message.remove(&message_id);
+        } else {
+            self.runtime_content_by_message
+                .insert(message_id, runtime_content);
+        }
+    }
+
+    pub(crate) fn clear_runtime_content(&mut self) {
+        self.runtime_content_by_message.clear();
+    }
+
+    /// 清除指定消息的本轮运行内容；稳定附件引用不受影响。
+    pub fn clear_runtime_content_for_message(&mut self, message_id: &str) {
+        self.runtime_content_by_message.remove(message_id);
     }
 
     pub fn append_worker_message(
@@ -800,7 +929,23 @@ impl Session {
         if let Some(ref msg) = self.system_prompt_message {
             context.push(msg.clone());
         }
-        context.extend(self.messages[self.summary_up_to..].iter().cloned());
+        context.extend(
+            self.messages[self.summary_up_to..]
+                .iter()
+                .cloned()
+                .map(|mut message| {
+                    if let Some(runtime_content) = self.runtime_content_by_message.get(&message.id)
+                    {
+                        message.content.extend(
+                            runtime_content
+                                .iter()
+                                .cloned()
+                                .map(ContentBlock::runtime_content),
+                        );
+                    }
+                    message
+                }),
+        );
         context
     }
 
@@ -854,4 +999,129 @@ impl Session {
 
 fn new_id() -> String {
     scru128::new().to_string()
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn atomic_replace_file_serializes_complete_replacements() -> io::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let target = temp_dir.path().join("sessions").join("session.json");
+        atomic_replace_file(&target, b"initial")?;
+
+        let payloads = (0..4)
+            .map(|writer| format!("writer-{writer}:{}", "x".repeat(16 * 1024)).into_bytes())
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(payloads.len()));
+        std::thread::scope(|scope| -> io::Result<()> {
+            let mut writers = Vec::new();
+            for payload in &payloads {
+                let target = target.clone();
+                let barrier = Arc::clone(&barrier);
+                writers.push(scope.spawn(move || {
+                    barrier.wait();
+                    atomic_replace_file(&target, payload)
+                }));
+            }
+            for writer in writers {
+                writer.join().expect("原子写入线程不应 panic")?;
+            }
+            Ok(())
+        })?;
+
+        let persisted = std::fs::read(&target)?;
+        assert!(payloads.contains(&persisted));
+        let entries = std::fs::read_dir(target.parent().expect("目标文件应有父目录"))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entries.len(), 1, "成功替换后不应遗留临时文件");
+        assert_eq!(entries[0].path(), target);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use tiangong_types::AttachmentHandlingMode;
+
+    fn prepared_message(runtime_data: &str) -> PreparedUserMessage {
+        PreparedUserMessage::new(
+            "分析图片",
+            vec![PreparedAttachment {
+                asset_id: "asset-1".to_string(),
+                local_path: "/tmp/asset-1.png".to_string(),
+                original_name: "asset-1.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: 4,
+                kind: MediaKind::Image,
+                handling_mode: AttachmentHandlingMode::InlineImage,
+                capability: Some("multimodal".to_string()),
+                capability_available: true,
+            }],
+            vec![RuntimeContent::InlineImage {
+                asset_id: "asset-1".to_string(),
+                mime_type: "image/png".to_string(),
+                data: runtime_data.to_string(),
+            }],
+        )
+    }
+
+    #[test]
+    fn runtime_base64_is_not_serialized_but_is_injected_into_context_clone() {
+        let secret_data = "data:image/png;base64,THIS_MUST_NOT_PERSIST";
+        let mut session = Session::new("attachment-runtime");
+        session.append_prepared_user_message_with_id(
+            "message-1".to_string(),
+            prepared_message(secret_data),
+        );
+
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("THIS_MUST_NOT_PERSIST"));
+        assert!(json.contains("inline_image"));
+        assert!(json.contains("/tmp/asset-1.png"));
+
+        let context = session.context();
+        assert!(context[0].content.iter().any(|block| matches!(
+            block,
+            ContentBlock::RuntimeInlineImage { data, .. } if data == secret_data
+        )));
+        assert!(
+            !serde_json::to_string(&context)
+                .unwrap()
+                .contains("THIS_MUST_NOT_PERSIST")
+        );
+        assert!(
+            !session.messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::RuntimeInlineImage { .. }))
+        );
+
+        session.clear_runtime_content_for_message("message-1");
+        assert!(
+            !session.context()[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::RuntimeInlineImage { .. }))
+        );
+    }
+
+    #[test]
+    fn persistence_rejects_runtime_block_inside_stable_messages() {
+        let mut session = Session::new("invalid-runtime-block");
+        let mut message = Message::new(MessageRole::User, "hello");
+        message.content.push(ContentBlock::RuntimeInlineImage {
+            asset_id: "asset-1".to_string(),
+            mime_type: "image/png".to_string(),
+            data: "base64-secret".to_string(),
+        });
+        session.messages.push(message);
+
+        let err = session.try_persist_to_disk().unwrap_err();
+        assert!(err.contains("仅供运行时"));
+    }
 }

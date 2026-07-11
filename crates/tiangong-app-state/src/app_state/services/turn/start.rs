@@ -8,13 +8,14 @@ use super::*;
 impl AppTurnService {
     /// 发送当前输入（已迁移到 TiangongCore.send_message）
     pub(in crate::app_state) fn send_current_input(self, state: &mut TiangongState) -> Result<()> {
-        let input = state.store.session.input_draft.trim().to_string();
+        let input = state.input_draft().trim().to_string();
         if input.is_empty() {
             return Ok(());
         }
         // TiangongCore 直接处理消息发送
         tracing::debug!("send_current_input 已迁移到 TiangongCore");
-        state.store.session.input_draft.clear();
+        let active_id = state.active_session_id().to_string();
+        state.store.session.input_drafts.remove(&active_id);
         Ok(())
     }
 }

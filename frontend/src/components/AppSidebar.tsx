@@ -1,4 +1,4 @@
-import { useStore } from '@/store/useStore';
+import { selectCurrentIsSending, useStore } from '@/store/useStore';
 import { Button } from './ui/button';
 import { ScrollArea } from './ui/scroll-area';
 import { useSidebar } from './ui/sidebar';
@@ -89,7 +89,6 @@ export function AppSidebar() {
     sessions,
     activeSessionId,
     isDraft,
-    isSending,
     sessionRunStatuses,
     createSession,
     switchSession,
@@ -98,6 +97,7 @@ export function AppSidebar() {
     isLoadingSessions,
     workspaceDir,
   } = useStore();
+  const isSending = useStore(selectCurrentIsSending);
 
   const { open } = useSidebar();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -146,9 +146,8 @@ export function AppSidebar() {
             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
         }`}
-        disabled={isSending}
         onClick={() => {
-          if (!isSending && (session.id !== activeSessionId || isDraft)) {
+          if (session.id !== activeSessionId || isDraft) {
             switchSession(session.id);
           }
         }}

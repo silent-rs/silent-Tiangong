@@ -15,6 +15,12 @@ export interface Session {
   cwd: string;
 }
 
+export interface DraftSessionCreation {
+  session: Session;
+  activation_epoch: number;
+  previous_active_session_id: string;
+}
+
 export type TabKind = 'browser' | 'terminal';
 
 export interface TabState {
@@ -105,16 +111,36 @@ export interface RequestCost {
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
 
-export interface ContentBlock {
-  type: 'text' | 'media';
-  // text 类型
-  text?: string;
-  // media 类型
-  kind?: MediaKind;
-  url?: string;
-  mime_type?: string;
-  title?: string;
+export type AttachmentHandlingMode = 'inline_image' | 'analyze_with_plugin' | 'file_reference';
+
+export interface PreparedAttachment {
+  asset_id: string;
+  local_path: string;
+  original_name: string;
+  mime_type: string;
+  size: number;
+  kind: MediaKind;
+  handling_mode: AttachmentHandlingMode;
+  capability?: string;
+  capability_available: boolean;
 }
+
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'media';
+      kind: MediaKind;
+      url: string;
+      mime_type?: string;
+      title?: string;
+    }
+  | { type: 'attachment'; attachment: PreparedAttachment }
+  | {
+      type: 'runtime_inline_image';
+      asset_id: string;
+      mime_type: string;
+      data?: string;
+    };
 
 export interface MediaAsset {
   kind: MediaKind;
@@ -122,6 +148,20 @@ export interface MediaAsset {
   mime_type?: string;
   title?: string;
   capability?: string;
+}
+
+export interface RawAttachment {
+  kind: MediaKind;
+  source: string;
+  original_name?: string;
+  mime_type?: string;
+}
+
+export interface SessionInputDraft {
+  text: string;
+  attachments: RawAttachment[];
+  is_sending: boolean;
+  revision: number;
 }
 
 export interface AttachmentDataUrl {
@@ -169,8 +209,7 @@ export function textContent(msg: Message): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
   return content
-    .filter((b) => b.type === 'text' && b.text)
-    .map((b) => b.text!)
+    .flatMap((block) => block.type === 'text' && block.text ? [block.text] : [])
     .join('');
 }
 
@@ -178,7 +217,7 @@ export function textContent(msg: Message): string {
 export function hasMediaBlocks(msg: Message): boolean {
   const content = msg.content;
   if (!Array.isArray(content)) return false;
-  return content.some((b) => b.type === 'media');
+  return content.some((b) => b.type === 'media' || b.type === 'attachment');
 }
 
 export interface RunSnapshot {
@@ -491,6 +530,24 @@ export const api = {
   createSession: (): Promise<Session> =>
     invoke('create_session'),
 
+  createSessionForDraft: (
+    cwd: string,
+    trustMode: string,
+    reasoningEffort: string,
+  ): Promise<DraftSessionCreation> =>
+    invoke('create_session_for_draft', { cwd, trustMode, reasoningEffort }),
+
+  activateDraftSession: (
+    sessionId: string,
+    expectedEpoch: number,
+    expectedActiveSessionId: string,
+  ): Promise<boolean> =>
+    invoke('activate_draft_session', {
+      sessionId,
+      expectedEpoch,
+      expectedActiveSessionId,
+    }),
+
   switchSession: (sessionId: string): Promise<void> =>
     invoke('switch_session', { sessionId }),
 
@@ -512,11 +569,13 @@ export const api = {
   // ----------------------------------------------------------------
   // 消息和执行
   // ----------------------------------------------------------------
-  sendMessage: (content: string): Promise<void> =>
-    invoke('send_message', { content }),
-
-  sendMessageWithMedia: (content: string, media: MediaAsset[]): Promise<void> =>
-    invoke('send_message_with_media', { content, media }),
+  sendMessage: (
+    sessionId: string,
+    content: string,
+    attachments: RawAttachment[],
+    revision: number,
+  ): Promise<void> =>
+    invoke('send_message', { sessionId, content, attachments, revision }),
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
     invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
@@ -527,20 +586,39 @@ export const api = {
   cancelAgent: (role: string): Promise<boolean> =>
     invoke('cancel_agent', { role }),
 
-  appendMessage: (sessionId: string, content: string, media?: MediaAsset[]): Promise<boolean> =>
-    invoke('append_message', { sessionId, content, media: media ?? null }),
+  appendMessage: (
+    sessionId: string,
+    content: string,
+    attachments: RawAttachment[],
+    revision: number,
+  ): Promise<boolean> =>
+    invoke('append_message', { sessionId, content, attachments, revision }),
 
-  editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]): Promise<void> =>
-    invoke('edit_and_resend', { messageId, newContent, media: media ?? null }),
+  editAndResend: (
+    sessionId: string,
+    messageId: string,
+    newContent: string,
+    attachments: RawAttachment[],
+    revision: number,
+    baseContent: ContentBlock[],
+  ): Promise<void> =>
+    invoke('edit_and_resend', {
+      sessionId,
+      messageId,
+      newContent,
+      attachments,
+      revision,
+      baseContent,
+    }),
 
   respondApproval: (requestId: string, approved: boolean): Promise<boolean> =>
     invoke('respond_approval', { requestId, approved }),
 
-  getTrustMode: (): Promise<string> =>
-    invoke('get_trust_mode'),
+  getTrustMode: (sessionId?: string): Promise<string> =>
+    invoke('get_trust_mode', { sessionId }),
 
-  setTrustMode: (mode: string): Promise<void> =>
-    invoke('set_trust_mode', { mode }),
+  setTrustMode: (mode: string, sessionId?: string): Promise<void> =>
+    invoke('set_trust_mode', { mode, sessionId }),
 
   getDefaultTrustMode: (): Promise<string> =>
     invoke('get_default_trust_mode'),
@@ -554,11 +632,11 @@ export const api = {
   setCustomSystemPrompt: (prompt: string): Promise<void> =>
     invoke('set_custom_system_prompt', { prompt }),
 
-  getReasoningEffort: (): Promise<string> =>
-    invoke('get_reasoning_effort'),
+  getReasoningEffort: (sessionId?: string): Promise<string> =>
+    invoke('get_reasoning_effort', { sessionId }),
 
-  setReasoningEffort: (effort: string): Promise<void> =>
-    invoke('set_reasoning_effort', { effort }),
+  setReasoningEffort: (effort: string, sessionId?: string): Promise<void> =>
+    invoke('set_reasoning_effort', { effort, sessionId }),
 
   getProviderBalance: (providerName: string): Promise<ProviderBalance> =>
     invoke('get_provider_balance', { providerName }),
@@ -566,17 +644,30 @@ export const api = {
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),
 
-  getInputDraft: (): Promise<string> =>
-    invoke('get_input_draft'),
+  newDraftId: (): Promise<string> =>
+    invoke('new_draft_id'),
 
-  setInputDraft: (content: string): Promise<void> =>
-    invoke('set_input_draft', { content }),
+  migrateInputDraft: (fromSessionId: string, toSessionId: string): Promise<SessionInputDraft> =>
+    invoke('migrate_input_draft', { fromSessionId, toSessionId }),
+
+  removeInputDraft: (sessionId: string): Promise<void> =>
+    invoke('remove_input_draft', { sessionId }),
+
+  getInputDraft: (sessionId: string): Promise<SessionInputDraft> =>
+    invoke('get_input_draft', { sessionId }),
+
+  setInputDraft: (
+    sessionId: string,
+    draft: SessionInputDraft,
+    claimRevision?: number,
+  ): Promise<SessionInputDraft> =>
+    invoke('set_input_draft', { sessionId, draft, claimRevision }),
 
   getSessionCwd: (): Promise<string> =>
     invoke('get_session_cwd'),
 
-  setSessionCwd: (cwd: string): Promise<void> =>
-    invoke('set_session_cwd', { cwd }),
+  setSessionCwd: (sessionId: string, cwd: string): Promise<void> =>
+    invoke('set_session_cwd', { sessionId, cwd }),
 
   getWorkspaceDir: (): Promise<string> =>
     invoke('get_workspace_dir'),

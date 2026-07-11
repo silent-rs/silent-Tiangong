@@ -13,7 +13,7 @@ use crate::core::command::Command;
 use crate::model::{ToolCall, ToolSpec};
 use crate::session::{Session, now_text};
 use crate::tool::ToolResult;
-use tiangong_types::StreamEvent;
+use tiangong_types::{PreparedAttachment, PreparedUserMessage, RuntimeContent, StreamEvent};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// 团队执行上下文，随 ReactEngine 的 execute_turn 传递
@@ -73,13 +73,18 @@ impl TeamContext {
         &mut self,
         agent_id: &str,
         message: AgentMessage,
-        media: Vec<tiangong_types::MediaAsset>,
+        persistent_attachments: Vec<PreparedAttachment>,
+        runtime_content: Vec<RuntimeContent>,
     ) {
         let dispatched = if let Some(tx) = self.active_agent_senders.get(agent_id) {
             tx.send(Command::Message {
-                content: format_agent_message_for_prompt(&message),
+                prepared: PreparedUserMessage::new(
+                    format_agent_message_for_prompt(&message),
+                    persistent_attachments,
+                    runtime_content,
+                ),
                 message_id: Some(message.id.clone()),
-                media,
+                persistence_ack: None,
             })
             .is_ok()
         } else {
@@ -354,6 +359,7 @@ pub fn execute_create_agent(
                 created_at: now_text(),
             },
             Vec::new(),
+            Vec::new(),
         );
     }
 
@@ -522,7 +528,7 @@ pub fn execute_send_message(
         created_at: now_text(),
     };
 
-    team.dispatch_agent_message(&target.agent_id, message, Vec::new());
+    team.dispatch_agent_message(&target.agent_id, message, Vec::new(), Vec::new());
 
     let _ = stream_tx.send(StreamEvent::AgentMessage {
         from_agent_id: current_agent_id.to_string(),
@@ -623,7 +629,7 @@ pub fn execute_broadcast_message(
             to: agent_id.clone(),
             ..message.clone()
         };
-        team.dispatch_agent_message(agent_id, msg, Vec::new());
+        team.dispatch_agent_message(agent_id, msg, Vec::new(), Vec::new());
     }
 
     // 为每个目标发送事件
@@ -952,15 +958,16 @@ pub fn route_user_mentions(
     content: &str,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
-    route_user_mentions_with_media(team, content, Vec::new(), stream_tx)
+    route_user_mentions_with_attachments(team, content, Vec::new(), Vec::new(), stream_tx)
 }
 
 /// 将用户 @提及消息投递给目标 Agent。运行中的 Agent 会实时注入当前循环，
 /// 空闲 Agent 会进入收件箱并唤醒调度器启动新一轮执行。
-pub fn route_user_mentions_with_media(
+pub fn route_user_mentions_with_attachments(
     team: &mut TeamContext,
     content: &str,
-    media: Vec<tiangong_types::MediaAsset>,
+    persistent_attachments: Vec<PreparedAttachment>,
+    runtime_content: Vec<RuntimeContent>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
     let Some(route) = parse_agent_mention_route(content) else {
@@ -1011,7 +1018,12 @@ pub fn route_user_mentions_with_media(
             priority: crate::agent_team::message_bus::MessagePriority::Normal,
             created_at: now_text(),
         };
-        team.dispatch_agent_message(&agent_id, message, media.clone());
+        team.dispatch_agent_message(
+            &agent_id,
+            message,
+            persistent_attachments.clone(),
+            runtime_content.clone(),
+        );
         let _ = stream_tx.send(StreamEvent::AgentMessage {
             from_agent_id: "user".to_string(),
             from_agent_label: "User".to_string(),
@@ -1064,7 +1076,7 @@ pub fn persist_child_session(parent_session: &Session, agent_id: &str, session: 
     let path = agents_dir.join(format!("{agent_id}.json"));
     match serde_json::to_string_pretty(session) {
         Ok(content) => {
-            if let Err(err) = std::fs::write(&path, content) {
+            if let Err(err) = crate::session::atomic_replace_file(&path, content.as_bytes()) {
                 tracing::warn!(error = %err, "child session 持久化写入失败");
             }
         }

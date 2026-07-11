@@ -134,24 +134,18 @@ pub async fn delete_session(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let mut app = app_ctx.state.lock().await;
-
-    // 先切换到目标会话再删除
-    let exists = app.sessions().iter().any(|s| s.id == id);
-    if !exists {
+    let deleted = app_ctx.cores.delete_session(&id).await.map_err(|error| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("删除会话失败：{error}"),
+        )
+    })?;
+    if !deleted {
         return Err(SilentError::business_error(
             StatusCode::NOT_FOUND,
             format!("会话 '{id}' 不存在"),
         ));
     }
-
-    app.switch_session(&id);
-    app.delete_active_session().map_err(|e| {
-        SilentError::business_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("删除会话失败：{e}"),
-        )
-    })?;
 
     Ok(Response::json(&serde_json::json!({
         "status": "deleted",

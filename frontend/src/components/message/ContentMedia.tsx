@@ -3,10 +3,28 @@ import type { MessageItem } from "./types";
 
 export function ContentMedia({ message }: { message: MessageItem }) {
   const content = Array.isArray(message.content) ? message.content : [];
-  const mediaBlocks = content.filter((b) => b.type === "media");
+  const mediaBlocks = content.flatMap((block) => {
+    if (block.type === "media") {
+      return [{
+        kind: block.kind,
+        url: block.url,
+        title: block.title,
+        mime_type: block.mime_type,
+      }];
+    }
+    if (block.type === "attachment") {
+      return [{
+        kind: block.attachment.kind,
+        url: block.attachment.local_path,
+        title: block.attachment.original_name,
+        mime_type: block.attachment.mime_type,
+      }];
+    }
+    return [];
+  });
   const legacyMedia = message.media || [];
   const allMedia = [
-    ...mediaBlocks.map((b) => ({ kind: b.kind!, url: b.url!, title: b.title, mime_type: b.mime_type })),
+    ...mediaBlocks,
     ...legacyMedia,
   ];
   if (allMedia.length === 0) return null;

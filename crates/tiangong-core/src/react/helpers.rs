@@ -14,7 +14,7 @@ use std::sync::mpsc::Sender as StdSender;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::{Command, PendingCommandEffect};
-use crate::react::message::append_or_reuse_user_message;
+use crate::react::message::accept_prepared_user_message;
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
 use tiangong_types::StreamEvent;
@@ -74,23 +74,23 @@ pub(super) fn drain_pending_commands_async(
             Command::CancelAgent { .. } => {}
             Command::Shutdown => return PendingCommandEffect::Terminate,
             Command::Message {
-                content,
+                prepared,
                 message_id,
-                media,
+                persistence_ack,
             } => {
-                let mid = append_or_reuse_user_message(session, &content, message_id, media);
-                let msg_media = session
-                    .messages
-                    .iter()
-                    .find(|message| message.id == mid)
-                    .map(|message| message.extract_media_assets())
-                    .unwrap_or_default();
-                let _ = stream_tx.send(StreamEvent::UserMessage {
-                    message_id: mid,
-                    content: content.clone(),
-                    media: msg_media,
-                });
-                injected_message = true;
+                match accept_prepared_user_message(
+                    session,
+                    stream_tx,
+                    message_id,
+                    prepared,
+                    persistence_ack,
+                ) {
+                    Ok(_) => injected_message = true,
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "排空队列时追加用户消息持久化失败"
+                    ),
+                }
             }
             Command::UpdateCwd { cwd } => {
                 session.cwd = cwd;
@@ -145,15 +145,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // 放入消息1、消息2、压缩、取消
         tx.send(Command::Message {
-            content: "msg1".into(),
+            prepared: tiangong_types::PreparedUserMessage::text("msg1"),
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
         tx.send(Command::Message {
-            content: "msg2".into(),
+            prepared: tiangong_types::PreparedUserMessage::text("msg2"),
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
         tx.send(Command::CompressContext).unwrap();
@@ -166,11 +166,11 @@ mod tests {
         let c2 = rx.try_recv().unwrap();
         let c3 = rx.try_recv().unwrap();
         match c1 {
-            Command::Message { content, .. } => assert_eq!(content, "msg1"),
+            Command::Message { prepared, .. } => assert_eq!(prepared.text, "msg1"),
             _ => panic!("第一个应为 msg1"),
         }
         match c2 {
-            Command::Message { content, .. } => assert_eq!(content, "msg2"),
+            Command::Message { prepared, .. } => assert_eq!(prepared.text, "msg2"),
             _ => panic!("第二个应为 msg2"),
         }
         assert!(
@@ -185,9 +185,9 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(Command::Message {
-            content: "msg".into(),
+            prepared: tiangong_types::PreparedUserMessage::text("msg"),
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
 

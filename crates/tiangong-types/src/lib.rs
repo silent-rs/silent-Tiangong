@@ -3,6 +3,7 @@
 //! 所有 crate（core、cli、gui、server、connector）共用的数据类型。
 //! 不包含业务逻辑，只有数据结构和序列化。
 
+pub mod attachment;
 pub mod event;
 pub mod message;
 pub mod process;
@@ -13,6 +14,9 @@ pub mod stream;
 pub mod token;
 pub mod trust_mode;
 
+pub use attachment::{
+    AttachmentHandlingMode, PreparedAttachment, PreparedUserMessage, RuntimeContent,
+};
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
 pub use message::{
     ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,

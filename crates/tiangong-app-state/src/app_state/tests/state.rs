@@ -137,3 +137,35 @@ fn reasoning_effort_is_session_scoped_when_present() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn draft_session_creation_does_not_change_active_session() -> Result<()> {
+    with_isolated_state(
+        "tiangong-state-background-session-create",
+        |_paths, state| {
+            let active_id = state.active_session_id().to_string();
+            let cwd = state.workspace_dir().to_string();
+            let created = state.create_session_without_activation(
+                cwd.clone(),
+                tiangong_core::permission::TrustMode::FullTrust,
+                "high".to_string(),
+            )?;
+
+            assert_eq!(state.active_session_id(), active_id);
+            assert_ne!(created.id, active_id);
+            assert_eq!(created.cwd, cwd);
+            assert_eq!(
+                created.trust_mode,
+                tiangong_core::permission::TrustMode::FullTrust
+            );
+            assert_eq!(created.reasoning_effort.as_deref(), Some("high"));
+            assert!(
+                state
+                    .sessions()
+                    .iter()
+                    .any(|session| session.id == created.id)
+            );
+            Ok(())
+        },
+    )
+}

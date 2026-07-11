@@ -16,7 +16,9 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tiangong_types::{ContentBlock, MediaKind, Message, MessageRole};
+use tiangong_types::{
+    AttachmentHandlingMode, ContentBlock, MediaKind, Message, MessageRole, PreparedAttachment,
+};
 
 use crate::endpoint::ModelEndpoint;
 use crate::message::{
@@ -1030,7 +1032,26 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
         }));
     }
 
-    // 遍历 content blocks
+    let runtime_images = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::RuntimeInlineImage {
+                asset_id,
+                mime_type,
+                data,
+            } => Some((asset_id.as_str(), (mime_type.as_str(), data.as_str()))),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut inline_image_count = 0usize;
+    let mut media_index = 0usize;
+    let mut analyze_notices = Vec::new();
+    let mut file_notices = Vec::new();
+    let mut unavailable_notices = Vec::new();
+
+    // 遍历 content blocks。正式 Attachment 完全按 handling_mode 处理；
+    // include_media 仅保留给旧版 Media 兼容链路。
     for block in &msg.content {
         match block {
             ContentBlock::Text { text: s } => {
@@ -1043,8 +1064,10 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
                 url,
                 ..
             } if include_media && msg.role == MessageRole::User => {
+                media_index += 1;
                 if let Some(img_content) = image_content_from_reference(url) {
                     content.push(LlmMessageContent::Image(img_content));
+                    inline_image_count += 1;
                 }
             }
             // 文件类附件（PDF/Office）不内联注入主请求。
@@ -1053,28 +1076,76 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
             ContentBlock::Media {
                 kind: MediaKind::File,
                 ..
-            } => {}
-            ContentBlock::Media { .. } => {}
+            } => {
+                media_index += 1;
+            }
+            ContentBlock::Media { .. } => {
+                media_index += 1;
+            }
+            ContentBlock::Attachment { attachment } if msg.role == MessageRole::User => {
+                let attachment_index = media_index;
+                media_index += 1;
+                match attachment.handling_mode {
+                    AttachmentHandlingMode::InlineImage => {
+                        let image = runtime_images
+                            .get(attachment.asset_id.as_str())
+                            .map(|(mime_type, data)| image_content_from_runtime(mime_type, data))
+                            .or_else(|| image_content_from_reference(&attachment.local_path));
+                        if let Some(image) = image {
+                            content.push(LlmMessageContent::Image(image));
+                            inline_image_count += 1;
+                        } else {
+                            unavailable_notices.push(format!(
+                                "附件 index={attachment_index} asset_id={} 无法从本轮运行内容或本地路径读取，请明确告知用户重新上传。",
+                                attachment.asset_id
+                            ));
+                        }
+                    }
+                    AttachmentHandlingMode::AnalyzeWithPlugin => analyze_notices.push(
+                        prepared_attachment_notice_item(attachment_index, attachment),
+                    ),
+                    AttachmentHandlingMode::FileReference => file_notices.push(
+                        prepared_attachment_notice_item(attachment_index, attachment),
+                    ),
+                }
+                if !attachment.capability_available {
+                    unavailable_notices.push(format!(
+                        "附件 index={attachment_index} asset_id={} 所需能力 {} 当前不可用；请保留附件引用并明确告知用户。",
+                        attachment.asset_id,
+                        attachment.capability.as_deref().unwrap_or("unknown")
+                    ));
+                }
+            }
+            ContentBlock::Attachment { .. } | ContentBlock::RuntimeInlineImage { .. } => {}
         }
     }
 
-    if include_media && msg.role == MessageRole::User {
-        let image_count = content
+    if msg.role == MessageRole::User && inline_image_count > 0 {
+        // 插入图片数量提示（在图片之前）
+        let notice = LlmMessageContent::Text(format!(
+            "本条用户消息包含 {inline_image_count} 张图片附件，图片内容已随消息提供，请直接基于附件分析。"
+        ));
+        let pos = content
             .iter()
-            .filter(|c| matches!(c, LlmMessageContent::Image(_)))
-            .count();
-        if image_count > 0 {
-            // 插入图片数量提示（在图片之前）
-            let notice = LlmMessageContent::Text(format!(
-                "本条用户消息包含 {image_count} 张图片附件，图片内容已随消息提供，请直接基于附件分析。"
-            ));
-            // 找到第一个 Image 的位置，在其前面插入
-            let pos = content
-                .iter()
-                .position(|c| matches!(c, LlmMessageContent::Image(_)))
-                .unwrap_or(content.len());
-            content.insert(pos, notice);
-        }
+            .position(|c| matches!(c, LlmMessageContent::Image(_)))
+            .unwrap_or(content.len());
+        content.insert(pos, notice);
+    }
+    if !analyze_notices.is_empty() {
+        content.push(LlmMessageContent::Text(format!(
+            "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={}，并指定下列 attachment index。\n{}",
+            msg.id,
+            analyze_notices.join("\n")
+        )));
+    }
+    if !file_notices.is_empty() {
+        content.push(LlmMessageContent::Text(format!(
+            "本条用户消息包含文件引用，文件内容不会直接发送给模型。请使用文件工具、文档解析器或 Skill 按下列本地 path 处理。\n{}",
+            file_notices.join("\n")
+        )));
+    }
+    if !unavailable_notices.is_empty() {
+        content.push(LlmMessageContent::Text(unavailable_notices.join("\n")));
     }
     // 文件附件（PDF/Office）统一走 attachment_notice 提示，不内联进请求。
     // 无论 include_media 与否，只要用户消息含文件附件就注入提示，
@@ -1082,7 +1153,7 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
     // 对于图片类附件：当 include_media=false 时（chat 模型非多模态）也走提示，
     // 引导调用 analyze_attachment 工具。
     let needs_attachment_notice = msg.role == MessageRole::User
-        && (msg.has_file_media() || (!include_media && msg.has_media()));
+        && (msg.has_legacy_file_media() || (!include_media && msg.has_legacy_media()));
     if needs_attachment_notice {
         content.push(LlmMessageContent::Text(attachment_notice_text(msg)));
     }
@@ -1099,6 +1170,32 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
     }
 
     Some(ChatMessage::new(role, content))
+}
+
+fn prepared_attachment_notice_item(index: usize, attachment: &PreparedAttachment) -> String {
+    format!(
+        "- index={index} asset_id={} kind={:?} name={} mime_type={} size={} path={} capability={} capability_available={}",
+        attachment.asset_id,
+        attachment.kind,
+        attachment.original_name,
+        attachment.mime_type,
+        attachment.size,
+        attachment.local_path,
+        attachment.capability.as_deref().unwrap_or("none"),
+        attachment.capability_available,
+    )
+}
+
+fn image_content_from_runtime(mime_type: &str, data: &str) -> crate::message::ImageContent {
+    let data = if data.trim_start().starts_with("data:") {
+        data.to_string()
+    } else {
+        format!("data:{mime_type};base64,{data}")
+    };
+    crate::message::ImageContent {
+        mime_type: mime_type.to_string(),
+        data,
+    }
 }
 
 fn attachment_notice_text(msg: &Message) -> String {
@@ -1853,7 +1950,10 @@ fn function_timeout_ms(base_timeout_ms: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiangong_types::{ContentBlock, MediaKind, Message, MessagePhase, MessageRole};
+    use tiangong_types::{
+        AttachmentHandlingMode, ContentBlock, MediaKind, Message, MessagePhase, MessageRole,
+        PreparedAttachment,
+    };
 
     #[test]
     fn empty_tool_arguments_become_parse_error() {
@@ -1997,6 +2097,163 @@ mod tests {
                 .any(|c| matches!(c, LlmMessageContent::Image(_))),
             "图片应内联为 Image content"
         );
+    }
+
+    #[test]
+    fn prepared_inline_image_prefers_current_runtime_content_regardless_of_include_media() {
+        let msg = test_user_message_with_prepared_attachment(
+            AttachmentHandlingMode::InlineImage,
+            MediaKind::Image,
+            "/path/that/does/not/exist.png",
+            Some("CURRENT_RUNTIME_BASE64"),
+        );
+
+        let result = provider_message_from_session(&msg, false).expect("应生成消息");
+        let image = result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                LlmMessageContent::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("Prepared InlineImage 应进入请求");
+        assert_eq!(image.data, "data:image/png;base64,CURRENT_RUNTIME_BASE64");
+    }
+
+    #[test]
+    fn prepared_historical_inline_image_is_encoded_from_local_path() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tiangong-provider-inline-{}-{unique}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
+        let msg = test_user_message_with_prepared_attachment(
+            AttachmentHandlingMode::InlineImage,
+            MediaKind::Image,
+            path.to_str().unwrap(),
+            None,
+        );
+
+        let result = provider_message_from_session(&msg, false).expect("应生成消息");
+        let image = result
+            .content
+            .iter()
+            .find_map(|content| match content {
+                LlmMessageContent::Image(image) => Some(image),
+                _ => None,
+            })
+            .expect("历史 InlineImage 应从本地路径重编码");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, "data:image/png;base64,AQIDBA==");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prepared_analyze_attachment_generates_explicit_plugin_notice() {
+        let msg = test_user_message_with_prepared_attachment(
+            AttachmentHandlingMode::AnalyzeWithPlugin,
+            MediaKind::Image,
+            "/tmp/analyze.png",
+            None,
+        );
+
+        let result = provider_message_from_session(&msg, true).expect("应生成消息");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text)
+                if text.contains("analyze_attachment")
+                    && text.contains("message_id=msg_prepared")
+                    && text.contains("index=0")
+                    && text.contains("path=/tmp/analyze.png")
+        )));
+        assert!(
+            !result
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::Image(_)))
+        );
+    }
+
+    #[test]
+    fn prepared_file_reference_generates_explicit_local_path_notice() {
+        let msg = test_user_message_with_prepared_attachment(
+            AttachmentHandlingMode::FileReference,
+            MediaKind::File,
+            "/tmp/report.pdf",
+            None,
+        );
+
+        let result = provider_message_from_session(&msg, true).expect("应生成消息");
+        assert!(result.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text)
+                if text.contains("文件引用")
+                    && text.contains("path=/tmp/report.pdf")
+                    && text.contains("name=prepared-file")
+        )));
+    }
+
+    fn test_user_message_with_prepared_attachment(
+        handling_mode: AttachmentHandlingMode,
+        kind: MediaKind,
+        local_path: &str,
+        runtime_data: Option<&str>,
+    ) -> Message {
+        let mut content = vec![
+            ContentBlock::text("处理附件"),
+            ContentBlock::Attachment {
+                attachment: PreparedAttachment {
+                    asset_id: "asset-prepared".to_string(),
+                    local_path: local_path.to_string(),
+                    original_name: "prepared-file".to_string(),
+                    mime_type: if kind == MediaKind::Image {
+                        "image/png".to_string()
+                    } else {
+                        "application/pdf".to_string()
+                    },
+                    size: 4,
+                    kind,
+                    handling_mode,
+                    capability: Some(
+                        match handling_mode {
+                            AttachmentHandlingMode::InlineImage => "chat_multimodal",
+                            AttachmentHandlingMode::AnalyzeWithPlugin => "analyze_attachment",
+                            AttachmentHandlingMode::FileReference => "file_reference",
+                        }
+                        .to_string(),
+                    ),
+                    capability_available: true,
+                },
+            },
+        ];
+        if let Some(data) = runtime_data {
+            content.push(ContentBlock::RuntimeInlineImage {
+                asset_id: "asset-prepared".to_string(),
+                mime_type: "image/png".to_string(),
+                data: data.to_string(),
+            });
+        }
+        Message {
+            id: "msg_prepared".to_string(),
+            role: MessageRole::User,
+            content,
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            phase: MessagePhase::Normal,
+            created_at: String::new(),
+            elapsed_ms: None,
+            turn_status: None,
+        }
     }
 
     /// 构造测试用 user Message（含一个 media block）

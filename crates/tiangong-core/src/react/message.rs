@@ -2,54 +2,118 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::session::{ContentBlock, Message, MessageRole, MessageToolCall, Session};
-use tiangong_types::{MediaAsset, StreamEvent};
+use crate::session::{Message, MessageRole, MessageToolCall, Session};
+use tiangong_types::{PreparedAttachment, PreparedUserMessage, RuntimeContent, StreamEvent};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
 pub(crate) fn append_or_reuse_user_message(
     session: &mut Session,
-    content: &str,
     message_id: Option<String>,
-    media: Vec<MediaAsset>,
-) -> String {
+    prepared: PreparedUserMessage,
+) -> Result<String, String> {
     if let Some(message_id) = message_id {
-        if let Some(message) = session
+        if session
             .messages
-            .iter_mut()
-            .find(|message| message.id == message_id)
+            .iter()
+            .any(|message| message.id == message_id)
         {
-            // 消息已存在（GUI 路径：app_state 已先持久化）：用本轮 ingress 处理后的
-            // content 与归档后的 media 重建 content blocks，确保 core session 的
-            // 文本与 media 引用均为最新（issue #149：attachment_notice 必须引用
-            // 本地路径而非 data URL）。
-            //
-            // 前提假设：当前 content blocks 仅含 Text 与 Media 两类。重建时以传入
-            // content 作为文本块、归档后 media 作为媒体块；若未来引入其他非文本
-            //（非媒体）块类型，需在此保留它们，否则会被丢弃。
-            let mut blocks = vec![ContentBlock::text(content.to_string())];
-            for asset in &media {
-                blocks.push(asset.to_content_block());
+            if !session.update_prepared_user_message(&message_id, prepared) {
+                return Err(format!("消息 ID {message_id} 已被非用户消息占用"));
             }
-            message.content = blocks;
         } else {
-            session.append_message_with_id_and_media(
-                message_id.clone(),
-                MessageRole::User,
-                content.to_string(),
-                String::new(),
-                media,
-            );
+            session.append_prepared_user_message_with_id(message_id.clone(), prepared);
         }
-        return message_id;
+        return Ok(message_id);
     }
 
-    session.append_message_with_media(MessageRole::User, content.to_string(), media);
+    let message_id = scru128::new().to_string();
+    session.append_prepared_user_message_with_id(message_id.clone(), prepared);
+    Ok(message_id)
+}
+
+pub(crate) struct AcceptedUserMessage {
+    pub message_id: String,
+    /// 该用户消息在 Session 中的实际索引；快照预含同 ID 消息时可能小于接收前 len。
+    pub turn_start_idx: usize,
+    pub text: String,
+    pub persistent_attachments: Vec<PreparedAttachment>,
+    pub runtime_content: Vec<RuntimeContent>,
+}
+
+/// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
+///
+/// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
+pub(crate) fn accept_prepared_user_message(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: Option<String>,
+    prepared: PreparedUserMessage,
+    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> Result<AcceptedUserMessage, String> {
+    let before = session.clone();
+    let text = prepared.text.clone();
+    let persistent_attachments = prepared.persistent_attachments.clone();
+    let runtime_content = prepared.runtime_content.clone();
+    let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
+        Ok(message_id) => message_id,
+        Err(err) => {
+            *session = before;
+            if let Some(ack) = persistence_ack {
+                let _ = ack.send(Err(err.clone()));
+            }
+            return Err(err);
+        }
+    };
+    let turn_start_idx = match user_message_turn_start_idx(session, &message_id) {
+        Some(index) => index,
+        None => {
+            let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
+            *session = before;
+            if let Some(ack) = persistence_ack {
+                let _ = ack.send(Err(err.clone()));
+            }
+            return Err(err);
+        }
+    };
+
+    if let Err(err) = session.try_persist_to_disk() {
+        *session = before;
+        if let Some(ack) = persistence_ack {
+            let _ = ack.send(Err(err.clone()));
+        }
+        return Err(err);
+    }
+
+    if let Some(ack) = persistence_ack {
+        let _ = ack.send(Ok(()));
+    }
+    let media = session
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .map(|message| message.extract_media_assets())
+        .unwrap_or_default();
+    let _ = stream_tx.send(StreamEvent::UserMessage {
+        message_id: message_id.clone(),
+        content: text.clone(),
+        prepared_attachments: persistent_attachments.clone(),
+        media: media.clone(),
+    });
+    Ok(AcceptedUserMessage {
+        message_id,
+        turn_start_idx,
+        text,
+        persistent_attachments,
+        runtime_content,
+    })
+}
+
+fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
     session
         .messages
-        .last()
-        .map(|m| m.id.clone())
-        .unwrap_or_default()
+        .iter()
+        .position(|message| message.id == message_id && message.role == MessageRole::User)
 }
 
 pub(crate) fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
@@ -634,6 +698,64 @@ fn format_payload_value(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn persistence_failure_is_confirmed_and_restores_session() {
+        let mut session = Session::new("persistence-failure");
+        let mut invalid = Message::new(MessageRole::User, "existing");
+        invalid
+            .content
+            .push(tiangong_types::ContentBlock::RuntimeInlineImage {
+                asset_id: "invalid-runtime".to_string(),
+                mime_type: "image/png".to_string(),
+                data: "must-not-persist".to_string(),
+            });
+        session.messages.push(invalid);
+        let before_content = session.messages[0].content.clone();
+
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        let result = accept_prepared_user_message(
+            &mut session,
+            &stream_tx,
+            Some("new-message".to_string()),
+            PreparedUserMessage::text("new content"),
+            Some(ack_tx),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, before_content);
+        let confirmation = ack_rx.await.expect("应收到持久化确认");
+        assert!(confirmation.is_err());
+    }
+
+    #[test]
+    fn preloaded_same_id_message_uses_its_actual_index_as_turn_start() {
+        let mut session = Session::new("preloaded-turn");
+        session.append_message(MessageRole::Assistant, "before");
+        session.append_prepared_user_message_with_id(
+            "preloaded-user".to_string(),
+            PreparedUserMessage::text("old content"),
+        );
+        session.append_message(MessageRole::Assistant, "after");
+        let accept_before_len = session.messages.len();
+
+        let message_id = append_or_reuse_user_message(
+            &mut session,
+            Some("preloaded-user".to_string()),
+            PreparedUserMessage::text("new content"),
+        )
+        .unwrap();
+        let turn_start_idx = user_message_turn_start_idx(&session, &message_id).unwrap();
+
+        assert_eq!(turn_start_idx, 1);
+        assert_ne!(turn_start_idx, accept_before_len);
+        assert_eq!(
+            session.messages[turn_start_idx].text_content(),
+            "new content"
+        );
+    }
 
     #[test]
     fn inject_tool_renders_browser_feedback() {

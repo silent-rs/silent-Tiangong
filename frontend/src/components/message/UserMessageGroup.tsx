@@ -11,7 +11,7 @@ import { VoiceBubble } from "./VoiceBubble";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
 
-export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, hasMultimodal, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
+export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
   runStatus: string;
   nonEditableIds: Set<string>;
@@ -20,7 +20,6 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   editingContent: string;
   editingAttachments: Attachment[];
   editingTextareaRef: React.RefObject<HTMLTextAreaElement>;
-  hasMultimodal: boolean;
   onStartEdit: (messageId: string, text: string) => void;
   onConfirmEdit: () => void;
   onCancelEdit: () => void;
@@ -52,10 +51,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           {editingAttachments.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {editingAttachments.map((item) => (
-                <span key={item.title + item.url.slice(0, 40)} className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs" title={item.title}>
-                  {item.kind === "image" ? <img src={resolveAttachmentUrl(item.url)} alt={item.title} className="h-6 w-6 shrink-0 rounded object-cover" /> : <Paperclip className="h-3 w-3 shrink-0" />}
-                  <span className="truncate">{item.title}</span>
-                  <button type="button" onClick={() => onSetEditingAttachments((prev) => prev.filter((a) => a.url !== item.url))} className="ml-1 text-muted-foreground hover:text-foreground" title="移除附件">
+                <span key={(item.original_name ?? '') + item.source.slice(0, 40)} className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs" title={item.original_name ?? item.source}>
+                  {item.kind === "image" ? <img src={resolveAttachmentUrl(item.source)} alt={item.original_name ?? '附件'} className="h-6 w-6 shrink-0 rounded object-cover" /> : <Paperclip className="h-3 w-3 shrink-0" />}
+                  <span className="truncate">{item.original_name ?? item.source}</span>
+                  <button type="button" onClick={() => onSetEditingAttachments((prev) => prev.filter((a) => a.source !== item.source))} className="ml-1 text-muted-foreground hover:text-foreground" title="移除附件">
                     <X className="h-3 w-3" />
                   </button>
                 </span>
@@ -81,11 +80,9 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
           <div className="flex justify-between items-center mt-1">
             <span className="text-[10px] text-muted-foreground">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
             <div className="flex gap-1.5">
-              {hasMultimodal && (
-                <button onClick={onAttachFiles} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors" title="添加附件">
-                  <Paperclip className="w-3 h-3" />
-                </button>
-              )}
+              <button onClick={onAttachFiles} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors" title="添加附件">
+                <Paperclip className="w-3 h-3" />
+              </button>
               <button onClick={onCancelEdit} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors">
                 <X className="h-3 w-3" /> 取消
               </button>

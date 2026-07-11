@@ -4,9 +4,9 @@
 pub(crate) enum Command {
     /// 发送消息
     Message {
-        content: String,
+        prepared: tiangong_types::PreparedUserMessage,
         message_id: Option<String>,
-        media: Vec<tiangong_types::MediaAsset>,
+        persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     },
     /// 更新当前会话工作目录
     UpdateCwd { cwd: String },

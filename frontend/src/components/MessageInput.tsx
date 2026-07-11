@@ -1,16 +1,18 @@
 import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, useCallback } from 'react';
-import { useStore } from '@/store/useStore';
+import type { SetStateAction } from 'react';
+import { selectCurrentDraftKey, selectCurrentInputDraft, useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
 import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
-import { api, type MediaAsset, textContent } from '@/api/tauri';
+import { api, textContent } from '@/api/tauri';
 import { useAudioRecording } from '@/hooks/useAudioRecording';
 import {
   type Attachment,
   MAX_ATTACHMENT_BASE64_BYTES,
+  attachmentKindFromMime,
   imageMimeType,
   imageExtFromMime,
   clipboardImagePaths,
@@ -18,7 +20,6 @@ import {
   attachmentFromPath,
   estimatedBase64Size,
   resolveAttachmentUrl,
-  attachmentsToBase64Media,
 } from '@/utils/attachments';
 
 interface MentionCandidate {
@@ -44,9 +45,15 @@ const SLASH_COMMANDS: MentionCandidate[] = [
 ];
 
 export function MessageInput() {
-  const inputContent = useStore((state) => state.inputContent);
-  const setInputContent = useStore((state) => state.setInputContent);
+  const draftKey = useStore(selectCurrentDraftKey);
+  const inputDraft = useStore(selectCurrentInputDraft);
+  const inputContent = inputDraft.text;
+  const attachments = inputDraft.attachments;
+  const isSending = inputDraft.is_sending;
+  const setDraftText = useStore((state) => state.setDraftText);
+  const setDraftAttachments = useStore((state) => state.setDraftAttachments);
   const sendMessage = useStore((state) => state.sendMessage);
+  const appendMessage = useStore((state) => state.appendMessage);
   const cancelTurn = useStore((state) => state.cancelTurn);
   const beginContextManagement = useStore((state) => state.beginContextManagement);
   const endContextManagement = useStore((state) => state.endContextManagement);
@@ -83,9 +90,18 @@ export function MessageInput() {
 
   // 信任模式
   const [trustMode, setTrustMode] = useState('full_trust');
-  const [hasMultimodal, setHasMultimodal] = useState(false);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+
+  const setInputContent = useCallback((content: string) => {
+    if (draftKey) setDraftText(draftKey, content);
+  }, [draftKey, setDraftText]);
+
+  const setAttachments = useCallback((update: SetStateAction<Attachment[]>) => {
+    if (!draftKey) return;
+    const current = useStore.getState().inputDrafts[draftKey]?.attachments ?? [];
+    const next = typeof update === 'function' ? update(current) : update;
+    setDraftAttachments(draftKey, next);
+  }, [draftKey, setDraftAttachments]);
 
   const currentRunStatus = isDraft
     ? 'idle'
@@ -110,21 +126,26 @@ export function MessageInput() {
   const activeAgentLabel = selectedAgent?.label ?? null;
 
   useEffect(() => {
-    api.getTrustMode().then(setTrustMode).catch(() => {});
-    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
-  }, []);
-
-  useEffect(() => {
-    if (!hasMultimodal) {
-      setAttachments([]);
-      setIsDraggingFiles(false);
-    }
-  }, [hasMultimodal]);
+    let cancelled = false;
+    const loadTrustMode = activeSessionId
+      ? api.getTrustMode(activeSessionId)
+      : api.getDefaultTrustMode();
+    loadTrustMode
+      .then((mode) => {
+        if (!cancelled) setTrustMode(mode);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSessionId]);
 
   const toggleTrustMode = async () => {
     const newMode = trustMode === 'full_trust' ? 'supervised' : 'full_trust';
     try {
-      await api.setTrustMode(newMode);
+      if (activeSessionId) {
+        await api.setTrustMode(newMode, activeSessionId);
+      }
       setTrustMode(newMode);
     } catch (e) {
       console.error('切换信任模式失败:', e);
@@ -148,8 +169,10 @@ export function MessageInput() {
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
-  const canSend = inputContent.trim().length > 0 || (hasMultimodal && attachments.length > 0);  // 执行中也允许输入
-  const isTextDropTargetActive = !voiceMode && hasMultimodal && isIdle;
+  const canSend = !isSending
+    && !!draftKey
+    && (inputContent.trim().length > 0 || attachments.length > 0);
+  const isTextDropTargetActive = !voiceMode && !!draftKey;
 
   // 推理计时器：仅在执行态（非 idle）运行，实时累计本轮已用时长，
   // 显示在「执行状态」指示器（Circle + runSummary）左侧；回到 idle 归零。
@@ -336,13 +359,13 @@ export function MessageInput() {
     setAttachments(prev => {
       const next = [...prev];
       for (const item of items) {
-        if (!next.some(existing => existing.url === item.url)) {
+        if (!next.some(existing => existing.source === item.source)) {
           next.push(item);
         }
       }
       return next;
     });
-  }, []);
+  }, [setAttachments]);
 
   const addAttachmentsFromPaths = useCallback((paths: string[]) => {
     addAttachments(paths.map(attachmentFromPath));
@@ -394,34 +417,29 @@ export function MessageInput() {
   const filesToAttachments = async (files: File[]) => {
     const items = await Promise.all(files.map(async (file, index): Promise<Attachment> => {
       const title = file.name || `dropped-file-${index + 1}`;
-      if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
-        throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
-      }
       const fileWithPath = file as File & { path?: string };
       if (fileWithPath.path) {
         return attachmentFromPath(fileWithPath.path);
       }
-      if (file.type.startsWith('image/')) {
-        const mimeType = file.type || 'image/png';
-        return {
-          kind: 'image',
-          url: await fileToDataUrl(file),
-          title: file.name || `dropped-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`,
-          mime_type: mimeType,
-        };
+      if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
+        throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
       }
+      const mimeType = file.type || 'application/octet-stream';
       return {
-        kind: 'file',
-        url: await fileToDataUrl(file),
-        title,
-        mime_type: file.type || 'application/octet-stream',
+        kind: attachmentKindFromMime(mimeType),
+        source: await fileToDataUrl(file),
+        original_name: file.name || (
+          mimeType.startsWith('image/')
+            ? `dropped-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`
+            : title
+        ),
+        mime_type: mimeType,
       };
     }));
     addAttachments(items);
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
-    if (!hasMultimodal || !isIdle) return;
     if (Array.from(e.dataTransfer.types).includes('Files')) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
@@ -436,7 +454,6 @@ export function MessageInput() {
   };
 
   const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
-    if (!hasMultimodal || !isIdle) return;
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
     e.preventDefault();
@@ -452,24 +469,22 @@ export function MessageInput() {
   };
 
   const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!hasMultimodal || !isIdle) return;
-
-    const files = Array.from(e.clipboardData.files).filter(file =>
-      file.type.startsWith('image/')
-    );
+    const files = Array.from(e.clipboardData.files);
     if (files.length > 0) {
       e.preventDefault();
       try {
         const pasted = await Promise.all(files.map(async (file, index) => {
-          const mimeType = file.type || 'image/png';
-          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+          const mimeType = file.type || 'application/octet-stream';
+          const title = file.name || (mimeType.startsWith('image/')
+            ? `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`
+            : `pasted-file-${Date.now()}-${index + 1}`);
           if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
             throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
           }
           return {
-            kind: 'image' as const,
-            url: await fileToDataUrl(file),
-            title,
+            kind: attachmentKindFromMime(mimeType),
+            source: await fileToDataUrl(file),
+            original_name: title,
             mime_type: mimeType,
           };
         }));
@@ -481,24 +496,24 @@ export function MessageInput() {
       return;
     }
 
-    const imageItems = Array.from(e.clipboardData.items).filter(item =>
-      item.kind === 'file' && item.type.startsWith('image/')
-    );
-    if (imageItems.length > 0) {
+    const fileItems = Array.from(e.clipboardData.items).filter(item => item.kind === 'file');
+    if (fileItems.length > 0) {
       e.preventDefault();
       try {
-        const pasted = await Promise.all(imageItems.map(async (item, index): Promise<Attachment | null> => {
+        const pasted = await Promise.all(fileItems.map(async (item, index): Promise<Attachment | null> => {
           const file = item.getAsFile();
           if (!file) return null;
-          const mimeType = file.type || item.type || 'image/png';
-          const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+          const mimeType = file.type || item.type || 'application/octet-stream';
+          const title = file.name || (mimeType.startsWith('image/')
+            ? `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`
+            : `pasted-file-${Date.now()}-${index + 1}`);
           if (estimatedBase64Size(file.size) > MAX_ATTACHMENT_BASE64_BYTES) {
             throw new Error(`附件“${title}”超过 50MB，已停止添加。`);
           }
           return {
-            kind: 'image' as const,
-            url: await fileToDataUrl(file),
-            title,
+            kind: attachmentKindFromMime(mimeType),
+            source: await fileToDataUrl(file),
+            original_name: title,
             mime_type: mimeType,
           };
         }));
@@ -520,8 +535,8 @@ export function MessageInput() {
       e.preventDefault();
       addAttachments(paths.map(path => ({
         kind: 'image',
-        url: path,
-        title: path.split('/').pop() || path,
+        source: path,
+        original_name: path.split(/[\\/]/).pop() || path,
         mime_type: imageMimeType(path),
       })));
     }
@@ -545,43 +560,39 @@ export function MessageInput() {
     if (!canSend) return;
     setMentionOpen(false);
 
+    // 在任何异步调用前固定目标与完整草稿快照，后续切换会话不改变投递目标。
+    const targetDraftKey = draftKey;
+    if (!targetDraftKey) return;
+    const draftSnapshot = {
+      ...inputDraft,
+      attachments: inputDraft.attachments.map((attachment) => ({ ...attachment })),
+    };
+
     // slash command 拦截
-    const trimmed = inputContent.trim();
+    const trimmed = draftSnapshot.text.trim();
     if (await executeSlashCommand(trimmed)) {
       return;
     }
-    if (attachments.length > 0 && !hasMultimodal) {
-      setAttachments([]);
-      alert('未配置多模态模型，文件上传能力已关闭。');
-      return;
-    }
-    let media: MediaAsset[];
-    try {
-      media = await attachmentsToBase64Media(attachments);
-    } catch (err) {
-      console.error('附件转换失败:', err);
-      alert(err instanceof Error ? err.message : '附件转换失败');
-      return;
-    }
-    const content = inputContent.trim() || (attachments.length > 0 ? '请处理这些附件。' : inputContent);
+    const content = draftSnapshot.text.trim()
+      || (draftSnapshot.attachments.length > 0 ? '请处理这些附件。' : draftSnapshot.text);
     if (isIdle) {
-      await sendMessage(content, media);
-      setAttachments([]);
+      await sendMessage(
+        targetDraftKey,
+        content,
+        draftSnapshot.attachments,
+        draftSnapshot.revision,
+        trustMode,
+      );
     } else {
       // 执行中：追加消息到正在执行的 turn
-      if (!activeSessionId) return;
-      try {
-        const appended = await api.appendMessage(activeSessionId, content, media.length > 0 ? media : undefined);
-        if (appended) {
-          setInputContent('');
-          setAttachments([]);
-        } else {
-          // 投递失败：不清空输入和附件，让用户重试
-          console.warn('当前会话没有正在执行的任务，追加消息未发送');
-        }
-      } catch (e) {
-        // 归档或投递失败：不清空附件，让用户重试
-        console.error('追加消息失败:', e);
+      const appended = await appendMessage(
+        targetDraftKey,
+        content,
+        draftSnapshot.attachments,
+        draftSnapshot.revision,
+      );
+      if (!appended) {
+        console.warn('当前会话没有正在执行的任务，追加消息未发送');
       }
     }
   };
@@ -589,14 +600,21 @@ export function MessageInput() {
   const handleCancel = () => { cancelTurn(); };
 
   const handleAttachFiles = async () => {
-    if (!hasMultimodal) return;
     try {
       const selected = await open({
         multiple: true,
         directory: false,
         title: '选择图片或文件',
         filters: [
-          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'json', 'csv'] },
+          {
+            name: '图片、音视频和文件',
+            extensions: [
+              'png', 'jpg', 'jpeg', 'webp', 'gif',
+              'mp3', 'wav', 'm4a', 'ogg', 'flac',
+              'mp4', 'mov', 'webm', 'mkv',
+              'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'json', 'csv',
+            ],
+          },
         ],
       });
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
@@ -607,8 +625,8 @@ export function MessageInput() {
     }
   };
 
-  const removeAttachment = (url: string) => {
-    setAttachments(prev => prev.filter(item => item.url !== url));
+  const removeAttachment = (source: string) => {
+    setAttachments(prev => prev.filter(item => item.source !== source));
   };
 
   const handleChangeCwd = async () => {
@@ -635,6 +653,16 @@ export function MessageInput() {
   const stopVoiceAndSend = useCallback(async () => {
     if (!isRecordingRef.current) return;
     isRecordingRef.current = false;
+    const targetDraftKey = draftKey;
+    if (!targetDraftKey) {
+      recording.cancelRecording();
+      return;
+    }
+    const targetDraft = useStore.getState().inputDrafts[targetDraftKey];
+    if (!targetDraft) {
+      recording.cancelRecording();
+      return;
+    }
 
     // 误触保护：录音不足 1 秒则丢弃
     const elapsedMs = recording.getElapsedMs();
@@ -664,7 +692,7 @@ export function MessageInput() {
         // 优先用 API 返回的时长，否则用前端录音计时
         const audioDuration = result.duration || voiceDuration;
 
-        sendMessage(text);
+        await sendMessage(targetDraftKey, text, [], targetDraft.revision, trustMode);
 
         // 轮询等待消息出现后，通过内容匹配关联语音
         const tryAssociate = (retries: number) => {
@@ -690,7 +718,7 @@ export function MessageInput() {
     } finally {
       recording.setState("idle");
     }
-  }, [recording, sendMessage]);
+  }, [draftKey, recording, sendMessage, trustMode]);
 
   const cancelVoiceRecording = useCallback(() => {
     if (!isRecordingRef.current) return;
@@ -926,23 +954,23 @@ export function MessageInput() {
                 <div className="mb-2 flex flex-wrap gap-1.5">
                   {attachments.map(item => (
                     <span
-                      key={item.title + item.url.slice(0, 40)}
+                      key={(item.original_name ?? '') + item.source.slice(0, 40)}
                       className="inline-flex h-9 max-w-[260px] items-center gap-1.5 rounded-md border bg-muted/40 px-2 text-xs"
-                      title={item.title}
+                      title={item.original_name ?? item.source}
                     >
                       {item.kind === 'image' ? (
                         <img
-                          src={resolveAttachmentUrl(item.url)}
-                          alt={item.title}
+                          src={resolveAttachmentUrl(item.source)}
+                          alt={item.original_name ?? '附件'}
                           className="h-6 w-6 shrink-0 rounded object-cover"
                         />
                       ) : (
                         <Paperclip className="h-3 w-3 shrink-0" />
                       )}
-                      <span className="truncate">{item.title}</span>
+                      <span className="truncate">{item.original_name ?? item.source}</span>
                       <button
                         type="button"
-                        onClick={() => removeAttachment(item.url)}
+                        onClick={() => removeAttachment(item.source)}
                         className="ml-1 text-muted-foreground hover:text-foreground"
                         title="移除附件"
                       >
@@ -964,6 +992,7 @@ export function MessageInput() {
                   setTimeout(() => { isComposingRef.current = false; }, 0);
                 }}
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
+                disabled={!draftKey}
                 placeholder={
                   isIdle
                     ? agents.length > 0
@@ -980,17 +1009,16 @@ export function MessageInput() {
               )}
               {/* 按钮区域 */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
-                {hasMultimodal && isIdle && (
-                  <Button
-                    onClick={handleAttachFiles}
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"
-                    title="添加图片或文件"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                  </Button>
-                )}
+                <Button
+                  onClick={handleAttachFiles}
+                  disabled={!draftKey}
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"
+                  title="添加图片、音视频或文件"
+                >
+                  <Paperclip className="w-4 h-4" />
+                </Button>
                 {hasStt && isIdle && (
                   <Button
                     onClick={() => setVoiceMode(true)}

@@ -68,7 +68,15 @@ impl TiangongState {
     }
 
     pub fn update_draft(&mut self, value: String) {
-        self.store.session.input_draft = value;
+        let active_id = self.store.session.active_session_id.clone();
+        let draft = self
+            .store
+            .session
+            .input_drafts
+            .entry(active_id)
+            .or_default();
+        draft.text = value;
+        draft.revision = draft.revision.saturating_add(1);
     }
 
     pub fn provider_label(&self) -> String {
@@ -82,7 +90,17 @@ impl TiangongState {
     /// 根据当前应用状态构建供 TiangongCore 使用的最小配置快照
     pub fn build_core_config_from_base(
         &self,
+        base: &tiangong_core::core_config::CoreConfig,
+    ) -> tiangong_core::core_config::CoreConfig {
+        self.build_core_config_for_session_from_base(base, self.active_session_id())
+    }
+
+    /// 按显式目标会话构建配置，异步发送期间即使活动会话切换也不会借用其他会话的
+    /// trust_mode 或 reasoning_effort。
+    pub fn build_core_config_for_session_from_base(
+        &self,
         _base: &tiangong_core::core_config::CoreConfig,
+        session_id: &str,
     ) -> tiangong_core::core_config::CoreConfig {
         let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
         // context_limit 由 config 层解析注入（core 不做配置磁盘 IO）。
@@ -92,12 +110,25 @@ impl TiangongState {
         } else {
             tiangong_config::io::resolve_context_limit_at(&dir, &llm.chat.model)
         };
+        let target_session = self
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id);
+        let trust_mode = target_session
+            .map(|session| session.trust_mode)
+            .unwrap_or(self.agent_config().default_trust_mode);
+        let reasoning_effort = target_session
+            .and_then(|session| session.reasoning_effort.as_deref())
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.agent_config().reasoning_effort.clone());
         tiangong_core::core_config::CoreConfig {
             llm,
-            trust_mode: self.active_session_trust_mode(),
+            trust_mode,
             default_trust_mode: self.agent_config().default_trust_mode,
             custom_system_prompt: self.agent_config().custom_system_prompt.clone(),
-            reasoning_effort: self.active_session_reasoning_effort(),
+            reasoning_effort,
             context_limit,
         }
     }
@@ -140,12 +171,17 @@ impl TiangongState {
 
     pub fn update_active_session_cwd(&mut self, cwd: String) -> Result<()> {
         let active_id = self.store.session.active_session_id.clone();
+        self.update_session_cwd(&active_id, cwd)
+    }
+
+    /// 按显式会话 ID 更新工作目录，异步创建/转正期间不依赖全局活动会话。
+    pub fn update_session_cwd(&mut self, session_id: &str, cwd: String) -> Result<()> {
         if let Some(session) = self
             .store
             .session
             .sessions
             .iter_mut()
-            .find(|s| s.id == active_id)
+            .find(|s| s.id == session_id)
         {
             // Isolated 模式不允许修改工作目录
             if session.cwd_mode == tiangong_core::session::SessionCwdMode::Isolated {
@@ -157,7 +193,9 @@ impl TiangongState {
             }
             session.cwd = cwd;
             session.cwd_mode = tiangong_core::session::SessionCwdMode::Custom;
+        } else {
+            return Err(anyhow::anyhow!("会话不存在：{session_id}"));
         }
-        self.persist_session_and_app(&active_id)
+        self.persist_session_and_app(session_id)
     }
 }

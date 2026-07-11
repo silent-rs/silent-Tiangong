@@ -9626,6 +9626,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-media-archive",
  "tiangong-types",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -9786,6 +9787,7 @@ dependencies = [
  "base64 0.22.1",
  "reqwest 0.13.4",
  "scru128",
+ "serde",
  "tiangong-types",
  "tracing",
 ]

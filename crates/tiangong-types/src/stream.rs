@@ -129,6 +129,10 @@ pub enum StreamEvent {
         /// 该用户消息在 session 中的 ID
         message_id: String,
         content: String,
+        /// 已由宿主入口保存和规划的正式附件，供会话副本保留 handling mode。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prepared_attachments: Vec<crate::PreparedAttachment>,
+        /// 旧版消费者兼容字段；仅包含稳定媒体引用，不携带运行时 base64。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         media: Vec<crate::MediaAsset>,
     },

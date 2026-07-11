@@ -169,6 +169,48 @@ fn stream_event_serde() {
 }
 
 #[test]
+fn user_message_event_preserves_prepared_attachments_and_accepts_legacy_media_only_json() {
+    let event = StreamEvent::UserMessage {
+        message_id: "msg-attachment".into(),
+        content: "查看附件".into(),
+        prepared_attachments: vec![PreparedAttachment {
+            asset_id: "asset-1".into(),
+            local_path: "/tmp/image.png".into(),
+            original_name: "image.png".into(),
+            mime_type: "image/png".into(),
+            size: 4,
+            kind: MediaKind::Image,
+            handling_mode: AttachmentHandlingMode::AnalyzeWithPlugin,
+            capability: Some("analyze_attachment".into()),
+            capability_available: true,
+        }],
+        media: Vec::new(),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("prepared_attachments"));
+    assert!(json.contains("analyze_with_plugin"));
+
+    let legacy = r#"{
+        "type":"user_message",
+        "message_id":"legacy-message",
+        "content":"legacy",
+        "media":[{"kind":"image","url":"/tmp/legacy.png"}]
+    }"#;
+    let parsed: StreamEvent = serde_json::from_str(legacy).unwrap();
+    match parsed {
+        StreamEvent::UserMessage {
+            prepared_attachments,
+            media,
+            ..
+        } => {
+            assert!(prepared_attachments.is_empty());
+            assert_eq!(media.len(), 1);
+        }
+        _ => panic!("应反序列化为 UserMessage"),
+    }
+}
+
+#[test]
 fn stream_event_phase_variants_serde() {
     // ReAct 阶段过程性文本
     let react = StreamEvent::ReactText {

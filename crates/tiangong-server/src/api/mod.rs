@@ -61,18 +61,7 @@ impl ServerAppContext {
     }
 
     pub async fn sync_core_config_from_state(&self) {
-        let base = self.config.snapshot();
-        let next = {
-            let state = self.state.lock().await;
-            // 同步最新 models 到 config 内存单例（与 Tauri 一致）。
-            tiangong_config::registry::set_models(state.models_config().clone());
-            let mut next = state.build_core_config_from_base(&base);
-            next.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
-            next
-        };
-        self.config.replace(next);
-        // 通知所有活跃 core reload_config（plugin 经 on_config_updated 热更新端点）。
-        self.cores.notify_reload_config();
+        self.cores.sync_config_from_state().await;
     }
 }
 

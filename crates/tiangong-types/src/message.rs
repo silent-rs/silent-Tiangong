@@ -3,6 +3,8 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 
+use crate::{PreparedAttachment, RuntimeContent};
+
 /// 消息角色
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +71,19 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    /// 宿主入口已保存并规划完成的正式附件块。
+    Attachment {
+        attachment: PreparedAttachment,
+    },
+    /// 仅由 `Session::context()` 注入克隆请求上下文的本轮图片内容。
+    ///
+    /// 该块不得进入 `Session.messages`；Core 持久化前会显式校验这一约束。
+    RuntimeInlineImage {
+        asset_id: String,
+        mime_type: String,
+        #[serde(default, skip_serializing)]
+        data: String,
+    },
 }
 
 impl ContentBlock {
@@ -92,14 +107,35 @@ impl ContentBlock {
     pub fn url(&self) -> Option<&str> {
         match self {
             Self::Media { url, .. } => Some(url),
-            Self::Text { .. } => None,
+            Self::Attachment { attachment } => Some(&attachment.local_path),
+            Self::Text { .. } | Self::RuntimeInlineImage { .. } => None,
         }
     }
 
     pub fn kind(&self) -> Option<MediaKind> {
         match self {
             Self::Media { kind, .. } => Some(*kind),
+            Self::Attachment { attachment } => Some(attachment.kind),
+            Self::RuntimeInlineImage { .. } => Some(MediaKind::Image),
             Self::Text { .. } => None,
+        }
+    }
+
+    pub fn attachment(attachment: PreparedAttachment) -> Self {
+        Self::Attachment { attachment }
+    }
+
+    pub fn runtime_content(content: RuntimeContent) -> Self {
+        match content {
+            RuntimeContent::InlineImage {
+                asset_id,
+                mime_type,
+                data,
+            } => Self::RuntimeInlineImage {
+                asset_id,
+                mime_type,
+                data,
+            },
         }
     }
 }
@@ -382,9 +418,67 @@ impl Message {
                 ContentBlock::Media {
                     kind: MediaKind::File,
                     ..
+                } | ContentBlock::Attachment {
+                    attachment: PreparedAttachment {
+                        kind: MediaKind::File,
+                        ..
+                    },
                 }
             )
         })
+    }
+
+    /// 是否含旧版 `Media` 块。
+    pub fn has_legacy_media(&self) -> bool {
+        self.content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Media { .. }))
+    }
+
+    /// 是否含旧版文件 `Media` 块。
+    pub fn has_legacy_file_media(&self) -> bool {
+        self.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::Media {
+                    kind: MediaKind::File,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// 提取正式稳定附件，保持 content block 原始顺序。
+    pub fn extract_prepared_attachments(&self) -> Vec<PreparedAttachment> {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Attachment { attachment } => Some(attachment.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 只提取旧版 `Media` 块，供兼容链路使用。
+    pub fn extract_legacy_media_assets(&self) -> Vec<MediaAsset> {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Media {
+                    kind,
+                    url,
+                    mime_type,
+                    title,
+                } => Some(MediaAsset {
+                    kind: *kind,
+                    url: url.clone(),
+                    mime_type: mime_type.clone(),
+                    title: title.clone(),
+                    capability: None,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// 从 content blocks 提取媒体资产（content blocks 是媒体的唯一真相源）。
@@ -407,7 +501,14 @@ impl Message {
                     title: title.clone(),
                     capability: None,
                 }),
-                ContentBlock::Text { .. } => None,
+                ContentBlock::Attachment { attachment } => Some(MediaAsset {
+                    kind: attachment.kind,
+                    url: attachment.local_path.clone(),
+                    mime_type: Some(attachment.mime_type.clone()),
+                    title: Some(attachment.original_name.clone()),
+                    capability: attachment.capability.clone(),
+                }),
+                ContentBlock::Text { .. } | ContentBlock::RuntimeInlineImage { .. } => None,
             })
             .collect()
     }

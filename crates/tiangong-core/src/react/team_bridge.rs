@@ -21,7 +21,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::agent_team::lifecycle::TeamContext;
 use crate::core::command::Command;
 use crate::model::TokenUsage;
-use crate::react::message::{append_or_reuse_user_message, append_runtime_tool_message};
+use crate::react::message::{accept_prepared_user_message, append_runtime_tool_message};
 use crate::session::{Message, MessageRole, Session, now_text};
 use tiangong_types::StreamEvent;
 
@@ -473,9 +473,9 @@ impl ReactEngine {
                 sub_engine = sub_engine.with_cancel_flag(flag.clone());
             }
             let _ = sub_cmd_tx.send(Command::Message {
-                content: combined_content,
+                prepared: tiangong_types::PreparedUserMessage::text(combined_content),
                 message_id: Some(scru128::new().to_string()),
-                media: Vec::new(),
+                persistence_ack: None,
             });
             if let Ok(mut team) = team_arc.lock() {
                 team.register_active_agent(agent_id.clone(), sub_cmd_tx.clone());
@@ -653,31 +653,33 @@ impl ReactEngine {
                                 });
                             }
                         }
-                        Some(Command::Message { content, message_id, media }) => {
-                            let message_id = append_or_reuse_user_message(
+                        Some(Command::Message {
+                            prepared,
+                            message_id,
+                            persistence_ack,
+                        }) => {
+                            match accept_prepared_user_message(
                                 parent_session,
-                                &content,
+                                stream_tx,
                                 message_id,
-                                media,
-                            );
-                            let media = parent_session
-                                .messages
-                                .iter()
-                                .find(|message| message.id == message_id)
-                                .map(|message| message.extract_media_assets())
-                                .unwrap_or_default();
-                            let _ = stream_tx.send(StreamEvent::UserMessage {
-                                message_id,
-                                content: content.clone(),
-                                media: media.clone(),
-                            });
-                            if let Ok(mut team) = team_arc.lock() {
-                                let _ = crate::agent_team::lifecycle::route_user_mentions_with_media(
-                                    &mut team,
-                                    &content,
-                                    media,
-                                    stream_tx,
-                                );
+                                prepared,
+                                persistence_ack,
+                            ) {
+                                Ok(accepted) => {
+                                    if let Ok(mut team) = team_arc.lock() {
+                                        let _ = crate::agent_team::lifecycle::route_user_mentions_with_attachments(
+                                            &mut team,
+                                            &accepted.text,
+                                            accepted.persistent_attachments,
+                                            accepted.runtime_content,
+                                            stream_tx,
+                                        );
+                                    }
+                                }
+                                Err(err) => tracing::warn!(
+                                    error = %err,
+                                    "团队执行期间追加用户消息持久化失败"
+                                ),
                             }
                         }
                         Some(Command::UpdateCwd { cwd }) => {

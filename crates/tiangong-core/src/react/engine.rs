@@ -320,22 +320,24 @@ impl ReactEngine {
                                         }
                                     }
                                 }
-                                Some(Command::Message { content, message_id, media }) => {
-                                    let mid = append_or_reuse_user_message(
-                                        session, &content, message_id, media,
-                                    );
-                                    let media = session
-                                        .messages
-                                        .iter()
-                                        .find(|message| message.id == mid)
-                                        .map(|message| message.extract_media_assets())
-                                        .unwrap_or_default();
-                                    let _ = stream_tx.send(StreamEvent::UserMessage {
-                                        message_id: mid,
-                                        content: content.clone(),
-                                        media,
-                                    });
-                                    user_message_injected_during_stream = true;
+                                Some(Command::Message {
+                                    prepared,
+                                    message_id,
+                                    persistence_ack,
+                                }) => {
+                                    match accept_prepared_user_message(
+                                        session,
+                                        stream_tx,
+                                        message_id,
+                                        prepared,
+                                        persistence_ack,
+                                    ) {
+                                        Ok(_) => user_message_injected_during_stream = true,
+                                        Err(err) => tracing::warn!(
+                                            error = %err,
+                                            "流式阶段追加用户消息持久化失败"
+                                        ),
+                                    }
                                 }
                                 Some(Command::UpdateCwd { cwd }) => {
                                     session.cwd = cwd;
@@ -918,24 +920,22 @@ impl ReactEngine {
                                         }
                                     }
                                     Some(Command::Message {
-                                        content,
+                                        prepared,
                                         message_id,
-                                        media,
+                                        persistence_ack,
                                     }) => {
-                                        let mid = append_or_reuse_user_message(
-                                            session, &content, message_id, media,
-                                        );
-                                        let msg_media = session
-                                            .messages
-                                            .iter()
-                                            .find(|message| message.id == mid)
-                                            .map(|message| message.extract_media_assets())
-                                            .unwrap_or_default();
-                                        let _ = stream_tx.send(StreamEvent::UserMessage {
-                                            message_id: mid,
-                                            content: content.clone(),
-                                            media: msg_media,
-                                        });
+                                        if let Err(err) = accept_prepared_user_message(
+                                            session,
+                                            stream_tx,
+                                            message_id,
+                                            prepared,
+                                            persistence_ack,
+                                        ) {
+                                            tracing::warn!(
+                                                error = %err,
+                                                "审批等待阶段追加用户消息持久化失败"
+                                            );
+                                        }
                                     }
                                     Some(Command::UpdateCwd { cwd }) => {
                                         session.cwd = cwd;

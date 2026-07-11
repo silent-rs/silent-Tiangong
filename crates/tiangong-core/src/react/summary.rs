@@ -18,7 +18,7 @@ use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, rebuild_system_prompt,
     select_client_for_request,
 };
-use crate::react::message::append_or_reuse_user_message;
+use crate::react::message::accept_prepared_user_message;
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
@@ -114,19 +114,23 @@ impl ReactEngine {
                                 }
                             });
                         }
-                        Some(Command::Message { content, message_id, media }) => {
-                            let mid = append_or_reuse_user_message(session, &content, message_id, media);
-                            let media = session
-                                .messages
-                                .iter()
-                                .find(|message| message.id == mid)
-                                .map(|message| message.extract_media_assets())
-                                .unwrap_or_default();
-                            let _ = stream_tx.send(StreamEvent::UserMessage {
-                                message_id: mid,
-                                content: content.clone(),
-                                media,
-                            });
+                        Some(Command::Message {
+                            prepared,
+                            message_id,
+                            persistence_ack,
+                        }) => {
+                            if let Err(err) = accept_prepared_user_message(
+                                session,
+                                stream_tx,
+                                message_id,
+                                prepared,
+                                persistence_ack,
+                            ) {
+                                tracing::warn!(
+                                    error = %err,
+                                    "总结阶段追加用户消息持久化失败"
+                                );
+                            }
                         }
                         Some(Command::UpdateCwd { cwd }) => {
                             session.cwd = cwd;

@@ -1,8 +1,92 @@
 import { create } from 'zustand';
-import { api, Session, Message, RunSnapshot, McpServer, Skill, TaskPlan, MediaAsset, TokenStats, textContent } from '../api/tauri';
+import { api, textContent } from '../api/tauri';
+import type {
+  ContentBlock,
+  McpServer,
+  Message,
+  RawAttachment,
+  RunSnapshot,
+  Session,
+  SessionInputDraft,
+  Skill,
+  TaskPlan,
+  TokenStats,
+} from '../api/tauri';
 import { notifyBackgroundSessionCompleted } from '../utils/desktopNotification';
+import {
+  cloneSessionInputDraft,
+  emptySessionInputDraft,
+  getSessionInputDraft,
+  mergePersistedDraft,
+  migrateDraftKey,
+  setDraftSending,
+  settleDraftSend,
+  updateDraftAttachments,
+  updateDraftText,
+  type SessionDraftMap,
+} from './sessionDrafts';
 
-const DRAFT_TERMINAL_ID = '__draft_terminal__';
+let switchRequestVersion = 0;
+let createDraftRequestVersion = 0;
+const draftPersistRequestVersions = new Map<string, number>();
+
+interface DraftPersistQueue {
+  pending: SessionInputDraft | null;
+  pendingVersion: number;
+  claimed: {
+    draft: SessionInputDraft;
+    version: number;
+    revision: number;
+  } | null;
+  running: boolean;
+  debounceVersion: number;
+  nextVersion: number;
+  immediateThroughVersion: number;
+  waiters: Array<{
+    version: number;
+    resolve: (draft: SessionInputDraft) => void;
+    reject: (error: unknown) => void;
+  }>;
+}
+
+const draftPersistQueues = new Map<string, DraftPersistQueue>();
+
+function sameAttachments(left: RawAttachment[], right: RawAttachment[]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function rebasePendingDraftOnPersisted(
+  pending: SessionInputDraft,
+  submitted: SessionInputDraft,
+  persisted: SessionInputDraft,
+): SessionInputDraft {
+  return {
+    text: pending.text === submitted.text ? persisted.text : pending.text,
+    attachments: sameAttachments(pending.attachments, submitted.attachments)
+      ? persisted.attachments.map((attachment) => ({ ...attachment }))
+      : pending.attachments,
+    is_sending: pending.is_sending,
+    revision: pending.revision,
+  };
+}
+
+function waitForDraftDebounce(): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, 200));
+}
+
+function discardDraftPersistQueue(draftKey: string): void {
+  const queue = draftPersistQueues.get(draftKey);
+  if (queue) {
+    for (const waiter of queue.waiters) waiter.resolve(emptySessionInputDraft());
+    queue.waiters = [];
+  }
+  draftPersistQueues.delete(draftKey);
+  draftPersistRequestVersions.delete(draftKey);
+}
+
+function persistDraftInBackground(promise: Promise<SessionInputDraft>): void {
+  void promise.catch(() => undefined);
+}
 
 // ---------------------------------------------------------------------------
 // Agent 信息（从系统消息解析）
@@ -141,10 +225,12 @@ function applyAgentMention(content: string, tab: string | null, agents: AgentInf
   return body.length > 0 ? `@${tab} ${body}` : `@${tab} `;
 }
 
-interface AppState {
+export interface AppState {
   // 状态
   sessions: Session[];
   activeSessionId: string | null;
+  draftSessionId: string | null;
+  inputDrafts: SessionDraftMap;
   /**
    * 草稿态终端的稳定临时 id。
    * 草稿态（activeSessionId=null）无法用真实 session_id 创建 PTY，
@@ -166,7 +252,6 @@ interface AppState {
   tokenStats: TokenStats | null;
   approvalRequestId: string | null;
   currentPlan: TaskPlan | undefined;
-  inputContent: string;
   mcpServers: McpServer[] | null;
   skills: Skill[] | null;
 
@@ -201,7 +286,6 @@ interface AppState {
 
   // 加载状态
   isLoadingSessions: boolean;
-  isSending: boolean;
 
   // 更新检查
   updateAvailable: null | { version: string; body?: string; date?: string };
@@ -213,17 +297,44 @@ interface AppState {
 
   // 操作
   loadSessions: () => Promise<void>;
-  createSession: (targetCwd?: string) => void;
+  createSession: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
   deleteSessionsByCwd: (cwd: string) => Promise<void>;
 
-  sendMessage: (content: string, media?: MediaAsset[]) => Promise<void>;
-  editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]) => Promise<void>;
+  sendMessage: (
+    draftKey: string,
+    content: string,
+    attachments: RawAttachment[],
+    revision: number,
+    trustMode?: string,
+  ) => Promise<boolean>;
+  appendMessage: (
+    sessionId: string,
+    content: string,
+    attachments: RawAttachment[],
+    revision: number,
+  ) => Promise<boolean>;
+  editAndResend: (
+    sessionId: string,
+    messageId: string,
+    newContent: string,
+    attachments: RawAttachment[],
+    revision: number,
+    baseContent: ContentBlock[],
+  ) => Promise<boolean>;
   cancelTurn: () => Promise<boolean>;
   cancelAgent: (role: string) => Promise<boolean>;
 
-  setInputContent: (content: string) => void;
+  setDraftText: (draftKey: string, content: string) => void;
+  setDraftAttachments: (draftKey: string, attachments: RawAttachment[]) => void;
+  persistInputDraft: (
+    draftKey: string,
+    draft: SessionInputDraft,
+    immediate?: boolean,
+    claimRevision?: number,
+  ) => Promise<SessionInputDraft>;
+  flushInputDraftQueue: (draftKey: string) => Promise<void>;
 
   setSessionCwd: (cwd: string) => Promise<void>;
   setWorkspaceDir: (workspaceDir: string) => Promise<void>;
@@ -239,10 +350,24 @@ interface AppState {
   updateFromSnapshot: (snapshot: RunSnapshot) => void;
 }
 
+export function selectCurrentDraftKey(state: AppState): string | null {
+  return state.activeSessionId ?? state.draftSessionId;
+}
+
+export function selectCurrentInputDraft(state: AppState): SessionInputDraft {
+  return getSessionInputDraft(state.inputDrafts, selectCurrentDraftKey(state));
+}
+
+export function selectCurrentIsSending(state: AppState): boolean {
+  return selectCurrentInputDraft(state).is_sending;
+}
+
 export const useStore = create<AppState>((set, get) => ({
   // 初始状态
   sessions: [],
   activeSessionId: null as string | null,
+  draftSessionId: null as string | null,
+  inputDrafts: {},
   draftTerminalId: null as string | null,
   workspaceTabsTransfer: null,
   messages: [],
@@ -253,7 +378,6 @@ export const useStore = create<AppState>((set, get) => ({
   tokenStats: null,
   approvalRequestId: null,
   currentPlan: undefined,
-  inputContent: '',
   mcpServers: null,
   skills: null,
   isDraft: true,
@@ -268,7 +392,9 @@ export const useStore = create<AppState>((set, get) => ({
     const key = activeSessionId || '__draft__';
     const updated = { ...reasoningEffortPerSession, [key]: effort };
     set({ reasoningEffort: effort, reasoningEffortPerSession: updated });
-    api.setReasoningEffort(effort).catch(console.error);
+    if (activeSessionId) {
+      api.setReasoningEffort(effort, activeSessionId).catch(console.error);
+    }
   },
   workspaceDir: '',
   sessionCwd: '',
@@ -304,7 +430,6 @@ export const useStore = create<AppState>((set, get) => ({
     });
   },
   isLoadingSessions: false,
-  isSending: false,
   agents: [],
   selectedAgentTab: null,
 
@@ -313,12 +438,31 @@ export const useStore = create<AppState>((set, get) => ({
     set({ isLoadingSessions: true });
     try {
       const sessions = await api.getSessions();
-      set({ sessions, isLoadingSessions: false });
-
-      // 未选中任何会话时确保处于草稿模式
       const { activeSessionId, isDraft } = get();
-      if (!activeSessionId && !isDraft) {
-        set({ isDraft: true, sessionCwd: get().workspaceDir });
+      let draftSessionId = get().draftSessionId;
+      if (!activeSessionId && isDraft && !draftSessionId) {
+        const requestVersion = ++createDraftRequestVersion;
+        const generatedDraftId = await api.newDraftId();
+        draftSessionId = requestVersion === createDraftRequestVersion
+          ? generatedDraftId
+          : get().draftSessionId;
+      }
+      const initialDraft = draftSessionId
+        ? get().inputDrafts[draftSessionId] ?? emptySessionInputDraft()
+        : null;
+      set((state) => ({
+        sessions,
+        isLoadingSessions: false,
+        isDraft: state.activeSessionId ? state.isDraft : true,
+        draftSessionId,
+        draftTerminalId: state.activeSessionId ? state.draftTerminalId : draftSessionId,
+        sessionCwd: state.activeSessionId ? state.sessionCwd : state.workspaceDir,
+        inputDrafts: draftSessionId && initialDraft
+          ? { ...state.inputDrafts, [draftSessionId]: initialDraft }
+          : state.inputDrafts,
+      }));
+      if (draftSessionId && initialDraft) {
+        persistDraftInBackground(get().persistInputDraft(draftSessionId, initialDraft));
       }
 
       // 从后端恢复思考强度设置
@@ -333,59 +477,86 @@ export const useStore = create<AppState>((set, get) => ({
 
   // 创建新会话 — 纯前端草稿模式，不立即调后端
   // targetCwd 用于在指定 workspace 分组下创建对话；不传则用全局 workspace。
-  createSession: (targetCwd?: string) => {
+  createSession: async (targetCwd?: string) => {
+    switchRequestVersion += 1;
+    const requestVersion = ++createDraftRequestVersion;
     const workspaceDir = get().workspaceDir;
     const draftCwd = targetCwd || workspaceDir;
     const { reasoningEffortPerSession } = get();
     const draftEffort = reasoningEffortPerSession['__draft__'] || 'medium';
-    // 为草稿态终端生成稳定临时 id：同一时刻只有一个草稿，用固定常量即可。
-    // TerminalPanel 草稿态会以此 id 创建 PTY；转正时迁移归属到真实 session_id。
-    const draftTerminalId = DRAFT_TERMINAL_ID;
-    // 销毁上一轮草稿残留的 PTY（草稿用固定 id，若上次草稿没转正也没销毁，
-    // 后端会残留死掉的 PTY，导致下次 ensure 复用陈旧条目、终端显示「未就绪」）。
-    // 销毁是幂等的：后端无此 id 时 no-op。后端 ensure 也会兜底检测陈旧 PTY 重建。
-    api.terminalDestroySession(draftTerminalId).catch((e) =>
-      console.error('销毁陈旧草稿 PTY 失败:', e),
-    );
-    set({
-      isDraft: true,
-      activeSessionId: null,
-      draftTerminalId,
-      messages: [],
-      inputContent: '',
-      runStatus: 'idle',
-      runSummary: '',
-      lastUsage: null,
-      tokenStats: null,
-      currentPlan: undefined,
-      streamingMessageId: null,
-      streamingContent: '',
-      streamingReasoningContent: '',
-      sessionCwd: draftCwd,
-      agents: [],
-      selectedAgentTab: null,
-      reasoningEffort: draftEffort,
-    });
-    api.setReasoningEffort(draftEffort).catch(console.error);
+    try {
+      const draftSessionId = await api.newDraftId();
+      if (requestVersion !== createDraftRequestVersion) return;
+      const previousDraftId = get().draftSessionId;
+      const previousDraftIsSending = previousDraftId
+        ? get().inputDrafts[previousDraftId]?.is_sending === true
+        : false;
+      if (previousDraftId && previousDraftId !== draftSessionId && !previousDraftIsSending) {
+        discardDraftPersistQueue(previousDraftId);
+        api.removeInputDraft(previousDraftId).catch((error) =>
+          console.error('清理旧草稿输入失败:', error),
+        );
+        api.terminalDestroySession(previousDraftId).catch((error) =>
+          console.error('销毁陈旧草稿 PTY 失败:', error),
+        );
+      }
+      const initialDraft = emptySessionInputDraft();
+      set((state) => {
+        const inputDrafts = { ...state.inputDrafts };
+        if (previousDraftId && !previousDraftIsSending) delete inputDrafts[previousDraftId];
+        inputDrafts[draftSessionId] = initialDraft;
+        return {
+          isDraft: true,
+          activeSessionId: null,
+          draftSessionId,
+          draftTerminalId: draftSessionId,
+          inputDrafts,
+          messages: [],
+          runStatus: 'idle',
+          runSummary: '',
+          lastUsage: null,
+          tokenStats: null,
+          currentPlan: undefined,
+          streamingMessageId: null,
+          streamingContent: '',
+          streamingReasoningContent: '',
+          sessionCwd: draftCwd,
+          agents: [],
+          selectedAgentTab: null,
+          reasoningEffort: draftEffort,
+        };
+      });
+      persistDraftInBackground(get().persistInputDraft(draftSessionId, initialDraft));
+    } catch (error) {
+      console.error('创建草稿会话失败:', error);
+    }
   },
 
   // 切换会话
   switchSession: async (id: string) => {
+    createDraftRequestVersion += 1;
+    const requestVersion = ++switchRequestVersion;
     try {
       await api.switchSession(id);
-      const [snapshot, cwd] = await Promise.all([
+      const [snapshot, cwd, persistedDraft, sessionEffort] = await Promise.all([
         api.getRunSnapshot(),
         api.getSessionCwd(),
+        api.getInputDraft(id),
+        api.getReasoningEffort(id),
       ]);
-      const { reasoningEffortPerSession } = get();
-      const sessionEffort = reasoningEffortPerSession[id] || 'medium';
-      set({
+      if (requestVersion !== switchRequestVersion) return;
+      set((state) => ({
         isDraft: false,
         activeSessionId: id,
         draftTerminalId: null,
         workspaceTabsTransfer: null,
+        inputDrafts: {
+          ...state.inputDrafts,
+          [id]: state.inputDrafts[id]?.revision > persistedDraft.revision
+            ? state.inputDrafts[id]
+            : cloneSessionInputDraft(persistedDraft),
+        },
         messages: snapshot.messages,
-        inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
         runSummary: snapshot.summary || '',
         lastDurationMs: snapshot.last_duration_ms ?? null,
@@ -400,8 +571,11 @@ export const useStore = create<AppState>((set, get) => ({
         agents: parseAgentsFromMessages(snapshot.messages),
         selectedAgentTab: null,
         reasoningEffort: sessionEffort,
-      });
-      api.setReasoningEffort(sessionEffort).catch(console.error);
+        reasoningEffortPerSession: {
+          ...state.reasoningEffortPerSession,
+          [id]: sessionEffort,
+        },
+      }));
     } catch (error) {
       console.error('切换会话失败:', error);
     }
@@ -411,17 +585,24 @@ export const useStore = create<AppState>((set, get) => ({
   deleteSession: async () => {
     try {
       await api.deleteSession();
-      const sessions = await api.getSessions();
-      const snapshot = await api.getRunSnapshot();
+      const [sessions, snapshot] = await Promise.all([api.getSessions(), api.getRunSnapshot()]);
+      const nextSessionId = snapshot.last_session_id ?? sessions[0]?.id ?? null;
+      const nextDraft = nextSessionId ? await api.getInputDraft(nextSessionId) : null;
+      const newDraftId = nextSessionId ? null : await api.newDraftId();
 
-      set({
+      set((state) => ({
         sessions,
-        isDraft: false,
-        activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
-        draftTerminalId: null,
+        isDraft: !nextSessionId,
+        activeSessionId: nextSessionId,
+        draftSessionId: newDraftId ?? state.draftSessionId,
+        draftTerminalId: newDraftId,
         workspaceTabsTransfer: null,
+        inputDrafts: nextSessionId && nextDraft
+          ? { ...state.inputDrafts, [nextSessionId]: cloneSessionInputDraft(nextDraft) }
+          : newDraftId
+            ? { ...state.inputDrafts, [newDraftId]: emptySessionInputDraft() }
+            : state.inputDrafts,
         messages: snapshot.messages,
-        inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
         runSummary: snapshot.summary || '',
         lastDurationMs: snapshot.last_duration_ms ?? null,
@@ -430,7 +611,7 @@ export const useStore = create<AppState>((set, get) => ({
         approvalRequestId: snapshot.approval_request_id || null,
         agents: parseAgentsFromMessages(snapshot.messages),
         selectedAgentTab: null,
-      });
+      }));
     } catch (error) {
       console.error('删除会话失败:', error);
     }
@@ -451,17 +632,20 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       // 非草稿态：跟随后端活跃会话快照
-      const snapshot = await api.getRunSnapshot();
-      const [sessionCwd] = await Promise.all([api.getSessionCwd()]);
+      const [snapshot, sessionCwd] = await Promise.all([api.getRunSnapshot(), api.getSessionCwd()]);
+      const nextSessionId = snapshot.last_session_id ?? sessions[0]?.id ?? null;
+      const nextDraft = nextSessionId ? await api.getInputDraft(nextSessionId) : null;
 
-      set({
+      set((state) => ({
         sessions,
-        isDraft: false,
-        activeSessionId: snapshot.messages.length > 0 ? snapshot.messages[0].id : null,
+        isDraft: !nextSessionId,
+        activeSessionId: nextSessionId,
         draftTerminalId: null,
         workspaceTabsTransfer: null,
+        inputDrafts: nextSessionId && nextDraft
+          ? { ...state.inputDrafts, [nextSessionId]: cloneSessionInputDraft(nextDraft) }
+          : state.inputDrafts,
         messages: snapshot.messages,
-        inputContent: snapshot.input_draft,
         runStatus: snapshot.status,
         runSummary: snapshot.summary || '',
         lastDurationMs: snapshot.last_duration_ms ?? null,
@@ -471,107 +655,395 @@ export const useStore = create<AppState>((set, get) => ({
         sessionCwd,
         agents: parseAgentsFromMessages(snapshot.messages),
         selectedAgentTab: null,
-      });
+      }));
     } catch (error) {
       console.error('删除 workspace 会话失败:', error);
     }
   },
 
-  // 发送消息
-  sendMessage: async (content: string, media: MediaAsset[] = []) => {
-    const { isDraft } = get();
+  persistInputDraft: (draftKey, draft, immediate = false, claimRevision) => {
+    let queue = draftPersistQueues.get(draftKey);
+    if (!queue) {
+      queue = {
+        pending: null,
+        pendingVersion: 0,
+        claimed: null,
+        running: false,
+        debounceVersion: 0,
+        nextVersion: 0,
+        immediateThroughVersion: 0,
+        waiters: [],
+      };
+      draftPersistQueues.set(draftKey, queue);
+    }
+    const enqueueVersion = queue.nextVersion + 1;
+    queue.nextVersion = enqueueVersion;
+    if (claimRevision !== undefined) {
+      // 发送快照必须保留精确 revision，不能被正在排队的 R+1 新输入合并。
+      // 更旧的普通 pending 可由该快照覆盖；快照之后的新输入会另存于 pending。
+      queue.claimed = {
+        draft: cloneSessionInputDraft(draft),
+        version: enqueueVersion,
+        revision: claimRevision,
+      };
+      queue.pending = null;
+    } else {
+      queue.pending = cloneSessionInputDraft(draft);
+      queue.pendingVersion = enqueueVersion;
+    }
+    if (immediate) queue.immediateThroughVersion = enqueueVersion;
+    queue.debounceVersion += 1;
+    const debounceVersion = queue.debounceVersion;
+    const completion = new Promise<SessionInputDraft>((resolve, reject) => {
+      queue!.waiters.push({ version: enqueueVersion, resolve, reject });
+    });
 
-    // 草稿模式时先创建后端会话
-    if (isDraft) {
-      try {
-        const session = await api.createSession();
-        // 把草稿模式下设置的 cwd 同步到新创建的会话
-        const draftCwd = get().sessionCwd;
-        if (draftCwd) {
-          await api.setSessionCwd(draftCwd).catch(console.error);
-        }
-        // 草稿 PTY 转正：把草稿态临时 id 的 PTY 迁移归属到真实 session_id。
-        // 草稿态若用户打开过终端，已用 draftTerminalId 创建了 PTY，这里迁移它
-        // （PTY 内 shell 历史、cwd 一并保留）；若草稿态没开终端（draftTerminalId
-        // 不存在或未创建），迁移是幂等的 no-op。
-        const draftId = get().draftTerminalId || DRAFT_TERMINAL_ID;
-        await api
-          .terminalAttachSession(draftId, session.id)
-          .catch(e => console.error('草稿终端 PTY 转正迁移失败:', e));
-        // 浏览器 state 同步转正（registry key + store 文件迁移）
-        await api
-          .browserAttachSession(draftId, session.id)
-          .catch(e => console.error('草稿浏览器 state 转正迁移失败:', e));
-        set(state => ({
-          sessions: [session, ...state.sessions],
-          activeSessionId: session.id,
-          isDraft: false,
-          draftTerminalId: null,
-          workspaceTabsTransfer: {
-            fromSessionId: draftId,
-            toSessionId: session.id,
-            version: (state.workspaceTabsTransfer?.version ?? 0) + 1,
-          },
-        }));
-        // 兜底：确保转正后真实 session 一定有 PTY。
-        // 草稿态未开终端时迁移是 no-op，这里补建；草稿态开过终端时迁移已完成，
-        // ensure 命中已存在直接返回 true，不会重复创建。
-        const ensureCwd = draftCwd || get().workspaceDir || '';
-        await api
-          .terminalEnsureSession(session.id, ensureCwd)
-          .catch(e => console.error('新会话终端 PTY 创建失败:', e));
-      } catch (error) {
-        console.error('创建会话失败:', error);
-        return;
+    if (!queue.running) {
+      if (immediate) {
+        void get().flushInputDraftQueue(draftKey);
+      } else {
+        void waitForDraftDebounce().then(() => {
+          const latest = draftPersistQueues.get(draftKey);
+          if (
+            latest === queue
+            && !latest.running
+            && latest.debounceVersion === debounceVersion
+          ) {
+            void get().flushInputDraftQueue(draftKey);
+          }
+        });
       }
     }
+    return completion;
+  },
 
-    const selectedTab = get().selectedAgentTab;
-    const nextDraft = selectedTab ? `@${selectedTab} ` : '';
-    set({ inputContent: nextDraft, isSending: true });
-
+  flushInputDraftQueue: async (draftKey) => {
+    const queue = draftPersistQueues.get(draftKey);
+    if (!queue || queue.running || (!queue.claimed && !queue.pending)) return;
+    const claimed = queue.claimed;
+    const submitted = claimed?.draft ?? queue.pending!;
+    const submittedVersion = claimed?.version ?? queue.pendingVersion;
+    const submittedClaimRevision = claimed?.revision;
+    if (claimed) {
+      queue.claimed = null;
+    } else {
+      queue.pending = null;
+    }
+    queue.running = true;
+    const requestVersion = (draftPersistRequestVersions.get(draftKey) ?? 0) + 1;
+    draftPersistRequestVersions.set(draftKey, requestVersion);
     try {
-      if (media.length > 0) {
-        await api.sendMessageWithMedia(content, media);
+      const persisted = await api.setInputDraft(
+        draftKey,
+        submitted,
+        submittedClaimRevision ?? undefined,
+      );
+      if (
+        draftPersistQueues.get(draftKey) !== queue
+        || draftPersistRequestVersions.get(draftKey) !== requestVersion
+      ) {
+        return;
+      }
+      if (!queue.pending) {
+        set((state) => ({
+          inputDrafts: mergePersistedDraft(
+            state.inputDrafts,
+            draftKey,
+            submitted.revision,
+            persisted,
+          ),
+        }));
       } else {
-        await api.sendMessage(content);
+        queue.pending = rebasePendingDraftOnPersisted(queue.pending, submitted, persisted);
       }
-      // 消息已提交到后端，释放发送锁，允许用户切换对话等操作
-      const runningSessionId = get().activeSessionId;
-      set(state => ({
-        runStatus: 'executing',
-        isSending: false,
-        inputContent: nextDraft,
-        sessionRunStatuses: runningSessionId
-          ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
-          : state.sessionRunStatuses,
-      }));
-      if (nextDraft) {
-        api.setInputDraft(nextDraft).catch(console.error);
-      }
+      const completed = queue.waiters.filter((waiter) => waiter.version <= submittedVersion);
+      queue.waiters = queue.waiters.filter((waiter) => waiter.version > submittedVersion);
+      for (const waiter of completed) waiter.resolve(cloneSessionInputDraft(persisted));
     } catch (error) {
-      console.error('发送消息失败:', error);
-      set({ inputContent: content, isSending: false });
+      console.error('保存会话草稿失败:', error);
+      const failed = queue.waiters.filter((waiter) => waiter.version <= submittedVersion);
+      queue.waiters = queue.waiters.filter((waiter) => waiter.version > submittedVersion);
+      for (const waiter of failed) waiter.reject(error);
+    } finally {
+      queue.running = false;
+      if (
+        draftPersistQueues.get(draftKey) === queue
+        && (queue.claimed || queue.pending)
+      ) {
+        const nextVersion = queue.claimed?.version ?? queue.pendingVersion;
+        if (queue.claimed || nextVersion <= queue.immediateThroughVersion) {
+          void get().flushInputDraftQueue(draftKey);
+        } else {
+          queue.debounceVersion += 1;
+          const debounceVersion = queue.debounceVersion;
+          void waitForDraftDebounce().then(() => {
+            const latest = draftPersistQueues.get(draftKey);
+            if (
+              latest === queue
+              && !latest.running
+              && latest.debounceVersion === debounceVersion
+            ) {
+              void get().flushInputDraftQueue(draftKey);
+            }
+          });
+        }
+      }
     }
   },
 
-  // 编辑用户消息并从该节点重新发送
-  editAndResend: async (messageId: string, newContent: string, media: MediaAsset[] = []) => {
-    set({ isSending: true });
+  // 普通发送：目标草稿、内容、附件与 revision 均由调用方在异步操作前固定。
+  sendMessage: async (draftKey, content, attachments, revision, trustMode) => {
+    let targetSessionId = draftKey;
+    let deliveryAttachments = attachments.map((attachment) => ({ ...attachment }));
+    const draftCwd = get().sessionCwd;
+    const draftReasoningEffort = get().reasoningEffort;
+    const navigationVersion = switchRequestVersion;
+    let sendingDraft: SessionInputDraft | undefined;
+    set((state) => {
+      const inputDrafts = setDraftSending(state.inputDrafts, draftKey, true);
+      sendingDraft = inputDrafts[draftKey];
+      return { inputDrafts };
+    });
+
     try {
-      await api.editAndResend(messageId, newContent, media.length > 0 ? media : undefined);
-      const runningSessionId = get().activeSessionId;
-      set(state => ({
-        runStatus: 'executing',
-        isSending: false,
-        inputContent: '',
-        sessionRunStatuses: runningSessionId
-          ? { ...state.sessionRunStatuses, [runningSessionId]: 'executing' }
-          : state.sessionRunStatuses,
-      }));
+      if (sendingDraft) {
+        const persisted = await get().persistInputDraft(
+          draftKey,
+          sendingDraft,
+          true,
+          revision,
+        );
+        if (persisted.revision !== revision) {
+          throw new Error('草稿已在发送前发生变化，请重试');
+        }
+        deliveryAttachments = persisted.attachments.map((attachment) => ({ ...attachment }));
+      }
+      if (get().draftSessionId === draftKey) {
+        const creation = await api.createSessionForDraft(
+          draftCwd || get().workspaceDir,
+          trustMode || 'supervised',
+          draftReasoningEffort,
+        );
+        const session = creation.session;
+        const persistedMigratedDraft = await api.migrateInputDraft(draftKey, session.id);
+        await Promise.all([
+          api.terminalAttachSession(draftKey, session.id)
+            .catch((error) => console.error('草稿终端 PTY 转正迁移失败:', error)),
+          api.browserAttachSession(draftKey, session.id)
+            .catch((error) => console.error('草稿浏览器 state 转正迁移失败:', error)),
+        ]);
+        const shouldActivate = switchRequestVersion === navigationVersion
+          && get().isDraft
+          && get().activeSessionId === null
+          && get().draftSessionId === draftKey;
+        const activated = shouldActivate
+          ? await api.activateDraftSession(
+              session.id,
+              creation.activation_epoch,
+              creation.previous_active_session_id,
+            )
+          : false;
+        let migratedDraft: SessionInputDraft | undefined;
+        set((state) => {
+          const isViewingDraft = activated
+            && switchRequestVersion === navigationVersion
+            && state.isDraft
+            && state.activeSessionId === null
+            && state.draftSessionId === draftKey;
+          const inputDrafts = migrateDraftKey(state.inputDrafts, draftKey, session.id);
+          if (
+            !inputDrafts[session.id]
+            || persistedMigratedDraft.revision >= inputDrafts[session.id].revision
+          ) {
+            inputDrafts[session.id] = {
+              ...cloneSessionInputDraft(persistedMigratedDraft),
+              is_sending: inputDrafts[session.id]?.is_sending ?? true,
+            };
+          }
+          migratedDraft = inputDrafts[session.id];
+          return {
+            sessions: state.sessions.some((item) => item.id === session.id)
+              ? state.sessions
+              : [session, ...state.sessions],
+            inputDrafts,
+            activeSessionId: isViewingDraft ? session.id : state.activeSessionId,
+            isDraft: isViewingDraft ? false : state.isDraft,
+            draftSessionId: isViewingDraft ? null : state.draftSessionId,
+            draftTerminalId: isViewingDraft ? null : state.draftTerminalId,
+            workspaceTabsTransfer: isViewingDraft
+              ? {
+                  fromSessionId: draftKey,
+                  toSessionId: session.id,
+                  version: (state.workspaceTabsTransfer?.version ?? 0) + 1,
+                }
+              : state.workspaceTabsTransfer,
+          };
+        });
+        discardDraftPersistQueue(draftKey);
+        targetSessionId = session.id;
+        if (migratedDraft) {
+          persistDraftInBackground(get().persistInputDraft(session.id, migratedDraft));
+        }
+        const ensureCwd = draftCwd || get().workspaceDir || '';
+        await api.terminalEnsureSession(session.id, ensureCwd)
+          .catch((error) => console.error('新会话终端 PTY 创建失败:', error));
+      }
+
+      await api.sendMessage(targetSessionId, content, deliveryAttachments, revision);
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = settleDraftSend(
+          state.inputDrafts,
+          targetSessionId,
+          revision,
+          true,
+        );
+        settledDraft = inputDrafts[targetSessionId];
+        const isCurrent = state.activeSessionId === targetSessionId;
+        return {
+          inputDrafts,
+          runStatus: isCurrent ? 'executing' : state.runStatus,
+          sessionRunStatuses: {
+            ...state.sessionRunStatuses,
+            [targetSessionId]: 'executing',
+          },
+        };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(targetSessionId, settledDraft));
+      }
+      return true;
+    } catch (error) {
+      console.error('发送消息失败:', error);
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = settleDraftSend(
+          state.inputDrafts,
+          targetSessionId,
+          revision,
+          false,
+        );
+        settledDraft = inputDrafts[targetSessionId];
+        return { inputDrafts };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(targetSessionId, settledDraft));
+      }
+      return false;
+    }
+  },
+
+  appendMessage: async (sessionId, content, attachments, revision) => {
+    let deliveryAttachments = attachments.map((attachment) => ({ ...attachment }));
+    let sendingDraft: SessionInputDraft | undefined;
+    set((state) => {
+      const inputDrafts = setDraftSending(state.inputDrafts, sessionId, true);
+      sendingDraft = inputDrafts[sessionId];
+      return { inputDrafts };
+    });
+    try {
+      if (sendingDraft) {
+        const persisted = await get().persistInputDraft(
+          sessionId,
+          sendingDraft,
+          true,
+          revision,
+        );
+        if (persisted.revision !== revision) {
+          throw new Error('草稿已在追加前发生变化，请重试');
+        }
+        deliveryAttachments = persisted.attachments.map((attachment) => ({ ...attachment }));
+      }
+      const appended = await api.appendMessage(
+        sessionId,
+        content,
+        deliveryAttachments,
+        revision,
+      );
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = settleDraftSend(
+          state.inputDrafts,
+          sessionId,
+          revision,
+          appended,
+        );
+        settledDraft = inputDrafts[sessionId];
+        return { inputDrafts };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(sessionId, settledDraft));
+      }
+      return appended;
+    } catch (error) {
+      console.error('追加消息失败:', error);
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = settleDraftSend(state.inputDrafts, sessionId, revision, false);
+        settledDraft = inputDrafts[sessionId];
+        return { inputDrafts };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(sessionId, settledDraft));
+      }
+      return false;
+    }
+  },
+
+  // 编辑态有自己的 revision；这里只按显式 session_id 更新该会话发送状态。
+  editAndResend: async (
+    sessionId,
+    messageId,
+    newContent,
+    attachments,
+    revision,
+    baseContent,
+  ) => {
+    let sendingDraft: SessionInputDraft | undefined;
+    set((state) => {
+      const inputDrafts = setDraftSending(state.inputDrafts, sessionId, true);
+      sendingDraft = inputDrafts[sessionId];
+      return { inputDrafts };
+    });
+    try {
+      if (sendingDraft) {
+        await get().persistInputDraft(sessionId, sendingDraft, true);
+      }
+      await api.editAndResend(
+        sessionId,
+        messageId,
+        newContent,
+        attachments,
+        revision,
+        baseContent,
+      );
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = setDraftSending(state.inputDrafts, sessionId, false);
+        settledDraft = inputDrafts[sessionId];
+        const isCurrent = state.activeSessionId === sessionId;
+        return {
+          inputDrafts,
+          runStatus: isCurrent ? 'executing' : state.runStatus,
+          sessionRunStatuses: { ...state.sessionRunStatuses, [sessionId]: 'executing' },
+        };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(sessionId, settledDraft));
+      }
+      return true;
     } catch (error) {
       console.error('编辑重发失败:', error);
-      set({ isSending: false });
+      let settledDraft: SessionInputDraft | undefined;
+      set((state) => {
+        const inputDrafts = setDraftSending(state.inputDrafts, sessionId, false);
+        settledDraft = inputDrafts[sessionId];
+        return { inputDrafts };
+      });
+      if (settledDraft) {
+        persistDraftInBackground(get().persistInputDraft(sessionId, settledDraft));
+      }
+      return false;
     }
   },
 
@@ -582,14 +1054,25 @@ export const useStore = create<AppState>((set, get) => ({
       if (cancelled) {
         // 立即获取最新快照确保状态一致（避免轮询线程的旧快照覆盖）
         const snapshot = await api.getRunSnapshot();
-        set({
-          runStatus: 'idle',
-          isSending: false,
-          messages: snapshot.messages,
-          currentPlan: snapshot.current_plan,
-          lastUsage: snapshot.last_usage ?? null,
-          tokenStats: snapshot.token_stats ?? null,
+        const draftKey = selectCurrentDraftKey(get());
+        let settledDraft: SessionInputDraft | undefined;
+        set((state) => {
+          const inputDrafts = draftKey
+            ? setDraftSending(state.inputDrafts, draftKey, false)
+            : state.inputDrafts;
+          settledDraft = draftKey ? inputDrafts[draftKey] : undefined;
+          return {
+            runStatus: 'idle',
+            inputDrafts,
+            messages: snapshot.messages,
+            currentPlan: snapshot.current_plan,
+            lastUsage: snapshot.last_usage ?? null,
+            tokenStats: snapshot.token_stats ?? null,
+          };
         });
+        if (draftKey && settledDraft) {
+          persistDraftInBackground(get().persistInputDraft(draftKey, settledDraft));
+        }
         // 刷新会话列表
         api.getSessions().then((sessions) => set({ sessions })).catch(console.error);
       }
@@ -617,21 +1100,33 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  // 设置输入内容
-  setInputContent: (content: string) => {
-    set({ inputContent: content });
-    // 草稿模式下不同步到后端
-    if (!get().isDraft) {
-      api.setInputDraft(content).catch(console.error);
-    }
+  setDraftText: (draftKey: string, content: string) => {
+    let nextDraft: SessionInputDraft | undefined;
+    set((state) => {
+      const inputDrafts = updateDraftText(state.inputDrafts, draftKey, content);
+      nextDraft = inputDrafts[draftKey];
+      return { inputDrafts };
+    });
+    if (nextDraft) persistDraftInBackground(get().persistInputDraft(draftKey, nextDraft));
+  },
+
+  setDraftAttachments: (draftKey: string, attachments: RawAttachment[]) => {
+    let nextDraft: SessionInputDraft | undefined;
+    set((state) => {
+      const inputDrafts = updateDraftAttachments(state.inputDrafts, draftKey, attachments);
+      nextDraft = inputDrafts[draftKey];
+      return { inputDrafts };
+    });
+    if (nextDraft) persistDraftInBackground(get().persistInputDraft(draftKey, nextDraft));
   },
 
   // 设置工作目录
   setSessionCwd: async (cwd: string) => {
     try {
       // 草稿模式下只在前端保存，创建会话时再同步到后端
-      if (!get().isDraft) {
-        await api.setSessionCwd(cwd);
+      const { isDraft, activeSessionId } = get();
+      if (!isDraft && activeSessionId) {
+        await api.setSessionCwd(activeSessionId, cwd);
       }
       set({ sessionCwd: cwd });
     } catch (error) {
@@ -672,12 +1167,12 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setSelectedAgentTab: (tab: string | null) => {
-    const { inputContent, agents, isDraft } = get();
-    const nextInput = applyAgentMention(inputContent, tab, agents);
-    set({ selectedAgentTab: tab, inputContent: nextInput });
-    if (!isDraft) {
-      api.setInputDraft(nextInput).catch(console.error);
-    }
+    const state = get();
+    const draftKey = selectCurrentDraftKey(state);
+    const currentDraft = selectCurrentInputDraft(state);
+    const nextInput = applyAgentMention(currentDraft.text, tab, state.agents);
+    set({ selectedAgentTab: tab });
+    if (draftKey) get().setDraftText(draftKey, nextInput);
   },
 
   beginContextManagement: (summary: string) => {
@@ -740,33 +1235,58 @@ export const useStore = create<AppState>((set, get) => ({
 
     set({ sessionRunStatuses: newStatuses });
 
-    // 始终同步当前活动会话的 runStatus（基于 snapshot.status）
-    // snapshot.status 已由后端 build_session_snapshot 按 session 修正
-    const { runStatus: prevStatus, isSending: prevSending } = get();
-    const snapshotStatus = snapshot.status;
+    // 只有快照明确属于当前会话时才采用其精确状态；后台会话的迟到快照
+    // 只能通过 pending_session_ids 影响自己的状态，不能覆盖当前会话。
+    const currentState = get();
+    const prevStatus = currentState.runStatus;
+    const prevSending = selectCurrentIsSending(currentState);
+    const snapshotTargetsActive = !!activeSessionId
+      && snapshot.last_session_id === activeSessionId;
+    const derivedActiveStatus = activeSessionId ? newStatuses[activeSessionId] : undefined;
+    const nextStatus = isDraft
+      ? 'idle'
+      : snapshotTargetsActive
+        ? snapshot.status
+        : derivedActiveStatus ?? 'idle';
     const snapshotApprovalRequestId = (snapshot as any).approval_request_id
       || (snapshot as any).approvalRequestId
       || null;
-    const isContextManagementSnapshot = (snapshot.summary || '').includes('上下文')
-      || (snapshot.summary || '').includes('正在压缩');
+    const nextSummary = snapshotTargetsActive
+      ? snapshot.summary || ''
+      : derivedActiveStatus
+        ? currentState.runSummary
+        : '';
+    const nextApprovalRequestId = snapshotTargetsActive
+      ? snapshotApprovalRequestId
+      : derivedActiveStatus
+        ? currentState.approvalRequestId
+        : null;
+    const isContextManagementSnapshot = nextSummary.includes('上下文')
+      || nextSummary.includes('正在压缩');
     // 防止取消后被旧快照覆盖
-    const effectiveStatus = (
+    const effectiveStatus = snapshotTargetsActive && (
       prevStatus === 'idle'
       && !prevSending
-      && snapshotStatus !== 'idle'
-      && snapshotStatus !== 'waiting_approval'
-      && !snapshotApprovalRequestId
+      && nextStatus !== 'idle'
+      && nextStatus !== 'waiting_approval'
+      && !nextApprovalRequestId
       && !isContextManagementSnapshot
     )
       ? 'idle'
-      : snapshotStatus;
+      : nextStatus;
     set({
       runStatus: effectiveStatus,
-      runSummary: snapshot.summary || '',
-      lastDurationMs: snapshot.last_duration_ms ?? null,
-      lastUsage: snapshot.last_usage ?? null,
-      tokenStats: snapshot.token_stats ?? null,
-      approvalRequestId: snapshotApprovalRequestId,
+      runSummary: nextSummary,
+      lastDurationMs: snapshotTargetsActive
+        ? snapshot.last_duration_ms ?? null
+        : currentState.lastDurationMs,
+      lastUsage: snapshotTargetsActive
+        ? snapshot.last_usage ?? null
+        : currentState.lastUsage,
+      tokenStats: snapshotTargetsActive
+        ? snapshot.token_stats ?? null
+        : currentState.tokenStats,
+      approvalRequestId: nextApprovalRequestId,
     });
 
     // 草稿模式或不是当前查看的会话 → 不更新消息/流式内容
