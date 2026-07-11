@@ -770,6 +770,9 @@ async fn send_message_inner(
 
     state.sync_core_config_from_state().await?;
 
+    // 在持锁前归档附件（远程下载可能阻塞 60s，不能在状态锁内执行）。
+    let media = tiangong_media_archive::archive_input_media_assets(media);
+
     // 准备 session
     let (session_id, user_message_id, session_snapshot) = state
         .with_state(|core_state| {
@@ -1501,6 +1504,9 @@ pub async fn edit_and_resend(
             ensure_multimodal_enabled(&state).await?;
         }
     }
+
+    // 编辑路径同样需要在写入会话前归档附件（与普通发送一致）。
+    let media = media.map(tiangong_media_archive::archive_input_media_assets);
 
     // 1. 查找消息所在会话并验证
     let session_id = state

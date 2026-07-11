@@ -6,50 +6,21 @@
 
 // ── 媒体产物解析函数 ──
 
-/// 从工具结果中解析 MediaAsset 列表（图片或视频）。
+/// 从工具结果中解析 MediaAsset 列表（仅内置生成工具）。
 ///
-/// 根据 `tool_name` 判断输出类型：
-/// - 如果输出可能包含生成的图片，则解析图片资源；
-/// - 如果工具名为 `generate_video`，则解析视频资源；
-/// - 其他情况返回空列表。
+/// 只有 `generate_image` / `generate_video` 的输出被识别为媒体资产——它们的
+/// 图片/视频已由插件自行归档为本地路径。其他工具（MCP/自定义）返回的图片链接
+/// 作为普通文本内容传递，由前端直接渲染，不强制归档。
 pub(crate) fn parse_media_assets_from_tool_result(
     tool_name: &str,
     stdout: &str,
     summary: &str,
 ) -> Vec<tiangong_types::MediaAsset> {
-    if output_may_contain_generated_images(tool_name, stdout) {
-        return parse_image_assets(stdout);
+    match tool_name {
+        "generate_image" => parse_image_assets(stdout),
+        "generate_video" => parse_video_assets(stdout, summary),
+        _ => Vec::new(),
     }
-    if tool_name == "generate_video" {
-        parse_video_assets(stdout, summary)
-    } else {
-        Vec::new()
-    }
-}
-
-/// 判断工具输出是否可能包含生成的图片。
-///
-/// 满足以下任一条件即返回 true：
-/// - 工具名为 `generate_image`；
-/// - 输出内容是纯图片 Markdown 格式；
-/// - 工具名包含 "image" 且输出包含 `](`（Markdown 图片链接特征）。
-fn output_may_contain_generated_images(tool_name: &str, output: &str) -> bool {
-    tool_name == "generate_image"
-        || looks_like_pure_image_markdown(output)
-        || (tool_name.to_ascii_lowercase().contains("image") && output.contains("]("))
-}
-
-/// 判断输出是否是纯图片 Markdown 格式。
-///
-/// 即所有非空行都是 `![alt](url)` 格式时返回 true。
-fn looks_like_pure_image_markdown(output: &str) -> bool {
-    let trimmed = output.trim();
-    !trimmed.is_empty()
-        && trimmed.lines().all(|line| {
-            let line = line.trim();
-            line.is_empty()
-                || (line.starts_with("![") && line.contains("](") && line.ends_with(')'))
-        })
 }
 
 /// 从输出文本中解析所有图片类型的 MediaAsset。

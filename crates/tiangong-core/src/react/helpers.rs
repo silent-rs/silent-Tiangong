@@ -135,9 +135,15 @@ pub(super) fn check_cancel(
     stream_tx: &StdSender<StreamEvent>,
     cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
 ) -> bool {
+    // 收集取出的非控制命令，循环结束后逆序回灌，保持原序（逆序 send 到队尾 = 原序）。
+    let mut pending: Vec<Command> = Vec::new();
     while let Ok(cmd) = cmd_rx.try_recv() {
         match cmd {
             Command::Cancel | Command::Shutdown => {
+                // 取消前先把已收集的命令放回，避免丢失。
+                for c in pending.into_iter().rev() {
+                    let _ = cmd_tx.send(c);
+                }
                 let _ = stream_tx.send(StreamEvent::Error {
                     message: "已取消".into(),
                 });
@@ -150,13 +156,14 @@ pub(super) fn check_cancel(
             Command::ResetContext => {
                 crate::core::reset_context_for_session(session, stream_tx, engine);
             }
-            // 非控制命令（Message / UpdateCwd / ReloadConfig / Approval 等）：回灌队列，
-            // 交由后续 drain_pending_commands_async 处理，避免被静默丢弃。
-            other => {
-                let _ = cmd_tx.send(other);
-                break;
-            }
+            // 非控制命令暂存，不回灌也不 break——继续向后找 Cancel/Shutdown，
+            // 确保 cancel 不被排在后面的消息延迟。
+            other => pending.push(other),
         }
+    }
+    // 未发现 Cancel，把暂存的命令逆序回灌（保持原序）。
+    for c in pending.into_iter().rev() {
+        let _ = cmd_tx.send(c);
     }
     false
 }

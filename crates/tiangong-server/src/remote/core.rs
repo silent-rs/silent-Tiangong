@@ -83,13 +83,13 @@ impl ServerCoreManager {
         media: Vec<MediaAsset>,
     ) -> Result<()> {
         let (session_id, _session, _created) = self.ensure_core(requested_session_id).await?;
+        // 在持锁前归档附件（远程下载可能阻塞 60s，不能在 cores 锁内执行）。
+        let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+        let media = tiangong_media_archive::archive_input_media_assets(media);
         let cores = self.cores.lock().unwrap();
         let Some(core) = cores.get(&session_id) else {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
-        let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        // 入口层归档附件为本地路径，与 GUI 的 app_state ingress 对齐。
-        let media = tiangong_media_archive::archive_input_media_assets(media);
         core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
             .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         Ok(())
@@ -111,13 +111,13 @@ impl ServerCoreManager {
         let turn_id = tracker.start_turn();
 
         {
+            let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+            // 在持锁前归档附件（远程下载可能阻塞 60s，不能在 cores 锁内执行）。
+            let media = tiangong_media_archive::archive_input_media_assets(media);
             let cores = self.cores.lock().unwrap();
             let Some(core) = cores.get(&session_id) else {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
-            let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            // 入口层归档附件为本地路径，与 GUI 的 app_state ingress 对齐。
-            let media = tiangong_media_archive::archive_input_media_assets(media);
             core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
                 .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         }

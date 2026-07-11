@@ -21,12 +21,8 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
-        // 落盘前先同步归档附件为本地路径，确保磁盘持久化的 media.url 始终是
-        // 可读的本地路径（而非 data URL / 远程地址）——即使消息投递失败、应用
-        // 崩溃或用户提前退出，会话文件也不含失效引用。
-        // core 侧 media-archive 插件会再次归档（幂等，is_archived_media_path 直接放行）。
+        // 调用方负责在持锁前完成附件归档（远程下载可能阻塞 60s，不能在状态锁内执行）。
         let content = content.into();
-        let media = tiangong_media_archive::archive_input_media_assets(media);
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
         let session_id = self.store.session.sessions[idx].id.clone();
