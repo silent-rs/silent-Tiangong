@@ -19,20 +19,15 @@ pub(crate) fn append_or_reuse_user_message(
             .iter_mut()
             .find(|message| message.id == message_id)
         {
-            // 消息已存在（GUI 路径：app_state 已先持久化）：用归档后的 media
-            // 重建 content blocks，确保 core session 的 media 引用为本地路径
-            //（issue #149：attachment_notice 必须引用本地路径而非 data URL）。
-            let text = message
-                .content
-                .iter()
-                .filter_map(|b| b.as_text().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-                .join("");
-            let mut blocks = vec![ContentBlock::text(if text.is_empty() {
-                content.to_string()
-            } else {
-                text
-            })];
+            // 消息已存在（GUI 路径：app_state 已先持久化）：用本轮 ingress 处理后的
+            // content 与归档后的 media 重建 content blocks，确保 core session 的
+            // 文本与 media 引用均为最新（issue #149：attachment_notice 必须引用
+            // 本地路径而非 data URL）。
+            //
+            // 前提假设：当前 content blocks 仅含 Text 与 Media 两类。重建时以传入
+            // content 作为文本块、归档后 media 作为媒体块；若未来引入其他非文本
+            //（非媒体）块类型，需在此保留它们，否则会被丢弃。
+            let mut blocks = vec![ContentBlock::text(content.to_string())];
             for asset in &media {
                 blocks.push(asset.to_content_block());
             }

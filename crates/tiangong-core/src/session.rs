@@ -246,12 +246,6 @@ impl Session {
         self.messages.iter().any(|m| m.role == MessageRole::User)
     }
 
-    /// 迁移旧格式数据。
-    ///
-    /// 旧 `media` 数组现已在 `Message` 反序列化时直接并入 `content`（见
-    /// `Message` 的自定义 `Deserialize`），此方法保留为空操作以维持向后兼容的调用点。
-    pub fn migrate_legacy_content(&mut self) {}
-
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
         Self {

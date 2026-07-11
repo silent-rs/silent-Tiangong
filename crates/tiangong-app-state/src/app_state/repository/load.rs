@@ -93,13 +93,7 @@ impl AppRepository {
             serde_json::from_str(&content).context("解析旧会话存储失败")?;
 
         Ok(Some(LoadedState {
-            sessions: {
-                let mut sessions = persisted.sessions;
-                for session in &mut sessions {
-                    session.migrate_legacy_content();
-                }
-                sessions
-            },
+            sessions: persisted.sessions,
             active_session_id: persisted.active_session_id,
             workspace_dir: default_workspace_dir(),
             model_list: persisted.model_list,
@@ -143,7 +137,6 @@ impl AppRepository {
         let mut session: Session = serde_json::from_str(&content)
             .with_context(|| format!("解析会话文件失败：{}", session_path.display()))?;
         session.id = session_id.to_string();
-        session.migrate_legacy_content();
         if missing_session_trust_mode {
             session.trust_mode = missing_trust_mode;
         }

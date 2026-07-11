@@ -9,6 +9,7 @@
 //! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
 //! core 不再感知浏览器快照注入。
 
+use std::sync::Arc;
 use std::sync::mpsc::Sender as StdSender;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -60,6 +61,7 @@ pub(super) fn drain_pending_commands_async(
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    plugins: &[Arc<dyn crate::core::Plugin>],
 ) -> PendingCommandEffect {
     let mut injected_message = false;
 
@@ -74,10 +76,14 @@ pub(super) fn drain_pending_commands_async(
             Command::CancelAgent { .. } => {}
             Command::Shutdown => return PendingCommandEffect::Terminate,
             Command::Message {
-                content,
+                mut content,
                 message_id,
-                media,
+                mut media,
             } => {
+                // 命令排空期间注入的用户新消息同样需经 ingress 钩子归档附件。
+                for plugin in plugins {
+                    plugin.on_message_ingress(&mut content, &mut media);
+                }
                 let mid = append_or_reuse_user_message(session, &content, message_id, media);
                 let msg_media = session
                     .messages
