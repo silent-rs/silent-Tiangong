@@ -114,6 +114,12 @@ export function estimatedBase64Size(rawBytes: number): number {
   return Math.ceil(rawBytes / 3) * 4;
 }
 
+/** 判断 URL 是否为已归档到本地的媒体路径（~/.tiangong/media/...）。
+ *  统一正反斜杠后判断（Windows 路径兼容）。 */
+export function isArchivedMediaPath(url: string): boolean {
+  return url.replace(/\\/g, '/').includes('/.tiangong/media/');
+}
+
 export async function attachmentToBase64Media(item: Attachment): Promise<MediaAsset> {
   if (item.url.startsWith('data:')) {
     assertBase64Size(item.url, item.title);
@@ -122,6 +128,17 @@ export async function attachmentToBase64Media(item: Attachment): Promise<MediaAs
       url: item.url,
       title: item.title,
       mime_type: item.mime_type || mimeTypeFromDataUrl(item.url),
+      capability: 'multimodal',
+    };
+  }
+
+  // 已归档到本地的路径直接复用，不重新读取为 base64——避免编辑时反复产生重复附件。
+  if (isArchivedMediaPath(item.url)) {
+    return {
+      kind: item.kind,
+      url: item.url,
+      title: item.title,
+      mime_type: item.mime_type,
       capability: 'multimodal',
     };
   }

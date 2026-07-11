@@ -10,85 +10,58 @@ use std::path::{Path, PathBuf};
 use base64::{Engine as _, engine::general_purpose};
 use tiangong_types::{MediaAsset, MediaKind};
 
+/// 单个附件最大字节数（50MB，与前端限制一致）。
+const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// 把输入附件归档到本地（图片/文件）。
+/// 把输入附件归档到本地。
 ///
-/// - 图片：归档到 `~/.tiangong/media/images/`
-/// - PDF/Office 文档：归档到 `~/.tiangong/media/files/`
-/// - 其他：保留原引用
-pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Vec<MediaAsset> {
-    media
+/// 新规则：**用户上传的图片和文件全部归档**。`MediaKind::Image` 走图片归档，
+/// `MediaKind::File` 走文件归档。文件类型/MIME 只用于确定扩展名和展示信息，
+/// 不决定是否归档。无法识别类型的文件以 `application/octet-stream` 保存，
+/// 不再保留临时远程地址。
+///
+/// 文件名、标题不能覆盖明确的 `MediaKind`——图片标题为 `report.pdf` 时仍按图片处理。
+pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Result<Vec<MediaAsset>, String> {
+    Ok(media
         .into_iter()
-        .map(|asset| {
-            if !should_archive_input_asset(&asset) {
-                return asset;
-            }
-            if is_document_asset(&asset) {
-                match archive_file_reference(&asset.url, asset.mime_type.as_deref()) {
+        .map(|asset| match asset.kind {
+            MediaKind::Image => {
+                let orig = asset.title.as_deref();
+                match archive_image_reference(&asset.url, asset.mime_type.as_deref(), orig) {
                     Ok(archived) => MediaAsset {
                         url: archived.path,
                         mime_type: Some(archived.mime_type),
                         ..asset
                     },
                     Err(err) => {
-                        tracing::warn!(
-                            url = %asset.url,
-                            error = %err,
-                            "输入文档归档到本地失败，保留原始引用"
-                        );
+                        tracing::warn!(url = %asset.url, error = %err, "输入图片归档到本地失败，保留原始引用");
                         asset
                     }
                 }
-            } else {
-                match archive_image_reference(&asset.url, asset.mime_type.as_deref()) {
+            }
+            // File（以及 Video/Audio 等其他类型）统一走文件归档。
+            _ => {
+                let mime_hint = asset
+                    .mime_type
+                    .clone()
+                    .or_else(|| document_mime_from_reference(&asset.url))
+                    .or_else(|| asset.title.as_deref().and_then(document_mime_from_reference));
+                let orig = asset.title.as_deref();
+                match archive_file_reference(&asset.url, mime_hint.as_deref(), orig) {
                     Ok(archived) => MediaAsset {
                         url: archived.path,
                         mime_type: Some(archived.mime_type),
                         ..asset
                     },
                     Err(err) => {
-                        tracing::warn!(
-                            url = %asset.url,
-                            error = %err,
-                            "输入图片归档到本地失败，保留原始引用"
-                        );
+                        tracing::warn!(url = %asset.url, error = %err, "输入文件归档到本地失败，保留原始引用");
                         asset
                     }
                 }
             }
         })
-        .collect()
-}
-
-fn should_archive_input_asset(asset: &MediaAsset) -> bool {
-    if matches!(asset.kind, MediaKind::Image) {
-        return true;
-    }
-    if matches!(asset.kind, MediaKind::File) {
-        // 图片类文件走图片归档
-        if asset
-            .mime_type
-            .as_deref()
-            .is_some_and(|mime| mime.starts_with("image/"))
-            || image_mime_from_reference(&asset.url).is_some()
-        {
-            return true;
-        }
-        // PDF/Office 文档走文件归档
-        if is_document_asset(asset) {
-            return true;
-        }
-    }
-    false
-}
-
-/// 判断是否为可归档的文档附件（PDF/Word/Excel/PowerPoint 现代格式）
-fn is_document_asset(asset: &MediaAsset) -> bool {
-    if let Some(mime) = asset.mime_type.as_deref()
-        && is_document_mime(mime)
-    {
-        return true;
-    }
-    document_mime_from_reference(&asset.url).is_some()
+        .collect())
 }
 
 fn is_document_mime(mime: &str) -> bool {
@@ -115,6 +88,7 @@ impl ArchivedImage {
 pub fn archive_image_reference(
     reference: &str,
     mime_hint: Option<&str>,
+    original_name: Option<&str>,
 ) -> Result<ArchivedImage, String> {
     let trimmed = reference.trim();
     if trimmed.is_empty() {
@@ -130,25 +104,32 @@ pub fn archive_image_reference(
         });
     }
     if trimmed.starts_with("data:image/") {
-        return archive_data_image(trimmed);
+        return archive_data_image(trimmed, original_name);
     }
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        return download_remote_image(trimmed);
+        return download_remote_image(trimmed, original_name);
     }
-    copy_local_image(Path::new(trimmed), mime_hint)
+    copy_local_image(Path::new(trimmed), mime_hint, original_name)
 }
 
-fn copy_local_image(path: &Path, mime_hint: Option<&str>) -> Result<ArchivedImage, String> {
+fn copy_local_image(
+    path: &Path,
+    mime_hint: Option<&str>,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读取本地图片失败：{err}"))?;
     let mime_type = mime_hint
         .filter(|mime| mime.starts_with("image/"))
         .map(str::to_string)
         .or_else(|| image_mime_from_reference(&path.to_string_lossy()))
         .unwrap_or_else(|| "image/png".to_string());
-    write_archived_image(bytes, &mime_type)
+    write_archived_image(bytes, &mime_type, original_name)
 }
 
-fn archive_data_image(data_url: &str) -> Result<ArchivedImage, String> {
+fn archive_data_image(
+    data_url: &str,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let (header, data) = data_url
         .split_once(',')
         .ok_or_else(|| "data:image 缺少 base64 内容".to_string())?;
@@ -160,22 +141,26 @@ fn archive_data_image(data_url: &str) -> Result<ArchivedImage, String> {
     let bytes = general_purpose::STANDARD
         .decode(data)
         .map_err(|err| format!("解码 data:image 失败：{err}"))?;
-    write_archived_image(bytes, mime_type)
+    write_archived_image(bytes, mime_type, original_name)
 }
 
-fn download_remote_image(url: &str) -> Result<ArchivedImage, String> {
+fn download_remote_image(url: &str, original_name: Option<&str>) -> Result<ArchivedImage, String> {
     // reqwest::blocking::Client 内部创建 tokio 运行时，
     // 在 async 上下文中 drop 会 panic，用独立线程隔离。
     let url = url.to_string();
+    let orig = original_name.map(str::to_string);
     std::thread::scope(|scope| {
         scope
-            .spawn(|| download_remote_image_inner(&url))
+            .spawn(move || download_remote_image_inner(&url, orig.as_deref()))
             .join()
             .unwrap()
     })
 }
 
-fn download_remote_image_inner(url: &str) -> Result<ArchivedImage, String> {
+fn download_remote_image_inner(
+    url: &str,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -198,17 +183,19 @@ fn download_remote_image_inner(url: &str) -> Result<ArchivedImage, String> {
         .map(str::to_string)
         .or_else(|| image_mime_from_reference(url))
         .unwrap_or_else(|| "image/png".to_string());
-    let bytes = response
-        .bytes()
-        .map_err(|err| format!("读取图片响应失败：{err}"))?
-        .to_vec();
-    write_archived_image(bytes, &mime_type)
+    let bytes = read_response_with_limit(response, MAX_ARCHIVE_BYTES, "图片")?;
+    write_archived_image(bytes, &mime_type, original_name)
 }
 
-fn write_archived_image(bytes: Vec<u8>, mime_type: &str) -> Result<ArchivedImage, String> {
+fn write_archived_image(
+    bytes: Vec<u8>,
+    mime_type: &str,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let dir = media_images_dir()?;
     let ext = image_ext_from_mime(mime_type).unwrap_or("png");
-    let path = dir.join(format!("{}.{}", scru128::new(), ext));
+    let filename = archived_filename(original_name, ext);
+    let path = dir.join(filename);
     std::fs::write(&path, bytes).map_err(|err| format!("写入图片归档失败：{err}"))?;
     Ok(ArchivedImage {
         path: path.to_string_lossy().to_string(),
@@ -246,6 +233,40 @@ fn is_archived_media_path(value: &str, subdir: &str) -> bool {
         })
 }
 
+/// 判断路径是否位于媒体归档目录（images 或 files）。
+///
+/// 后端用此验证前端传入的"已归档"路径确实位于真实媒体目录——不仅检查路径
+/// 片段，还 canonicalize 真实归档根目录与目标路径，确认目标在根目录内且是
+/// 实际存在的普通文件。防止 `/tmp/.tiangong/media/files/../../etc/passwd`
+/// 或不存在的伪造路径通过校验。
+pub fn is_archived_media_path_any(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    // 快速片段检查（排除明显不在归档目录的路径）
+    if !is_archived_media_path(&normalized, "images")
+        && !is_archived_media_path(&normalized, "files")
+    {
+        return false;
+    }
+    // 严格验证：canonicalize 目标路径，确认位于真实归档根目录内且是普通文件
+    let path = match std::fs::canonicalize(&normalized) {
+        Ok(p) => p,
+        Err(_) => return false, // 路径不存在或无法解析
+    };
+    if !path.is_file() {
+        return false;
+    }
+    // 检查 canonicalize 后的路径是否位于 images 或 files 根目录内
+    for subdir in &["images", "files"] {
+        if let Ok(root) = media_subdir(subdir)
+            && let Ok(root_canon) = std::fs::canonicalize(&root)
+            && path.starts_with(&root_canon)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn image_mime_from_reference(value: &str) -> Option<String> {
     let lower = value.trim().to_ascii_lowercase();
     if lower.starts_with("data:image/") {
@@ -280,7 +301,9 @@ fn image_ext_from_mime(mime_type: &str) -> Option<&'static str> {
 
 /// 从文件引用推断文档 MIME（按扩展名）
 fn document_mime_from_reference(value: &str) -> Option<String> {
-    let lower = value.trim().to_ascii_lowercase();
+    // 忽略查询参数与片段，只检查路径部分（如 "报告.pdf?token=xxx" → ".pdf"）。
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let lower = path.trim().to_ascii_lowercase();
     if lower.ends_with(".pdf") {
         Some("application/pdf".to_string())
     } else if lower.ends_with(".docx") {
@@ -296,14 +319,37 @@ fn document_mime_from_reference(value: &str) -> Option<String> {
     }
 }
 
-/// 文档 MIME → 扩展名
-fn document_ext_from_mime(mime_type: &str) -> Option<&'static str> {
+/// MIME → 扩展名（通用，覆盖常见文本/音视频/文档类型）
+fn ext_from_mime(mime_type: &str) -> &'static str {
     match mime_type {
-        "application/pdf" => Some("pdf"),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
-        _ => None,
+        // 文档
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        // 文本
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" => "xml",
+        // 音视频
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "audio/mpeg" => "mp3",
+        "audio/wav" => "wav",
+        "audio/ogg" => "ogg",
+        // 图片
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        // 压缩
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        // 通用
+        _ => "bin",
     }
 }
 
@@ -313,6 +359,7 @@ fn document_ext_from_mime(mime_type: &str) -> Option<&'static str> {
 pub fn archive_file_reference(
     reference: &str,
     mime_hint: Option<&str>,
+    original_name: Option<&str>,
 ) -> Result<ArchivedImage, String> {
     let trimmed = reference.trim();
     if trimmed.is_empty() {
@@ -328,25 +375,33 @@ pub fn archive_file_reference(
         });
     }
     if let Some(rest) = trimmed.strip_prefix("data:") {
-        return archive_data_file(rest, mime_hint);
+        return archive_data_file(rest, mime_hint, original_name);
     }
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        return download_remote_file(trimmed, mime_hint);
+        return download_remote_file(trimmed, mime_hint, original_name);
     }
-    copy_local_file(Path::new(trimmed), mime_hint)
+    copy_local_file(Path::new(trimmed), mime_hint, original_name)
 }
 
-fn copy_local_file(path: &Path, mime_hint: Option<&str>) -> Result<ArchivedImage, String> {
+fn copy_local_file(
+    path: &Path,
+    mime_hint: Option<&str>,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let bytes = std::fs::read(path).map_err(|err| format!("读取本地文档失败：{err}"))?;
     let mime_type = mime_hint
         .filter(|mime| is_document_mime(mime))
         .map(str::to_string)
         .or_else(|| document_mime_from_reference(&path.to_string_lossy()))
-        .ok_or_else(|| "无法识别文档类型".to_string())?;
-    write_archived_file(bytes, &mime_type)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    write_archived_file(bytes, &mime_type, original_name)
 }
 
-fn archive_data_file(data_payload: &str, mime_hint: Option<&str>) -> Result<ArchivedImage, String> {
+fn archive_data_file(
+    data_payload: &str,
+    mime_hint: Option<&str>,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let (header, data) = data_payload
         .split_once(',')
         .ok_or_else(|| "data: 文档缺少 base64 内容".to_string())?;
@@ -360,24 +415,33 @@ fn archive_data_file(data_payload: &str, mime_hint: Option<&str>) -> Result<Arch
                 .filter(|m| is_document_mime(m))
                 .map(str::to_string)
         })
-        .ok_or_else(|| "data: 文档 MIME 不在支持范围内".to_string())?;
+        .unwrap_or_else(|| "application/octet-stream".to_string());
     let bytes = general_purpose::STANDARD
         .decode(data)
         .map_err(|err| format!("解码 data: 文档失败：{err}"))?;
-    write_archived_file(bytes, &mime_type)
+    write_archived_file(bytes, &mime_type, original_name)
 }
 
-fn download_remote_file(url: &str, mime_hint: Option<&str>) -> Result<ArchivedImage, String> {
+fn download_remote_file(
+    url: &str,
+    mime_hint: Option<&str>,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let url = url.to_string();
+    let orig = original_name.map(str::to_string);
     std::thread::scope(|scope| {
         scope
-            .spawn(move || download_remote_file_inner(&url, mime_hint))
+            .spawn(move || download_remote_file_inner(&url, mime_hint, orig.as_deref()))
             .join()
             .unwrap()
     })
 }
 
-fn download_remote_file_inner(url: &str, mime_hint: Option<&str>) -> Result<ArchivedImage, String> {
+fn download_remote_file_inner(
+    url: &str,
+    mime_hint: Option<&str>,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -404,23 +468,81 @@ fn download_remote_file_inner(url: &str, mime_hint: Option<&str>) -> Result<Arch
                 .map(str::to_string)
         })
         .or_else(|| document_mime_from_reference(url))
-        .ok_or_else(|| "下载文档的 MIME 不在支持范围内".to_string())?;
-    let bytes = response
-        .bytes()
-        .map_err(|err| format!("读取文档响应失败：{err}"))?
-        .to_vec();
-    write_archived_file(bytes, &mime_type)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let bytes = read_response_with_limit(response, MAX_ARCHIVE_BYTES, "文档")?;
+    write_archived_file(bytes, &mime_type, original_name)
 }
 
-fn write_archived_file(bytes: Vec<u8>, mime_type: &str) -> Result<ArchivedImage, String> {
+fn write_archived_file(
+    bytes: Vec<u8>,
+    mime_type: &str,
+    original_name: Option<&str>,
+) -> Result<ArchivedImage, String> {
     let dir = media_files_dir()?;
-    let ext = document_ext_from_mime(mime_type).unwrap_or("bin");
-    let path = dir.join(format!("{}.{}", scru128::new(), ext));
+    let ext = ext_from_mime(mime_type);
+    let filename = archived_filename(original_name, ext);
+    let path = dir.join(filename);
     std::fs::write(&path, bytes).map_err(|err| format!("写入文档归档失败：{err}"))?;
     Ok(ArchivedImage {
         path: path.to_string_lossy().to_string(),
         mime_type: mime_type.to_string(),
     })
+}
+
+/// 构造归档文件名：优先保留原始文件名的词干，加 scru128 前缀避免冲突。
+///
+/// 例如 original_name="报告.pdf"、ext="pdf" → "SCRU128_报告.pdf"。
+/// original_name 为空或无词干时回退到 "SCRU128.{ext}"。文件名中的路径分隔符
+/// 和特殊字符会被清理。
+fn archived_filename(original_name: Option<&str>, ext: &str) -> String {
+    let id = scru128::new().to_string();
+    if let Some(name) = original_name {
+        // 取文件名部分（去掉路径），去掉扩展名，清理特殊字符。
+        let normalized = name.replace('\\', "/");
+        let stem = normalized.rsplit('/').next().unwrap_or(name).trim();
+        let stem = stem.rsplit_once('.').map(|(s, _)| s).unwrap_or(stem);
+        let stem = stem.trim();
+        if !stem.is_empty() {
+            let safe: String = stem
+                .chars()
+                .map(|ch| {
+                    if ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | ' ') {
+                        ch
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            if !safe.is_empty() {
+                return format!("{id}_{safe}.{ext}");
+            }
+        }
+    }
+    format!("{id}.{ext}")
+}
+
+/// 读取 HTTP 响应到内存，限制最大字节数（防止超大响应耗尽内存）。
+fn read_response_with_limit(
+    response: reqwest::blocking::Response,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut reader = response;
+    let mut buf = Vec::new();
+    let mut limited = reader.by_ref().take(max_bytes);
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|err| format!("读取{label}响应失败：{err}"))?;
+    // 检查是否还有更多数据（说明超过限制）
+    let mut probe = [0u8; 1];
+    if reader.read(&mut probe).unwrap_or(0) > 0 {
+        return Err(format!(
+            "{label}超过 {}MB 大小限制",
+            max_bytes / 1024 / 1024
+        ));
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -442,7 +564,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         let result = &archived[0];
 
@@ -488,7 +610,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(!archived[0].url.starts_with("data:"));
         assert!(archived[0].url.ends_with(".docx"));
@@ -512,7 +634,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("media/images/"),
@@ -520,5 +642,227 @@ mod tests {
             archived[0].url
         );
         let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn unknown_file_type_archives_as_octet_stream() {
+        // 无扩展名、无 MIME 的 data URL 文件应归档为 octet-stream，不报错
+        let bytes = b"random binary content";
+        let b64 = general_purpose::STANDARD.encode(bytes);
+        let data_url = format!("data:application/octet-stream;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::File,
+            url: data_url,
+            mime_type: None,
+            title: Some("unknown.dat".to_string()),
+            capability: None,
+        };
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0].url.contains("media/files/"),
+            "未知类型文件应归档到 media/files/：{}",
+            archived[0].url
+        );
+        assert!(
+            archived[0].mime_type.as_deref() == Some("application/octet-stream"),
+            "未知类型应为 octet-stream，实际：{:?}",
+            archived[0].mime_type
+        );
+        let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn image_with_pdf_title_still_archives_as_image() {
+        // 图片标题为 report.pdf 时仍按图片归档（title 不覆盖 MediaKind）
+        let bytes = b"fake png";
+        let b64 = general_purpose::STANDARD.encode(bytes);
+        let data_url = format!("data:image/png;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::Image,
+            url: data_url,
+            mime_type: Some("image/png".to_string()),
+            title: Some("report.pdf".to_string()),
+            capability: None,
+        };
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0].url.contains("media/images/"),
+            "图片标题为 pdf 时仍应归档到 images/：{}",
+            archived[0].url
+        );
+        let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn document_mime_from_reference_ignores_query_params() {
+        // 带查询参数的 URL 应忽略参数后检查扩展名
+        assert_eq!(
+            document_mime_from_reference("https://host/dl/报告.pdf?token=xxx"),
+            Some("application/pdf".to_string())
+        );
+        // 无扩展名的临时地址
+        assert!(document_mime_from_reference("https://host/download/123").is_none());
+    }
+
+    #[test]
+    fn is_archived_media_path_any_handles_backslashes() {
+        // 创建真实归档文件用于 canonicalize 验证
+        let dir = media_images_dir().unwrap();
+        let file_path = dir.join("backslash_test.png");
+        std::fs::write(&file_path, b"test").unwrap();
+
+        // Unix 路径（真实文件）
+        assert!(is_archived_media_path_any(file_path.to_str().unwrap()));
+
+        // 非归档路径（不存在或不在归档目录）
+        assert!(!is_archived_media_path_any("/tmp/some_file.png"));
+
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn archived_filename_preserves_original_stem() {
+        // 有原文件名时保留词干
+        let f = archived_filename(Some("报告.pdf"), "pdf");
+        assert!(f.contains("报告"), "文件名应含原词干：{f}");
+        assert!(f.ends_with(".pdf"), "文件名应以 .pdf 结尾：{f}");
+
+        // 带路径的原文件名只取文件名部分
+        let f = archived_filename(Some("/tmp/sub/photo.PNG"), "png");
+        assert!(f.contains("photo"), "应只取文件名部分：{f}");
+
+        // 无原文件名时回退到 scru128.ext
+        let f = archived_filename(None, "bin");
+        assert!(f.ends_with(".bin"), "无原文件名应回退：{f}");
+
+        // 空字符串原文件名
+        let f = archived_filename(Some(""), "pdf");
+        assert!(f.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn archive_preserves_original_filename() {
+        let pdf_bytes = b"%PDF-1.4";
+        let b64 = general_purpose::STANDARD.encode(pdf_bytes);
+        let data_url = format!("data:application/pdf;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::File,
+            url: data_url,
+            mime_type: Some("application/pdf".to_string()),
+            title: Some("季度报告.pdf".to_string()),
+            capability: None,
+        };
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0].url.contains("季度报告"),
+            "归档文件名应保留原始词干：{}",
+            archived[0].url
+        );
+        assert!(archived[0].url.ends_with(".pdf"));
+        let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn archive_image_preserves_filename() {
+        let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let b64 = general_purpose::STANDARD.encode(png_bytes);
+        let data_url = format!("data:image/png;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::Image,
+            url: data_url,
+            mime_type: Some("image/png".to_string()),
+            title: Some("截图.png".to_string()),
+            capability: None,
+        };
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(
+            archived[0].url.contains("截图"),
+            "图片归档文件名应保留原始词干：{}",
+            archived[0].url
+        );
+        assert!(archived[0].url.ends_with(".png"));
+        let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn no_extension_temp_url_still_archives_as_file() {
+        // 无扩展名临时下载地址的 data URL（模拟 Server 文件附件场景）
+        let bytes = b"file content";
+        let b64 = general_purpose::STANDARD.encode(bytes);
+        let data_url = format!("data:application/octet-stream;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::File,
+            url: data_url,
+            mime_type: None,
+            title: Some("downloaded_file".to_string()),
+            capability: None,
+        };
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(archived[0].url.contains("media/files/"));
+        assert!(
+            archived[0].url.contains("downloaded_file"),
+            "应保留原始文件名词干：{}",
+            archived[0].url
+        );
+        let _ = std::fs::remove_file(&archived[0].url);
+    }
+
+    #[test]
+    fn re_archiving_already_archived_path_is_idempotent() {
+        // 重复编辑场景：已归档路径再次归档应返回相同路径，不产生新文件。
+        // 1. 先归档一次
+        let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let b64 = general_purpose::STANDARD.encode(png_bytes);
+        let data_url = format!("data:image/png;base64,{b64}");
+        let asset = MediaAsset {
+            kind: MediaKind::Image,
+            url: data_url,
+            mime_type: Some("image/png".to_string()),
+            title: Some("test.png".to_string()),
+            capability: None,
+        };
+        let first = archive_input_media_assets(vec![asset]).unwrap();
+        let archived_path = first[0].url.clone();
+        assert!(Path::new(&archived_path).exists());
+
+        // 2. 用已归档路径再次归档——应幂等放行，返回相同路径
+        let asset2 = MediaAsset {
+            kind: MediaKind::Image,
+            url: archived_path.clone(),
+            mime_type: Some("image/png".to_string()),
+            title: Some("test.png".to_string()),
+            capability: None,
+        };
+        let second = archive_input_media_assets(vec![asset2]).unwrap();
+        assert_eq!(
+            second[0].url, archived_path,
+            "已归档路径再次归档应返回相同路径，不产生副本"
+        );
+
+        let _ = std::fs::remove_file(&archived_path);
+    }
+
+    #[test]
+    fn archived_media_path_any_rejects_non_media_paths() {
+        // 无效编辑场景：前端传入的路径不在媒体目录时，后端验证应拒绝
+        assert!(!is_archived_media_path_any("/etc/passwd"));
+        assert!(!is_archived_media_path_any("/tmp/malicious.png"));
+        assert!(!is_archived_media_path_any("../../../etc/shadow"));
+        // 路径包含 .tiangong/media/ 片段但不是真实文件 → 拒绝
+        assert!(!is_archived_media_path_any(
+            "/home/user/.tiangong/media/files/ghost.pdf"
+        ));
+
+        // 创建真实归档文件 → 通过
+        let dir = media_files_dir().unwrap();
+        let file_path = dir.join("validation_test.pdf");
+        std::fs::write(&file_path, b"test").unwrap();
+        assert!(is_archived_media_path_any(file_path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&file_path);
     }
 }

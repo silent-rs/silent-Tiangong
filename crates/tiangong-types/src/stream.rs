@@ -54,9 +54,6 @@ pub enum StreamEvent {
         /// Rust 内部落盘使用的完整输出，不序列化给前端或远端消费者。
         #[serde(default, skip)]
         full_output: Option<String>,
-        /// 工具生成的媒体资源（图片/视频等），由 core 侧直接解析，消费者无需重复解析。
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        media: Vec<crate::MediaAsset>,
         /// 工具执行耗时（毫秒）。前端据此展示真实耗时，不再把后续模型等待算到工具上。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,

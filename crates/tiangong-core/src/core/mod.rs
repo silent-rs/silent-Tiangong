@@ -76,8 +76,10 @@ impl TiangongCore {
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let worker_trust_mode = shared_trust_mode.clone();
+        let worker_cancel_flag = cancel_flag.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
@@ -90,6 +92,7 @@ impl TiangongCore {
                 worker_trust_mode,
                 plugins,
                 worker_cmd_tx,
+                worker_cancel_flag,
                 storage_root,
             )
         });
@@ -99,7 +102,7 @@ impl TiangongCore {
             worker: Some(worker),
             session_id,
             shared_trust_mode,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancel_flag,
         }
     }
 
@@ -179,10 +182,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
-        // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。
-        // 这样外部调用 deliver(Cancel) 无需知道 cancel_flag 的存在，封装更完整。
+        // Cancel 使用独立的 AtomicBool 信号，不再混入命令队列（避免残留 Cancel
+        // 跨轮次影响下一条消息）。deliver(Cancel) 只置标志，不发送 Command::Cancel。
         if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
             self.cancel_flag.store(true, Ordering::Release);
+            return Ok(());
         }
 
         match input {
@@ -239,6 +243,7 @@ fn worker_loop(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    cancel_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
@@ -259,6 +264,7 @@ fn worker_loop(
         shared_trust_mode,
         plugins,
         cmd_tx,
+        cancel_flag,
         storage_root,
     ))
 }
@@ -273,6 +279,7 @@ async fn worker_loop_async(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    cancel_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
@@ -510,6 +517,8 @@ async fn worker_loop_async(
                 message_id,
                 media,
             } => {
+                // 新一轮开始：清除上一轮的取消信号。
+                cancel_flag.store(false, Ordering::Release);
                 let turn_start_idx = session.messages.len();
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
@@ -518,10 +527,9 @@ async fn worker_loop_async(
                 if let Ok(mut slot) = turn_outcome.lock() {
                     *slot = None;
                 }
-                // 归档附件到本地（图片→images/，PDF/Office→files/）。
-                // 必须在 append 之前归档，否则 attachment_notice 引用的是 data URL
-                // 而非本地路径，agent 无法读取文件（issue #149）。
-                let media = tiangong_media_archive::archive_input_media_assets(media);
+                // 输入附件归档由各入口层在 deliver 前完成（GUI: app_state ingress；
+                // Server: remote/core.rs；CLI 无 media）。core 只接收已归档的 media，
+                // 不再参与 ingress 归档。
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);
@@ -533,7 +541,7 @@ async fn worker_loop_async(
                         .messages
                         .iter()
                         .find(|message| message.id == user_msg_id)
-                        .map(|message| message.media.clone())
+                        .map(|message| message.extract_media_assets())
                         .unwrap_or_default(),
                 });
 
@@ -551,6 +559,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
+                    &cancel_flag,
                 )
                 .await;
 
@@ -583,8 +592,9 @@ async fn worker_loop_async(
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
-                // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
-                // engine 在每个 block_in_place 前后检查取消信号。
+                // Cancel 经独立 cancel_flag 信号传递（deliver 不再入队 Command::Cancel）。
+                // 此分支为防御性处理：若因其他路径收到 Cancel，清除标志避免残留。
+                cancel_flag.store(false, Ordering::Release);
             }
             Command::CancelAgent { .. } => {
                 // 仅在多 Agent 执行等待期间由 ReactEngine 转发处理。
@@ -770,6 +780,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
+    cancel_flag: &Arc<AtomicBool>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -777,7 +788,8 @@ async fn execute_turn_async(
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
     )
-    .with_shared_team(team_context, "main".to_string());
+    .with_shared_team(team_context, "main".to_string())
+    .with_cancel_flag(cancel_flag.clone());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;

@@ -55,8 +55,6 @@ fn sub_agent_stream_message(
         reasoning_content: reasoning_content.into(),
         reasoning_signature: None,
         worker_id: None,
-        media: Vec::new(),
-        media_migrated: true,
         elapsed_ms: None,
         turn_status: None,
         tool_calls: Vec::new(),
@@ -470,6 +468,10 @@ impl ReactEngine {
             // handler），故子 agent 的 recall_memory / index_search 能直接路由到同一插件实例。
 
             let (sub_cmd_tx, mut sub_cmd_rx) = tokio_mpsc::unbounded_channel();
+            // 子 agent 共享父 agent 的 cancel_flag（父级取消时子级一并终止）。
+            if let Some(flag) = &self.cancel_flag {
+                sub_engine = sub_engine.with_cancel_flag(flag.clone());
+            }
             let _ = sub_cmd_tx.send(Command::Message {
                 content: combined_content,
                 message_id: Some(scru128::new().to_string()),
@@ -662,7 +664,7 @@ impl ReactEngine {
                                 .messages
                                 .iter()
                                 .find(|message| message.id == message_id)
-                                .map(|message| message.media.clone())
+                                .map(|message| message.extract_media_assets())
                                 .unwrap_or_default();
                             let _ = stream_tx.send(StreamEvent::UserMessage {
                                 message_id,

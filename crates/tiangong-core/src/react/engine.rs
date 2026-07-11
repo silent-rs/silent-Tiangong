@@ -55,6 +55,9 @@ pub(crate) struct ReactEngine {
     pub(super) max_outer_iterations: u32,
     pub(super) team: Option<Arc<Mutex<TeamContext>>>,
     pub(super) agent_id: String,
+    /// 取消信号（独立于命令队列）：check_cancel 读取此标志判断是否取消，
+    /// 不排空命令队列，避免乱序。
+    pub(super) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ReactEngine {
@@ -71,7 +74,17 @@ impl ReactEngine {
             max_outer_iterations,
             team: None,
             agent_id: "main".to_string(),
+            cancel_flag: None,
         }
+    }
+
+    /// 注入取消信号，供 check_cancel 读取（独立于命令队列，不排空队列）。
+    pub(crate) fn with_cancel_flag(
+        mut self,
+        cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.cancel_flag = Some(cancel_flag);
+        self
     }
 
     fn build_thinking_config(
@@ -315,7 +328,7 @@ impl ReactEngine {
                                         .messages
                                         .iter()
                                         .find(|message| message.id == mid)
-                                        .map(|message| message.media.clone())
+                                        .map(|message| message.extract_media_assets())
                                         .unwrap_or_default();
                                     let _ = stream_tx.send(StreamEvent::UserMessage {
                                         message_id: mid,
@@ -669,7 +682,6 @@ impl ReactEngine {
                             ok: false,
                             output: message.clone(),
                             full_output: Some(message.clone()),
-                            media: vec![],
                             duration_ms: None,
                         });
                         append_tool_result_message(
@@ -727,7 +739,6 @@ impl ReactEngine {
                             ok: result.ok,
                             output: tool_result_stream_output(&result),
                             full_output: Some(tool_result_full_output(&result)),
-                            media: vec![],
                             duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                         });
                         append_tool_result_message(
@@ -835,7 +846,6 @@ impl ReactEngine {
                                 ok: false,
                                 output: format!("权限拒绝：{reason}"),
                                 full_output: None,
-                                media: vec![],
                                 duration_ms: None,
                             });
                             append_tool_result_message(
@@ -919,7 +929,7 @@ impl ReactEngine {
                                             .messages
                                             .iter()
                                             .find(|message| message.id == mid)
-                                            .map(|message| message.media.clone())
+                                            .map(|message| message.extract_media_assets())
                                             .unwrap_or_default();
                                         let _ = stream_tx.send(StreamEvent::UserMessage {
                                             message_id: mid,
@@ -996,7 +1006,6 @@ impl ReactEngine {
                                     ok: false,
                                     output: "用户拒绝执行".to_string(),
                                     full_output: None,
-                                    media: vec![],
                                     duration_ms: None,
                                 });
                                 merge_plugin_usage(&mut accumulated_usage);
@@ -1008,8 +1017,15 @@ impl ReactEngine {
                         }
                     }
 
-                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if check_cancel(
+                        self.cancel_flag
+                            .as_ref()
+                            .expect("cancel_flag 必须在 execute_turn 前注入"),
+                    ) {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1051,7 +1067,6 @@ impl ReactEngine {
                                     ok: false,
                                     output: message.clone(),
                                     full_output: None,
-                                    media: vec![],
                                     duration_ms: None,
                                 });
                                 append_tool_result_message(
@@ -1079,7 +1094,7 @@ impl ReactEngine {
                         // analyze_attachment 已迁移至独立插件（tiangong-plugin-analyze-
                         // attachment），经 execute_tool_call → tool_overrides 统一分发，
                         // 其 multimodal 子调用的 token 用量由插件经反馈通道上报。
-                        let (mut result, tool_llm_usage, allow_memory_context, usage_source) = {
+                        let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                             (
                                 self.engine.execute_tool_call(call, session).await,
                                 tiangong_types::TokenUsage::default(),
@@ -1087,7 +1102,6 @@ impl ReactEngine {
                                 "",
                             )
                         };
-                        crate::tool::media::localize_tool_result_images(&call.name, &mut result);
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };
                     accumulated_usage.accumulate(&tool_llm_usage);
@@ -1109,32 +1123,16 @@ impl ReactEngine {
                         normalized_target.as_deref().or(target_summary.as_deref()),
                         &result.summary,
                     );
-                    let tool_media = if result.ok {
-                        crate::tool::media::parse_media_assets_from_tool_result(
-                            &call.name,
-                            &result.stdout,
-                            &result.summary,
-                        )
-                    } else {
-                        Vec::new()
-                    };
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         tool_call_id: Some(call.id.clone()),
                         ok: result.ok,
                         output: tool_result_stream_output(&result),
                         full_output: Some(tool_result_full_output(&result)),
-                        media: tool_media.clone(),
+                        // 工具产出的图片/视频已包含在 output（stdout）中，模型与前端
+                        // 均可直接识别 markdown 图片语法，无需 core 额外提取媒体资产。
                         duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                     });
-                    // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
-                    if !tool_media.is_empty() {
-                        session.append_message_with_media(
-                            MessageRole::Assistant,
-                            String::new(),
-                            tool_media.clone(),
-                        );
-                    }
                     append_tool_result_message(
                         session,
                         &call.id,
@@ -1157,8 +1155,17 @@ impl ReactEngine {
                         &call.name,
                         format_tool_trace_message(&result),
                     );
-                    if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if !result.ok
+                        && check_cancel(
+                            self.cancel_flag
+                                .as_ref()
+                                .expect("cancel_flag 必须在 execute_turn 前注入"),
+                        )
+                    {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1182,8 +1189,15 @@ impl ReactEngine {
                         need_failure_recovery_prompt = true;
                     }
 
-                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if check_cancel(
+                        self.cancel_flag
+                            .as_ref()
+                            .expect("cancel_flag 必须在 execute_turn 前注入"),
+                    ) {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }

@@ -246,13 +246,6 @@ impl Session {
         self.messages.iter().any(|m| m.role == MessageRole::User)
     }
 
-    /// 迁移旧格式数据：将 message.media 合并到 message.content 中。
-    pub fn migrate_legacy_content(&mut self) {
-        for message in &mut self.messages {
-            message.migrate_legacy_media();
-        }
-    }
-
     pub fn new(title: impl Into<String>) -> Self {
         let now = now_text();
         Self {
@@ -363,8 +356,6 @@ impl Session {
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
             tool_calls: Vec::new(),
@@ -390,8 +381,6 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
             tool_calls: Vec::new(),
@@ -435,8 +424,6 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
             tool_calls: Vec::new(),
@@ -472,8 +459,6 @@ impl Session {
             reasoning_content: reasoning_content.into(),
             reasoning_signature: None,
             worker_id: Some(worker_id.to_string()),
-            media: Vec::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
             tool_calls: Vec::new(),
@@ -849,8 +834,6 @@ impl Session {
                 blocks.push(asset.to_content_block());
             }
             msg.content = blocks;
-            msg.media.clear();
-            msg.media_migrated = true;
             self.updated_at = now_text();
             true
         } else {

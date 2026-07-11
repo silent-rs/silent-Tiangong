@@ -114,38 +114,6 @@ fn mime_type_from_path(path: &std::path::Path) -> String {
     .to_string()
 }
 
-/// 从消息的 content blocks 提取 media 资产（新格式）。
-///
-/// `append_message_with_id_and_media` 把附件存进 `content` 的 `ContentBlock::Media`，
-/// 而非旧的 `media` 字段。提取时必须从 content blocks 取，否则附件会丢失。
-fn extract_media_from_content(
-    message: &tiangong_types::Message,
-) -> Vec<tiangong_types::MediaAsset> {
-    message
-        .content
-        .iter()
-        .filter_map(|block| {
-            if let tiangong_types::message::ContentBlock::Media {
-                kind,
-                url,
-                mime_type,
-                title,
-            } = block
-            {
-                Some(tiangong_types::MediaAsset {
-                    kind: *kind,
-                    url: url.clone(),
-                    mime_type: mime_type.clone(),
-                    title: title.clone(),
-                    capability: None,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 async fn ensure_multimodal_enabled(state: &State<'_, TiangongApp>) -> Result<(), String> {
     state
         .with_state_read(|core_state| {
@@ -358,17 +326,6 @@ fn append_tool_result_message(
         tiangong_core::session::Message::tool_result(tool_call_id, tool_name, content, is_error);
     session.messages.push(message);
     session.updated_at = tiangong_core::session::now_text();
-}
-
-fn append_assistant_media(
-    session: &mut tiangong_core::session::Session,
-    media: Vec<tiangong_types::MediaAsset>,
-) {
-    session.append_message_with_media(
-        tiangong_core::session::MessageRole::Assistant,
-        String::new(),
-        media,
-    );
 }
 
 fn record_session_token_usage(
@@ -802,20 +759,34 @@ async fn send_message_inner(
 
     state.sync_core_config_from_state().await?;
 
-    // 准备 session
-    let (session_id, user_message_id, session_snapshot) = state
-        .with_state(|core_state| {
-            core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
+    // 归档前先固定目标会话，避免归档期间活动会话切换导致串线。
+    let session_id = state
+        .with_state_read(|core_state| {
+            Ok::<_, anyhow::Error>(core_state.active_session_id().to_string())
         })
         .await?;
-    // 从 content blocks 提取 media（新格式），而非旧 media 字段。
-    // append_message_with_id_and_media 把 media 存进 content blocks，
-    // 旧 media 字段为空。若取旧字段会导致附件丢失（issue #149）。
+
+    // 在持锁前归档附件（远程下载可能阻塞 60s），放到 spawn_blocking 避免阻塞
+    // 当前 async 任务的执行线程。
+    let media = tokio::task::spawn_blocking(move || {
+        tiangong_media_archive::archive_input_media_assets(media)
+    })
+    .await
+    .map_err(|e| format!("附件归档失败：{e}"))?
+    .map_err(|e| format!("附件归档失败：{e}"))?;
+
+    // 按固定 session_id 写入（不再读取活动会话）。
+    let (session_id, user_message_id, session_snapshot) = state
+        .with_state(|core_state| {
+            core_state.prepare_user_message_ingress_for_session(&session_id, content.clone(), media)
+        })
+        .await?;
+    // 从 content blocks 提取 media（媒体唯一真相源，不再有独立 media 字段）。
     let command_media = session_snapshot
         .messages
         .iter()
         .find(|message| message.id == user_message_id)
-        .map(extract_media_from_content)
+        .map(|message| message.extract_media_assets())
         .unwrap_or_default();
 
     // 获取或创建 TiangongCore
@@ -907,8 +878,22 @@ pub(crate) fn start_stream_consumer(
                             content,
                             media,
                         } => {
-                            // Core 已记录用户消息，同步到 TiangongState session
-                            if !session.messages.iter().any(|msg| msg.id == *message_id) {
+                            // Core 已记录用户消息（media 已由插件归档为本地路径），
+                            // 同步到 TiangongState session：用归档后的 media 重建
+                            // content blocks，使 app_state 落盘也持本地路径（issue #149）。
+                            if let Some(message) = session
+                                .messages
+                                .iter_mut()
+                                .find(|msg| msg.id == *message_id)
+                            {
+                                let mut blocks = vec![tiangong_types::message::ContentBlock::text(
+                                    content.clone(),
+                                )];
+                                for asset in media {
+                                    blocks.push(asset.to_content_block());
+                                }
+                                message.content = blocks;
+                            } else {
                                 session.append_message_with_id_and_media(
                                     message_id.clone(),
                                     tiangong_core::session::MessageRole::User,
@@ -916,16 +901,6 @@ pub(crate) fn start_stream_consumer(
                                     String::new(),
                                     media.clone(),
                                 );
-                            } else if !media.is_empty() {
-                                if let Some(message) = session
-                                    .messages
-                                    .iter_mut()
-                                    .find(|msg| msg.id == *message_id)
-                                {
-                                    if message.media.is_empty() {
-                                        message.media = media.clone();
-                                    }
-                                }
                             }
                         }
                         StreamEvent::Delta {
@@ -1000,7 +975,6 @@ pub(crate) fn start_stream_consumer(
                             ok,
                             ref output,
                             ref full_output,
-                            ref media,
                             duration_ms: _,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
@@ -1027,9 +1001,6 @@ pub(crate) fn start_stream_consumer(
                                 );
                             } else {
                                 // 正常工具结果：只存标准 Tool result（不再写 System 摘要，避免重复）
-                                if !media.is_empty() {
-                                    append_assistant_media(session, media.clone());
-                                }
                                 append_tool_result_message(
                                     session,
                                     tool_call_id.as_deref(),
@@ -1515,6 +1486,24 @@ pub(crate) fn start_stream_consumer(
 
 /// 编辑用户消息并从该节点重新发送
 ///
+/// 编辑时处理附件：已存在于原消息中的归档路径复用（后端验证在媒体目录），
+/// 只对新附件归档。避免重复编辑产生附件副本。
+fn archive_edit_media(
+    media: Vec<tiangong_types::MediaAsset>,
+    existing_urls: &[String],
+) -> Vec<tiangong_types::MediaAsset> {
+    let (to_archive, mut result): (Vec<_>, Vec<_>) = media.into_iter().partition(|asset| {
+        let normalized = asset.url.replace('\\', "/");
+        // 已归档路径且存在于原消息 → 复用，不重新归档。
+        !(tiangong_media_archive::is_archived_media_path_any(&normalized)
+            && existing_urls.contains(&normalized))
+    });
+    // 只归档新附件。
+    result
+        .extend(tiangong_media_archive::archive_input_media_assets(to_archive).unwrap_or_default());
+    result
+}
+
 /// 截断该消息之后的所有内容，更新消息内容，然后创建新的 core 重新执行 turn。
 #[tauri::command]
 pub async fn edit_and_resend(
@@ -1532,8 +1521,8 @@ pub async fn edit_and_resend(
         }
     }
 
-    // 1. 查找消息所在会话并验证
-    let session_id = state
+    // 1. 先验证消息存在、角色正确且允许编辑，再处理附件。
+    let (session_id, existing_media_urls) = state
         .with_state(|core_state| {
             let session = core_state
                 .sessions()
@@ -1556,15 +1545,36 @@ pub async fn edit_and_resend(
             if msg_idx < session.summary_up_to {
                 return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
             }
-            Ok(session.id.clone())
+            // 收集原消息中已归档的媒体路径，用于复用验证。
+            let existing: Vec<String> = msg
+                .extract_media_assets()
+                .into_iter()
+                .map(|a| a.url.replace('\\', "/"))
+                .collect();
+            Ok((session.id.clone(), existing))
         })
         .await?;
+
+    // 2. 处理附件：已存在于原消息中的归档路径直接复用（后端验证确实在媒体目录），
+    //    只对新附件归档。这样重复编辑不会产生附件副本。
+    let media = match media {
+        Some(m) if !m.is_empty() => {
+            let existing = existing_media_urls;
+            Some(
+                tokio::task::spawn_blocking(move || archive_edit_media(m, &existing))
+                    .await
+                    .map_err(|e| format!("附件归档失败：{e}"))?,
+            )
+        }
+        other => other,
+    };
 
     // 2. 取消并丢弃旧 core
     state.cancel_core(&session_id);
     state.take_core(&session_id);
 
-    // 3. 更新消息内容、截断后续消息、持久化
+    // 3. 在同一把状态锁内完成：重新确认可编辑（角色/索引/摘要边界）+ 修改 + 持久化。
+    //    归档期间可能发生上下文压缩，必须原子复查避免 summary_up_to > messages.len()。
     let (session_snapshot, message_media) = state
         .with_state(|core_state| {
             let session = core_state
@@ -1572,6 +1582,20 @@ pub async fn edit_and_resend(
                 .iter_mut()
                 .find(|s| s.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
+
+            // 重新确认消息仍可编辑（完整复查角色、索引、摘要边界）
+            let msg_idx = session
+                .messages
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+            let msg = &session.messages[msg_idx];
+            if msg.role != tiangong_core::session::MessageRole::User {
+                return Err(anyhow::anyhow!("只能编辑用户消息"));
+            }
+            if msg.compact || msg_idx < session.summary_up_to {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
 
             if let Some(ref new_media) = media {
                 session.update_message_content_with_media(
@@ -1588,28 +1612,7 @@ pub async fn edit_and_resend(
                 .messages
                 .iter()
                 .find(|message| message.id == message_id)
-                .map(|message| {
-                    let mut assets = Vec::new();
-                    for block in &message.content {
-                        if let tiangong_types::message::ContentBlock::Media {
-                            kind,
-                            url,
-                            mime_type,
-                            title,
-                        } = block
-                        {
-                            assets.push(tiangong_types::MediaAsset {
-                                kind: *kind,
-                                url: url.clone(),
-                                mime_type: mime_type.clone(),
-                                title: title.clone(),
-                                capability: None,
-                            });
-                        }
-                    }
-                    assets.extend(message.media.clone());
-                    assets
-                })
+                .map(|message| message.extract_media_assets())
                 .unwrap_or_default();
 
             let mut runtime_session = session.clone();
@@ -1751,6 +1754,7 @@ pub async fn cancel_agent(role: String, state: State<'_, TiangongApp>) -> Result
 pub async fn append_message(
     session_id: String,
     content: String,
+    media: Option<Vec<tiangong_types::MediaAsset>>,
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
@@ -1766,8 +1770,32 @@ pub async fn append_message(
         return Ok(ok);
     }
 
+    // 附件能力检查（与普通发送一致：未配置多模态时拒绝附件）。
+    if let Some(ref media_vec) = media {
+        if parse_context_slash_command(&content).is_none() && !media_vec.is_empty() {
+            ensure_multimodal_enabled(&state).await?;
+        }
+    }
+
+    // 归档附件（spawn_blocking，避免阻塞 async 执行线程）。
+    let media = match media {
+        Some(m) if !m.is_empty() => tokio::task::spawn_blocking(move || {
+            tiangong_media_archive::archive_input_media_assets(m)
+        })
+        .await
+        .map_err(|e| format!("附件归档失败：{e}"))?
+        .map_err(|e| format!("附件归档失败：{e}"))?,
+        other => other.unwrap_or_default(),
+    };
+
     let message_id = scru128::new().to_string();
-    if !state.send_to_core_with_id(&session_id, content.clone(), Some(message_id.clone())) {
+    let media_for_snapshot = media.clone();
+    if !state.send_to_core_with_media(
+        &session_id,
+        content.clone(),
+        Some(message_id.clone()),
+        media,
+    ) {
         let snapshot = state
             .with_state(|core_state| {
                 core_state.report_run_idle("当前会话任务已结束，请重新发送");
@@ -1794,7 +1822,7 @@ pub async fn append_message(
                         tiangong_core::session::MessageRole::User,
                         content,
                         String::new(),
-                        Vec::new(),
+                        media_for_snapshot.clone(),
                     );
                 }
             }

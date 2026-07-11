@@ -9,7 +9,6 @@ tiangong-core = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
-tiangong-media-archive = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true, default-features = false, features = [
     "std",

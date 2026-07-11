@@ -80,11 +80,25 @@ impl GenerateImagePlugin {
                 Ok(output) => {
                     let mut parts = Vec::new();
                     for (i, img) in output.response.images.iter().enumerate() {
-                        if let Some(url) = &img.url {
-                            parts.push(format!("![图片 {}]({})", i + 1, url));
+                        // 构造原始引用：远程 URL 优先，否则 base64 data URL。
+                        let raw = if let Some(url) = &img.url {
+                            url.clone()
                         } else if let Some(b64) = &img.b64_data {
-                            parts.push(format!("![图片 {}](data:image/png;base64,{})", i + 1, b64));
-                        }
+                            format!("data:image/png;base64,{b64}")
+                        } else {
+                            continue;
+                        };
+                        // 归档到本地（~/.tiangong/media/images/），失败则保留原始引用。
+                        let reference = match tiangong_media_archive::archive_image_reference(
+                            &raw, None, None,
+                        ) {
+                            Ok(archived) => archived.path().to_string(),
+                            Err(err) => {
+                                tracing::warn!(url = %raw, error = %err, "生成图片归档到本地失败，保留原始引用");
+                                raw
+                            }
+                        };
+                        parts.push(format!("![图片 {}]({})", i + 1, reference));
                     }
                     let markdown = parts.join("\n");
                     let summary = format!("图片生成成功（模型：{}）", output.resolved.model);

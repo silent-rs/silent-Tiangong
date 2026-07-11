@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::session::{Message, MessageRole, MessageToolCall, Session};
+use crate::session::{ContentBlock, Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{MediaAsset, StreamEvent};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
@@ -19,13 +19,19 @@ pub(crate) fn append_or_reuse_user_message(
             .iter_mut()
             .find(|message| message.id == message_id)
         {
-            let has_media = message.content.iter().any(|b| !b.is_text());
-            if !has_media && !media.is_empty() {
-                for asset in &media {
-                    message.content.push(asset.to_content_block());
-                }
-                message.media_migrated = true;
+            // 消息已存在（GUI 路径：app_state 已先持久化）：用本轮 ingress 处理后的
+            // content 与归档后的 media 重建 content blocks，确保 core session 的
+            // 文本与 media 引用均为最新（issue #149：attachment_notice 必须引用
+            // 本地路径而非 data URL）。
+            //
+            // 前提假设：当前 content blocks 仅含 Text 与 Media 两类。重建时以传入
+            // content 作为文本块、归档后 media 作为媒体块；若未来引入其他非文本
+            //（非媒体）块类型，需在此保留它们，否则会被丢弃。
+            let mut blocks = vec![ContentBlock::text(content.to_string())];
+            for asset in &media {
+                blocks.push(asset.to_content_block());
             }
+            message.content = blocks;
         } else {
             session.append_message_with_id_and_media(
                 message_id.clone(),
@@ -392,7 +398,6 @@ pub(crate) fn append_duplicate_tool_result(
         ok: true,
         output: message.clone(),
         full_output: Some(message.clone()),
-        media: vec![],
         duration_ms: None,
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
@@ -424,7 +429,6 @@ pub(crate) fn append_repeated_failed_tool_result(
         ok: false,
         output: message.clone(),
         full_output: Some(message.clone()),
-        media: vec![],
         duration_ms: None,
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
@@ -565,7 +569,6 @@ pub(crate) fn inject_tool_to_session(
             ok: true,
             output,
             full_output: None,
-            media: vec![],
             duration_ms: None,
         });
     }

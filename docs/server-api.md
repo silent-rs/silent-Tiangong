@@ -205,6 +205,10 @@ POST /api/v1/messages
 | title | string | 标题或描述（可选） |
 | capability | string | 能力标识（可选，如 `multimodal`） |
 
+> **归档**：Server 在消息投递前会把所有图片和文件附件归档到本地 `~/.tiangong/media/`。
+> `kind=image` 归档到 `images/`，`kind=file` 归档到 `files/`。文件类型/MIME 只用于
+> 确定扩展名，不影响是否归档。无法识别类型的文件以 `application/octet-stream` 保存。
+
 ### 会话管理
 
 #### 列出会话

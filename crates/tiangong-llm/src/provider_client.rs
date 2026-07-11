@@ -2022,7 +2022,6 @@ mod tests {
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -2030,7 +2029,6 @@ mod tests {
             compact: false,
             phase: MessagePhase::Normal,
             created_at: String::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
         }
@@ -2060,7 +2058,6 @@ mod tests {
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
-            media: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
@@ -2068,7 +2065,6 @@ mod tests {
             compact: false,
             phase: MessagePhase::Normal,
             created_at: String::new(),
-            media_migrated: true,
             elapsed_ms: None,
             turn_status: None,
         };

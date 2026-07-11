@@ -571,14 +571,16 @@ export function MessageInput() {
       // 执行中：追加消息到正在执行的 turn
       if (!activeSessionId) return;
       try {
-        const appended = await api.appendMessage(activeSessionId, content);
+        const appended = await api.appendMessage(activeSessionId, content, media.length > 0 ? media : undefined);
         if (appended) {
           setInputContent('');
           setAttachments([]);
         } else {
+          // 投递失败：不清空输入和附件，让用户重试
           console.warn('当前会话没有正在执行的任务，追加消息未发送');
         }
       } catch (e) {
+        // 归档或投递失败：不清空附件，让用户重试
         console.error('追加消息失败:', e);
       }
     }

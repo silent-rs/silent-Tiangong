@@ -237,11 +237,7 @@ impl ToolOverrideHandler for AnalyzeAttachmentPlugin {
 
 /// 判断消息是否携带媒体附件。
 fn has_media(msg: &Message) -> bool {
-    !msg.media.is_empty()
-        || msg
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Media { .. }))
+    msg.has_media()
 }
 
 /// 定位用于附件解析的源用户消息。
@@ -264,28 +260,9 @@ fn find_attachment_source_message<'a>(
         .find(|message| message.role == MessageRole::User && has_media(message))
 }
 
-/// 收集消息中的全部媒体资源（content Media 块 + 旧 media 字段）。
+/// 收集消息中的全部媒体资源（content blocks 是媒体的唯一真相源）。
 fn collect_message_media(message: &Message) -> Vec<MediaAsset> {
-    let mut assets = Vec::new();
-    for block in &message.content {
-        if let ContentBlock::Media {
-            kind,
-            url,
-            mime_type,
-            title,
-        } = block
-        {
-            assets.push(MediaAsset {
-                kind: *kind,
-                url: url.clone(),
-                mime_type: mime_type.clone(),
-                title: title.clone(),
-                capability: None,
-            });
-        }
-    }
-    assets.extend(message.media.clone());
-    assets
+    message.extract_media_assets()
 }
 
 // ── ToolResult 构造辅助 ──────────────────────────────────────────

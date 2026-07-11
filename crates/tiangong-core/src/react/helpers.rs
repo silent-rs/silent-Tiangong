@@ -83,7 +83,7 @@ pub(super) fn drain_pending_commands_async(
                     .messages
                     .iter()
                     .find(|message| message.id == mid)
-                    .map(|message| message.media.clone())
+                    .map(|message| message.extract_media_assets())
                     .unwrap_or_default();
                 let _ = stream_tx.send(StreamEvent::UserMessage {
                     message_id: mid,
@@ -123,37 +123,96 @@ pub(super) fn drain_pending_commands_async(
     }
 }
 
-/// 非阻塞检查是否有取消或关闭命令待处理。
-pub(super) fn check_cancel(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    stream_tx: &StdSender<StreamEvent>,
-) -> bool {
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        match cmd {
-            Command::Cancel | Command::Shutdown => {
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "已取消".into(),
-                });
-                return true;
-            }
-            Command::CancelAgent { .. } => {}
-            Command::CompressContext => {
-                crate::core::compress_context_for_session(session, engine, stream_tx);
-            }
-            Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx, engine);
-            }
-            _ => {}
-        }
-    }
-    false
+/// 检查是否收到取消信号。
+///
+/// 读取独立的 `cancel_flag`（由 deliver(Cancel) 在发送命令前设置），不排空命令
+/// 队列——队列中的所有命令（Message / CompressContext / ResetContext 等）严格
+/// 按提交顺序保留，由随后的 drain_pending_commands_async 处理。这彻底避免了
+/// 回灌导致的乱序和压缩/清理提前执行问题。
+pub(super) fn check_cancel(cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> bool {
+    use std::sync::atomic::Ordering;
+    cancel_flag.load(Ordering::Acquire)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_cancel_preserves_queue_order() {
+        // check_cancel 不应排空或重排命令队列——即使队列中有多个命令。
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // 放入消息1、消息2、压缩、取消
+        tx.send(Command::Message {
+            content: "msg1".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+        tx.send(Command::Message {
+            content: "msg2".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+        tx.send(Command::CompressContext).unwrap();
+
+        // check_cancel 返回 false（无取消信号）
+        assert!(!check_cancel(&flag));
+
+        // 队列应完整保留、顺序不变
+        let c1 = rx.try_recv().unwrap();
+        let c2 = rx.try_recv().unwrap();
+        let c3 = rx.try_recv().unwrap();
+        match c1 {
+            Command::Message { content, .. } => assert_eq!(content, "msg1"),
+            _ => panic!("第一个应为 msg1"),
+        }
+        match c2 {
+            Command::Message { content, .. } => assert_eq!(content, "msg2"),
+            _ => panic!("第二个应为 msg2"),
+        }
+        assert!(
+            matches!(c3, Command::CompressContext),
+            "第三个应为 CompressContext"
+        );
+    }
+
+    #[test]
+    fn check_cancel_true_when_signal_set() {
+        // 即使队列中有消息，cancel_flag=true 时应立即返回 true，不排空队列
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(Command::Message {
+            content: "msg".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(check_cancel(&flag));
+
+        // 队列中的消息应仍然存在（check_cancel 不消费队列）
+        assert!(
+            rx.try_recv().is_ok(),
+            "队列中的消息不应被 check_cancel 消费"
+        );
+    }
+
+    #[test]
+    fn check_cancel_reads_signal_not_queue() {
+        // cancel_flag = true → 返回 true
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(check_cancel(&flag));
+    }
+
+    #[test]
+    fn check_cancel_false_when_no_signal() {
+        // cancel_flag = false → 返回 false（不排空队列）
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(!check_cancel(&flag));
+    }
 
     #[test]
     fn looks_like_final_answer_empty_is_not_final() {
