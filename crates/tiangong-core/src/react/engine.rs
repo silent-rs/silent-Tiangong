@@ -678,7 +678,6 @@ impl ReactEngine {
                             ok: false,
                             output: message.clone(),
                             full_output: Some(message.clone()),
-                            media: vec![],
                             duration_ms: None,
                         });
                         append_tool_result_message(
@@ -736,7 +735,6 @@ impl ReactEngine {
                             ok: result.ok,
                             output: tool_result_stream_output(&result),
                             full_output: Some(tool_result_full_output(&result)),
-                            media: vec![],
                             duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                         });
                         append_tool_result_message(
@@ -844,7 +842,6 @@ impl ReactEngine {
                                 ok: false,
                                 output: format!("权限拒绝：{reason}"),
                                 full_output: None,
-                                media: vec![],
                                 duration_ms: None,
                             });
                             append_tool_result_message(
@@ -1005,7 +1002,6 @@ impl ReactEngine {
                                     ok: false,
                                     output: "用户拒绝执行".to_string(),
                                     full_output: None,
-                                    media: vec![],
                                     duration_ms: None,
                                 });
                                 merge_plugin_usage(&mut accumulated_usage);
@@ -1068,7 +1064,6 @@ impl ReactEngine {
                                     ok: false,
                                     output: message.clone(),
                                     full_output: None,
-                                    media: vec![],
                                     duration_ms: None,
                                 });
                                 append_tool_result_message(
@@ -1133,7 +1128,6 @@ impl ReactEngine {
                         full_output: Some(tool_result_full_output(&result)),
                         // 工具产出的图片/视频已包含在 output（stdout）中，模型与前端
                         // 均可直接识别 markdown 图片语法，无需 core 额外提取媒体资产。
-                        media: Vec::new(),
                         duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                     });
                     append_tool_result_message(

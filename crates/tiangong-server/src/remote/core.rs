@@ -563,27 +563,10 @@ fn sync_stream_event_to_state(
             ok,
             output,
             full_output,
-            media,
             duration_ms: _,
         } => {
             let persisted_output = full_output.as_deref().unwrap_or(output);
 
-            if *ok && !media.is_empty() {
-                session.append_message_with_media(
-                    MessageRole::Assistant,
-                    String::new(),
-                    media.clone(),
-                );
-            } else if *ok {
-                let parsed_media = parse_tool_media_assets(name, persisted_output);
-                if !parsed_media.is_empty() {
-                    session.append_message_with_media(
-                        MessageRole::Assistant,
-                        String::new(),
-                        parsed_media,
-                    );
-                }
-            }
             append_tool_result_message(
                 session,
                 tool_call_id.as_deref(),
@@ -759,60 +742,6 @@ fn append_tool_result_message(
     let message = Message::tool_result(tool_call_id, tool_name, content, is_error);
     session.messages.push(message);
     session.updated_at = now_text();
-}
-
-fn parse_tool_media_assets(name: &str, output: &str) -> Vec<MediaAsset> {
-    match name {
-        "generate_image" => parse_image_assets(output),
-        "generate_video" => parse_video_assets(output),
-        _ => Vec::new(),
-    }
-}
-
-fn parse_image_assets(output: &str) -> Vec<MediaAsset> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if !line.starts_with("![") || !line.ends_with(')') {
-                return None;
-            }
-            let close_alt = line.find("](")?;
-            let title = line[2..close_alt].trim();
-            let url = line[close_alt + 2..line.len() - 1].trim();
-            if url.is_empty() {
-                return None;
-            }
-            Some(MediaAsset {
-                kind: MediaKind::Image,
-                url: url.to_string(),
-                mime_type: None,
-                title: (!title.is_empty()).then(|| title.to_string()),
-                capability: Some("image_generation".to_string()),
-            })
-        })
-        .collect()
-}
-
-fn parse_video_assets(output: &str) -> Vec<MediaAsset> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let url = line
-                .trim()
-                .strip_prefix("Video URL:")
-                .or_else(|| line.trim().strip_prefix("video_url:"))
-                .map(str::trim)?;
-            let url = url.split_whitespace().next().unwrap_or(url);
-            (url.starts_with("http://") || url.starts_with("https://")).then(|| MediaAsset {
-                kind: MediaKind::Video,
-                url: url.to_string(),
-                mime_type: Some("video/mp4".to_string()),
-                title: Some("生成的视频".to_string()),
-                capability: Some("video_generation".to_string()),
-            })
-        })
-        .collect()
 }
 
 fn ensure_assistant_message(session: &mut Session, message_id: &str) {

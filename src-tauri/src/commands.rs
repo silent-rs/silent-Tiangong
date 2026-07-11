@@ -328,17 +328,6 @@ fn append_tool_result_message(
     session.updated_at = tiangong_core::session::now_text();
 }
 
-fn append_assistant_media(
-    session: &mut tiangong_core::session::Session,
-    media: Vec<tiangong_types::MediaAsset>,
-) {
-    session.append_message_with_media(
-        tiangong_core::session::MessageRole::Assistant,
-        String::new(),
-        media,
-    );
-}
-
 fn record_session_token_usage(
     session: &mut tiangong_core::session::Session,
     usage: &tiangong_types::TokenUsage,
@@ -973,7 +962,6 @@ pub(crate) fn start_stream_consumer(
                             ok,
                             ref output,
                             ref full_output,
-                            ref media,
                             duration_ms: _,
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
@@ -1000,9 +988,6 @@ pub(crate) fn start_stream_consumer(
                                 );
                             } else {
                                 // 正常工具结果：只存标准 Tool result（不再写 System 摘要，避免重复）
-                                if !media.is_empty() {
-                                    append_assistant_media(session, media.clone());
-                                }
                                 append_tool_result_message(
                                     session,
                                     tool_call_id.as_deref(),

@@ -398,7 +398,6 @@ pub(crate) fn append_duplicate_tool_result(
         ok: true,
         output: message.clone(),
         full_output: Some(message.clone()),
-        media: vec![],
         duration_ms: None,
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
@@ -430,7 +429,6 @@ pub(crate) fn append_repeated_failed_tool_result(
         ok: false,
         output: message.clone(),
         full_output: Some(message.clone()),
-        media: vec![],
         duration_ms: None,
     });
     append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
@@ -571,7 +569,6 @@ pub(crate) fn inject_tool_to_session(
             ok: true,
             output,
             full_output: None,
-            media: vec![],
             duration_ms: None,
         });
     }
