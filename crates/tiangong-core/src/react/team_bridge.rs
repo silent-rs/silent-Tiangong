@@ -652,12 +652,13 @@ impl ReactEngine {
                                 });
                             }
                         }
-                        Some(Command::Message { mut content, message_id, mut media }) => {
+                        Some(Command::Message { content, message_id, media }) => {
                             // 多 Agent 场景下注入的用户新消息同样需经 ingress 钩子
                             // 归档附件（与 worker_loop 主分支、engine 内层一致）。
-                            for plugin in &self.plugins {
-                                plugin.on_message_ingress(&mut content, &mut media);
-                            }
+                            let (content, media) = super::message::dispatch_message_ingress(
+                                &self.plugins, content, media,
+                            )
+                            .await;
                             let message_id = append_or_reuse_user_message(
                                 parent_session,
                                 &content,

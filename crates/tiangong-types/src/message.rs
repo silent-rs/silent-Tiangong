@@ -218,51 +218,34 @@ impl<'de> Deserialize<'de> for Message {
     where
         D: Deserializer<'de>,
     {
+        // 与 origin/main 的 derive 行为保持一致：id/role/content/created_at 为必填，
+        // 缺失时反序列化失败（而非静默生成空消息）。其余字段按需 default。
         #[derive(Deserialize)]
-        #[serde(default)]
         struct MessageRaw {
             id: String,
             role: MessageRole,
             #[serde(deserialize_with = "deserialize_content")]
             content: Vec<ContentBlock>,
+            #[serde(default)]
             reasoning_content: String,
             reasoning_signature: Option<String>,
             worker_id: Option<String>,
             /// 旧格式 media 字段：反序列化时捕获，随即并入 content，不保留为结构字段。
             #[serde(default)]
             media: Vec<MediaAsset>,
+            #[serde(default)]
             tool_calls: Vec<MessageToolCall>,
             tool_call_id: Option<String>,
             tool_name: Option<String>,
+            #[serde(default)]
             tool_result_is_error: bool,
+            #[serde(default)]
             compact: bool,
+            #[serde(default)]
             phase: MessagePhase,
             created_at: String,
             elapsed_ms: Option<u64>,
             turn_status: Option<TurnStatus>,
-        }
-
-        impl Default for MessageRaw {
-            fn default() -> Self {
-                Self {
-                    id: String::new(),
-                    role: MessageRole::User,
-                    content: Vec::new(),
-                    reasoning_content: String::new(),
-                    reasoning_signature: None,
-                    worker_id: None,
-                    media: Vec::new(),
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_result_is_error: false,
-                    compact: false,
-                    phase: MessagePhase::Normal,
-                    created_at: String::new(),
-                    elapsed_ms: None,
-                    turn_status: None,
-                }
-            }
         }
 
         let mut raw = MessageRaw::deserialize(deserializer)?;

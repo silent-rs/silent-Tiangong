@@ -57,6 +57,8 @@ pub(crate) struct ReactEngine {
     pub(super) agent_id: String,
     /// 会话级插件引用：用于在工具执行后分发 egress 钩子（如图片本地化）。
     pub(super) plugins: Vec<Arc<dyn crate::core::Plugin>>,
+    /// 命令通道发送端：check_cancel 遇到非控制命令时回灌队列用。
+    pub(super) cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
 }
 
 impl ReactEngine {
@@ -74,12 +76,19 @@ impl ReactEngine {
             team: None,
             agent_id: "main".to_string(),
             plugins: Vec::new(),
+            cmd_tx: None,
         }
     }
 
     /// 注入会话级插件，供 egress 钩子（工具输出本地化等）分发。
     pub(crate) fn with_plugins(mut self, plugins: Vec<Arc<dyn crate::core::Plugin>>) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    /// 注入命令通道发送端，供 check_cancel 回灌被排空的非控制命令。
+    pub(crate) fn with_cmd_tx(mut self, cmd_tx: tokio_mpsc::UnboundedSender<Command>) -> Self {
+        self.cmd_tx = Some(cmd_tx);
         self
     }
 
@@ -235,7 +244,9 @@ impl ReactEngine {
                     stream_tx,
                     cmd_rx,
                     &self.plugins,
-                ) {
+                )
+                .await
+                {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
@@ -322,13 +333,14 @@ impl ReactEngine {
                                         }
                                     }
                                 }
-                                Some(Command::Message { mut content, message_id, mut media }) => {
+                                Some(Command::Message { content, message_id, media }) => {
                                     // 与 worker_loop 主分支一致：注入的新消息同样需经
                                     // ingress 钩子归档附件（issue #149），否则流式/工具
                                     // 执行期间追加的 PDF/图片会保留原始地址无法读取。
-                                    for plugin in &self.plugins {
-                                        plugin.on_message_ingress(&mut content, &mut media);
-                                    }
+                                    let (content, media) = super::message::dispatch_message_ingress(
+                                        &self.plugins, content, media,
+                                    )
+                                    .await;
                                     let mid = append_or_reuse_user_message(
                                         session, &content, message_id, media,
                                     );
@@ -661,7 +673,9 @@ impl ReactEngine {
                         stream_tx,
                         cmd_rx,
                         &self.plugins,
-                    ) {
+                    )
+                    .await
+                    {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -935,14 +949,18 @@ impl ReactEngine {
                                         }
                                     }
                                     Some(Command::Message {
-                                        mut content,
+                                        content,
                                         message_id,
-                                        mut media,
+                                        media,
                                     }) => {
                                         // 外层迭代阶段注入的用户新消息同样需经 ingress 钩子归档附件。
-                                        for plugin in &self.plugins {
-                                            plugin.on_message_ingress(&mut content, &mut media);
-                                        }
+                                        let (content, media) =
+                                            super::message::dispatch_message_ingress(
+                                                &self.plugins,
+                                                content,
+                                                media,
+                                            )
+                                            .await;
                                         let mid = append_or_reuse_user_message(
                                             session, &content, message_id, media,
                                         );
@@ -1039,7 +1057,15 @@ impl ReactEngine {
                         }
                     }
 
-                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if check_cancel(
+                        session,
+                        &self.engine,
+                        cmd_rx,
+                        stream_tx,
+                        self.cmd_tx
+                            .as_ref()
+                            .expect("cmd_tx 必须在 execute_turn 前注入"),
+                    ) {
                         {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1192,7 +1218,17 @@ impl ReactEngine {
                         &call.name,
                         format_tool_trace_message(&result),
                     );
-                    if !result.ok && check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if !result.ok
+                        && check_cancel(
+                            session,
+                            &self.engine,
+                            cmd_rx,
+                            stream_tx,
+                            self.cmd_tx
+                                .as_ref()
+                                .expect("cmd_tx 必须在 execute_turn 前注入"),
+                        )
+                    {
                         {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1217,7 +1253,15 @@ impl ReactEngine {
                         need_failure_recovery_prompt = true;
                     }
 
-                    if check_cancel(session, &self.engine, cmd_rx, stream_tx) {
+                    if check_cancel(
+                        session,
+                        &self.engine,
+                        cmd_rx,
+                        stream_tx,
+                        self.cmd_tx
+                            .as_ref()
+                            .expect("cmd_tx 必须在 execute_turn 前注入"),
+                    ) {
                         {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1233,7 +1277,9 @@ impl ReactEngine {
                         stream_tx,
                         cmd_rx,
                         &self.plugins,
-                    ) {
+                    )
+                    .await
+                    {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;

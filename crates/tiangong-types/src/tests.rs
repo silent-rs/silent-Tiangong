@@ -256,3 +256,27 @@ fn session_serde_roundtrip() {
     assert_eq!(parsed.messages.len(), 2);
     assert_eq!(parsed.messages[0].text_content(), "你好");
 }
+
+#[test]
+fn empty_object_is_rejected_required_fields() {
+    // 回归：id/role/content/created_at 为必填字段。空对象 `{}` 必须反序列化失败，
+    // 而非静默生成空编号、空正文的用户消息（与 origin/main 的 derive 行为一致）。
+    let result = serde_json::from_str::<Message>("{}");
+    assert!(
+        result.is_err(),
+        "空对象应因缺少必填字段而失败，实际得到：{:?}",
+        result.ok()
+    );
+}
+
+#[test]
+fn missing_created_at_is_rejected() {
+    // 缺少 created_at（必填）应失败
+    let json = r#"{"id":"x","role":"user","content":"hi"}"#;
+    let result = serde_json::from_str::<Message>(json);
+    assert!(
+        result.is_err(),
+        "缺少 created_at 应失败，实际得到：{:?}",
+        result.ok()
+    );
+}

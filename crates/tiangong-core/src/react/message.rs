@@ -7,6 +7,31 @@ use tiangong_types::{MediaAsset, StreamEvent};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
+/// 异步分发 on_message_ingress 钩子（媒体归档等）。
+///
+/// 归档可能触发同步远程下载（单附件最长 60s），放到 spawn_blocking 执行，
+/// 避免阻塞 worker 线程导致流式输出与取消操作停滞。
+pub(crate) async fn dispatch_message_ingress(
+    plugins: &[std::sync::Arc<dyn crate::core::Plugin>],
+    content: String,
+    media: Vec<MediaAsset>,
+) -> (String, Vec<MediaAsset>) {
+    if plugins.is_empty() {
+        return (content, media);
+    }
+    let plugins = plugins.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let mut content = content;
+        let mut media = media;
+        for plugin in &plugins {
+            plugin.on_message_ingress(&mut content, &mut media);
+        }
+        (content, media)
+    })
+    .await
+    .unwrap_or_else(|_| (String::new(), Vec::new()))
+}
+
 pub(crate) fn append_or_reuse_user_message(
     session: &mut Session,
     content: &str,

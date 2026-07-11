@@ -520,9 +520,10 @@ async fn worker_loop_async(
                 }
                 // 插件接管输入附件归档：必须在 append 之前完成，否则
                 // attachment_notice 引用的是 data URL 而非本地路径（issue #149）。
-                for plugin in &plugins {
-                    plugin.on_message_ingress(&mut content, &mut media);
-                }
+                // 归档经 spawn_blocking 异步执行（见 dispatch_message_ingress），
+                // 避免阻塞 worker 线程。
+                (content, media) =
+                    crate::react::message::dispatch_message_ingress(&plugins, content, media).await;
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);
@@ -553,6 +554,7 @@ async fn worker_loop_async(
                     &mut cmd_rx,
                     team_context.clone(),
                     &plugins,
+                    &cmd_tx,
                 )
                 .await;
 
@@ -773,6 +775,7 @@ async fn execute_turn_async(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
     plugins: &[Arc<dyn Plugin>],
+    cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -781,7 +784,8 @@ async fn execute_turn_async(
         MAX_OUTER_ITERATIONS,
     )
     .with_shared_team(team_context, "main".to_string())
-    .with_plugins(plugins.to_vec());
+    .with_plugins(plugins.to_vec())
+    .with_cmd_tx(cmd_tx.clone());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;

@@ -56,7 +56,7 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 }
 
 /// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
-pub(super) fn drain_pending_commands_async(
+pub(super) async fn drain_pending_commands_async(
     session: &mut Session,
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
@@ -76,14 +76,14 @@ pub(super) fn drain_pending_commands_async(
             Command::CancelAgent { .. } => {}
             Command::Shutdown => return PendingCommandEffect::Terminate,
             Command::Message {
-                mut content,
+                content,
                 message_id,
-                mut media,
+                media,
             } => {
-                // 命令排空期间注入的用户新消息同样需经 ingress 钩子归档附件。
-                for plugin in plugins {
-                    plugin.on_message_ingress(&mut content, &mut media);
-                }
+                // 命令排空期间注入的用户新消息同样需经 ingress 钩子归档附件
+                //（spawn_blocking，避免阻塞 worker）。
+                let (content, media) =
+                    super::message::dispatch_message_ingress(plugins, content, media).await;
                 let mid = append_or_reuse_user_message(session, &content, message_id, media);
                 let msg_media = session
                     .messages
@@ -130,11 +130,16 @@ pub(super) fn drain_pending_commands_async(
 }
 
 /// 非阻塞检查是否有取消或关闭命令待处理。
+///
+/// 仅消费 Cancel/Shutdown/CompressContext/ResetContext 等控制命令；遇到其他命令
+/// （如排队中的用户新消息 `Command::Message`）时**回灌队列**并停止排空，避免吞掉
+/// 用户在工具执行期间追加的消息（它们应由随后的 drain_pending_commands_async 处理）。
 pub(super) fn check_cancel(
     session: &mut Session,
     engine: &RuntimeEngine,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     stream_tx: &StdSender<StreamEvent>,
+    cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
 ) -> bool {
     while let Ok(cmd) = cmd_rx.try_recv() {
         match cmd {
@@ -151,7 +156,12 @@ pub(super) fn check_cancel(
             Command::ResetContext => {
                 crate::core::reset_context_for_session(session, stream_tx, engine);
             }
-            _ => {}
+            // 非控制命令（Message / UpdateCwd / ReloadConfig / Approval 等）：回灌队列，
+            // 交由后续 drain_pending_commands_async 处理，避免被静默丢弃。
+            other => {
+                let _ = cmd_tx.send(other);
+                break;
+            }
         }
     }
     false

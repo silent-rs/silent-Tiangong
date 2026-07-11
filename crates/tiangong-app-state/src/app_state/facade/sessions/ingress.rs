@@ -21,11 +21,12 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
-        // 注意：此处以原始 media（data URL / 远程地址）立即落盘。归档由 core 侧
-        // media-archive 插件经 on_message_ingress 完成，随后经 StreamEvent::UserMessage
-        // 回流重建 content blocks。若消息投递失败/应用崩溃/提前退出，落盘的会是
-        // 原始地址而非本地路径——这是 GUI 双持久化架构的固有窗口期。
+        // 落盘前先同步归档附件为本地路径，确保磁盘持久化的 media.url 始终是
+        // 可读的本地路径（而非 data URL / 远程地址）——即使消息投递失败、应用
+        // 崩溃或用户提前退出，会话文件也不含失效引用。
+        // core 侧 media-archive 插件会再次归档（幂等，is_archived_media_path 直接放行）。
         let content = content.into();
+        let media = tiangong_media_archive::archive_input_media_assets(media);
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
         let session_id = self.store.session.sessions[idx].id.clone();
