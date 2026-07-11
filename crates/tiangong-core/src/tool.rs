@@ -9,8 +9,6 @@
 //! core 不再直接执行任何工具，仅保留 ToolResult 供插件 handler 返回。
 //! 路径沙箱/命令白名单（原 common）已迁出为独立 crate tiangong-toolkit。
 
-pub(crate) mod media;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

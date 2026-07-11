@@ -1125,32 +1125,17 @@ impl ReactEngine {
                         normalized_target.as_deref().or(target_summary.as_deref()),
                         &result.summary,
                     );
-                    let tool_media = if result.ok {
-                        crate::tool::media::parse_media_assets_from_tool_result(
-                            &call.name,
-                            &result.stdout,
-                            &result.summary,
-                        )
-                    } else {
-                        Vec::new()
-                    };
                     let _ = stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         tool_call_id: Some(call.id.clone()),
                         ok: result.ok,
                         output: tool_result_stream_output(&result),
                         full_output: Some(tool_result_full_output(&result)),
-                        media: tool_media.clone(),
+                        // 工具产出的图片/视频已包含在 output（stdout）中，模型与前端
+                        // 均可直接识别 markdown 图片语法，无需 core 额外提取媒体资产。
+                        media: Vec::new(),
                         duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                     });
-                    // 媒体工具成功时，立即创建一条携带媒体的 assistant 消息，前端可实时渲染
-                    if !tool_media.is_empty() {
-                        session.append_message_with_media(
-                            MessageRole::Assistant,
-                            String::new(),
-                            tool_media.clone(),
-                        );
-                    }
                     append_tool_result_message(
                         session,
                         &call.id,
