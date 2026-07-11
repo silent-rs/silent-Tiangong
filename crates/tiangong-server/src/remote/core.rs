@@ -88,6 +88,8 @@ impl ServerCoreManager {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
         };
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+        // 入口层归档附件为本地路径，与 GUI 的 app_state ingress 对齐。
+        let media = tiangong_media_archive::archive_input_media_assets(media);
         core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
             .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         Ok(())
@@ -114,6 +116,8 @@ impl ServerCoreManager {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
             };
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+            // 入口层归档附件为本地路径，与 GUI 的 app_state ingress 对齐。
+            let media = tiangong_media_archive::archive_input_media_assets(media);
             core.deliver(AgentInputKind::message_with_id(content, msg_id, media))
                 .map_err(|e| anyhow!("消息投递失败：{e}"))?;
         }

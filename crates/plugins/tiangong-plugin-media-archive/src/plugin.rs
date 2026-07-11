@@ -5,15 +5,15 @@
 
 use tiangong_core::core::Plugin;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
-use tiangong_types::MediaAsset;
 
 /// 媒体归档插件。
 ///
-/// 通过两个生命周期钩子接管归档：
-/// - [`Plugin::on_message_ingress`]：用户消息进入 agent loop 前，把输入附件
-///   （data URL / http / 本地路径）归档为 `~/.tiangong/media/` 下的本地路径。
+/// 通过生命周期钩子接管工具输出的图片本地化：
 /// - [`Plugin::on_tool_result_localize`]：工具执行后，把生成图片 Markdown 中
 ///   的远程 URL 归档为本地路径。
+///
+/// 输入附件的归档由各入口层在消息投递（deliver）前完成（GUI 的 app_state
+/// ingress、Server 的 remote/core.rs），不经过 core。
 pub struct MediaArchivePlugin;
 
 impl MediaArchivePlugin {
@@ -31,13 +31,6 @@ impl Default for MediaArchivePlugin {
 impl Plugin for MediaArchivePlugin {
     fn id(&self) -> &str {
         "media-archive"
-    }
-
-    fn on_message_ingress(&self, _content: &mut String, media: &mut Vec<MediaAsset>) {
-        // 归档必须在消息写入 session 之前完成（issue #149：attachment_notice
-        // 引用的是 media.url，必须为本地路径而非 data URL）。
-        let archived = tiangong_media_archive::archive_input_media_assets(std::mem::take(media));
-        *media = archived;
     }
 
     fn on_tool_result_localize(&self, tool_name: &str, stdout: &mut String) {

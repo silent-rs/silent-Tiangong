@@ -1,8 +1,9 @@
 //! 媒体归档插件（media-archive）。
 //!
-//! 接管全部媒体归档职责，使 core 不再直接依赖 `tiangong-media-archive`：
-//! - 用户输入附件归档（`on_message_ingress`）；
-//! - 工具输出图片本地化（`on_tool_result_localize`）。
+//! 接管工具输出图片本地化（`on_tool_result_localize`），使 core 不再直接
+//! 依赖 `tiangong-media-archive`。
+//!
+//! 输入附件归档由各入口层在 deliver 前完成，不经此插件。
 //!
 //! 归档是基础能力，由各入口无条件注册。
 

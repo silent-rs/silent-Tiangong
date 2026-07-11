@@ -238,15 +238,7 @@ impl ReactEngine {
                 if round == 0 {
                     crate::react::context::rebuild_system_prompt(session, &self.engine);
                 }
-                match drain_pending_commands_async(
-                    session,
-                    &self.engine,
-                    stream_tx,
-                    cmd_rx,
-                    &self.plugins,
-                )
-                .await
-                {
+                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
@@ -334,13 +326,6 @@ impl ReactEngine {
                                     }
                                 }
                                 Some(Command::Message { content, message_id, media }) => {
-                                    // 与 worker_loop 主分支一致：注入的新消息同样需经
-                                    // ingress 钩子归档附件（issue #149），否则流式/工具
-                                    // 执行期间追加的 PDF/图片会保留原始地址无法读取。
-                                    let (content, media) = super::message::dispatch_message_ingress(
-                                        &self.plugins, content, media,
-                                    )
-                                    .await;
                                     let mid = append_or_reuse_user_message(
                                         session, &content, message_id, media,
                                     );
@@ -667,15 +652,7 @@ impl ReactEngine {
                     // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
-                    match drain_pending_commands_async(
-                        session,
-                        &self.engine,
-                        stream_tx,
-                        cmd_rx,
-                        &self.plugins,
-                    )
-                    .await
-                    {
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -953,14 +930,6 @@ impl ReactEngine {
                                         message_id,
                                         media,
                                     }) => {
-                                        // 外层迭代阶段注入的用户新消息同样需经 ingress 钩子归档附件。
-                                        let (content, media) =
-                                            super::message::dispatch_message_ingress(
-                                                &self.plugins,
-                                                content,
-                                                media,
-                                            )
-                                            .await;
                                         let mid = append_or_reuse_user_message(
                                             session, &content, message_id, media,
                                         );
@@ -1271,15 +1240,7 @@ impl ReactEngine {
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     maybe_update_context_summary(session, &self.engine, &response.usage, stream_tx);
 
-                    match drain_pending_commands_async(
-                        session,
-                        &self.engine,
-                        stream_tx,
-                        cmd_rx,
-                        &self.plugins,
-                    )
-                    .await
-                    {
+                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;

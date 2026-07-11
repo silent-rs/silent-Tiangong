@@ -115,11 +115,6 @@ impl ReactEngine {
                             });
                         }
                         Some(Command::Message { content, message_id, media }) => {
-                            // 总结阶段注入的用户新消息同样需经 ingress 钩子归档附件。
-                            let (content, media) = super::message::dispatch_message_ingress(
-                                &self.plugins, content, media,
-                            )
-                            .await;
                             let mid = append_or_reuse_user_message(session, &content, message_id, media);
                             let media = session
                                 .messages

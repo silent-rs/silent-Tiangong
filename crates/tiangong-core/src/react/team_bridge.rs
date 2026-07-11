@@ -451,7 +451,7 @@ impl ReactEngine {
             )
             .with_shared_team(team_arc.clone(), agent_id.clone())
             // 继承父 agent 的插件集，使子 agent 同样具备媒体归档（输入附件
-            // on_message_ingress + 工具输出本地化 on_tool_result_localize）等能力。
+            // 工具输出本地化 on_tool_result_localize）等能力。
             .with_plugins(self.plugins.clone());
 
             // 通过 SubAgentPromptContext 构建 system prompt
@@ -653,12 +653,6 @@ impl ReactEngine {
                             }
                         }
                         Some(Command::Message { content, message_id, media }) => {
-                            // 多 Agent 场景下注入的用户新消息同样需经 ingress 钩子
-                            // 归档附件（与 worker_loop 主分支、engine 内层一致）。
-                            let (content, media) = super::message::dispatch_message_ingress(
-                                &self.plugins, content, media,
-                            )
-                            .await;
                             let message_id = append_or_reuse_user_message(
                                 parent_session,
                                 &content,

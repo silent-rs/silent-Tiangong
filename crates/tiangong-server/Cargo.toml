@@ -26,6 +26,7 @@ tiangong-plugin-skill = { workspace = true }
 tiangong-plugin-mcp = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media = { workspace = true }
+tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
 tiangong-scheduler = { workspace = true }
 async-trait = { workspace = true }

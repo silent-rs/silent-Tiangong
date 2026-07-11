@@ -506,9 +506,9 @@ async fn worker_loop_async(
                 continue;
             }
             Command::Message {
-                mut content,
+                content,
                 message_id,
-                mut media,
+                media,
             } => {
                 let turn_start_idx = session.messages.len();
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -518,12 +518,9 @@ async fn worker_loop_async(
                 if let Ok(mut slot) = turn_outcome.lock() {
                     *slot = None;
                 }
-                // 插件接管输入附件归档：必须在 append 之前完成，否则
-                // attachment_notice 引用的是 data URL 而非本地路径（issue #149）。
-                // 归档经 spawn_blocking 异步执行（见 dispatch_message_ingress），
-                // 避免阻塞 worker 线程。
-                (content, media) =
-                    crate::react::message::dispatch_message_ingress(&plugins, content, media).await;
+                // 输入附件归档由各入口层在 deliver 前完成（GUI: app_state ingress；
+                // Server: remote/core.rs；CLI 无 media）。core 只接收已归档的 media，
+                // 不再参与 ingress 归档。
                 // 记录用户消息
                 let user_msg_id =
                     append_or_reuse_user_message(&mut session, &content, message_id, media);

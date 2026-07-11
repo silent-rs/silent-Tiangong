@@ -10114,6 +10114,7 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media",
+ "tiangong-media-archive",
  "tiangong-memory",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",

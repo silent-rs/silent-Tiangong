@@ -128,25 +128,10 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 默认实现为空。
     fn on_config_updated(&self, _config: &crate::core_config::CoreConfig) {}
 
-    // ── 数据入口/出口钩子 ──
+    // ── 数据出口钩子 ──
     //
-    // 让「插件产生的数据由插件处理」：媒体归档等可由插件接管的转换，core 只负责
+    // 让「插件产生的数据由插件处理」：工具输出等可由插件接管的转换，core 只负责
     // 在正确时机分发钩子，不直接调用具体实现。
-
-    /// 用户消息进入 agent loop 前、写入 session 前回调（归档/改写附件用）。
-    ///
-    /// worker_loop 在 `Command::Message` 分支、`append_or_reuse_user_message` **之前**
-    /// 遍历插件调用。需要归档/改写输入附件的插件（如 media-archive）应覆写此方法，
-    /// 原地改写 `media`（例如把 data URL / http URL 归档为本地路径）。
-    ///
-    /// 必须在消息写入 session 之前完成，否则 attachment_notice 引用的是未归档引用
-    ///（issue #149）。默认实现为空——不关心输入附件的插件无需覆写。
-    fn on_message_ingress(
-        &self,
-        _content: &mut String,
-        _media: &mut Vec<tiangong_types::MediaAsset>,
-    ) {
-    }
 
     /// 工具执行成功后、结果写入 session 前回调（改写工具输出用）。
     ///
