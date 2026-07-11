@@ -89,6 +89,7 @@ impl ServerCoreManager {
             tiangong_media_archive::archive_input_media_assets(media)
         })
         .await
+        .map_err(|e| anyhow!("附件归档失败：{e}"))?
         .map_err(|e| anyhow!("附件归档失败：{e}"))?;
         let cores = self.cores.lock().unwrap();
         let Some(core) = cores.get(&session_id) else {
@@ -121,6 +122,7 @@ impl ServerCoreManager {
                 tiangong_media_archive::archive_input_media_assets(media)
             })
             .await
+            .map_err(|e| anyhow!("附件归档失败：{e}"))?
             .map_err(|e| anyhow!("附件归档失败：{e}"))?;
             let cores = self.cores.lock().unwrap();
             let Some(core) = cores.get(&session_id) else {

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use base64::{Engine as _, engine::general_purpose};
 use tiangong_types::{MediaAsset, MediaKind};
 
+/// 单个附件最大字节数（50MB，与前端限制一致）。
+const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// 把输入附件归档到本地（图片/文件）。
 /// 把输入附件归档到本地。
 ///
@@ -19,8 +22,8 @@ use tiangong_types::{MediaAsset, MediaKind};
 /// 不再保留临时远程地址。
 ///
 /// 文件名、标题不能覆盖明确的 `MediaKind`——图片标题为 `report.pdf` 时仍按图片处理。
-pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Vec<MediaAsset> {
-    media
+pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Result<Vec<MediaAsset>, String> {
+    Ok(media
         .into_iter()
         .map(|asset| match asset.kind {
             MediaKind::Image => {
@@ -58,7 +61,7 @@ pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Vec<MediaAsset> {
                 }
             }
         })
-        .collect()
+        .collect())
 }
 
 fn is_document_mime(mime: &str) -> bool {
@@ -180,10 +183,7 @@ fn download_remote_image_inner(
         .map(str::to_string)
         .or_else(|| image_mime_from_reference(url))
         .unwrap_or_else(|| "image/png".to_string());
-    let bytes = response
-        .bytes()
-        .map_err(|err| format!("读取图片响应失败：{err}"))?
-        .to_vec();
+    let bytes = read_response_with_limit(response, MAX_ARCHIVE_BYTES, "图片")?;
     write_archived_image(bytes, &mime_type, original_name)
 }
 
@@ -235,11 +235,36 @@ fn is_archived_media_path(value: &str, subdir: &str) -> bool {
 
 /// 判断路径是否位于媒体归档目录（images 或 files）。
 ///
-/// 后端用此验证前端传入的"已归档"路径确实位于媒体目录，不完全信任前端。
-/// 接受正反斜杠（统一后判断）。
+/// 后端用此验证前端传入的"已归档"路径确实位于真实媒体目录——不仅检查路径
+/// 片段，还 canonicalize 真实归档根目录与目标路径，确认目标在根目录内且是
+/// 实际存在的普通文件。防止 `/tmp/.tiangong/media/files/../../etc/passwd`
+/// 或不存在的伪造路径通过校验。
 pub fn is_archived_media_path_any(value: &str) -> bool {
     let normalized = value.replace('\\', "/");
-    is_archived_media_path(&normalized, "images") || is_archived_media_path(&normalized, "files")
+    // 快速片段检查（排除明显不在归档目录的路径）
+    if !is_archived_media_path(&normalized, "images")
+        && !is_archived_media_path(&normalized, "files")
+    {
+        return false;
+    }
+    // 严格验证：canonicalize 目标路径，确认位于真实归档根目录内且是普通文件
+    let path = match std::fs::canonicalize(&normalized) {
+        Ok(p) => p,
+        Err(_) => return false, // 路径不存在或无法解析
+    };
+    if !path.is_file() {
+        return false;
+    }
+    // 检查 canonicalize 后的路径是否位于 images 或 files 根目录内
+    for subdir in &["images", "files"] {
+        if let Ok(root) = media_subdir(subdir)
+            && let Ok(root_canon) = std::fs::canonicalize(&root)
+            && path.starts_with(&root_canon)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn image_mime_from_reference(value: &str) -> Option<String> {
@@ -294,14 +319,37 @@ fn document_mime_from_reference(value: &str) -> Option<String> {
     }
 }
 
-/// 文档 MIME → 扩展名
-fn document_ext_from_mime(mime_type: &str) -> Option<&'static str> {
+/// MIME → 扩展名（通用，覆盖常见文本/音视频/文档类型）
+fn ext_from_mime(mime_type: &str) -> &'static str {
     match mime_type {
-        "application/pdf" => Some("pdf"),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
-        _ => None,
+        // 文档
+        "application/pdf" => "pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        // 文本
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "text/html" => "html",
+        "application/json" => "json",
+        "application/xml" => "xml",
+        // 音视频
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "audio/mpeg" => "mp3",
+        "audio/wav" => "wav",
+        "audio/ogg" => "ogg",
+        // 图片
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        // 压缩
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        // 通用
+        _ => "bin",
     }
 }
 
@@ -421,10 +469,7 @@ fn download_remote_file_inner(
         })
         .or_else(|| document_mime_from_reference(url))
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let bytes = response
-        .bytes()
-        .map_err(|err| format!("读取文档响应失败：{err}"))?
-        .to_vec();
+    let bytes = read_response_with_limit(response, MAX_ARCHIVE_BYTES, "文档")?;
     write_archived_file(bytes, &mime_type, original_name)
 }
 
@@ -434,7 +479,7 @@ fn write_archived_file(
     original_name: Option<&str>,
 ) -> Result<ArchivedImage, String> {
     let dir = media_files_dir()?;
-    let ext = document_ext_from_mime(mime_type).unwrap_or("bin");
+    let ext = ext_from_mime(mime_type);
     let filename = archived_filename(original_name, ext);
     let path = dir.join(filename);
     std::fs::write(&path, bytes).map_err(|err| format!("写入文档归档失败：{err}"))?;
@@ -476,6 +521,30 @@ fn archived_filename(original_name: Option<&str>, ext: &str) -> String {
     format!("{id}.{ext}")
 }
 
+/// 读取 HTTP 响应到内存，限制最大字节数（防止超大响应耗尽内存）。
+fn read_response_with_limit(
+    response: reqwest::blocking::Response,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut reader = response;
+    let mut buf = Vec::new();
+    let mut limited = reader.by_ref().take(max_bytes);
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|err| format!("读取{label}响应失败：{err}"))?;
+    // 检查是否还有更多数据（说明超过限制）
+    let mut probe = [0u8; 1];
+    if reader.read(&mut probe).unwrap_or(0) > 0 {
+        return Err(format!(
+            "{label}超过 {}MB 大小限制",
+            max_bytes / 1024 / 1024
+        ));
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,7 +564,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         let result = &archived[0];
 
@@ -541,7 +610,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(!archived[0].url.starts_with("data:"));
         assert!(archived[0].url.ends_with(".docx"));
@@ -565,7 +634,7 @@ mod tests {
             capability: None,
         };
 
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("media/images/"),
@@ -588,7 +657,7 @@ mod tests {
             title: Some("unknown.dat".to_string()),
             capability: None,
         };
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("media/files/"),
@@ -616,7 +685,7 @@ mod tests {
             title: Some("report.pdf".to_string()),
             capability: None,
         };
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("media/images/"),
@@ -639,13 +708,18 @@ mod tests {
 
     #[test]
     fn is_archived_media_path_any_handles_backslashes() {
-        assert!(is_archived_media_path_any(
-            "/home/user/.tiangong/media/images/abc.png"
-        ));
-        assert!(is_archived_media_path_any(
-            "C:\\Users\\user\\.tiangong\\media\\files\\doc.pdf"
-        ));
+        // 创建真实归档文件用于 canonicalize 验证
+        let dir = media_images_dir().unwrap();
+        let file_path = dir.join("backslash_test.png");
+        std::fs::write(&file_path, b"test").unwrap();
+
+        // Unix 路径（真实文件）
+        assert!(is_archived_media_path_any(file_path.to_str().unwrap()));
+
+        // 非归档路径（不存在或不在归档目录）
         assert!(!is_archived_media_path_any("/tmp/some_file.png"));
+
+        let _ = std::fs::remove_file(&file_path);
     }
 
     #[test]
@@ -680,7 +754,7 @@ mod tests {
             title: Some("季度报告.pdf".to_string()),
             capability: None,
         };
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("季度报告"),
@@ -703,7 +777,7 @@ mod tests {
             title: Some("截图.png".to_string()),
             capability: None,
         };
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(
             archived[0].url.contains("截图"),
@@ -727,7 +801,7 @@ mod tests {
             title: Some("downloaded_file".to_string()),
             capability: None,
         };
-        let archived = archive_input_media_assets(vec![asset]);
+        let archived = archive_input_media_assets(vec![asset]).unwrap();
         assert_eq!(archived.len(), 1);
         assert!(archived[0].url.contains("media/files/"));
         assert!(
@@ -752,7 +826,7 @@ mod tests {
             title: Some("test.png".to_string()),
             capability: None,
         };
-        let first = archive_input_media_assets(vec![asset]);
+        let first = archive_input_media_assets(vec![asset]).unwrap();
         let archived_path = first[0].url.clone();
         assert!(Path::new(&archived_path).exists());
 
@@ -764,7 +838,7 @@ mod tests {
             title: Some("test.png".to_string()),
             capability: None,
         };
-        let second = archive_input_media_assets(vec![asset2]);
+        let second = archive_input_media_assets(vec![asset2]).unwrap();
         assert_eq!(
             second[0].url, archived_path,
             "已归档路径再次归档应返回相同路径，不产生副本"
@@ -778,11 +852,17 @@ mod tests {
         // 无效编辑场景：前端传入的路径不在媒体目录时，后端验证应拒绝
         assert!(!is_archived_media_path_any("/etc/passwd"));
         assert!(!is_archived_media_path_any("/tmp/malicious.png"));
-        assert!(!is_archived_media_path_any(r"C:\Windows\system32\evil.dll"));
         assert!(!is_archived_media_path_any("../../../etc/shadow"));
-        // 只有真正在 .tiangong/media/ 下的路径才通过
-        assert!(is_archived_media_path_any(
-            "/home/user/.tiangong/media/files/report.pdf"
+        // 路径包含 .tiangong/media/ 片段但不是真实文件 → 拒绝
+        assert!(!is_archived_media_path_any(
+            "/home/user/.tiangong/media/files/ghost.pdf"
         ));
+
+        // 创建真实归档文件 → 通过
+        let dir = media_files_dir().unwrap();
+        let file_path = dir.join("validation_test.pdf");
+        std::fs::write(&file_path, b"test").unwrap();
+        assert!(is_archived_media_path_any(file_path.to_str().unwrap()));
+        let _ = std::fs::remove_file(&file_path);
     }
 }

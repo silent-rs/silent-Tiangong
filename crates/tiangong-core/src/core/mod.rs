@@ -182,10 +182,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
-        // Cancel 副作用内化：在发送命令前先置 cancel_flag（与原 cancel() 方法时序一致）。
-        // 这样外部调用 deliver(Cancel) 无需知道 cancel_flag 的存在，封装更完整。
+        // Cancel 使用独立的 AtomicBool 信号，不再混入命令队列（避免残留 Cancel
+        // 跨轮次影响下一条消息）。deliver(Cancel) 只置标志，不发送 Command::Cancel。
         if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
             self.cancel_flag.store(true, Ordering::Release);
+            return Ok(());
         }
 
         match input {
@@ -591,8 +592,9 @@ async fn worker_loop_async(
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
-                // Cancel 信号通过 cmd_rx 传递到 engine 内部处理；
-                // engine 在每个 block_in_place 前后检查取消信号。
+                // Cancel 经独立 cancel_flag 信号传递（deliver 不再入队 Command::Cancel）。
+                // 此分支为防御性处理：若因其他路径收到 Cancel，清除标志避免残留。
+                cancel_flag.store(false, Ordering::Release);
             }
             Command::CancelAgent { .. } => {
                 // 仅在多 Agent 执行等待期间由 ReactEngine 转发处理。

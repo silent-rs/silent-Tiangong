@@ -1023,6 +1023,9 @@ impl ReactEngine {
                             .expect("cancel_flag 必须在 execute_turn 前注入"),
                     ) {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1160,6 +1163,9 @@ impl ReactEngine {
                         )
                     {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1189,6 +1195,9 @@ impl ReactEngine {
                             .expect("cancel_flag 必须在 execute_turn 前注入"),
                     ) {
                         {
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "已取消".into(),
+                            });
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }

@@ -772,6 +772,7 @@ async fn send_message_inner(
         tiangong_media_archive::archive_input_media_assets(media)
     })
     .await
+    .map_err(|e| format!("附件归档失败：{e}"))?
     .map_err(|e| format!("附件归档失败：{e}"))?;
 
     // 按固定 session_id 写入（不再读取活动会话）。
@@ -1498,9 +1499,8 @@ fn archive_edit_media(
             && existing_urls.contains(&normalized))
     });
     // 只归档新附件。
-    result.extend(tiangong_media_archive::archive_input_media_assets(
-        to_archive,
-    ));
+    result
+        .extend(tiangong_media_archive::archive_input_media_assets(to_archive).unwrap_or_default());
     result
 }
 
@@ -1569,31 +1569,12 @@ pub async fn edit_and_resend(
         other => other,
     };
 
-    // 3. 归档完成后重新确认消息仍可编辑（会话/消息可能在归档期间被删除）。
-    state
-        .with_state(|core_state| {
-            let session = core_state
-                .sessions()
-                .iter()
-                .find(|s| s.messages.iter().any(|m| m.id == message_id))
-                .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
-            let msg = session
-                .messages
-                .iter()
-                .find(|m| m.id == message_id)
-                .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
-            if msg.compact {
-                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
-            }
-            Ok(())
-        })
-        .await?;
-
     // 2. 取消并丢弃旧 core
     state.cancel_core(&session_id);
     state.take_core(&session_id);
 
-    // 3. 更新消息内容、截断后续消息、持久化
+    // 3. 在同一把状态锁内完成：重新确认可编辑（角色/索引/摘要边界）+ 修改 + 持久化。
+    //    归档期间可能发生上下文压缩，必须原子复查避免 summary_up_to > messages.len()。
     let (session_snapshot, message_media) = state
         .with_state(|core_state| {
             let session = core_state
@@ -1601,6 +1582,20 @@ pub async fn edit_and_resend(
                 .iter_mut()
                 .find(|s| s.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在"))?;
+
+            // 重新确认消息仍可编辑（完整复查角色、索引、摘要边界）
+            let msg_idx = session
+                .messages
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+            let msg = &session.messages[msg_idx];
+            if msg.role != tiangong_core::session::MessageRole::User {
+                return Err(anyhow::anyhow!("只能编辑用户消息"));
+            }
+            if msg.compact || msg_idx < session.summary_up_to {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
 
             if let Some(ref new_media) = media {
                 session.update_message_content_with_media(
@@ -1775,12 +1770,20 @@ pub async fn append_message(
         return Ok(ok);
     }
 
+    // 附件能力检查（与普通发送一致：未配置多模态时拒绝附件）。
+    if let Some(ref media_vec) = media {
+        if parse_context_slash_command(&content).is_none() && !media_vec.is_empty() {
+            ensure_multimodal_enabled(&state).await?;
+        }
+    }
+
     // 归档附件（spawn_blocking，避免阻塞 async 执行线程）。
     let media = match media {
         Some(m) if !m.is_empty() => tokio::task::spawn_blocking(move || {
             tiangong_media_archive::archive_input_media_assets(m)
         })
         .await
+        .map_err(|e| format!("附件归档失败：{e}"))?
         .map_err(|e| format!("附件归档失败：{e}"))?,
         other => other.unwrap_or_default(),
     };
