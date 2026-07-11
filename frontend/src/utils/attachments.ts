@@ -114,9 +114,10 @@ export function estimatedBase64Size(rawBytes: number): number {
   return Math.ceil(rawBytes / 3) * 4;
 }
 
-/** 判断 URL 是否为已归档到本地的媒体路径（~/.tiangong/media/...）。 */
+/** 判断 URL 是否为已归档到本地的媒体路径（~/.tiangong/media/...）。
+ *  统一正反斜杠后判断（Windows 路径兼容）。 */
 export function isArchivedMediaPath(url: string): boolean {
-  return url.includes('/.tiangong/media/');
+  return url.replace(/\\\\/g, '/').includes('/.tiangong/media/');
 }
 
 export async function attachmentToBase64Media(item: Attachment): Promise<MediaAsset> {

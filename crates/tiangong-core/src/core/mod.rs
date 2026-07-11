@@ -76,8 +76,10 @@ impl TiangongCore {
         let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let worker_trust_mode = shared_trust_mode.clone();
+        let worker_cancel_flag = cancel_flag.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
@@ -90,6 +92,7 @@ impl TiangongCore {
                 worker_trust_mode,
                 plugins,
                 worker_cmd_tx,
+                worker_cancel_flag,
                 storage_root,
             )
         });
@@ -99,7 +102,7 @@ impl TiangongCore {
             worker: Some(worker),
             session_id,
             shared_trust_mode,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancel_flag,
         }
     }
 
@@ -239,6 +242,7 @@ fn worker_loop(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    cancel_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
@@ -259,6 +263,7 @@ fn worker_loop(
         shared_trust_mode,
         plugins,
         cmd_tx,
+        cancel_flag,
         storage_root,
     ))
 }
@@ -273,6 +278,7 @@ async fn worker_loop_async(
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    cancel_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
@@ -510,6 +516,8 @@ async fn worker_loop_async(
                 message_id,
                 media,
             } => {
+                // 新一轮开始：清除上一轮的取消信号。
+                cancel_flag.store(false, Ordering::Release);
                 let turn_start_idx = session.messages.len();
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
@@ -550,7 +558,7 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
-                    &cmd_tx,
+                    &cancel_flag,
                 )
                 .await;
 
@@ -770,7 +778,7 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
-    cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
+    cancel_flag: &Arc<AtomicBool>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -779,7 +787,7 @@ async fn execute_turn_async(
         MAX_OUTER_ITERATIONS,
     )
     .with_shared_team(team_context, "main".to_string())
-    .with_cmd_tx(cmd_tx.clone());
+    .with_cancel_flag(cancel_flag.clone());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx)
         .await;

@@ -527,8 +527,8 @@ export const api = {
   cancelAgent: (role: string): Promise<boolean> =>
     invoke('cancel_agent', { role }),
 
-  appendMessage: (sessionId: string, content: string): Promise<boolean> =>
-    invoke('append_message', { sessionId, content }),
+  appendMessage: (sessionId: string, content: string, media?: MediaAsset[]): Promise<boolean> =>
+    invoke('append_message', { sessionId, content, media: media ?? null }),
 
   editAndResend: (messageId: string, newContent: string, media?: MediaAsset[]): Promise<void> =>
     invoke('edit_and_resend', { messageId, newContent, media: media ?? null }),

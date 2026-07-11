@@ -55,8 +55,9 @@ pub(crate) struct ReactEngine {
     pub(super) max_outer_iterations: u32,
     pub(super) team: Option<Arc<Mutex<TeamContext>>>,
     pub(super) agent_id: String,
-    /// 命令通道发送端：check_cancel 遇到非控制命令时回灌队列用。
-    pub(super) cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
+    /// 取消信号（独立于命令队列）：check_cancel 读取此标志判断是否取消，
+    /// 不排空命令队列，避免乱序。
+    pub(super) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ReactEngine {
@@ -73,13 +74,16 @@ impl ReactEngine {
             max_outer_iterations,
             team: None,
             agent_id: "main".to_string(),
-            cmd_tx: None,
+            cancel_flag: None,
         }
     }
 
-    /// 注入命令通道发送端，供 check_cancel 回灌被排空的非控制命令。
-    pub(crate) fn with_cmd_tx(mut self, cmd_tx: tokio_mpsc::UnboundedSender<Command>) -> Self {
-        self.cmd_tx = Some(cmd_tx);
+    /// 注入取消信号，供 check_cancel 读取（独立于命令队列，不排空队列）。
+    pub(crate) fn with_cancel_flag(
+        mut self,
+        cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.cancel_flag = Some(cancel_flag);
         self
     }
 
@@ -1014,13 +1018,9 @@ impl ReactEngine {
                     }
 
                     if check_cancel(
-                        session,
-                        &self.engine,
-                        cmd_rx,
-                        stream_tx,
-                        self.cmd_tx
+                        self.cancel_flag
                             .as_ref()
-                            .expect("cmd_tx 必须在 execute_turn 前注入"),
+                            .expect("cancel_flag 必须在 execute_turn 前注入"),
                     ) {
                         {
                             merge_plugin_usage(&mut accumulated_usage);
@@ -1154,13 +1154,9 @@ impl ReactEngine {
                     );
                     if !result.ok
                         && check_cancel(
-                            session,
-                            &self.engine,
-                            cmd_rx,
-                            stream_tx,
-                            self.cmd_tx
+                            self.cancel_flag
                                 .as_ref()
-                                .expect("cmd_tx 必须在 execute_turn 前注入"),
+                                .expect("cancel_flag 必须在 execute_turn 前注入"),
                         )
                     {
                         {
@@ -1188,13 +1184,9 @@ impl ReactEngine {
                     }
 
                     if check_cancel(
-                        session,
-                        &self.engine,
-                        cmd_rx,
-                        stream_tx,
-                        self.cmd_tx
+                        self.cancel_flag
                             .as_ref()
-                            .expect("cmd_tx 必须在 execute_turn 前注入"),
+                            .expect("cancel_flag 必须在 execute_turn 前注入"),
                     ) {
                         {
                             merge_plugin_usage(&mut accumulated_usage);

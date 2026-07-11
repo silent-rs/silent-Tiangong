@@ -1485,6 +1485,25 @@ pub(crate) fn start_stream_consumer(
 
 /// 编辑用户消息并从该节点重新发送
 ///
+/// 编辑时处理附件：已存在于原消息中的归档路径复用（后端验证在媒体目录），
+/// 只对新附件归档。避免重复编辑产生附件副本。
+fn archive_edit_media(
+    media: Vec<tiangong_types::MediaAsset>,
+    existing_urls: &[String],
+) -> Vec<tiangong_types::MediaAsset> {
+    let (to_archive, mut result): (Vec<_>, Vec<_>) = media.into_iter().partition(|asset| {
+        let normalized = asset.url.replace('\\', "/");
+        // 已归档路径且存在于原消息 → 复用，不重新归档。
+        !(tiangong_media_archive::is_archived_media_path_any(&normalized)
+            && existing_urls.contains(&normalized))
+    });
+    // 只归档新附件。
+    result.extend(tiangong_media_archive::archive_input_media_assets(
+        to_archive,
+    ));
+    result
+}
+
 /// 截断该消息之后的所有内容，更新消息内容，然后创建新的 core 重新执行 turn。
 #[tauri::command]
 pub async fn edit_and_resend(
@@ -1502,20 +1521,8 @@ pub async fn edit_and_resend(
         }
     }
 
-    // 编辑路径同样需要在写入会话前归档附件（spawn_blocking，避免阻塞）。
-    let media = match media {
-        Some(m) if !m.is_empty() => Some(
-            tokio::task::spawn_blocking(move || {
-                tiangong_media_archive::archive_input_media_assets(m)
-            })
-            .await
-            .map_err(|e| format!("附件归档失败：{e}"))?,
-        ),
-        other => other,
-    };
-
-    // 1. 查找消息所在会话并验证
-    let session_id = state
+    // 1. 先验证消息存在、角色正确且允许编辑，再处理附件。
+    let (session_id, existing_media_urls) = state
         .with_state(|core_state| {
             let session = core_state
                 .sessions()
@@ -1538,7 +1545,47 @@ pub async fn edit_and_resend(
             if msg_idx < session.summary_up_to {
                 return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
             }
-            Ok(session.id.clone())
+            // 收集原消息中已归档的媒体路径，用于复用验证。
+            let existing: Vec<String> = msg
+                .extract_media_assets()
+                .into_iter()
+                .map(|a| a.url.replace('\\', "/"))
+                .collect();
+            Ok((session.id.clone(), existing))
+        })
+        .await?;
+
+    // 2. 处理附件：已存在于原消息中的归档路径直接复用（后端验证确实在媒体目录），
+    //    只对新附件归档。这样重复编辑不会产生附件副本。
+    let media = match media {
+        Some(m) if !m.is_empty() => {
+            let existing = existing_media_urls;
+            Some(
+                tokio::task::spawn_blocking(move || archive_edit_media(m, &existing))
+                    .await
+                    .map_err(|e| format!("附件归档失败：{e}"))?,
+            )
+        }
+        other => other,
+    };
+
+    // 3. 归档完成后重新确认消息仍可编辑（会话/消息可能在归档期间被删除）。
+    state
+        .with_state(|core_state| {
+            let session = core_state
+                .sessions()
+                .iter()
+                .find(|s| s.messages.iter().any(|m| m.id == message_id))
+                .ok_or_else(|| anyhow::anyhow!("消息不存在：{message_id}"))?;
+            let msg = session
+                .messages
+                .iter()
+                .find(|m| m.id == message_id)
+                .ok_or_else(|| anyhow::anyhow!("消息不存在"))?;
+            if msg.compact {
+                return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
+            }
+            Ok(())
         })
         .await?;
 
@@ -1712,6 +1759,7 @@ pub async fn cancel_agent(role: String, state: State<'_, TiangongApp>) -> Result
 pub async fn append_message(
     session_id: String,
     content: String,
+    media: Option<Vec<tiangong_types::MediaAsset>>,
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
@@ -1727,8 +1775,24 @@ pub async fn append_message(
         return Ok(ok);
     }
 
+    // 归档附件（spawn_blocking，避免阻塞 async 执行线程）。
+    let media = match media {
+        Some(m) if !m.is_empty() => tokio::task::spawn_blocking(move || {
+            tiangong_media_archive::archive_input_media_assets(m)
+        })
+        .await
+        .map_err(|e| format!("附件归档失败：{e}"))?,
+        other => other.unwrap_or_default(),
+    };
+
     let message_id = scru128::new().to_string();
-    if !state.send_to_core_with_id(&session_id, content.clone(), Some(message_id.clone())) {
+    let media_for_snapshot = media.clone();
+    if !state.send_to_core_with_media(
+        &session_id,
+        content.clone(),
+        Some(message_id.clone()),
+        media,
+    ) {
         let snapshot = state
             .with_state(|core_state| {
                 core_state.report_run_idle("当前会话任务已结束，请重新发送");
@@ -1755,7 +1819,7 @@ pub async fn append_message(
                         tiangong_core::session::MessageRole::User,
                         content,
                         String::new(),
-                        Vec::new(),
+                        media_for_snapshot.clone(),
                     );
                 }
             }

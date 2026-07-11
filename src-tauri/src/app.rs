@@ -436,17 +436,29 @@ impl TiangongApp {
         content: String,
         message_id: Option<String>,
     ) -> bool {
+        self.send_to_core_with_media(session_id, content, message_id, Vec::new())
+    }
+
+    /// 向 Core 投递用户消息（携带已归档的媒体附件）。
+    pub fn send_to_core_with_media(
+        &self,
+        session_id: &str,
+        content: String,
+        message_id: Option<String>,
+        media: Vec<tiangong_types::MediaAsset>,
+    ) -> bool {
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
+                core.deliver(AgentInputKind::message_with_id(content, message_id, media))
+                    .is_ok()
+            } else {
                 core.deliver(AgentInputKind::message_with_id(
                     content,
-                    message_id,
-                    Vec::new(),
+                    scru128::new().to_string(),
+                    media,
                 ))
                 .is_ok()
-            } else {
-                core.deliver(AgentInputKind::message(content)).is_ok()
             };
             if !sent {
                 warn!(session_id, "TiangongCore 命令通道已关闭，移除僵尸 core");

@@ -123,54 +123,34 @@ pub(super) fn drain_pending_commands_async(
     }
 }
 
-/// 非阻塞检查队首是否有取消或关闭命令。
+/// 检查是否收到取消信号。
 ///
-/// 只看队首：是 Cancel/Shutdown 则消费并返回 true；否则回灌并返回 false，完全不
-/// 排空队列——队列顺序和后续命令（Message / CompressContext / ResetContext 等）
-/// 一律保持原样，由随后的 drain_pending_commands_async 按提交顺序处理。
-pub(super) fn check_cancel(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    stream_tx: &StdSender<StreamEvent>,
-    cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
-) -> bool {
-    // 收集取出的非控制命令，循环结束后逆序回灌，保持原序（逆序 send 到队尾 = 原序）。
-    let mut pending: Vec<Command> = Vec::new();
-    while let Ok(cmd) = cmd_rx.try_recv() {
-        match cmd {
-            Command::Cancel | Command::Shutdown => {
-                // 取消前先把已收集的命令放回，避免丢失。
-                for c in pending.into_iter().rev() {
-                    let _ = cmd_tx.send(c);
-                }
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "已取消".into(),
-                });
-                return true;
-            }
-            Command::CancelAgent { .. } => {}
-            Command::CompressContext => {
-                crate::core::compress_context_for_session(session, engine, stream_tx);
-            }
-            Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx, engine);
-            }
-            // 非控制命令暂存，不回灌也不 break——继续向后找 Cancel/Shutdown，
-            // 确保 cancel 不被排在后面的消息延迟。
-            other => pending.push(other),
-        }
-    }
-    // 未发现 Cancel，把暂存的命令逆序回灌（保持原序）。
-    for c in pending.into_iter().rev() {
-        let _ = cmd_tx.send(c);
-    }
-    false
+/// 读取独立的 `cancel_flag`（由 deliver(Cancel) 在发送命令前设置），不排空命令
+/// 队列——队列中的所有命令（Message / CompressContext / ResetContext 等）严格
+/// 按提交顺序保留，由随后的 drain_pending_commands_async 处理。这彻底避免了
+/// 回灌导致的乱序和压缩/清理提前执行问题。
+pub(super) fn check_cancel(cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>) -> bool {
+    use std::sync::atomic::Ordering;
+    cancel_flag.load(Ordering::Acquire)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_cancel_reads_signal_not_queue() {
+        // cancel_flag = true → 返回 true
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(check_cancel(&flag));
+    }
+
+    #[test]
+    fn check_cancel_false_when_no_signal() {
+        // cancel_flag = false → 返回 false（不排空队列）
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(!check_cancel(&flag));
+    }
 
     #[test]
     fn looks_like_final_answer_empty_is_not_final() {

@@ -468,8 +468,10 @@ impl ReactEngine {
             // handler），故子 agent 的 recall_memory / index_search 能直接路由到同一插件实例。
 
             let (sub_cmd_tx, mut sub_cmd_rx) = tokio_mpsc::unbounded_channel();
-            // 子 agent 的 check_cancel 需要 cmd_tx 回灌非控制命令，注入子通道发送端。
-            sub_engine = sub_engine.with_cmd_tx(sub_cmd_tx.clone());
+            // 子 agent 共享父 agent 的 cancel_flag（父级取消时子级一并终止）。
+            if let Some(flag) = &self.cancel_flag {
+                sub_engine = sub_engine.with_cancel_flag(flag.clone());
+            }
             let _ = sub_cmd_tx.send(Command::Message {
                 content: combined_content,
                 message_id: Some(scru128::new().to_string()),
