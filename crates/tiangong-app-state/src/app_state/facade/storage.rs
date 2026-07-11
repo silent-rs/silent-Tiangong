@@ -42,10 +42,8 @@ impl TiangongState {
             .find(|session| session.id == session_id)
         {
             // 宿主可在执行期间修改这些会话元数据；Core 只拥有消息/上下文执行状态。
-            // 终态重载时保留宿主值，再由调用方统一落盘，避免异步标题或 Tab 更新丢失。
+            // 终态重载时保留宿主值，再由调用方统一落盘，避免异步标题更新丢失。
             loaded.title = existing.title.clone();
-            loaded.tabs = existing.tabs.clone();
-            loaded.active_tab_id = existing.active_tab_id.clone();
             loaded.cwd = existing.cwd.clone();
             loaded.cwd_mode = existing.cwd_mode.clone();
             loaded.trust_mode = existing.trust_mode;

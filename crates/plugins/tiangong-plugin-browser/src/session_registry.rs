@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use tracing::warn;
+
 use crate::manager::{BrowserSharedState, BrowserState};
 
 /// 浏览器 per-session 状态注册表。
@@ -131,7 +133,7 @@ impl BrowserSessionRegistry {
             let mut sessions = self.sessions.lock().expect("browser sessions poisoned");
             sessions.remove(draft_id)
         };
-        if let Some(state_arc) = removed {
+        let runtime_state = if let Some(state_arc) = removed {
             let mut s = state_arc.lock().unwrap_or_else(|e| e.into_inner());
             // 停 draft 轮询
             s.poll_stop
@@ -142,33 +144,61 @@ impl BrowserSessionRegistry {
             for (_, wv) in s.webviews.drain() {
                 let _ = wv.close();
             }
-            // 保存有效 tabs 到 persistent store
-            let tabs: Vec<_> = s
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    let url = tab.url.trim();
-                    !url.is_empty() && !url.starts_with("about:")
-                })
-                .cloned()
-                .collect();
+            // 保存全部 tabs；about:blank 只延迟创建 WebView，不代表无需恢复。
+            let tabs = s.tabs.clone();
             let active_tab_id = s
                 .active_tab_id
                 .as_ref()
                 .filter(|id| tabs.iter().any(|t| &t.id == *id))
                 .cloned();
-            if !tabs.is_empty() {
-                crate::session_store::BrowserSessionStore::save(
-                    persistent_id,
-                    &crate::session_store::BrowserSessionPersisted {
-                        tabs,
-                        active_tab_id,
-                    },
-                );
+            Some(crate::session_store::BrowserSessionPersisted {
+                tabs,
+                active_tab_id,
+            })
+        } else {
+            None
+        };
+
+        let mut draft_state = match crate::session_store::BrowserSessionStore::load(draft_id) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(%error, draft_id, "加载草稿浏览器会话状态失败，保留原状态");
+                return;
+            }
+        };
+        if let Some(runtime_state) = runtime_state {
+            draft_state = runtime_state;
+        }
+        let mut target_state = match crate::session_store::BrowserSessionStore::load(persistent_id)
+        {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(%error, persistent_id, "加载目标浏览器会话状态失败，保留草稿状态");
+                return;
+            }
+        };
+        let mut target_ids = target_state
+            .tabs
+            .iter()
+            .map(|tab| tab.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for tab in draft_state.tabs {
+            if target_ids.insert(tab.id.clone()) {
+                target_state.tabs.push(tab);
             }
         }
-        // 删除 draft store
-        crate::session_store::BrowserSessionStore::remove(draft_id);
+        if target_state.active_tab_id.is_none() {
+            target_state.active_tab_id = draft_state.active_tab_id;
+        }
+        if let Err(error) =
+            crate::session_store::BrowserSessionStore::save(persistent_id, &target_state)
+        {
+            warn!(%error, persistent_id, "持久化转正浏览器会话状态失败");
+            return;
+        }
+        if let Err(error) = crate::session_store::BrowserSessionStore::remove(draft_id) {
+            warn!(%error, draft_id, "删除草稿浏览器会话状态失败");
+        }
         // 更新 active
         let mut active = self
             .active_session_id
@@ -203,7 +233,9 @@ impl BrowserSessionRegistry {
             *active = sessions.keys().next().cloned();
         }
         // 删除持久化文件
-        crate::session_store::BrowserSessionStore::remove(session_id);
+        if let Err(error) = crate::session_store::BrowserSessionStore::remove(session_id) {
+            warn!(%error, session_id, "删除浏览器会话状态失败");
+        }
     }
 }
 

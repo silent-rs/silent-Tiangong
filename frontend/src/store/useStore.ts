@@ -884,9 +884,6 @@ export const useStore = create<AppState>((set, get) => ({
         if (migratedDraft) {
           persistDraftInBackground(get().persistInputDraft(session.id, migratedDraft));
         }
-        const ensureCwd = draftCwd || get().workspaceDir || '';
-        await api.terminalEnsureSession(session.id, ensureCwd)
-          .catch((error) => console.error('新会话终端 PTY 创建失败:', error));
       }
 
       await api.sendMessage(targetSessionId, content, deliveryAttachments, revision);

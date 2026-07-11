@@ -201,7 +201,7 @@ pub async fn terminal_tab_close(
     tab_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    if state.registry.tab_close(&session_id, &tab_id) {
+    if state.registry.tab_close(&session_id, &tab_id)? {
         Ok(())
     } else {
         Err(format!("终端 Tab 不存在：{session_id}:{tab_id}"))

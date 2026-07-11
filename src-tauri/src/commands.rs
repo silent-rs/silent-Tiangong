@@ -13,6 +13,10 @@ use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tracing::{debug, warn};
 
+use crate::workspace_tabs::{
+    WorkspaceTabKind as TabKind, WorkspaceTabRef, WorkspaceTabState as TabState,
+};
+
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
 #[allow(unused_mut)]
@@ -468,7 +472,7 @@ fn build_session_snapshot(
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionTabsView {
-    pub tabs: Vec<tiangong_core::session::TabState>,
+    pub tabs: Vec<TabState>,
     pub active_tab_id: Option<String>,
 }
 
@@ -495,40 +499,66 @@ pub async fn get_session_tabs(
 ) -> Result<SessionTabsView, String> {
     state
         .with_state_read(|core_state| {
-            let session = core_state
+            if !core_state
                 .sessions()
                 .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
+                .any(|session| session.id == session_id)
+            {
+                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
+            }
 
-            // Browser tabs 只从 BrowserSessionStore 读取（唯一真相源）；
-            // Terminal tabs 从 Session.tabs 读取（terminal 暂无独立 store）。
-            let persisted =
-                tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id);
-            let browser_tabs: Vec<_> = persisted
+            let browser =
+                tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id)?;
+            let browser_active = browser.active_tab_id.clone();
+            let browser_tabs: Vec<_> = browser
                 .tabs
                 .iter()
-                .map(|tab| tiangong_core::session::TabState {
+                .map(|tab| TabState {
                     id: tab.id.clone(),
-                    kind: tiangong_core::session::TabKind::Browser,
+                    kind: TabKind::Browser,
                     title: tab.title.clone(),
                     url: tab.url.clone(),
                     created_at: String::new(),
                 })
                 .collect();
-            let terminal_tabs: Vec<_> = session
+            let terminal = tiangong_plugin_terminal::session_store::TerminalSessionStore::load_or_migrate_legacy(&session_id)?;
+            let terminal_active = terminal.active_tab_id.clone();
+            let terminal_tabs: Vec<_> = terminal
                 .tabs
-                .iter()
-                .filter(|tab| matches!(tab.kind, tiangong_core::session::TabKind::Terminal))
-                .cloned()
+                .into_iter()
+                .map(|tab| TabState {
+                    id: tab.id,
+                    kind: TabKind::Terminal,
+                    title: tab.title,
+                    url: String::new(),
+                    created_at: tab.created_at,
+                })
                 .collect();
-            let tabs: Vec<_> = terminal_tabs.into_iter().chain(browser_tabs).collect();
-
-            // active_tab_id：browser store 的 active 优先，其次 session 的 terminal active
-            let persisted_active = persisted
-                .active_tab_id
-                .filter(|id| tabs.iter().any(|tab| tab.id == *id));
-            let active_tab_id = persisted_active.or_else(|| session.active_tab_id.clone());
+            let available = terminal_tabs
+                .into_iter()
+                .chain(browser_tabs)
+                .collect::<Vec<_>>();
+            let layout = crate::workspace_tabs::load_layout(&session_id);
+            let fallback_active = browser_active
+                .map(|id| WorkspaceTabRef {
+                    kind: TabKind::Browser,
+                    id,
+                })
+                .into_iter()
+                .chain(terminal_active.map(|id| WorkspaceTabRef {
+                    kind: TabKind::Terminal,
+                    id,
+                }))
+                .collect::<Vec<_>>();
+            let (tabs, active_tab_id) =
+                crate::workspace_tabs::reconcile_tabs(available, layout, &fallback_active);
+            if let Err(error) = crate::workspace_tabs::save_layout(
+                &session_id,
+                &tabs,
+                active_tab_id.as_deref(),
+            ) {
+                warn!(%error, session_id, "清理工作区标签页布局失败");
+            }
 
             Ok(SessionTabsView {
                 tabs,
@@ -542,25 +572,21 @@ pub async fn get_session_tabs(
 #[tauri::command]
 pub async fn set_session_tabs(
     session_id: String,
-    tabs: Vec<tiangong_core::session::TabState>,
+    tabs: Vec<TabState>,
     active_tab_id: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     state
-        .with_state(|core_state| {
-            let session = core_state
-                .sessions_mut()
-                .iter_mut()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
-            session.tabs = tabs;
-            session.active_tab_id = active_tab_id;
-            if core_state.has_pending_turn_for(&session_id) {
-                // 活跃轮次由 Core 独占会话文件；终态重载会保留这些宿主元数据。
-                Ok(())
-            } else {
-                core_state.persist_session_and_app(&session_id)
+        .with_state_read(|core_state| {
+            if !core_state
+                .sessions()
+                .iter()
+                .any(|session| session.id == session_id)
+            {
+                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
+
+            crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
         })
         .await
 }
@@ -805,6 +831,9 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     app.state::<tiangong_plugin_browser::BrowserPluginState>()
         .registry
         .destroy_session(&deleted_id);
+    if let Err(error) = crate::workspace_tabs::remove_layout(&deleted_id) {
+        warn!(%error, session_id = %deleted_id, "删除工作区标签页布局失败");
+    }
     cleanup_unreferenced_draft_attachments(state.inner(), draft_attachments).await;
     Ok(())
 }
@@ -876,6 +905,9 @@ pub async fn delete_sessions_by_cwd(
     for id in &deleted_ids {
         tiangong_plugin_terminal::destroy_session_pty(&app, id);
         browser_state.registry.destroy_session(id);
+        if let Err(error) = crate::workspace_tabs::remove_layout(id) {
+            warn!(%error, session_id = %id, "删除工作区标签页布局失败");
+        }
         state.remove_session_send_lock(id);
     }
     cleanup_unreferenced_draft_attachments(state.inner(), draft_attachments).await;

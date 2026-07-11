@@ -280,6 +280,11 @@ async fn run_cli_update_async(
 fn run_gui() {
     let _guard = init_logging(true).expect("failed to initialize logging");
 
+    // 旧版工作区 Tab 必须在 App State 加载/恢复前迁入各插件与薄布局存储，
+    // 否则启动恢复可能先重写 Session JSON，永久丢失迁移输入。
+    tiangong_app::workspace_tabs::migrate_legacy_tabs()
+        .expect("旧工作区标签页迁移失败，为避免覆盖旧数据已停止启动");
+
     tauri::Builder::default()
         .manage(tiangong_app::TiangongApp::new())
         .setup(|app| {
@@ -628,7 +633,6 @@ fn run_gui() {
         ])
         .plugin(tiangong_plugin_browser::init())
         .plugin(tiangong_plugin_terminal::init(
-            scru128::new().to_string(),
             std::env::var("TIANGONG_WORKSPACE")
                 .ok()
                 .or_else(|| std::env::var("HOME").ok())

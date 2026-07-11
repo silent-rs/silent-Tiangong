@@ -89,7 +89,8 @@ impl BrowserPluginState {
             let mut s = new_state.lock().map_err(|e| e.to_string())?;
             // 只在 state 无 tabs 时从 store 恢复（不覆盖已有 runtime state）
             if s.tabs.is_empty() {
-                let persisted = crate::session_store::BrowserSessionStore::load(session_id);
+                let persisted = crate::session_store::BrowserSessionStore::load(session_id)
+                    .map_err(|error| error.to_string())?;
                 if !persisted.tabs.is_empty() {
                     s.tabs = persisted.tabs;
                 }

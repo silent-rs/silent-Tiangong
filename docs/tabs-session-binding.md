@@ -4,6 +4,8 @@
 >
 > 当前分支：`feature/unified-tabs-session-binding`
 
+> 2026-07-12 后续收敛：工作区 Tab 元数据已从 Core Session 迁回 Browser/Terminal 插件自治存储；Desktop 只保存跨插件顺序和活跃项的 `{kind, id}` 引用。本文中将 Session 作为 Tab 持久化边界的旧描述仅用于记录最初设计。
+
 ## 完成标准
 
 本功能完成时必须同时满足：
@@ -20,8 +22,8 @@
 ## 设计原则
 
 - **元数据和运行实例分离**：会话文件只保存 Tab 元数据，不保存 PTY、WebView、xterm 实例等运行对象。
-- **Session 是持久化边界**：工作区 Tab 归属于对话 Session，切换会话时不得复用旧会话的 Tab 状态。
-- **插件各自管理运行时**：Core 只保存会话元数据；终端插件管理 PTY；浏览器插件管理 WebView。
+- **插件按会话自治**：Browser/Terminal 插件分别保存自己拥有的 Tab 元数据，不进入 Core Session；切换会话时不得复用旧会话的 Tab 状态。
+- **宿主只协调布局**：Desktop 仅保存跨插件排列顺序和当前活跃项的 `{kind, id}` 引用，不复制插件元数据；终端插件管理 PTY，浏览器插件管理 WebView。
 - **前端只协调，不成为事实源**：前端负责展示、触发命令和防抖持久化；真实运行对象以后端插件状态为准。
 - **Agent 命令落在可见终端**：Desktop 模式下普通命令执行优先落在当前会话的存活终端里，用户可以看到命令过程。
 
@@ -45,7 +47,17 @@
 - 不重写浏览器全局历史能力。
 - 不重写终端底层 PTY 协议。
 
-## 数据模型
+## 当前持久化边界
+
+- Browser 插件以 `browser-sessions/<session_id>.json` 保存浏览器 Tab 元数据与插件内活跃项。
+- Terminal 插件以 `terminal-sessions/<session_id>.json` 保存终端 Tab 元数据与插件内活跃项；PTY、cwd、shell、存活状态和协作阶段仅存在于运行时。
+- Desktop 以 `workspace-tab-layouts/<session_id>.json` 只保存 `{kind, id}` 的混排顺序和 UI 活跃引用。
+- `get_session_tabs` 合并两个插件存储并按薄布局排序；`set_session_tabs` 只更新薄布局，不替插件写元数据。
+- 应用必须在 Core/App State 恢复前把旧 Session 中的 `tabs` / `active_tab_id` 一次性迁入上述三个边界；任一迁移失败时停止启动，保留旧数据供重试。
+
+## 原始数据模型（已废弃，仅保留设计沿革）
+
+以下 Core 字段和“不做一次性迁移”的兼容策略不再适用于当前实现。
 
 位置：`crates/tiangong-core/src/session.rs`
 
@@ -85,7 +97,7 @@ pub struct TabState {
 
 ## 后端设计
 
-### Core / App 命令
+### Core / App 命令（原始设计，已废弃）
 
 位置：`src-tauri/src/commands.rs`
 
@@ -98,7 +110,7 @@ pub struct TabState {
 
 要求：
 
-- 只读写 `Session.tabs` 和 `Session.active_tab_id`。
+- 当前实现不再读写 `Session.tabs` 和 `Session.active_tab_id`；该条仅记录旧设计。
 - 反序列化失败时不得破坏原会话数据。
 - 不在这些命令中创建 PTY 或 WebView。
 
@@ -198,7 +210,7 @@ StatusPanel 点击终端/浏览器
 - 维护当前会话的统一 Tab 列表。
 - 渲染顶部统一 Tab 栏。
 - 新建、切换、关闭浏览器或终端 Tab。
-- 会话切换时从后端加载 `Session.tabs`。
+- 会话切换时从 Browser/Terminal 插件存储加载元数据，并按 Desktop 薄布局引用合并。
 - 根据 Tab 类型调用对应插件恢复运行实例。
 - 防抖调用 `set_session_tabs` 持久化元数据。
 

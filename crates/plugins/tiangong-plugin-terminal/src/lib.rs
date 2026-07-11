@@ -16,6 +16,7 @@ pub mod manager;
 pub mod output_processor;
 pub mod plugin;
 pub mod session_pty;
+pub mod session_store;
 pub mod types;
 pub mod util;
 
@@ -33,7 +34,7 @@ pub struct TerminalPluginState {
     pub registry: Arc<SessionPtyRegistry>,
 }
 
-pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
+pub fn init(cwd: String) -> TauriPlugin<Wry> {
     Builder::new("terminal")
         .invoke_handler(tauri::generate_handler![
             commands::terminal_ensure_session,
@@ -64,9 +65,6 @@ pub fn init(session_id: String, cwd: String) -> TauriPlugin<Wry> {
                 registry: registry.clone(),
             };
             app.manage(state);
-
-            // 预创建初始 session 的 PTY（确保启动即可用）
-            registry.ensure(&session_id, &cwd);
 
             Ok(())
         })
