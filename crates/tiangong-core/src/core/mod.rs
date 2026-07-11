@@ -550,7 +550,6 @@ async fn worker_loop_async(
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
-                    &plugins,
                     &cmd_tx,
                 )
                 .await;
@@ -771,7 +770,6 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
-    plugins: &[Arc<dyn Plugin>],
     cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -781,7 +779,6 @@ async fn execute_turn_async(
         MAX_OUTER_ITERATIONS,
     )
     .with_shared_team(team_context, "main".to_string())
-    .with_plugins(plugins.to_vec())
     .with_cmd_tx(cmd_tx.clone());
     react
         .execute_turn(session, user_input, stream_tx, cmd_rx)

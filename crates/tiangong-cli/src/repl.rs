@@ -72,8 +72,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                     .map(ModelEndpoint::from_resolved)
             };
             let mut plugins = tiangong_plugin_fs::default_plugins();
-            // 媒体归档是基础能力，无条件注册（接管输入附件归档 + 工具输出本地化）。
-            plugins.push(tiangong_plugin_media_archive::build_plugin());
             plugins.extend(tiangong_plugin_index::default_plugins());
             if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
                 plugins.push(tiangong_plugin_generate_image::build_plugin(ep));

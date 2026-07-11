@@ -1,33 +1,8 @@
-//! 工具结果中的媒体产物解析与插件化本地化分发。
+//! 工具结果中的媒体产物解析。
 //!
-//! 图片/视频资源提取（`parse_media_assets_from_tool_result`）保留在 core，
-//! 供 ReactEngine 在工具执行后解析工具产出的媒体。工具输出图片的**本地化归档**
-//! 已迁移到 `tiangong-plugin-media-archive` 插件，经 [`localize_tool_result_via_plugins`]
-//! 分发 egress 钩子；core 不再直接调用 `tiangong-media-archive`。
-
-use std::sync::Arc;
-
-use crate::core::Plugin;
-use crate::tool::ToolResult;
-
-// ── 插件化本地化分发 ──
-
-/// 通过插件分发工具输出本地化钩子（`on_tool_result_localize`）。
-///
-/// 仅当工具执行成功时分发——保持原 `localize_tool_result_images` 的 `result.ok`
-/// 守卫语义。具体归档实现（图片 URL → 本地路径）由 media-archive 插件接管。
-pub(crate) fn localize_tool_result_via_plugins(
-    plugins: &[Arc<dyn Plugin>],
-    tool_name: &str,
-    result: &mut ToolResult,
-) {
-    if !result.ok {
-        return;
-    }
-    for plugin in plugins {
-        plugin.on_tool_result_localize(tool_name, &mut result.stdout);
-    }
-}
+//! 图片/视频资源提取（`parse_media_assets_from_tool_result`）供 ReactEngine 在
+//! 工具执行后解析工具产出的媒体。工具输出图片的本地化归档由生成插件（如
+//! `tiangong-plugin-generate-image`）在产出时自行完成，core 不再参与。
 
 // ── 媒体产物解析函数 ──
 

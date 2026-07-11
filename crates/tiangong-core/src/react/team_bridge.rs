@@ -449,10 +449,7 @@ impl ReactEngine {
                 sub_max_rounds,
                 crate::agent_team::tools::SUB_AGENT_MAX_OUTER_ITERATIONS,
             )
-            .with_shared_team(team_arc.clone(), agent_id.clone())
-            // 继承父 agent 的插件集，使子 agent 同样具备媒体归档（输入附件
-            // 工具输出本地化 on_tool_result_localize）等能力。
-            .with_plugins(self.plugins.clone());
+            .with_shared_team(team_arc.clone(), agent_id.clone());
 
             // 通过 SubAgentPromptContext 构建 system prompt
             let base_config = crate::prompt::SystemPromptConfig::from_configs(

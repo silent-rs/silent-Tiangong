@@ -55,8 +55,6 @@ pub(crate) struct ReactEngine {
     pub(super) max_outer_iterations: u32,
     pub(super) team: Option<Arc<Mutex<TeamContext>>>,
     pub(super) agent_id: String,
-    /// 会话级插件引用：用于在工具执行后分发 egress 钩子（如图片本地化）。
-    pub(super) plugins: Vec<Arc<dyn crate::core::Plugin>>,
     /// 命令通道发送端：check_cancel 遇到非控制命令时回灌队列用。
     pub(super) cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
 }
@@ -75,15 +73,8 @@ impl ReactEngine {
             max_outer_iterations,
             team: None,
             agent_id: "main".to_string(),
-            plugins: Vec::new(),
             cmd_tx: None,
         }
-    }
-
-    /// 注入会话级插件，供 egress 钩子（工具输出本地化等）分发。
-    pub(crate) fn with_plugins(mut self, plugins: Vec<Arc<dyn crate::core::Plugin>>) -> Self {
-        self.plugins = plugins;
-        self
     }
 
     /// 注入命令通道发送端，供 check_cancel 回灌被排空的非控制命令。
@@ -1105,7 +1096,7 @@ impl ReactEngine {
                         // analyze_attachment 已迁移至独立插件（tiangong-plugin-analyze-
                         // attachment），经 execute_tool_call → tool_overrides 统一分发，
                         // 其 multimodal 子调用的 token 用量由插件经反馈通道上报。
-                        let (mut result, tool_llm_usage, allow_memory_context, usage_source) = {
+                        let (result, tool_llm_usage, allow_memory_context, usage_source) = {
                             (
                                 self.engine.execute_tool_call(call, session).await,
                                 tiangong_types::TokenUsage::default(),
@@ -1113,11 +1104,6 @@ impl ReactEngine {
                                 "",
                             )
                         };
-                        crate::tool::media::localize_tool_result_via_plugins(
-                            &self.plugins,
-                            &call.name,
-                            &mut result,
-                        );
                         (result, tool_llm_usage, allow_memory_context, usage_source)
                     };
                     accumulated_usage.accumulate(&tool_llm_usage);

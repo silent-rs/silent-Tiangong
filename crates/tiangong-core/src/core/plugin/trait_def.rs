@@ -128,18 +128,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 默认实现为空。
     fn on_config_updated(&self, _config: &crate::core_config::CoreConfig) {}
 
-    // ── 数据出口钩子 ──
-    //
-    // 让「插件产生的数据由插件处理」：工具输出等可由插件接管的转换，core 只负责
-    // 在正确时机分发钩子，不直接调用具体实现。
-
-    /// 工具执行成功后、结果写入 session 前回调（改写工具输出用）。
-    ///
-    /// ReactEngine 在工具执行完毕后遍历插件调用。需要本地化工具输出的插件（如把
-    /// 生成图片的远程 URL 归档为本地路径）应覆写此方法，原地改写 `stdout`。
-    /// 默认实现为空——不关心工具输出的插件无需覆写。
-    fn on_tool_result_localize(&self, _tool_name: &str, _stdout: &mut String) {}
-
     // ── 生命周期钩子 ──
     //
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
