@@ -23,7 +23,19 @@ pub fn archive_input_media_assets(media: Vec<MediaAsset>) -> Vec<MediaAsset> {
                 return asset;
             }
             if is_document_asset(&asset) {
-                match archive_file_reference(&asset.url, asset.mime_type.as_deref()) {
+                // mime_hint 优先用显式 mime_type，其次用 URL/文件名推断
+                //（Server 的文件附件 mime_type 可能为 None，但 title 含文件名）。
+                let mime_hint = asset
+                    .mime_type
+                    .clone()
+                    .or_else(|| document_mime_from_reference(&asset.url))
+                    .or_else(|| {
+                        asset
+                            .title
+                            .as_deref()
+                            .and_then(document_mime_from_reference)
+                    });
+                match archive_file_reference(&asset.url, mime_hint.as_deref()) {
                     Ok(archived) => MediaAsset {
                         url: archived.path,
                         mime_type: Some(archived.mime_type),
@@ -82,13 +94,25 @@ fn should_archive_input_asset(asset: &MediaAsset) -> bool {
 }
 
 /// 判断是否为可归档的文档附件（PDF/Word/Excel/PowerPoint 现代格式）
+///
+/// 依次检查：显式 MIME → URL 扩展名 → 文件名（title）扩展名。文件名兜底
+/// 是因为 Server 等入口的文件附件 URL 可能是无扩展名的临时下载地址
+/// （如 `download/123`），但接口提供的文件名（如 `报告.pdf`）能表明类型。
 fn is_document_asset(asset: &MediaAsset) -> bool {
     if let Some(mime) = asset.mime_type.as_deref()
         && is_document_mime(mime)
     {
         return true;
     }
-    document_mime_from_reference(&asset.url).is_some()
+    if document_mime_from_reference(&asset.url).is_some() {
+        return true;
+    }
+    // 文件名兜底：URL 无扩展名时，用 title（文件名）推断。
+    asset
+        .title
+        .as_deref()
+        .and_then(document_mime_from_reference)
+        .is_some()
 }
 
 fn is_document_mime(mime: &str) -> bool {
@@ -280,7 +304,9 @@ fn image_ext_from_mime(mime_type: &str) -> Option<&'static str> {
 
 /// 从文件引用推断文档 MIME（按扩展名）
 fn document_mime_from_reference(value: &str) -> Option<String> {
-    let lower = value.trim().to_ascii_lowercase();
+    // 忽略查询参数与片段，只检查路径部分（如 "报告.pdf?token=xxx" → ".pdf"）。
+    let path = value.split(['?', '#']).next().unwrap_or(value);
+    let lower = path.trim().to_ascii_lowercase();
     if lower.ends_with(".pdf") {
         Some("application/pdf".to_string())
     } else if lower.ends_with(".docx") {

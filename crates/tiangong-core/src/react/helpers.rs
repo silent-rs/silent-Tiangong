@@ -123,11 +123,11 @@ pub(super) fn drain_pending_commands_async(
     }
 }
 
-/// 非阻塞检查是否有取消或关闭命令待处理。
+/// 非阻塞检查队首是否有取消或关闭命令。
 ///
-/// 仅消费 Cancel/Shutdown/CompressContext/ResetContext 等控制命令；遇到其他命令
-/// （如排队中的用户新消息 `Command::Message`）时**回灌队列**并停止排空，避免吞掉
-/// 用户在工具执行期间追加的消息（它们应由随后的 drain_pending_commands_async 处理）。
+/// 只看队首：是 Cancel/Shutdown 则消费并返回 true；否则回灌并返回 false，完全不
+/// 排空队列——队列顺序和后续命令（Message / CompressContext / ResetContext 等）
+/// 一律保持原样，由随后的 drain_pending_commands_async 按提交顺序处理。
 pub(super) fn check_cancel(
     session: &mut Session,
     engine: &RuntimeEngine,

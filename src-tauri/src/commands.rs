@@ -759,13 +759,25 @@ async fn send_message_inner(
 
     state.sync_core_config_from_state().await?;
 
-    // 在持锁前归档附件（远程下载可能阻塞 60s，不能在状态锁内执行）。
-    let media = tiangong_media_archive::archive_input_media_assets(media);
+    // 归档前先固定目标会话，避免归档期间活动会话切换导致串线。
+    let session_id = state
+        .with_state_read(|core_state| {
+            Ok::<_, anyhow::Error>(core_state.active_session_id().to_string())
+        })
+        .await?;
 
-    // 准备 session
+    // 在持锁前归档附件（远程下载可能阻塞 60s），放到 spawn_blocking 避免阻塞
+    // 当前 async 任务的执行线程。
+    let media = tokio::task::spawn_blocking(move || {
+        tiangong_media_archive::archive_input_media_assets(media)
+    })
+    .await
+    .map_err(|e| format!("附件归档失败：{e}"))?;
+
+    // 按固定 session_id 写入（不再读取活动会话）。
     let (session_id, user_message_id, session_snapshot) = state
         .with_state(|core_state| {
-            core_state.prepare_active_user_message_ingress_with_media(content.clone(), media)
+            core_state.prepare_user_message_ingress_for_session(&session_id, content.clone(), media)
         })
         .await?;
     // 从 content blocks 提取 media（媒体唯一真相源，不再有独立 media 字段）。
@@ -1490,8 +1502,17 @@ pub async fn edit_and_resend(
         }
     }
 
-    // 编辑路径同样需要在写入会话前归档附件（与普通发送一致）。
-    let media = media.map(tiangong_media_archive::archive_input_media_assets);
+    // 编辑路径同样需要在写入会话前归档附件（spawn_blocking，避免阻塞）。
+    let media = match media {
+        Some(m) if !m.is_empty() => Some(
+            tokio::task::spawn_blocking(move || {
+                tiangong_media_archive::archive_input_media_assets(m)
+            })
+            .await
+            .map_err(|e| format!("附件归档失败：{e}"))?,
+        ),
+        other => other,
+    };
 
     // 1. 查找消息所在会话并验证
     let session_id = state

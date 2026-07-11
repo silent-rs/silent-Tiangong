@@ -83,9 +83,13 @@ impl ServerCoreManager {
         media: Vec<MediaAsset>,
     ) -> Result<()> {
         let (session_id, _session, _created) = self.ensure_core(requested_session_id).await?;
-        // 在持锁前归档附件（远程下载可能阻塞 60s，不能在 cores 锁内执行）。
+        // 在持锁前归档附件（spawn_blocking，避免阻塞 async 执行线程）。
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        let media = tiangong_media_archive::archive_input_media_assets(media);
+        let media = tokio::task::spawn_blocking(move || {
+            tiangong_media_archive::archive_input_media_assets(media)
+        })
+        .await
+        .map_err(|e| anyhow!("附件归档失败：{e}"))?;
         let cores = self.cores.lock().unwrap();
         let Some(core) = cores.get(&session_id) else {
             return Err(anyhow!("会话 core 不存在：{session_id}"));
@@ -112,8 +116,12 @@ impl ServerCoreManager {
 
         {
             let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-            // 在持锁前归档附件（远程下载可能阻塞 60s，不能在 cores 锁内执行）。
-            let media = tiangong_media_archive::archive_input_media_assets(media);
+            // 在持锁前归档附件（spawn_blocking，避免阻塞 async 执行线程）。
+            let media = tokio::task::spawn_blocking(move || {
+                tiangong_media_archive::archive_input_media_assets(media)
+            })
+            .await
+            .map_err(|e| anyhow!("附件归档失败：{e}"))?;
             let cores = self.cores.lock().unwrap();
             let Some(core) = cores.get(&session_id) else {
                 return Err(anyhow!("会话 core 不存在：{session_id}"));
