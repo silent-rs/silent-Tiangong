@@ -1,89 +1,97 @@
-//! 用户附件经过宿主入口保存、规划后的稳定消息合同。
+//! 宿主完成输入准备后交给 Agent 的通用消息合同。
 //!
-//! `RawAttachment` 属于宿主 App 层，不在本 crate 中定义。Core 只接收
-//! [`PreparedUserMessage`]，其中可持久化附件与仅供当前轮次使用的运行内容严格分离。
+//! Core 只接收已经按最终顺序组织好的 [`ContentBlock`]，不参与资源处理方式、
+//! 插件能力或提示文案决策。
 
 use serde::{Deserialize, Serialize};
 
-use crate::MediaKind;
+use crate::{ContentBlock, MediaKind};
 
-/// 附件进入模型请求或工具链路的确定处理方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttachmentHandlingMode {
-    /// 图片内容直接进入对话模型请求。
-    InlineImage,
-    /// 主模型只接收本地引用，并按需调用附件分析插件。
-    AnalyzeWithPlugin,
-    /// 主模型只接收稳定文件引用，由文件工具、文档解析器或 Skill 使用。
-    FileReference,
-}
-
-/// 已由宿主入口保存并完成处理方案规划的稳定附件。
+/// 已由宿主保存的稳定资源引用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedAttachment {
+pub struct StoredAsset {
     pub asset_id: String,
     pub local_path: String,
     pub original_name: String,
     pub mime_type: String,
     pub size: u64,
     pub kind: MediaKind,
-    pub handling_mode: AttachmentHandlingMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability: Option<String>,
-    #[serde(default)]
-    pub capability_available: bool,
 }
 
-/// 仅供当前轮次模型请求使用、不得写入会话文件的内容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RuntimeContent {
-    InlineImage {
-        asset_id: String,
-        mime_type: String,
-        /// 图片 base64；可为纯 base64，也可为完整 data URL。
-        data: String,
-    },
-}
+impl StoredAsset {
+    pub fn has_inline_data_reference(&self) -> bool {
+        [&self.asset_id, &self.local_path].into_iter().any(|value| {
+            value
+                .trim_start()
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        })
+    }
 
-impl RuntimeContent {
-    pub fn asset_id(&self) -> &str {
-        match self {
-            Self::InlineImage { asset_id, .. } => asset_id,
+    pub fn clear_inline_data_reference(&mut self) {
+        if self
+            .local_path
+            .trim_start()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        {
+            self.local_path = "<inline-data-reference-unavailable>".to_string();
+        }
+        if self
+            .asset_id
+            .trim_start()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        {
+            self.asset_id = "<inline-data-asset-unavailable>".to_string();
         }
     }
 }
 
-/// Core 用户消息入口：稳定附件与本轮运行内容分离。
+/// Core 用户消息入口：内容块已经由宿主准备完成并按最终顺序排列。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedUserMessage {
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub persistent_attachments: Vec<PreparedAttachment>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runtime_content: Vec<RuntimeContent>,
+    #[serde(default)]
+    pub content: Vec<ContentBlock>,
 }
 
 impl PreparedUserMessage {
-    pub fn new(
-        text: impl Into<String>,
-        persistent_attachments: Vec<PreparedAttachment>,
-        runtime_content: Vec<RuntimeContent>,
-    ) -> Self {
-        Self {
-            text: text.into(),
-            persistent_attachments,
-            runtime_content,
-        }
+    pub fn new(content: Vec<ContentBlock>) -> Self {
+        Self { content }
     }
 
     pub fn text(text: impl Into<String>) -> Self {
-        Self::new(text, Vec::new(), Vec::new())
+        Self::new(vec![ContentBlock::text(text)])
+    }
+
+    /// 返回只含稳定内容的副本，移除所有仅供当前请求使用的图片数据。
+    pub fn stable(&self) -> Self {
+        let mut content = self.content.clone();
+        for block in &mut content {
+            block.clear_transient_data();
+        }
+        Self { content }
+    }
+
+    /// Core 接收边界校验：持久资源字段只能保存引用，不能伪装成内联数据通道。
+    pub fn validate_ready(&self) -> Result<(), String> {
+        for block in &self.content {
+            block.validate_stable_reference()?;
+        }
+        Ok(())
+    }
+
+    /// 拼接面向用户的文本，不包含宿主提供给模型的指令块。
+    pub fn text_content(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(ContentBlock::as_text)
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty() && self.persistent_attachments.is_empty()
+        self.content.iter().all(ContentBlock::is_empty)
     }
 }
 
@@ -103,24 +111,60 @@ impl From<&str> for PreparedUserMessage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn handling_mode_serde_roundtrip_uses_snake_case() {
-        let modes = [
-            (AttachmentHandlingMode::InlineImage, "\"inline_image\""),
-            (
-                AttachmentHandlingMode::AnalyzeWithPlugin,
-                "\"analyze_with_plugin\"",
-            ),
-            (AttachmentHandlingMode::FileReference, "\"file_reference\""),
-        ];
-
-        for (mode, expected) in modes {
-            let json = serde_json::to_string(&mode).unwrap();
-            assert_eq!(json, expected);
-            assert_eq!(
-                serde_json::from_str::<AttachmentHandlingMode>(&json).unwrap(),
-                mode
-            );
+    fn image_block(data: Option<&str>) -> ContentBlock {
+        ContentBlock::Image {
+            asset: StoredAsset {
+                asset_id: "asset-1".to_string(),
+                local_path: "/tmp/asset-1.png".to_string(),
+                original_name: "asset-1.png".to_string(),
+                mime_type: "image/png".to_string(),
+                size: 4,
+                kind: MediaKind::Image,
+            },
+            data: data.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn stable_message_clears_transient_image_data() {
+        let prepared = PreparedUserMessage::new(vec![
+            ContentBlock::text("查看图片"),
+            image_block(Some("CURRENT_BASE64")),
+        ]);
+
+        let stable = prepared.stable();
+
+        assert!(matches!(
+            &prepared.content[1],
+            ContentBlock::Image { data: Some(data), .. } if data == "CURRENT_BASE64"
+        ));
+        assert!(matches!(
+            &stable.content[1],
+            ContentBlock::Image { data: None, .. }
+        ));
+    }
+
+    #[test]
+    fn image_data_is_never_serialized() {
+        let prepared = PreparedUserMessage::new(vec![image_block(Some("SECRET_BASE64"))]);
+        let json = serde_json::to_string(&prepared).unwrap();
+
+        assert!(!json.contains("SECRET_BASE64"));
+        assert!(json.contains("/tmp/asset-1.png"));
+    }
+
+    #[test]
+    fn ready_message_rejects_inline_data_in_stable_path() {
+        let mut block = image_block(None);
+        let ContentBlock::Image { asset, .. } = &mut block else {
+            unreachable!();
+        };
+        asset.local_path = "data:image/png;base64,SECRET_BASE64".to_string();
+        let prepared = PreparedUserMessage::new(vec![block]);
+
+        assert!(prepared.validate_ready().is_err());
+        let json = serde_json::to_string(&prepared.stable()).unwrap();
+        assert!(!json.contains("SECRET_BASE64"));
+        assert!(json.contains("inline-data-reference-unavailable"));
     }
 }

@@ -16,9 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tiangong_types::{
-    AttachmentHandlingMode, ContentBlock, MediaKind, Message, MessageRole, PreparedAttachment,
-};
+use tiangong_types::{ContentBlock, Message, MessageRole, StoredAsset};
 
 use crate::endpoint::ModelEndpoint;
 use crate::message::{
@@ -61,8 +59,6 @@ pub struct ModelRequest {
     pub thinking: Option<ThinkingConfig>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub thinking_disabled: bool,
-    /// 普通主模型请求不携带附件原始内容；只有显式的多模态解析工具会开启。
-    pub include_media: bool,
 }
 
 impl ModelRequest {
@@ -172,6 +168,25 @@ impl std::fmt::Debug for SingleProviderClient {
 }
 
 impl SingleProviderClient {
+    /// 可取消的非流式主模型调用。调用方丢弃 future 时底层 HTTP 请求随之终止。
+    pub async fn complete_async(&self, req: &ModelRequest) -> Result<ModelResponse> {
+        let timeout_ms = self.cfg.timeout_ms;
+        let model = self.cfg.model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
+        }
+        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let response = provider.complete(request).await.map_err(map_llm_error)?;
+        Ok(ModelResponse {
+            text: collect_provider_text(&response).trim().to_string(),
+            reasoning_content: response.reasoning_content.unwrap_or_default(),
+            reasoning_signature: None,
+            usage: response.usage.unwrap_or_default().into(),
+            tool_calls: Vec::new(),
+        })
+    }
+
     pub fn new(cfg: ModelEndpoint) -> Self {
         Self {
             cfg,
@@ -377,7 +392,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式模型请求"));
         }
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
         let provider = self.build_provider_dispatch(timeout_ms)?;
         consume_provider_stream(provider, request, &mut on_delta)
     }
@@ -404,7 +419,7 @@ impl SingleProviderClient {
         if model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空，无法发起流式工具模型请求"));
         }
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let provider = self.build_provider_dispatch(timeout_ms)?;
         convert_stream_to_function_response(provider, request, on_delta)
     }
@@ -522,15 +537,16 @@ impl SingleProviderClient {
                 if let Some(on_retry) = &fallback_client.on_retry {
                     on_retry(1, MAX_RETRIES, 0, &err.to_string());
                 }
-                let response = tokio::task::spawn_blocking(move || {
-                    fallback_client.complete_with_functions_with_tool_choice(
+                // 直接 await provider future；上层 abort 流任务时 HTTP future 会随之
+                // drop，不能使用不可取消的 spawn_blocking，否则旧请求会越过轮次屏障。
+                let response = fallback_client
+                    .complete_with_functions_with_tool_choice_async(
                         &fallback_req,
                         &fallback_functions,
                         fallback_tool_choice,
                     )
-                })
-                .await
-                .context("流式失败后回退非流式调用失败")??;
+                    .await
+                    .context("流式失败后回退非流式调用失败")?;
                 if !response.reasoning_content.is_empty() {
                     let _ = fallback_tx.send(ModelStreamChunk {
                         content: String::new(),
@@ -571,7 +587,7 @@ impl SingleProviderClient {
             ));
         }
         let request =
-            build_provider_request(&req, &model, MAX_TOKENS_MAIN, &functions, tool_choice);
+            build_provider_request(&req, &model, MAX_TOKENS_MAIN, &functions, tool_choice)?;
         let provider = self.build_provider_dispatch(timeout_ms)?;
 
         let mut text = String::new();
@@ -709,8 +725,25 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let response = self.block_on_llm(provider.complete(request))?;
+        convert_provider_response_to_function_response(response)
+    }
+
+    pub async fn complete_with_functions_with_tool_choice_async(
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ModelFunctionResponse> {
+        let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
+        let model = self.cfg.model.trim();
+        if model.is_empty() {
+            return Err(anyhow!("API_MODEL 不能为空，无法发起工具模型请求"));
+        }
+        let provider = self.build_provider_dispatch(timeout_ms)?;
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let response = provider.complete(request).await.map_err(map_llm_error)?;
         convert_provider_response_to_function_response(response)
     }
 
@@ -800,7 +833,7 @@ impl ModelClient for SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None);
+        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
@@ -904,10 +937,10 @@ fn build_provider_request(
     max_tokens: u32,
     functions: &[ToolSpec],
     tool_choice: Option<ToolChoice>,
-) -> ProviderRequest {
-    let (system, messages) = build_provider_messages(req);
+) -> Result<ProviderRequest> {
+    let (system, messages) = build_provider_messages(req)?;
     let thinking = req.thinking.clone();
-    ProviderRequest {
+    Ok(ProviderRequest {
         model: model.to_string(),
         system: (!system.trim().is_empty()).then_some(system),
         messages,
@@ -921,7 +954,7 @@ fn build_provider_request(
         thinking,
         reasoning_effort: req.reasoning_effort,
         thinking_disabled: req.thinking_disabled,
-    }
+    })
 }
 
 const SYSTEM_IDENTITY: &str = "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和技能完成各种复杂任务。";
@@ -937,7 +970,7 @@ const SYSTEM_RULES: &str = "规则：\
 8. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。\
 9. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。";
 
-fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
+fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessage>)> {
     let mut messages = Vec::new();
     let mut system_texts = vec![
         SYSTEM_IDENTITY.to_string(),
@@ -946,16 +979,20 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         format!("当前工作目录：{}", current_working_directory_text()),
         format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
+    let mut has_context_system = false;
     for msg in &req.context {
         if msg.role == MessageRole::System {
             let text = msg.text_content().trim().to_string();
             if !text.is_empty() {
-                system_texts.clear();
+                if !has_context_system {
+                    system_texts.clear();
+                    has_context_system = true;
+                }
                 system_texts.push(text);
             }
             continue;
         }
-        if let Some(message) = provider_message_from_session(msg, req.include_media) {
+        if let Some(message) = provider_message_from_session(msg)? {
             messages.push(message);
         }
     }
@@ -988,40 +1025,40 @@ fn build_provider_messages(req: &ModelRequest) -> (String, Vec<ChatMessage>) {
         messages.push(ChatMessage::text(LlmMessageRole::User, fallback));
     }
 
-    (system_texts.join("\n"), messages)
+    Ok((system_texts.join("\n"), messages))
 }
 
-fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<ChatMessage> {
+fn provider_message_from_session(msg: &Message) -> Result<Option<ChatMessage>> {
     let role = match msg.role {
         MessageRole::User => LlmMessageRole::User,
         MessageRole::Assistant => LlmMessageRole::Assistant,
         MessageRole::Tool => LlmMessageRole::Tool,
-        MessageRole::System => return None,
+        MessageRole::System => return Ok(None),
     };
 
     if msg.role == MessageRole::Tool {
         let text = msg.text_content();
         let Some(tool_call_id) = msg.tool_call_id.as_ref() else {
             if text.trim().is_empty() {
-                return None;
+                return Ok(None);
             }
             let tool_name = msg.tool_name.as_deref().unwrap_or("runtime_context");
-            return Some(ChatMessage::text(
+            return Ok(Some(ChatMessage::text(
                 LlmMessageRole::User,
                 format!(
                     "<tool-context name=\"{tool_name}\">\n{}\n</tool-context>",
                     text.trim()
                 ),
-            ));
+            )));
         };
-        return Some(ChatMessage::new(
+        return Ok(Some(ChatMessage::new(
             role,
             vec![LlmMessageContent::ToolResult(LlmToolResult {
                 tool_call_id: tool_call_id.clone(),
                 content: LlmToolResultContent::Text(text),
                 is_error: msg.tool_result_is_error,
             })],
-        ));
+        )));
     }
 
     let mut content = Vec::new();
@@ -1032,130 +1069,21 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
         }));
     }
 
-    let runtime_images = msg
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::RuntimeInlineImage {
-                asset_id,
-                mime_type,
-                data,
-            } => Some((asset_id.as_str(), (mime_type.as_str(), data.as_str()))),
-            _ => None,
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut inline_image_count = 0usize;
-    let mut media_index = 0usize;
-    let mut analyze_notices = Vec::new();
-    let mut file_notices = Vec::new();
-    let mut unavailable_notices = Vec::new();
-
-    // 遍历 content blocks。正式 Attachment 完全按 handling_mode 处理；
-    // include_media 仅保留给旧版 Media 兼容链路。
+    // 宿主已经完成全部输入准备；这里只做内容块到 Provider 消息的机械映射。
     for block in &msg.content {
         match block {
-            ContentBlock::Text { text: s } => {
+            ContentBlock::Text { text: s } | ContentBlock::ModelInstruction { text: s } => {
                 if !s.trim().is_empty() {
-                    content.push(LlmMessageContent::Text(s.trim().to_string()));
+                    content.push(LlmMessageContent::Text(s.clone()));
                 }
             }
-            ContentBlock::Media {
-                kind: MediaKind::Image,
-                url,
-                ..
-            } if include_media && msg.role == MessageRole::User => {
-                media_index += 1;
-                if let Some(img_content) = image_content_from_reference(url) {
-                    content.push(LlmMessageContent::Image(img_content));
-                    inline_image_count += 1;
-                }
+            ContentBlock::Image { asset, data } => {
+                let img_content = image_content_from_ready_image(asset, data.as_deref())
+                    .ok_or_else(|| anyhow!("已就绪图片无法读取：asset_id={}", asset.asset_id))?;
+                content.push(LlmMessageContent::Image(img_content));
             }
-            // 文件类附件（PDF/Office）不内联注入主请求。
-            // 统一交给下方的 attachment_notice 提示 + system prompt 中的
-            // 「文档附件解析规则」引导 agent 用本地脚本解析（issue #149）。
-            ContentBlock::Media {
-                kind: MediaKind::File,
-                ..
-            } => {
-                media_index += 1;
-            }
-            ContentBlock::Media { .. } => {
-                media_index += 1;
-            }
-            ContentBlock::Attachment { attachment } if msg.role == MessageRole::User => {
-                let attachment_index = media_index;
-                media_index += 1;
-                match attachment.handling_mode {
-                    AttachmentHandlingMode::InlineImage => {
-                        let image = runtime_images
-                            .get(attachment.asset_id.as_str())
-                            .map(|(mime_type, data)| image_content_from_runtime(mime_type, data))
-                            .or_else(|| image_content_from_reference(&attachment.local_path));
-                        if let Some(image) = image {
-                            content.push(LlmMessageContent::Image(image));
-                            inline_image_count += 1;
-                        } else {
-                            unavailable_notices.push(format!(
-                                "附件 index={attachment_index} asset_id={} 无法从本轮运行内容或本地路径读取，请明确告知用户重新上传。",
-                                attachment.asset_id
-                            ));
-                        }
-                    }
-                    AttachmentHandlingMode::AnalyzeWithPlugin => analyze_notices.push(
-                        prepared_attachment_notice_item(attachment_index, attachment),
-                    ),
-                    AttachmentHandlingMode::FileReference => file_notices.push(
-                        prepared_attachment_notice_item(attachment_index, attachment),
-                    ),
-                }
-                if !attachment.capability_available {
-                    unavailable_notices.push(format!(
-                        "附件 index={attachment_index} asset_id={} 所需能力 {} 当前不可用；请保留附件引用并明确告知用户。",
-                        attachment.asset_id,
-                        attachment.capability.as_deref().unwrap_or("unknown")
-                    ));
-                }
-            }
-            ContentBlock::Attachment { .. } | ContentBlock::RuntimeInlineImage { .. } => {}
+            ContentBlock::Media { .. } | ContentBlock::AssetReference { .. } => {}
         }
-    }
-
-    if msg.role == MessageRole::User && inline_image_count > 0 {
-        // 插入图片数量提示（在图片之前）
-        let notice = LlmMessageContent::Text(format!(
-            "本条用户消息包含 {inline_image_count} 张图片附件，图片内容已随消息提供，请直接基于附件分析。"
-        ));
-        let pos = content
-            .iter()
-            .position(|c| matches!(c, LlmMessageContent::Image(_)))
-            .unwrap_or(content.len());
-        content.insert(pos, notice);
-    }
-    if !analyze_notices.is_empty() {
-        content.push(LlmMessageContent::Text(format!(
-            "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={}，并指定下列 attachment index。\n{}",
-            msg.id,
-            analyze_notices.join("\n")
-        )));
-    }
-    if !file_notices.is_empty() {
-        content.push(LlmMessageContent::Text(format!(
-            "本条用户消息包含文件引用，文件内容不会直接发送给模型。请使用文件工具、文档解析器或 Skill 按下列本地 path 处理。\n{}",
-            file_notices.join("\n")
-        )));
-    }
-    if !unavailable_notices.is_empty() {
-        content.push(LlmMessageContent::Text(unavailable_notices.join("\n")));
-    }
-    // 文件附件（PDF/Office）统一走 attachment_notice 提示，不内联进请求。
-    // 无论 include_media 与否，只要用户消息含文件附件就注入提示，
-    // 由 system prompt 中的「文档附件解析规则」引导 agent 本地解析。
-    // 对于图片类附件：当 include_media=false 时（chat 模型非多模态）也走提示，
-    // 引导调用 analyze_attachment 工具。
-    let needs_attachment_notice = msg.role == MessageRole::User
-        && (msg.has_legacy_file_media() || (!include_media && msg.has_legacy_media()));
-    if needs_attachment_notice {
-        content.push(LlmMessageContent::Text(attachment_notice_text(msg)));
     }
 
     content.extend(msg.tool_calls.iter().map(|call| {
@@ -1166,24 +1094,10 @@ fn provider_message_from_session(msg: &Message, include_media: bool) -> Option<C
         })
     }));
     if content.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Some(ChatMessage::new(role, content))
-}
-
-fn prepared_attachment_notice_item(index: usize, attachment: &PreparedAttachment) -> String {
-    format!(
-        "- index={index} asset_id={} kind={:?} name={} mime_type={} size={} path={} capability={} capability_available={}",
-        attachment.asset_id,
-        attachment.kind,
-        attachment.original_name,
-        attachment.mime_type,
-        attachment.size,
-        attachment.local_path,
-        attachment.capability.as_deref().unwrap_or("none"),
-        attachment.capability_available,
-    )
+    Ok(Some(ChatMessage::new(role, content)))
 }
 
 fn image_content_from_runtime(mime_type: &str, data: &str) -> crate::message::ImageContent {
@@ -1198,76 +1112,24 @@ fn image_content_from_runtime(mime_type: &str, data: &str) -> crate::message::Im
     }
 }
 
-fn attachment_notice_text(msg: &Message) -> String {
-    let mut media_index = 0usize;
-    let mut has_file_attachment = false;
-    let items: Vec<String> = msg
-        .content
-        .iter()
-        .filter_map(|block| {
-            if let ContentBlock::Media {
-                kind,
-                url,
-                mime_type,
-                title,
-            } = block
-            {
-                if matches!(kind, MediaKind::File) {
-                    has_file_attachment = true;
-                }
-                let title = title.as_deref().unwrap_or("未命名附件");
-                let mime = mime_type.as_deref().unwrap_or("unknown");
-                let idx = media_index;
-                media_index += 1;
-                // 归档成功的附件 url 是本地路径，可直接引用。
-                // 归档失败的附件 url 仍是 data URL（可能长达数 MB），
-                // 绝不能原样塞进提示文本，否则会撑爆上下文窗口。
-                let path_field = if url.trim_start().starts_with("data:") {
-                    "<归档失败，仅有内联 data URL；请告知用户重新上传>".to_string()
-                } else {
-                    url.clone()
-                };
-                Some(format!(
-                    "- index={idx} kind={kind:?} title={title} mime_type={mime} path={path_field}",
-                ))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let items = items.join("\n");
-    if has_file_attachment {
-        // 文件类附件（PDF/Office）统一走本地脚本解析（issue #149）。
-        // path 字段为本地归档路径（~/.tiangong/media/files/...），
-        // agent 据此用 run_command 读取并解析，具体方法见 system prompt 中的
-        // 「文档附件解析规则」段。
-        format!(
-            "本条用户消息包含文件附件，文件内容不会直接发送给模型。请使用 run_command 工具按「文档附件解析规则」读取上述 path 路径的文件并解析（path 为本地归档路径，可直接读取）。\n{}",
-            items
-        )
-    } else {
-        format!(
-            "本条用户消息包含附件，但主模型请求不会直接携带附件内容。需要查看附件内容时，请调用 analyze_attachment 工具，必须使用本提示中的 message_id={}（不要使用其他消息的 ID），并指定附件 index。\n{}",
-            msg.id, items
-        )
+fn image_content_from_ready_image(
+    asset: &StoredAsset,
+    runtime_data: Option<&str>,
+) -> Option<crate::message::ImageContent> {
+    if let Some(data) = runtime_data.filter(|data| !data.trim().is_empty()) {
+        return Some(image_content_from_runtime(&asset.mime_type, data));
     }
-}
 
-fn image_content_from_reference(value: &str) -> Option<crate::message::ImageContent> {
-    let trimmed = value.trim();
-    if trimmed.starts_with("data:image/")
-        || trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
-    {
+    let trimmed = asset.local_path.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         return Some(crate::message::ImageContent {
-            mime_type: image_mime_from_reference(trimmed)
-                .unwrap_or_else(|| "image/png".to_string()),
+            mime_type: asset.mime_type.clone(),
             data: trimmed.to_string(),
         });
     }
 
     let bytes = std::fs::read(Path::new(trimmed)).ok()?;
-    let mime_type = image_mime_from_reference(trimmed).unwrap_or_else(|| "image/png".to_string());
+    let mime_type = asset.mime_type.clone();
     let data = format!(
         "data:{mime_type};base64,{}",
         general_purpose::STANDARD.encode(bytes)
@@ -1275,31 +1137,9 @@ fn image_content_from_reference(value: &str) -> Option<crate::message::ImageCont
     Some(crate::message::ImageContent { mime_type, data })
 }
 
-fn image_mime_from_reference(value: &str) -> Option<String> {
-    let lower = value.trim().to_ascii_lowercase();
-    if lower.starts_with("data:image/") {
-        return lower
-            .split_once(';')
-            .map(|(mime, _)| mime.trim_start_matches("data:").to_string());
-    }
-    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        Some("image/jpeg".to_string())
-    } else if lower.ends_with(".webp") {
-        Some("image/webp".to_string())
-    } else if lower.ends_with(".gif") {
-        Some("image/gif".to_string())
-    } else if lower.ends_with(".png") {
-        Some("image/png".to_string())
-    } else {
-        None
-    }
-}
-
 fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
-    let mut sanitized: Vec<ChatMessage> = Vec::new();
+    let mut filtered = Vec::new();
     let mut seen_user = false;
-    let mut deferred_tool_contexts: Vec<ChatMessage> = Vec::new();
-    let mut pending_tool_results = 0usize;
 
     for message in messages {
         if message.role == LlmMessageRole::System || is_empty_provider_message(&message) {
@@ -1311,41 +1151,12 @@ fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
             }
             seen_user = true;
         }
-
-        if pending_tool_results > 0 {
-            if message.role == LlmMessageRole::User && is_internal_tool_context_message(&message) {
-                deferred_tool_contexts.push(message);
-                continue;
-            }
-            if message.role == LlmMessageRole::Tool {
-                pending_tool_results = pending_tool_results
-                    .saturating_sub(provider_message_tool_result_count(&message));
-            } else {
-                flush_deferred_messages(&mut sanitized, &mut deferred_tool_contexts);
-                pending_tool_results = 0;
-            }
-        }
-
-        if let Some(last) = sanitized.last_mut()
-            && last.role == message.role
-        {
-            merge_provider_message_content(last, message);
-        } else {
-            pending_tool_results =
-                pending_tool_results.max(provider_message_tool_call_count(&message));
-            sanitized.push(message);
-            continue;
-        }
-        pending_tool_results =
-            pending_tool_results.max(provider_message_tool_call_count(sanitized.last().unwrap()));
+        filtered.push(message);
     }
 
-    flush_deferred_messages(&mut sanitized, &mut deferred_tool_contexts);
-
-    // 修复上下文截断导致的 tool_call/tool_result 配对不一致
-    sanitize_tool_call_pairing(&mut sanitized);
-
-    sanitized
+    // 修复上下文截断、迟到结果和跨轮复用 ID 导致的配对不一致。
+    sanitize_tool_call_pairing(&mut filtered);
+    filtered
 }
 
 /// 确保消息序列中 tool_call 与 tool_result 一一配对。
@@ -1356,101 +1167,103 @@ fn sanitize_provider_messages(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
 ///
 /// Anthropic 等提供商会校验配对关系，不一致时直接拒绝请求。
 fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
-    if messages.is_empty() {
-        return;
-    }
+    let input = std::mem::take(messages);
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0usize;
 
-    // 第一遍：收集所有 tool_call id
-    let mut valid_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for msg in messages.iter() {
-        for content in &msg.content {
-            if let LlmMessageContent::ToolCall(tc) = content {
-                valid_call_ids.insert(tc.id.clone());
+    while index < input.len() {
+        let mut assistant = input[index].clone();
+        let has_tool_calls = assistant.role == LlmMessageRole::Assistant
+            && assistant
+                .content
+                .iter()
+                .any(|content| matches!(content, LlmMessageContent::ToolCall(_)));
+
+        if !has_tool_calls {
+            if assistant.role != LlmMessageRole::Tool {
+                push_merged_provider_message(&mut output, assistant);
             }
-        }
-    }
-
-    // 第二遍：移除没有对应 tool_call 的 tool result（可能是截断残留）
-    for msg in messages.iter_mut() {
-        if msg.role != LlmMessageRole::Tool {
+            index += 1;
             continue;
         }
-        msg.content.retain(|content| {
-            if let LlmMessageContent::ToolResult(tr) = content {
-                valid_call_ids.contains(&tr.tool_call_id)
-            } else {
-                true
+
+        let mut call_order = Vec::new();
+        let mut unique_call_ids = std::collections::HashSet::new();
+        for content in &assistant.content {
+            if let LlmMessageContent::ToolCall(call) = content
+                && !call.id.is_empty()
+                && unique_call_ids.insert(call.id.clone())
+            {
+                call_order.push(call.id.clone());
             }
+        }
+
+        // 一个调用批次只消费紧随其后的 Tool 消息；工具内部上下文可以夹在
+        // 并行结果之间，但普通 User/Assistant 会立即封闭批次。
+        let mut cursor = index + 1;
+        let mut results = std::collections::HashMap::<String, LlmToolResult>::new();
+        let mut deferred_contexts = Vec::new();
+        while cursor < input.len() {
+            let message = &input[cursor];
+            if message.role == LlmMessageRole::Tool {
+                for content in &message.content {
+                    if let LlmMessageContent::ToolResult(result) = content
+                        && unique_call_ids.contains(&result.tool_call_id)
+                    {
+                        results
+                            .entry(result.tool_call_id.clone())
+                            .or_insert_with(|| result.clone());
+                    }
+                }
+                cursor += 1;
+                continue;
+            }
+            if is_internal_tool_context_message(message) {
+                deferred_contexts.push(message.clone());
+                cursor += 1;
+                continue;
+            }
+            break;
+        }
+
+        let valid_ids = results
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut emitted_call_ids = std::collections::HashSet::new();
+        assistant.content.retain(|content| match content {
+            LlmMessageContent::ToolCall(call) => {
+                !call.id.is_empty()
+                    && valid_ids.contains(&call.id)
+                    && emitted_call_ids.insert(call.id.clone())
+            }
+            _ => true,
         });
+        if !assistant.content.is_empty() {
+            push_merged_provider_message(&mut output, assistant);
+        }
+
+        let paired_results = call_order
+            .into_iter()
+            .filter_map(|call_id| results.remove(&call_id))
+            .map(LlmMessageContent::ToolResult)
+            .collect::<Vec<_>>();
+        if !paired_results.is_empty() {
+            push_merged_provider_message(
+                &mut output,
+                ChatMessage::new(LlmMessageRole::Tool, paired_results),
+            );
+        }
+        for context in deferred_contexts {
+            push_merged_provider_message(&mut output, context);
+        }
+        index = cursor;
     }
 
-    // 移除内容被清空的 tool 消息
-    messages.retain(|msg| {
-        if msg.role == LlmMessageRole::Tool {
-            !msg.content.is_empty()
-        } else {
-            true
-        }
-    });
-
-    // 第三遍：处理尾部 assistant 消息中有 tool_call 但无后续 tool_result 的情况
-    // 收集所有 tool_result 的 tool_call_id
-    let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for msg in messages.iter() {
-        for content in &msg.content {
-            if let LlmMessageContent::ToolResult(tr) = content {
-                result_ids.insert(tr.tool_call_id.clone());
-            }
-        }
-    }
-
-    // 从尾部 assistant 消息中移除没有对应 tool_result 的 tool_call
-    // 如果 assistant 消息只剩下 tool_call（没有文本），则整条移除
-    let mut i = messages.len();
-    while i > 0 {
-        i -= 1;
-        let msg = &mut messages[i];
-        if msg.role != LlmMessageRole::Assistant {
-            break;
-        }
-        let had_tool_calls = msg
-            .content
-            .iter()
-            .any(|c| matches!(c, LlmMessageContent::ToolCall(_)));
-        if !had_tool_calls {
-            break;
-        }
-
-        msg.content.retain(|content| {
-            if let LlmMessageContent::ToolCall(tc) = content {
-                result_ids.contains(&tc.id)
-            } else {
-                true
-            }
-        });
-
-        // 如果 assistant 消息被清空，移除整条
-        if msg.content.is_empty() {
-            messages.remove(i);
-        } else if !msg
-            .content
-            .iter()
-            .any(|c| matches!(c, LlmMessageContent::ToolCall(_)))
-        {
-            // 不再有 tool_call 了，不需要继续向前处理
-            break;
-        }
-    }
+    *messages = output;
 }
 
-fn provider_message_tool_call_count(message: &ChatMessage) -> usize {
-    message
-        .content
-        .iter()
-        .filter(|content| matches!(content, LlmMessageContent::ToolCall(_)))
-        .count()
-}
-
+#[cfg(test)]
 fn provider_message_tool_result_count(message: &ChatMessage) -> usize {
     message
         .content
@@ -1469,15 +1282,16 @@ fn is_internal_tool_context_message(message: &ChatMessage) -> bool {
         })
 }
 
-fn flush_deferred_messages(sanitized: &mut Vec<ChatMessage>, deferred: &mut Vec<ChatMessage>) {
-    for message in deferred.drain(..) {
-        if let Some(last) = sanitized.last_mut()
-            && last.role == message.role
-        {
-            merge_provider_message_content(last, message);
-            continue;
-        }
-        sanitized.push(message);
+fn push_merged_provider_message(messages: &mut Vec<ChatMessage>, message: ChatMessage) {
+    if message.content.is_empty() {
+        return;
+    }
+    if let Some(last) = messages.last_mut()
+        && last.role == message.role
+    {
+        merge_provider_message_content(last, message);
+    } else {
+        messages.push(message);
     }
 }
 
@@ -1951,9 +1765,24 @@ fn function_timeout_ms(base_timeout_ms: u64) -> u64 {
 mod tests {
     use super::*;
     use tiangong_types::{
-        AttachmentHandlingMode, ContentBlock, MediaKind, Message, MessagePhase, MessageRole,
-        PreparedAttachment,
+        ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
     };
+
+    fn provider_tool_call(id: &str) -> LlmMessageContent {
+        LlmMessageContent::ToolCall(LlmToolCall {
+            id: id.to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": id}),
+        })
+    }
+
+    fn provider_tool_result(id: &str) -> LlmMessageContent {
+        LlmMessageContent::ToolResult(LlmToolResult {
+            tool_call_id: id.to_string(),
+            content: LlmToolResultContent::Text(format!("result-{id}")),
+            is_error: false,
+        })
+    }
 
     #[test]
     fn empty_tool_arguments_become_parse_error() {
@@ -2019,96 +1848,130 @@ mod tests {
     }
 
     #[test]
-    fn file_attachment_injects_notice_with_path() {
-        // 含 PDF 文件附件的 user 消息，必须注入 attachment_notice（含 path），
-        // 而不是把文件内联或静默丢弃（issue #149 的核心保证）。
-        let msg = test_user_message_with_media(
-            "请处理这些附件。",
-            MediaKind::File,
-            "/Users/test/.tiangong/media/files/abc.pdf",
-            Some("application/pdf"),
-            Some("测试文档.pdf"),
-        );
+    fn sanitize_keeps_a_complete_parallel_tool_batch() {
+        let messages = vec![
+            ChatMessage::text(LlmMessageRole::User, "开始"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("a"), provider_tool_call("b")],
+            ),
+            ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![provider_tool_result("a"), provider_tool_result("b")],
+            ),
+        ];
 
-        // include_media=true（chat 模型多模态）：文件仍走 notice，不内联
-        let result = provider_message_from_session(&msg, true).expect("应生成消息");
-        let texts: Vec<&str> = result
+        assert_eq!(sanitize_provider_messages(messages.clone()), messages);
+    }
+
+    #[test]
+    fn sanitize_does_not_pair_a_result_that_precedes_its_call() {
+        let sanitized = sanitize_provider_messages(vec![
+            ChatMessage::text(LlmMessageRole::User, "开始"),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("same")]),
+            ChatMessage::new(LlmMessageRole::Assistant, vec![provider_tool_call("same")]),
+        ]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].role, LlmMessageRole::User);
+    }
+
+    #[test]
+    fn sanitize_does_not_reuse_an_old_result_for_a_new_call() {
+        let sanitized = sanitize_provider_messages(vec![
+            ChatMessage::text(LlmMessageRole::User, "第一轮"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("reused")],
+            ),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("reused")]),
+            ChatMessage::text(LlmMessageRole::User, "第二轮"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("reused")],
+            ),
+        ]);
+
+        assert_eq!(sanitized.len(), 4);
+        assert_eq!(sanitized[1].role, LlmMessageRole::Assistant);
+        assert_eq!(sanitized[2].role, LlmMessageRole::Tool);
+        assert_eq!(sanitized[3].role, LlmMessageRole::User);
+    }
+
+    #[test]
+    fn sanitize_keeps_only_the_completed_part_of_a_parallel_batch() {
+        let sanitized = sanitize_provider_messages(vec![
+            ChatMessage::text(LlmMessageRole::User, "开始"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![
+                    LlmMessageContent::Text("处理中".to_string()),
+                    provider_tool_call("a"),
+                    provider_tool_call("b"),
+                ],
+            ),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("a")]),
+            ChatMessage::text(LlmMessageRole::User, "继续"),
+        ]);
+
+        assert_eq!(sanitized.len(), 4);
+        let calls = sanitized[1]
             .content
             .iter()
-            .filter_map(|c| match c {
-                LlmMessageContent::Text(t) => Some(t.as_str()),
+            .filter_map(|content| match content {
+                LlmMessageContent::ToolCall(call) => Some(call.id.as_str()),
                 _ => None,
             })
-            .collect();
-        let notice = texts
+            .collect::<Vec<_>>();
+        assert_eq!(calls, vec!["a"]);
+        assert_eq!(provider_message_tool_result_count(&sanitized[2]), 1);
+    }
+
+    #[test]
+    fn sanitize_deduplicates_calls_and_results_within_one_batch() {
+        let sanitized = sanitize_provider_messages(vec![
+            ChatMessage::text(LlmMessageRole::User, "开始"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![
+                    provider_tool_call("same"),
+                    provider_tool_call("same"),
+                    provider_tool_call(""),
+                ],
+            ),
+            ChatMessage::new(
+                LlmMessageRole::Tool,
+                vec![
+                    provider_tool_result("same"),
+                    provider_tool_result("same"),
+                    provider_tool_result("extra"),
+                ],
+            ),
+        ]);
+
+        assert_eq!(sanitized.len(), 3);
+        assert_eq!(provider_message_tool_call_count_for_test(&sanitized[1]), 1);
+        assert_eq!(provider_message_tool_result_count(&sanitized[2]), 1);
+    }
+
+    fn provider_message_tool_call_count_for_test(message: &ChatMessage) -> usize {
+        message
+            .content
             .iter()
-            .find(|t| t.contains("path="))
-            .unwrap_or_else(|| panic!("应包含 attachment_notice，实际 texts: {texts:?}"));
-        assert!(
-            notice.contains("path=/Users/test/.tiangong/media/files/abc.pdf"),
-            "notice 应含文件路径，实际：{notice}"
-        );
-        assert!(
-            notice.contains("文件附件"),
-            "notice 应说明是文件附件，实际：{notice}"
-        );
-        // 不应有内联 File content
-        assert!(
-            !result
-                .content
-                .iter()
-                .any(|c| matches!(c, LlmMessageContent::File(_))),
-            "文件不应内联为 File content"
-        );
+            .filter(|content| matches!(content, LlmMessageContent::ToolCall(_)))
+            .count()
     }
 
     #[test]
-    fn file_attachment_notice_injected_even_when_include_media_false() {
-        // include_media=false 时同样应注入 notice
-        let msg = test_user_message_with_media(
-            "分析这个",
-            MediaKind::File,
-            "/tmp/doc.docx",
-            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-            None,
-        );
-        let result = provider_message_from_session(&msg, false).expect("应生成消息");
-        assert!(result.content.iter().any(|c| matches!(
-            c,
-            LlmMessageContent::Text(t) if t.contains("path=/tmp/doc.docx")
-        )));
-    }
-
-    #[test]
-    fn image_attachment_still_inlines_when_multimodal() {
-        // 图片附件在 include_media=true 时应内联，不走 notice（回归保护）
-        let msg = test_user_message_with_media(
-            "看这张图",
-            MediaKind::Image,
-            "data:image/png;base64,iVBORw0KGgo=",
-            Some("image/png"),
-            None,
-        );
-        let result = provider_message_from_session(&msg, true).expect("应生成消息");
-        assert!(
-            result
-                .content
-                .iter()
-                .any(|c| matches!(c, LlmMessageContent::Image(_))),
-            "图片应内联为 Image content"
-        );
-    }
-
-    #[test]
-    fn prepared_inline_image_prefers_current_runtime_content_regardless_of_include_media() {
-        let msg = test_user_message_with_prepared_attachment(
-            AttachmentHandlingMode::InlineImage,
-            MediaKind::Image,
+    fn ready_image_prefers_current_data() {
+        let msg = test_user_message_with_ready_image(
             "/path/that/does/not/exist.png",
             Some("CURRENT_RUNTIME_BASE64"),
         );
 
-        let result = provider_message_from_session(&msg, false).expect("应生成消息");
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
         let image = result
             .content
             .iter()
@@ -2116,12 +1979,12 @@ mod tests {
                 LlmMessageContent::Image(image) => Some(image),
                 _ => None,
             })
-            .expect("Prepared InlineImage 应进入请求");
+            .expect("已就绪图片应进入请求");
         assert_eq!(image.data, "data:image/png;base64,CURRENT_RUNTIME_BASE64");
     }
 
     #[test]
-    fn prepared_historical_inline_image_is_encoded_from_local_path() {
+    fn historical_ready_image_is_encoded_from_local_path() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -2131,14 +1994,11 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&path, [1_u8, 2, 3, 4]).unwrap();
-        let msg = test_user_message_with_prepared_attachment(
-            AttachmentHandlingMode::InlineImage,
-            MediaKind::Image,
-            path.to_str().unwrap(),
-            None,
-        );
+        let msg = test_user_message_with_ready_image(path.to_str().unwrap(), None);
 
-        let result = provider_message_from_session(&msg, false).expect("应生成消息");
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
         let image = result
             .content
             .iter()
@@ -2146,99 +2006,98 @@ mod tests {
                 LlmMessageContent::Image(image) => Some(image),
                 _ => None,
             })
-            .expect("历史 InlineImage 应从本地路径重编码");
+            .expect("历史图片应从本地路径重编码");
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.data, "data:image/png;base64,AQIDBA==");
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn prepared_analyze_attachment_generates_explicit_plugin_notice() {
-        let msg = test_user_message_with_prepared_attachment(
-            AttachmentHandlingMode::AnalyzeWithPlugin,
-            MediaKind::Image,
-            "/tmp/analyze.png",
-            None,
-        );
+    fn missing_historical_ready_image_fails_the_request() {
+        let msg = test_user_message_with_ready_image("/path/that/does/not/exist-history.png", None);
 
-        let result = provider_message_from_session(&msg, true).expect("应生成消息");
+        let error = provider_message_from_session(&msg).unwrap_err();
+        assert!(error.to_string().contains("已就绪图片无法读取"));
+        assert!(error.to_string().contains("asset-ready"));
+    }
+
+    #[test]
+    fn model_instruction_is_mapped_verbatim_and_asset_reference_is_ignored() {
+        let instruction = "  使用宿主已选择的资源能力处理 path=/tmp/report.pdf\n";
+        let msg = test_message(vec![
+            ContentBlock::text("处理资源"),
+            ContentBlock::AssetReference {
+                asset: test_asset(MediaKind::File, "/tmp/report.pdf", "application/pdf"),
+            },
+            ContentBlock::model_instruction(instruction),
+        ]);
+
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
         assert!(result.content.iter().any(|content| matches!(
             content,
-            LlmMessageContent::Text(text)
-                if text.contains("analyze_attachment")
-                    && text.contains("message_id=msg_prepared")
-                    && text.contains("index=0")
-                    && text.contains("path=/tmp/analyze.png")
+            LlmMessageContent::Text(text) if text == instruction
         )));
-        assert!(
-            !result
+        assert_eq!(
+            result
                 .content
                 .iter()
-                .any(|content| matches!(content, LlmMessageContent::Image(_)))
+                .filter(|content| matches!(content, LlmMessageContent::Text(_)))
+                .count(),
+            2
         );
-    }
-
-    #[test]
-    fn prepared_file_reference_generates_explicit_local_path_notice() {
-        let msg = test_user_message_with_prepared_attachment(
-            AttachmentHandlingMode::FileReference,
-            MediaKind::File,
-            "/tmp/report.pdf",
-            None,
-        );
-
-        let result = provider_message_from_session(&msg, true).expect("应生成消息");
-        assert!(result.content.iter().any(|content| matches!(
+        assert!(!result.content.iter().any(|content| matches!(
             content,
-            LlmMessageContent::Text(text)
-                if text.contains("文件引用")
-                    && text.contains("path=/tmp/report.pdf")
-                    && text.contains("name=prepared-file")
+            LlmMessageContent::Image(_) | LlmMessageContent::File(_)
         )));
     }
 
-    fn test_user_message_with_prepared_attachment(
-        handling_mode: AttachmentHandlingMode,
-        kind: MediaKind,
-        local_path: &str,
-        runtime_data: Option<&str>,
-    ) -> Message {
-        let mut content = vec![
-            ContentBlock::text("处理附件"),
-            ContentBlock::Attachment {
-                attachment: PreparedAttachment {
-                    asset_id: "asset-prepared".to_string(),
-                    local_path: local_path.to_string(),
-                    original_name: "prepared-file".to_string(),
-                    mime_type: if kind == MediaKind::Image {
-                        "image/png".to_string()
-                    } else {
-                        "application/pdf".to_string()
-                    },
-                    size: 4,
-                    kind,
-                    handling_mode,
-                    capability: Some(
-                        match handling_mode {
-                            AttachmentHandlingMode::InlineImage => "chat_multimodal",
-                            AttachmentHandlingMode::AnalyzeWithPlugin => "analyze_attachment",
-                            AttachmentHandlingMode::FileReference => "file_reference",
-                        }
-                        .to_string(),
-                    ),
-                    capability_available: true,
-                },
+    #[test]
+    fn legacy_media_is_ignored_without_provider_decision() {
+        let msg = test_message(vec![
+            ContentBlock::text("仅保留用户文本"),
+            ContentBlock::Media {
+                kind: MediaKind::Image,
+                url: "data:image/png;base64,SHOULD_NOT_INLINE".to_string(),
+                mime_type: Some("image/png".to_string()),
+                title: None,
             },
-        ];
-        if let Some(data) = runtime_data {
-            content.push(ContentBlock::RuntimeInlineImage {
-                asset_id: "asset-prepared".to_string(),
-                mime_type: "image/png".to_string(),
-                data: data.to_string(),
-            });
+        ]);
+        let result = provider_message_from_session(&msg)
+            .expect("映射不应失败")
+            .expect("应生成消息");
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(
+            &result.content[0],
+            LlmMessageContent::Text(text) if text == "仅保留用户文本"
+        ));
+    }
+
+    fn test_user_message_with_ready_image(local_path: &str, data: Option<&str>) -> Message {
+        test_message(vec![
+            ContentBlock::text("处理图片"),
+            ContentBlock::Image {
+                asset: test_asset(MediaKind::Image, local_path, "image/png"),
+                data: data.map(str::to_string),
+            },
+        ])
+    }
+
+    fn test_asset(kind: MediaKind, local_path: &str, mime_type: &str) -> StoredAsset {
+        StoredAsset {
+            asset_id: "asset-ready".to_string(),
+            local_path: local_path.to_string(),
+            original_name: "ready-resource".to_string(),
+            mime_type: mime_type.to_string(),
+            size: 4,
+            kind,
         }
+    }
+
+    fn test_message(content: Vec<ContentBlock>) -> Message {
         Message {
-            id: "msg_prepared".to_string(),
+            id: "msg-ready".to_string(),
             role: MessageRole::User,
             content,
             reasoning_content: String::new(),
@@ -2249,41 +2108,7 @@ mod tests {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
-            phase: MessagePhase::Normal,
-            created_at: String::new(),
-            elapsed_ms: None,
-            turn_status: None,
-        }
-    }
-
-    /// 构造测试用 user Message（含一个 media block）
-    fn test_user_message_with_media(
-        text: &str,
-        kind: MediaKind,
-        url: &str,
-        mime_type: Option<&str>,
-        title: Option<&str>,
-    ) -> Message {
-        Message {
-            id: "msg_test".to_string(),
-            role: MessageRole::User,
-            content: vec![
-                ContentBlock::text(text),
-                ContentBlock::Media {
-                    kind,
-                    url: url.to_string(),
-                    mime_type: mime_type.map(str::to_string),
-                    title: title.map(str::to_string),
-                },
-            ],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            worker_id: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
+            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: String::new(),
             elapsed_ms: None,
@@ -2292,26 +2117,20 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_request_contains_rules_and_notice() {
-        // 端到端验证：完整 ModelRequest 构建（build_provider_messages）后，
-        // system prompt 必须含「文档附件解析规则」，user message 必须含
-        // attachment_notice（含文件路径）。
-        // 这是离实际 LLM 请求最近的测试，能暴露注入链路的任何断点。
-        let user_msg = test_user_message_with_media(
-            "请处理这些附件。",
-            MediaKind::File,
-            "/Users/test/.tiangong/media/files/report.pdf",
-            Some("application/pdf"),
-            Some("report.pdf"),
-        );
+    fn end_to_end_request_preserves_ready_instruction() {
+        let instruction = "读取宿主提供的资源 path=/tmp/report.pdf";
+        let user_msg = test_message(vec![
+            ContentBlock::text("请处理资源。"),
+            ContentBlock::AssetReference {
+                asset: test_asset(MediaKind::File, "/tmp/report.pdf", "application/pdf"),
+            },
+            ContentBlock::model_instruction(instruction),
+        ]);
 
-        // 构造一条含解析规则的 System 消息（模拟 rebuild_system_prompt 的输出）
         let system_msg = Message {
             id: "sys".to_string(),
             role: MessageRole::System,
-            content: vec![ContentBlock::text(
-                "你是天工助手。\n## 文档附件解析规则\n源文件已归档在 ~/.tiangong/media/files/。",
-            )],
+            content: vec![ContentBlock::text("你是通用助手。")],
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
@@ -2320,6 +2139,7 @@ mod tests {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: String::new(),
             elapsed_ms: None,
@@ -2333,33 +2153,18 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
-            include_media: true,
         };
 
-        let (system, messages) = build_provider_messages(&req);
+        let (system, messages) = build_provider_messages(&req).unwrap();
 
-        // system prompt 必须含解析规则（来自 System 消息，不是 fallback 常量）
-        assert!(
-            system.contains("文档附件解析规则"),
-            "system prompt 应含解析规则，实际前200字：{}",
-            &system[..system.len().min(200)]
-        );
-        assert!(
-            system.contains("media/files"),
-            "system prompt 应含 media/files 路径说明"
-        );
-
-        // user message 必须含 attachment_notice（含文件路径）
+        assert_eq!(system, "你是通用助手。");
         let user_content = messages
             .iter()
             .find(|m| m.role == LlmMessageRole::User)
             .expect("应有 user 消息");
-        let has_notice = user_content.content.iter().any(|c| match c {
-            LlmMessageContent::Text(t) => {
-                t.contains("path=/Users/test/.tiangong/media/files/report.pdf")
-            }
-            _ => false,
-        });
-        assert!(has_notice, "user message 应含带路径的 attachment_notice");
+        assert!(user_content.content.iter().any(|content| matches!(
+            content,
+            LlmMessageContent::Text(text) if text == instruction
+        )));
     }
 }

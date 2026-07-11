@@ -18,12 +18,14 @@ use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, rebuild_system_prompt,
     select_client_for_request,
 };
-use crate::react::message::accept_prepared_user_message;
+use crate::react::message::{
+    RuntimeMessageDisposition, accept_runtime_user_message, upsert_assistant_text_message,
+};
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
-use super::cancel::{CancelSignal, CancelStrategy, emit_cancel_usage};
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, wait_for_abort_signal};
 use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
 
 /// 总结阶段的执行结果。
@@ -36,6 +38,11 @@ pub(super) enum SummaryPhaseResult {
     Cancelled(TokenUsage),
     /// 总结阶段 LLM 请求失败。
     Failed { message: String, usage: TokenUsage },
+    /// 执行中收到新的用户消息，当前总结已停止。
+    Interrupted {
+        current_agent_input: String,
+        usage: TokenUsage,
+    },
 }
 
 impl ReactEngine {
@@ -48,7 +55,7 @@ impl ReactEngine {
     /// - 取消 → 返回 `Cancelled`
     /// - LLM 错误 → 返回 `Failed`
     pub(super) async fn run_summary_phase(
-        &self,
+        &mut self,
         session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -97,44 +104,125 @@ impl ReactEngine {
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
-        let cancel_strategy = CancelStrategy::from_protocol(self.engine.client().protocol());
+        let mut routed_usage = tiangong_types::TokenUsage::default();
+        let mut summary_interruption = None;
+        let mut delegated_interruption = false;
+        let mut streamed_text = String::new();
+        let mut streamed_reasoning = String::new();
 
         let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
             tokio::select! {
                 biased;
                 cmd_opt = cmd_rx.recv() => {
                     match cmd_opt {
-                        Some(Command::Cancel) | Some(Command::Shutdown) | None => {
-                            break Err(match cancel_strategy {
-                                CancelStrategy::AbortWithStreamingUsage => {
-                                    anyhow::Error::new(CancelSignal::Abort)
-                                }
-                                CancelStrategy::WaitForUsage => {
-                                    anyhow::Error::new(CancelSignal::WaitForUsage)
-                                }
-                            });
+                        Some(Command::Shutdown) => {
+                            self.request_shutdown();
+                            break Err(anyhow::Error::new(CancelSignal::Abort));
+                        }
+                        Some(Command::Cancel) | None => {
+                            break Err(anyhow::Error::new(CancelSignal::Abort));
                         }
                         Some(Command::Message {
                             prepared,
                             message_id,
                             persistence_ack,
                         }) => {
-                            if let Err(err) = accept_prepared_user_message(
+                            sink.flush();
+                            let message_count_before_interruption = session.messages.len();
+                            if !streamed_text.trim().is_empty()
+                                || !streamed_reasoning.trim().is_empty()
+                            {
+                                upsert_assistant_text_message(
+                                    session,
+                                    &pending_msg_id,
+                                    &streamed_text,
+                                    &streamed_reasoning,
+                                    crate::session::MessagePhase::Summary,
+                                );
+                            }
+                            match accept_runtime_user_message(
+                                &self.agent_id,
+                                self.team.as_ref(),
                                 session,
                                 stream_tx,
                                 message_id,
                                 prepared,
                                 persistence_ack,
                             ) {
-                                tracing::warn!(
-                                    error = %err,
-                                    "总结阶段追加用户消息持久化失败"
-                                );
+                                Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
+                                    summary_interruption = Some(input);
+                                    if let Some(handle) = llm_fut.take() {
+                                        abort_and_join(handle).await;
+                                    }
+                                    break Err(anyhow::anyhow!(
+                                        "总结响应已被新的用户消息中断"
+                                    ));
+                                }
+                                Ok(RuntimeMessageDisposition::RoutedToAgent) => {
+                                    if let Err(error) = session.try_persist_to_disk() {
+                                        tracing::warn!(%error, "清理定向消息产生的临时总结失败");
+                                    }
+                                    let sub_result = self
+                                        .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
+                                        .await;
+                                    routed_usage.accumulate(&sub_result.usage);
+                                    self.flush_deferred_tool_injections(session, stream_tx);
+                                    let delegated_input =
+                                        self.inject_main_agent_messages(session, stream_tx);
+                                    session.persist_to_disk();
+                                    if sub_result.cancelled {
+                                        if let Some(handle) = llm_fut.take() {
+                                            abort_and_join(handle).await;
+                                        }
+                                        sink.finish();
+                                        persist_partial_summary(
+                                            session,
+                                            stream_tx,
+                                            &pending_msg_id,
+                                            &streamed_text,
+                                            &streamed_reasoning,
+                                        );
+                                        routed_usage.accumulate(&streaming_usage);
+                                        return SummaryPhaseResult::Cancelled(routed_usage);
+                                    }
+                                    if let Some(input) = sub_result.current_agent_input {
+                                        summary_interruption = Some(input);
+                                        if let Some(handle) = llm_fut.take() {
+                                            abort_and_join(handle).await;
+                                        }
+                                        break Err(anyhow::anyhow!(
+                                            "总结响应已被新的用户消息中断"
+                                        ));
+                                    }
+                                    if delegated_input.is_some() {
+                                        delegated_interruption = true;
+                                        if let Some(handle) = llm_fut.take() {
+                                            abort_and_join(handle).await;
+                                        }
+                                        break Err(anyhow::anyhow!(
+                                            "总结响应已被 Sub Agent 结果中断"
+                                        ));
+                                    }
+                                }
+                                Err(err) => {
+                                    session.messages.truncate(message_count_before_interruption);
+                                    tracing::warn!(
+                                        error = %err,
+                                        "总结阶段追加用户消息持久化失败"
+                                    );
+                                }
                             }
                         }
                         Some(Command::UpdateCwd { cwd }) => {
                             session.cwd = cwd;
                             crate::core::apply_session_cwd(session);
+                            if let Some(handle) = llm_fut.take() {
+                                abort_and_join(handle).await;
+                            }
+                            let _ = stream_tx.send(StreamEvent::Error {
+                                message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
+                            });
+                            break Err(anyhow::Error::new(CancelSignal::Abort));
                         }
                         Some(Command::ReloadConfig) => {}
                         Some(Command::Approval { .. }) => {}
@@ -148,11 +236,12 @@ impl ReactEngine {
                             );
                         }
                         Some(Command::CompressContext) => {
-                            crate::core::compress_context_for_session(
-                                session,
-                                &self.engine,
-                                stream_tx,
-                            );
+                            let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                agent_id: "system".to_string(),
+                                agent_label: "系统".to_string(),
+                                content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
+                                level: "warning".to_string(),
+                            });
                         }
                         Some(Command::ResetContext) => {
                             crate::core::reset_context_for_session(
@@ -162,6 +251,7 @@ impl ReactEngine {
                             );
                         }
                         Some(Command::EmitStreamEvent(ev)) => {
+                            let ev = *ev;
                             let _ = stream_tx.send(ev);
                         }
                     }
@@ -173,6 +263,8 @@ impl ReactEngine {
                                 let tu: tiangong_types::TokenUsage = chunk_usage.clone().into();
                                 streaming_usage.accumulate(&tu);
                             }
+                            streamed_text.push_str(&chunk.content);
+                            streamed_reasoning.push_str(&chunk.reasoning_content);
                             sink.push_chunk(&chunk);
                         }
                         None => {
@@ -180,6 +272,13 @@ impl ReactEngine {
                                 Ok(r) => r,
                                 Err(e) if e.is_cancelled() => {
                                     sink.finish();
+                                    persist_partial_summary(
+                                        session,
+                                        stream_tx,
+                                        &pending_msg_id,
+                                        &streamed_text,
+                                        &streamed_reasoning,
+                                    );
                                     let _ = stream_tx.send(StreamEvent::Error {
                                         message: "已取消".into(),
                                     });
@@ -194,58 +293,50 @@ impl ReactEngine {
             }
         };
         sink.finish();
+        persist_partial_summary(
+            session,
+            stream_tx,
+            &pending_msg_id,
+            &streamed_text,
+            &streamed_reasoning,
+        );
+
+        if let Some(current_agent_input) = summary_interruption {
+            streaming_usage.accumulate(&routed_usage);
+            if streaming_usage.total_tokens > 0 {
+                emit_token_usage(
+                    stream_tx,
+                    &streaming_usage,
+                    None,
+                    self.engine.context_limit,
+                    "summary-interrupted",
+                    None,
+                );
+            }
+            return SummaryPhaseResult::Interrupted {
+                current_agent_input,
+                usage: streaming_usage,
+            };
+        }
+
+        if delegated_interruption {
+            streaming_usage.accumulate(&routed_usage);
+            return SummaryPhaseResult::NeedMoreWork {
+                reason: "Sub Agent 返回了需要 Main Agent 继续处理的新结果。".to_string(),
+                usage: streaming_usage,
+            };
+        }
 
         let response = match response_result {
             Ok(response) => response,
             Err(err) => {
                 if let Some(signal) = CancelSignal::from_error(&err) {
-                    match signal {
-                        CancelSignal::Abort => {
-                            if let Some(handle) = llm_fut.take() {
-                                handle.abort();
-                            }
-                            emit_cancel_usage(
-                                stream_tx,
-                                &streaming_usage,
-                                self.engine.context_limit,
-                            );
-                            return SummaryPhaseResult::Cancelled(streaming_usage);
-                        }
-                        CancelSignal::WaitForUsage => {
-                            if streaming_usage.total_tokens > 0 {
-                                emit_token_usage(
-                                    stream_tx,
-                                    &streaming_usage,
-                                    None,
-                                    self.engine.context_limit,
-                                    "summary-cancelled",
-                                    None,
-                                );
-                            }
-                            let _ = stream_tx.send(StreamEvent::Error {
-                                message: "已取消".into(),
-                            });
-                            if let Some(handle) = llm_fut.take() {
-                                let ctx_limit = self.engine.context_limit;
-                                let tx = stream_tx.clone();
-                                tokio::task::spawn(async move {
-                                    if let Ok(Ok(resp)) = handle.await
-                                        && resp.usage.total_tokens > 0
-                                    {
-                                        emit_token_usage(
-                                            &tx,
-                                            &resp.usage,
-                                            None,
-                                            ctx_limit,
-                                            "summary-cancelled-background",
-                                            None,
-                                        );
-                                    }
-                                });
-                            }
-                            return SummaryPhaseResult::Cancelled(streaming_usage);
-                        }
+                    let CancelSignal::Abort = signal;
+                    if let Some(handle) = llm_fut.take() {
+                        abort_and_join(handle).await;
                     }
+                    emit_cancel_usage(stream_tx, &streaming_usage, self.engine.context_limit);
+                    return SummaryPhaseResult::Cancelled(streaming_usage);
                 }
                 return SummaryPhaseResult::Failed {
                     message: err.to_string(),
@@ -266,6 +357,7 @@ impl ReactEngine {
         if usage.total_tokens == 0 {
             usage.accumulate(&streaming_usage);
         }
+        usage.accumulate(&routed_usage);
 
         // 兼容性防御：正常 provider 在 ToolChoice::None 下不应返回 tool_calls，
         // 但部分 OpenAI-compatible / vLLM / 第三方后端可能忽略 tool_choice: "none"。
@@ -294,19 +386,41 @@ impl ReactEngine {
         // 此时落盘一条空 Summary 消息只会与上一轮回复重复展示（双重总结）。
         // 改为不落盘新消息，直接把上一轮 ReAct 的过程回复（phase=React）提升为最终回复。
         if !needs_more_work && summary_content.trim().is_empty() {
-            promote_last_react_message_to_summary(session);
-            maybe_update_context_summary(session, &self.engine, &usage, stream_tx);
+            if let Some(message_id) = promote_last_react_message_to_summary(session) {
+                crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
+            }
+            let compression_cancelled = maybe_update_context_summary(
+                session,
+                &self.engine,
+                &usage,
+                stream_tx,
+                self.cancel_flag
+                    .as_ref()
+                    .expect("cancel_flag 必须在 execute_turn 前注入")
+                    .clone(),
+                self.shutdown_flag.clone(),
+            )
+            .await;
+            if compression_cancelled {
+                emit_cancel_usage(stream_tx, &usage, self.engine.context_limit);
+                return SummaryPhaseResult::Cancelled(usage);
+            }
             session.persist_to_disk();
             return SummaryPhaseResult::Completed(usage);
         }
 
-        session.append_message_with_id(
-            pending_msg_id,
-            MessageRole::Assistant,
-            summary_content.clone(),
-            response.reasoning_content,
+        upsert_assistant_text_message(
+            session,
+            &pending_msg_id,
+            &summary_content,
+            &response.reasoning_content,
+            crate::session::MessagePhase::Normal,
         );
-        if let Some(message) = session.messages.last_mut() {
+        if let Some(message) = session
+            .messages
+            .iter_mut()
+            .find(|message| message.id == pending_msg_id)
+        {
             message.reasoning_signature = response.reasoning_signature;
             // 需要 more work 的总结视为过程性内容；Done/AskUser 视为最终回复。
             message.phase = if needs_more_work {
@@ -315,7 +429,23 @@ impl ReactEngine {
                 crate::session::MessagePhase::Summary
             };
         }
-        maybe_update_context_summary(session, &self.engine, &usage, stream_tx);
+        crate::react::message::emit_session_message_upsert(session, stream_tx, &pending_msg_id);
+        let compression_cancelled = maybe_update_context_summary(
+            session,
+            &self.engine,
+            &usage,
+            stream_tx,
+            self.cancel_flag
+                .as_ref()
+                .expect("cancel_flag 必须在 execute_turn 前注入")
+                .clone(),
+            self.shutdown_flag.clone(),
+        )
+        .await;
+        if compression_cancelled {
+            emit_cancel_usage(stream_tx, &usage, self.engine.context_limit);
+            return SummaryPhaseResult::Cancelled(usage);
+        }
         session.persist_to_disk();
 
         if needs_more_work {
@@ -334,16 +464,17 @@ impl ReactEngine {
 /// 用于总结阶段判定为「空正文 Done」时：LLM 认为上一轮 ReAct 已有完整可用的答复，
 /// 无需新内容。此时直接复用上一轮回复作为最终回复，避免落盘空消息造成重复展示。
 /// 找不到符合条件的消息时不做任何改动（兜底）。
-fn promote_last_react_message_to_summary(session: &mut Session) {
+fn promote_last_react_message_to_summary(session: &mut Session) -> Option<String> {
     for message in session.messages.iter_mut().rev() {
         if message.role == MessageRole::Assistant
             && message.phase == crate::session::MessagePhase::React
         {
             message.phase = crate::session::MessagePhase::Summary;
-            return;
+            return Some(message.id.clone());
         }
     }
     tracing::warn!("空正文 Done 但未找到可提升的 React 消息，保持现状");
+    None
 }
 
 /// 总结阶段对任务完成度的判定结果。
@@ -400,6 +531,29 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
         text[marker.len()..]
             .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | '：' | '-')),
     )
+}
+
+fn persist_partial_summary(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: &str,
+    text: &str,
+    reasoning: &str,
+) {
+    if text.trim().is_empty() && reasoning.trim().is_empty() {
+        return;
+    }
+    upsert_assistant_text_message(
+        session,
+        message_id,
+        text,
+        reasoning,
+        crate::session::MessagePhase::Summary,
+    );
+    if let Err(error) = session.try_persist_to_disk() {
+        tracing::warn!(%error, "持久化部分总结响应失败");
+    }
+    crate::react::message::emit_session_message_upsert(session, stream_tx, message_id);
 }
 
 #[cfg(test)]
@@ -623,7 +777,6 @@ fn build_text_finalization_request(session: &Session, prompt: &str) -> ModelRequ
         }),
         reasoning_effort: None,
         thinking_disabled: false,
-        include_media: false,
     }
 }
 
@@ -675,12 +828,12 @@ impl ReactEngine {
     /// 注意：force-final 的提示词以「强制终结」语义给出（不允许 [NEED_MORE_WORK]），
     /// 与 `run_summary_phase` 的「完成度判断器」语义相反——这是二者不能合并的根本原因：
     /// 否则 OuterLimit / SummaryError 会再次触发重入，造成无限循环。
-    pub(super) fn force_final_response(
+    pub(super) async fn force_final_response(
         &self,
         session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
         reason: ForceFinalReason,
-    ) {
+    ) -> bool {
         // 确保 system prompt 已构建
         if session.system_prompt_message.is_none() {
             rebuild_system_prompt(session, &self.engine);
@@ -704,6 +857,7 @@ impl ReactEngine {
             tool_name: Some("force_final_response".to_string()),
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -716,27 +870,48 @@ impl ReactEngine {
 
         let pending_msg_id = scru128::new().to_string();
 
-        let resp = match self.run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx) {
+        let resp = match self
+            .run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx)
+            .await
+        {
             Some(r) => r,
             None => {
                 crate::react::context::persist_error(
                     session,
                     "force_final_response 失败".to_string(),
                 );
-                return;
+                return false;
             }
         };
 
-        self.commit_summary_message(
+        if self
+            .cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            || self
+                .shutdown_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: "已取消".to_string(),
+            });
+            return false;
+        }
+
+        if !self.commit_summary_message(
             session,
             stream_tx,
             &pending_msg_id,
             &resp,
             "force_final_response",
-        );
+        ) {
+            return false;
+        }
         let _ = stream_tx.send(StreamEvent::Done {
             usage: Some(resp.usage.clone()),
         });
+        true
     }
 
     /// 执行一次「只产出文本最终回复」的 LLM 调用（tools + `ToolChoice::None`，流式）。
@@ -746,7 +921,7 @@ impl ReactEngine {
     /// 内部按 `use_stream_mode()` 自动选择流式/非流式实现，并在流式失败时回退非流式。
     ///
     /// 成功返回响应；失败则上报错误、持久化错误痕迹并返回 `None`（调用方据此终止）。
-    fn run_text_finalization_llm(
+    async fn run_text_finalization_llm(
         &self,
         session: &Session,
         req: &ModelRequest,
@@ -759,15 +934,49 @@ impl ReactEngine {
             stream_tx.clone(),
             StreamTextKind::Summary,
         );
-        let response_result = select_client_for_request(&self.engine, req)
-            .complete_with_functions_stream_with_tool_choice(
-                req,
-                &final_tools,
-                Some(crate::model::ToolChoice::None),
-                &mut |delta| {
-                    sink.push_chunk(delta);
-                },
-            );
+        let (chunk_tx, mut chunk_rx) = tokio_mpsc::unbounded_channel();
+        let client = select_client_for_request(&self.engine, req).clone();
+        let request = req.clone();
+        let llm_fut = tokio::spawn(async move {
+            client
+                .stream_function_calls_with_tool_choice(
+                    request,
+                    final_tools,
+                    Some(crate::model::ToolChoice::None),
+                    chunk_tx,
+                )
+                .await
+        });
+        let cancel_flag = self
+            .cancel_flag
+            .as_ref()
+            .expect("cancel_flag 必须在 execute_turn 前注入")
+            .clone();
+        let shutdown_flag = self.shutdown_flag.clone();
+        let response_result = loop {
+            tokio::select! {
+                biased;
+                _ = wait_for_abort_signal(cancel_flag.clone(), shutdown_flag.clone()) => {
+                    llm_fut.abort();
+                    let _ = llm_fut.await;
+                    sink.finish();
+                    let _ = stream_tx.send(StreamEvent::Error {
+                        message: "已取消".to_string(),
+                    });
+                    return None;
+                }
+                chunk = chunk_rx.recv() => {
+                    if let Some(chunk) = chunk {
+                        sink.push_chunk(&chunk);
+                    } else {
+                        break match llm_fut.await {
+                            Ok(result) => result,
+                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+                        };
+                    }
+                }
+            }
+        };
         sink.finish();
         match response_result {
             Ok(r) => Some(r),
@@ -791,7 +1000,7 @@ impl ReactEngine {
         pending_msg_id: &str,
         resp: &crate::model::ModelFunctionResponse,
         usage_source: &str,
-    ) {
+    ) -> bool {
         session.append_message_with_id(
             pending_msg_id.to_string(),
             MessageRole::Assistant,
@@ -810,6 +1019,13 @@ impl ReactEngine {
             usage_source,
             None,
         );
-        session.persist_to_disk();
+        if let Err(error) = session.try_persist_to_disk() {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: format!("持久化最终回复失败：{error}"),
+            });
+            return false;
+        }
+        crate::react::message::emit_session_message_upsert(session, stream_tx, pending_msg_id);
+        true
     }
 }

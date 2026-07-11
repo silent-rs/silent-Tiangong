@@ -5,13 +5,15 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::{accept_prepared_user_message, append_runtime_tool_message};
+use crate::react::message::{
+    accept_prepared_user_message_with_options, append_runtime_tool_message,
+};
 use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{MessageRole, Session};
 use tiangong_types::{PreparedUserMessage, SessionStreamEvent, StreamEvent};
@@ -53,6 +55,10 @@ pub struct TiangongCore {
     shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
     /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
     cancel_flag: Arc<AtomicBool>,
+    /// 关闭标志由 Core 句柄直接设置，不能依赖正在阻塞的 worker 先消费命令。
+    shutdown_flag: Arc<AtomicBool>,
+    /// 保证“设置取消信号 + 入队取消命令”与并发消息入队具有单一顺序。
+    command_delivery_lock: Mutex<()>,
 }
 
 /// Prepared 消息入队后返回的持久化确认句柄。
@@ -108,9 +114,11 @@ impl TiangongCore {
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
 
         let worker_trust_mode = shared_trust_mode.clone();
         let worker_cancel_flag = cancel_flag.clone();
+        let worker_shutdown_flag = shutdown_flag.clone();
         let worker_config = config.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
@@ -125,6 +133,7 @@ impl TiangongCore {
                 plugins,
                 worker_cmd_tx,
                 worker_cancel_flag,
+                worker_shutdown_flag,
                 storage_root,
             )
         });
@@ -136,6 +145,8 @@ impl TiangongCore {
             config,
             shared_trust_mode,
             cancel_flag,
+            shutdown_flag,
+            command_delivery_lock: Mutex::new(()),
         }
     }
 
@@ -163,6 +174,10 @@ impl TiangongCore {
         message_id: impl Into<String>,
         prepared: PreparedUserMessage,
     ) -> Result<PreparedMessageReceipt, CoreError> {
+        let _delivery_guard = self
+            .command_delivery_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.send_cmd(Command::Message {
             prepared,
@@ -230,6 +245,8 @@ impl TiangongCore {
     /// worker panic 时返回 [`CoreError::WorkerPanicked`]，不再静默兜底为
     /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
     pub fn into_session(mut self) -> Result<Session, CoreError> {
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.cancel_flag.store(true, Ordering::Release);
         let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
         if let Some(w) = self.worker.take() {
@@ -246,11 +263,16 @@ impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
-        // Cancel 使用独立的 AtomicBool 信号，不再混入命令队列（避免残留 Cancel
-        // 跨轮次影响下一条消息）。deliver(Cancel) 只置标志，不发送 Command::Cancel。
+        let _delivery_guard = self
+            .command_delivery_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        // AtomicBool 供工具执行中的同步检查；队列命令用于唤醒流式请求、审批等待
+        // 等正阻塞在命令接收器上的状态。worker 消费命令后会清除标志，不会跨轮残留。
         if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
             self.cancel_flag.store(true, Ordering::Release);
-            return Ok(());
+            return self.send_cmd(Command::Cancel);
         }
 
         match input {
@@ -287,6 +309,8 @@ impl crate::agent_input::AgentInput for TiangongCore {
 
 impl Drop for TiangongCore {
     fn drop(&mut self) {
+        self.shutdown_flag.store(true, Ordering::Release);
+        self.cancel_flag.store(true, Ordering::Release);
         if let Some(ref tx) = self.cmd_tx {
             let _ = tx.send(Command::Shutdown);
         }
@@ -307,6 +331,7 @@ fn worker_loop(
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     cancel_flag: Arc<AtomicBool>,
+    shutdown_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
@@ -328,6 +353,7 @@ fn worker_loop(
         plugins,
         cmd_tx,
         cancel_flag,
+        shutdown_flag,
         storage_root,
     ))
 }
@@ -343,6 +369,7 @@ async fn worker_loop_async(
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     cancel_flag: Arc<AtomicBool>,
+    shutdown_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
@@ -364,38 +391,63 @@ async fn worker_loop_async(
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let fwd_session_id = session_id.clone();
     let fwd_tx = external_tx.clone();
-    // 轮次终态记录：转发线程在透传事件的同时，捕获 Done/Error 终态，
-    // 供 worker_loop_async 在 execute_turn_async 返回后读取并写入用户消息。
-    // 每个轮次开始前由 worker_loop_async 清空。
-    let turn_outcome: Arc<Mutex<Option<TurnOutcome>>> = Arc::new(Mutex::new(None));
-    let fwd_outcome = turn_outcome.clone();
+    // ReactEngine 内部仍可用 Done/Error 表达执行结果，但外部终态必须由 worker 在
+    // 完成清理、插件钩子与持久化后统一发出。转发线程先捕获内部终态，通过屏障
+    // 确认已消费完本轮事件；worker 最后只放行一个规范化终态。
+    let turn_capture = Arc::new((Mutex::new(TurnCapture::default()), Condvar::new()));
+    let fwd_capture = turn_capture.clone();
+    let forward_terminal = Arc::new(AtomicBool::new(false));
+    let fwd_terminal = forward_terminal.clone();
     let forward_handle = thread::spawn(move || {
+        let mut external_open = true;
         while let Ok(event) = stream_rx.recv() {
-            // 捕获终态：Done → Success；Error → 按文案区分 Cancelled/Failed。
-            match &event {
-                StreamEvent::Done { .. } => {
-                    if let Ok(mut slot) = fwd_outcome.lock() {
-                        *slot = Some(TurnOutcome::success());
+            match event {
+                StreamEvent::TurnBoundary { boundary_id } => {
+                    let (lock, ready) = &*fwd_capture;
+                    if let Ok(mut capture) = lock.lock() {
+                        capture.processed_boundary = capture.processed_boundary.max(boundary_id);
+                        ready.notify_all();
                     }
+                    continue;
                 }
-                StreamEvent::Error { message } => {
-                    if let Ok(mut slot) = fwd_outcome.lock() {
-                        *slot = Some(TurnOutcome::from_error(message));
+                terminal @ (StreamEvent::Done { .. } | StreamEvent::Error { .. }) => {
+                    if !fwd_terminal.swap(false, Ordering::AcqRel) {
+                        let (lock, _) = &*fwd_capture;
+                        if let Ok(mut capture) = lock.lock() {
+                            // 可恢复错误之后可能继续成功；以本轮最后一个内部终态为准。
+                            capture.terminal = Some(terminal);
+                        }
+                        continue;
                     }
+                    if external_open
+                        && fwd_tx
+                            .send(SessionStreamEvent {
+                                session_id: fwd_session_id.clone(),
+                                event: terminal,
+                            })
+                            .is_err()
+                    {
+                        // 即使宿主已断开，也必须继续消费内部事件并响应屏障，避免 worker
+                        // 在会话关闭时永久等待。
+                        external_open = false;
+                    }
+                    continue;
                 }
                 _ => {}
             }
-            if fwd_tx
-                .send(SessionStreamEvent {
-                    session_id: fwd_session_id.clone(),
-                    event,
-                })
-                .is_err()
+            if external_open
+                && fwd_tx
+                    .send(SessionStreamEvent {
+                        session_id: fwd_session_id.clone(),
+                        event,
+                    })
+                    .is_err()
             {
-                break;
+                external_open = false;
             }
         }
     });
+    let mut turn_boundary_id = 0u64;
 
     apply_session_cwd(&session);
 
@@ -528,6 +580,16 @@ async fn worker_loop_async(
                     if restored > 0 {
                         tracing::info!(count = restored, "已从会话历史恢复 Agent 团队");
                     }
+                    let restored_deliveries =
+                        crate::agent_team::lifecycle::restore_pending_agent_deliveries(
+                            &mut team, &session,
+                        );
+                    if restored_deliveries > 0 {
+                        tracing::info!(
+                            count = restored_deliveries,
+                            "已恢复尚未完成的 Agent 用户直达投递"
+                        );
+                    }
                 }
                 team_restored = true;
             }
@@ -585,30 +647,53 @@ async fn worker_loop_async(
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
                 let turn_started = std::time::Instant::now();
-                // 清空上一轮终态记录
-                if let Ok(mut slot) = turn_outcome.lock() {
-                    *slot = None;
+                let turn_start_cwd = session.cwd.clone();
+                // 新轮次内部终态一律先捕获，直到最终会话状态提交完毕。
+                forward_terminal.store(false, Ordering::Release);
+                if let Ok(mut capture) = turn_capture.0.lock() {
+                    capture.terminal = None;
                 }
-                // 宿主入口已完成附件保存与处理方案规划。Core 只接收 Prepared 消息，
-                // 先持久化稳定引用并确认，再进入 Agent Loop。
-                let accepted = match accept_prepared_user_message(
+                // 宿主入口已完成输入准备。Core 原样持久化已就绪消息并确认，
+                // 再进入 Agent Loop。
+                let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+                let pending_agent_deliveries = team_context
+                    .lock()
+                    .ok()
+                    .map(|team| {
+                        crate::agent_team::lifecycle::plan_user_mention_deliveries(
+                            &team,
+                            &message_id,
+                            &prepared,
+                        )
+                    })
+                    .unwrap_or_default();
+                let model_excluded = !pending_agent_deliveries.is_empty();
+                let accepted = match accept_prepared_user_message_with_options(
                     &mut session,
                     &stream_tx,
-                    message_id,
+                    Some(message_id),
                     prepared,
                     persistence_ack,
+                    pending_agent_deliveries,
+                    model_excluded,
+                    true,
                 ) {
                     Ok(accepted) => accepted,
                     Err(err) => {
-                        let _ = stream_tx.send(StreamEvent::Error {
-                            message: format!("用户消息持久化失败：{err}"),
-                        });
+                        send_final_stream_event(
+                            &stream_tx,
+                            &forward_terminal,
+                            &turn_capture,
+                            &mut turn_boundary_id,
+                            StreamEvent::Error {
+                                message: format!("用户消息持久化失败：{err}"),
+                            },
+                        );
                         continue;
                     }
                 };
                 let turn_start_idx = accepted.turn_start_idx;
-                let user_msg_id = accepted.message_id;
-                let content = accepted.text;
+                let user_msg_id = accepted.message_id.clone();
 
                 // Turn 开始前：回调插件生命周期钩子（用户消息已写入 session）
                 for plugin in &plugins {
@@ -618,27 +703,87 @@ async fn worker_loop_async(
                 // 执行对话轮次
                 execute_turn_async(
                     &mut session,
-                    &content,
+                    &accepted.message_id,
+                    &accepted.prepared,
                     engine.as_ref().unwrap(),
                     &tools,
                     &stream_tx,
                     &mut cmd_rx,
                     team_context.clone(),
                     &cancel_flag,
+                    &shutdown_flag,
                 )
                 .await;
 
+                // 等转发线程消费完 execute_turn_async 在返回前产生的所有事件，取得
+                // 本轮最后一个内部终态。屏障不对外可见。
+                turn_boundary_id = turn_boundary_id.wrapping_add(1);
+                let boundary_id = turn_boundary_id;
+                let _ = stream_tx.send(StreamEvent::TurnBoundary { boundary_id });
+                let mut terminal = tokio::task::block_in_place(|| {
+                    let (lock, ready) = &*turn_capture;
+                    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                    while capture.processed_boundary < boundary_id {
+                        capture = ready
+                            .wait(capture)
+                            .unwrap_or_else(|poison| poison.into_inner());
+                    }
+                    capture.terminal.take()
+                })
+                .unwrap_or_else(|| {
+                    if shutdown_flag.load(Ordering::Acquire) || cancel_flag.load(Ordering::Acquire)
+                    {
+                        StreamEvent::Error {
+                            message: "执行已取消".to_string(),
+                        }
+                    } else {
+                        StreamEvent::Done { usage: None }
+                    }
+                });
+
+                if session.cwd != turn_start_cwd {
+                    let workspace_path = std::path::PathBuf::from(&session.cwd);
+                    let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
+                    for plugin in &plugins {
+                        plugin.set_workspace(workspace);
+                        plugin.on_cwd_changed(&mut session);
+                    }
+                }
+
+                // 无论哪个执行分支结束，都闭合尚未配对的工具调用，避免下一轮给
+                // Provider 发送不合法的 Assistant(tool_calls) 历史。
+                let interrupted_tools =
+                    crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
+                if !interrupted_tools.is_empty() {
+                    for (tool_call_id, tool_name, output) in interrupted_tools {
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: tool_name,
+                            tool_call_id: Some(tool_call_id),
+                            ok: false,
+                            output,
+                            full_output: None,
+                            duration_ms: None,
+                        });
+                    }
+                    if matches!(terminal, StreamEvent::Done { .. }) {
+                        terminal = StreamEvent::Error {
+                            message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
+                        };
+                    }
+                }
+
+                // Turn 完成后：插件先提交自己的最终状态，再由 Core 保存整份会话。
+                for plugin in &plugins {
+                    plugin.on_turn_finished(&mut session, turn_start_idx);
+                }
+
                 // base64 等运行内容只服务本轮；历史图片由 Provider 按稳定本地引用重编码。
-                session.clear_runtime_content();
+                session.clear_transient_content();
 
                 // 轮次结束：将执行时长与终态写入用户消息（turn 锚点）并落盘。
                 // 所有终态分支（成功/失败/取消）都会回到这里，故统一处理。
                 let elapsed_ms = turn_started.elapsed().as_millis() as u64;
-                let status = turn_outcome
-                    .lock()
-                    .ok()
-                    .and_then(|slot| slot.as_ref().map(|o| o.status))
-                    .unwrap_or(tiangong_types::TurnStatus::Success);
+                let mut status = TurnOutcome::from_terminal(&terminal).status;
                 let mut user_msg_updated = false;
                 if let Some(msg) = session
                     .messages
@@ -648,20 +793,48 @@ async fn worker_loop_async(
                     msg.set_turn_result(elapsed_ms, status);
                     user_msg_updated = true;
                 }
+                let persist_result = session.try_persist_to_disk();
+                if let Err(err) = persist_result {
+                    terminal = StreamEvent::Error {
+                        message: format!("最终会话持久化失败：{err}"),
+                    };
+                    status = tiangong_types::TurnStatus::Failed;
+                    if let Some(msg) = session
+                        .messages
+                        .iter_mut()
+                        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
+                    {
+                        msg.set_turn_result(elapsed_ms, status);
+                    }
+                    // 尽力再保存一次失败状态；即使存储介质持续失败，也仍需向调用方
+                    // 返回明确失败，不能伪装成功。
+                    let _ = session.try_persist_to_disk();
+                }
                 if user_msg_updated {
-                    session.persist_to_disk();
+                    crate::react::message::emit_session_message_upsert(
+                        &session,
+                        &stream_tx,
+                        &user_msg_id,
+                    );
                 }
 
-                // Turn 完成后：回调插件生命周期钩子（index 插件在此批量写入 Session 索引）
-                for plugin in &plugins {
-                    plugin.on_turn_finished(&mut session, turn_start_idx);
+                send_final_stream_event(
+                    &stream_tx,
+                    &forward_terminal,
+                    &turn_capture,
+                    &mut turn_boundary_id,
+                    terminal,
+                );
+                cancel_flag.store(false, Ordering::Release);
+
+                if shutdown_flag.load(Ordering::Acquire) {
+                    break;
                 }
 
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
-                // Cancel 经独立 cancel_flag 信号传递（deliver 不再入队 Command::Cancel）。
-                // 此分支为防御性处理：若因其他路径收到 Cancel，清除标志避免残留。
+                // 活跃执行会消费命令并结束；空闲时在此清除同步取消标志。
                 cancel_flag.store(false, Ordering::Release);
             }
             Command::CancelAgent { .. } => {
@@ -684,24 +857,56 @@ async fn worker_loop_async(
                         format!("审批响应：{action}（会话已恢复，请重新发送消息继续）"),
                     );
                     session.persist_to_disk();
-                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                    send_final_stream_event(
+                        &stream_tx,
+                        &forward_terminal,
+                        &turn_capture,
+                        &mut turn_boundary_id,
+                        StreamEvent::Done { usage: None },
+                    );
                 }
             }
             Command::Shutdown => break,
             Command::InjectTool { tool_name, payload } => {
-                crate::react::message::inject_tool_to_session(
+                crate::react::message::defer_tool_injection(
                     &mut session,
                     &stream_tx,
-                    &tool_name,
-                    &payload,
+                    tool_name,
+                    payload,
                 );
-                let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                crate::react::message::flush_deferred_tool_injections(&mut session, &stream_tx);
+                session.persist_to_disk();
+                send_final_stream_event(
+                    &stream_tx,
+                    &forward_terminal,
+                    &turn_capture,
+                    &mut turn_boundary_id,
+                    StreamEvent::Done { usage: None },
+                );
             }
             Command::EmitStreamEvent(ev) => {
-                let _ = stream_tx.send(ev);
+                let ev = *ev;
+                if matches!(ev, StreamEvent::Done { .. } | StreamEvent::Error { .. }) {
+                    send_final_stream_event(
+                        &stream_tx,
+                        &forward_terminal,
+                        &turn_capture,
+                        &mut turn_boundary_id,
+                        ev,
+                    );
+                } else {
+                    let _ = stream_tx.send(ev);
+                }
             }
             Command::CompressContext => {
-                compress_context_for_session(&mut session, engine.as_ref().unwrap(), &stream_tx);
+                compress_context_for_session(
+                    &mut session,
+                    engine.as_ref().unwrap(),
+                    &stream_tx,
+                    cancel_flag.clone(),
+                    Some(shutdown_flag.clone()),
+                )
+                .await;
                 continue;
             }
             Command::ResetContext => {
@@ -741,10 +946,12 @@ pub(crate) fn apply_session_cwd(session: &Session) {
     }
 }
 
-pub(crate) fn compress_context_for_session(
+pub(crate) async fn compress_context_for_session(
     session: &mut Session,
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
+    cancel_flag: Arc<AtomicBool>,
+    shutdown_flag: Option<Arc<AtomicBool>>,
 ) {
     let _ = stream_tx.send(StreamEvent::ContextCompressing {
         summary_up_to: session.summary_up_to,
@@ -752,7 +959,24 @@ pub(crate) fn compress_context_for_session(
     });
     let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
         .with_keep_recent_turns(6);
-    match organizer.force_update_summary_with_usage(session, engine.client()) {
+    let update = tokio::select! {
+        update = organizer.force_update_summary_with_usage_async(session, engine.client()) => update,
+        _ = crate::react::cancel::wait_for_abort_signal(cancel_flag, shutdown_flag) => {
+            let _ = stream_tx.send(StreamEvent::AgentNotification {
+                agent_id: "system".to_string(),
+                agent_label: "系统".to_string(),
+                content: "上下文压缩已取消".to_string(),
+                level: "warning".to_string(),
+            });
+            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+                action: tiangong_types::stream::ContextCompressAction::Cancelled,
+                summary_up_to: session.summary_up_to,
+                remaining_messages: session.messages.len().saturating_sub(session.summary_up_to),
+            });
+            return;
+        }
+    };
+    match update {
         Ok(update) => {
             let remaining = session.messages.len().saturating_sub(session.summary_up_to);
             session.current_tokens = 0;
@@ -779,8 +1003,16 @@ pub(crate) fn compress_context_for_session(
             session.persist_to_disk();
         }
         Err(err) => {
-            let _ = stream_tx.send(StreamEvent::Error {
-                message: format!("上下文压缩失败：{err}"),
+            let _ = stream_tx.send(StreamEvent::AgentNotification {
+                agent_id: "system".to_string(),
+                agent_label: "系统".to_string(),
+                content: format!("上下文压缩失败：{err}"),
+                level: "error".to_string(),
+            });
+            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+                action: tiangong_types::stream::ContextCompressAction::Failed,
+                summary_up_to: session.summary_up_to,
+                remaining_messages: session.messages.len().saturating_sub(session.summary_up_to),
             });
         }
     }
@@ -808,6 +1040,55 @@ pub(crate) fn reset_context_for_session(
     session.persist_to_disk();
 }
 
+/// 转发线程与 worker 之间的轮次终态/屏障状态。
+#[derive(Default)]
+struct TurnCapture {
+    terminal: Option<StreamEvent>,
+    processed_boundary: u64,
+}
+
+fn send_final_stream_event(
+    stream_tx: &StdSender<StreamEvent>,
+    forward_terminal: &AtomicBool,
+    turn_capture: &Arc<(Mutex<TurnCapture>, Condvar)>,
+    turn_boundary_id: &mut u64,
+    event: StreamEvent,
+) {
+    debug_assert!(matches!(
+        event,
+        StreamEvent::Done { .. } | StreamEvent::Error { .. }
+    ));
+    forward_terminal.store(true, Ordering::Release);
+    if stream_tx.send(event).is_ok() {
+        // 必须确认转发线程已经处理完这个终态，才能接收/重置下一轮。否则新轮次
+        // 清除放行标志时，上一轮尚在队列里的终态可能被误当作内部事件吞掉。
+        wait_for_stream_boundary(stream_tx, turn_capture, turn_boundary_id);
+    }
+    forward_terminal.store(false, Ordering::Release);
+}
+
+fn wait_for_stream_boundary(
+    stream_tx: &StdSender<StreamEvent>,
+    turn_capture: &Arc<(Mutex<TurnCapture>, Condvar)>,
+    turn_boundary_id: &mut u64,
+) {
+    *turn_boundary_id = turn_boundary_id.wrapping_add(1);
+    let boundary_id = *turn_boundary_id;
+    if stream_tx
+        .send(StreamEvent::TurnBoundary { boundary_id })
+        .is_err()
+    {
+        return;
+    }
+    let (lock, ready) = &**turn_capture;
+    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    while capture.processed_boundary < boundary_id {
+        capture = ready
+            .wait(capture)
+            .unwrap_or_else(|poison| poison.into_inner());
+    }
+}
+
 /// 转发线程捕获的单个对话轮次终态。
 ///
 /// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
@@ -818,26 +1099,24 @@ struct TurnOutcome {
 }
 
 impl TurnOutcome {
-    fn success() -> Self {
-        Self {
-            status: tiangong_types::TurnStatus::Success,
-        }
-    }
-
-    /// 根据错误文案区分用户取消与执行失败。
-    fn from_error(message: &str) -> Self {
-        let lower = message.to_lowercase();
-        let is_cancel = lower.contains("取消")
-            || lower.contains("cancel")
-            || lower.contains("abort")
-            || lower.contains("中断");
-        Self {
-            status: if is_cancel {
-                tiangong_types::TurnStatus::Cancelled
-            } else {
-                tiangong_types::TurnStatus::Failed
-            },
-        }
+    fn from_terminal(event: &StreamEvent) -> Self {
+        let status = match event {
+            StreamEvent::Done { .. } => tiangong_types::TurnStatus::Success,
+            StreamEvent::Error { message } => {
+                let lower = message.to_lowercase();
+                if lower.contains("取消")
+                    || lower.contains("cancel")
+                    || lower.contains("abort")
+                    || lower.contains("中断")
+                {
+                    tiangong_types::TurnStatus::Cancelled
+                } else {
+                    tiangong_types::TurnStatus::Failed
+                }
+            }
+            _ => tiangong_types::TurnStatus::Failed,
+        };
+        Self { status }
     }
 }
 
@@ -845,13 +1124,15 @@ impl TurnOutcome {
 #[allow(clippy::too_many_arguments)]
 async fn execute_turn_async(
     session: &mut Session,
-    user_input: &str,
+    message_id: &str,
+    prepared: &PreparedUserMessage,
     engine: &RuntimeEngine,
     tools: &[ToolSpec],
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     team_context: Arc<Mutex<crate::agent_team::lifecycle::TeamContext>>,
     cancel_flag: &Arc<AtomicBool>,
+    shutdown_flag: &Arc<AtomicBool>,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -860,9 +1141,10 @@ async fn execute_turn_async(
         MAX_OUTER_ITERATIONS,
     )
     .with_shared_team(team_context, "main".to_string())
-    .with_cancel_flag(cancel_flag.clone());
+    .with_cancel_flag(cancel_flag.clone())
+    .with_shutdown_flag(shutdown_flag.clone());
     react
-        .execute_turn(session, user_input, stream_tx, cmd_rx)
+        .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
 }
 
@@ -971,8 +1253,5 @@ fn build_engine_from_config(
             SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()),
         );
     }
-    // multimodal_client 已随 LlmConfig 裁剪移除：附件分析插件（analyze-attachment）
-    // 改为自行从 ModelsConfig 路由解析 multimodal 端点并构造 SingleProviderClient。
-
     engine
 }

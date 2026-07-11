@@ -79,6 +79,20 @@ impl ContextOrganizer {
         self.compressor.update_summary_with_usage(session, client)
     }
 
+    pub async fn maybe_update_summary_with_usage_async(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+        actual_prompt_tokens: usize,
+    ) -> anyhow::Result<CompressionUpdate> {
+        if actual_prompt_tokens == 0 || !self.needs_compression(actual_prompt_tokens) {
+            return Ok(CompressionUpdate::default());
+        }
+        self.compressor
+            .update_summary_with_usage_async(session, client)
+            .await
+    }
+
     /// 强制压缩上下文（忽略 token 阈值检查）
     pub fn force_update_summary(
         &self,
@@ -96,6 +110,16 @@ impl ContextOrganizer {
         client: &SingleProviderClient,
     ) -> anyhow::Result<CompressionUpdate> {
         self.compressor.update_summary_with_usage(session, client)
+    }
+
+    pub async fn force_update_summary_with_usage_async(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> anyhow::Result<CompressionUpdate> {
+        self.compressor
+            .update_summary_with_usage_async(session, client)
+            .await
     }
 
     /// 构建 LLM 请求上下文

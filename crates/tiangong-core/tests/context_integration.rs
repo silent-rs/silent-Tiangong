@@ -113,7 +113,6 @@ fn new_path_system_prompt_includes_all_sections() {
             "插件规则段：终端交互引导".to_string(),
             "用户偏好深色主题".to_string(),
         ],
-        attachment_rules_text: String::new(),
     };
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
     assert_eq!(msg.role, MessageRole::System);
@@ -250,29 +249,5 @@ fn new_path_clear_and_rebuild_system_prompt() {
     assert!(
         !context_after[0].text_content().contains("此前对话摘要"),
         "清空后 system prompt 不应包含摘要段"
-    );
-}
-
-#[test]
-fn system_prompt_contains_attachment_rules_after_rebuild() {
-    // 验证 rebuild_system_prompt 后，system prompt 必须包含
-    // 「文档附件解析规则」段和 media/files 路径说明（issue #149 核心）。
-    let mut session = helper_session();
-    rebuild_session(&mut session);
-    assert!(session.system_prompt_message.is_some());
-    let context = session.context();
-    let system_text = context[0].text_content();
-    assert!(
-        system_text.contains("文档附件解析规则"),
-        "system prompt 应包含文档附件解析规则段，实际前300字：{}",
-        &system_text[..system_text.len().min(300)]
-    );
-    assert!(
-        system_text.contains("media/files"),
-        "system prompt 应包含 media/files 路径说明"
-    );
-    assert!(
-        system_text.contains("pdfplumber") || system_text.contains("python-docx"),
-        "system prompt 应包含具体解析库名"
     );
 }

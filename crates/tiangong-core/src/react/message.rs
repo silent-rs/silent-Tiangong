@@ -1,9 +1,11 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
 use std::sync::mpsc::Sender as StdSender;
+use std::sync::{Arc, Mutex};
 
-use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use tiangong_types::{PreparedAttachment, PreparedUserMessage, RuntimeContent, StreamEvent};
+use crate::agent_team::lifecycle::TeamContext;
+use crate::session::{Message, MessageRole, MessageToolCall, PendingAgentDelivery, Session};
+use tiangong_types::{PreparedUserMessage, StreamEvent};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
@@ -36,25 +38,120 @@ pub(crate) struct AcceptedUserMessage {
     pub message_id: String,
     /// 该用户消息在 Session 中的实际索引；快照预含同 ID 消息时可能小于接收前 len。
     pub turn_start_idx: usize,
-    pub text: String,
-    pub persistent_attachments: Vec<PreparedAttachment>,
-    pub runtime_content: Vec<RuntimeContent>,
+    pub prepared: PreparedUserMessage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeMessageDisposition {
+    CurrentAgentInput(String),
+    RoutedToAgent,
+}
+
+pub(crate) fn emit_session_message_upsert(
+    session: &Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: &str,
+) {
+    emit_session_message_upsert_with_state(session, stream_tx, message_id, false, false);
+}
+
+pub(crate) fn emit_session_message_upsert_with_state(
+    session: &Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: &str,
+    include_pending_agent_deliveries: bool,
+    include_deferred_tool_injections: bool,
+) {
+    let Some(mut message) = session
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .cloned()
+    else {
+        return;
+    };
+    message.clear_transient_data();
+    let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+        message,
+        pending_agent_deliveries: include_pending_agent_deliveries
+            .then(|| session.pending_agent_deliveries.clone()),
+        deferred_tool_injections: include_deferred_tool_injections
+            .then(|| session.deferred_tool_injections.clone()),
+    });
+}
+
+pub(crate) fn emit_pending_agent_deliveries_changed(
+    session: &Session,
+    stream_tx: &StdSender<StreamEvent>,
+) {
+    let mut deliveries = session.pending_agent_deliveries.clone();
+    for delivery in &mut deliveries {
+        for block in &mut delivery.additional_content {
+            block.clear_transient_data();
+        }
+    }
+    let _ = stream_tx.send(StreamEvent::PendingAgentDeliveriesChanged { deliveries });
+}
+
+pub(crate) fn emit_deferred_tool_injections_changed(
+    session: &Session,
+    stream_tx: &StdSender<StreamEvent>,
+) {
+    let _ = stream_tx.send(StreamEvent::DeferredToolInjectionsChanged {
+        injections: session.deferred_tool_injections.clone(),
+    });
+}
+
+pub(crate) fn defer_tool_injection(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    tool_name: String,
+    payload: serde_json::Value,
+) {
+    session.defer_tool_injection(tool_name, payload);
+    session.persist_to_disk();
+    emit_deferred_tool_injections_changed(session, stream_tx);
 }
 
 /// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
 ///
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
-pub(crate) fn accept_prepared_user_message(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn accept_prepared_user_message_with_options(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: PreparedUserMessage,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    pending_agent_deliveries: Vec<PendingAgentDelivery>,
+    model_excluded: bool,
+    close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
+    if let Err(err) = prepared.validate_ready() {
+        if let Some(ack) = persistence_ack {
+            let _ = ack.send(Err(err.clone()));
+        }
+        return Err(err);
+    }
     let before = session.clone();
-    let text = prepared.text.clone();
-    let persistent_attachments = prepared.persistent_attachments.clone();
-    let runtime_content = prepared.runtime_content.clone();
+    // Desktop/Server 会先把稳定 User 乐观写入宿主快照。执行中追加时必须先取出
+    // 这条预写消息，闭合未完成 tool calls 后再把 User 放回末尾，保持协议顺序。
+    if let Some(message_id) = message_id.as_deref()
+        && let Some(index) = session
+            .messages
+            .iter()
+            .position(|message| message.id == message_id && message.role == MessageRole::User)
+    {
+        session.messages.remove(index);
+    }
+    let interrupted_tool_calls = if close_pending_tools {
+        close_unfinished_tool_calls(session)
+    } else {
+        Vec::new()
+    };
+    let text = prepared.text_content();
+    let accepted_prepared = prepared.clone();
+    let stable_content = prepared.stable().content;
     let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
         Ok(message_id) => message_id,
         Err(err) => {
@@ -76,6 +173,10 @@ pub(crate) fn accept_prepared_user_message(
             return Err(err);
         }
     };
+    if let Some(message) = session.messages.get_mut(turn_start_idx) {
+        message.model_excluded = model_excluded;
+    }
+    session.replace_pending_agent_deliveries(&message_id, pending_agent_deliveries);
 
     if let Err(err) = session.try_persist_to_disk() {
         *session = before;
@@ -88,6 +189,16 @@ pub(crate) fn accept_prepared_user_message(
     if let Some(ack) = persistence_ack {
         let _ = ack.send(Ok(()));
     }
+    for (tool_call_id, tool_name, output) in interrupted_tool_calls {
+        let _ = stream_tx.send(StreamEvent::ToolResult {
+            name: tool_name,
+            tool_call_id: Some(tool_call_id),
+            ok: false,
+            output,
+            full_output: None,
+            duration_ms: None,
+        });
+    }
     let media = session
         .messages
         .iter()
@@ -97,16 +208,161 @@ pub(crate) fn accept_prepared_user_message(
     let _ = stream_tx.send(StreamEvent::UserMessage {
         message_id: message_id.clone(),
         content: text.clone(),
-        prepared_attachments: persistent_attachments.clone(),
+        content_blocks: stable_content,
         media: media.clone(),
+        model_excluded,
+        pending_agent_deliveries: session.pending_agent_deliveries.clone(),
     });
     Ok(AcceptedUserMessage {
         message_id,
         turn_start_idx,
-        text,
-        persistent_attachments,
-        runtime_content,
+        prepared: accepted_prepared,
     })
+}
+
+/// 在追加新的 User 消息前闭合所有尚未返回结果的工具调用，保持 Provider 协议顺序。
+fn close_unfinished_tool_calls(session: &mut Session) -> Vec<(String, String, String)> {
+    close_unfinished_tool_calls_with_reason(session, "工具调用因新的用户消息而中断，未执行。")
+}
+
+/// 在轮次终态提交前闭合所有未完成的工具调用，保持 Provider 历史协议完整。
+pub(crate) fn close_unfinished_tool_calls_for_turn(
+    session: &mut Session,
+) -> Vec<(String, String, String)> {
+    close_unfinished_tool_calls_with_reason(session, "工具调用因本轮结束而中断，未执行。")
+}
+
+fn close_unfinished_tool_calls_with_reason(
+    session: &mut Session,
+    reason: &str,
+) -> Vec<(String, String, String)> {
+    let pending = unfinished_tool_calls(session);
+
+    pending
+        .into_iter()
+        .map(|(tool_call_id, tool_name)| {
+            let output = reason.to_string();
+            append_tool_result_message(session, &tool_call_id, &tool_name, output.clone(), true);
+            (tool_call_id, tool_name, output)
+        })
+        .collect()
+}
+
+pub(crate) fn has_unfinished_tool_calls(session: &Session) -> bool {
+    !unfinished_tool_calls(session).is_empty()
+}
+
+pub(crate) fn flush_deferred_tool_injections(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+) {
+    if has_unfinished_tool_calls(session) {
+        return;
+    }
+    for injection in std::mem::take(&mut session.deferred_tool_injections) {
+        inject_tool_to_session(session, stream_tx, &injection.tool_name, &injection.payload);
+    }
+    session.persist_to_disk();
+    emit_deferred_tool_injections_changed(session, stream_tx);
+}
+
+fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
+    let Some((assistant_index, assistant)) = session
+        .messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| !message.tool_calls.is_empty())
+    else {
+        return Vec::new();
+    };
+    let completed = session.messages[assistant_index + 1..]
+        .iter()
+        .filter_map(|message| message.tool_call_id.as_deref())
+        .collect::<std::collections::HashSet<_>>();
+    assistant
+        .tool_calls
+        .iter()
+        .filter(|call| !completed.contains(call.id.as_str()))
+        .map(|call| (call.id.clone(), call.name.clone()))
+        .collect()
+}
+
+/// 持久化执行中的追加消息，并在主 Agent 上统一处理 `@Agent` 定向投递。
+///
+/// 子 Agent 收到的内部 `Command::Message` 已经完成定向，不再重复解析提及。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn accept_runtime_user_message(
+    agent_id: &str,
+    team: Option<&Arc<Mutex<TeamContext>>>,
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: Option<String>,
+    prepared: PreparedUserMessage,
+    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> Result<RuntimeMessageDisposition, String> {
+    // 路由预判和实际投递使用同一把团队锁，避免两次加锁之间目标 Agent 状态变化，
+    // 导致消息已按“仅子 Agent 可见”持久化后又回退成主输入。
+    let mut locked_team = if agent_id == "main" {
+        team.and_then(|team| team.lock().ok())
+    } else {
+        None
+    };
+    let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+    let pending_agent_deliveries = locked_team
+        .as_deref()
+        .map(|team| {
+            crate::agent_team::lifecycle::plan_user_mention_deliveries(team, &message_id, &prepared)
+        })
+        .unwrap_or_default();
+    let route_planned = !pending_agent_deliveries.is_empty();
+    let accepted = accept_prepared_user_message_with_options(
+        session,
+        stream_tx,
+        Some(message_id),
+        prepared,
+        persistence_ack,
+        pending_agent_deliveries,
+        route_planned,
+        !route_planned,
+    )?;
+
+    let routed = route_planned
+        && locked_team.as_deref_mut().is_some_and(|team| {
+            crate::agent_team::lifecycle::dispatch_pending_agent_deliveries(
+                team,
+                session,
+                &accepted.message_id,
+                stream_tx,
+            )
+        });
+    if routed {
+        Ok(RuntimeMessageDisposition::RoutedToAgent)
+    } else {
+        if route_planned {
+            if let Some(message) = session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == accepted.message_id)
+            {
+                message.model_excluded = false;
+            }
+            session.replace_pending_agent_deliveries(&accepted.message_id, Vec::new());
+            if let Err(error) = session.try_persist_to_disk() {
+                tracing::warn!(%error, "定向消息路由失效后恢复主模型可见性失败");
+            }
+            emit_session_message_upsert_with_state(
+                session,
+                stream_tx,
+                &accepted.message_id,
+                true,
+                false,
+            );
+        }
+        Ok(RuntimeMessageDisposition::CurrentAgentInput(
+            accepted.prepared.text_content(),
+        ))
+    }
 }
 
 fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
@@ -150,7 +406,40 @@ pub(crate) fn append_assistant_tool_call_message(
     message.id = message_id;
     message.reasoning_signature = reasoning_signature;
     message.tool_calls = tool_calls;
-    session.messages.push(message);
+    if let Some(existing) = session
+        .messages
+        .iter_mut()
+        .find(|existing| existing.id == message.id && existing.role == MessageRole::Assistant)
+    {
+        *existing = message;
+    } else {
+        session.messages.push(message);
+    }
+}
+
+pub(crate) fn upsert_assistant_text_message(
+    session: &mut Session,
+    message_id: &str,
+    text: &str,
+    reasoning_content: &str,
+    phase: crate::session::MessagePhase,
+) {
+    let mut message = Message::with_reasoning(
+        MessageRole::Assistant,
+        text.to_string(),
+        reasoning_content.to_string(),
+    )
+    .with_phase(phase);
+    message.id = message_id.to_string();
+    if let Some(existing) = session
+        .messages
+        .iter_mut()
+        .find(|existing| existing.id == message_id && existing.role == MessageRole::Assistant)
+    {
+        *existing = message;
+    } else {
+        session.messages.push(message);
+    }
 }
 
 pub(crate) fn append_tool_result_message(
@@ -622,6 +911,12 @@ pub(crate) fn inject_tool_to_session(
     if let Some(assistant_msg) = session.messages.iter().rev().nth(1)
         && let Some(tc) = assistant_msg.tool_calls.first()
     {
+        let assistant_id = assistant_msg.id.clone();
+        let tool_result_id = session.messages.last().map(|message| message.id.clone());
+        emit_session_message_upsert(session, stream_tx, &assistant_id);
+        if let Some(tool_result_id) = tool_result_id {
+            emit_session_message_upsert(session, stream_tx, &tool_result_id);
+        }
         let output = session
             .messages
             .last()
@@ -699,37 +994,6 @@ fn format_payload_value(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn persistence_failure_is_confirmed_and_restores_session() {
-        let mut session = Session::new("persistence-failure");
-        let mut invalid = Message::new(MessageRole::User, "existing");
-        invalid
-            .content
-            .push(tiangong_types::ContentBlock::RuntimeInlineImage {
-                asset_id: "invalid-runtime".to_string(),
-                mime_type: "image/png".to_string(),
-                data: "must-not-persist".to_string(),
-            });
-        session.messages.push(invalid);
-        let before_content = session.messages[0].content.clone();
-
-        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
-        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-        let result = accept_prepared_user_message(
-            &mut session,
-            &stream_tx,
-            Some("new-message".to_string()),
-            PreparedUserMessage::text("new content"),
-            Some(ack_tx),
-        );
-
-        assert!(result.is_err());
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.messages[0].content, before_content);
-        let confirmation = ack_rx.await.expect("应收到持久化确认");
-        assert!(confirmation.is_err());
-    }
-
     #[test]
     fn preloaded_same_id_message_uses_its_actual_index_as_turn_start() {
         let mut session = Session::new("preloaded-turn");
@@ -755,6 +1019,104 @@ mod tests {
             session.messages[turn_start_idx].text_content(),
             "new content"
         );
+    }
+
+    #[test]
+    fn new_user_message_closes_every_unfinished_tool_call_first() {
+        let mut session = Session::new("tool-interruption");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![
+            MessageToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            MessageToolCall {
+                id: "call-2".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ];
+        session.messages.push(assistant);
+        append_tool_result_message(
+            &mut session,
+            "call-1",
+            "read_file",
+            "done".to_string(),
+            false,
+        );
+
+        let interrupted = close_unfinished_tool_calls(&mut session);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].0, "call-2");
+        assert!(!has_unfinished_tool_calls(&session));
+
+        session.append_prepared_user_message_with_id(
+            "next-user".to_string(),
+            PreparedUserMessage::text("continue"),
+        );
+        let call_2_result = session
+            .messages
+            .iter()
+            .position(|message| message.tool_call_id.as_deref() == Some("call-2"))
+            .unwrap();
+        let next_user = session
+            .messages
+            .iter()
+            .position(|message| message.id == "next-user")
+            .unwrap();
+        assert!(call_2_result < next_user);
+    }
+
+    #[test]
+    fn unfinished_tool_call_is_detected_before_context_injection() {
+        let mut session = Session::new("deferred-injection");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![MessageToolCall {
+            id: "call-pending".to_string(),
+            name: "write_file".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        session.messages.push(assistant);
+
+        assert!(has_unfinished_tool_calls(&session));
+        append_tool_result_message(
+            &mut session,
+            "call-pending",
+            "write_file",
+            "done".to_string(),
+            false,
+        );
+        assert!(!has_unfinished_tool_calls(&session));
+    }
+
+    #[test]
+    fn reused_tool_call_id_does_not_reuse_an_old_result() {
+        let mut session = Session::new("reused-tool-id");
+        for completed in [true, false] {
+            let mut assistant = Message::new(MessageRole::Assistant, "");
+            assistant.tool_calls = vec![MessageToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            }];
+            session.messages.push(assistant);
+            if completed {
+                append_tool_result_message(
+                    &mut session,
+                    "call-1",
+                    "read_file",
+                    "old result".to_string(),
+                    false,
+                );
+            }
+        }
+
+        assert!(has_unfinished_tool_calls(&session));
+        let interrupted = close_unfinished_tool_calls(&mut session);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].0, "call-1");
+        assert!(!has_unfinished_tool_calls(&session));
     }
 
     #[test]
@@ -787,8 +1149,18 @@ mod tests {
         assert!(tool_text.contains("title: API Keys"));
         assert!(tool_text.contains("sk-test"));
 
-        let event = rx.recv().unwrap();
-        match event {
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            &events[0],
+            StreamEvent::SessionMessageUpsert { message, .. }
+                if message.role == MessageRole::Assistant && message.tool_calls.len() == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::SessionMessageUpsert { message, .. }
+                if message.role == MessageRole::Tool
+        ));
+        match &events[2] {
             StreamEvent::ToolResult { output, .. } => {
                 assert!(output.contains("数据来源：browser_data"));
                 assert!(output.contains("sk-test"));

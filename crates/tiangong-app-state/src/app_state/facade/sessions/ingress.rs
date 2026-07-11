@@ -20,7 +20,11 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
-        // 调用方负责在持锁前完成附件归档（远程下载可能阻塞 60s，不能在状态锁内执行）。
+        if !media.is_empty() {
+            return Err(anyhow!(
+                "旧消息入口不再接收媒体；请先通过宿主附件准备管线生成已就绪内容块"
+            ));
+        }
         let content = content.into();
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
@@ -41,7 +45,7 @@ impl TiangongState {
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        self.mark_pending_turn_for(session.id.clone());
+        self.mark_pending_message_for(&session.id, &message_id);
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
             runtime_session.cwd = self.store.session.workspace_dir.clone();
@@ -60,6 +64,11 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
+        if !media.is_empty() {
+            return Err(anyhow!(
+                "旧消息入口不再接收媒体；请先通过宿主附件准备管线生成已就绪内容块"
+            ));
+        }
         let content = content.into();
         let idx = self
             .store
@@ -85,7 +94,7 @@ impl TiangongState {
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        self.mark_pending_turn_for(session.id.clone());
+        self.mark_pending_message_for(&session.id, &message_id);
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
             runtime_session.cwd = self.store.session.workspace_dir.clone();

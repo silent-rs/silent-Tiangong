@@ -106,12 +106,13 @@ export function attachmentFromPath(path: string): Attachment {
 
 export function attachmentsFromContentBlocks(blocks: ContentBlock[]): Attachment[] {
   return blocks.flatMap((block): Attachment[] => {
-    if (block.type === 'attachment') {
+    if (block.type === 'asset_reference' || block.type === 'image') {
+      if (block.asset.local_path === '<legacy-inline-data-unavailable>') return [];
       return [{
-        kind: block.attachment.kind,
-        source: block.attachment.local_path,
-        original_name: block.attachment.original_name,
-        mime_type: block.attachment.mime_type,
+        kind: block.asset.kind,
+        source: block.asset.local_path,
+        original_name: block.asset.original_name,
+        mime_type: block.asset.mime_type,
       }];
     }
     if (block.type === 'media') {

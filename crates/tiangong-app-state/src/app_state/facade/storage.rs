@@ -17,6 +17,60 @@ impl TiangongState {
             .persist_session(&self.store, session_id)
     }
 
+    /// 从 Core 已写入的权威会话文件刷新内存镜像，不反向写盘。
+    pub fn reload_session_from_disk(&mut self, session_id: &str) -> Result<bool> {
+        let fallback_trust_mode = self
+            .store
+            .session
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.trust_mode)
+            .unwrap_or_default();
+        let Some(mut loaded) = self
+            .services
+            .repository
+            .load_session_from_disk(session_id, fallback_trust_mode)?
+        else {
+            return Ok(false);
+        };
+        if let Some(existing) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            // 宿主可在执行期间修改这些会话元数据；Core 只拥有消息/上下文执行状态。
+            // 终态重载时保留宿主值，再由调用方统一落盘，避免异步标题或 Tab 更新丢失。
+            loaded.title = existing.title.clone();
+            loaded.tabs = existing.tabs.clone();
+            loaded.active_tab_id = existing.active_tab_id.clone();
+            loaded.cwd = existing.cwd.clone();
+            loaded.cwd_mode = existing.cwd_mode.clone();
+            loaded.trust_mode = existing.trust_mode;
+            loaded.reasoning_effort = existing.reasoning_effort.clone();
+            loaded.updated_at = loaded.updated_at.max(existing.updated_at.clone());
+            // Token 用量由宿主按流事件累计，Core 文件不维护这部分运行指标。
+            loaded.token_usage = existing.token_usage.clone();
+            loaded.agent_token_usage = existing.agent_token_usage.clone();
+            loaded.current_tokens = loaded.current_tokens.max(existing.current_tokens);
+            loaded.active_agent_current_tokens = existing.active_agent_current_tokens;
+            loaded.active_agent_id = existing.active_agent_id.clone();
+            loaded.agent_current_tokens = existing.agent_current_tokens.clone();
+            loaded.compression_threshold_tokens = loaded
+                .compression_threshold_tokens
+                .max(existing.compression_threshold_tokens);
+            loaded.context_limit_tokens = loaded
+                .context_limit_tokens
+                .max(existing.context_limit_tokens);
+            *existing = loaded;
+        } else {
+            self.store.session.sessions.push(loaded);
+        }
+        Ok(true)
+    }
+
     pub(in crate::app_state) fn persist_app_only(&mut self) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services.repository.persist_app_only(&self.store)

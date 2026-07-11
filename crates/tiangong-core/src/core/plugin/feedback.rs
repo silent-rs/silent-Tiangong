@@ -240,7 +240,7 @@ impl PluginFeedbackTx {
     /// 后者能让 core 正确即时记账；直接用本方法转发 `StreamEvent::TokenUsage` 只会让
     /// 前端看到事件而不会计入本轮 `Done.usage`。
     pub fn send_stream_event(&self, event: tiangong_types::StreamEvent) {
-        let _ = self.tx.send(Command::EmitStreamEvent(event));
+        let _ = self.tx.send(Command::EmitStreamEvent(Box::new(event)));
     }
 
     /// 通道是否已关闭（worker 已退出，无法再投递命令队列事件）。

@@ -26,16 +26,11 @@ fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::pro
     command
 }
 
-fn format_agent_reply_message(agent_label: &str, content: &str) -> String {
-    let safe_label = agent_label.replace(['\n', '\r'], " ").replace("--", "- -");
-    format!("<!-- tiangong-agent-reply -->\n<!-- label:{safe_label} -->\n\n{content}")
-}
-
 fn done_event_keeps_turn_running(
     event: &tiangong_types::StreamEvent,
     has_pending_turn: bool,
 ) -> bool {
-    matches!(event, tiangong_types::StreamEvent::Done { usage: None }) && has_pending_turn
+    matches!(event, tiangong_types::StreamEvent::Done { .. }) && has_pending_turn
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -308,6 +303,27 @@ fn append_tool_result_message(
     let Some(tool_call_id) = tool_call_id else {
         return;
     };
+    let current_assistant_index = session.messages.iter().rposition(|message| {
+        message.role == tiangong_core::session::MessageRole::Assistant
+            && message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == tool_call_id)
+    });
+    let current_result = current_assistant_index.and_then(|assistant_index| {
+        session.messages[assistant_index + 1..]
+            .iter()
+            .take_while(|message| message.role == tiangong_core::session::MessageRole::Tool)
+            .position(|message| message.tool_call_id.as_deref() == Some(tool_call_id))
+            .map(|offset| assistant_index + 1 + offset)
+    });
+    if let Some(message) = current_result.and_then(|index| session.messages.get_mut(index)) {
+        message.content = vec![tiangong_core::session::ContentBlock::text(content)];
+        message.tool_name = Some(tool_name.to_string());
+        message.tool_result_is_error = is_error;
+        session.updated_at = tiangong_core::session::now_text();
+        return;
+    }
     let message =
         tiangong_core::session::Message::tool_result(tool_call_id, tool_name, content, is_error);
     session.messages.push(message);
@@ -539,7 +555,12 @@ pub async fn set_session_tabs(
                 .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
             session.tabs = tabs;
             session.active_tab_id = active_tab_id;
-            core_state.persist_session_and_app(&session_id)
+            if core_state.has_pending_turn_for(&session_id) {
+                // 活跃轮次由 Core 独占会话文件；终态重载会保留这些宿主元数据。
+                Ok(())
+            } else {
+                core_state.persist_session_and_app(&session_id)
+            }
         })
         .await
 }
@@ -1057,11 +1078,17 @@ async fn send_message_inner(
             return Err(error);
         }
     };
+    let user_message_id = scru128::new().to_string();
+    let message_id_for_prepare = user_message_id.clone();
     let content_for_prepare = content.clone();
     let prepared_batch = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(content_for_prepare, capabilities)?;
+        let prepared = transaction.prepare_message(
+            &message_id_for_prepare,
+            content_for_prepare,
+            capabilities,
+        )?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
@@ -1074,12 +1101,7 @@ async fn send_message_inner(
         }
     };
 
-    let user_message_id = scru128::new().to_string();
-    let prepared_for_state = tiangong_types::PreparedUserMessage {
-        text: prepared.text.clone(),
-        persistent_attachments: prepared.persistent_attachments.clone(),
-        runtime_content: Vec::new(),
-    };
+    let prepared_for_state = prepared.stable();
     let state_prepare = state
         .with_state(|core_state| {
             let index = core_state
@@ -1088,18 +1110,13 @@ async fn send_message_inner(
                 .position(|session| session.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("目标会话不存在：{session_id}"))?;
             let original_session = core_state.sessions()[index].clone();
-            let originally_pending = core_state.has_pending_turn_for(&session_id);
             core_state.sessions_mut()[index]
                 .append_prepared_user_message_with_id(user_message_id.clone(), prepared_for_state);
             core_state.sessions_mut()[index].updated_at = tiangong_core::session::now_text();
-            core_state.mark_pending_turn_for(session_id.clone());
+            core_state.mark_pending_message_for(&session_id, &user_message_id);
             if let Err(error) = core_state.persist_session_and_app(&session_id) {
                 core_state.sessions_mut()[index] = original_session;
-                if originally_pending {
-                    core_state.mark_pending_turn_for(session_id.clone());
-                } else {
-                    core_state.clear_pending_turn_for(&session_id);
-                }
+                core_state.remove_pending_message_for(&session_id, &user_message_id);
                 let rollback_error = core_state.persist_session_and_app(&session_id).err();
                 return Err(match rollback_error {
                     Some(rollback_error) => anyhow::anyhow!(
@@ -1112,10 +1129,10 @@ async fn send_message_inner(
             if runtime_session.cwd.trim().is_empty() {
                 runtime_session.cwd = core_state.workspace_dir().to_string();
             }
-            Ok((originally_pending, runtime_session))
+            Ok(runtime_session)
         })
         .await;
-    let (originally_pending, session_snapshot) = match state_prepare {
+    let session_snapshot = match state_prepare {
         Ok(value) => value,
         Err(error) => {
             abort_session_send(state, &session_id, revision, true).await;
@@ -1151,13 +1168,7 @@ async fn send_message_inner(
             if is_new_core {
                 state.take_core(&sid);
             }
-            let _ = restore_failed_user_message_state(
-                state,
-                &session_id,
-                &user_message_id,
-                originally_pending,
-            )
-            .await;
+            let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
             cleanup_unreferenced_draft_attachments(
                 state,
                 raw_attachments_for_paths(created_paths.clone()),
@@ -1172,13 +1183,7 @@ async fn send_message_inner(
         if is_new_core {
             state.take_core(&sid);
         }
-        let _ = restore_failed_user_message_state(
-            state,
-            &session_id,
-            &user_message_id,
-            originally_pending,
-        )
-        .await;
+        let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
         cleanup_unreferenced_draft_attachments(state, raw_attachments_for_paths(created_paths))
             .await;
         abort_session_send(state, &session_id, revision, true).await;
@@ -1218,7 +1223,7 @@ async fn send_message_inner(
 
     if is_new_core {
         let cancel_flag = get_cancel_flag(state, &sid);
-        start_stream_consumer(app, stream_rx, cancel_flag);
+        start_stream_consumer(app, sid, stream_rx, cancel_flag);
     }
 
     Ok(())
@@ -1248,7 +1253,6 @@ async fn restore_failed_user_message_state(
     state: &TiangongApp,
     session_id: &str,
     message_id: &str,
-    originally_pending: bool,
 ) -> Result<(), String> {
     state
         .with_state(|core_state| {
@@ -1264,12 +1268,9 @@ async fn restore_failed_user_message_state(
             {
                 session.messages.remove(index);
                 session.summary_up_to = session.summary_up_to.min(session.messages.len());
-                session.clear_runtime_content_for_message(message_id);
                 session.updated_at = tiangong_core::session::now_text();
             }
-            if !originally_pending {
-                core_state.clear_pending_turn_for(session_id);
-            }
+            core_state.remove_pending_message_for(session_id, message_id);
             core_state.persist_session_and_app(session_id)
         })
         .await
@@ -1286,8 +1287,12 @@ async fn attachment_capability_snapshot(
             Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
                 chat_multimodal,
                 analyze_attachment: !chat_multimodal
-                    && models.has_capability(ModelCapability::Multimodal),
-                audio_processor: models.has_capability(ModelCapability::Stt),
+                    && models
+                        .resolve_for_capability(ModelCapability::Multimodal)
+                        .is_some(),
+                audio_processor: models
+                    .resolve_for_capability(ModelCapability::Stt)
+                    .is_some(),
                 // 当前没有“视频内容分析”插件；视频生成能力不能冒充输入处理能力。
                 video_processor: false,
             })
@@ -1312,6 +1317,7 @@ fn get_cancel_flag(state: &TiangongApp, sid: &str) -> Arc<std::sync::atomic::Ato
 /// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
+    session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
     cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -1322,6 +1328,13 @@ pub(crate) fn start_stream_consumer(
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
         for session_event in stream_rx.iter() {
+            if !app
+                .state::<TiangongApp>()
+                .is_current_core_instance(&session_id, &cancel_flag)
+            {
+                // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
+                continue;
+            }
             let event = &session_event.event;
 
             // 取消时跳过文本增量事件，只处理终止事件
@@ -1337,8 +1350,14 @@ pub(crate) fn start_stream_consumer(
                 continue;
             }
 
-            // 先 emit 完整事件给前端，再解构
-            let _ = app.emit("stream_event", &session_event);
+            let terminal_event = matches!(
+                &session_event.event,
+                StreamEvent::Done { .. } | StreamEvent::Error { .. }
+            );
+            // 普通流事件立即转发；终态必须等 Core 权威会话重载完成后再对外发布。
+            if !terminal_event {
+                let _ = app.emit("stream_event", &session_event);
+            }
 
             let sid = session_event.session_id;
             let event = session_event.event;
@@ -1347,54 +1366,91 @@ pub(crate) fn start_stream_consumer(
 
             // 更新 session + RunStatus/usage
             let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
+                let accepted_message_id = match &event {
+                    StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
+                    _ => None,
+                };
+                let final_user_snapshot = matches!(
+                    &event,
+                    StreamEvent::SessionMessageUpsert { message, .. }
+                        if message.role == tiangong_core::session::MessageRole::User
+                            && message.turn_status.is_some()
+                );
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
                         StreamEvent::UserMessage {
                             message_id,
                             content,
-                            prepared_attachments,
+                            content_blocks,
                             media,
+                            model_excluded,
+                            pending_agent_deliveries,
                         } => {
-                            if prepared_attachments.is_empty() {
-                                // 旧入口兼容：仅在事件没有正式 PreparedAttachment 时
-                                // 使用 legacy media 回流。
-                                if let Some(message) = session
-                                    .messages
-                                    .iter_mut()
-                                    .find(|msg| msg.id == *message_id)
-                                {
-                                    let mut blocks =
-                                        vec![tiangong_types::message::ContentBlock::text(
-                                            content.clone(),
-                                        )];
-                                    for asset in media {
-                                        blocks.push(asset.to_content_block());
-                                    }
-                                    message.content = blocks;
-                                } else {
-                                    session.append_message_with_id_and_media(
-                                        message_id.clone(),
-                                        tiangong_core::session::MessageRole::User,
-                                        content.clone(),
-                                        String::new(),
-                                        media.clone(),
-                                    );
-                                }
+                            let prepared = if content_blocks.is_empty() {
+                                let mut blocks = vec![tiangong_types::message::ContentBlock::text(
+                                    content.clone(),
+                                )];
+                                blocks.extend(media.iter().map(|asset| asset.to_content_block()));
+                                tiangong_types::PreparedUserMessage::new(blocks).stable()
                             } else {
-                                let prepared = tiangong_types::PreparedUserMessage {
-                                    text: content.clone(),
-                                    persistent_attachments: prepared_attachments.clone(),
-                                    runtime_content: Vec::new(),
-                                };
-                                if !session
-                                    .update_prepared_user_message(message_id, prepared.clone())
+                                tiangong_types::PreparedUserMessage::new(content_blocks.clone())
+                                    .stable()
+                            };
+                            let existing = session
+                                .messages
+                                .iter()
+                                .position(|message| {
+                                    message.id == *message_id
+                                        && message.role == tiangong_core::session::MessageRole::User
+                                })
+                                .map(|index| session.messages.remove(index));
+                            if let Some(mut message) = existing {
+                                // 兼容旧 Core 的状态更新事件：没有稳定块和 media 时
+                                // 保留已同步内容，仅更新可见性并移动到轮次末尾。
+                                if !content_blocks.is_empty()
+                                    || !media.is_empty()
+                                    || message.content.is_empty()
+                                    || message.text_content() != *content
                                 {
-                                    session.append_prepared_user_message_with_id(
-                                        message_id.clone(),
-                                        prepared,
-                                    );
+                                    message.content = prepared.content;
                                 }
+                                message.model_excluded = *model_excluded;
+                                session.messages.push(message);
+                            } else {
+                                session.append_prepared_user_message_with_id(
+                                    message_id.clone(),
+                                    prepared,
+                                );
+                                session.set_message_model_excluded(message_id, *model_excluded);
                             }
+                            session.pending_agent_deliveries = pending_agent_deliveries.clone();
+                        }
+                        StreamEvent::SessionMessageUpsert {
+                            message,
+                            pending_agent_deliveries,
+                            deferred_tool_injections,
+                        } => {
+                            if let Some(existing) = session
+                                .messages
+                                .iter_mut()
+                                .find(|existing| existing.id == message.id)
+                            {
+                                *existing = message.clone();
+                            } else {
+                                session.messages.push(message.clone());
+                            }
+                            if let Some(deliveries) = pending_agent_deliveries {
+                                session.pending_agent_deliveries = deliveries.clone();
+                            }
+                            if let Some(injections) = deferred_tool_injections {
+                                session.deferred_tool_injections = injections.clone();
+                            }
+                        }
+                        StreamEvent::PendingAgentDeliveriesChanged { deliveries } => {
+                            session.pending_agent_deliveries = deliveries.clone();
+                        }
+                        StreamEvent::DeferredToolInjectionsChanged { injections } => {
+                            session.deferred_tool_injections = injections.clone();
                         }
                         StreamEvent::Delta {
                             message_id,
@@ -1472,47 +1528,22 @@ pub(crate) fn start_stream_consumer(
                         } => {
                             let persisted_output = full_output.as_deref().unwrap_or(output);
 
-                            // plugin_injection 注入结果：追加完整消息对（与 worker session 一致）
-                            if name == tiangong_core::react::message::INJECTION_TOOL_NAME {
-                                use tiangong_core::session::{Message, MessageRole};
-                                let tc_id = tool_call_id.clone().unwrap_or_default();
-                                let mut assistant_msg =
-                                    Message::new(MessageRole::Assistant, String::new());
-                                assistant_msg.tool_calls =
-                                    vec![tiangong_core::session::MessageToolCall {
-                                        id: tc_id.clone(),
-                                        name: name.clone(),
-                                        arguments: serde_json::json!({}),
-                                    }];
-                                session.messages.push(assistant_msg);
-                                append_tool_result_message(
-                                    session,
-                                    Some(&tc_id),
-                                    name,
-                                    persisted_output.to_string(),
-                                    !*ok,
-                                );
-                            } else {
-                                // 正常工具结果：只存标准 Tool result（不再写 System 摘要，避免重复）
-                                append_tool_result_message(
-                                    session,
-                                    tool_call_id.as_deref(),
-                                    name,
-                                    persisted_output.to_string(),
-                                    !*ok,
-                                );
-                            }
+                            // plugin_injection 的完整 Assistant+Tool 对由 SessionMessageUpsert
+                            // 先行同步；这里按 tool_call_id 原位更新，普通结果则追加。
+                            append_tool_result_message(
+                                session,
+                                tool_call_id.as_deref(),
+                                name,
+                                persisted_output.to_string(),
+                                !*ok,
+                            );
                             last_tool_args_summary.clear();
-                            let _ = core_state.persist_session_and_app(&sid);
                         }
                         StreamEvent::ApprovalNeeded { .. } => {
                             // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
                         }
                         StreamEvent::Error { ref message } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[错误] {message}"),
-                            );
+                            let _ = message;
                             assistant_msg_id = None;
                         }
                         StreamEvent::Retry {
@@ -1532,18 +1563,13 @@ pub(crate) fn start_stream_consumer(
                             // 仅更新状态栏（见下方状态映射），不写入对话消息列表
                         }
                         StreamEvent::AgentCreated {
-                            ref agent_id,
-                            ref role,
-                            ref label,
-                        } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[Agent] {label} ({role}) 已加入团队 id={agent_id}"),
-                            );
-                        }
+                            agent_id: _,
+                            role: _,
+                            label: _,
+                        } => {}
                         StreamEvent::AgentStatusChanged {
                             ref agent_id,
-                            ref label,
+                            label: _,
                             ref status,
                         } => {
                             if status == "terminated" {
@@ -1556,20 +1582,14 @@ pub(crate) fn start_stream_consumer(
                                 session.active_agent_id = None;
                                 session.active_agent_current_tokens = 0;
                             }
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!("[Agent] {label} 状态变更: {status} id={agent_id}"),
-                            );
                         }
                         StreamEvent::AgentNotification {
                             ref agent_label,
                             ref content,
                             ..
                         } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::Assistant,
-                                format_agent_reply_message(agent_label, content),
-                            );
+                            // 通知只更新运行状态；稳定对话消息由 Core 的精确快照负责。
+                            let _ = (agent_label, content);
                         }
                         StreamEvent::AgentMessage {
                             ref from_agent_id,
@@ -1578,13 +1598,12 @@ pub(crate) fn start_stream_consumer(
                             ref content,
                             ..
                         } => {
-                            if to_agent_id == "main" && from_agent_id != "user" {
-                                session.append_message(
-                                    tiangong_core::session::MessageRole::Assistant,
-                                    format_agent_reply_message(from_agent_label, content),
-                                );
-                            } else if from_agent_id == "user" {
+                            if from_agent_id == "user" {
                                 // 用户 @Agent 的原始输入已经作为用户消息存在，避免重复写入。
+                            } else if to_agent_id == "main" {
+                                // 最终回复由 SessionMessageUpsert 携带完整消息写入，避免宿主
+                                // 生成不同 ID 或丢失模型可见性标记。
+                                let _ = (from_agent_label, content);
                             }
                         }
                         StreamEvent::AgentOutput {
@@ -1642,13 +1661,26 @@ pub(crate) fn start_stream_consumer(
                             if *action == tiangong_types::stream::ContextCompressAction::Clear {
                                 session.context_summary = None;
                             }
-                            let _ = core_state.persist_session_and_app(&sid);
                         }
                         _ => {}
                     }
                 }
+                if let Some(message_id) = accepted_message_id {
+                    core_state.accept_pending_message_for(&sid, &message_id);
+                }
+                if final_user_snapshot {
+                    core_state.complete_accepted_turn_for(&sid);
+                }
                 // RunStatus/usage 更新
                 match &event {
+                    StreamEvent::UserMessage { .. } => {
+                        core_state.store.runtime.run.status =
+                            tiangong_core::runtime::RunStatus::Executing;
+                        core_state.store.runtime.run.summary = "正在处理".to_string();
+                        core_state.store.runtime.run.last_session_id = Some(sid.clone());
+                        core_state.store.runtime.run.updated_at =
+                            tiangong_core::session::now_text();
+                    }
                     StreamEvent::ApprovalNeeded {
                         ref request_id,
                         ref tool_name,
@@ -1712,8 +1744,17 @@ pub(crate) fn start_stream_consumer(
                         }
                     }
                     StreamEvent::Error { ref message } => {
-                        core_state.report_run_idle(format!("执行失败：{message}"));
-                        core_state.clear_pending_turn_for(&sid);
+                        if core_state.has_pending_turn_for(&sid) {
+                            core_state.store.runtime.run.status =
+                                tiangong_core::runtime::RunStatus::Executing;
+                            core_state.store.runtime.run.summary = "正在处理下一条消息".to_string();
+                            core_state.store.runtime.run.last_session_id = Some(sid.clone());
+                            core_state.store.runtime.run.updated_at =
+                                tiangong_core::session::now_text();
+                        } else {
+                            core_state.report_run_idle(format!("执行失败：{message}"));
+                            core_state.clear_pending_turn_for(&sid);
+                        }
                     }
                     StreamEvent::Retry {
                         attempt,
@@ -1823,8 +1864,8 @@ pub(crate) fn start_stream_consumer(
                 Ok(())
             }));
 
-            // emit run_snapshot
-            {
+            // 终态会在权威重载后发布最终快照；避免先暴露临时 reducer 镜像。
+            if !is_done && !is_error {
                 if let Ok(snapshot) =
                     rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
                         Ok(build_full_snapshot_with_status(
@@ -1853,13 +1894,16 @@ pub(crate) fn start_stream_consumer(
             }
 
             if is_done || is_error {
-                cancel_flag.store(false, Ordering::Release);
-
                 // Done：先持久化，再异步生成标题（不阻塞消费线程）
                 let final_sid = sid.clone();
 
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
                 let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
+                    // Core 是执行中会话的唯一真相。终态已经在 Core 完成清理和落盘后
+                    // 发出，此处整会话重载，覆盖宿主为流式展示构造的临时消息。
+                    if let Err(error) = core_state.reload_session_from_disk(&final_sid) {
+                        tracing::warn!(%error, session_id = %final_sid, "终态重载 Core 会话失败");
+                    }
                     let _ = core_state.persist_session_and_app(&final_sid);
                     let still_running = done_event_keeps_turn_running(
                         &event,
@@ -1909,6 +1953,14 @@ pub(crate) fn start_stream_consumer(
                     Ok(None)
                 }));
 
+                let _ = app.emit(
+                    "stream_event",
+                    &tiangong_types::SessionStreamEvent {
+                        session_id: final_sid.clone(),
+                        event: event.clone(),
+                    },
+                );
+
                 // 异步生成标题（不阻塞消费线程）
                 if let Ok(Some((input, provider_config))) = title_task {
                     let app_for_title = app.clone();
@@ -1931,8 +1983,10 @@ pub(crate) fn start_stream_consumer(
                                                 s.title = clean;
                                                 s.updated_at = tiangong_core::session::now_text();
                                             }
-                                            let _ =
-                                                core_state.persist_session_and_app(&sid_for_title);
+                                            if !core_state.has_pending_turn_for(&sid_for_title) {
+                                                let _ = core_state
+                                                    .persist_session_and_app(&sid_for_title);
+                                            }
                                             let snapshot = build_full_snapshot_with_status(
                                                 core_state,
                                                 active_session_is_executing(core_state),
@@ -1948,6 +2002,34 @@ pub(crate) fn start_stream_consumer(
                 }
                 // 不 break — 消费线程继续运行，等待下一轮消息的 StreamEvent
             }
+        }
+
+        let app_state = app.state::<TiangongApp>();
+        if app_state.remove_stopped_core(&session_id) {
+            let _ = rt.block_on(app_state.with_state(|core_state| {
+                if let Err(error) = core_state.reload_session_from_disk(&session_id) {
+                    tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
+                }
+                core_state.clear_pending_turn_for(&session_id);
+                core_state.report_run_idle("执行已中断：Core 事件流已关闭".to_string());
+                let _ = core_state.persist_session_and_app(&session_id);
+                let snapshot = build_full_snapshot_with_status(
+                    core_state,
+                    active_session_is_executing(core_state),
+                );
+                let _ = app.emit("run_snapshot", &snapshot);
+                let _ = app.emit("sessions_updated", &());
+                Ok(())
+            }));
+            let _ = app.emit(
+                "stream_event",
+                &tiangong_types::SessionStreamEvent {
+                    session_id,
+                    event: tiangong_types::StreamEvent::Error {
+                        message: "Core 事件流已关闭".to_string(),
+                    },
+                },
+            );
         }
     });
 }
@@ -2006,10 +2088,15 @@ pub async fn edit_and_resend(
 
     let capabilities = attachment_capability_snapshot(state.inner()).await?;
     let content_for_prepare = new_content.clone();
+    let message_id_for_prepare = message_id.clone();
     let (transaction, prepared) = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
-        let prepared = transaction.prepare_message(content_for_prepare, capabilities)?;
+        let prepared = transaction.prepare_message(
+            &message_id_for_prepare,
+            content_for_prepare,
+            capabilities,
+        )?;
         Ok::<_, String>((transaction, prepared))
     })
     .await
@@ -2018,11 +2105,7 @@ pub async fn edit_and_resend(
 
     // 附件准备可能很慢；在同一把 App 状态锁内做完整二次校验、修改和持久化。
     // 只有本步骤成功后才允许终止旧任务。
-    let prepared_for_state = tiangong_types::PreparedUserMessage {
-        text: prepared.text.clone(),
-        persistent_attachments: prepared.persistent_attachments.clone(),
-        runtime_content: Vec::new(),
-    };
+    let prepared_for_state = prepared.stable();
     let (original_session, originally_pending, session_snapshot) = state
         .with_state(|core_state| {
             let index = core_state
@@ -2048,14 +2131,10 @@ pub async fn edit_and_resend(
                 runtime_session.cwd = core_state.workspace_dir().to_string();
             }
 
-            core_state.mark_pending_turn_for(session_id.clone());
+            core_state.mark_pending_message_for(&session_id, &message_id);
             if let Err(error) = core_state.persist_session_and_app(&session_id) {
                 core_state.sessions_mut()[index] = original_session;
-                if originally_pending {
-                    core_state.mark_pending_turn_for(session_id.clone());
-                } else {
-                    core_state.clear_pending_turn_for(&session_id);
-                }
+                core_state.remove_pending_message_for(&session_id, &message_id);
                 let rollback_error = core_state.persist_session_and_app(&session_id).err();
                 return Err(match rollback_error {
                     Some(rollback_error) => anyhow::anyhow!(
@@ -2073,15 +2152,10 @@ pub async fn edit_and_resend(
         .messages
         .iter()
         .flat_map(|message| {
-            let prepared = message
-                .extract_prepared_attachments()
-                .into_iter()
-                .map(|attachment| attachment.local_path);
-            let legacy = message
+            message
                 .extract_media_assets()
                 .into_iter()
-                .map(|attachment| attachment.url);
-            prepared.chain(legacy)
+                .map(|asset| asset.url)
         })
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -2096,8 +2170,19 @@ pub async fn edit_and_resend(
     transaction.commit();
 
     // 最终校验及稳定消息落盘均成功后，才终止旧 Core。
-    state.cancel_core(&session_id);
-    state.take_core(&session_id);
+    if let Some(core) = state.take_core(&session_id) {
+        let _ = core.deliver(AgentInputKind::cancel());
+        match tokio::task::spawn_blocking(move || core.into_session()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, %session_id, "编辑重发前关闭旧 Core 失败"),
+            Err(error) => tracing::warn!(%error, %session_id, "编辑重发前等待旧 Core 失败"),
+        }
+        // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
+        // 此后已无旧写入者可覆盖。
+        state
+            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+            .await?;
+    }
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
     let (sid, is_new_core) = state
@@ -2172,7 +2257,7 @@ pub async fn edit_and_resend(
         .await;
     if is_new_core {
         let cancel_flag = get_cancel_flag(state.inner(), &sid);
-        start_stream_consumer(app, stream_rx, cancel_flag);
+        start_stream_consumer(app, sid, stream_rx, cancel_flag);
     }
 
     Ok(())
@@ -2246,7 +2331,9 @@ async fn ensure_active_context_core(app: AppHandle, state: &TiangongApp) -> Resu
             if session_snapshot.cwd.trim().is_empty() {
                 session_snapshot.cwd = core_state.workspace_dir().to_string();
             }
-            core_state.persist_session_and_app(&session_id)?;
+            if !core_state.has_pending_turn_for(&session_id) {
+                core_state.persist_session_and_app(&session_id)?;
+            }
             Ok((session_id, session_snapshot))
         })
         .await?;
@@ -2257,7 +2344,7 @@ async fn ensure_active_context_core(app: AppHandle, state: &TiangongApp) -> Resu
         .await;
     if is_new_core {
         let cancel_flag = get_cancel_flag(state, &sid);
-        start_stream_consumer(app, stream_rx, cancel_flag);
+        start_stream_consumer(app, sid.clone(), stream_rx, cancel_flag);
     }
     Ok(sid)
 }
@@ -3080,12 +3167,6 @@ async fn cleanup_unreferenced_draft_attachments(
                 for message in &session.messages {
                     paths.extend(
                         message
-                            .extract_prepared_attachments()
-                            .into_iter()
-                            .map(|item| item.local_path),
-                    );
-                    paths.extend(
-                        message
                             .extract_media_assets()
                             .into_iter()
                             .map(|item| item.url),
@@ -3132,15 +3213,10 @@ fn session_attachment_candidates(
         .messages
         .iter()
         .flat_map(|message| {
-            let prepared = message
-                .extract_prepared_attachments()
-                .into_iter()
-                .map(|attachment| attachment.local_path);
-            let legacy = message
+            message
                 .extract_media_assets()
                 .into_iter()
-                .map(|attachment| attachment.url);
-            prepared.chain(legacy)
+                .map(|asset| asset.url)
         })
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -4460,7 +4536,7 @@ pub async fn webhook_list_runs(
 
 #[cfg(test)]
 mod tests {
-    use super::done_event_keeps_turn_running;
+    use super::{append_tool_result_message, done_event_keeps_turn_running};
 
     #[test]
     fn empty_done_keeps_pending_turn_running() {
@@ -4470,11 +4546,11 @@ mod tests {
     }
 
     #[test]
-    fn final_done_with_usage_finishes_pending_turn() {
+    fn final_done_with_usage_keeps_queued_next_turn_running() {
         let event = tiangong_types::StreamEvent::Done {
             usage: Some(tiangong_types::TokenUsage::default()),
         };
-        assert!(!done_event_keeps_turn_running(&event, true));
+        assert!(done_event_keeps_turn_running(&event, true));
     }
 
     #[test]
@@ -4483,6 +4559,40 @@ mod tests {
             message: "failed".to_string(),
         };
         assert!(!done_event_keeps_turn_running(&event, true));
+    }
+
+    #[test]
+    fn tool_result_deduplication_is_scoped_to_the_latest_call_batch() {
+        use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session};
+
+        let mut session = Session::new("desktop-reused-tool-id");
+        for (round, result) in [("first", "old"), ("second", "new")] {
+            if round == "second" {
+                session.append_message(MessageRole::User, "next");
+            }
+            let mut assistant = Message::new(MessageRole::Assistant, String::new());
+            assistant.tool_calls = vec![MessageToolCall {
+                id: "reused".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            }];
+            session.messages.push(assistant);
+            append_tool_result_message(
+                &mut session,
+                Some("reused"),
+                "read_file",
+                result.to_string(),
+                false,
+            );
+        }
+
+        let results = session
+            .messages
+            .iter()
+            .filter(|message| message.tool_call_id.as_deref() == Some("reused"))
+            .map(Message::text_content)
+            .collect::<Vec<_>>();
+        assert_eq!(results, vec!["old", "new"]);
     }
 }
 

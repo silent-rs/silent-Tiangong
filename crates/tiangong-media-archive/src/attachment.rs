@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
-use tiangong_types::{
-    AttachmentHandlingMode, MediaKind, PreparedAttachment, PreparedUserMessage, RuntimeContent,
-};
+use tiangong_types::{ContentBlock, MediaKind, PreparedUserMessage, StoredAsset};
 
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -96,7 +94,7 @@ impl AttachmentStore {
 
         Ok(AttachmentTransaction {
             stored,
-            prepared: Vec::new(),
+            assets: Vec::new(),
             created_paths,
             finished: false,
         })
@@ -218,7 +216,7 @@ impl AttachmentStore {
 #[derive(Debug)]
 pub struct AttachmentTransaction {
     stored: Vec<StoredAttachment>,
-    prepared: Vec<PreparedAttachment>,
+    assets: Vec<StoredAsset>,
     created_paths: Vec<PathBuf>,
     finished: bool,
 }
@@ -228,8 +226,8 @@ impl AttachmentTransaction {
         &self.stored
     }
 
-    pub fn prepared(&self) -> &[PreparedAttachment] {
-        &self.prepared
+    pub fn assets(&self) -> &[StoredAsset] {
+        &self.assets
     }
 
     pub fn newly_created_paths(&self) -> &[PathBuf] {
@@ -239,13 +237,14 @@ impl AttachmentTransaction {
     /// 根据发送开始时捕获的能力快照生成持久内容与本轮运行内容。
     pub fn prepare_message(
         &mut self,
+        message_id: &str,
         text: impl Into<String>,
         capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<PreparedUserMessage, String> {
-        let result = self.build_prepared_message(text.into(), capabilities);
+        let result = self.build_prepared_message(message_id, text.into(), capabilities);
         match result {
-            Ok((message, prepared)) => {
-                self.prepared = prepared;
+            Ok((message, assets)) => {
+                self.assets = assets;
                 Ok(message)
             }
             Err(error) => {
@@ -270,74 +269,89 @@ impl AttachmentTransaction {
 
     fn build_prepared_message(
         &self,
+        message_id: &str,
         text: String,
         capabilities: AttachmentCapabilitySnapshot,
-    ) -> Result<(PreparedUserMessage, Vec<PreparedAttachment>), String> {
-        let mut prepared = Vec::with_capacity(self.stored.len());
-        let mut runtime_content = Vec::new();
+    ) -> Result<(PreparedUserMessage, Vec<StoredAsset>), String> {
+        if message_id.trim().is_empty() {
+            return Err("准备用户消息时 message_id 不能为空".to_string());
+        }
+        let mut content = Vec::with_capacity(1 + self.stored.len() * 2);
+        content.push(ContentBlock::Text { text });
+        let mut assets = Vec::with_capacity(self.stored.len());
 
-        for stored in &self.stored {
-            let (handling_mode, capability, capability_available) = match stored.kind {
-                MediaKind::Image if capabilities.chat_multimodal => {
-                    let bytes = fs::read(&stored.local_path)
-                        .map_err(|error| format!("读取内联图片失败：{error}"))?;
-                    ensure_size(bytes.len() as u64, "图片")?;
-                    runtime_content.push(RuntimeContent::InlineImage {
-                        asset_id: stored.asset_id.clone(),
-                        mime_type: stored.mime_type.clone(),
-                        data: general_purpose::STANDARD.encode(bytes),
-                    });
-                    (
-                        AttachmentHandlingMode::InlineImage,
-                        Some("chat_multimodal".to_string()),
-                        true,
-                    )
-                }
-                MediaKind::Image if capabilities.analyze_attachment => (
-                    AttachmentHandlingMode::AnalyzeWithPlugin,
-                    Some("analyze_attachment".to_string()),
-                    true,
-                ),
-                MediaKind::Image => {
-                    return Err(format!(
-                        "图片附件无法处理：对话模型和附件分析能力均不可用（{}）",
-                        stored.original_name
-                    ));
-                }
-                MediaKind::Audio => (
-                    AttachmentHandlingMode::FileReference,
-                    Some("audio_processor".to_string()),
-                    capabilities.audio_processor,
-                ),
-                MediaKind::Video => (
-                    AttachmentHandlingMode::FileReference,
-                    Some("video_processor".to_string()),
-                    capabilities.video_processor,
-                ),
-                MediaKind::File => (AttachmentHandlingMode::FileReference, None, true),
-            };
-
-            prepared.push(PreparedAttachment {
+        for (index, stored) in self.stored.iter().enumerate() {
+            let asset = StoredAsset {
                 asset_id: stored.asset_id.clone(),
                 local_path: stored.local_path.clone(),
                 original_name: stored.original_name.clone(),
                 mime_type: stored.mime_type.clone(),
                 size: stored.size,
                 kind: stored.kind,
-                handling_mode,
-                capability,
-                capability_available,
-            });
+            };
+
+            match stored.kind {
+                MediaKind::Image if capabilities.chat_multimodal => {
+                    let bytes = fs::read(&stored.local_path)
+                        .map_err(|error| format!("读取内联图片失败：{error}"))?;
+                    ensure_size(bytes.len() as u64, "图片")?;
+                    content.push(ContentBlock::Image {
+                        asset: asset.clone(),
+                        data: Some(general_purpose::STANDARD.encode(bytes)),
+                    });
+                }
+                MediaKind::Image if capabilities.analyze_attachment => {
+                    content.push(ContentBlock::AssetReference {
+                        asset: asset.clone(),
+                    });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: analyze_attachment_instruction(message_id, index, &asset),
+                    });
+                }
+                MediaKind::Image => {
+                    return Err(format!(
+                        "图片附件无法处理：对话模型和附件分析能力均不可用（{}）",
+                        stored.original_name
+                    ));
+                }
+                MediaKind::Audio => {
+                    content.push(ContentBlock::AssetReference {
+                        asset: asset.clone(),
+                    });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: audio_attachment_instruction(
+                            index,
+                            &asset,
+                            capabilities.audio_processor,
+                        ),
+                    });
+                }
+                MediaKind::Video => {
+                    content.push(ContentBlock::AssetReference {
+                        asset: asset.clone(),
+                    });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: video_attachment_instruction(
+                            index,
+                            &asset,
+                            capabilities.video_processor,
+                        ),
+                    });
+                }
+                MediaKind::File => {
+                    content.push(ContentBlock::AssetReference {
+                        asset: asset.clone(),
+                    });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: file_attachment_instruction(index, &asset),
+                    });
+                }
+            }
+
+            assets.push(asset);
         }
 
-        Ok((
-            PreparedUserMessage {
-                text,
-                persistent_attachments: prepared.clone(),
-                runtime_content,
-            },
-            prepared,
-        ))
+        Ok((PreparedUserMessage::new(content), assets))
     }
 
     fn rollback_in_place(&mut self) -> Result<(), String> {
@@ -347,6 +361,68 @@ impl AttachmentTransaction {
         cleanup_paths(&self.created_paths)?;
         self.finished = true;
         Ok(())
+    }
+}
+
+fn asset_notice_item(index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "index={index} asset_id={} kind={:?} name={} mime_type={} size={} path={}",
+        asset.asset_id,
+        asset.kind,
+        asset.original_name,
+        asset.mime_type,
+        asset.size,
+        asset.local_path,
+    )
+}
+
+fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={message_id}，并指定 attachment_index={index}。\n- {}",
+        asset_notice_item(index, asset)
+    )
+}
+
+fn file_attachment_instruction(index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条用户消息包含文件引用，文件内容不会直接发送给模型。请使用文件工具、文档解析器或 Skill 按下列本地 path 处理。\n- {}",
+        asset_notice_item(index, asset)
+    )
+}
+
+fn audio_attachment_instruction(
+    index: usize,
+    asset: &StoredAsset,
+    capability_available: bool,
+) -> String {
+    if capability_available {
+        format!(
+            "本条用户消息包含音频引用。需要获取音频内容时，请调用 speech_to_text 工具，并将下列本地 path 作为 file_path。\n- {}",
+            asset_notice_item(index, asset)
+        )
+    } else {
+        format!(
+            "音频附件所需能力 speech_to_text 当前不可用；请保留附件引用并明确告知用户。\n- {}",
+            asset_notice_item(index, asset)
+        )
+    }
+}
+
+fn video_attachment_instruction(
+    index: usize,
+    asset: &StoredAsset,
+    capability_available: bool,
+) -> String {
+    if capability_available {
+        format!(
+            "本条用户消息包含视频引用。请使用已注册的视频处理能力按下列本地 path 处理。\n- {}",
+            asset_notice_item(index, asset)
+        )
+    } else {
+        format!(
+            "视频附件所需内容分析能力当前不可用；请保留附件引用并明确告知用户。\n- {}",
+            asset_notice_item(index, asset)
+        )
     }
 }
 
@@ -838,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_is_runtime_only() {
+    fn inline_image_is_a_final_image_block_with_stable_asset_data() {
         let root = TestRoot::new();
         let mut transaction = root
             .store()
@@ -851,6 +927,7 @@ mod tests {
             .unwrap();
         let message = transaction
             .prepare_message(
+                "message-inline",
                 "look",
                 AttachmentCapabilitySnapshot {
                     chat_multimodal: true,
@@ -859,37 +936,40 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(message.persistent_attachments.len(), 1);
-        assert!(
-            !message.persistent_attachments[0]
-                .local_path
-                .starts_with("data:")
-        );
-        assert_eq!(message.runtime_content.len(), 1);
-        match &message.runtime_content[0] {
-            RuntimeContent::InlineImage { data, .. } => {
+        assert_eq!(transaction.assets().len(), 1);
+        assert!(!transaction.assets()[0].local_path.starts_with("data:"));
+        assert_eq!(message.content.len(), 2);
+        match &message.content[1] {
+            ContentBlock::Image { asset, data } => {
+                assert_eq!(asset, &transaction.assets()[0]);
                 assert_eq!(
-                    general_purpose::STANDARD.decode(data).unwrap(),
+                    general_purpose::STANDARD
+                        .decode(data.as_ref().unwrap())
+                        .unwrap(),
                     b"png bytes"
                 );
             }
+            other => panic!("应生成最终 Image block，实际：{other:?}"),
         }
+        assert!(matches!(
+            &message.stable().content[1],
+            ContentBlock::Image { data: None, .. }
+        ));
     }
 
     #[test]
-    fn planner_applies_capability_matrix() {
+    fn planner_builds_analyzer_reference_with_exact_message_and_index() {
         let root = TestRoot::new();
         let mut analyze = root
             .store()
-            .store_batch(vec![data_attachment(
-                MediaKind::Image,
-                "analyze.png",
-                "image/png",
-                b"image",
-            )])
+            .store_batch(vec![
+                data_attachment(MediaKind::File, "context.txt", "text/plain", b"context"),
+                data_attachment(MediaKind::Image, "analyze.png", "image/png", b"image"),
+            ])
             .unwrap();
         let message = analyze
             .prepare_message(
+                "message-analyze",
                 "analyze",
                 AttachmentCapabilitySnapshot {
                     analyze_attachment: true,
@@ -897,12 +977,27 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            message.persistent_attachments[0].handling_mode,
-            AttachmentHandlingMode::AnalyzeWithPlugin
-        );
-        analyze.commit();
 
+        assert_eq!(analyze.assets().len(), 2);
+        assert!(matches!(
+            &message.content[3],
+            ContentBlock::AssetReference { asset }
+                if asset.original_name == "analyze.png"
+        ));
+        assert!(matches!(
+            &message.content[4],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("analyze_attachment")
+                    && text.contains("message_id=message-analyze")
+                    && text.contains("attachment_index=1")
+                    && text.contains("name=analyze.png")
+                    && text.contains("path=")
+        ));
+    }
+
+    #[test]
+    fn unavailable_image_rejects_and_rolls_back_the_batch() {
+        let root = TestRoot::new();
         let mut unavailable = root
             .store()
             .store_batch(vec![data_attachment(
@@ -914,10 +1009,19 @@ mod tests {
             .unwrap();
         assert!(
             unavailable
-                .prepare_message("fail", AttachmentCapabilitySnapshot::default())
+                .prepare_message(
+                    "message-unavailable",
+                    "fail",
+                    AttachmentCapabilitySnapshot::default()
+                )
                 .is_err()
         );
+        assert_eq!(file_count(&root.0), 0);
+    }
 
+    #[test]
+    fn reference_instructions_preserve_asset_order_and_capability_state() {
+        let root = TestRoot::new();
         let mut other = root
             .store()
             .store_batch(vec![
@@ -927,11 +1031,41 @@ mod tests {
             ])
             .unwrap();
         let message = other
-            .prepare_message("other", AttachmentCapabilitySnapshot::default())
+            .prepare_message(
+                "message-references",
+                "other",
+                AttachmentCapabilitySnapshot {
+                    audio_processor: true,
+                    video_processor: false,
+                    ..AttachmentCapabilitySnapshot::default()
+                },
+            )
             .unwrap();
-        assert!(message.persistent_attachments[0].capability_available);
-        assert!(!message.persistent_attachments[1].capability_available);
-        assert!(!message.persistent_attachments[2].capability_available);
+
+        assert_eq!(other.assets().len(), 3);
+        for (index, expected_name) in ["doc.txt", "voice.mp3", "clip.mp4"].iter().enumerate() {
+            let block_index = 1 + index * 2;
+            assert!(matches!(
+                &message.content[block_index],
+                ContentBlock::AssetReference { asset }
+                    if asset.original_name == *expected_name
+            ));
+        }
+        assert!(matches!(
+            &message.content[2],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("index=0") && text.contains("文件引用")
+        ));
+        assert!(matches!(
+            &message.content[4],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("index=1") && text.contains("speech_to_text")
+        ));
+        assert!(matches!(
+            &message.content[6],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("index=2") && text.contains("当前不可用")
+        ));
     }
 
     #[test]

@@ -9,6 +9,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -93,6 +95,7 @@ impl FetchPlugin {
             .ok_or_else(|| anyhow!("会话工作目录未注入，无法执行 web_fetch"))
     }
 
+    #[cfg(test)]
     pub(crate) fn dispatch(&self, call: &ToolCall) -> Option<ToolResult> {
         match call.name.as_str() {
             TOOL_WEB_FETCH => Some(match self.handle_web_fetch(call) {
@@ -103,16 +106,18 @@ impl FetchPlugin {
         }
     }
 
+    #[cfg(test)]
     fn handle_web_fetch(&self, call: &ToolCall) -> Result<ToolResult> {
         let request = WebFetchRequest::from_call(call)?;
         let base = self.base()?;
         let is_full_trust = self.is_full_trust();
+        let cancel = AtomicBool::new(false);
 
         // reqwest::blocking::Client 内部创建 tokio 运行时，在 async 上下文中 drop
         // 会 panic，用独立线程隔离（与原 core 实现一致）。
         std::thread::scope(|scope| {
             scope
-                .spawn(move || web_fetch_inner(request, &base, is_full_trust))
+                .spawn(move || web_fetch_inner(request, &base, is_full_trust, &cancel))
                 .join()
                 .map_err(|_| anyhow!("web_fetch 线程 panic"))?
         })
@@ -174,7 +179,9 @@ fn web_fetch_inner(
     request: WebFetchRequest,
     base: &Path,
     is_full_trust: bool,
+    cancel: &AtomicBool,
 ) -> Result<ToolResult> {
+    ensure_not_cancelled(cancel)?;
     let client = Client::builder()
         .timeout(Duration::from_millis(request.timeout_ms))
         .redirect(reqwest::redirect::Policy::none())
@@ -182,7 +189,12 @@ fn web_fetch_inner(
         .context("创建 web_fetch HTTP 客户端失败")?;
 
     let original_url = request.url.clone();
-    let response = fetch_with_redirects(&client, request.url.clone(), request.follow_redirects)?;
+    let response = fetch_with_redirects(
+        &client,
+        request.url.clone(),
+        request.follow_redirects,
+        cancel,
+    )?;
     let final_url = response.url().clone();
     let status = response.status();
     if !status.is_success() {
@@ -190,7 +202,9 @@ fn web_fetch_inner(
     }
 
     match request.mode {
-        FetchMode::Text => finish_text_fetch(request, original_url, final_url, status, response),
+        FetchMode::Text => {
+            finish_text_fetch(request, original_url, final_url, status, response, cancel)
+        }
         FetchMode::Download => finish_download(
             request,
             original_url,
@@ -199,6 +213,7 @@ fn web_fetch_inner(
             response,
             base,
             is_full_trust,
+            cancel,
         ),
     }
 }
@@ -209,10 +224,11 @@ fn finish_text_fetch(
     final_url: Url,
     status: StatusCode,
     mut response: Response,
+    cancel: &AtomicBool,
 ) -> Result<ToolResult> {
     let content_type = header_text(response.headers(), CONTENT_TYPE.as_str());
     ensure_text_content_type(&content_type)?;
-    let bytes = read_limited(&mut response, MAX_BODY_BYTES)?;
+    let bytes = read_limited(&mut response, MAX_BODY_BYTES, cancel)?;
     let bytes_read = bytes.len();
     let raw_text = String::from_utf8(bytes).context("响应体不是有效 UTF-8 文本")?;
     let extracted = extract_text(&raw_text, &content_type, request.extract_mode);
@@ -257,7 +273,9 @@ fn finish_download(
     mut response: Response,
     base: &Path,
     is_full_trust: bool,
+    cancel: &AtomicBool,
 ) -> Result<ToolResult> {
+    ensure_not_cancelled(cancel)?;
     if let Some(length) = response
         .headers()
         .get(CONTENT_LENGTH)
@@ -303,6 +321,10 @@ fn finish_download(
     let mut written = 0_u64;
     let mut buf = [0_u8; 16 * 1024];
     loop {
+        if let Err(error) = ensure_not_cancelled(cancel) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
         let n = response
             .read(&mut buf)
             .with_context(|| format!("读取下载响应失败：{}", final_url))?;
@@ -321,6 +343,10 @@ fn finish_download(
     file.flush()
         .with_context(|| format!("刷新下载临时文件失败：{}", temp_path.display()))?;
 
+    if let Err(error) = ensure_not_cancelled(cancel) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
     if request.overwrite && target.exists() {
         fs::remove_file(&target)
             .with_context(|| format!("删除旧下载文件失败：{}", target.display()))?;
@@ -360,8 +386,14 @@ fn finish_download(
     })
 }
 
-fn fetch_with_redirects(client: &Client, mut url: Url, follow_redirects: bool) -> Result<Response> {
+fn fetch_with_redirects(
+    client: &Client,
+    mut url: Url,
+    follow_redirects: bool,
+    cancel: &AtomicBool,
+) -> Result<Response> {
     for redirect_count in 0..=MAX_REDIRECTS {
+        ensure_not_cancelled(cancel)?;
         ensure_url_allowed(&url)?;
         let response = client
             .get(url.clone())
@@ -450,10 +482,11 @@ fn ensure_public_ip(ip: IpAddr, host: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_limited(response: &mut Response, limit: usize) -> Result<Vec<u8>> {
+fn read_limited(response: &mut Response, limit: usize, cancel: &AtomicBool) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = [0_u8; 16 * 1024];
     loop {
+        ensure_not_cancelled(cancel)?;
         let n = response.read(&mut buf).context("读取响应体失败")?;
         if n == 0 {
             break;
@@ -464,6 +497,14 @@ fn read_limited(response: &mut Response, limit: usize) -> Result<Vec<u8>> {
         out.extend_from_slice(&buf[..n]);
     }
     Ok(out)
+}
+
+fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<()> {
+    if cancel.load(Ordering::Acquire) {
+        Err(anyhow!("web_fetch 已取消"))
+    } else {
+        Ok(())
+    }
 }
 
 fn ensure_text_content_type(content_type: &str) -> Result<()> {
@@ -698,8 +739,51 @@ impl ToolOverrideHandler for FetchPlugin {
         call: &ToolCall,
         _session: &tiangong_core::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        let result = self.dispatch(call);
-        Box::pin(async move { result })
+        if call.name != TOOL_WEB_FETCH {
+            return Box::pin(async { None });
+        }
+        let prepared = WebFetchRequest::from_call(call)
+            .and_then(|request| Ok((request, self.base()?, self.is_full_trust())));
+        let (request, base, is_full_trust) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Box::pin(async move { Some(tool_error(TOOL_WEB_FETCH, error)) });
+            }
+        };
+
+        Box::pin(async move {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let _cancel_on_drop = FetchCancelOnDrop(cancel.clone());
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let worker = std::thread::Builder::new()
+                .name("tiangong-web-fetch".to_string())
+                .spawn(move || {
+                    let result = web_fetch_inner(request, &base, is_full_trust, &cancel)
+                        .unwrap_or_else(|error| tool_error(TOOL_WEB_FETCH, error));
+                    let _ = result_tx.send(result);
+                });
+            if let Err(error) = worker {
+                return Some(tool_error(
+                    TOOL_WEB_FETCH,
+                    anyhow!("启动 web_fetch 工作线程失败：{error}"),
+                ));
+            }
+            match result_rx.await {
+                Ok(result) => Some(result),
+                Err(_) => Some(tool_error(
+                    TOOL_WEB_FETCH,
+                    anyhow!("web_fetch 工作线程意外退出"),
+                )),
+            }
+        })
+    }
+}
+
+struct FetchCancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for FetchCancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
 

@@ -45,6 +45,189 @@ fn message_turn_metadata_backward_compatible() {
 }
 
 #[test]
+fn legacy_attachment_blocks_migrate_to_ready_content() {
+    let legacy = r#"{
+        "id":"legacy-message",
+        "role":"user",
+        "content":[
+            {"type":"text","text":"查看资源"},
+            {"type":"attachment","attachment":{
+                "asset_id":"inline-1",
+                "local_path":"/tmp/inline.png",
+                "original_name":"inline.png",
+                "mime_type":"image/png",
+                "size":4,
+                "kind":"image",
+                "handling_mode":"inline_image",
+                "capability":"chat_multimodal",
+                "capability_available":true
+            }},
+            {"type":"attachment","attachment":{
+                "asset_id":"resource-1",
+                "local_path":"/tmp/resource.png",
+                "original_name":"resource.png",
+                "mime_type":"image/png",
+                "size":8,
+                "kind":"image",
+                "handling_mode":"analyze_with_plugin",
+                "capability":"analyze_attachment",
+                "capability_available":true
+            }}
+        ],
+        "created_at":"2026-01-01 00:00:00"
+    }"#;
+
+    let message: Message = serde_json::from_str(legacy).unwrap();
+
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Image { asset, data: None } if asset.asset_id == "inline-1"
+    ));
+    assert!(matches!(
+        &message.content[2],
+        ContentBlock::AssetReference { asset } if asset.asset_id == "resource-1"
+    ));
+    assert!(matches!(
+        &message.content[3],
+        ContentBlock::ModelInstruction { text }
+            if text.contains("message_id=legacy-message")
+                && text.contains("attachment_index=1")
+                && text.contains("path=/tmp/resource.png")
+    ));
+    let migrated_json = serde_json::to_string(&message).unwrap();
+    assert!(!migrated_json.contains("handling_mode"));
+    assert!(!migrated_json.contains("analyze_attachment"));
+}
+
+#[test]
+fn legacy_user_media_migrates_but_assistant_media_remains_display_only() {
+    let user_json = r#"{
+        "id":"legacy-user",
+        "role":"user",
+        "content":"处理文件",
+        "media":[{"kind":"file","url":"/tmp/report.pdf","title":"report.pdf"}],
+        "created_at":"2026-01-01 00:00:00"
+    }"#;
+    let user: Message = serde_json::from_str(user_json).unwrap();
+    assert!(matches!(
+        &user.content[1],
+        ContentBlock::AssetReference { asset } if asset.local_path == "/tmp/report.pdf"
+    ));
+    assert!(matches!(
+        &user.content[2],
+        ContentBlock::ModelInstruction { text } if text.contains("path=/tmp/report.pdf")
+    ));
+
+    let assistant_json = r#"{
+        "id":"legacy-assistant",
+        "role":"assistant",
+        "content":"结果",
+        "media":[{"kind":"image","url":"/tmp/result.png"}],
+        "created_at":"2026-01-01 00:00:00"
+    }"#;
+    let assistant: Message = serde_json::from_str(assistant_json).unwrap();
+    assert!(matches!(
+        &assistant.content[1],
+        ContentBlock::Media { url, .. } if url == "/tmp/result.png"
+    ));
+}
+
+#[test]
+fn legacy_user_local_image_remains_a_sendable_image() {
+    let json = r#"{
+        "id":"legacy-image",
+        "role":"user",
+        "content":"查看图片",
+        "media":[{"kind":"image","url":"/tmp/history.png","title":"history.png"}],
+        "created_at":"2026-01-01 00:00:00"
+    }"#;
+
+    let message: Message = serde_json::from_str(json).unwrap();
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Image { asset, data: None }
+            if asset.local_path == "/tmp/history.png" && asset.mime_type == "image/png"
+    ));
+}
+
+#[test]
+fn legacy_user_data_url_is_redacted_during_migration() {
+    let legacy_payload = "VERY_LARGE_LEGACY_BASE64_PAYLOAD";
+    let json = format!(
+        r#"{{
+            "id":"legacy-data-url",
+            "role":"user",
+            "content":[
+                {{"type":"text","text":"处理旧图片"}},
+                {{"type":"media","kind":"image","url":"data:image/png;base64,{legacy_payload}"}},
+                {{"type":"attachment","attachment":{{
+                    "asset_id":"data:image/png;base64,{legacy_payload}",
+                    "local_path":"data:image/png;base64,{legacy_payload}",
+                    "original_name":"legacy.png",
+                    "mime_type":"image/png",
+                    "size":32,
+                    "kind":"image",
+                    "handling_mode":"inline_image"
+                }}}}
+            ],
+            "created_at":"2026-01-01 00:00:00"
+        }}"#
+    );
+
+    let message: Message = serde_json::from_str(&json).unwrap();
+    let migrated = serde_json::to_string(&message).unwrap();
+
+    assert!(!migrated.contains(legacy_payload));
+    assert!(migrated.contains("legacy-inline-data-unavailable"));
+    assert!(migrated.contains("重新上传"));
+    assert_eq!(message.extract_stored_assets().len(), 2);
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::AssetReference { asset }
+            if asset.asset_id.starts_with("legacy-")
+                && !asset.asset_id.contains(legacy_payload)
+    ));
+}
+
+#[test]
+fn new_content_blocks_redact_case_insensitive_inline_data_references_on_load() {
+    let secret = "SECRET_CASE_INSENSITIVE_BASE64";
+    let user_json = format!(
+        r#"{{
+            "id":"new-image-data-path",
+            "role":"user",
+            "content":[{{
+                "type":"image",
+                "asset":{{
+                    "asset_id":"asset-1",
+                    "local_path":"DATA:image/png;base64,{secret}",
+                    "original_name":"image.png",
+                    "mime_type":"image/png",
+                    "size":4,
+                    "kind":"image"
+                }}
+            }}],
+            "created_at":"2026-01-01 00:00:00"
+        }}"#
+    );
+    let assistant_json = format!(
+        r#"{{
+            "id":"assistant-data-media",
+            "role":"assistant",
+            "content":[{{"type":"media","kind":"image","url":"DaTa:image/png;base64,{secret}"}}],
+            "created_at":"2026-01-01 00:00:00"
+        }}"#
+    );
+
+    for json in [user_json, assistant_json] {
+        let message: Message = serde_json::from_str(&json).unwrap();
+        let stable_json = serde_json::to_string(&message).unwrap();
+        assert!(!stable_json.contains(secret));
+        assert!(stable_json.contains("inline-data-reference-unavailable"));
+    }
+}
+
+#[test]
 fn session_new() {
     let session = Session::new("测试");
     assert_eq!(session.title, "测试");
@@ -169,26 +352,31 @@ fn stream_event_serde() {
 }
 
 #[test]
-fn user_message_event_preserves_prepared_attachments_and_accepts_legacy_media_only_json() {
+fn user_message_event_preserves_content_blocks_without_serializing_image_data() {
+    let asset = StoredAsset {
+        asset_id: "asset-1".into(),
+        local_path: "/tmp/image.png".into(),
+        original_name: "image.png".into(),
+        mime_type: "image/png".into(),
+        size: 4,
+        kind: MediaKind::Image,
+    };
     let event = StreamEvent::UserMessage {
-        message_id: "msg-attachment".into(),
-        content: "查看附件".into(),
-        prepared_attachments: vec![PreparedAttachment {
-            asset_id: "asset-1".into(),
-            local_path: "/tmp/image.png".into(),
-            original_name: "image.png".into(),
-            mime_type: "image/png".into(),
-            size: 4,
-            kind: MediaKind::Image,
-            handling_mode: AttachmentHandlingMode::AnalyzeWithPlugin,
-            capability: Some("analyze_attachment".into()),
-            capability_available: true,
+        message_id: "msg-resource".into(),
+        content: "查看资源".into(),
+        content_blocks: vec![ContentBlock::Image {
+            asset,
+            data: Some("SECRET_BASE64".into()),
         }],
         media: Vec::new(),
+        model_excluded: true,
+        pending_agent_deliveries: Vec::new(),
     };
     let json = serde_json::to_string(&event).unwrap();
-    assert!(json.contains("prepared_attachments"));
-    assert!(json.contains("analyze_with_plugin"));
+    assert!(json.contains("content_blocks"));
+    assert!(json.contains("/tmp/image.png"));
+    assert!(!json.contains("SECRET_BASE64"));
+    assert!(json.contains("\"model_excluded\":true"));
 
     let legacy = r#"{
         "type":"user_message",
@@ -199,12 +387,14 @@ fn user_message_event_preserves_prepared_attachments_and_accepts_legacy_media_on
     let parsed: StreamEvent = serde_json::from_str(legacy).unwrap();
     match parsed {
         StreamEvent::UserMessage {
-            prepared_attachments,
+            content_blocks,
             media,
+            model_excluded,
             ..
         } => {
-            assert!(prepared_attachments.is_empty());
+            assert!(content_blocks.is_empty());
             assert_eq!(media.len(), 1);
+            assert!(!model_excluded);
         }
         _ => panic!("应反序列化为 UserMessage"),
     }

@@ -12,12 +12,12 @@ export function ContentMedia({ message }: { message: MessageItem }) {
         mime_type: block.mime_type,
       }];
     }
-    if (block.type === "attachment") {
+    if (block.type === "asset_reference" || block.type === "image") {
       return [{
-        kind: block.attachment.kind,
-        url: block.attachment.local_path,
-        title: block.attachment.original_name,
-        mime_type: block.attachment.mime_type,
+        kind: block.asset.kind,
+        url: block.asset.local_path,
+        title: block.asset.original_name,
+        mime_type: block.asset.mime_type,
       }];
     }
     return [];
@@ -31,6 +31,9 @@ export function ContentMedia({ message }: { message: MessageItem }) {
   return (
     <div className="space-y-2 my-2">
       {allMedia.map((asset, index) => {
+        if (asset.url === "<legacy-inline-data-unavailable>") {
+          return <div key={`${message.id}-media-${index}`} className="text-sm text-muted-foreground">旧附件无法安全恢复，请重新上传。</div>;
+        }
         const src = resolveAssetUrl(asset.url);
         if (asset.kind === "image") {
           return <img key={`${message.id}-media-${index}`} src={src} alt={asset.title || "生成的图片"} className="max-w-full max-h-96 rounded-md cursor-pointer hover:opacity-90 transition-opacity" loading="lazy" />;

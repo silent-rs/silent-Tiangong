@@ -44,3 +44,24 @@ fn report_run_helpers_preserve_existing_snapshot_fields() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn pending_messages_keep_queued_next_turn_after_current_completion() -> Result<()> {
+    with_isolated_state("tiangong-pending-message-state", |_paths, state| {
+        let session_id = state.active_session_id().to_string();
+        state.mark_pending_message_for(&session_id, "message-a");
+        state.accept_pending_message_for(&session_id, "message-a");
+        state.mark_pending_message_for(&session_id, "message-b");
+
+        assert!(state.has_active_turn_for(&session_id));
+        state.complete_accepted_turn_for(&session_id);
+        assert!(state.has_pending_turn_for(&session_id));
+        assert!(!state.has_active_turn_for(&session_id));
+
+        state.accept_pending_message_for(&session_id, "message-b");
+        assert!(state.has_active_turn_for(&session_id));
+        state.complete_accepted_turn_for(&session_id);
+        assert!(!state.has_pending_turn_for(&session_id));
+        Ok(())
+    })
+}

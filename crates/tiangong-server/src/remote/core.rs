@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+#[cfg(test)]
 use std::time::Duration;
 
 use crate::api::SharedState;
@@ -33,6 +34,7 @@ pub struct ServerCoreManager {
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
     session_operation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    session_wait_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     /// 串行全局配置刷新与新 Core 安装，避免新实例错过刚完成的配置更新。
     config_update_lock: Arc<AsyncMutex<()>>,
     core_attachment_capabilities: Arc<Mutex<HashMap<String, AttachmentCapabilitySnapshot>>>,
@@ -54,6 +56,7 @@ impl ServerCoreManager {
             mcp_plugin,
             cores: Arc::new(Mutex::new(HashMap::new())),
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
+            session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
             core_attachment_capabilities: Arc::new(Mutex::new(HashMap::new())),
             trackers: Arc::new(Mutex::new(HashMap::new())),
@@ -115,6 +118,17 @@ impl ServerCoreManager {
             .clone()
     }
 
+    fn session_wait_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = match self.session_wait_locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
     pub async fn send_connector_message_and_wait(
         &self,
         connector: &str,
@@ -130,7 +144,8 @@ impl ServerCoreManager {
             .await
     }
 
-    /// 发送消息到 core（不等结果），适用于定时任务等触发场景
+    /// 发送消息到 Core。所有入口都串行到当前轮次真正结束，避免后台消息在等待型
+    /// 请求执行期间被吸收到同一轮、导致回复归属错乱。
     pub async fn send_message(
         &self,
         requested_session_id: &str,
@@ -138,22 +153,9 @@ impl ServerCoreManager {
         message_id: Option<String>,
         media: Vec<MediaAsset>,
     ) -> Result<()> {
-        let requested_session_id = normalize_session_id(requested_session_id)?;
-        let session_lock = self.session_operation_lock(&requested_session_id);
-        let _session_guard = session_lock.lock().await;
-        let (session_id, capabilities) = self.ensure_core_locked(&requested_session_id).await?;
-        let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-        let (transaction, prepared) = self
-            .prepare_user_message(content, media, capabilities)
+        let _ = self
+            .send_message_and_wait(requested_session_id, content, message_id, media)
             .await?;
-        let receipt = match self.enqueue_prepared(&session_id, &msg_id, prepared) {
-            Ok(receipt) => receipt,
-            Err(error) => return Err(error),
-        };
-        let created_paths = commit_enqueued_attachment_transaction(transaction);
-        if let Err(error) = receipt.await_persisted().await {
-            return Err(attachment_delivery_failure(error, &created_paths));
-        }
         Ok(())
     }
 
@@ -165,6 +167,11 @@ impl ServerCoreManager {
         media: Vec<MediaAsset>,
     ) -> Result<(String, OutgoingMessage)> {
         let requested_session_id = normalize_session_id(requested_session_id)?;
+        // 一个 Core 执行可吸收运行中追加消息但只产生一个终态；等待型入口按会话
+        // 串行到终态，确保每个调用拿到与自身消息对应的回复。DELETE 使用独立锁，
+        // 仍可随时取消正在等待的 Core。
+        let wait_lock = self.session_wait_lock(&requested_session_id);
+        let _wait_guard = wait_lock.lock().await;
         let session_lock = self.session_operation_lock(&requested_session_id);
         let session_guard = session_lock.lock().await;
         let (session_id, capabilities) = self.ensure_core_locked(&requested_session_id).await?;
@@ -172,7 +179,7 @@ impl ServerCoreManager {
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
         // 附件准备成功后才登记 waiter，准备失败不会污染 tracker。
         let (transaction, prepared) = self
-            .prepare_user_message(content, media, capabilities)
+            .prepare_user_message(msg_id.clone(), content, media, capabilities)
             .await?;
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
@@ -205,8 +212,18 @@ impl ServerCoreManager {
             }
         };
         let response = match outcome {
-            TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await,
-            TurnOutcome::Failed(message) => return Err(anyhow!(message)),
+            TurnOutcome::Completed => self.last_assistant_outgoing(&session_id).await.0,
+            TurnOutcome::Failed(message) => {
+                let (response, is_direct_agent_reply) =
+                    self.last_assistant_outgoing(&session_id).await;
+                if is_direct_agent_reply {
+                    // @Agent 的业务失败/定向取消已经生成可交付说明；会话轮次仍记录为
+                    // failed/cancelled，但远程用户不能因为终态是 Error 而看不到说明。
+                    response
+                } else {
+                    return Err(anyhow!(message));
+                }
+            }
         };
 
         Ok((session_id, response))
@@ -273,6 +290,7 @@ impl ServerCoreManager {
 
     async fn prepare_user_message(
         &self,
+        message_id: String,
         content: String,
         media: Vec<MediaAsset>,
         capabilities: AttachmentCapabilitySnapshot,
@@ -280,7 +298,7 @@ impl ServerCoreManager {
         let raw = media.into_iter().map(raw_attachment_from_media).collect();
         let media_root = tiangong_app_state::app_state::storage_root().join("media");
         tokio::task::spawn_blocking(move || {
-            prepare_user_message_blocking(media_root, raw, content, capabilities)
+            prepare_user_message_blocking(media_root, raw, message_id, content, capabilities)
         })
         .await
         .map_err(|error| anyhow!("附件准备任务失败：{error}"))?
@@ -315,8 +333,23 @@ impl ServerCoreManager {
             resolve_explicit_session(state.sessions(), &session_id)?;
         }
 
-        // 先检查是否已有 core（不持有锁跨 await）。
-        if self.cores.lock().unwrap().contains_key(&session_id) {
+        // 先检查是否已有可用 Core；事件流已关闭的僵尸实例必须先移除再重建。
+        let has_live_core = {
+            let mut cores = self.cores.lock().unwrap();
+            match cores.get(&session_id) {
+                Some(core) if !core.is_stopped() => true,
+                Some(_) => {
+                    cores.remove(&session_id);
+                    self.core_attachment_capabilities
+                        .lock()
+                        .unwrap()
+                        .remove(&session_id);
+                    false
+                }
+                None => false,
+            }
+        };
+        if has_live_core {
             let capabilities = self
                 .core_attachment_capabilities
                 .lock()
@@ -340,7 +373,22 @@ impl ServerCoreManager {
 
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
-        if self.cores.lock().unwrap().contains_key(&session_id) {
+        let has_live_core = {
+            let mut cores = self.cores.lock().unwrap();
+            match cores.get(&session_id) {
+                Some(core) if !core.is_stopped() => true,
+                Some(_) => {
+                    cores.remove(&session_id);
+                    self.core_attachment_capabilities
+                        .lock()
+                        .unwrap()
+                        .remove(&session_id);
+                    false
+                }
+                None => false,
+            }
+        };
+        if has_live_core {
             let capabilities = self
                 .core_attachment_capabilities
                 .lock()
@@ -522,9 +570,12 @@ impl ServerCoreManager {
         thread::spawn(move || {
             for session_event in stream_rx {
                 let event = session_event.event;
-                tracker.observe_event(&event);
                 sync_stream_event_to_state(&state, &event_bus, &session_id, &event);
+                // 终态先完成 Core 权威会话重载，再唤醒等待者；否则等待线程可能读到
+                // 尚未提交的流式镜像。
+                tracker.observe_event(&event);
             }
+            tracker.fail_all("Core 事件流已关闭");
         });
     }
 
@@ -536,53 +587,103 @@ impl ServerCoreManager {
             .clone()
     }
 
-    async fn last_assistant_outgoing(&self, session_id: &str) -> OutgoingMessage {
+    async fn last_assistant_outgoing(&self, session_id: &str) -> (OutgoingMessage, bool) {
         let state = self.state.lock().await;
         let Some(session) = state
             .sessions()
             .iter()
             .find(|session| session.id == session_id)
         else {
-            return text_outgoing("处理完成");
+            return (text_outgoing("处理完成"), false);
         };
 
-        let last_user_index = session
-            .messages
-            .iter()
-            .rposition(|message| message.role == MessageRole::User)
-            .unwrap_or(0);
-        let mut latest_text = String::new();
-        let mut latest_media: Option<MediaAsset> = None;
-        for message in session.messages.iter().skip(last_user_index + 1) {
-            if message.role != MessageRole::Assistant {
-                continue;
+        assistant_outgoing_after_last_user(session)
+    }
+}
+
+fn assistant_outgoing_after_last_user(session: &Session) -> (OutgoingMessage, bool) {
+    let last_user_index = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == MessageRole::User)
+        .unwrap_or(0);
+    let assistant_messages = session
+        .messages
+        .iter()
+        .skip(last_user_index + 1)
+        .filter(|message| message.role == MessageRole::Assistant)
+        .collect::<Vec<_>>();
+    let has_direct_agent_reply = assistant_messages.iter().any(|message| {
+        message.model_excluded
+            && message
+                .worker_id
+                .as_deref()
+                .is_some_and(|worker_id| worker_id.starts_with("agent:"))
+    });
+    let selected = assistant_messages.into_iter().filter(|message| {
+        !has_direct_agent_reply
+            || (message.model_excluded
+                && message
+                    .worker_id
+                    .as_deref()
+                    .is_some_and(|worker_id| worker_id.starts_with("agent:")))
+    });
+    let mut texts = Vec::new();
+    let mut media_items = Vec::new();
+    for message in selected {
+        let text = message.text_content();
+        if !text.trim().is_empty() {
+            if has_direct_agent_reply {
+                texts.push(text);
+            } else {
+                texts.clear();
+                texts.push(text);
             }
-            let text = message.text_content();
-            if !text.trim().is_empty() {
-                latest_text = text;
-            }
-            for block in &message.content {
-                if let tiangong_types::ContentBlock::Media { kind, url, .. } = block {
-                    latest_media = Some(MediaAsset {
+        }
+        for block in &message.content {
+            match block {
+                tiangong_types::ContentBlock::Media {
+                    kind,
+                    url,
+                    mime_type,
+                    title,
+                } => {
+                    media_items.push(MediaAsset {
                         kind: *kind,
                         url: url.clone(),
-                        mime_type: None,
-                        title: None,
+                        mime_type: mime_type.clone(),
+                        title: title.clone(),
                         capability: None,
                     });
                 }
+                tiangong_types::ContentBlock::Image { asset, .. }
+                | tiangong_types::ContentBlock::AssetReference { asset } => {
+                    media_items.push(MediaAsset {
+                        kind: asset.kind,
+                        url: asset.local_path.clone(),
+                        mime_type: Some(asset.mime_type.clone()),
+                        title: Some(asset.original_name.clone()),
+                        capability: None,
+                    });
+                }
+                tiangong_types::ContentBlock::Text { .. }
+                | tiangong_types::ContentBlock::ModelInstruction { .. } => {}
             }
         }
+    }
+    let latest_text = texts.join("\n\n");
 
-        if let Some(media) = latest_media {
-            return media_outgoing(media, latest_text);
-        }
+    if !media_items.is_empty() {
+        return (
+            media_outgoing(media_items, latest_text),
+            has_direct_agent_reply,
+        );
+    }
 
-        if latest_text.trim().is_empty() {
-            text_outgoing("处理完成")
-        } else {
-            text_outgoing(latest_text)
-        }
+    if latest_text.trim().is_empty() {
+        (text_outgoing("处理完成"), has_direct_agent_reply)
+    } else {
+        (text_outgoing(latest_text), has_direct_agent_reply)
     }
 }
 
@@ -660,11 +761,12 @@ fn resolve_explicit_session(
 fn prepare_user_message_blocking(
     media_root: std::path::PathBuf,
     raw: Vec<RawAttachment>,
+    message_id: String,
     content: String,
     capabilities: AttachmentCapabilitySnapshot,
 ) -> std::result::Result<(AttachmentTransaction, PreparedUserMessage), String> {
     let mut transaction = AttachmentStore::new(media_root).store_batch(raw)?;
-    let prepared = transaction.prepare_message(content, capabilities)?;
+    let prepared = transaction.prepare_message(&message_id, content, capabilities)?;
     Ok((transaction, prepared))
 }
 
@@ -710,13 +812,27 @@ fn remote_session_title(connector: &str, channel_id: &str) -> String {
 fn text_outgoing(text: impl Into<String>) -> OutgoingMessage {
     OutgoingMessage {
         content: MessageContent::Text(text.into()),
+        attachments: Vec::new(),
         reply_to: None,
     }
 }
 
-fn media_outgoing(media: MediaAsset, caption: String) -> OutgoingMessage {
-    let caption = (!caption.trim().is_empty()).then_some(caption);
-    let content = match media.kind {
+fn media_outgoing(media: Vec<MediaAsset>, caption: String) -> OutgoingMessage {
+    let mut media = media.into_iter();
+    let first = media.next().expect("media_outgoing 至少需要一个媒体项");
+    let content = media_content(first, (!caption.trim().is_empty()).then_some(caption));
+    let attachments = media
+        .map(|media| media_content(media, None))
+        .collect::<Vec<_>>();
+    OutgoingMessage {
+        content,
+        attachments,
+        reply_to: None,
+    }
+}
+
+fn media_content(media: MediaAsset, caption: Option<String>) -> MessageContent {
+    match media.kind {
         MediaKind::Image => MessageContent::Image {
             url: media.url,
             caption,
@@ -733,10 +849,6 @@ fn media_outgoing(media: MediaAsset, caption: String) -> OutgoingMessage {
             name: media.title.unwrap_or_else(|| "文件".to_string()),
             url: media.url,
         },
-    };
-    OutgoingMessage {
-        content,
-        reply_to: None,
     }
 }
 
@@ -804,31 +916,37 @@ impl ExecutionTracker {
     }
 
     fn wait_for_turn(&self, turn_id: u64) -> TurnOutcome {
-        let timeout = Duration::from_secs(300);
         let mut state = self.state.lock().unwrap();
-        let deadline = std::time::Instant::now() + timeout;
         loop {
             if let Some(outcome) = state.outcomes.remove(&turn_id) {
                 return outcome;
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                remove_turn_state(&mut state, turn_id);
-                return TurnOutcome::Failed("执行超时（300 秒）".to_string());
-            }
-            match self.notify.wait_timeout(state, remaining) {
-                Ok((guard, timed_out)) => {
-                    state = guard;
-                    if timed_out.timed_out() {
-                        remove_turn_state(&mut state, turn_id);
-                        return TurnOutcome::Failed("执行超时（300 秒）".to_string());
-                    }
-                }
+            match self.notify.wait(state) {
+                Ok(guard) => state = guard,
                 Err(poisoned) => {
-                    state = poisoned.into_inner().0;
+                    state = poisoned.into_inner();
                 }
             }
         }
+    }
+
+    fn fail_all(&self, message: &str) {
+        let mut state = self.state.lock().unwrap();
+        let mut turn_ids = state
+            .pending_by_message
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        turn_ids.extend(state.active_turns.iter().copied());
+        state.pending_by_message.clear();
+        state.active_turns.clear();
+        for turn_id in turn_ids {
+            state
+                .outcomes
+                .entry(turn_id)
+                .or_insert_with(|| TurnOutcome::Failed(message.to_string()));
+        }
+        self.notify.notify_all();
     }
 
     #[cfg(test)]
@@ -855,8 +973,26 @@ fn sync_stream_event_to_state(
     event: &StreamEvent,
 ) {
     let mut state = state.blocking_lock();
-    let mut should_persist = false;
-    let mut completion_event: Option<bool> = None;
+    let completion_event = match event {
+        StreamEvent::Done { .. } => Some(true),
+        StreamEvent::Error { .. } => Some(false),
+        _ => None,
+    };
+
+    if let Some(success) = completion_event {
+        // Core 只会在最终会话状态落盘后发送终态。此时整会话重载，保留宿主累计的
+        // token 指标并覆盖流式 reducer 生成的临时/近似消息。
+        if let Err(error) = state.reload_session_from_disk(session_id) {
+            tracing::warn!(%error, %session_id, "终态重载 Core 会话失败");
+        }
+        let _ = state.persist_session(session_id);
+        drop(state);
+        event_bus.publish(TiangongEvent::TurnCompleted {
+            session_id: session_id.to_string(),
+            success,
+        });
+        return;
+    }
 
     let Some(session) = state.sessions_mut().iter_mut().find(|s| s.id == session_id) else {
         return;
@@ -866,11 +1002,47 @@ fn sync_stream_event_to_state(
         StreamEvent::UserMessage {
             message_id,
             content,
-            prepared_attachments,
+            content_blocks,
             media,
+            model_excluded,
+            pending_agent_deliveries,
         } => {
-            should_persist =
-                apply_user_message_event(session, message_id, content, prepared_attachments, media);
+            apply_user_message_event(
+                session,
+                message_id,
+                content,
+                content_blocks,
+                media,
+                *model_excluded,
+            );
+            session.pending_agent_deliveries = pending_agent_deliveries.clone();
+        }
+        StreamEvent::SessionMessageUpsert {
+            message,
+            pending_agent_deliveries,
+            deferred_tool_injections,
+        } => {
+            if let Some(existing) = session
+                .messages
+                .iter_mut()
+                .find(|existing| existing.id == message.id)
+            {
+                *existing = message.clone();
+            } else {
+                session.messages.push(message.clone());
+            }
+            if let Some(deliveries) = pending_agent_deliveries {
+                session.pending_agent_deliveries = deliveries.clone();
+            }
+            if let Some(injections) = deferred_tool_injections {
+                session.deferred_tool_injections = injections.clone();
+            }
+        }
+        StreamEvent::PendingAgentDeliveriesChanged { deliveries } => {
+            session.pending_agent_deliveries = deliveries.clone();
+        }
+        StreamEvent::DeferredToolInjectionsChanged { injections } => {
+            session.deferred_tool_injections = injections.clone();
         }
         StreamEvent::Delta {
             message_id,
@@ -941,80 +1113,53 @@ fn sync_stream_event_to_state(
             if let Some(context_limit_tokens) = context_limit_tokens {
                 session.context_limit_tokens = *context_limit_tokens;
             }
-            should_persist = true;
         }
-        StreamEvent::ApprovalNeeded { .. } => {
-            session.append_message(
-                MessageRole::System,
-                "[Server 模式已强制 full_trust，不应进入审批状态]".to_string(),
-            );
-            should_persist = true;
-            completion_event = Some(false);
+        StreamEvent::ApprovalNeeded { .. } => {}
+        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
+            unreachable!("终态已在会话借用前处理")
         }
-        StreamEvent::Done { .. } => {
-            should_persist = true;
-            completion_event = Some(true);
-        }
-        StreamEvent::Error { message } => {
-            session.append_message(MessageRole::System, format!("[错误] {message}"));
-            should_persist = true;
-            completion_event = Some(false);
-        }
-        StreamEvent::Retry {
-            message,
-            attempt,
-            max_attempts,
-        } => {
-            session.append_message(
-                MessageRole::System,
-                format!("[重试] ({attempt}/{max_attempts}) {message}"),
-            );
-        }
+        StreamEvent::Retry { .. } => {}
         _ => {}
     }
-
-    if should_persist {
-        let _ = state.persist_session(session_id);
-    }
     drop(state);
-
-    if let Some(success) = completion_event {
-        event_bus.publish(TiangongEvent::TurnCompleted {
-            session_id: session_id.to_string(),
-            success,
-        });
-    }
 }
 
 fn apply_user_message_event(
     session: &mut Session,
     message_id: &str,
     content: &str,
-    prepared_attachments: &[tiangong_types::PreparedAttachment],
+    content_blocks: &[tiangong_types::ContentBlock],
     media: &[MediaAsset],
+    model_excluded: bool,
 ) -> bool {
-    if session
+    let existing = session
         .messages
         .iter()
-        .any(|message| message.id == message_id)
-    {
-        return false;
-    }
-
-    if !prepared_attachments.is_empty() {
-        session.append_prepared_user_message_with_id(
-            message_id.to_string(),
-            PreparedUserMessage::new(content, prepared_attachments.to_vec(), Vec::new()),
-        );
+        .position(|message| message.id == message_id && message.role == MessageRole::User)
+        .map(|index| session.messages.remove(index));
+    let prepared = if !content_blocks.is_empty() {
+        PreparedUserMessage::new(content_blocks.to_vec()).stable()
     } else {
         // 兼容旧 Core/历史入口；这里的 media 已由入口归档为稳定本地引用。
-        session.append_message_with_id_and_media(
-            message_id.to_string(),
-            MessageRole::User,
-            content.to_string(),
-            String::new(),
-            media.to_vec(),
-        );
+        let mut blocks = vec![tiangong_types::ContentBlock::text(content.to_string())];
+        blocks.extend(media.iter().map(MediaAsset::to_content_block));
+        PreparedUserMessage::new(blocks).stable()
+    };
+    if let Some(mut message) = existing {
+        // 旧 Core 只会重发文本/media 为空的状态事件；此时保留宿主已经同步的
+        // 稳定内容块，只更新可见性并把消息移动到当前轮次末尾。
+        if !content_blocks.is_empty()
+            || !media.is_empty()
+            || message.content.is_empty()
+            || message.text_content() != content
+        {
+            message.content = prepared.content;
+        }
+        message.model_excluded = model_excluded;
+        session.messages.push(message);
+    } else {
+        session.append_prepared_user_message_with_id(message_id.to_string(), prepared);
+        session.set_message_model_excluded(message_id, model_excluded);
     }
     true
 }
@@ -1112,6 +1257,27 @@ fn append_tool_result_message(
     let Some(tool_call_id) = tool_call_id else {
         return;
     };
+    let current_assistant_index = session.messages.iter().rposition(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == tool_call_id)
+    });
+    let current_result = current_assistant_index.and_then(|assistant_index| {
+        session.messages[assistant_index + 1..]
+            .iter()
+            .take_while(|message| message.role == MessageRole::Tool)
+            .position(|message| message.tool_call_id.as_deref() == Some(tool_call_id))
+            .map(|offset| assistant_index + 1 + offset)
+    });
+    if let Some(message) = current_result.and_then(|index| session.messages.get_mut(index)) {
+        message.content = vec![tiangong_types::ContentBlock::text(content)];
+        message.tool_name = Some(tool_name.to_string());
+        message.tool_result_is_error = is_error;
+        session.updated_at = now_text();
+        return;
+    }
     let message = Message::tool_result(tool_call_id, tool_name, content, is_error);
     session.messages.push(message);
     session.updated_at = now_text();
@@ -1145,7 +1311,7 @@ mod tests {
     use tiangong_core::tool_override::{
         PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
-    use tiangong_types::{AttachmentHandlingMode, PreparedAttachment, RuntimeContent};
+    use tiangong_types::{ContentBlock, StoredAsset};
 
     static STORAGE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -1244,17 +1410,14 @@ mod tests {
             .unwrap()
     }
 
-    fn image_attachment() -> PreparedAttachment {
-        PreparedAttachment {
+    fn image_asset() -> StoredAsset {
+        StoredAsset {
             asset_id: "asset-server".to_string(),
             local_path: "/tmp/server-image.png".to_string(),
             original_name: "server-image.png".to_string(),
             mime_type: "image/png".to_string(),
             size: 4,
             kind: MediaKind::Image,
-            handling_mode: AttachmentHandlingMode::AnalyzeWithPlugin,
-            capability: Some("analyze_attachment".to_string()),
-            capability_available: true,
         }
     }
 
@@ -1475,6 +1638,7 @@ mod tests {
         let result = prepare_user_message_blocking(
             root.path().join("media"),
             raw,
+            "message-broken".to_string(),
             "broken".to_string(),
             AttachmentCapabilitySnapshot {
                 chat_multimodal: true,
@@ -1487,6 +1651,37 @@ mod tests {
     }
 
     #[test]
+    fn attachment_preparation_uses_the_server_message_id_in_model_guidance() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = vec![RawAttachment {
+            kind: MediaKind::Image,
+            source: "data:image/png;base64,aW1hZ2U=".to_string(),
+            mime_type: Some("image/png".to_string()),
+            original_name: Some("server.png".to_string()),
+        }];
+
+        let (_transaction, prepared) = prepare_user_message_blocking(
+            root.path().join("media"),
+            raw,
+            "message-from-server".to_string(),
+            "analyze".to_string(),
+            AttachmentCapabilitySnapshot {
+                analyze_attachment: true,
+                ..AttachmentCapabilitySnapshot::default()
+            },
+        )
+        .unwrap();
+
+        assert!(prepared.content.iter().any(|block| matches!(
+            block,
+            ContentBlock::ModelInstruction { text }
+                if text.contains("message_id=message-from-server")
+                    && text.contains("attachment_index=0")
+                    && text.contains("analyze_attachment")
+        )));
+    }
+
+    #[test]
     fn tracker_correlates_events_by_message_and_cleans_cancelled_turn() {
         let tracker = ExecutionTracker::default();
         let first = tracker.start_turn("message-1".to_string());
@@ -1495,8 +1690,10 @@ mod tests {
         tracker.observe_event(&StreamEvent::UserMessage {
             message_id: "message-2".to_string(),
             content: "second".to_string(),
-            prepared_attachments: Vec::new(),
+            content_blocks: Vec::new(),
             media: Vec::new(),
+            model_excluded: false,
+            pending_agent_deliveries: Vec::new(),
         });
         tracker.observe_event(&StreamEvent::Done { usage: None });
         assert!(matches!(
@@ -1509,26 +1706,173 @@ mod tests {
     }
 
     #[test]
-    fn user_message_event_preserves_attachment_block_without_runtime_content() {
+    fn tracker_fails_all_waiters_when_core_stream_closes() {
+        let tracker = ExecutionTracker::default();
+        let pending = tracker.start_turn("message-pending".to_string());
+        let active = tracker.start_turn("message-active".to_string());
+        tracker.observe_event(&StreamEvent::UserMessage {
+            message_id: "message-active".to_string(),
+            content: "active".to_string(),
+            content_blocks: Vec::new(),
+            media: Vec::new(),
+            model_excluded: false,
+            pending_agent_deliveries: Vec::new(),
+        });
+
+        tracker.fail_all("Core 事件流已关闭");
+
+        assert!(matches!(
+            tracker.wait_for_turn(pending),
+            TurnOutcome::Failed(message) if message.contains("事件流已关闭")
+        ));
+        assert!(matches!(
+            tracker.wait_for_turn(active),
+            TurnOutcome::Failed(message) if message.contains("事件流已关闭")
+        ));
+    }
+
+    #[test]
+    fn direct_agent_outgoing_aggregates_all_replies_and_maps_ready_assets() {
+        let mut session = Session::new("direct-agent-outgoing");
+        session.append_message(MessageRole::User, "@dev @test 请分别处理".to_string());
+        session.append_worker_message(MessageRole::Assistant, "开发结果", "agent:dev:agent-dev");
+        if let Some(message) = session.messages.last_mut() {
+            message.model_excluded = true;
+            let mut asset = image_asset();
+            asset.local_path = "/tmp/dev-image.png".to_string();
+            message.content.push(ContentBlock::AssetReference { asset });
+        }
+        session.append_worker_message(MessageRole::Assistant, "测试结果", "agent:test:agent-test");
+        if let Some(message) = session.messages.last_mut() {
+            message.model_excluded = true;
+            message.content.push(ContentBlock::AssetReference {
+                asset: image_asset(),
+            });
+        }
+
+        let (outgoing, is_direct) = assistant_outgoing_after_last_user(&session);
+        assert!(is_direct);
+        match outgoing.content {
+            MessageContent::Image { url, caption } => {
+                assert_eq!(url, "/tmp/dev-image.png");
+                let caption = caption.unwrap();
+                assert!(caption.contains("开发结果"));
+                assert!(caption.contains("测试结果"));
+            }
+            other => panic!("expected image outgoing, got {other:?}"),
+        }
+        assert_eq!(outgoing.attachments.len(), 1);
+        assert!(matches!(
+            &outgoing.attachments[0],
+            MessageContent::Image { url, .. } if url == "/tmp/server-image.png"
+        ));
+    }
+
+    #[test]
+    fn user_message_event_preserves_exact_stable_content_blocks() {
         let mut session = Session::new("server-state");
-        let prepared_attachments = vec![image_attachment()];
+        let content_blocks = vec![
+            ContentBlock::Text {
+                text: "event text".to_string(),
+            },
+            ContentBlock::AssetReference {
+                asset: image_asset(),
+            },
+            ContentBlock::ModelInstruction {
+                text: "model-only attachment guidance".to_string(),
+            },
+        ];
 
         assert!(apply_user_message_event(
             &mut session,
             "message-server",
             "event text",
-            &prepared_attachments,
+            &content_blocks,
             &[],
+            true,
         ));
         let message = session.messages.last().unwrap();
         assert_eq!(message.text_content(), "event text");
-        assert_eq!(
-            message.extract_prepared_attachments()[0].handling_mode,
-            AttachmentHandlingMode::AnalyzeWithPlugin
-        );
+        assert_eq!(message.content, content_blocks);
+        assert!(message.model_excluded);
+
+        assert!(apply_user_message_event(
+            &mut session,
+            "message-server",
+            "event text",
+            &[],
+            &[],
+            false,
+        ));
+        assert!(!session.messages.last().unwrap().model_excluded);
         let json = serde_json::to_string(&session).unwrap();
-        assert!(json.contains("\"type\":\"attachment\""));
-        assert!(!json.contains("runtime_inline_image"));
+        assert!(json.contains("\"type\":\"asset_reference\""));
+        assert!(json.contains("model-only attachment guidance"));
+    }
+
+    #[test]
+    fn tool_result_updates_only_the_latest_matching_call_batch() {
+        let mut session = Session::new("reused-tool-id");
+        let mut first = Message::new(MessageRole::Assistant, String::new());
+        first.tool_calls = vec![MessageToolCall {
+            id: "reused".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        session.messages.push(first);
+        append_tool_result_message(
+            &mut session,
+            Some("reused"),
+            "read_file",
+            "old-result".to_string(),
+            false,
+        );
+        session.append_message(MessageRole::User, "next");
+        let mut second = Message::new(MessageRole::Assistant, String::new());
+        second.tool_calls = vec![MessageToolCall {
+            id: "reused".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        session.messages.push(second);
+
+        append_tool_result_message(
+            &mut session,
+            Some("reused"),
+            "read_file",
+            "new-result".to_string(),
+            false,
+        );
+        let result_indices = session
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.tool_call_id.as_deref() == Some("reused"))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(result_indices.len(), 2);
+        assert_eq!(
+            session.messages[result_indices[0]].text_content(),
+            "old-result"
+        );
+        assert_eq!(
+            session.messages[result_indices[1]].text_content(),
+            "new-result"
+        );
+
+        let len = session.messages.len();
+        append_tool_result_message(
+            &mut session,
+            Some("reused"),
+            "read_file",
+            "new-result-updated".to_string(),
+            false,
+        );
+        assert_eq!(session.messages.len(), len);
+        assert_eq!(
+            session.messages[result_indices[1]].text_content(),
+            "new-result-updated"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1550,15 +1894,15 @@ mod tests {
         let receipt = core
             .enqueue_prepared_with_receipt(
                 "receipt-message",
-                PreparedUserMessage::new(
-                    "hello",
-                    vec![image_attachment()],
-                    vec![RuntimeContent::InlineImage {
-                        asset_id: "asset-server".to_string(),
-                        mime_type: "image/png".to_string(),
-                        data: "RECEIPT_RUNTIME_SECRET".to_string(),
-                    }],
-                ),
+                PreparedUserMessage::new(vec![
+                    ContentBlock::Text {
+                        text: "hello".to_string(),
+                    },
+                    ContentBlock::Image {
+                        asset: image_asset(),
+                        data: Some("RECEIPT_RUNTIME_SECRET".to_string()),
+                    },
+                ]),
             )
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), receipt.await_persisted())
@@ -1573,7 +1917,8 @@ mod tests {
         )
         .unwrap();
         assert!(json.contains("receipt-message"));
-        assert!(json.contains("analyze_with_plugin"));
+        assert!(json.contains("\"type\": \"image\""));
+        assert!(json.contains("asset-server"));
         assert!(!json.contains("RECEIPT_RUNTIME_SECRET"));
 
         drop(core);

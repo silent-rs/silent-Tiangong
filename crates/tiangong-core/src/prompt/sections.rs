@@ -116,8 +116,6 @@ pub struct SystemPromptConfig {
     pub team_text: String,
     /// Plugin 注入的额外段落。
     pub plugin_sections: Vec<String>,
-    /// 文档附件解析规则段（PDF/Office 处理引导，issue #149）
-    pub attachment_rules_text: String,
 }
 
 impl SystemPromptConfig {
@@ -128,7 +126,6 @@ impl SystemPromptConfig {
             media_text: build_media_section(models_config),
             team_text: build_agent_team_section(),
             plugin_sections: Vec::new(),
-            attachment_rules_text: super::attachment_rules::attachment_rules_section(),
         }
     }
 
@@ -142,7 +139,7 @@ impl SystemPromptConfig {
 /// 构建完整的 system prompt 消息
 ///
 /// 合并静态段（身份 + 规则 + 自定义指令）、环境段（工作目录 + 文件根）、
-/// 动态段（多媒体 + 附件规则 + 团队协作 + Plugin 段落 + 用户上下文）、摘要段。
+/// 动态段（多媒体 + 团队协作 + Plugin 段落 + 用户上下文）、摘要段。
 /// 返回 `Message { role: System }`，由 `build_provider_messages()` 提取到 system prompt。
 pub fn build_full_system_prompt(session: &Session, config: &SystemPromptConfig) -> Message {
     let mut parts = Vec::new();
@@ -180,14 +177,11 @@ fn collect_environment_parts(session: &Session) -> Vec<String> {
     parts
 }
 
-/// 收集动态段（多媒体、附件规则、团队协作、Plugin 段落、用户上下文）
+/// 收集动态段（多媒体、团队协作、Plugin 段落、用户上下文）
 fn collect_dynamic_parts(config: &SystemPromptConfig) -> Vec<String> {
     let mut parts = Vec::new();
     if !config.media_text.is_empty() {
         parts.push(config.media_text.clone());
-    }
-    if !config.attachment_rules_text.is_empty() {
-        parts.push(config.attachment_rules_text.clone());
     }
     if !config.team_text.is_empty() {
         parts.push(config.team_text.clone());
@@ -232,6 +226,7 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
         tool_name: None,
         tool_result_is_error: false,
         compact: false,
+        model_excluded: false,
         phase: MessagePhase::Normal,
         created_at: now_text(),
     }

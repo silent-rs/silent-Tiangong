@@ -261,8 +261,18 @@ impl ResponseState {
     /// 处理单个事件，返回 true 表示本轮结束
     fn process(&mut self, event: &StreamEvent, core: &TiangongCore) -> bool {
         match event {
+            StreamEvent::TurnBoundary { .. } => {}
             StreamEvent::UserMessage { .. } => {
                 // CLI 模式下用户消息由 REPL 自己显示，忽略
+            }
+            StreamEvent::SessionMessageUpsert { .. } => {
+                // Core 已持有权威会话；CLI 不维护第二份消息镜像。
+            }
+            StreamEvent::PendingAgentDeliveriesChanged { .. } => {
+                // Core 已持久化；CLI 不维护第二份会话镜像。
+            }
+            StreamEvent::DeferredToolInjectionsChanged { .. } => {
+                // Core 已持久化；CLI 不维护第二份会话镜像。
             }
             StreamEvent::Reasoning {
                 message_id,

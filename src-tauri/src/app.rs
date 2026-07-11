@@ -38,6 +38,7 @@ pub struct TiangongApp {
     /// 活动会话变更代数，用于草稿转正后的条件激活。
     active_session_epoch: AtomicU64,
     pub config: CoreConfigProvider,
+    scheduler_context: std::sync::Arc<crate::scheduler::DesktopSchedulerContext>,
     /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
     plugin_dirty_sessions: Mutex<HashSet<String>>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
@@ -94,6 +95,9 @@ impl TiangongApp {
         let state = std::sync::Arc::new(AsyncMutex::new(
             tiangong_app_state::app_state::TiangongState::load_or_default(),
         ));
+        let scheduler_context = std::sync::Arc::new(
+            crate::scheduler::DesktopSchedulerContext::new(state.clone(), config.clone()),
+        );
 
         Self {
             state,
@@ -106,6 +110,7 @@ impl TiangongApp {
             discarded_drafts: Mutex::new(HashSet::new()),
             active_session_epoch: AtomicU64::new(0),
             config,
+            scheduler_context,
             plugin_dirty_sessions: Mutex::new(HashSet::new()),
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
@@ -193,6 +198,7 @@ impl TiangongApp {
                         if let Some(cancel_flag) = cancel_flag {
                             crate::commands::start_stream_consumer(
                                 app_handle.clone(),
+                                session_id.clone(),
                                 stream_rx,
                                 cancel_flag,
                             );
@@ -611,7 +617,7 @@ impl TiangongApp {
     pub async fn ensure_core(
         &self,
         session_id: &str,
-        session: tiangong_core::session::Session,
+        mut session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
     ) -> (String, bool) {
         // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
@@ -624,13 +630,16 @@ impl TiangongApp {
         // 如未来允许同 session 并发入口，需要在 await 后增加二次检查。
 
         let base = self.config.snapshot();
-        let session_config = {
+        let (session_config, session_pending) = {
             let core_state = self.state.lock().await;
-            core_state.build_core_config_for_session_from_base(&base, session_id)
+            (
+                core_state.build_core_config_for_session_from_base(&base, session_id),
+                core_state.has_active_turn_for(session_id),
+            )
         };
 
         // 1. 先检查是否已有 core（持有锁期间不做 async 操作）
-        {
+        let retired_core = {
             let mut cores = self.lock_cores();
             // 插件集合变化（能力新增/删除）时移除旧 core，用最新 models 重建。
             let dirty = self
@@ -639,9 +648,24 @@ impl TiangongApp {
                 .map(|mut g| g.remove(session_id))
                 .unwrap_or(false);
             if dirty {
-                if cores.remove(session_id).is_some() {
+                if session_pending {
+                    if let Some(core) = cores.get(session_id) {
+                        if !core.is_stopped() {
+                            self.plugin_dirty_sessions
+                                .lock()
+                                .map(|mut dirty| dirty.insert(session_id.to_string()))
+                                .ok();
+                            let _ = core.replace_config(session_config.clone());
+                            core.set_trust_mode(session.trust_mode);
+                            return (session_id.to_string(), false);
+                        }
+                    }
+                }
+                let retired = cores.remove(session_id);
+                if retired.is_some() {
                     tracing::info!(session_id, "插件集合变化，移除旧 core 待重建");
                 }
+                retired
             } else if let Some(core) = cores.get(session_id) {
                 if !core.is_stopped() {
                     let _ = core.replace_config(session_config.clone());
@@ -650,7 +674,30 @@ impl TiangongApp {
                     return (session_id.to_string(), false); // 已存在，复用
                 }
                 warn!(session_id, "移除已停止的 TiangongCore");
-                cores.remove(session_id);
+                cores.remove(session_id)
+            } else {
+                None
+            }
+        };
+
+        if let Some(core) = retired_core {
+            let desired_title = session.title.clone();
+            let desired_cwd = session.cwd.clone();
+            let desired_trust_mode = session.trust_mode;
+            match tokio::task::spawn_blocking(move || core.into_session()).await {
+                Ok(Ok(mut final_session)) => {
+                    final_session.title = desired_title;
+                    final_session.cwd = desired_cwd;
+                    final_session.trust_mode = desired_trust_mode;
+                    final_session.persist_to_disk();
+                    session = final_session;
+                }
+                Ok(Err(error)) => {
+                    warn!(%error, session_id, "插件重建前关闭旧 Core 失败");
+                }
+                Err(error) => {
+                    warn!(%error, session_id, "插件重建前等待旧 Core 失败");
+                }
             }
         }
 
@@ -782,6 +829,28 @@ impl TiangongApp {
         cores.remove(session_id)
     }
 
+    /// 仅移除已经停止的当前 Core。旧消费者晚到的 EOF 不会误删同会话的新实例。
+    pub fn remove_stopped_core(&self, session_id: &str) -> bool {
+        let mut cores = self.lock_cores();
+        if cores.get(session_id).is_some_and(TiangongCore::is_stopped) {
+            cores.remove(session_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_current_core_instance(
+        &self,
+        session_id: &str,
+        cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        self.lock_cores()
+            .get(session_id)
+            .map(|core| core.cancel_flag())
+            .is_some_and(|current| std::sync::Arc::ptr_eq(&current, cancel_flag))
+    }
+
     /// 取消指定会话的执行
     pub fn cancel_core(&self, session_id: &str) {
         let cores = self.lock_cores();
@@ -895,9 +964,6 @@ impl TiangongApp {
     pub fn create_scheduler_context(
         &self,
     ) -> std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext> {
-        std::sync::Arc::new(crate::scheduler::DesktopSchedulerContext::new(
-            self.state.clone(),
-            self.config.clone(),
-        ))
+        self.scheduler_context.clone()
     }
 }

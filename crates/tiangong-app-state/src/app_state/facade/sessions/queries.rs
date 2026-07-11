@@ -51,6 +51,16 @@ impl TiangongState {
         self.store.runtime.pending_turns.contains_key(session_id)
     }
 
+    pub fn has_active_turn_for(&self, session_id: &str) -> bool {
+        self.store
+            .runtime
+            .pending_turns
+            .get(session_id)
+            .is_some_and(|pending| {
+                pending.legacy_pending || !pending.accepted_message_ids.is_empty()
+            })
+    }
+
     pub fn pending_session_ids(&self) -> Vec<String> {
         self.store.runtime.pending_turns.keys().cloned().collect()
     }
@@ -60,7 +70,81 @@ impl TiangongState {
         self.store
             .runtime
             .pending_turns
-            .insert(session_id.clone(), PendingTurnStub { session_id });
+            .entry(session_id.clone())
+            .or_insert_with(|| PendingTurnStub {
+                session_id,
+                queued_message_ids: HashSet::new(),
+                accepted_message_ids: HashSet::new(),
+                legacy_pending: false,
+            })
+            .legacy_pending = true;
+    }
+
+    pub fn mark_pending_message_for(&mut self, session_id: &str, message_id: &str) {
+        let pending = self
+            .store
+            .runtime
+            .pending_turns
+            .entry(session_id.to_string())
+            .or_insert_with(|| PendingTurnStub {
+                session_id: session_id.to_string(),
+                queued_message_ids: HashSet::new(),
+                accepted_message_ids: HashSet::new(),
+                legacy_pending: false,
+            });
+        pending.queued_message_ids.insert(message_id.to_string());
+    }
+
+    pub fn accept_pending_message_for(&mut self, session_id: &str, message_id: &str) {
+        let pending = self
+            .store
+            .runtime
+            .pending_turns
+            .entry(session_id.to_string())
+            .or_insert_with(|| PendingTurnStub {
+                session_id: session_id.to_string(),
+                queued_message_ids: HashSet::new(),
+                accepted_message_ids: HashSet::new(),
+                legacy_pending: false,
+            });
+        pending.queued_message_ids.remove(message_id);
+        pending.accepted_message_ids.insert(message_id.to_string());
+    }
+
+    /// 当前 turn 的最终 User 快照已提交：清除本轮所有已接受消息，只保留仍在
+    /// Core 命令队列、尚未开始的后续消息。
+    pub fn complete_accepted_turn_for(&mut self, session_id: &str) {
+        let should_remove = self
+            .store
+            .runtime
+            .pending_turns
+            .get_mut(session_id)
+            .is_some_and(|pending| {
+                pending.accepted_message_ids.clear();
+                pending.legacy_pending = false;
+                pending.queued_message_ids.is_empty()
+            });
+        if should_remove {
+            self.store.runtime.pending_turns.remove(session_id);
+        }
+    }
+
+    pub fn remove_pending_message_for(&mut self, session_id: &str, message_id: &str) {
+        let should_remove = self
+            .store
+            .runtime
+            .pending_turns
+            .get_mut(session_id)
+            .is_some_and(|pending| {
+                pending.queued_message_ids.remove(message_id);
+                pending.accepted_message_ids.remove(message_id);
+                !pending.legacy_pending
+                    && pending.queued_message_ids.is_empty()
+                    && pending.accepted_message_ids.is_empty()
+            });
+        if should_remove {
+            self.store.runtime.pending_turns.remove(session_id);
+        }
     }
 
     pub fn clear_pending_turn_for(&mut self, session_id: &str) {

@@ -9,7 +9,7 @@ import {
   type SessionDraftMap,
 } from '@/store/sessionDrafts';
 import { attachmentsFromContentBlocks } from '@/utils/attachments';
-import { hasMediaBlocks, type Message } from '@/api/tauri';
+import { hasMediaBlocks, textContent, type Message } from '@/api/tauri';
 
 describe('session drafts', () => {
   it('keeps text and attachments isolated between sessions', () => {
@@ -64,25 +64,18 @@ describe('session drafts', () => {
     expect(migrated['real-session']).not.toBe(temporary.temp);
   });
 
-  it('extracts new and legacy attachment blocks in their original order', () => {
+  it('extracts ready and legacy resource blocks in their original order', () => {
     const attachments = attachmentsFromContentBlocks([
       {
-        type: 'attachment',
-        attachment: {
+        type: 'image',
+        asset: {
           asset_id: 'asset-new',
           local_path: '/media/new.png',
           original_name: 'new.png',
           mime_type: 'image/png',
           size: 12,
           kind: 'image',
-          handling_mode: 'inline_image',
-          capability_available: true,
         },
-      },
-      {
-        type: 'runtime_inline_image',
-        asset_id: 'runtime-only',
-        mime_type: 'image/png',
         data: 'not-persisted',
       },
       {
@@ -92,6 +85,17 @@ describe('session drafts', () => {
         title: 'legacy.pdf',
         mime_type: 'application/pdf',
       },
+      {
+        type: 'asset_reference',
+        asset: {
+          asset_id: 'legacy-unavailable',
+          local_path: '<legacy-inline-data-unavailable>',
+          original_name: 'legacy.png',
+          mime_type: 'image/png',
+          size: 0,
+          kind: 'image',
+        },
+      },
     ]);
 
     expect(attachments.map((attachment) => attachment.source)).toEqual([
@@ -100,7 +104,7 @@ describe('session drafts', () => {
     ]);
   });
 
-  it('treats persistent attachments as media but ignores runtime-only images', () => {
+  it('treats ready images and stable resource references as media', () => {
     const message = (content: Message['content']): Message => ({
       id: 'message',
       role: 'user',
@@ -110,23 +114,45 @@ describe('session drafts', () => {
     });
 
     expect(hasMediaBlocks(message([{
-      type: 'attachment',
-      attachment: {
+      type: 'asset_reference',
+      asset: {
         asset_id: 'asset',
         local_path: '/media/image.png',
         original_name: 'image.png',
         mime_type: 'image/png',
         size: 12,
         kind: 'image',
-        handling_mode: 'inline_image',
-        capability_available: true,
       },
     }]))).toBe(true);
     expect(hasMediaBlocks(message([{
-      type: 'runtime_inline_image',
-      asset_id: 'runtime',
-      mime_type: 'image/png',
+      type: 'image',
+      asset: {
+        asset_id: 'runtime',
+        local_path: '/media/runtime.png',
+        original_name: 'runtime.png',
+        mime_type: 'image/png',
+        size: 12,
+        kind: 'image',
+      },
       data: 'ephemeral',
-    }]))).toBe(false);
+    }]))).toBe(true);
+  });
+
+  it('keeps model-only attachment instructions out of the visible user text', () => {
+    const message: Message = {
+      id: 'message',
+      role: 'user',
+      content: [
+        { type: 'text', text: '请查看附件' },
+        {
+          type: 'model_instruction',
+          text: '请调用附件工具并使用内部路径 /media/private.png',
+        },
+      ],
+      reasoning_content: '',
+      created_at: '',
+    };
+
+    expect(textContent(message)).toBe('请查看附件');
   });
 });

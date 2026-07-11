@@ -44,13 +44,17 @@ impl ContextCompressor {
             return Ok(CompressionUpdate::default());
         }
 
-        let new_messages = &session.messages[session.summary_up_to..split_point];
+        let new_messages = session.messages[session.summary_up_to..split_point]
+            .iter()
+            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+            .cloned()
+            .collect::<Vec<_>>();
 
         if new_messages.is_empty() {
             return Ok(CompressionUpdate::default());
         }
 
-        let (summary, usage) = self.fold_summary(session, new_messages, client)?;
+        let (summary, usage) = self.fold_summary(session, &new_messages, client)?;
 
         tracing::info!(
             old_summary_up_to = session.summary_up_to,
@@ -69,6 +73,36 @@ impl ContextCompressor {
         })
     }
 
+    pub async fn update_summary_with_usage_async(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+    ) -> Result<CompressionUpdate> {
+        let split_point = self.find_split_point(&session.messages);
+        if split_point == 0 || split_point <= session.summary_up_to {
+            return Ok(CompressionUpdate::default());
+        }
+        let new_messages = session.messages[session.summary_up_to..split_point]
+            .iter()
+            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+            .cloned()
+            .collect::<Vec<_>>();
+        if new_messages.is_empty() {
+            return Ok(CompressionUpdate::default());
+        }
+
+        let (summary, usage) = self
+            .fold_summary_async(session, &new_messages, client)
+            .await?;
+        session.context_summary = Some(summary);
+        session.summary_up_to = split_point;
+        mark_compact_boundary(&mut session.messages, split_point);
+        Ok(CompressionUpdate {
+            compressed: true,
+            usage,
+        })
+    }
+
     /// 构建发送给 LLM 的上下文消息列表
     pub fn build_context(&self, session: &Session) -> Vec<Message> {
         let split_point = if session.summary_up_to > 0 {
@@ -76,7 +110,11 @@ impl ContextCompressor {
         } else {
             0
         };
-        session.messages[split_point..].to_vec()
+        session.messages[split_point..]
+            .iter()
+            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+            .cloned()
+            .collect()
     }
 
     /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
@@ -85,7 +123,7 @@ impl ContextCompressor {
         let mut split_point = messages.len();
 
         for (i, msg) in messages.iter().enumerate().rev() {
-            if msg.role == MessageRole::User {
+            if msg.role == MessageRole::User && !msg.model_excluded {
                 turn_count += 1;
                 if turn_count >= self.keep_recent_turns {
                     split_point = i;
@@ -138,6 +176,7 @@ impl ContextCompressor {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: MessagePhase::Normal,
             created_at: crate::session::now_text(),
         });
@@ -151,9 +190,57 @@ impl ContextCompressor {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
-            include_media: false,
         };
         let resp = client.complete(&req)?;
+        Ok((resp.text, resp.usage))
+    }
+
+    async fn fold_summary_async(
+        &self,
+        session: &Session,
+        new_messages: &[Message],
+        client: &SingleProviderClient,
+    ) -> Result<(String, TokenUsage)> {
+        let mut context = Vec::new();
+        let mut instruction = String::from(
+            "请将以下对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。直接输出摘要内容。",
+        );
+        if let Some(summary) = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
+        }
+        context.push(Message {
+            id: scru128::new().to_string(),
+            role: MessageRole::User,
+            content: vec![ContentBlock::text(instruction)],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            elapsed_ms: None,
+            turn_status: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            model_excluded: false,
+            phase: MessagePhase::Normal,
+            created_at: crate::session::now_text(),
+        });
+        context.extend(new_messages.iter().cloned());
+        let req = ModelRequest {
+            session_title: String::new(),
+            user_input: String::new(),
+            context,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let resp = client.complete_async(&req).await?;
         Ok((resp.text, resp.usage))
     }
 }
@@ -234,7 +321,6 @@ pub fn compress_loop_messages(
         thinking: None,
         reasoning_effort: None,
         thinking_disabled: false,
-        include_media: false,
     };
 
     let summary = match client.complete(&req) {
@@ -261,6 +347,7 @@ pub fn compress_loop_messages(
         tool_name: Some("loop_summary".to_string()),
         tool_result_is_error: false,
         compact: true,
+        model_excluded: false,
         phase: MessagePhase::Normal,
         created_at: now_text(),
     }];

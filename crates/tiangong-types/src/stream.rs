@@ -18,6 +18,9 @@ pub struct StreamToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
+    /// Core 内部流屏障；仅用于统一终态提交，不会转发给外部消费者。
+    #[serde(skip)]
+    TurnBoundary { boundary_id: u64 },
     /// 文本增量（assistant 回复内容）
     Delta {
         /// 所属消息 ID（前端据此组装到正确的消息）
@@ -129,12 +132,37 @@ pub enum StreamEvent {
         /// 该用户消息在 session 中的 ID
         message_id: String,
         content: String,
-        /// 已由宿主入口保存和规划的正式附件，供会话副本保留 handling mode。
+        /// 宿主准备完成并由 Core 原样保存的稳定内容块。
+        /// `Image.data` 始终跳过序列化，不会进入事件负载。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        prepared_attachments: Vec<crate::PreparedAttachment>,
+        content_blocks: Vec<crate::ContentBlock>,
         /// 旧版消费者兼容字段；仅包含稳定媒体引用，不携带运行时 base64。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         media: Vec<crate::MediaAsset>,
+        /// 消息保留在会话历史中，但不进入当前 Agent 的模型上下文。
+        #[serde(default, skip_serializing_if = "is_false")]
+        model_excluded: bool,
+        /// 与本条消息同一次持久化确认产生的待投递快照，宿主必须原子同步。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_agent_deliveries: Vec<crate::PendingAgentDelivery>,
+    },
+    /// Core 会话中的稳定消息快照，供宿主按 ID 更新本地镜像。
+    SessionMessageUpsert {
+        message: crate::Message,
+        /// 与消息快照同一原子状态变更中的待投递列表；None 表示不修改。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_agent_deliveries: Option<Vec<crate::PendingAgentDelivery>>,
+        /// 与消息快照同一原子状态变更中的延迟注入列表；None 表示不修改。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferred_tool_injections: Option<Vec<crate::DeferredToolInjection>>,
+    },
+    /// 尚未完成的用户直达 Agent 投递快照，供宿主同步 Session 顶层状态。
+    PendingAgentDeliveriesChanged {
+        deliveries: Vec<crate::PendingAgentDelivery>,
+    },
+    /// 尚未到达安全注入边界的外部工具内容快照。
+    DeferredToolInjectionsChanged {
+        injections: Vec<crate::DeferredToolInjection>,
     },
 
     // ===== 记忆检索事件 =====
@@ -217,6 +245,10 @@ pub enum StreamEvent {
     },
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// 上下文压缩/清理操作类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -229,6 +261,10 @@ pub enum ContextCompressAction {
     Clear,
     /// 自动压缩
     Auto,
+    /// 压缩失败
+    Failed,
+    /// 压缩被取消
+    Cancelled,
 }
 
 impl ContextCompressAction {
@@ -239,6 +275,8 @@ impl ContextCompressAction {
             Self::Noop => "无需压缩",
             Self::Clear => "清理",
             Self::Auto => "自动压缩",
+            Self::Failed => "失败",
+            Self::Cancelled => "取消",
         }
     }
 }

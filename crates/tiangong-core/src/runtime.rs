@@ -388,8 +388,7 @@ impl RuntimeEngine {
 
 /// 注入增强工具定义（团队协作等 core 内置增强工具）。
 ///
-/// 注：多媒体、附件分析、扩展能力查询、后台任务、扩展工具管理等功能均由各自
-/// 插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
+/// 其他扩展能力均由插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
 pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
     // 多智能体团队工具
     crate::agent_team::tools::inject_agent_team_tools(tools);

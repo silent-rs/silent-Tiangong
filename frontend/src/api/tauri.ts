@@ -111,22 +111,18 @@ export interface RequestCost {
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'file';
 
-export type AttachmentHandlingMode = 'inline_image' | 'analyze_with_plugin' | 'file_reference';
-
-export interface PreparedAttachment {
+export interface StoredAsset {
   asset_id: string;
   local_path: string;
   original_name: string;
   mime_type: string;
   size: number;
   kind: MediaKind;
-  handling_mode: AttachmentHandlingMode;
-  capability?: string;
-  capability_available: boolean;
 }
 
 export type ContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'model_instruction'; text: string }
   | {
       type: 'media';
       kind: MediaKind;
@@ -134,11 +130,10 @@ export type ContentBlock =
       mime_type?: string;
       title?: string;
     }
-  | { type: 'attachment'; attachment: PreparedAttachment }
+  | { type: 'asset_reference'; asset: StoredAsset }
   | {
-      type: 'runtime_inline_image';
-      asset_id: string;
-      mime_type: string;
+      type: 'image';
+      asset: StoredAsset;
       data?: string;
     };
 
@@ -195,6 +190,8 @@ export interface Message {
   tool_name?: string;
   tool_result_is_error?: boolean;
   compact?: boolean;
+  /** 保留在会话历史中，但不进入当前 Agent 的模型上下文。 */
+  model_excluded?: boolean;
   phase?: MessagePhase;
   created_at: string;
   /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带，前端展示「执行总时长」。 */
@@ -217,7 +214,9 @@ export function textContent(msg: Message): string {
 export function hasMediaBlocks(msg: Message): boolean {
   const content = msg.content;
   if (!Array.isArray(content)) return false;
-  return content.some((b) => b.type === 'media' || b.type === 'attachment');
+  return content.some((b) =>
+    b.type === 'media' || b.type === 'asset_reference' || b.type === 'image'
+  );
 }
 
 export interface RunSnapshot {

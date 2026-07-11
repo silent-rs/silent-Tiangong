@@ -127,16 +127,12 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
 
 fn build_user_message(message: &ChatMessage) -> Option<tiangong_deepseek::types::ChatMessage> {
     let text = extract_text(message);
-    let images: Vec<_> = message
+    let has_images = message
         .content
         .iter()
-        .filter_map(|c| match c {
-            MessageContent::Image(img) => Some(img),
-            _ => None,
-        })
-        .collect();
+        .any(|content| matches!(content, MessageContent::Image(_)));
 
-    if images.is_empty() {
+    if !has_images {
         if text.trim().is_empty() {
             return None;
         }
@@ -152,14 +148,17 @@ fn build_user_message(message: &ChatMessage) -> Option<tiangong_deepseek::types:
     }
 
     let mut content = Vec::new();
-    if !text.is_empty() {
-        content.push(json!({"type": "text", "text": text}));
-    }
-    for image in images {
-        content.push(json!({
-            "type": "image_url",
-            "image_url": { "url": image.data }
-        }));
+    for block in &message.content {
+        match block {
+            MessageContent::Image(image) => content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": image.data }
+            })),
+            MessageContent::Text(text) if !text.trim().is_empty() => {
+                content.push(json!({"type": "text", "text": text}));
+            }
+            _ => {}
+        }
     }
     Some(tiangong_deepseek::types::ChatMessage {
         role: tiangong_deepseek::types::MessageRole::User,
@@ -371,9 +370,42 @@ fn map_stop_reason(reason: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageContent;
     use crate::message::ThinkingContent;
+    use crate::message::{ImageContent, MessageContent};
     use crate::tool::ToolCall;
+
+    #[test]
+    fn multimodal_user_content_preserves_interleaved_order() {
+        let message = ChatMessage::new(
+            MessageRole::User,
+            vec![
+                MessageContent::Text("图一".to_string()),
+                MessageContent::Image(ImageContent {
+                    mime_type: "image/png".to_string(),
+                    data: "data:image/png;base64,A".to_string(),
+                }),
+                MessageContent::Text("图二".to_string()),
+                MessageContent::Image(ImageContent {
+                    mime_type: "image/png".to_string(),
+                    data: "data:image/png;base64,B".to_string(),
+                }),
+            ],
+        );
+
+        let mapped = build_user_message(&message).expect("user message");
+        let content = mapped.content.unwrap();
+        let content = content.as_array().unwrap();
+        assert_eq!(content[0]["text"], json!("图一"));
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            json!("data:image/png;base64,A")
+        );
+        assert_eq!(content[2]["text"], json!("图二"));
+        assert_eq!(
+            content[3]["image_url"]["url"],
+            json!("data:image/png;base64,B")
+        );
+    }
 
     fn response_with_arguments(
         arguments: &str,

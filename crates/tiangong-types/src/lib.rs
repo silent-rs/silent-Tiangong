@@ -14,13 +14,11 @@ pub mod stream;
 pub mod token;
 pub mod trust_mode;
 
-pub use attachment::{
-    AttachmentHandlingMode, PreparedAttachment, PreparedUserMessage, RuntimeContent,
-};
+pub use attachment::{PreparedUserMessage, StoredAsset};
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
 pub use message::{
-    ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
-    TurnStatus, now_text,
+    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
+    MessageToolCall, PendingAgentDelivery, TurnStatus, now_text,
 };
 pub use process::{configure_no_window, configure_tokio_no_window};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};

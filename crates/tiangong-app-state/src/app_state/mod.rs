@@ -289,7 +289,12 @@ impl TiangongState {
             self.services.runtime.permission_gate().set_trust_mode(mode);
             self.rebuild_runtime_from_current_config();
         }
-        self.persist_session_and_app(session_id)
+        if self.has_pending_turn_for(session_id) {
+            // Core 在活跃轮次中独占会话文件；终态重载会保留宿主信任模式。
+            self.persist_app_only()
+        } else {
+            self.persist_session_and_app(session_id)
+        }
     }
 
     pub fn set_default_trust_mode(
@@ -342,7 +347,11 @@ impl TiangongState {
             if self.store.session.active_session_id == session_id {
                 self.store.agent.agent_config.reasoning_effort = effort;
             }
-            self.persist_session_and_app(session_id)
+            if self.has_pending_turn_for(session_id) {
+                self.persist_app_only()
+            } else {
+                self.persist_session_and_app(session_id)
+            }
         } else {
             Err(anyhow::anyhow!(
                 "会话不存在，无法设置思考强度：{session_id}"

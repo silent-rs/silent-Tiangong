@@ -59,6 +59,9 @@ pub struct IncomingMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutgoingMessage {
     pub content: MessageContent,
+    /// 同一回复中的其余结构化内容；保留旧 content 作为首项以兼容现有消费者。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageContent>,
     pub reply_to: Option<String>,
 }
 
