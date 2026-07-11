@@ -90,7 +90,7 @@ impl GenerateImagePlugin {
                         };
                         // 归档到本地（~/.tiangong/media/images/），失败则保留原始引用。
                         let reference = match tiangong_media_archive::archive_image_reference(
-                            &raw, None,
+                            &raw, None, None,
                         ) {
                             Ok(archived) => archived.path().to_string(),
                             Err(err) => {

@@ -139,6 +139,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn check_cancel_preserves_queue_order() {
+        // check_cancel 不应排空或重排命令队列——即使队列中有多个命令。
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // 放入消息1、消息2、压缩、取消
+        tx.send(Command::Message {
+            content: "msg1".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+        tx.send(Command::Message {
+            content: "msg2".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+        tx.send(Command::CompressContext).unwrap();
+
+        // check_cancel 返回 false（无取消信号）
+        assert!(!check_cancel(&flag));
+
+        // 队列应完整保留、顺序不变
+        let c1 = rx.try_recv().unwrap();
+        let c2 = rx.try_recv().unwrap();
+        let c3 = rx.try_recv().unwrap();
+        match c1 {
+            Command::Message { content, .. } => assert_eq!(content, "msg1"),
+            _ => panic!("第一个应为 msg1"),
+        }
+        match c2 {
+            Command::Message { content, .. } => assert_eq!(content, "msg2"),
+            _ => panic!("第二个应为 msg2"),
+        }
+        assert!(
+            matches!(c3, Command::CompressContext),
+            "第三个应为 CompressContext"
+        );
+    }
+
+    #[test]
+    fn check_cancel_true_when_signal_set() {
+        // 即使队列中有消息，cancel_flag=true 时应立即返回 true，不排空队列
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(Command::Message {
+            content: "msg".into(),
+            message_id: None,
+            media: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(check_cancel(&flag));
+
+        // 队列中的消息应仍然存在（check_cancel 不消费队列）
+        assert!(
+            rx.try_recv().is_ok(),
+            "队列中的消息不应被 check_cancel 消费"
+        );
+    }
+
+    #[test]
     fn check_cancel_reads_signal_not_queue() {
         // cancel_flag = true → 返回 true
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
