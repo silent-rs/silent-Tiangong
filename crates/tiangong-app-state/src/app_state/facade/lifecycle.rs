@@ -23,8 +23,7 @@ impl TiangongState {
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
 
-        let context_limit =
-            tiangong_config::io::resolve_context_limit_at(&storage_dir, &model_endpoint.model);
+        let context_limit = Self::resolve_chat_context_limit(&models_config, &model_endpoint.model);
         let runtime = RuntimeEngine::new(
             SingleProviderClient::new(model_endpoint.clone()),
             context_limit,

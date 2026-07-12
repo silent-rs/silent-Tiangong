@@ -1,9 +1,36 @@
+use tiangong_core::context::organizer::ContextOrganizer;
 use tiangong_llm::ModelEndpoint;
-use tiangong_llm::models_config::RoutingSlot;
+use tiangong_llm::models_config::{ModelsConfig, RoutingSlot};
 
 use super::super::*;
 
 impl TiangongState {
+    pub(in crate::app_state) fn resolve_chat_context_limit(
+        models_config: &ModelsConfig,
+        model_name: &str,
+    ) -> usize {
+        if model_name.is_empty() {
+            return tiangong_core::core_config::default_context_limit();
+        }
+        let chat_override = models_config
+            .resolve_slot(RoutingSlot::Chat)
+            .and_then(|resolved| resolved.context_window);
+        tiangong_config::io::resolve_context_limit_with_override(
+            &tiangong_config::io::storage_root(),
+            model_name,
+            chat_override,
+        )
+    }
+
+    pub(in crate::app_state) fn apply_derived_context_metrics(
+        session: &mut Session,
+        context_limit: usize,
+    ) {
+        session.context_limit_tokens = context_limit;
+        session.compression_threshold_tokens =
+            ContextOrganizer::new(context_limit).token_threshold();
+    }
+
     pub(in crate::app_state) fn rebuild_runtime_from_current_config(&mut self) {
         let endpoint = self
             .store
@@ -22,17 +49,9 @@ impl TiangongState {
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
-        let storage_dir = tiangong_config::io::storage_root();
-        let chat_override = self
-            .store
-            .provider
-            .models_config
-            .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
-            .and_then(|r| r.context_window);
-        let context_limit = tiangong_config::io::resolve_context_limit_with_override(
-            &storage_dir,
+        let context_limit = Self::resolve_chat_context_limit(
+            &self.store.provider.models_config,
             &self.store.provider.model_endpoint.model,
-            chat_override,
         );
         let new_runtime = RuntimeEngine::with_shared_trust_mode(
             SingleProviderClient::new(endpoint),
@@ -52,6 +71,9 @@ impl TiangongState {
             new_runtime.register_prompt_section_provider(provider);
         }
         self.services.runtime = new_runtime;
+        for session in &mut self.store.session.sessions {
+            Self::apply_derived_context_metrics(session, context_limit);
+        }
     }
 
     pub(in crate::app_state) fn replace_run_snapshot(

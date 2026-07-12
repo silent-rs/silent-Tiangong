@@ -5,7 +5,8 @@ impl TiangongState {
     ///
     /// 将 Core 的最终 session 合并到 TiangongState 并持久化。
     /// 如果该 session 已存在则替换，否则插入。
-    pub fn save_core_session(&mut self, session: Session) {
+    pub fn save_core_session(&mut self, mut session: Session) {
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         let session_id = session.id.clone();
         if let Some(existing) = self
             .store
@@ -34,6 +35,7 @@ impl TiangongState {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
         session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.agent.agent_config.trust_mode = session.trust_mode;
         self.services
             .runtime
@@ -68,6 +70,7 @@ impl TiangongState {
         };
         session.trust_mode = trust_mode;
         session.reasoning_effort = Some(reasoning_effort);
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         let session_id = session.id.clone();
         self.store.session.sessions.push(session.clone());
         self.store
@@ -154,6 +157,7 @@ impl TiangongState {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store
@@ -227,6 +231,7 @@ impl TiangongState {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store

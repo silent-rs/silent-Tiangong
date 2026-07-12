@@ -56,14 +56,12 @@ impl TiangongState {
             loaded.active_agent_current_tokens = existing.active_agent_current_tokens;
             loaded.active_agent_id = existing.active_agent_id.clone();
             loaded.agent_current_tokens = existing.agent_current_tokens.clone();
-            loaded.compression_threshold_tokens = loaded
-                .compression_threshold_tokens
-                .max(existing.compression_threshold_tokens);
-            loaded.context_limit_tokens = loaded
-                .context_limit_tokens
-                .max(existing.context_limit_tokens);
+            // 两个上下文上限字段由当前模型配置派生，不从 Core 会话文件恢复。
+            loaded.compression_threshold_tokens = existing.compression_threshold_tokens;
+            loaded.context_limit_tokens = existing.context_limit_tokens;
             *existing = loaded;
         } else {
+            Self::apply_derived_context_metrics(&mut loaded, self.services.runtime.context_limit);
             self.store.session.sessions.push(loaded);
         }
         Ok(true)
@@ -104,6 +102,7 @@ impl TiangongState {
 
         let mut session = Session::new(DEFAULT_SESSION_TITLE);
         session.cwd = self.store.session.workspace_dir.clone();
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.sessions.push(session);
         self.store.session.sessions.len() - 1

@@ -66,10 +66,10 @@ pub struct Session {
     #[serde(default)]
     pub current_tokens: usize,
     /// 当前模型配置下触发上下文压缩的 token 阈值。
-    #[serde(default)]
+    #[serde(skip)]
     pub compression_threshold_tokens: usize,
     /// 当前模型配置下的上下文窗口上限。
-    #[serde(default)]
+    #[serde(skip)]
     pub context_limit_tokens: usize,
     /// 当前活跃 sub agent 的上下文 token 数
     #[serde(default)]
@@ -1051,6 +1051,35 @@ mod persistence_tests {
         let serialized = serde_json::to_value(restored).unwrap();
         assert!(serialized.get("tabs").is_none());
         assert!(serialized.get("active_tab_id").is_none());
+    }
+
+    #[test]
+    fn derived_context_metrics_are_not_persisted_but_usage_is() {
+        let mut session = Session::new("derived-context-metrics");
+        session.compression_threshold_tokens = 190_000;
+        session.context_limit_tokens = 200_000;
+        session.current_tokens = 12_345;
+        session.token_usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: Some(10),
+            prompt_cache_miss_tokens: Some(90),
+        };
+
+        let mut value = serde_json::to_value(&session).unwrap();
+        assert!(value.get("compression_threshold_tokens").is_none());
+        assert!(value.get("context_limit_tokens").is_none());
+        assert_eq!(value["current_tokens"], 12_345);
+        assert_eq!(value["token_usage"]["total_tokens"], 120);
+
+        value["compression_threshold_tokens"] = serde_json::json!(999_999);
+        value["context_limit_tokens"] = serde_json::json!(1_000_000);
+        let restored: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.compression_threshold_tokens, 0);
+        assert_eq!(restored.context_limit_tokens, 0);
+        assert_eq!(restored.current_tokens, 12_345);
+        assert_eq!(restored.token_usage.total_tokens, 120);
     }
 }
 

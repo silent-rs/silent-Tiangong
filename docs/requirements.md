@@ -106,6 +106,7 @@
 
 #### 上下文管理
 - 当 API 返回的精确 `prompt_tokens` 达到模型上下文限制的 95% 或用户配置的上下文长度阈值时，必须自动触发上下文压缩。
+- `compression_threshold_tokens` 与 `context_limit_tokens` 仅是当前模型配置派生的界面运行值，不得写入 Session；应用启动、模型配置变更和会话磁盘重载后必须按 Chat 路由的有效 `context_window` 恢复，其中显式 `context_window` 优先于映射表，压缩阈值必须与 Core 当前压缩策略一致。`current_tokens` 与 `token_usage` 仍须随会话持久化。
 - Agent 主循环在收到 LLM 输出后，必须结合本次请求的输入与输出 token 总量判断是否触发上下文压缩；达到阈值时应先压缩早期上下文，再继续下一轮工具调用或回复生成。
 - GUI 必须展示当前请求上下文 tokens、触发上下文压缩的进度条和当前会话累计总 tokens。
 - 所有会话相关 LLM 请求产生的 token 消耗都必须进入会话统计，至少覆盖主对话请求、工具调用决策、附件解析、记忆召回和上下文压缩摘要请求。

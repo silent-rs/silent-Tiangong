@@ -188,12 +188,7 @@ impl TiangongState {
     ) -> tiangong_core::core_config::CoreConfig {
         let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
         // context_limit 由 config 层解析注入（core 不做配置磁盘 IO）。
-        let dir = tiangong_config::io::storage_root();
-        let context_limit = if llm.chat.model.is_empty() {
-            tiangong_core::core_config::default_context_limit()
-        } else {
-            tiangong_config::io::resolve_context_limit_at(&dir, &llm.chat.model)
-        };
+        let context_limit = Self::resolve_chat_context_limit(self.models_config(), &llm.chat.model);
         let target_session = self
             .sessions()
             .iter()
