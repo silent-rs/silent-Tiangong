@@ -11,7 +11,7 @@ use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
-    MessageToolCall, PendingAgentDelivery, PreparedUserMessage, StoredAsset, now_text,
+    MessageToolCall, PendingAgentDelivery, StoredAsset, now_text,
 };
 
 /// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。
@@ -450,15 +450,11 @@ impl Session {
     }
 
     /// 使用预生成 ID 原样追加宿主准备好的用户消息。
-    pub fn append_prepared_user_message_with_id(
-        &mut self,
-        id: String,
-        prepared: PreparedUserMessage,
-    ) {
+    pub fn append_prepared_user_message_with_id(&mut self, id: String, content: Vec<ContentBlock>) {
         self.messages.push(Message {
             id,
             role: MessageRole::User,
-            content: prepared.content,
+            content,
             reasoning_content: String::new(),
             reasoning_signature: None,
             worker_id: None,
@@ -480,7 +476,7 @@ impl Session {
     pub fn update_prepared_user_message(
         &mut self,
         message_id: &str,
-        prepared: PreparedUserMessage,
+        content: Vec<ContentBlock>,
     ) -> bool {
         let Some(message) = self
             .messages
@@ -489,7 +485,7 @@ impl Session {
         else {
             return false;
         };
-        message.content = prepared.content;
+        message.content = content;
         self.updated_at = now_text();
         true
     }
@@ -1087,8 +1083,8 @@ mod persistence_tests {
 mod ready_content_tests {
     use super::*;
 
-    fn prepared_message(data: &str) -> PreparedUserMessage {
-        PreparedUserMessage::new(vec![
+    fn prepared_message(data: &str) -> Vec<ContentBlock> {
+        vec![
             ContentBlock::text("分析图片"),
             ContentBlock::Image {
                 asset: StoredAsset {
@@ -1101,7 +1097,7 @@ mod ready_content_tests {
                 },
                 data: Some(data.to_string()),
             },
-        ])
+        ]
     }
 
     #[test]
@@ -1140,7 +1136,7 @@ mod ready_content_tests {
         let mut session = Session::new("excluded-message");
         session.append_prepared_user_message_with_id(
             "routed-user".to_string(),
-            PreparedUserMessage::text("@dev handle this"),
+            vec![ContentBlock::text("@dev handle this")],
         );
         assert!(session.set_message_model_excluded("routed-user", true));
         assert!(session.context().is_empty());
@@ -1169,7 +1165,9 @@ mod ready_content_tests {
             target_agent_id: "agent-dev".to_string(),
             content: "检查图片".to_string(),
             created_at: now_text(),
-            additional_content: prepared_message("SECRET_PENDING_BASE64").stable().content,
+            additional_content: tiangong_types::stable_content_blocks(&prepared_message(
+                "SECRET_PENDING_BASE64",
+            )),
         }];
 
         let json = serde_json::to_string(&session).unwrap();

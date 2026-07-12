@@ -16,8 +16,8 @@ use tiangong_media_archive::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
 };
 use tiangong_types::{
-    MediaAsset, MediaKind, MessageContent, OutgoingMessage, PreparedUserMessage,
-    SessionStreamEvent, StreamEvent,
+    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionStreamEvent,
+    StreamEvent, stable_content_blocks,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -294,7 +294,7 @@ impl ServerCoreManager {
         content: String,
         media: Vec<MediaAsset>,
         capabilities: AttachmentCapabilitySnapshot,
-    ) -> Result<(AttachmentTransaction, PreparedUserMessage)> {
+    ) -> Result<(AttachmentTransaction, Vec<ContentBlock>)> {
         let raw = media.into_iter().map(raw_attachment_from_media).collect();
         let media_root = tiangong_app_state::app_state::storage_root().join("media");
         tokio::task::spawn_blocking(move || {
@@ -309,7 +309,7 @@ impl ServerCoreManager {
         &self,
         session_id: &str,
         message_id: &str,
-        prepared: PreparedUserMessage,
+        prepared: Vec<ContentBlock>,
     ) -> Result<tiangong_core::core::PreparedMessageReceipt> {
         let cores = self
             .cores
@@ -764,7 +764,7 @@ fn prepare_user_message_blocking(
     message_id: String,
     content: String,
     capabilities: AttachmentCapabilitySnapshot,
-) -> std::result::Result<(AttachmentTransaction, PreparedUserMessage), String> {
+) -> std::result::Result<(AttachmentTransaction, Vec<ContentBlock>), String> {
     let mut transaction = AttachmentStore::new(media_root).store_batch(raw)?;
     let prepared = transaction.prepare_message(&message_id, content, capabilities)?;
     Ok((transaction, prepared))
@@ -1138,12 +1138,12 @@ fn apply_user_message_event(
         .position(|message| message.id == message_id && message.role == MessageRole::User)
         .map(|index| session.messages.remove(index));
     let prepared = if !content_blocks.is_empty() {
-        PreparedUserMessage::new(content_blocks.to_vec()).stable()
+        stable_content_blocks(content_blocks)
     } else {
         // 兼容旧 Core/历史入口；这里的 media 已由入口归档为稳定本地引用。
         let mut blocks = vec![tiangong_types::ContentBlock::text(content.to_string())];
         blocks.extend(media.iter().map(MediaAsset::to_content_block));
-        PreparedUserMessage::new(blocks).stable()
+        stable_content_blocks(&blocks)
     };
     if let Some(mut message) = existing {
         // 旧 Core 只会重发文本/media 为空的状态事件；此时保留宿主已经同步的
@@ -1153,7 +1153,7 @@ fn apply_user_message_event(
             || message.content.is_empty()
             || message.text_content() != content
         {
-            message.content = prepared.content;
+            message.content = prepared;
         }
         message.model_excluded = model_excluded;
         session.messages.push(message);
@@ -1672,7 +1672,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(prepared.content.iter().any(|block| matches!(
+        assert!(prepared.iter().any(|block| matches!(
             block,
             ContentBlock::ModelInstruction { text }
                 if text.contains("message_id=message-from-server")
@@ -1894,7 +1894,7 @@ mod tests {
         let receipt = core
             .enqueue_prepared_with_receipt(
                 "receipt-message",
-                PreparedUserMessage::new(vec![
+                vec![
                     ContentBlock::Text {
                         text: "hello".to_string(),
                     },
@@ -1902,7 +1902,7 @@ mod tests {
                         asset: image_asset(),
                         data: Some("RECEIPT_RUNTIME_SECRET".to_string()),
                     },
-                ]),
+                ],
             )
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), receipt.await_persisted())

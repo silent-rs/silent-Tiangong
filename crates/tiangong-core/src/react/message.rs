@@ -5,14 +5,17 @@ use std::sync::{Arc, Mutex};
 
 use crate::agent_team::lifecycle::TeamContext;
 use crate::session::{Message, MessageRole, MessageToolCall, PendingAgentDelivery, Session};
-use tiangong_types::{PreparedUserMessage, StreamEvent};
+use tiangong_types::{
+    ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
+    validate_ready_content_blocks,
+};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
 pub(crate) fn append_or_reuse_user_message(
     session: &mut Session,
     message_id: Option<String>,
-    prepared: PreparedUserMessage,
+    prepared: Vec<ContentBlock>,
 ) -> Result<String, String> {
     if let Some(message_id) = message_id {
         if session
@@ -38,7 +41,7 @@ pub(crate) struct AcceptedUserMessage {
     pub message_id: String,
     /// 该用户消息在 Session 中的实际索引；快照预含同 ID 消息时可能小于接收前 len。
     pub turn_start_idx: usize,
-    pub prepared: PreparedUserMessage,
+    pub prepared: Vec<ContentBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,13 +124,13 @@ pub(crate) fn accept_prepared_user_message_with_options(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
-    prepared: PreparedUserMessage,
+    prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     pending_agent_deliveries: Vec<PendingAgentDelivery>,
     model_excluded: bool,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
-    if let Err(err) = prepared.validate_ready() {
+    if let Err(err) = validate_ready_content_blocks(&prepared) {
         if let Some(ack) = persistence_ack {
             let _ = ack.send(Err(err.clone()));
         }
@@ -149,9 +152,9 @@ pub(crate) fn accept_prepared_user_message_with_options(
     } else {
         Vec::new()
     };
-    let text = prepared.text_content();
+    let text = content_blocks_text(&prepared);
     let accepted_prepared = prepared.clone();
-    let stable_content = prepared.stable().content;
+    let stable_content = stable_content_blocks(&prepared);
     let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
         Ok(message_id) => message_id,
         Err(err) => {
@@ -298,7 +301,7 @@ pub(crate) fn accept_runtime_user_message(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
-    prepared: PreparedUserMessage,
+    prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> Result<RuntimeMessageDisposition, String> {
     // 路由预判和实际投递使用同一把团队锁，避免两次加锁之间目标 Agent 状态变化，
@@ -360,7 +363,7 @@ pub(crate) fn accept_runtime_user_message(
             );
         }
         Ok(RuntimeMessageDisposition::CurrentAgentInput(
-            accepted.prepared.text_content(),
+            content_blocks_text(&accepted.prepared),
         ))
     }
 }
@@ -1000,7 +1003,7 @@ mod tests {
         session.append_message(MessageRole::Assistant, "before");
         session.append_prepared_user_message_with_id(
             "preloaded-user".to_string(),
-            PreparedUserMessage::text("old content"),
+            vec![ContentBlock::text("old content")],
         );
         session.append_message(MessageRole::Assistant, "after");
         let accept_before_len = session.messages.len();
@@ -1008,7 +1011,7 @@ mod tests {
         let message_id = append_or_reuse_user_message(
             &mut session,
             Some("preloaded-user".to_string()),
-            PreparedUserMessage::text("new content"),
+            vec![ContentBlock::text("new content")],
         )
         .unwrap();
         let turn_start_idx = user_message_turn_start_idx(&session, &message_id).unwrap();
@@ -1053,7 +1056,7 @@ mod tests {
 
         session.append_prepared_user_message_with_id(
             "next-user".to_string(),
-            PreparedUserMessage::text("continue"),
+            vec![ContentBlock::text("continue")],
         );
         let call_2_result = session
             .messages

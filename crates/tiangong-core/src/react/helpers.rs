@@ -167,13 +167,13 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // 放入消息1、消息2、压缩、取消
         tx.send(Command::Message {
-            prepared: tiangong_types::PreparedUserMessage::text("msg1"),
+            prepared: vec![tiangong_types::ContentBlock::text("msg1")],
             message_id: None,
             persistence_ack: None,
         })
         .unwrap();
         tx.send(Command::Message {
-            prepared: tiangong_types::PreparedUserMessage::text("msg2"),
+            prepared: vec![tiangong_types::ContentBlock::text("msg2")],
             message_id: None,
             persistence_ack: None,
         })
@@ -188,11 +188,15 @@ mod tests {
         let c2 = rx.try_recv().unwrap();
         let c3 = rx.try_recv().unwrap();
         match c1 {
-            Command::Message { prepared, .. } => assert_eq!(prepared.text_content(), "msg1"),
+            Command::Message { prepared, .. } => {
+                assert_eq!(tiangong_types::content_blocks_text(&prepared), "msg1")
+            }
             _ => panic!("第一个应为 msg1"),
         }
         match c2 {
-            Command::Message { prepared, .. } => assert_eq!(prepared.text_content(), "msg2"),
+            Command::Message { prepared, .. } => {
+                assert_eq!(tiangong_types::content_blocks_text(&prepared), "msg2")
+            }
             _ => panic!("第二个应为 msg2"),
         }
         assert!(
@@ -207,7 +211,7 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(Command::Message {
-            prepared: tiangong_types::PreparedUserMessage::text("msg"),
+            prepared: vec![tiangong_types::ContentBlock::text("msg")],
             message_id: None,
             persistence_ack: None,
         })

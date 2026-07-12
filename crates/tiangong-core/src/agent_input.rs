@@ -60,13 +60,13 @@ impl AgentInputKind {
     /// 便捷构造：用户消息（触发 turn）。
     pub fn message(content: impl Into<String>) -> Self {
         AgentInputKind::Message(MessageInput::UserMessage {
-            prepared: tiangong_types::PreparedUserMessage::text(content),
+            prepared: vec![tiangong_types::ContentBlock::text(content)],
             message_id: None,
         })
     }
 
     /// 便捷构造：已由宿主入口准备完成的用户消息。
-    pub fn prepared(prepared: tiangong_types::PreparedUserMessage) -> Self {
+    pub fn prepared(prepared: Vec<tiangong_types::ContentBlock>) -> Self {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: None,
@@ -76,7 +76,7 @@ impl AgentInputKind {
     /// 便捷构造：带稳定消息 ID 的 Prepared 用户消息。
     pub fn prepared_with_id(
         message_id: impl Into<String>,
-        prepared: tiangong_types::PreparedUserMessage,
+        prepared: Vec<tiangong_types::ContentBlock>,
     ) -> Self {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
@@ -129,7 +129,7 @@ impl AgentInputKind {
 pub enum MessageInput {
     /// 用户消息（触发 Agent 执行一轮 turn）。
     UserMessage {
-        prepared: tiangong_types::PreparedUserMessage,
+        prepared: Vec<tiangong_types::ContentBlock>,
         /// 前端预生成的消息 ID（用于流式复用），None 则由后端生成。
         message_id: Option<String>,
     },

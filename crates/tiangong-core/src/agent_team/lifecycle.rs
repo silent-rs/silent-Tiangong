@@ -14,7 +14,7 @@ use crate::core::command::Command;
 use crate::model::{ToolCall, ToolSpec};
 use crate::session::{PendingAgentDelivery, Session, now_text};
 use crate::tool::ToolResult;
-use tiangong_types::{ContentBlock, PreparedUserMessage, StreamEvent};
+use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// 团队执行上下文，随 ReactEngine 的 execute_turn 传递
@@ -116,10 +116,13 @@ fn normalize_agent_role(role: &str) -> String {
 pub(crate) fn prepared_agent_message_for_prompt(
     message: &AgentMessage,
     mut additional_content: Vec<ContentBlock>,
-) -> PreparedUserMessage {
+) -> Vec<ContentBlock> {
     let source_prefix = format!("[from:{} at {}]\n", message.from, message.created_at);
     if additional_content.is_empty() {
-        return PreparedUserMessage::text(format!("{source_prefix}{}", message.content));
+        return vec![ContentBlock::text(format!(
+            "{source_prefix}{}",
+            message.content
+        ))];
     }
 
     if let Some(ContentBlock::Text { text }) = additional_content
@@ -130,7 +133,7 @@ pub(crate) fn prepared_agent_message_for_prompt(
     } else {
         additional_content.insert(0, ContentBlock::text(source_prefix));
     }
-    PreparedUserMessage::new(additional_content)
+    additional_content
 }
 
 #[derive(Debug, Clone)]
@@ -1072,16 +1075,16 @@ pub fn route_user_mentions(
     content: &str,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
-    route_user_mentions_with_content(team, None, PreparedUserMessage::text(content), stream_tx)
+    route_user_mentions_with_content(team, None, vec![ContentBlock::text(content)], stream_tx)
 }
 
 /// 在用户消息持久化前生成确定性的直达投递计划。
 pub(crate) fn plan_user_mention_deliveries(
     team: &TeamContext,
     source_message_id: &str,
-    prepared: &PreparedUserMessage,
+    prepared: &[ContentBlock],
 ) -> Vec<PendingAgentDelivery> {
-    build_user_mention_entries(team, Some(source_message_id), prepared.clone())
+    build_user_mention_entries(team, Some(source_message_id), prepared.to_vec())
         .into_iter()
         .map(|(target_agent_id, _label, entry)| PendingAgentDelivery {
             delivery_id: entry.message.id,
@@ -1180,7 +1183,7 @@ pub(crate) fn restore_pending_agent_deliveries(
 pub fn route_user_mentions_with_content(
     team: &mut TeamContext,
     source_message_id: Option<&str>,
-    prepared: PreparedUserMessage,
+    prepared: Vec<ContentBlock>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
     let entries = build_user_mention_entries(team, source_message_id, prepared);
@@ -1209,9 +1212,9 @@ pub fn route_user_mentions_with_content(
 fn build_user_mention_entries(
     team: &TeamContext,
     source_message_id: Option<&str>,
-    prepared: PreparedUserMessage,
+    prepared: Vec<ContentBlock>,
 ) -> Vec<(String, String, AgentInboxEntry)> {
-    let content = prepared.text_content();
+    let content = content_blocks_text(&prepared);
     let Some(route) = parse_agent_mention_route(&content) else {
         return Vec::new();
     };
@@ -1250,7 +1253,7 @@ fn build_user_mention_entries(
     targets.retain(|(agent_id, _, _)| seen_targets.insert(agent_id.clone()));
 
     // 只移除开头的 @Agent 路由前缀，完整保留宿主已准备内容块的相对顺序。
-    let mut routed_content = prepared.content;
+    let mut routed_content = prepared;
     let mut prefix_bytes = content.len().saturating_sub(route.content.len());
     for block in &mut routed_content {
         let ContentBlock::Text { text } = block else {
@@ -1269,7 +1272,7 @@ fn build_user_mention_entries(
         }
     }
 
-    let routed_content = PreparedUserMessage::new(routed_content).stable().content;
+    let routed_content = stable_content_blocks(&routed_content);
     let routed_revision = serde_json::to_string(&routed_content).unwrap_or_default();
     targets
         .into_iter()
@@ -1879,10 +1882,10 @@ mod tests {
             },
             Session::new("child"),
         );
-        let prepared = PreparedUserMessage::new(vec![
+        let prepared = vec![
             ContentBlock::text("@dev 检查附件"),
             ContentBlock::model_instruction("保持块顺序"),
-        ]);
+        ];
         let mut parent = Session::new("parent");
         let deliveries = plan_user_mention_deliveries(&team, "source-1", &prepared);
         parent.replace_pending_agent_deliveries("source-1", deliveries);
@@ -1943,7 +1946,7 @@ mod tests {
         assert!(route_user_mentions_with_content(
             &mut team,
             Some("source-message"),
-            PreparedUserMessage::new(content),
+            content,
             &tx,
         ));
 
@@ -1955,8 +1958,8 @@ mod tests {
             .expect("direct user message should wait in the persistent inbox");
         assert_eq!(entry.session_message_id.as_deref(), Some("source-message"));
         let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
-        assert!(prepared.text_content().contains("检查附件"));
-        assert_eq!(&prepared.content[1..], expected_additional.as_slice());
+        assert!(content_blocks_text(&prepared).contains("检查附件"));
+        assert_eq!(&prepared[1..], expected_additional.as_slice());
     }
 
     #[test]
@@ -1988,10 +1991,7 @@ mod tests {
         assert!(route_user_mentions_with_content(
             &mut team,
             Some("source-message"),
-            PreparedUserMessage::new(vec![
-                ContentBlock::text("@dev 检查附件"),
-                instruction.clone(),
-            ]),
+            vec![ContentBlock::text("@dev 检查附件"), instruction.clone(),],
             &tx,
         ));
 
@@ -2007,9 +2007,9 @@ mod tests {
         ));
         assert_eq!(entry.additional_content[1], instruction);
         let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
-        assert!(prepared.text_content().contains("检查附件"));
+        assert!(content_blocks_text(&prepared).contains("检查附件"));
         assert!(matches!(
-            &prepared.content[1],
+            &prepared[1],
             ContentBlock::ModelInstruction { text }
                 if text.contains("message_id=source-message")
         ));
@@ -2057,29 +2057,29 @@ mod tests {
         assert!(route_user_mentions_with_content(
             &mut team,
             Some("source-message"),
-            PreparedUserMessage::new(vec![
+            vec![
                 ContentBlock::text("@dev 比较"),
                 image("one"),
                 ContentBlock::text("第一张"),
                 image("two"),
                 ContentBlock::text("第二张"),
-            ]),
+            ],
             &tx,
         ));
 
         let entry = team.registry.drain_inbox("dev-agent").remove(0);
         let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
         assert!(matches!(
-            &prepared.content[0],
+            &prepared[0],
             ContentBlock::Text { text } if text.ends_with("比较")
         ));
         assert!(
-            matches!(&prepared.content[1], ContentBlock::Image { asset, .. } if asset.asset_id == "one")
+            matches!(&prepared[1], ContentBlock::Image { asset, .. } if asset.asset_id == "one")
         );
-        assert!(matches!(&prepared.content[2], ContentBlock::Text { text } if text == "第一张"));
+        assert!(matches!(&prepared[2], ContentBlock::Text { text } if text == "第一张"));
         assert!(
-            matches!(&prepared.content[3], ContentBlock::Image { asset, .. } if asset.asset_id == "two")
+            matches!(&prepared[3], ContentBlock::Image { asset, .. } if asset.asset_id == "two")
         );
-        assert!(matches!(&prepared.content[4], ContentBlock::Text { text } if text == "第二张"));
+        assert!(matches!(&prepared[4], ContentBlock::Text { text } if text == "第二张"));
     }
 }

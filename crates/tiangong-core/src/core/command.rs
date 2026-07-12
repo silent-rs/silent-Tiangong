@@ -4,7 +4,7 @@
 pub(crate) enum Command {
     /// 发送消息
     Message {
-        prepared: tiangong_types::PreparedUserMessage,
+        prepared: Vec<tiangong_types::ContentBlock>,
         message_id: Option<String>,
         persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     },

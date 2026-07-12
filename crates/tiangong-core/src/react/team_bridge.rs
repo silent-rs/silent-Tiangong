@@ -26,7 +26,7 @@ use crate::react::message::{
     RuntimeMessageDisposition, accept_runtime_user_message, append_runtime_tool_message,
 };
 use crate::session::{Message, MessageRole, Session, now_text};
-use tiangong_types::{PreparedUserMessage, StreamEvent};
+use tiangong_types::{ContentBlock, StreamEvent};
 
 use super::engine::ReactEngine;
 
@@ -401,7 +401,7 @@ impl ReactEngine {
             return false;
         }
 
-        type PendingInput = (PreparedUserMessage, String);
+        type PendingInput = (Vec<ContentBlock>, String);
         type PendingAgent = (
             String,
             String,

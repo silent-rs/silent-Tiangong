@@ -16,7 +16,7 @@ use crate::react::message::{
 };
 use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
 use crate::session::{MessageRole, Session};
-use tiangong_types::{PreparedUserMessage, SessionStreamEvent, StreamEvent};
+use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 
 /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
 ///
@@ -172,7 +172,7 @@ impl TiangongCore {
     pub fn enqueue_prepared_with_receipt(
         &self,
         message_id: impl Into<String>,
-        prepared: PreparedUserMessage,
+        prepared: Vec<ContentBlock>,
     ) -> Result<PreparedMessageReceipt, CoreError> {
         let _delivery_guard = self
             .command_delivery_lock
@@ -191,7 +191,7 @@ impl TiangongCore {
     pub async fn deliver_prepared_and_wait(
         &self,
         message_id: impl Into<String>,
-        prepared: PreparedUserMessage,
+        prepared: Vec<ContentBlock>,
     ) -> Result<(), CoreError> {
         self.enqueue_prepared_with_receipt(message_id, prepared)?
             .await
@@ -1125,7 +1125,7 @@ impl TurnOutcome {
 async fn execute_turn_async(
     session: &mut Session,
     message_id: &str,
-    prepared: &PreparedUserMessage,
+    prepared: &[ContentBlock],
     engine: &RuntimeEngine,
     tools: &[ToolSpec],
     stream_tx: &StdSender<StreamEvent>,

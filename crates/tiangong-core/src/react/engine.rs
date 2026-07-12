@@ -24,7 +24,7 @@ use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
-use tiangong_types::{PreparedUserMessage, StreamEvent, StreamToolCall};
+use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
 
 use crate::agent_team::lifecycle::TeamContext;
 
@@ -193,7 +193,7 @@ impl ReactEngine {
     pub(crate) async fn execute_turn(
         &mut self,
         session: &mut Session,
-        initial_user_message: Option<(&str, &PreparedUserMessage)>,
+        initial_user_message: Option<(&str, &[ContentBlock])>,
         stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> TokenUsage {
@@ -215,7 +215,7 @@ impl ReactEngine {
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
         let mut user_input = initial_user_message
-            .map(|(_, prepared)| prepared.text_content())
+            .map(|(_, prepared)| content_blocks_text(prepared))
             .unwrap_or_default();
 
         if self.agent_id == "main" {
@@ -1899,7 +1899,7 @@ pub(super) fn tools_for_current_turn(
 fn route_initial_prepared_user_message(
     team: Option<&Arc<Mutex<TeamContext>>>,
     session: &Session,
-    initial_user_message: Option<(&str, &PreparedUserMessage)>,
+    initial_user_message: Option<(&str, &[ContentBlock])>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
     initial_user_message
@@ -1919,7 +1919,7 @@ fn route_initial_prepared_user_message(
 mod tests {
     use super::*;
 
-    fn prepared_resource_mention() -> PreparedUserMessage {
+    fn prepared_resource_mention() -> Vec<ContentBlock> {
         let asset = tiangong_types::StoredAsset {
             asset_id: "asset-1".to_string(),
             local_path: "/tmp/report.pdf".to_string(),
@@ -1928,13 +1928,13 @@ mod tests {
             size: 12,
             kind: tiangong_types::MediaKind::File,
         };
-        PreparedUserMessage::new(vec![
+        vec![
             tiangong_types::ContentBlock::text("@dev 检查附件"),
             tiangong_types::ContentBlock::asset_reference(asset),
             tiangong_types::ContentBlock::model_instruction(
                 "使用 message_id=source-message、attachment_index=0",
             ),
-        ])
+        ]
     }
 
     fn tool(name: &str) -> ToolSpec {
@@ -2006,7 +2006,7 @@ mod tests {
         );
         let team = Arc::new(Mutex::new(team));
         let prepared = prepared_resource_mention();
-        let mut expected_content = prepared.content.clone();
+        let mut expected_content = prepared.clone();
         expected_content[0] = tiangong_types::ContentBlock::text("检查附件");
         let (tx, _rx) = std::sync::mpsc::channel();
 

@@ -807,7 +807,7 @@ impl TiangongApp {
             let sent = if let Some(message_id) = message_id {
                 core.deliver(AgentInputKind::prepared_with_id(
                     message_id,
-                    tiangong_types::PreparedUserMessage::text(content),
+                    vec![tiangong_types::ContentBlock::text(content)],
                 ))
                 .is_ok()
             } else {

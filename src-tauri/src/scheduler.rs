@@ -226,9 +226,9 @@ fn apply_scheduler_stream_event(session: &mut Session, event: &tiangong_types::S
             let prepared = if content_blocks.is_empty() {
                 let mut blocks = vec![tiangong_types::ContentBlock::text(content.clone())];
                 blocks.extend(media.iter().map(|asset| asset.to_content_block()));
-                tiangong_types::PreparedUserMessage::new(blocks).stable()
+                tiangong_types::stable_content_blocks(&blocks)
             } else {
-                tiangong_types::PreparedUserMessage::new(content_blocks.clone()).stable()
+                tiangong_types::stable_content_blocks(content_blocks)
             };
             let existing = session
                 .messages
@@ -241,7 +241,7 @@ fn apply_scheduler_stream_event(session: &mut Session, event: &tiangong_types::S
                     || message.content.is_empty()
                     || message.text_content() != *content
                 {
-                    message.content = prepared.content;
+                    message.content = prepared;
                 }
                 message.model_excluded = *model_excluded;
                 session.messages.push(message);

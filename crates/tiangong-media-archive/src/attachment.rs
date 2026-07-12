@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
-use tiangong_types::{ContentBlock, MediaKind, PreparedUserMessage, StoredAsset};
+use tiangong_types::{ContentBlock, MediaKind, StoredAsset};
 
 pub(crate) const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -240,7 +240,7 @@ impl AttachmentTransaction {
         message_id: &str,
         text: impl Into<String>,
         capabilities: AttachmentCapabilitySnapshot,
-    ) -> Result<PreparedUserMessage, String> {
+    ) -> Result<Vec<ContentBlock>, String> {
         let result = self.build_prepared_message(message_id, text.into(), capabilities);
         match result {
             Ok((message, assets)) => {
@@ -272,7 +272,7 @@ impl AttachmentTransaction {
         message_id: &str,
         text: String,
         capabilities: AttachmentCapabilitySnapshot,
-    ) -> Result<(PreparedUserMessage, Vec<StoredAsset>), String> {
+    ) -> Result<(Vec<ContentBlock>, Vec<StoredAsset>), String> {
         if message_id.trim().is_empty() {
             return Err("准备用户消息时 message_id 不能为空".to_string());
         }
@@ -351,7 +351,7 @@ impl AttachmentTransaction {
             assets.push(asset);
         }
 
-        Ok((PreparedUserMessage::new(content), assets))
+        Ok((content, assets))
     }
 
     fn rollback_in_place(&mut self) -> Result<(), String> {
@@ -938,8 +938,8 @@ mod tests {
 
         assert_eq!(transaction.assets().len(), 1);
         assert!(!transaction.assets()[0].local_path.starts_with("data:"));
-        assert_eq!(message.content.len(), 2);
-        match &message.content[1] {
+        assert_eq!(message.len(), 2);
+        match &message[1] {
             ContentBlock::Image { asset, data } => {
                 assert_eq!(asset, &transaction.assets()[0]);
                 assert_eq!(
@@ -952,7 +952,7 @@ mod tests {
             other => panic!("应生成最终 Image block，实际：{other:?}"),
         }
         assert!(matches!(
-            &message.stable().content[1],
+            &tiangong_types::stable_content_blocks(&message)[1],
             ContentBlock::Image { data: None, .. }
         ));
     }
@@ -980,12 +980,12 @@ mod tests {
 
         assert_eq!(analyze.assets().len(), 2);
         assert!(matches!(
-            &message.content[3],
+            &message[3],
             ContentBlock::AssetReference { asset }
                 if asset.original_name == "analyze.png"
         ));
         assert!(matches!(
-            &message.content[4],
+            &message[4],
             ContentBlock::ModelInstruction { text }
                 if text.contains("analyze_attachment")
                     && text.contains("message_id=message-analyze")
@@ -1046,23 +1046,23 @@ mod tests {
         for (index, expected_name) in ["doc.txt", "voice.mp3", "clip.mp4"].iter().enumerate() {
             let block_index = 1 + index * 2;
             assert!(matches!(
-                &message.content[block_index],
+                &message[block_index],
                 ContentBlock::AssetReference { asset }
                     if asset.original_name == *expected_name
             ));
         }
         assert!(matches!(
-            &message.content[2],
+            &message[2],
             ContentBlock::ModelInstruction { text }
                 if text.contains("index=0") && text.contains("文件引用")
         ));
         assert!(matches!(
-            &message.content[4],
+            &message[4],
             ContentBlock::ModelInstruction { text }
                 if text.contains("index=1") && text.contains("speech_to_text")
         ));
         assert!(matches!(
-            &message.content[6],
+            &message[6],
             ContentBlock::ModelInstruction { text }
                 if text.contains("index=2") && text.contains("当前不可用")
         ));

@@ -1133,7 +1133,7 @@ async fn send_message_inner(
         }
     };
 
-    let prepared_for_state = prepared.stable();
+    let prepared_for_state = tiangong_types::stable_content_blocks(&prepared);
     let state_prepare = state
         .with_state(|core_state| {
             let index = core_state
@@ -1423,10 +1423,9 @@ pub(crate) fn start_stream_consumer(
                                     content.clone(),
                                 )];
                                 blocks.extend(media.iter().map(|asset| asset.to_content_block()));
-                                tiangong_types::PreparedUserMessage::new(blocks).stable()
+                                tiangong_types::stable_content_blocks(&blocks)
                             } else {
-                                tiangong_types::PreparedUserMessage::new(content_blocks.clone())
-                                    .stable()
+                                tiangong_types::stable_content_blocks(content_blocks)
                             };
                             let existing = session
                                 .messages
@@ -1444,7 +1443,7 @@ pub(crate) fn start_stream_consumer(
                                     || message.content.is_empty()
                                     || message.text_content() != *content
                                 {
-                                    message.content = prepared.content;
+                                    message.content = prepared;
                                 }
                                 message.model_excluded = *model_excluded;
                                 session.messages.push(message);
@@ -2137,7 +2136,7 @@ pub async fn edit_and_resend(
 
     // 附件准备可能很慢；在同一把 App 状态锁内做完整二次校验、修改和持久化。
     // 只有本步骤成功后才允许终止旧任务。
-    let prepared_for_state = prepared.stable();
+    let prepared_for_state = tiangong_types::stable_content_blocks(&prepared);
     let (original_session, originally_pending, session_snapshot) = state
         .with_state(|core_state| {
             let index = core_state

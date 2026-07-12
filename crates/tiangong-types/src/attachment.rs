@@ -48,63 +48,34 @@ impl StoredAsset {
     }
 }
 
-/// Core 用户消息入口：内容块已经由宿主准备完成并按最终顺序排列。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedUserMessage {
-    #[serde(default)]
-    pub content: Vec<ContentBlock>,
+/// 返回只含稳定内容的副本，移除所有仅供当前请求使用的图片数据。
+pub fn stable_content_blocks(content: &[ContentBlock]) -> Vec<ContentBlock> {
+    let mut stable = content.to_vec();
+    for block in &mut stable {
+        block.clear_transient_data();
+    }
+    stable
 }
 
-impl PreparedUserMessage {
-    pub fn new(content: Vec<ContentBlock>) -> Self {
-        Self { content }
+/// Core 接收边界校验：持久资源字段只能保存引用，不能伪装成内联数据通道。
+pub fn validate_ready_content_blocks(content: &[ContentBlock]) -> Result<(), String> {
+    for block in content {
+        block.validate_stable_reference()?;
     }
-
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::new(vec![ContentBlock::text(text)])
-    }
-
-    /// 返回只含稳定内容的副本，移除所有仅供当前请求使用的图片数据。
-    pub fn stable(&self) -> Self {
-        let mut content = self.content.clone();
-        for block in &mut content {
-            block.clear_transient_data();
-        }
-        Self { content }
-    }
-
-    /// Core 接收边界校验：持久资源字段只能保存引用，不能伪装成内联数据通道。
-    pub fn validate_ready(&self) -> Result<(), String> {
-        for block in &self.content {
-            block.validate_stable_reference()?;
-        }
-        Ok(())
-    }
-
-    /// 拼接面向用户的文本，不包含宿主提供给模型的指令块。
-    pub fn text_content(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(ContentBlock::as_text)
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.content.iter().all(ContentBlock::is_empty)
-    }
+    Ok(())
 }
 
-impl From<String> for PreparedUserMessage {
-    fn from(value: String) -> Self {
-        Self::text(value)
-    }
+/// 拼接面向用户的文本，不包含宿主提供给模型的指令块。
+pub fn content_blocks_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(ContentBlock::as_text)
+        .collect::<Vec<_>>()
+        .join("")
 }
 
-impl From<&str> for PreparedUserMessage {
-    fn from(value: &str) -> Self {
-        Self::text(value)
-    }
+pub fn content_blocks_are_empty(content: &[ContentBlock]) -> bool {
+    content.iter().all(ContentBlock::is_empty)
 }
 
 #[cfg(test)]
@@ -126,28 +97,25 @@ mod tests {
     }
 
     #[test]
-    fn stable_message_clears_transient_image_data() {
-        let prepared = PreparedUserMessage::new(vec![
+    fn stable_content_clears_transient_image_data() {
+        let content = vec![
             ContentBlock::text("查看图片"),
             image_block(Some("CURRENT_BASE64")),
-        ]);
+        ];
 
-        let stable = prepared.stable();
+        let stable = stable_content_blocks(&content);
 
         assert!(matches!(
-            &prepared.content[1],
+            &content[1],
             ContentBlock::Image { data: Some(data), .. } if data == "CURRENT_BASE64"
         ));
-        assert!(matches!(
-            &stable.content[1],
-            ContentBlock::Image { data: None, .. }
-        ));
+        assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
     }
 
     #[test]
     fn image_data_is_never_serialized() {
-        let prepared = PreparedUserMessage::new(vec![image_block(Some("SECRET_BASE64"))]);
-        let json = serde_json::to_string(&prepared).unwrap();
+        let content = vec![image_block(Some("SECRET_BASE64"))];
+        let json = serde_json::to_string(&content).unwrap();
 
         assert!(!json.contains("SECRET_BASE64"));
         assert!(json.contains("/tmp/asset-1.png"));
@@ -160,11 +128,44 @@ mod tests {
             unreachable!();
         };
         asset.local_path = "data:image/png;base64,SECRET_BASE64".to_string();
-        let prepared = PreparedUserMessage::new(vec![block]);
+        let content = vec![block];
 
-        assert!(prepared.validate_ready().is_err());
-        let json = serde_json::to_string(&prepared.stable()).unwrap();
+        assert!(validate_ready_content_blocks(&content).is_err());
+        let json = serde_json::to_string(&stable_content_blocks(&content)).unwrap();
         assert!(!json.contains("SECRET_BASE64"));
         assert!(json.contains("inline-data-reference-unavailable"));
+    }
+
+    #[test]
+    fn ready_content_allows_transient_image_data() {
+        let content = vec![image_block(Some("CURRENT_REQUEST_BASE64"))];
+
+        assert!(validate_ready_content_blocks(&content).is_ok());
+        assert!(matches!(
+            &content[0],
+            ContentBlock::Image { data: Some(data), .. } if data == "CURRENT_REQUEST_BASE64"
+        ));
+    }
+
+    #[test]
+    fn content_helpers_keep_user_text_semantics() {
+        let content = vec![
+            ContentBlock::text("第一段"),
+            ContentBlock::ModelInstruction {
+                text: "仅供模型".to_string(),
+            },
+            ContentBlock::text("第二段"),
+        ];
+
+        assert_eq!(content_blocks_text(&content), "第一段第二段");
+        assert!(!content_blocks_are_empty(&content));
+        assert!(content_blocks_are_empty(&[]));
+        assert!(content_blocks_are_empty(&[
+            ContentBlock::text("  "),
+            ContentBlock::ModelInstruction {
+                text: "\n".to_string(),
+            },
+        ]));
+        assert!(!content_blocks_are_empty(&[image_block(None)]));
     }
 }
