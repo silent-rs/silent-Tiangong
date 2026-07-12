@@ -15,11 +15,14 @@ use std::sync::Arc;
 use silent::prelude::*;
 use tiangong_app_state::app_state::TiangongState;
 use tiangong_config::CoreConfigProvider;
+use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
 
+use crate::remote::backend::ServerCoreBackend;
 use crate::remote::core::ServerCoreManager;
 use crate::remote::event::EventBus;
 use crate::remote::router::MessageRouter;
+use crate::scheduler::context::ServerSchedulerContext;
 
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
@@ -29,7 +32,8 @@ pub type SharedState = Arc<Mutex<TiangongState>>;
 pub struct ServerAppContext {
     pub state: SharedState,
     pub config: CoreConfigProvider,
-    pub cores: Arc<ServerCoreManager>,
+    pub core_backend: Arc<dyn ServerCoreBackend>,
+    pub scheduler_context: Arc<dyn SchedulerContext>,
     pub router: Arc<MessageRouter>,
     /// MCP 管理插件共享句柄：API 管理（register/remove/...）与 core 注册使用同一实例，
     /// 避免管理实例与运行实例状态分叉（对齐 CLI/Tauri 的 dual-ownership）。
@@ -50,18 +54,51 @@ impl ServerAppContext {
             event_bus.clone(),
             mcp_plugin.clone(),
         ));
-        let router = Arc::new(MessageRouter::new(state.clone(), event_bus, cores.clone()));
+        let core_backend: Arc<dyn ServerCoreBackend> = cores;
+        let scheduler_context: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
+            state: state.clone(),
+            core_backend: core_backend.clone(),
+        });
+        Self::with_backend(
+            state,
+            config,
+            event_bus,
+            core_backend,
+            scheduler_context,
+            mcp_plugin,
+        )
+    }
+
+    /// 使用宿主提供的 Core 与调度上下文构建 Server。
+    ///
+    /// Desktop 内嵌模式必须走此入口，确保 HTTP 与桌面 UI 共用同一套 Core 生命周期。
+    pub fn with_backend(
+        state: SharedState,
+        config: CoreConfigProvider,
+        event_bus: Arc<EventBus>,
+        core_backend: Arc<dyn ServerCoreBackend>,
+        scheduler_context: Arc<dyn SchedulerContext>,
+        mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    ) -> Self {
+        let router = Arc::new(MessageRouter::new(
+            state.clone(),
+            event_bus,
+            core_backend.clone(),
+        ));
         Self {
             state,
             config,
-            cores,
+            core_backend,
+            scheduler_context,
             router,
             mcp_plugin,
         }
     }
 
     pub async fn sync_core_config_from_state(&self) {
-        self.cores.sync_config_from_state().await;
+        if let Err(error) = self.core_backend.sync_config_from_state().await {
+            tracing::warn!(%error, "同步 Core 配置失败");
+        }
     }
 }
 
@@ -132,4 +169,144 @@ pub fn build_routes(
         .append(ws::ws_route());
 
     (route, configs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use anyhow::{Result, anyhow};
+    use async_trait::async_trait;
+    use tiangong_types::{
+        IncomingMessage, MediaAsset, MessageContent, OutgoingMessage, RemoteRole,
+    };
+
+    use super::*;
+    use crate::remote::backend::CoreBackendKind;
+
+    struct EmbeddedBackend {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ServerCoreBackend for EmbeddedBackend {
+        fn kind(&self) -> CoreBackendKind {
+            CoreBackendKind::EmbeddedHost
+        }
+
+        async fn send_connector_message_and_wait(
+            &self,
+            _connector: &str,
+            channel_id: &str,
+            _content: String,
+            _message_id: Option<String>,
+            _media: Vec<MediaAsset>,
+        ) -> Result<(String, OutgoingMessage)> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok((
+                channel_id.to_string(),
+                OutgoingMessage {
+                    content: MessageContent::Text("embedded reply".to_string()),
+                    attachments: Vec::new(),
+                    reply_to: None,
+                },
+            ))
+        }
+
+        async fn send_message_and_wait(
+            &self,
+            _session_id: &str,
+            _content: String,
+            _message_id: Option<String>,
+            _media: Vec<MediaAsset>,
+        ) -> Result<(String, OutgoingMessage)> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+
+        async fn delete_session(&self, _session_id: &str) -> Result<bool> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+
+        async fn sync_config_from_state(&self) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+    }
+
+    struct EmbeddedScheduler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SchedulerContext for EmbeddedScheduler {
+        async fn send_message(&self, _session_id: &str, _content: String) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+
+        async fn resolve_or_create_session(
+            &self,
+            _requested_session_id: Option<&str>,
+            _trigger_name: &str,
+        ) -> Result<(String, bool)> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("not used"))
+        }
+    }
+
+    #[tokio::test]
+    async fn embedded_messages_use_host_backend_without_starting_another_scheduler() {
+        let _storage_guard = crate::remote::core::test_support::STORAGE_TEST_LOCK
+            .lock()
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let _home_guard =
+            crate::remote::core::test_support::TestHomeGuard::new(&temp.path().join("home"));
+        let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
+        let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
+        let event_bus = Arc::new(EventBus::default());
+        let backend_calls = Arc::new(AtomicUsize::new(0));
+        let scheduler_calls = Arc::new(AtomicUsize::new(0));
+        let backend: Arc<dyn ServerCoreBackend> = Arc::new(EmbeddedBackend {
+            calls: backend_calls.clone(),
+        });
+        let scheduler: Arc<dyn SchedulerContext> = Arc::new(EmbeddedScheduler {
+            calls: scheduler_calls.clone(),
+        });
+        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+            temp.path().to_path_buf(),
+        ));
+
+        let context = ServerAppContext::with_backend(
+            state, config, event_bus, backend, scheduler, mcp_plugin,
+        );
+
+        assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);
+        assert_eq!(backend_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(scheduler_calls.load(Ordering::Relaxed), 0);
+
+        let outgoing = context
+            .router
+            .handle_incoming(IncomingMessage {
+                id: "stable-message".to_string(),
+                connector: "embedded-test".to_string(),
+                channel_id: "desktop-session".to_string(),
+                sender_id: "test".to_string(),
+                sender_role: RemoteRole::Controller,
+                content: MessageContent::Text("hello".to_string()),
+                media: Vec::new(),
+                reply_to: None,
+                timestamp: tiangong_core::session::now_text(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outgoing.content,
+            MessageContent::Text(ref text) if text == "embedded reply"
+        ));
+        assert_eq!(backend_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(scheduler_calls.load(Ordering::Relaxed), 0);
+    }
 }

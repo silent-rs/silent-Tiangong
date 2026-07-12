@@ -160,7 +160,109 @@ fn wrap_non_interactive_command(
     )
 }
 
+/// 取得 PTY 当前前台进程组。交互 shell 开启 job control 后，运行中的用户命令
+/// 位于该进程组；取消升级时必须终止整个组，不能只终止 shell 或只发送 Ctrl+C。
+#[cfg(unix)]
+fn foreground_process_group(ps: &crate::types::PtyState) -> Option<libc::pid_t> {
+    ps.master
+        .lock()
+        .ok()
+        .and_then(|master| master.process_group_leader())
+        .filter(|process_group| *process_group > 0)
+}
+
+/// 对已确认仍占用 PTY 前台的进程组发送不可忽略的终止信号。
+///
+/// `kill(-pgid, SIGKILL)` 成功返回后，该组中的进程不能再执行用户态代码；即使
+/// 尚待父进程回收，也不会在文件锁释放后继续写入工作区。`ESRCH` 表示进程组已
+/// 自行退出，同样是安全终态。
+#[cfg(unix)]
+fn force_stop_process_group(process_group: libc::pid_t) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+fn command_boundary_seen(manager: &TerminalManager, start_marker: &str, end_marker: &str) -> bool {
+    let state = manager
+        .state
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut start_seen = false;
+    for line in &state.output_buffer {
+        if line.trim() == start_marker {
+            start_seen = true;
+        }
+        if start_seen && line.trim() == end_marker {
+            return true;
+        }
+    }
+    false
+}
+
+/// Ctrl+C 只是协作式取消，命令可以捕获或忽略 SIGINT。宽限期结束后若本次命令
+/// 的 end marker 仍未出现，升级终止 PTY 前台进程组。返回前必须取得一个可证明
+/// 的安全终态：命令边界已闭合，或不可忽略的终止信号已成功投递。
+async fn stop_cancelled_command(
+    manager: &Arc<TerminalManager>,
+    ps: &mut crate::types::PtyState,
+    start_marker: &str,
+    end_marker: &str,
+) -> bool {
+    #[cfg(unix)]
+    let process_group = foreground_process_group(ps);
+    #[cfg(unix)]
+    let shell_process_id = ps.child.process_id().map(|pid| pid as libc::pid_t);
+
+    if let Ok(mut writer) = ps.writer.lock() {
+        let _ = writer.write_all(b"\x03");
+        let _ = writer.flush();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if command_boundary_seen(manager, start_marker, end_marker) {
+        return false;
+    }
+
+    if let Ok(mut writer) = ps.writer.lock() {
+        // CR 让已经回到 ZLE、但尚未输出 marker 的 shell 提交当前空行。
+        let _ = writer.write_all(b"\x03\r");
+        let _ = writer.flush();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if command_boundary_seen(manager, start_marker, end_marker) {
+        return false;
+    }
+
+    #[cfg(unix)]
+    if let Some(process_group) = process_group {
+        if force_stop_process_group(process_group).is_ok() {
+            return shell_process_id == Some(process_group);
+        }
+    }
+
+    // 非 Unix 平台没有可移植的前台进程组接口；Unix 上查询/终止进程组异常时，
+    // 关闭 PTY shell 是最后一道保险。portable-pty 的 kill 会升级到不可忽略终止。
+    // 只有 kill 成功或 shell 已退出才返回；瞬时失败则重试，避免栅栏提前放行。
+    loop {
+        if let Ok(Some(_)) = ps.child.try_wait() {
+            return true;
+        }
+        if ps.child.kill().is_ok() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// 非交互式命令执行：通过 marker 检测命令边界，捕获退出码和 cwd
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_exec(
     manager: &Arc<TerminalManager>,
     pty_state: &mut Option<PtyState>,
@@ -168,8 +270,13 @@ pub(crate) async fn handle_exec(
     command: &str,
     timeout_secs: Option<u64>,
     response_tx: oneshot::Sender<TerminalExecResponse>,
+    cancellation: Arc<crate::types::TerminalExecCancellation>,
+    _completion: crate::types::TerminalExecCompletion,
     activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
+    if cancellation.is_requested() || response_tx.is_closed() {
+        return;
+    }
     let ps = match pty_state {
         Some(ps) => ps,
         None => {
@@ -360,27 +467,12 @@ pub(crate) async fn handle_exec(
             return;
         }
 
-        if start_time.elapsed() >= timeout_dur {
-            // 超时，先发送 Ctrl+C 中断前台进程，等待 shell 回到 prompt
-            {
-                if let Ok(mut writer) = ps.writer.lock() {
-                    // 发送 Ctrl+C 中断前台进程
-                    let _ = writer.write_all(b"\x03");
-                    let _ = writer.flush();
-                }
-            }
-            // 等待短暂时间让 shell 回到 prompt
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            // 再发一次 Ctrl+C 并发送回车确保 shell 回到干净状态
-            // 注意用 `\r`（CR）而非 `\n`：PTY 线路规程只识别 CR 作为回车提交，
-            // 发 LF 在 zsh ZLE / 交互程序中无效，可能导致 shell 卡在未提交状态
-            {
-                if let Ok(mut writer) = ps.writer.lock() {
-                    let _ = writer.write_all(b"\x03\r");
-                    let _ = writer.flush();
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let cancelled = cancellation.is_requested() || response_tx.is_closed();
+        if cancelled || start_time.elapsed() >= timeout_dur {
+            // 完成栅栏只会在命令边界闭合，或前台进程组收到不可忽略终止后释放。
+            // 因此即使用户命令捕获/忽略 SIGINT，也不能越过 Agent Team 文件锁。
+            let shell_stopped =
+                stop_cancelled_command(manager, ps, &start_marker, &end_marker).await;
 
             // 收集已捕获的输出
             let fallback_idx = {
@@ -404,12 +496,20 @@ pub(crate) async fn handle_exec(
             let _ = response_tx.send(TerminalExecResponse {
                 exit_code: -1,
                 stdout: stdout_text,
-                stderr: "命令执行超时".to_string(),
-                timed_out: true,
+                stderr: if cancelled {
+                    "命令执行已取消".to_string()
+                } else {
+                    "命令执行超时".to_string()
+                },
+                timed_out: !cancelled,
                 cwd_after: manager.cwd(),
-                interrupted_by_user: interrupted || tracker_interrupted,
+                interrupted_by_user: cancelled || interrupted || tracker_interrupted,
                 interactive_mode: false,
             });
+            if shell_stopped {
+                // 强制终止 shell 后丢弃失效 PTY；下一条命令会走统一恢复入口重建。
+                *pty_state = None;
+            }
             return;
         }
 
@@ -829,5 +929,49 @@ mod tests {
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_stop_prevents_sigint_ignoring_command_from_writing_after_release() {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let ready_path = temp.path().join("ready");
+        let late_write_path = temp.path().join("late-write");
+        let script = format!(
+            "trap '' INT HUP TERM; printf ready > {}; sleep 1; printf late > {}",
+            crate::util::shell_quote(&ready_path.to_string_lossy()),
+            crate::util::shell_quote(&late_write_path.to_string_lossy()),
+        );
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let process_group = child.id() as libc::pid_t;
+
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !ready_path.exists() && std::time::Instant::now() < ready_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready_path.exists(), "测试命令未进入忽略 SIGINT 的执行阶段");
+
+        let sent = unsafe { libc::kill(-process_group, libc::SIGINT) };
+        assert_eq!(sent, 0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "测试命令必须证明普通 Ctrl+C 不足以停止它"
+        );
+
+        force_stop_process_group(process_group).unwrap();
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(
+            !late_write_path.exists(),
+            "取消栅栏放行后，忽略 SIGINT 的命令不得继续写文件"
+        );
     }
 }

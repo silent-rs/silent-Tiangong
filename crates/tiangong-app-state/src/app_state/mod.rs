@@ -271,6 +271,23 @@ impl TiangongState {
         session_id: &str,
         mode: tiangong_core::permission::TrustMode,
     ) -> Result<()> {
+        self.set_session_trust_mode_in_memory(session_id, mode)?;
+        if self.has_pending_turn_for(session_id) {
+            // Core 在活跃轮次中独占会话文件；终态重载会保留宿主信任模式。
+            self.persist_app_only()
+        } else {
+            self.persist_session_and_app(session_id)
+        }
+    }
+
+    /// 只更新宿主内存与配置镜像，不写 Session 文件。
+    ///
+    /// Desktop 在 Core 存活时通过 Core 元数据命令持久化，避免宿主成为第二写入者。
+    pub fn set_session_trust_mode_in_memory(
+        &mut self,
+        session_id: &str,
+        mode: tiangong_core::permission::TrustMode,
+    ) -> Result<()> {
         let Some(session) = self
             .store
             .session
@@ -289,12 +306,7 @@ impl TiangongState {
             self.services.runtime.permission_gate().set_trust_mode(mode);
             self.rebuild_runtime_from_current_config();
         }
-        if self.has_pending_turn_for(session_id) {
-            // Core 在活跃轮次中独占会话文件；终态重载会保留宿主信任模式。
-            self.persist_app_only()
-        } else {
-            self.persist_session_and_app(session_id)
-        }
+        Ok(())
     }
 
     pub fn set_default_trust_mode(
@@ -336,6 +348,20 @@ impl TiangongState {
     }
 
     pub fn set_session_reasoning_effort(&mut self, session_id: &str, effort: String) -> Result<()> {
+        self.set_session_reasoning_effort_in_memory(session_id, effort)?;
+        if self.has_pending_turn_for(session_id) {
+            self.persist_app_only()
+        } else {
+            self.persist_session_and_app(session_id)
+        }
+    }
+
+    /// 只更新宿主内存与兼容配置镜像，不写 Session 文件。
+    pub fn set_session_reasoning_effort_in_memory(
+        &mut self,
+        session_id: &str,
+        effort: String,
+    ) -> Result<()> {
         if let Some(session) = self
             .store
             .session
@@ -347,11 +373,7 @@ impl TiangongState {
             if self.store.session.active_session_id == session_id {
                 self.store.agent.agent_config.reasoning_effort = effort;
             }
-            if self.has_pending_turn_for(session_id) {
-                self.persist_app_only()
-            } else {
-                self.persist_session_and_app(session_id)
-            }
+            Ok(())
         } else {
             Err(anyhow::anyhow!(
                 "会话不存在，无法设置思考强度：{session_id}"

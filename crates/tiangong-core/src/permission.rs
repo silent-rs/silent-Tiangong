@@ -2,7 +2,9 @@
 //!
 //! 在工具执行前进行权限检查，支持"完全信任"和"监督"两种模式。
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,161 @@ use serde::{Deserialize, Serialize};
 /// 定义已下沉至 [`tiangong_types::TrustMode`]，此处 re-export 保持
 /// `tiangong_core::permission::TrustMode` 路径稳定，core 内部用法无需改动。
 pub use tiangong_types::TrustMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TrustModeBindingOwner {
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
+}
+
+fn current_trust_mode_owner() -> TrustModeBindingOwner {
+    tokio::task::try_id()
+        .map(TrustModeBindingOwner::Task)
+        .unwrap_or_else(|| TrustModeBindingOwner::Thread(std::thread::current().id()))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrustModeBinding {
+    id: u64,
+    override_mode: Option<TrustMode>,
+}
+
+/// 会话信任模式的共享解析句柄。
+///
+/// 会话基线对所有执行可见；单轮覆盖则按 Tokio task（无 task 时按线程）隔离并支持
+/// 嵌套。这样主 Agent 的临时 FullTrust 不会被并发后台 Sub Agent 继承，插件和
+/// [`PermissionGate`] 又能在同一执行任务内读取完全一致的有效值。
+#[derive(Debug, Clone)]
+pub struct TrustModeHandle {
+    base_mode: Arc<RwLock<TrustMode>>,
+    bindings: Arc<Mutex<HashMap<TrustModeBindingOwner, Vec<TrustModeBinding>>>>,
+    next_binding_id: Arc<AtomicU64>,
+}
+
+impl TrustModeHandle {
+    pub fn new(base_mode: TrustMode) -> Self {
+        Self {
+            base_mode: Arc::new(RwLock::new(base_mode)),
+            bindings: Arc::new(Mutex::new(HashMap::new())),
+            next_binding_id: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// 更新会话共享基线。已有显式单轮覆盖保持不变；该作用域结束后自动读取新基线。
+    pub fn set_base(&self, mode: TrustMode) {
+        *self
+            .base_mode
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = mode;
+    }
+
+    /// 解析当前执行任务的有效信任模式；没有本任务绑定时只读取会话基线。
+    pub fn current(&self) -> TrustMode {
+        let owner = current_trust_mode_owner();
+        let override_mode = self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&owner)
+            .and_then(|bindings| bindings.last())
+            .and_then(|binding| binding.override_mode);
+        override_mode.unwrap_or_else(|| {
+            *self
+                .base_mode
+                .read()
+                .unwrap_or_else(|poison| poison.into_inner())
+        })
+    }
+
+    pub(crate) fn bind_override(&self, override_mode: Option<TrustMode>) -> TrustModeBindingGuard {
+        let owner = current_trust_mode_owner();
+        let binding_id = self.next_binding_id.fetch_add(1, Ordering::Relaxed);
+        self.bindings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(owner)
+            .or_default()
+            .push(TrustModeBinding {
+                id: binding_id,
+                override_mode,
+            });
+        TrustModeBindingGuard {
+            controller: TrustModeBindingController {
+                handle: self.clone(),
+                owner,
+                binding_id,
+            },
+        }
+    }
+
+    fn update_override(
+        &self,
+        owner: TrustModeBindingOwner,
+        binding_id: u64,
+        override_mode: Option<TrustMode>,
+    ) {
+        let mut bindings = self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(binding) = bindings.get_mut(&owner).and_then(|bindings| {
+            bindings
+                .iter_mut()
+                .rfind(|binding| binding.id == binding_id)
+        }) {
+            binding.override_mode = override_mode;
+        }
+    }
+
+    fn remove_binding(&self, owner: TrustModeBindingOwner, binding_id: u64) {
+        let mut bindings = self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(owner_bindings) = bindings.get_mut(&owner)
+            && let Some(index) = owner_bindings
+                .iter()
+                .rposition(|binding| binding.id == binding_id)
+        {
+            owner_bindings.remove(index);
+            if owner_bindings.is_empty() {
+                bindings.remove(&owner);
+            }
+        }
+    }
+}
+
+pub(crate) struct TrustModeBindingGuard {
+    controller: TrustModeBindingController,
+}
+
+impl TrustModeBindingGuard {
+    pub(crate) fn controller(&self) -> TrustModeBindingController {
+        self.controller.clone()
+    }
+}
+
+impl Drop for TrustModeBindingGuard {
+    fn drop(&mut self) {
+        self.controller
+            .handle
+            .remove_binding(self.controller.owner, self.controller.binding_id);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TrustModeBindingController {
+    handle: TrustModeHandle,
+    owner: TrustModeBindingOwner,
+    binding_id: u64,
+}
+
+impl TrustModeBindingController {
+    pub(crate) fn apply_override(&self, override_mode: Option<TrustMode>) {
+        self.handle
+            .update_override(self.owner, self.binding_id, override_mode);
+    }
+}
 
 /// 工具风险等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,12 +242,11 @@ pub struct PermissionAuditEntry {
 
 /// 权限检查网关
 ///
-/// trust_mode 通过 `Arc<RwLock>` 共享，允许运行中的任务实时感知权限模式变更。
+/// trust_mode 通过 [`TrustModeHandle`] 解析，使会话基线实时更新、单轮覆盖任务隔离。
 #[derive(Debug, Clone)]
 pub struct PermissionGate {
     policy: PermissionPolicy,
-    /// 共享的信任模式引用，clone 后仍指向同一个 RwLock
-    shared_trust_mode: Arc<RwLock<TrustMode>>,
+    trust_mode: TrustModeHandle,
     /// 插件贡献的工具权限覆盖表（由 core/mod.rs 汇总各插件的
     /// `tool_permission_overrides` 写入）。check 时优先于 classify_tool 查询。
     plugin_overrides: Arc<RwLock<std::collections::BTreeMap<String, PermissionLevel>>>,
@@ -99,10 +255,10 @@ pub struct PermissionGate {
 impl Default for PermissionGate {
     fn default() -> Self {
         let policy = PermissionPolicy::default();
-        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        let trust_mode = TrustModeHandle::new(policy.trust_mode);
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
@@ -110,36 +266,31 @@ impl Default for PermissionGate {
 
 impl PermissionGate {
     pub fn new(policy: PermissionPolicy) -> Self {
-        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        let trust_mode = TrustModeHandle::new(policy.trust_mode);
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
     /// 使用外部共享的信任模式创建（确保所有持有该 Gate clone 共享同一引用）
-    pub fn with_shared_trust_mode(
-        policy: PermissionPolicy,
-        shared: Arc<RwLock<TrustMode>>,
-    ) -> Self {
+    pub fn with_shared_trust_mode(policy: PermissionPolicy, trust_mode: TrustModeHandle) -> Self {
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
     /// 获取共享的信任模式引用（用于跨 RuntimeEngine 实例共享）
-    pub fn shared_trust_mode_ref(&self) -> Arc<RwLock<TrustMode>> {
-        self.shared_trust_mode.clone()
+    pub fn trust_mode_handle(&self) -> TrustModeHandle {
+        self.trust_mode.clone()
     }
 
     /// 实时更新信任模式（所有持有该 Gate clone 的线程立即生效）
     pub fn set_trust_mode(&self, mode: TrustMode) {
-        if let Ok(mut guard) = self.shared_trust_mode.write() {
-            *guard = mode;
-        }
+        self.trust_mode.set_base(mode);
     }
 
     /// 写入插件贡献的工具权限覆盖表（供 core/mod.rs 汇总插件能力时调用）。
@@ -155,11 +306,7 @@ impl PermissionGate {
     /// 对工具调用进行权限检查
     pub fn check(&self, tool_name: &str) -> PermissionDecision {
         // 读取共享的信任模式（实时值）
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         // 完全信任模式：直接放行
         if trust_mode == TrustMode::FullTrust {
@@ -200,10 +347,7 @@ impl PermissionGate {
 
     /// 获取当前信任模式（实时值）
     pub fn trust_mode(&self) -> TrustMode {
-        self.shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode)
+        self.trust_mode.current()
     }
 
     /// 检查路径访问权限
@@ -211,11 +355,7 @@ impl PermissionGate {
     /// 按路径规则顺序匹配，首条命中生效。
     /// 无匹配规则时默认允许。
     pub fn check_path(&self, path: &str) -> PermissionDecision {
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         if trust_mode == TrustMode::FullTrust {
             return PermissionDecision::Approved;
@@ -241,11 +381,7 @@ impl PermissionGate {
     /// 按网络规则顺序匹配，首条命中生效。
     /// 无匹配规则时默认允许。
     pub fn check_network(&self, target: &str) -> PermissionDecision {
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         if trust_mode == TrustMode::FullTrust {
             return PermissionDecision::Approved;
@@ -582,6 +718,53 @@ pub(crate) fn normalize_permission_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_trust_main_turn_does_not_escalate_concurrent_subagent_task() {
+        let trust_mode = TrustModeHandle::new(TrustMode::Supervised);
+        let gate = PermissionGate::with_shared_trust_mode(
+            PermissionPolicy {
+                trust_mode: TrustMode::Supervised,
+                ..Default::default()
+            },
+            trust_mode.clone(),
+        );
+        let _main_turn = trust_mode.bind_override(Some(TrustMode::FullTrust));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+        let child_gate = gate.clone();
+        let child_barrier = Arc::clone(&barrier);
+        let child = tokio::spawn(async move {
+            child_barrier.wait().await;
+            child_gate.check("run_command")
+        });
+
+        barrier.wait().await;
+        assert!(matches!(
+            gate.check("run_command"),
+            PermissionDecision::Approved
+        ));
+        assert!(matches!(
+            child.await.unwrap(),
+            PermissionDecision::NeedsApproval { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nested_binding_without_override_uses_latest_base() {
+        let trust_mode = TrustModeHandle::new(TrustMode::Supervised);
+        let _outer = trust_mode.bind_override(Some(TrustMode::FullTrust));
+        assert_eq!(trust_mode.current(), TrustMode::FullTrust);
+
+        {
+            let _inner = trust_mode.bind_override(None);
+            assert_eq!(trust_mode.current(), TrustMode::Supervised);
+            trust_mode.set_base(TrustMode::FullTrust);
+            assert_eq!(trust_mode.current(), TrustMode::FullTrust);
+        }
+
+        assert_eq!(trust_mode.current(), TrustMode::FullTrust);
+    }
 
     #[test]
     fn full_trust_approves_everything() {

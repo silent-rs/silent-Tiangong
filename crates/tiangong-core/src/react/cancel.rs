@@ -40,14 +40,29 @@ impl std::fmt::Debug for CancelSignal {
 impl std::error::Error for CancelSignal {}
 
 /// 取消时统一上报 token usage 并发送 Error 事件。
+///
+/// `usage` 只允许传入尚未通过其他 `TokenUsage` 事件上报的当前请求增量；此前轮次
+/// 已上报的累计值不得再次放入取消事件，否则 Core 会重复记账。
 pub(super) fn emit_cancel_usage(
     stream_tx: &StdSender<StreamEvent>,
     usage: &tiangong_types::TokenUsage,
     context_limit: usize,
 ) {
     if usage.total_tokens > 0 {
-        emit_token_usage(stream_tx, usage, None, context_limit, "cancelled", None);
+        emit_token_usage(
+            stream_tx,
+            usage,
+            None,
+            context_limit,
+            "cancelled-incremental",
+            None,
+        );
     }
+    emit_cancelled(stream_tx);
+}
+
+/// 取消时仅发送终态，不重复上报已经发出过的用量。
+pub(super) fn emit_cancelled(stream_tx: &StdSender<StreamEvent>) {
     let _ = stream_tx.send(StreamEvent::Error {
         message: "已取消".into(),
     });

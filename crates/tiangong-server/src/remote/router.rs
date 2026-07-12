@@ -9,13 +9,13 @@ use tiangong_types::event::{EventSource, RuntimeEvent, RuntimeEventType};
 use tiangong_types::{IncomingMessage, MediaAsset, MediaKind, MessageContent, OutgoingMessage};
 use tokio::sync::Mutex;
 
-use super::core::ServerCoreManager;
+use super::backend::ServerCoreBackend;
 use super::event::{EventBus, TiangongEvent};
 
 pub struct MessageRouter {
     state: Arc<Mutex<TiangongState>>,
     event_bus: Arc<EventBus>,
-    core_manager: Arc<ServerCoreManager>,
+    core_backend: Arc<dyn ServerCoreBackend>,
     media_agent: Option<Arc<MediaAgent>>,
 }
 
@@ -23,12 +23,12 @@ impl MessageRouter {
     pub fn new(
         state: Arc<Mutex<TiangongState>>,
         event_bus: Arc<EventBus>,
-        core_manager: Arc<ServerCoreManager>,
+        core_backend: Arc<dyn ServerCoreBackend>,
     ) -> Self {
         Self {
             state,
             event_bus,
-            core_manager,
+            core_backend,
             media_agent: None,
         }
     }
@@ -229,7 +229,7 @@ impl MessageRouter {
                 }
 
                 let (actual_session_id, mut outgoing) = self
-                    .core_manager
+                    .core_backend
                     .send_connector_message_and_wait(
                         connector,
                         &requested_session_id,

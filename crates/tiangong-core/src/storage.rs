@@ -1,7 +1,7 @@
 //! 存储根目录注入点
 //!
-//! core 内所有持久化点（audit / custom_prompt / models_config / approval_store
-//! / session / core_config / agent_team）都通过本模块取存储根目录（`~/.tiangong`）。
+//! core 内所有持久化点（audit / custom_prompt / models_config / approval_store /
+//! session / core_config）都通过本模块取存储根目录（`~/.tiangong`）。
 //!
 //! ## 所有权与注入方向
 //!

@@ -7,7 +7,7 @@
 //!
 //! 编排顺序（由 worker_loop 在 engine 创建/重建时逐个插件调用）：
 //! 1. `set_workspace` — 注入会话工作目录；
-//! 2. `set_trust_mode` — 注入共享信任模式引用；
+//! 2. `set_trust_mode` — 注入任务隔离的信任模式解析句柄；
 //! 3. `set_feedback_tx` — 注入状态反馈通道（复用 worker 命令通道）；
 //! 4. `Plugin::register` — 让插件初始化内部状态或注入 engine 依赖
 //!    （如克隆 models_config、初始化插件内部状态等）。必须在收集
@@ -50,12 +50,15 @@ pub(crate) fn register_plugin(
     workspace: Option<&Path>,
     cmd_tx: UnboundedSender<Command>,
 ) -> Vec<ToolSpec> {
+    // 保留插件实例，供消息投递、工具策略和运行时控制等通用扩展点调用。
+    engine.register_plugin(plugin.clone());
+
     // 1) 注入当前会话工作目录（None 表示无有效 cwd，插件应清空缓存的旧值）
     plugin.set_workspace(workspace);
 
-    // 2) 注入共享信任模式引用（在 register 之前，让 register 内可读）
-    let shared_trust = engine.permission_gate().shared_trust_mode_ref();
-    plugin.set_trust_mode(shared_trust);
+    // 2) 注入信任模式解析句柄（在 register 之前，让 register 内可读）
+    let trust_mode = engine.permission_gate().trust_mode_handle();
+    plugin.set_trust_mode(trust_mode);
 
     // 3) 注入状态反馈通道（复用 worker 命令通道，clone 给插件持有）
     plugin.set_feedback_tx(PluginFeedbackTx::new(

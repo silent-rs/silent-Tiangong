@@ -56,6 +56,48 @@ impl FsPlugin {
         Some(result)
     }
 
+    /// 返回工具执行时会实际修改的文件路径，供跨插件策略（如 Agent Team 文件锁）
+    /// 在写入发生前统一校验。
+    pub(crate) fn resolve_tool_write_targets(
+        &self,
+        call: &ToolCall,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        match call.name.as_str() {
+            TOOL_WRITE_FILE | TOOL_REPLACE_IN_FILE => {
+                let base = self.base()?;
+                let path = call
+                    .arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("{} 缺少 path 参数", call.name))?;
+                Ok(vec![self.resolve_write_path(path, &base)?])
+            }
+            TOOL_APPLY_PATCH => {
+                let verify = call
+                    .arguments
+                    .get("verify")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if verify {
+                    return Ok(Vec::new());
+                }
+                let base = self.base()?;
+                let patch = call
+                    .arguments
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("apply_patch 缺少 patch 参数"))?;
+                if patch.trim().is_empty() {
+                    return Err(anyhow!("apply_patch patch 内容不能为空"));
+                }
+                let workdir_raw = call.arguments.get("workdir").and_then(Value::as_str);
+                let effective_cwd = shared::resolve_effective_cwd_with(workdir_raw, &base)?;
+                unified_diff_write_targets(patch, &effective_cwd)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     // ── list_dir ────────────────────────────────────────────────
 
     fn handle_list_dir(&self, call: &ToolCall) -> ToolResult {
@@ -602,7 +644,8 @@ impl ToolOverrideHandler for FsPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &tiangong_core::session::Session,
+        _session: &mut tiangong_core::session::Session,
+        _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let result = self.dispatch(call);
         Box::pin(async move { result })
@@ -837,6 +880,44 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
     Ok(stats)
 }
 
+/// 解析 unified diff 中所有会被修改的路径。
+///
+/// 新增只锁目标，删除只锁来源，普通更新锁目标；移动同时会删除来源并写入目标，因此
+/// 两端都必须声明。返回顺序遵循补丁文件顺序，并按规范化后的绝对路径去重。
+fn unified_diff_write_targets(
+    patch: &str,
+    effective_cwd: &Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    use diffy::Patch;
+
+    let sections = split_unified_diff_sections(patch)?;
+    let mut targets = Vec::new();
+    for section in &sections {
+        let parsed =
+            Patch::from_str(section).map_err(|err| anyhow!("解析 unified diff 失败：{err}"))?;
+        let original = normalize_diff_filename(parsed.original().unwrap_or_default())?;
+        let modified = normalize_diff_filename(parsed.modified().unwrap_or_default())?;
+
+        let mut push_target = |raw: &str| -> Result<()> {
+            let target = shared::resolve_write_path_from_base(raw, effective_cwd)?;
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+            Ok(())
+        };
+
+        if original == "/dev/null" && modified != "/dev/null" {
+            push_target(&modified)?;
+        } else if modified == "/dev/null" && original != "/dev/null" {
+            push_target(&original)?;
+        } else {
+            push_target(&original)?;
+            push_target(&modified)?;
+        }
+    }
+    Ok(targets)
+}
+
 fn split_unified_diff_sections(patch: &str) -> Result<Vec<String>> {
     let lines = patch.lines().collect::<Vec<_>>();
     if lines.len() < 3 {
@@ -993,6 +1074,75 @@ mod tests {
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "hello\n"
         );
+    }
+
+    #[test]
+    fn write_tools_declare_resolved_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+
+        for tool_name in [TOOL_WRITE_FILE, TOOL_REPLACE_IN_FILE] {
+            let targets = plugin
+                .tool_write_targets(&make_call(tool_name, json!({ "path": "nested/a.txt" })))
+                .unwrap();
+            assert_eq!(targets, vec![dir.path().join("nested/a.txt")]);
+        }
+    }
+
+    #[test]
+    fn apply_patch_declares_add_delete_update_and_move_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        let patch = concat!(
+            "--- /dev/null\n",
+            "+++ added.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+added\n",
+            "--- deleted.txt\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-deleted\n",
+            "--- updated.txt\n",
+            "+++ updated.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "--- old-name.txt\n",
+            "+++ new-name.txt\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+        );
+
+        let targets = plugin
+            .tool_write_targets(&make_call(TOOL_APPLY_PATCH, json!({ "patch": patch })))
+            .unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        assert_eq!(
+            targets,
+            vec![
+                root.join("added.txt"),
+                root.join("deleted.txt"),
+                root.join("updated.txt"),
+                root.join("old-name.txt"),
+                root.join("new-name.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_patch_verify_mode_declares_no_write_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        let patch = "--- /dev/null\n+++ new.txt\n@@ -0,0 +1 @@\n+hello\n";
+
+        let targets = plugin
+            .tool_write_targets(&make_call(
+                TOOL_APPLY_PATCH,
+                json!({ "patch": patch, "verify": true }),
+            ))
+            .unwrap();
+        assert!(targets.is_empty());
     }
 
     #[test]

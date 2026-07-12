@@ -105,7 +105,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             // CLI 侧经 mcp_plugin 做管理。
             plugins.push(mcp_plugin.clone());
             // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-            plugins.extend(tiangong_plugin_agent_team::default_plugins());
+            plugins.extend(tiangong_plugin_agent_team::default_plugins(
+                storage_root.clone(),
+            ));
             plugins
         })
         .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
@@ -270,7 +272,7 @@ impl ResponseState {
             StreamEvent::SessionMessageUpsert { .. } => {
                 // Core 已持有权威会话；CLI 不维护第二份消息镜像。
             }
-            StreamEvent::PendingAgentDeliveriesChanged { .. } => {
+            StreamEvent::PendingPluginDeliveriesChanged { .. } => {
                 // Core 已持久化；CLI 不维护第二份会话镜像。
             }
             StreamEvent::DeferredToolInjectionsChanged { .. } => {

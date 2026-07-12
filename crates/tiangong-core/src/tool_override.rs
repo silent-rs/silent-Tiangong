@@ -12,13 +12,15 @@ use crate::tool::ToolResult;
 pub trait ToolOverrideHandler: Send + Sync + 'static {
     /// 处理工具调用。返回 None 表示不拦截，由默认逻辑处理。
     ///
-    /// `session` 为当前对话的只读引用：插件可读取 `session.id` 用于按对话路由
-    /// （如终端 PTY），也可读取消息历史（如记忆召回构建上下文）。
+    /// `session` 为当前对话的可变引用：插件可读取 `session.id` 用于按对话路由
+    /// （如终端 PTY），也可在工具返回前同步提交必要的会话状态。`actor_id`
+    /// 是当前工具调用方的稳定身份，不从 Session 的展示状态推断。
     /// 默认不拦截任何调用，不关心工具覆盖的插件无需覆写。
     fn handle(
         &self,
         _call: &ToolCall,
-        _session: &Session,
+        _session: &mut Session,
+        _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         Box::pin(async { None })
     }

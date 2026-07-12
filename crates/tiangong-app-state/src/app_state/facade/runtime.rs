@@ -40,12 +40,8 @@ impl TiangongState {
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
         self.store.provider.model_endpoint = endpoint.clone();
-        // 保留旧 RuntimeEngine 的共享信任模式引用和 tool_overrides
-        let shared_trust_mode = self
-            .services
-            .runtime
-            .permission_gate()
-            .shared_trust_mode_ref();
+        // 保留旧 RuntimeEngine 的任务隔离信任模式解析句柄和 tool_overrides
+        let trust_mode = self.services.runtime.permission_gate().trust_mode_handle();
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();
@@ -57,7 +53,7 @@ impl TiangongState {
             SingleProviderClient::new(endpoint),
             context_limit,
             self.store.agent.agent_config.clone(),
-            shared_trust_mode,
+            trust_mode,
             crate::app_state::repository::storage_root(),
         )
         .with_models_config(self.store.provider.models_config.clone());

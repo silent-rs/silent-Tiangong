@@ -992,16 +992,29 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         let command = command.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            let resp: crate::types::TerminalExecResponse = send_and_wait!(
-                tx,
-                TerminalCommand::Exec {
+            let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+            let mut cancel_on_drop = CancelTerminalExecOnDrop::new(Arc::clone(&cancellation));
+            let completion = crate::types::TerminalExecCompletion::new(Arc::clone(&cancellation));
+            if tx
+                .send(TerminalCommand::Exec {
                     command,
                     timeout_secs,
                     response_tx,
-                },
-                response_rx,
-                180
-            );
+                    cancellation,
+                    completion,
+                })
+                .await
+                .is_err()
+            {
+                cancel_on_drop.disarm();
+                return None;
+            }
+            cancel_on_drop.arm();
+            let resp = tokio::time::timeout(std::time::Duration::from_secs(180), response_rx)
+                .await
+                .ok()?
+                .ok()?;
+            cancel_on_drop.disarm();
             Some(resp.into())
         })
     }
@@ -1164,5 +1177,105 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
             send_and_wait!(tx, TerminalCommand::Reset { response_tx }, response_rx, 10);
             Some(())
         })
+    }
+}
+
+struct CancelTerminalExecOnDrop {
+    cancellation: Arc<crate::types::TerminalExecCancellation>,
+    armed: bool,
+}
+
+impl CancelTerminalExecOnDrop {
+    fn new(cancellation: Arc<crate::types::TerminalExecCancellation>) -> Self {
+        Self {
+            cancellation,
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelTerminalExecOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.request_and_wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_accepted_exec_waits_for_command_loop_cleanup() {
+        let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+        let mut guard = CancelTerminalExecOnDrop::new(Arc::clone(&cancellation));
+        guard.arm();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+
+        let dropper = std::thread::spawn(move || {
+            drop(guard);
+            let _ = dropped_tx.send(());
+        });
+        while !cancellation.is_requested() {
+            std::thread::yield_now();
+        }
+        assert!(
+            dropped_rx
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err(),
+            "cleanup acknowledgement 前不应释放执行 Future"
+        );
+
+        cancellation.mark_finished();
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        dropper.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_exec_releases_barrier_when_receiver_closes() {
+        let (command_tx, command_rx) = tokio::sync::mpsc::channel(1);
+        let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+        let completion = crate::types::TerminalExecCompletion::new(Arc::clone(&cancellation));
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+
+        assert!(command_tx
+            .send(TerminalCommand::Exec {
+                command: "sleep 60".to_string(),
+                timeout_secs: None,
+                response_tx,
+                cancellation: Arc::clone(&cancellation),
+                completion,
+            })
+            .await
+            .is_ok());
+
+        let mut guard = CancelTerminalExecOnDrop::new(Arc::clone(&cancellation));
+        guard.arm();
+
+        // receiver 关闭会丢弃已入队 payload；payload 自身必须确认完成，
+        // 否则调用 Future 的 Drop 会永久卡在取消栅栏上。
+        drop(command_rx);
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(guard);
+            let _ = dropped_tx.send(());
+        });
+
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("队列关闭后应立即释放取消栅栏");
+        assert!(cancellation.is_requested());
+        dropper.join().unwrap();
     }
 }

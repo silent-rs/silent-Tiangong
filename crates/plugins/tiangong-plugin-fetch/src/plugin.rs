@@ -1,16 +1,16 @@
-//! web_fetch 插件：持有会话工作目录与信任模式引用。
+//! web_fetch 插件：持有会话工作目录与信任模式解析句柄。
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::TrustMode;
+use tiangong_core::permission::{TrustMode, TrustModeHandle};
 
 /// web_fetch 插件。
 #[derive(Default)]
 pub struct FetchPlugin {
     workspace: RwLock<Option<PathBuf>>,
-    trust_mode: RwLock<Option<Arc<RwLock<TrustMode>>>>,
+    trust_mode: RwLock<Option<TrustModeHandle>>,
 }
 
 impl FetchPlugin {
@@ -29,9 +29,7 @@ impl FetchPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.read()
-            .map(|g| *g == TrustMode::FullTrust)
-            .unwrap_or(false)
+        tm.current() == TrustMode::FullTrust
     }
 }
 
@@ -46,7 +44,7 @@ impl Plugin for FetchPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: Arc<RwLock<TrustMode>>) {
+    fn set_trust_mode(&self, trust: TrustModeHandle) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

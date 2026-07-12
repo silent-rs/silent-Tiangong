@@ -25,8 +25,12 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, wait_for_abort_signal};
-use super::helpers::{check_cancel, drain_pending_commands_async, looks_like_final_answer};
+use super::cancel::{
+    CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled, wait_for_abort_signal,
+};
+use super::helpers::{
+    check_cancel, drain_pending_commands_async, looks_like_final_answer, process_buffered_commands,
+};
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
 /// 单个 turn 内的执行阶段。
@@ -44,20 +48,24 @@ pub(super) enum TurnPhase {
 
 /// 单个 agent 的 async ReAct 执行引擎
 pub struct ReactEngine {
-    /// 共享的 RuntimeEngine（子 Agent 经 clone 继承父引擎的 tool_overrides）。
+    /// 共享的 RuntimeEngine（嵌套执行经 clone 继承父引擎的 tool_overrides）。
     pub engine: crate::runtime::RuntimeEngine,
-    /// 当前 Agent 可用的工具集（子 Agent 经父工具集过滤得到）。
+    /// 当前执行单元可用的工具集。
     pub tools: Vec<ToolSpec>,
     /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
     pub max_tool_rounds: usize,
     /// 总结阶段后重新进入工具执行阶段的最大次数。
     pub max_outer_iterations: u32,
-    /// 当前 Agent 身份（"main" 或子 Agent 的 agent_id）。
+    /// 当前执行单元身份。
     pub agent_id: String,
+    /// 调用方提供的完整 system prompt；用于插件启动的嵌套 Agent。
+    system_prompt_override: Option<Message>,
     /// 取消信号（独立于命令队列）：check_cancel 读取此标志判断是否取消，
     /// 不排空命令队列，避免乱序。
     pub(super) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub(super) shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Core 单轮信任模式控制器；插件直接构造的嵌套 Agent 不需要。
+    pub(super) turn_trust_mode: Option<crate::core::TurnTrustModeController>,
 }
 
 impl ReactEngine {
@@ -73,8 +81,10 @@ impl ReactEngine {
             max_tool_rounds,
             max_outer_iterations,
             agent_id: "main".to_string(),
+            system_prompt_override: None,
             cancel_flag: None,
             shutdown_flag: None,
+            turn_trust_mode: None,
         }
     }
 
@@ -112,6 +122,36 @@ impl ReactEngine {
     ) -> Self {
         self.shutdown_flag = Some(shutdown_flag);
         self
+    }
+
+    pub(crate) fn with_turn_trust_mode_controller(
+        mut self,
+        controller: crate::core::TurnTrustModeController,
+    ) -> Self {
+        self.turn_trust_mode = Some(controller);
+        self
+    }
+
+    pub(super) fn apply_message_trust_mode_override(
+        &self,
+        trust_mode_override: Option<crate::permission::TrustMode>,
+    ) {
+        if let Some(controller) = &self.turn_trust_mode {
+            controller.apply_message_override(trust_mode_override);
+        }
+    }
+
+    /// 只有 Core 的主执行单元负责把宿主控制命令交给插件。
+    ///
+    /// 插件启动的嵌套 ReactEngine 共享同一份 RuntimeEngine；若子执行单元把自己
+    /// 收到的 Approval/Cancel/Shutdown 再广播回插件，Agent Team 会把命令重新投递
+    /// 给包括当前子 Agent 在内的所有执行单元，形成命令回声，定向取消还会升级为
+    /// 全团队取消。
+    pub(super) fn forward_plugin_runtime_command(&self, command: &Command) -> bool {
+        if self.agent_id != "main" {
+            return false;
+        }
+        self.engine.handle_plugin_runtime_command(command)
     }
 
     pub(super) fn request_shutdown(&self) {
@@ -173,12 +213,15 @@ impl ReactEngine {
         }
     }
 
-    /// 设置当前 Agent 身份（"main" 或子 Agent 的 agent_id）。
-    ///
-    /// team 插件化后，子 Agent 经此设置身份（TeamContext 改由插件持有），
-    /// 供子 Agent 系统提示构建等识别身份。
+    /// 设置当前执行单元身份，供插件策略与工具处理器识别调用方。
     pub fn with_agent_id(mut self, agent_id: String) -> Self {
         self.agent_id = agent_id;
+        self
+    }
+
+    /// 为嵌套 Agent 固定专属 system prompt，避免首轮按主 Agent 配置重建覆盖。
+    pub fn with_system_prompt(mut self, system_prompt: Message) -> Self {
+        self.system_prompt_override = Some(system_prompt);
         self
     }
 
@@ -231,15 +274,19 @@ impl ReactEngine {
                 // 首轮始终重建 system prompt，确保规则段与当前代码版本一致。
                 // 旧 session 持久化的 system_prompt_message 可能缺少新增规则。
                 if round == 0 {
-                    crate::react::context::rebuild_system_prompt(session, &self.engine);
+                    if let Some(system_prompt) = &self.system_prompt_override {
+                        session.system_prompt_message = Some(system_prompt.clone());
+                    } else {
+                        crate::react::context::rebuild_system_prompt(session, &self.engine);
+                    }
                 }
                 match drain_pending_commands_async(
                     session,
                     &self.engine,
                     &self.agent_id,
-                    None,
                     stream_tx,
                     cmd_rx,
+                    self.turn_trust_mode.as_ref(),
                 ) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
@@ -342,6 +389,7 @@ impl ReactEngine {
                                 Some(Command::Message {
                                     prepared,
                                     message_id,
+                                    trust_mode_override,
                                     persistence_ack,
                                 }) => {
                                     sink.flush();
@@ -358,8 +406,8 @@ impl ReactEngine {
                                         );
                                     }
                                     match accept_runtime_user_message(
+                                        &self.engine,
                                         &self.agent_id,
-                                        None,
                                         session,
                                         stream_tx,
                                         message_id,
@@ -367,6 +415,9 @@ impl ReactEngine {
                                         persistence_ack,
                                     ) {
                                         Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
+                                            self.apply_message_trust_mode_override(
+                                                trust_mode_override,
+                                            );
                                             stream_interruption = Some(input);
                                             if let Some(handle) = llm_fut.take() {
                                                 abort_and_join(handle).await;
@@ -375,7 +426,7 @@ impl ReactEngine {
                                                 "模型响应已被新的用户消息中断"
                                             ));
                                         }
-                                        Ok(RuntimeMessageDisposition::RoutedToAgent) => {}
+                                        Ok(RuntimeMessageDisposition::RoutedToPlugin) => {}
                                         Err(err) => {
                                             session
                                                 .messages
@@ -398,9 +449,26 @@ impl ReactEngine {
                                     });
                                     break Err(anyhow::Error::new(CancelSignal::Abort));
                                 }
+                                Some(Command::UpdateSessionMetadata {
+                                    update,
+                                    persistence_ack,
+                                }) => {
+                                    let trust_mode =
+                                        self.engine.permission_gate().trust_mode_handle();
+                                    if let Err(error) = crate::core::apply_session_metadata_update(
+                                        session,
+                                        &trust_mode,
+                                        update,
+                                        persistence_ack,
+                                    ) {
+                                        tracing::warn!(%error, "流式阶段更新会话元数据失败");
+                                    }
+                                }
                                 Some(Command::ReloadConfig) => {}
-                                Some(Command::Approval { .. }) => {}
-                                Some(Command::CancelAgent { .. }) => {}
+                                Some(command @ Command::Approval { .. })
+                                | Some(command @ Command::PluginControl { .. }) => {
+                                    self.forward_plugin_runtime_command(&command);
+                                }
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     crate::react::message::inject_tool_to_session(
                                         session,
@@ -408,6 +476,21 @@ impl ReactEngine {
                                         &tool_name,
                                         &payload,
                                     );
+                                }
+                                Some(Command::CommitPluginDeliveries {
+                                    delivery_ids,
+                                    tool_injections,
+                                    persistence_ack,
+                                }) => {
+                                    if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                                        session,
+                                        stream_tx,
+                                        delivery_ids,
+                                        tool_injections,
+                                        persistence_ack,
+                                    ) {
+                                        tracing::warn!(%error, "提交插件持久投递失败");
+                                    }
                                 }
                                 Some(Command::CompressContext) => {
                                     let _ = stream_tx.send(StreamEvent::AgentNotification {
@@ -446,10 +529,14 @@ impl ReactEngine {
                                         Ok(r) => r,
                                         Err(e) if e.is_cancelled() => {
                                             sink.finish();
-                                            let _ = stream_tx.send(StreamEvent::Error {
-                                                message: "已取消".into(),
-                                            });
-                                            { merge_plugin_usage(&mut accumulated_usage); return accumulated_usage; }
+                                            accumulated_usage.accumulate(&streaming_usage);
+                                            emit_cancel_usage(
+                                                stream_tx,
+                                                &streaming_usage,
+                                                self.engine.context_limit,
+                                            );
+                                            merge_plugin_usage(&mut accumulated_usage);
+                                            return accumulated_usage;
                                         }
                                         Err(e) => Err(anyhow::anyhow!(e.to_string())),
                                     };
@@ -509,7 +596,7 @@ impl ReactEngine {
                             accumulated_usage.accumulate(&streaming_usage);
                             emit_cancel_usage(
                                 stream_tx,
-                                &accumulated_usage,
+                                &streaming_usage,
                                 self.engine.context_limit,
                             );
                             merge_plugin_usage(&mut accumulated_usage);
@@ -544,11 +631,7 @@ impl ReactEngine {
                                 )
                                 .await;
                             if compression_cancelled {
-                                emit_cancel_usage(
-                                    stream_tx,
-                                    &accumulated_usage,
-                                    self.engine.context_limit,
-                                );
+                                emit_cancelled(stream_tx);
                                 merge_plugin_usage(&mut accumulated_usage);
                                 return accumulated_usage;
                             }
@@ -634,7 +717,7 @@ impl ReactEngine {
                     )
                     .await;
                     if compression_cancelled {
-                        emit_cancel_usage(stream_tx, &accumulated_usage, self.engine.context_limit);
+                        emit_cancelled(stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
@@ -759,9 +842,9 @@ impl ReactEngine {
                         session,
                         &self.engine,
                         &self.agent_id,
-                        None,
                         stream_tx,
                         cmd_rx,
+                        self.turn_trust_mode.as_ref(),
                     ) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
@@ -994,11 +1077,12 @@ impl ReactEngine {
                                     Some(Command::Message {
                                         prepared,
                                         message_id,
+                                        trust_mode_override,
                                         persistence_ack,
                                     }) => {
                                         match accept_runtime_user_message(
+                                            &self.engine,
                                             &self.agent_id,
-                                            None,
                                             session,
                                             stream_tx,
                                             message_id,
@@ -1008,9 +1092,12 @@ impl ReactEngine {
                                             Ok(RuntimeMessageDisposition::CurrentAgentInput(
                                                 input,
                                             )) => {
+                                                self.apply_message_trust_mode_override(
+                                                    trust_mode_override,
+                                                );
                                                 break ApprovalWaitOutcome::CurrentInput(input);
                                             }
-                                            Ok(RuntimeMessageDisposition::RoutedToAgent) => {}
+                                            Ok(RuntimeMessageDisposition::RoutedToPlugin) => {}
                                             Err(err) => tracing::warn!(
                                                 error = %err,
                                                 "审批等待阶段追加用户消息持久化失败"
@@ -1032,15 +1119,51 @@ impl ReactEngine {
                                         merge_plugin_usage(&mut accumulated_usage);
                                         return accumulated_usage;
                                     }
+                                    Some(Command::UpdateSessionMetadata {
+                                        update,
+                                        persistence_ack,
+                                    }) => {
+                                        let trust_mode =
+                                            self.engine.permission_gate().trust_mode_handle();
+                                        if let Err(error) =
+                                            crate::core::apply_session_metadata_update(
+                                                session,
+                                                &trust_mode,
+                                                update,
+                                                persistence_ack,
+                                            )
+                                        {
+                                            tracing::warn!(%error, "审批等待阶段更新会话元数据失败");
+                                        }
+                                    }
                                     Some(Command::ReloadConfig) => {}
-                                    Some(Command::Approval { .. }) => {}
-                                    Some(Command::CancelAgent { .. }) => {}
+                                    Some(command @ Command::Approval { .. })
+                                    | Some(command @ Command::PluginControl { .. }) => {
+                                        self.forward_plugin_runtime_command(&command);
+                                    }
                                     Some(Command::InjectTool { tool_name, payload }) => {
                                         self.defer_tool_injections(
                                             session,
                                             stream_tx,
                                             std::iter::once((tool_name, payload)),
                                         );
+                                    }
+                                    Some(Command::CommitPluginDeliveries {
+                                        delivery_ids,
+                                        tool_injections,
+                                        persistence_ack,
+                                    }) => {
+                                        if let Err(error) =
+                                            crate::react::message::commit_plugin_deliveries(
+                                                session,
+                                                stream_tx,
+                                                delivery_ids,
+                                                tool_injections,
+                                                persistence_ack,
+                                            )
+                                        {
+                                            tracing::warn!(%error, "提交插件持久投递失败");
+                                        }
                                     }
                                     Some(Command::CompressContext) => {
                                         let _ = stream_tx.send(StreamEvent::AgentNotification {
@@ -1155,11 +1278,86 @@ impl ReactEngine {
                         .expect("cancel_flag 必须在 execute_turn 前注入")
                         .clone();
                     let shutdown_flag = self.shutdown_flag.clone();
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_abort_signal(cancel_flag, shutdown_flag) => None,
-                        result = self.engine.execute_tool_call(call, session) => Some(result),
+                    let mut buffered_tool_commands = Vec::new();
+                    // 工具处理器只在启动瞬间借用 Session；执行期间 Core 仍可原子提交
+                    // 插件投递并及时回 ACK，避免工具等待 ACK、Core 又等待工具的互等。
+                    let mut tool_future =
+                        self.engine.start_tool_call(call, session, &self.agent_id);
+                    let result = loop {
+                        tokio::select! {
+                            biased;
+                            _ = wait_for_abort_signal(cancel_flag.clone(), shutdown_flag.clone()) => {
+                                let command = if shutdown_flag.as_ref().is_some_and(|flag| {
+                                    flag.load(std::sync::atomic::Ordering::Acquire)
+                                }) {
+                                    Command::Shutdown
+                                } else {
+                                    Command::Cancel
+                                };
+                                self.forward_plugin_runtime_command(&command);
+                                break None;
+                            }
+                            result = &mut tool_future => break Some(result),
+                            command = cmd_rx.recv() => {
+                                match command {
+                                    Some(command @ Command::Approval { .. })
+                                    | Some(command @ Command::PluginControl { .. }) => {
+                                        self.forward_plugin_runtime_command(&command);
+                                    }
+                                    Some(Command::EmitStreamEvent(event)) => {
+                                        let _ = stream_tx.send(*event);
+                                    }
+                                    Some(Command::CommitPluginDeliveries {
+                                        delivery_ids,
+                                        tool_injections,
+                                        persistence_ack,
+                                    }) => {
+                                        if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                                            session,
+                                            stream_tx,
+                                            delivery_ids,
+                                            tool_injections,
+                                            persistence_ack,
+                                        ) {
+                                            tracing::warn!(%error, "工具执行期间提交插件持久投递失败");
+                                        }
+                                    }
+                                    Some(Command::UpdateSessionMetadata {
+                                        update,
+                                        persistence_ack,
+                                    }) => {
+                                        let trust_mode =
+                                            self.engine.permission_gate().trust_mode_handle();
+                                        if let Err(error) =
+                                            crate::core::apply_session_metadata_update(
+                                                session,
+                                                &trust_mode,
+                                                update,
+                                                persistence_ack,
+                                            )
+                                        {
+                                            tracing::warn!(%error, "工具执行期间更新会话元数据失败");
+                                        }
+                                    }
+                                    Some(Command::Cancel) => {
+                                        self.forward_plugin_runtime_command(&Command::Cancel);
+                                        break None;
+                                    }
+                                    Some(Command::Shutdown) => {
+                                        self.request_shutdown();
+                                        self.forward_plugin_runtime_command(&Command::Shutdown);
+                                        break None;
+                                    }
+                                    Some(command) => buffered_tool_commands.push(command),
+                                    None => {
+                                        self.forward_plugin_runtime_command(&Command::Cancel);
+                                        break None;
+                                    }
+                                }
+                            }
+                        }
                     };
+                    drop(tool_future);
                     let Some(result) = result else {
                         let output = "工具调用因执行取消或会话关闭而中断。".to_string();
                         let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -1171,6 +1369,32 @@ impl ReactEngine {
                             duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                         });
                         append_tool_result_message(session, &call.id, &call.name, output, true);
+                        let buffered_effect = process_buffered_commands(
+                            session,
+                            &self.engine,
+                            &self.agent_id,
+                            stream_tx,
+                            buffered_tool_commands,
+                            self.turn_trust_mode.as_ref(),
+                        );
+                        if let PendingCommandEffect::MessagesInjected {
+                            current_agent_input: Some(input),
+                            ..
+                        } = buffered_effect
+                            && !self
+                                .shutdown_flag
+                                .as_ref()
+                                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+                        {
+                            successful_tool_call_keys.clear();
+                            failed_tool_call_keys.clear();
+                            failed_tool_names.clear();
+                            user_input = input;
+                            round = 0;
+                            outer_iteration = 0;
+                            session.persist_to_disk();
+                            continue 'outer;
+                        }
                         merge_plugin_usage(&mut accumulated_usage);
                         let _ = stream_tx.send(StreamEvent::Error {
                             message: "已取消".into(),
@@ -1231,6 +1455,39 @@ impl ReactEngine {
                         &call.name,
                         format_tool_trace_message(&result),
                     );
+                    match process_buffered_commands(
+                        session,
+                        &self.engine,
+                        &self.agent_id,
+                        stream_tx,
+                        buffered_tool_commands,
+                        self.turn_trust_mode.as_ref(),
+                    ) {
+                        PendingCommandEffect::Terminate => {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
+                        PendingCommandEffect::Shutdown => {
+                            self.request_shutdown();
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return accumulated_usage;
+                        }
+                        PendingCommandEffect::MessagesInjected {
+                            current_agent_input: Some(input),
+                            ..
+                        } => {
+                            successful_tool_call_keys.clear();
+                            failed_tool_call_keys.clear();
+                            failed_tool_names.clear();
+                            user_input = input;
+                            round = 0;
+                            outer_iteration = 0;
+                            session.persist_to_disk();
+                            continue 'outer;
+                        }
+                        PendingCommandEffect::MessagesInjected { .. }
+                        | PendingCommandEffect::None => {}
+                    }
                     if !result.ok
                         && check_cancel(
                             self.cancel_flag
@@ -1293,7 +1550,7 @@ impl ReactEngine {
                     )
                     .await;
                     if compression_cancelled {
-                        emit_cancel_usage(stream_tx, &accumulated_usage, self.engine.context_limit);
+                        emit_cancelled(stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
@@ -1302,9 +1559,9 @@ impl ReactEngine {
                         session,
                         &self.engine,
                         &self.agent_id,
-                        None,
                         stream_tx,
                         cmd_rx,
+                        self.turn_trust_mode.as_ref(),
                     ) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
@@ -1339,18 +1596,12 @@ impl ReactEngine {
                 if need_failure_recovery_prompt {
                     let mut failed_tools = failed_tool_names.iter().cloned().collect::<Vec<_>>();
                     failed_tools.sort();
-                    let collaboration_hint = if self.agent_id == "main"
-                        && request_tools.iter().any(|tool| tool.name == "create_agent")
-                    {
-                        "如果问题适合并行排查或需要第二视角，请创建 temporary Sub Agent 协作处理，并把失败工具、失败原因、已尝试方案和用户目标一并分配给它。"
-                    } else {
-                        "如果当前 Agent 无法继续独立推进，请向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。"
-                    };
+                    let collaboration_hint = "如果当前执行单元无法继续推进，请优先使用当前已注册工具中合适的协作或替代能力；仍无法解决时，再向用户说明需要的外部条件、凭据、授权、环境调整或人工确认。";
                     let recall_hint = if request_tools
                         .iter()
                         .any(|tool| tool.name == "recall_memory")
                     {
-                        "优先调用 recall_memory，充分使用 Memory 系统查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、创建子 Agent 或请求用户协作。"
+                        "优先调用 recall_memory，充分查询这个工具以前成功调用时使用的参数、环境前置条件、配置方式、替代步骤和相关经验；只有回忆不足以解决时，再切换工具、使用其他已注册协作能力或请求用户协作。"
                     } else {
                         ""
                     };
@@ -1480,6 +1731,133 @@ pub(super) fn tools_for_current_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::react::test_support::{
+        MockLlmServer, MockResponse, RecordedRuntimeCommand, approval, plugin_control,
+        runtime_with_recorder,
+    };
+
+    fn test_react_engine(
+        engine: crate::runtime::RuntimeEngine,
+        tools: Vec<ToolSpec>,
+    ) -> ReactEngine {
+        ReactEngine::new(engine, tools, 2, 1)
+            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+    }
+
+    #[test]
+    fn nested_engine_does_not_forward_control_back_to_shared_plugins() {
+        let (engine, recorder) = runtime_with_recorder("http://127.0.0.1:1/v1".to_string());
+        let react = test_react_engine(engine, Vec::new()).with_agent_id("child-agent".to_string());
+
+        assert!(!react.forward_plugin_runtime_command(&plugin_control("cancel-sibling")));
+        assert!(!react.forward_plugin_runtime_command(&approval("sibling-approval", true,)));
+        assert!(recorder.commands().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn main_model_stream_forwards_plugin_runtime_commands() {
+        let server = MockLlmServer::start(MockResponse::Stall);
+        let (engine, recorder) = runtime_with_recorder(server.base_url());
+        let mut react = test_react_engine(engine, Vec::new());
+        let mut session = Session::new("main-stream-runtime-command");
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
+
+        let execution = tokio::spawn(async move {
+            react
+                .execute_turn(&mut session, None, &stream_tx, &mut command_rx)
+                .await;
+        });
+        server.wait_until_connected().await;
+        command_tx.send(plugin_control("cancel-child")).unwrap();
+        command_tx.send(approval("child-approval", true)).unwrap();
+        command_tx.send(Command::Cancel).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), execution)
+            .await
+            .expect("主模型流式执行未及时退出")
+            .unwrap();
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                RecordedRuntimeCommand::PluginControl {
+                    plugin_id: "test-plugin".to_string(),
+                    action: "cancel-child".to_string(),
+                },
+                RecordedRuntimeCommand::Approval {
+                    request_id: "child-approval".to_string(),
+                    approved: true,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approval_wait_forwards_unmatched_plugin_runtime_commands() {
+        crate::storage::set_storage_root(
+            std::env::temp_dir().join("tiangong-core-react-command-tests"),
+        );
+        let server = MockLlmServer::start(MockResponse::ToolCall {
+            name: "approval_test_tool".to_string(),
+        });
+        let (engine, recorder) = runtime_with_recorder(server.base_url());
+        let tool = ToolSpec {
+            name: "approval_test_tool".to_string(),
+            description: "测试审批等待".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let mut react = test_react_engine(engine, vec![tool]);
+        let mut session = Session::new("approval-wait-runtime-command");
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
+
+        let execution = tokio::spawn(async move {
+            react
+                .execute_turn(&mut session, None, &stream_tx, &mut command_rx)
+                .await;
+        });
+        server.wait_until_connected().await;
+        let request_id = tokio::task::spawn_blocking(move || {
+            loop {
+                match stream_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                    Ok(StreamEvent::ApprovalNeeded { request_id, .. }) => break request_id,
+                    Ok(_) => {}
+                    Err(error) => panic!("未收到主 Agent 审批请求：{error}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        command_tx.send(approval("child-approval", true)).unwrap();
+        command_tx.send(plugin_control("cancel-child")).unwrap();
+        command_tx.send(approval(&request_id, false)).unwrap();
+        command_tx.send(Command::Cancel).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), execution)
+            .await
+            .expect("审批等待执行未及时退出")
+            .unwrap();
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                RecordedRuntimeCommand::Approval {
+                    request_id: "child-approval".to_string(),
+                    approved: true,
+                },
+                RecordedRuntimeCommand::PluginControl {
+                    plugin_id: "test-plugin".to_string(),
+                    action: "cancel-child".to_string(),
+                },
+            ],
+            "主 Agent 自己的审批响应必须继续由当前审批等待分支消费"
+        );
+    }
 
     fn tool(name: &str) -> ToolSpec {
         ToolSpec {

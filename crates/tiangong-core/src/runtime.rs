@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::agent_config::AgentConfig;
-use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
@@ -89,6 +90,8 @@ pub struct RuntimeEngine {
     tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
     /// Plugin 注册的 Prompt 段落提供者
     prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
+    /// 已注册插件实例（供通用消息投递、工具策略和运行时控制钩子使用）。
+    plugins: Arc<Mutex<Vec<Arc<dyn crate::core::Plugin>>>>,
     /// Turn-scoped 插件 usage 收集器（由插件经 PluginFeedbackTx.report_token_usage
     /// 即时累加，turn 开始绑定 / 结束解绑，见 core::plugin::feedback::TurnUsageSink）。
     turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
@@ -108,6 +111,34 @@ impl std::fmt::Debug for RuntimeEngine {
 }
 
 impl RuntimeEngine {
+    #[cfg(test)]
+    pub(crate) fn for_react_test(
+        client: SingleProviderClient,
+        plugin: Arc<dyn crate::core::Plugin>,
+    ) -> Self {
+        let agent_config = AgentConfig::default();
+        let permission_gate =
+            crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
+                trust_mode: agent_config.trust_mode,
+                ..Default::default()
+            });
+        Self {
+            client,
+            lite_client: None,
+            runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            context_limit: 8_192,
+            agent_config,
+            models_config: ModelsConfig::default(),
+            core_config: None,
+            permission_gate,
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
+            tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
+            prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            plugins: Arc::new(Mutex::new(vec![plugin])),
+            turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
+        }
+    }
+
     pub fn new(
         client: SingleProviderClient,
         context_limit: usize,
@@ -134,6 +165,7 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            plugins: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
@@ -143,7 +175,7 @@ impl RuntimeEngine {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
-        shared_trust_mode: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
+        trust_mode: crate::permission::TrustModeHandle,
         storage_root: std::path::PathBuf,
     ) -> Self {
         crate::storage::set_storage_root(storage_root);
@@ -152,7 +184,7 @@ impl RuntimeEngine {
                 trust_mode: agent_config.trust_mode,
                 ..Default::default()
             },
-            shared_trust_mode.clone(),
+            trust_mode,
         );
         Self {
             client,
@@ -166,6 +198,7 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            plugins: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
@@ -220,17 +253,6 @@ impl RuntimeEngine {
     /// 开始时绑定本轮 usage 上下文，插件经 PluginFeedbackTx 即时上报）。
     pub fn turn_usage_sink(&self) -> &Arc<crate::core::plugin::TurnUsageSink> {
         &self.turn_usage_sink
-    }
-
-    /// 替换 turn-scoped usage 收集器（返回新的 RuntimeEngine）。
-    ///
-    /// 子 Agent 经此替换为**独立的 sink**，避免其 `execute_turn` 内的 `bind()`
-    /// 覆盖主 Agent 的 binding（TurnUsageSink 是单槽，覆盖会导致主 Agent 后续插件
-    /// usage 被丢弃）。子 Agent 的 usage 经其 execute_turn 返回值由 team 插件
-    /// handler 上报主 Agent。
-    pub fn with_turn_usage_sink(mut self, sink: Arc<crate::core::plugin::TurnUsageSink>) -> Self {
-        self.turn_usage_sink = sink;
-        self
     }
 
     /// 获取各插件贡献的环境变量快照（供 command 插件注入子进程）。
@@ -325,6 +347,55 @@ impl RuntimeEngine {
             .unwrap_or_default()
     }
 
+    /// 注册插件实例，供工具规格之外的通用生命周期扩展点使用。
+    pub(crate) fn register_plugin(&self, plugin: Arc<dyn crate::core::Plugin>) {
+        if let Ok(mut guard) = self.plugins.lock() {
+            guard.push(plugin);
+        }
+    }
+
+    fn plugins(&self) -> Vec<Arc<dyn crate::core::Plugin>> {
+        self.plugins.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// 汇总插件为用户消息规划的持久投递。
+    pub(crate) fn plan_plugin_deliveries(
+        &self,
+        actor_id: &str,
+        source_message_id: &str,
+        prepared: &[tiangong_types::ContentBlock],
+    ) -> Vec<crate::session::PendingPluginDelivery> {
+        self.plugins()
+            .iter()
+            .flat_map(|plugin| plugin.plan_plugin_deliveries(actor_id, source_message_id, prepared))
+            .collect()
+    }
+
+    /// 通知插件派发已成功持久化的用户消息计划。
+    pub(crate) fn dispatch_plugin_deliveries(
+        &self,
+        session: &Session,
+        source_message_id: &str,
+    ) -> bool {
+        let mut dispatched = false;
+        for plugin in self.plugins() {
+            dispatched |= plugin.dispatch_plugin_deliveries(session, source_message_id);
+        }
+        dispatched
+    }
+
+    /// 把工具执行期间到达的控制命令广播给插件内部执行单元。
+    pub(crate) fn handle_plugin_runtime_command(
+        &self,
+        command: &crate::core::command::Command,
+    ) -> bool {
+        let mut handled = false;
+        for plugin in self.plugins() {
+            handled |= plugin.handle_runtime_command(command);
+        }
+        handled
+    }
+
     pub fn provider_label(&self) -> String {
         format!(
             "{} @ {} · {}ms",
@@ -348,20 +419,65 @@ impl RuntimeEngine {
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
     ///
     /// 所有工具均由各插件经 tool_overrides 统一分发，此方法不再持有具体领域参数。
-    pub(crate) async fn execute_tool_call(&self, call: &ToolCall, session: &Session) -> ToolResult {
+    pub(crate) fn start_tool_call(
+        &self,
+        call: &ToolCall,
+        session: &mut Session,
+        actor_id: &str,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
+        // 同一份插件快照既贡献写入目标也执行策略检查，避免两次竞争注册表锁。
+        let plugins = self.plugins();
+        let mut write_targets = Vec::new();
+        for plugin in &plugins {
+            match plugin.tool_write_targets(call) {
+                Ok(targets) => write_targets.extend(targets),
+                Err(reason) => {
+                    return Box::pin(async move {
+                        ToolResult {
+                            ok: false,
+                            summary: format!("工具策略拒绝：{reason}"),
+                            stdout: String::new(),
+                            stderr: reason,
+                            exit_code: 1,
+                            execution: None,
+                        }
+                    });
+                }
+            }
+        }
+        write_targets.sort();
+        write_targets.dedup();
+        let guard_result = plugins
+            .iter()
+            .try_for_each(|plugin| plugin.guard_tool_call(actor_id, call, &write_targets));
+        if let Err(reason) = guard_result {
+            return Box::pin(async move {
+                ToolResult {
+                    ok: false,
+                    summary: format!("工具策略拒绝：{reason}"),
+                    stdout: String::new(),
+                    stderr: reason,
+                    exit_code: 1,
+                    execution: None,
+                }
+            });
+        }
+
         // 权限检查
         use crate::permission::PermissionDecision;
         match self.permission_gate.check(&call.name) {
             PermissionDecision::Approved => {}
             PermissionDecision::Denied { reason } => {
-                return ToolResult {
-                    ok: false,
-                    summary: format!("权限拒绝：{reason}"),
-                    stdout: String::new(),
-                    stderr: reason,
-                    exit_code: 1,
-                    execution: None,
-                };
+                return Box::pin(async move {
+                    ToolResult {
+                        ok: false,
+                        summary: format!("权限拒绝：{reason}"),
+                        stdout: String::new(),
+                        stderr: reason,
+                        exit_code: 1,
+                        execution: None,
+                    }
+                });
             }
             PermissionDecision::NeedsApproval { .. } => {
                 // 审批已由调用方（core/mod.rs execute_turn_inner）完成，此处放行
@@ -376,34 +492,42 @@ impl RuntimeEngine {
             .lock()
             .ok()
             .and_then(|g| g.get(&call.name).cloned())
-            && let Some(result) = handler.handle(call, session).await
         {
-            return result;
+            let handler_future = handler.handle(call, session, actor_id);
+            let tool_name = call.name.clone();
+            return Box::pin(async move {
+                if let Some(result) = handler_future.await {
+                    return result;
+                }
+
+                ToolResult {
+                    ok: false,
+                    summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
+                    stdout: String::new(),
+                    stderr: format!("tool {tool_name} not handled by any plugin"),
+                    exit_code: 1,
+                    execution: None,
+                }
+            });
         }
 
         // 无任何处理器命中的工具：LocalToolExecutor 已删除，所有工具均由插件提供。
-        ToolResult {
-            ok: false,
-            summary: format!("未注册的工具：{}（请确认对应插件已启用）", call.name),
-            stdout: String::new(),
-            stderr: format!("tool {} not handled by any plugin", call.name),
-            exit_code: 1,
-            execution: None,
-        }
+        let tool_name = call.name.clone();
+        Box::pin(async move {
+            ToolResult {
+                ok: false,
+                summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
+                stdout: String::new(),
+                stderr: format!("tool {tool_name} not handled by any plugin"),
+                exit_code: 1,
+                execution: None,
+            }
+        })
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
-}
-
-/// 保留增强工具注入钩子。
-///
-/// 扩展能力均由插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
-pub(crate) fn inject_enhanced_tools(_tools: &mut Vec<ToolSpec>) {
-    // 团队工具（create_agent/dismiss_agent/send_message/broadcast_message/notify_user/
-    // lock_file/unlock_file）已迁移至独立插件 crate（tiangong-plugin-agent-team），
-    // 经 tool_overrides 统一分发，不再由 core 硬编码注入。
 }
 
 /// 清理 LLM 响应中混入的工具执行 trace 文本

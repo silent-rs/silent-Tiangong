@@ -75,7 +75,8 @@ impl ToolOverrideHandler for SkillPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        session: &Session,
+        session: &mut Session,
+        _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         match self.dispatch(call, session) {
             Some(future) => Box::pin(async move { Some(future.await) }),

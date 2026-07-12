@@ -6,7 +6,8 @@
 //! 工具规格（run_shell / terminal_send）与覆盖处理器、Prompt 段落直接在
 //! [`TerminalPlugin`] 上实现，core 通过 supertrait 自动收集。
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use serde_json::json;
 use tauri::{Manager, Wry};
@@ -18,7 +19,7 @@ use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler};
 use crate::capability::TerminalProvider;
 use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
 use crate::session_pty::SessionAwareTerminalProvider;
-use tiangong_core::permission::TrustMode;
+use tiangong_core::permission::TrustModeHandle;
 
 /// 终端插件：聚合终端能力、工具覆盖处理器与 Prompt 段落提供者。
 ///
@@ -27,6 +28,7 @@ use tiangong_core::permission::TrustMode;
 pub struct TerminalPlugin {
     override_handler: TerminalToolOverride,
     prompt_provider: TerminalPromptSectionProvider,
+    workspace: RwLock<Option<PathBuf>>,
 }
 
 impl TerminalPlugin {
@@ -44,6 +46,7 @@ impl TerminalPlugin {
         Some(Self {
             override_handler,
             prompt_provider,
+            workspace: RwLock::new(None),
         })
     }
 }
@@ -56,9 +59,30 @@ impl Plugin for TerminalPlugin {
     // register 留空：终端能力是插件内部状态，由 handler 直接持有 provider 调用，
     // 不再经 RuntimeEngine 中转注入（#225 能力下沉）。
 
-    /// 注入共享信任模式引用：透传给 handler，FullTrust 时跳过 run_command 校验。
-    fn set_trust_mode(&self, trust: std::sync::Arc<std::sync::RwLock<TrustMode>>) {
+    /// 注入信任模式解析句柄：透传给 handler，FullTrust 时跳过 run_command 校验。
+    fn set_trust_mode(&self, trust: TrustModeHandle) {
         self.override_handler.set_trust_mode(trust);
+    }
+
+    fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        if let Ok(mut guard) = self.workspace.write() {
+            *guard = workspace.map(std::path::Path::to_path_buf);
+        }
+    }
+
+    fn tool_write_targets(&self, call: &ToolCall) -> Result<Vec<PathBuf>, String> {
+        if !matches!(
+            call.name.as_str(),
+            "run_command" | "run_shell" | "terminal_send"
+        ) {
+            return Ok(Vec::new());
+        }
+        self.workspace
+            .read()
+            .map_err(|_| "终端工作目录状态锁定失败".to_string())?
+            .clone()
+            .map(|workspace| vec![workspace])
+            .ok_or_else(|| "终端工具缺少工作目录，无法声明写入边界".to_string())
     }
 }
 
@@ -66,10 +90,35 @@ impl ToolOverrideHandler for TerminalPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        session: &tiangong_core::session::Session,
+        session: &mut tiangong_core::session::Session,
+        actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        ToolOverrideHandler::handle(&self.override_handler, call, session)
+        // 嵌套执行单元不能沿用用户终端可能已经切换过的 cwd，否则外层按工作区
+        // 声明的写入边界与真实进程目录不一致。显式切回插件收到的会话工作区。
+        let workspace = self.workspace.read().ok().and_then(|guard| guard.clone());
+        let normalized = normalize_nested_terminal_call(call, actor_id, workspace.as_deref());
+        ToolOverrideHandler::handle(
+            &self.override_handler,
+            normalized.as_ref().unwrap_or(call),
+            session,
+            actor_id,
+        )
     }
+}
+
+fn normalize_nested_terminal_call(
+    call: &ToolCall,
+    actor_id: &str,
+    workspace: Option<&std::path::Path>,
+) -> Option<ToolCall> {
+    if actor_id == "main" || !matches!(call.name.as_str(), "run_command" | "run_shell") {
+        return None;
+    }
+    workspace.map(|workspace| {
+        let mut normalized = call.clone();
+        normalized.arguments["cwd"] = serde_json::Value::String(workspace.display().to_string());
+        normalized
+    })
 }
 
 impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
@@ -129,5 +178,29 @@ impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
 impl PromptSectionProvider for TerminalPlugin {
     fn prompt_sections(&self) -> Vec<String> {
         PromptSectionProvider::prompt_sections(&self.prompt_provider)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_agent_terminal_call_is_forced_to_workspace() {
+        let call = ToolCall {
+            id: "call".to_string(),
+            name: "run_shell".to_string(),
+            arguments: serde_json::json!({ "script": "cargo check", "cwd": "/other" }),
+        };
+
+        let normalized = normalize_nested_terminal_call(
+            &call,
+            "agent-dev",
+            Some(std::path::Path::new("/workspace")),
+        )
+        .unwrap();
+
+        assert_eq!(normalized.arguments["cwd"], "/workspace");
+        assert!(normalize_nested_terminal_call(&call, "main", None).is_none());
     }
 }

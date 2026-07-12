@@ -3,18 +3,17 @@
 //! 单一线程完成所有工作：接收消息 → LLM 调用 → 工具执行 → session 更新 → 推送 StreamEvent
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::{
-    accept_prepared_user_message_with_options, append_runtime_tool_message,
-};
-use crate::runtime::{RuntimeEngine, inject_enhanced_tools};
+use crate::react::message::{accept_user_message_with_plugin_routes, append_runtime_tool_message};
+use crate::runtime::RuntimeEngine;
 use crate::session::{MessageRole, Session};
 use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 
@@ -29,6 +28,7 @@ const MAX_OUTER_ITERATIONS: u32 = 3;
 
 pub mod command;
 pub(crate) use command::Command;
+pub use command::SessionMetadataUpdate;
 pub mod plugin;
 pub use plugin::Plugin;
 pub mod builder;
@@ -51,8 +51,8 @@ pub struct TiangongCore {
     ///
     /// 宿主可以按会话原子替换配置，不会影响同进程中的其他 Core。
     config: CoreConfigProvider,
-    /// 独立的信任模式（共享引用，实时生效）
-    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    /// 会话信任模式基线与按执行任务隔离的 turn 覆盖。
+    trust_mode: crate::permission::TrustModeHandle,
     /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
     cancel_flag: Arc<AtomicBool>,
     /// 关闭标志由 Core 句柄直接设置，不能依赖正在阻塞的 worker 先消费命令。
@@ -68,6 +68,55 @@ pub struct PreparedMessageReceipt {
     receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
 }
 
+/// 会话元数据入队后返回的持久化确认句柄。
+pub struct SessionMetadataReceipt {
+    receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+/// 单个 turn 内的信任模式控制器。
+///
+/// 运行中收到新的 `Command::Message` 时，ReAct 循环会复用该控制器
+/// 切换到新消息的覆盖；新消息没有覆盖时立即使用最新会话基线。
+#[derive(Clone)]
+pub(crate) struct TurnTrustModeController {
+    binding: crate::permission::TrustModeBindingController,
+}
+
+impl TurnTrustModeController {
+    pub(crate) fn apply_message_override(
+        &self,
+        trust_mode_override: Option<crate::permission::TrustMode>,
+    ) {
+        self.binding.apply_override(trust_mode_override);
+    }
+}
+
+/// 工作循环的 RAII 轮次边界；任何 `continue` / `break` / unwind
+/// 都会恢复轮次开始前的信任模式。
+pub(crate) struct TurnTrustModeGuard {
+    _binding_guard: crate::permission::TrustModeBindingGuard,
+    controller: TurnTrustModeController,
+}
+
+impl TurnTrustModeGuard {
+    pub(crate) fn new(
+        trust_mode: crate::permission::TrustModeHandle,
+        trust_mode_override: Option<crate::permission::TrustMode>,
+    ) -> Self {
+        let binding_guard = trust_mode.bind_override(trust_mode_override);
+        Self {
+            controller: TurnTrustModeController {
+                binding: binding_guard.controller(),
+            },
+            _binding_guard: binding_guard,
+        }
+    }
+
+    pub(crate) fn controller(&self) -> TurnTrustModeController {
+        self.controller.clone()
+    }
+}
+
 impl PreparedMessageReceipt {
     pub async fn await_persisted(self) -> Result<(), CoreError> {
         match self.receiver.await {
@@ -79,6 +128,26 @@ impl PreparedMessageReceipt {
 }
 
 impl std::future::IntoFuture for PreparedMessageReceipt {
+    type Output = Result<(), CoreError>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'static>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.await_persisted())
+    }
+}
+
+impl SessionMetadataReceipt {
+    pub async fn await_persisted(self) -> Result<(), CoreError> {
+        match self.receiver.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(message)) => Err(CoreError::MetadataPersistenceFailed(message)),
+            Err(_) => Err(CoreError::MetadataPersistenceConfirmationDropped),
+        }
+    }
+}
+
+impl std::future::IntoFuture for SessionMetadataReceipt {
     type Output = Result<(), CoreError>;
     type IntoFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'static>>;
@@ -110,13 +179,13 @@ impl TiangongCore {
         }
         let storage_root = storage.into_root();
         let initial_trust_mode = session.trust_mode;
-        let shared_trust_mode = Arc::new(RwLock::new(initial_trust_mode));
+        let trust_mode = crate::permission::TrustModeHandle::new(initial_trust_mode);
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
         let cancel_flag = Arc::new(AtomicBool::new(false));
         let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-        let worker_trust_mode = shared_trust_mode.clone();
+        let worker_trust_mode = trust_mode.clone();
         let worker_cancel_flag = cancel_flag.clone();
         let worker_shutdown_flag = shutdown_flag.clone();
         let worker_config = config.clone();
@@ -143,7 +212,7 @@ impl TiangongCore {
             worker: Some(worker),
             session_id,
             config,
-            shared_trust_mode,
+            trust_mode,
             cancel_flag,
             shutdown_flag,
             command_delivery_lock: Mutex::new(()),
@@ -174,6 +243,29 @@ impl TiangongCore {
         message_id: impl Into<String>,
         prepared: Vec<ContentBlock>,
     ) -> Result<PreparedMessageReceipt, CoreError> {
+        self.enqueue_prepared_with_receipt_inner(message_id, prepared, None)
+    }
+
+    /// 同步入队 Prepared 用户消息，并仅在该轮使用指定信任模式。
+    ///
+    /// 返回的确认句柄与 [`enqueue_prepared_with_receipt`](Self::enqueue_prepared_with_receipt)
+    /// 语义相同；无论消息持久化、插件路由、执行、取消或关闭如何结束，
+    /// Core 都会在该 turn 后恢复原信任模式。
+    pub fn enqueue_prepared_with_receipt_and_trust_mode(
+        &self,
+        message_id: impl Into<String>,
+        prepared: Vec<ContentBlock>,
+        trust_mode: crate::permission::TrustMode,
+    ) -> Result<PreparedMessageReceipt, CoreError> {
+        self.enqueue_prepared_with_receipt_inner(message_id, prepared, Some(trust_mode))
+    }
+
+    fn enqueue_prepared_with_receipt_inner(
+        &self,
+        message_id: impl Into<String>,
+        prepared: Vec<ContentBlock>,
+        trust_mode_override: Option<crate::permission::TrustMode>,
+    ) -> Result<PreparedMessageReceipt, CoreError> {
         let _delivery_guard = self
             .command_delivery_lock
             .lock()
@@ -182,6 +274,7 @@ impl TiangongCore {
         self.send_cmd(Command::Message {
             prepared,
             message_id: Some(message_id.into()),
+            trust_mode_override,
             persistence_ack: Some(sender),
         })?;
         Ok(PreparedMessageReceipt { receiver })
@@ -197,6 +290,17 @@ impl TiangongCore {
             .await
     }
 
+    /// 入队 Prepared 用户消息，仅在该轮使用指定信任模式，并等待持久化。
+    pub async fn deliver_prepared_and_wait_with_trust_mode(
+        &self,
+        message_id: impl Into<String>,
+        prepared: Vec<ContentBlock>,
+        trust_mode: crate::permission::TrustMode,
+    ) -> Result<(), CoreError> {
+        self.enqueue_prepared_with_receipt_and_trust_mode(message_id, prepared, trust_mode)?
+            .await
+    }
+
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
     }
@@ -209,6 +313,23 @@ impl TiangongCore {
     pub fn replace_config(&self, config: CoreConfig) -> Result<(), CoreError> {
         self.config.replace(config);
         self.send_cmd(Command::ReloadConfig)
+    }
+
+    /// 同步入队会话元数据更新，并返回可在释放宿主锁后等待的持久化确认。
+    pub fn enqueue_session_metadata_update_with_receipt(
+        &self,
+        update: SessionMetadataUpdate,
+    ) -> Result<SessionMetadataReceipt, CoreError> {
+        let _delivery_guard = self
+            .command_delivery_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.send_cmd(Command::UpdateSessionMetadata {
+            update,
+            persistence_ack: Some(sender),
+        })?;
+        Ok(SessionMetadataReceipt { receiver })
     }
 
     /// 是否已停止（worker 已结束或命令通道已关闭）。
@@ -233,11 +354,13 @@ impl TiangongCore {
         !self.is_stopped()
     }
 
-    /// 设置信任模式（实时生效，当前对话下一次工具调用立即感知）
+    /// 设置会话信任模式。
+    ///
+    /// 普通轮次中实时生效。若当前消息携带显式的单轮覆盖，
+    /// 新设置先更新会话基线，当前覆盖仍持续到该消息结束；
+    /// 随后立即恢复到最新基线，不会写回轮次起点的旧值。
     pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
-        if let Ok(mut guard) = self.shared_trust_mode.write() {
-            *guard = mode;
-        }
+        self.trust_mode.set_base(mode);
     }
 
     /// 关闭并获取最终 session。
@@ -288,9 +411,11 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
+                trust_mode_override,
             }) => self.send_cmd(Command::Message {
                 prepared,
                 message_id,
+                trust_mode_override,
                 persistence_ack: None,
             }),
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
@@ -306,7 +431,15 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
-                CommandInput::CancelAgent { role } => self.send_cmd(Command::CancelAgent { role }),
+                CommandInput::PluginControl {
+                    plugin_id,
+                    action,
+                    payload,
+                } => self.send_cmd(Command::PluginControl {
+                    plugin_id,
+                    action,
+                    payload,
+                }),
                 CommandInput::UpdateCwd { cwd } => self.send_cmd(Command::UpdateCwd { cwd }),
                 CommandInput::ReloadConfig => self.send_cmd(Command::ReloadConfig),
                 CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
@@ -336,7 +469,7 @@ fn worker_loop(
     session: Session,
     external_tx: StdSender<SessionStreamEvent>,
     cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    trust_mode: crate::permission::TrustModeHandle,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     cancel_flag: Arc<AtomicBool>,
@@ -358,7 +491,7 @@ fn worker_loop(
         session,
         external_tx,
         cmd_rx,
-        shared_trust_mode,
+        trust_mode,
         plugins,
         cmd_tx,
         cancel_flag,
@@ -374,7 +507,7 @@ async fn worker_loop_async(
     mut session: Session,
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    trust_mode: crate::permission::TrustModeHandle,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     cancel_flag: Arc<AtomicBool>,
@@ -408,6 +541,18 @@ async fn worker_loop_async(
     let forward_handle = thread::spawn(move || {
         let mut external_open = true;
         while let Ok(event) = stream_rx.recv() {
+            if let StreamEvent::TokenUsage {
+                usage,
+                agent_id,
+                source,
+                ..
+            } = &event
+            {
+                let (lock, _) = &*fwd_capture;
+                if let Ok(mut capture) = lock.lock() {
+                    capture.usage.record(usage, agent_id.as_deref(), source);
+                }
+            }
             match event {
                 StreamEvent::TurnBoundary { boundary_id } => {
                     let (lock, ready) = &*fwd_capture;
@@ -455,6 +600,9 @@ async fn worker_loop_async(
         }
     });
     let mut turn_boundary_id = 0u64;
+    // 空闲/关闭阶段的后台插件事件不经过主 turn 提交；保留一份连续去重状态，
+    // 既能即时持久化增量，也能识别随后到达的 cancelled 累计事件。
+    let mut background_usage_capture = TurnUsageCapture::default();
 
     apply_session_cwd(&session);
 
@@ -484,7 +632,7 @@ async fn worker_loop_async(
             engine = Some(build_engine_from_config(
                 &cfg,
                 &stream_tx,
-                shared_trust_mode.clone(),
+                trust_mode.clone(),
                 storage_root.clone(),
             ));
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
@@ -576,7 +724,6 @@ async fn worker_loop_async(
             new_tools.push(injection_spec);
             // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
             new_tools.extend(plugin_specs);
-            inject_enhanced_tools(&mut new_tools);
             tools = new_tools;
             // Agent 团队从会话历史恢复的逻辑已迁移至 team 插件的 on_session_ready。
             last_cfg_gen = cfg_gen;
@@ -620,14 +767,34 @@ async fn worker_loop_async(
 
                 continue;
             }
+            Command::UpdateSessionMetadata {
+                update,
+                persistence_ack,
+            } => {
+                if let Err(error) = apply_session_metadata_update(
+                    &mut session,
+                    &trust_mode,
+                    update,
+                    persistence_ack,
+                ) {
+                    tracing::warn!(%error, "更新会话元数据失败");
+                }
+                continue;
+            }
             Command::ReloadConfig => {
                 continue;
             }
             Command::Message {
                 prepared,
                 message_id,
+                trust_mode_override,
                 persistence_ack,
             } => {
+                // 覆盖在处理该 Message 的第一个副作用前生效。守卫的
+                // Drop 覆盖持久化失败、插件路由、正常终态、取消与
+                // shutdown 等所有出口，防止信任模式泄漏到下条消息。
+                let turn_trust_mode =
+                    TurnTrustModeGuard::new(trust_mode.clone(), trust_mode_override);
                 // 新一轮开始：清除上一轮的取消信号。
                 cancel_flag.store(false, Ordering::Release);
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -638,18 +805,20 @@ async fn worker_loop_async(
                 forward_terminal.store(false, Ordering::Release);
                 if let Ok(mut capture) = turn_capture.0.lock() {
                     capture.terminal = None;
+                    capture.usage = TurnUsageCapture::default();
                 }
+                background_usage_capture = TurnUsageCapture::default();
                 // 宿主入口已完成输入准备。Core 原样持久化已就绪消息并确认，
                 // 再进入 Agent Loop。
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-                let accepted = match accept_prepared_user_message_with_options(
+                let (accepted, routed_to_plugin) = match accept_user_message_with_plugin_routes(
+                    engine.as_ref().expect("engine 已完成构建"),
+                    "main",
                     &mut session,
                     &stream_tx,
                     Some(message_id),
                     prepared,
                     persistence_ack,
-                    Vec::new(),
-                    false,
                     true,
                 ) {
                     Ok(accepted) => accepted,
@@ -674,19 +843,26 @@ async fn worker_loop_async(
                     plugin.on_turn_started(&mut session, turn_start_idx);
                 }
 
-                // 执行对话轮次
-                execute_turn_async(
-                    &mut session,
-                    &accepted.message_id,
-                    &accepted.prepared,
-                    engine.as_ref().unwrap(),
-                    &tools,
-                    &stream_tx,
-                    &mut cmd_rx,
-                    &cancel_flag,
-                    &shutdown_flag,
-                )
-                .await;
+                if routed_to_plugin {
+                    // 插件已接管该消息；用户消息和待投递计划已经原子落盘，当前主
+                    // Agent 不再重复读取。插件完成后通过反馈命令提交结果与完成确认。
+                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                } else {
+                    // 执行普通主 Agent 对话轮次。
+                    execute_turn_async(
+                        &mut session,
+                        &accepted.message_id,
+                        &accepted.prepared,
+                        engine.as_ref().unwrap(),
+                        &tools,
+                        &stream_tx,
+                        &mut cmd_rx,
+                        &cancel_flag,
+                        &shutdown_flag,
+                        turn_trust_mode.controller(),
+                    )
+                    .await;
+                }
 
                 // 等转发线程消费完 execute_turn_async 在返回前产生的所有事件，取得
                 // 本轮最后一个内部终态。屏障不对外可见。
@@ -745,10 +921,29 @@ async fn worker_loop_async(
                     }
                 }
 
+                // 未完成工具已统一闭合，这里已经重新到达安全注入边界。审批等待期间
+                // 提交的插件结果不能因随后取消或关闭而滞留到下一轮。
+                crate::react::message::flush_deferred_tool_injections(&mut session, &stream_tx);
+
                 // Turn 完成后：插件先提交自己的最终状态，再由 Core 保存整份会话。
                 for plugin in &plugins {
                     plugin.on_turn_finished(&mut session, turn_start_idx);
                 }
+
+                // 插件终态钩子也可能同步上报用量。再次设置屏障，确保转发线程已捕获
+                // 本轮全部 TokenUsage，再由 Core 统一写入权威 Session。
+                tokio::task::block_in_place(|| {
+                    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id);
+                });
+                let turn_usage = {
+                    let (lock, _) = &*turn_capture;
+                    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                    std::mem::take(&mut capture.usage)
+                };
+                // 本轮结束后后台子执行仍可能继续发送累计取消事件；继承本轮已经观测
+                // 的 actor 基线，避免跨“主 turn → 空闲”边界重复记账。
+                background_usage_capture = turn_usage.clone();
+                turn_usage.apply_to_session(&mut session);
 
                 // base64 等运行内容只服务本轮；历史图片由 Provider 按稳定本地引用重编码。
                 session.clear_transient_content();
@@ -807,16 +1002,27 @@ async fn worker_loop_async(
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
+                if let Some(runtime) = engine.as_ref() {
+                    runtime.handle_plugin_runtime_command(&Command::Cancel);
+                }
                 // 活跃执行会消费命令并结束；空闲时在此清除同步取消标志。
                 cancel_flag.store(false, Ordering::Release);
             }
-            Command::CancelAgent { .. } => {
-                // 仅在多 Agent 执行等待期间由 ReactEngine 转发处理。
+            command @ Command::PluginControl { .. } => {
+                if let Some(runtime) = engine.as_ref() {
+                    runtime.handle_plugin_runtime_command(&command);
+                }
             }
             Command::Approval {
                 request_id,
                 approved,
             } => {
+                if let Some(runtime) = engine.as_ref() {
+                    runtime.handle_plugin_runtime_command(&Command::Approval {
+                        request_id: request_id.clone(),
+                        approved,
+                    });
+                }
                 // 恢复场景的审批响应：清除 pending 状态
                 let pending = crate::approval_store::get_pending(&session_id);
                 let had_pending = pending.iter().any(|a| a.request_id == request_id);
@@ -839,7 +1045,12 @@ async fn worker_loop_async(
                     );
                 }
             }
-            Command::Shutdown => break,
+            Command::Shutdown => {
+                if let Some(runtime) = engine.as_ref() {
+                    runtime.handle_plugin_runtime_command(&Command::Shutdown);
+                }
+                break;
+            }
             Command::InjectTool { tool_name, payload } => {
                 crate::react::message::defer_tool_injection(
                     &mut session,
@@ -857,8 +1068,39 @@ async fn worker_loop_async(
                     StreamEvent::Done { usage: None },
                 );
             }
+            Command::CommitPluginDeliveries {
+                delivery_ids,
+                tool_injections,
+                persistence_ack,
+            } => {
+                if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                    &mut session,
+                    &stream_tx,
+                    delivery_ids,
+                    tool_injections,
+                    persistence_ack,
+                ) {
+                    tracing::warn!(%error, "提交插件持久投递失败");
+                }
+            }
             Command::EmitStreamEvent(ev) => {
                 let ev = *ev;
+                // 没有主 Agent turn 时，插件后台任务的用量事件会直接到达 worker。
+                // 此时不存在后续 turn 终态可代为提交，必须在转发前由 Core 自己落盘。
+                if let StreamEvent::TokenUsage {
+                    usage,
+                    agent_id,
+                    source,
+                    ..
+                } = &ev
+                {
+                    let delta = background_usage_capture.record(usage, agent_id.as_deref(), source);
+                    apply_usage_delta_to_session(&mut session, &delta, agent_id.as_deref());
+                    session.updated_at = crate::session::now_text();
+                    if let Err(error) = session.try_persist_to_disk() {
+                        tracing::warn!(%error, "持久化插件后台用量失败");
+                    }
+                }
                 if matches!(ev, StreamEvent::Done { .. } | StreamEvent::Error { .. }) {
                     send_final_stream_event(
                         &stream_tx,
@@ -867,6 +1109,7 @@ async fn worker_loop_async(
                         &mut turn_boundary_id,
                         ev,
                     );
+                    background_usage_capture = TurnUsageCapture::default();
                 } else {
                     let _ = stream_tx.send(ev);
                 }
@@ -889,6 +1132,44 @@ async fn worker_loop_async(
         }
     }
 
+    // 等待插件内部任务收敛时继续处理反馈命令。插件的 shutdown 可能等待一次带
+    // ACK 的原子提交；若此处只 await shutdown、之后才排空命令，会形成互相等待。
+    for plugin in &plugins {
+        let shutdown = plugin.shutdown();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = shutdown.as_mut() => break,
+                command = cmd_rx.recv() => {
+                    let Some(command) = command else {
+                        shutdown.as_mut().await;
+                        break;
+                    };
+                    process_shutdown_feedback_command(
+                        &mut session,
+                        &stream_tx,
+                        command,
+                        &mut background_usage_capture,
+                        &trust_mode,
+                    );
+                }
+            }
+        }
+    }
+
+    // 插件可能在收敛前最后提交完成确认或报告；worker 已退出主循环，因此在关闭
+    // 通道前做一次有界排空，确保这些已提交状态进入最终 Session。
+    while let Ok(command) = cmd_rx.try_recv() {
+        process_shutdown_feedback_command(
+            &mut session,
+            &stream_tx,
+            command,
+            &mut background_usage_capture,
+            &trust_mode,
+        );
+    }
+    session.persist_to_disk();
+
     // RuntimeEngine 的重试回调持有 stream_tx clone；先释放 engine，确保内部通道
     // 能在 drop(stream_tx) 后真正关闭，避免 Shutdown/join 永久等待转发线程。
     drop(engine);
@@ -904,6 +1185,144 @@ async fn worker_loop_async(
     }
 
     session
+}
+
+fn process_shutdown_feedback_command(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    command: Command,
+    usage_capture: &mut TurnUsageCapture,
+    trust_mode: &crate::permission::TrustModeHandle,
+) {
+    match command {
+        Command::UpdateSessionMetadata {
+            update,
+            persistence_ack,
+        } => {
+            if let Err(error) =
+                apply_session_metadata_update(session, trust_mode, update, persistence_ack)
+            {
+                tracing::warn!(%error, "关闭阶段更新会话元数据失败");
+            }
+        }
+        Command::CommitPluginDeliveries {
+            delivery_ids,
+            tool_injections,
+            persistence_ack,
+        } => {
+            if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                session,
+                stream_tx,
+                delivery_ids,
+                tool_injections,
+                persistence_ack,
+            ) {
+                tracing::warn!(%error, "关闭阶段提交插件持久投递失败");
+            }
+        }
+        Command::InjectTool { tool_name, payload } => {
+            crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
+            crate::react::message::flush_deferred_tool_injections(session, stream_tx);
+        }
+        Command::EmitStreamEvent(event)
+            if !matches!(*event, StreamEvent::Done { .. } | StreamEvent::Error { .. }) =>
+        {
+            let event = *event;
+            if let StreamEvent::TokenUsage {
+                usage,
+                agent_id,
+                source,
+                ..
+            } = &event
+            {
+                let delta = usage_capture.record(usage, agent_id.as_deref(), source);
+                apply_usage_delta_to_session(session, &delta, agent_id.as_deref());
+                session.updated_at = crate::session::now_text();
+            }
+            let _ = stream_tx.send(event);
+        }
+        Command::EmitStreamEvent(_) => {}
+        _ => {}
+    }
+}
+
+/// 在 Core worker 内原子更新会话元数据；写盘失败时同时恢复内存状态和信任基线。
+pub(crate) fn apply_session_metadata_update(
+    session: &mut Session,
+    trust_mode: &crate::permission::TrustModeHandle,
+    update: SessionMetadataUpdate,
+    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> Result<(), String> {
+    apply_session_metadata_update_with_persist(
+        session,
+        trust_mode,
+        update,
+        persistence_ack,
+        Session::try_persist_to_disk,
+    )
+}
+
+fn apply_session_metadata_update_with_persist<F>(
+    session: &mut Session,
+    trust_mode: &crate::permission::TrustModeHandle,
+    update: SessionMetadataUpdate,
+    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    persist: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Session) -> Result<(), String>,
+{
+    let SessionMetadataUpdate {
+        title,
+        trust_mode: next_trust_mode,
+        reasoning_effort,
+    } = update;
+
+    if title.is_none() && next_trust_mode.is_none() && reasoning_effort.is_none() {
+        if let Some(ack) = persistence_ack {
+            let _ = ack.send(Ok(()));
+        }
+        return Ok(());
+    }
+
+    let before_title = session.title.clone();
+    let before_trust_mode = session.trust_mode;
+    let before_reasoning_effort = session.reasoning_effort.clone();
+    let before_updated_at = session.updated_at.clone();
+
+    let result = (|| {
+        if let Some(title) = title {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err("会话标题不能为空".to_string());
+            }
+            session.title = title.to_string();
+        }
+        if let Some(mode) = next_trust_mode {
+            session.trust_mode = mode;
+            trust_mode.set_base(mode);
+        }
+        if let Some(effort) = reasoning_effort {
+            session.reasoning_effort = effort
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+        }
+        session.updated_at = crate::session::now_text();
+        persist(session)
+    })();
+
+    if result.is_err() {
+        session.title = before_title;
+        session.trust_mode = before_trust_mode;
+        session.reasoning_effort = before_reasoning_effort;
+        session.updated_at = before_updated_at;
+        trust_mode.set_base(before_trust_mode);
+    }
+
+    if let Some(ack) = persistence_ack {
+        let _ = ack.send(result.clone());
+    }
+    result
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
@@ -1017,7 +1436,354 @@ pub(crate) fn reset_context_for_session(
 #[derive(Default)]
 struct TurnCapture {
     terminal: Option<StreamEvent>,
+    usage: TurnUsageCapture,
     processed_boundary: u64,
+}
+
+/// 转发线程捕获的单轮精确用量。
+///
+/// `total` 同时包含主 Agent 与所有子 Agent；`by_agent` 额外保留子 Agent 维度，
+/// 供会话切换到 Agent Tab 时恢复各自累计值。
+#[derive(Default, Clone)]
+struct TurnUsageCapture {
+    total: tiangong_types::TokenUsage,
+    by_agent: HashMap<String, tiangong_types::TokenUsage>,
+    /// 每个执行单元已经观测到的用量，用于把显式标记为
+    /// `source=cancelled-cumulative` 的累计快照换算成尚未落账的增量。
+    /// `None` 表示主执行单元。普通 `cancelled-incremental` 事件始终按增量记账。
+    observed_by_actor: HashMap<Option<String>, tiangong_types::TokenUsage>,
+}
+
+impl TurnUsageCapture {
+    fn record(
+        &mut self,
+        usage: &tiangong_types::TokenUsage,
+        agent_id: Option<&str>,
+        source: &str,
+    ) -> tiangong_types::TokenUsage {
+        let mut normalized = usage.clone();
+        if normalized.total_tokens == 0 {
+            normalized.total_tokens = normalized.prompt_tokens + normalized.completion_tokens;
+        }
+        if normalized.total_tokens == 0 {
+            return tiangong_types::TokenUsage::default();
+        }
+
+        let actor = agent_id.map(str::to_string);
+        let observed = self.observed_by_actor.entry(actor).or_default();
+        let delta = if source == "cancelled-cumulative" {
+            let delta = cumulative_usage_delta(&normalized, observed);
+            merge_cumulative_usage(observed, &normalized);
+            delta
+        } else {
+            observed.accumulate(&normalized);
+            normalized
+        };
+
+        self.total.accumulate(&delta);
+        if let Some(agent_id) = agent_id {
+            self.by_agent
+                .entry(agent_id.to_string())
+                .or_default()
+                .accumulate(&delta);
+        }
+        delta
+    }
+
+    fn apply_to_session(self, session: &mut Session) {
+        if self.total.total_tokens > 0 {
+            session.token_usage.accumulate(&self.total);
+        }
+        for (agent_id, usage) in self.by_agent {
+            session
+                .agent_token_usage
+                .entry(agent_id)
+                .or_default()
+                .accumulate(&usage);
+        }
+    }
+}
+
+fn cumulative_usage_delta(
+    cumulative: &tiangong_types::TokenUsage,
+    observed: &tiangong_types::TokenUsage,
+) -> tiangong_types::TokenUsage {
+    tiangong_types::TokenUsage {
+        prompt_tokens: cumulative
+            .prompt_tokens
+            .saturating_sub(observed.prompt_tokens),
+        completion_tokens: cumulative
+            .completion_tokens
+            .saturating_sub(observed.completion_tokens),
+        total_tokens: cumulative
+            .total_tokens
+            .saturating_sub(observed.total_tokens),
+        prompt_cache_hit_tokens: optional_usage_delta(
+            cumulative.prompt_cache_hit_tokens,
+            observed.prompt_cache_hit_tokens,
+        ),
+        prompt_cache_miss_tokens: optional_usage_delta(
+            cumulative.prompt_cache_miss_tokens,
+            observed.prompt_cache_miss_tokens,
+        ),
+    }
+}
+
+fn optional_usage_delta(cumulative: Option<usize>, observed: Option<usize>) -> Option<usize> {
+    cumulative.map(|value| value.saturating_sub(observed.unwrap_or_default()))
+}
+
+fn merge_cumulative_usage(
+    observed: &mut tiangong_types::TokenUsage,
+    cumulative: &tiangong_types::TokenUsage,
+) {
+    observed.prompt_tokens = observed.prompt_tokens.max(cumulative.prompt_tokens);
+    observed.completion_tokens = observed.completion_tokens.max(cumulative.completion_tokens);
+    observed.total_tokens = observed
+        .total_tokens
+        .max(cumulative.total_tokens)
+        .max(observed.prompt_tokens + observed.completion_tokens);
+    observed.prompt_cache_hit_tokens = max_optional_usage(
+        observed.prompt_cache_hit_tokens,
+        cumulative.prompt_cache_hit_tokens,
+    );
+    observed.prompt_cache_miss_tokens = max_optional_usage(
+        observed.prompt_cache_miss_tokens,
+        cumulative.prompt_cache_miss_tokens,
+    );
+}
+
+fn max_optional_usage(current: Option<usize>, cumulative: Option<usize>) -> Option<usize> {
+    match (current, cumulative) {
+        (Some(current), Some(cumulative)) => Some(current.max(cumulative)),
+        (current, cumulative) => current.or(cumulative),
+    }
+}
+
+fn apply_usage_delta_to_session(
+    session: &mut Session,
+    usage: &tiangong_types::TokenUsage,
+    agent_id: Option<&str>,
+) {
+    if usage.total_tokens == 0 {
+        return;
+    }
+    session.token_usage.accumulate(usage);
+    if let Some(agent_id) = agent_id {
+        session
+            .agent_token_usage
+            .entry(agent_id.to_string())
+            .or_default()
+            .accumulate(usage);
+    }
+}
+
+#[cfg(test)]
+mod turn_usage_capture_tests {
+    use super::*;
+
+    fn usage(
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        total_tokens: usize,
+    ) -> tiangong_types::TokenUsage {
+        tiangong_types::TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        }
+    }
+
+    #[test]
+    fn normalizes_and_persists_main_and_agent_usage_once() {
+        let mut capture = TurnUsageCapture::default();
+        capture.record(&usage(10, 5, 0), None, "react-round-1");
+        capture.record(&usage(20, 8, 28), Some("researcher"), "react-round-1");
+        capture.record(&usage(7, 3, 10), Some("researcher"), "react-round-2");
+
+        let mut session = Session::new("usage-capture");
+        session.token_usage = usage(1, 1, 2);
+        session
+            .agent_token_usage
+            .insert("researcher".to_string(), usage(2, 1, 3));
+        capture.apply_to_session(&mut session);
+
+        assert_eq!(session.token_usage.prompt_tokens, 38);
+        assert_eq!(session.token_usage.completion_tokens, 17);
+        assert_eq!(session.token_usage.total_tokens, 55);
+
+        let agent_usage = session.agent_token_usage.get("researcher").unwrap();
+        assert_eq!(agent_usage.prompt_tokens, 29);
+        assert_eq!(agent_usage.completion_tokens, 12);
+        assert_eq!(agent_usage.total_tokens, 41);
+    }
+
+    #[test]
+    fn cancelled_cumulative_usage_only_records_unseen_delta() {
+        let mut capture = TurnUsageCapture::default();
+        capture.record(&usage(10, 5, 15), None, "react-round-1");
+        let delta = capture.record(&usage(14, 8, 22), None, "cancelled-cumulative");
+
+        assert_eq!(delta.prompt_tokens, 4);
+        assert_eq!(delta.completion_tokens, 3);
+        assert_eq!(delta.total_tokens, 7);
+
+        let mut session = Session::new("cancelled-usage-capture");
+        capture.apply_to_session(&mut session);
+        assert_eq!(session.token_usage.prompt_tokens, 14);
+        assert_eq!(session.token_usage.completion_tokens, 8);
+        assert_eq!(session.token_usage.total_tokens, 22);
+    }
+
+    #[test]
+    fn shutdown_background_usage_delta_can_be_applied_immediately() {
+        let mut capture = TurnUsageCapture::default();
+        let first = capture.record(&usage(20, 10, 30), Some("child-agent"), "react-round-1");
+        let cancelled = capture.record(
+            &usage(25, 12, 37),
+            Some("child-agent"),
+            "cancelled-cumulative",
+        );
+        let mut session = Session::new("shutdown-usage-capture");
+
+        apply_usage_delta_to_session(&mut session, &first, Some("child-agent"));
+        apply_usage_delta_to_session(&mut session, &cancelled, Some("child-agent"));
+
+        assert_eq!(session.token_usage.total_tokens, 37);
+        assert_eq!(
+            session
+                .agent_token_usage
+                .get("child-agent")
+                .unwrap()
+                .total_tokens,
+            37
+        );
+    }
+
+    #[test]
+    fn summary_cancelled_increment_is_added_after_react_usage() {
+        let mut capture = TurnUsageCapture::default();
+        capture.record(&usage(70, 30, 100), None, "react-round-1");
+        capture.record(&usage(15, 5, 20), None, "cancelled-incremental");
+
+        let mut session = Session::new("summary-cancelled-increment");
+        capture.apply_to_session(&mut session);
+
+        assert_eq!(session.token_usage.prompt_tokens, 85);
+        assert_eq!(session.token_usage.completion_tokens, 35);
+        assert_eq!(session.token_usage.total_tokens, 120);
+    }
+
+    #[test]
+    fn shutdown_feedback_persists_incremental_and_cancelled_usage_once() {
+        let mut session = Session::new("shutdown-feedback-usage");
+        let mut capture = TurnUsageCapture::default();
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
+
+        for (usage, source) in [
+            (usage(20, 10, 30), "react-round-1"),
+            (usage(25, 12, 37), "cancelled-cumulative"),
+        ] {
+            process_shutdown_feedback_command(
+                &mut session,
+                &stream_tx,
+                Command::EmitStreamEvent(Box::new(StreamEvent::TokenUsage {
+                    usage,
+                    current_tokens: None,
+                    compression_threshold_tokens: None,
+                    context_limit_tokens: None,
+                    source: source.to_string(),
+                    agent_id: Some("child-agent".to_string()),
+                })),
+                &mut capture,
+                &trust_mode,
+            );
+        }
+
+        assert_eq!(session.token_usage.total_tokens, 37);
+        assert_eq!(
+            session
+                .agent_token_usage
+                .get("child-agent")
+                .unwrap()
+                .total_tokens,
+            37
+        );
+        assert_eq!(stream_rx.try_iter().count(), 2);
+    }
+}
+
+#[cfg(test)]
+mod session_metadata_update_tests {
+    use super::*;
+    use crate::permission::TrustMode;
+
+    #[test]
+    fn metadata_update_commits_all_fields_and_acknowledges() {
+        let mut session = Session::new("旧标题");
+        session.trust_mode = TrustMode::Supervised;
+        session.reasoning_effort = Some("low".to_string());
+        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+
+        apply_session_metadata_update_with_persist(
+            &mut session,
+            &trust_mode,
+            SessionMetadataUpdate {
+                title: Some("  新标题  ".to_string()),
+                trust_mode: Some(TrustMode::FullTrust),
+                reasoning_effort: Some(Some("high".to_string())),
+            },
+            Some(ack_tx),
+            |persisted| {
+                assert_eq!(persisted.title, "新标题");
+                assert_eq!(persisted.trust_mode, TrustMode::FullTrust);
+                assert_eq!(persisted.reasoning_effort.as_deref(), Some("high"));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(ack_rx.try_recv().unwrap(), Ok(()));
+        assert_eq!(session.title, "新标题");
+        assert_eq!(session.trust_mode, TrustMode::FullTrust);
+        assert_eq!(session.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(trust_mode.current(), TrustMode::FullTrust);
+    }
+
+    #[test]
+    fn metadata_update_rolls_back_memory_and_trust_when_persist_fails() {
+        let mut session = Session::new("原标题");
+        session.trust_mode = TrustMode::Supervised;
+        session.reasoning_effort = Some("medium".to_string());
+        let before_updated_at = session.updated_at.clone();
+        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
+        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+
+        let error = apply_session_metadata_update_with_persist(
+            &mut session,
+            &trust_mode,
+            SessionMetadataUpdate {
+                title: Some("失败标题".to_string()),
+                trust_mode: Some(TrustMode::FullTrust),
+                reasoning_effort: Some(None),
+            },
+            Some(ack_tx),
+            |_| Err("模拟写盘失败".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "模拟写盘失败");
+        assert_eq!(ack_rx.try_recv().unwrap(), Err(error));
+        assert_eq!(session.title, "原标题");
+        assert_eq!(session.trust_mode, TrustMode::Supervised);
+        assert_eq!(session.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(session.updated_at, before_updated_at);
+        assert_eq!(trust_mode.current(), TrustMode::Supervised);
+    }
 }
 
 fn send_final_stream_event(
@@ -1105,6 +1871,7 @@ async fn execute_turn_async(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     cancel_flag: &Arc<AtomicBool>,
     shutdown_flag: &Arc<AtomicBool>,
+    turn_trust_mode: TurnTrustModeController,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -1113,7 +1880,8 @@ async fn execute_turn_async(
         MAX_OUTER_ITERATIONS,
     )
     .with_cancel_flag(cancel_flag.clone())
-    .with_shutdown_flag(shutdown_flag.clone());
+    .with_shutdown_flag(shutdown_flag.clone())
+    .with_turn_trust_mode_controller(turn_trust_mode);
     react
         .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
@@ -1122,11 +1890,11 @@ async fn execute_turn_async(
 /// 从 CoreConfig 快照构建 RuntimeEngine
 ///
 /// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
-/// `shared_trust_mode` 是 TiangongCore 持有的独立信任模式，RuntimeEngine 共享此引用。
+/// `trust_mode` 是 TiangongCore 持有的任务隔离信任解析句柄，RuntimeEngine 共享它。
 fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
-    shared_trust_mode: Arc<RwLock<crate::permission::TrustMode>>,
+    trust_mode: crate::permission::TrustModeHandle,
     storage_root: std::path::PathBuf,
 ) -> RuntimeEngine {
     use crate::agent_config::AgentConfig;
@@ -1212,7 +1980,7 @@ fn build_engine_from_config(
         SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
-        shared_trust_mode,
+        trust_mode,
         storage_root,
     )
     .with_models_config(models_config)
@@ -1225,4 +1993,98 @@ fn build_engine_from_config(
         );
     }
     engine
+}
+
+#[cfg(test)]
+mod trust_mode_override_tests {
+    use super::*;
+    use crate::permission::TrustMode;
+
+    fn state(initial_mode: TrustMode) -> crate::permission::TrustModeHandle {
+        crate::permission::TrustModeHandle::new(initial_mode)
+    }
+
+    fn current_mode(state: &crate::permission::TrustModeHandle) -> TrustMode {
+        state.current()
+    }
+
+    #[test]
+    fn turn_override_is_restored_after_scope_exit() {
+        let state = state(TrustMode::Supervised);
+
+        {
+            let _guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
+            assert_eq!(current_mode(&state), TrustMode::FullTrust);
+        }
+
+        assert_eq!(current_mode(&state), TrustMode::Supervised);
+    }
+
+    #[test]
+    fn following_message_without_override_uses_current_base_mode() {
+        let state = state(TrustMode::Supervised);
+
+        {
+            let guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
+            assert_eq!(current_mode(&state), TrustMode::FullTrust);
+
+            // 运行中连续到达的第二条普通消息会复用当前 turn，
+            // 它必须立即回到最新会话基线，不能继承首条的覆盖。
+            guard.controller().apply_message_override(None);
+            assert_eq!(current_mode(&state), TrustMode::Supervised);
+        }
+
+        assert_eq!(current_mode(&state), TrustMode::Supervised);
+    }
+
+    #[test]
+    fn external_update_during_override_survives_turn_finish() {
+        let state = state(TrustMode::FullTrust);
+
+        {
+            let _guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
+            state.set_base(TrustMode::Supervised);
+            // 会话基线已更新，但显式的单轮覆盖仍持续到 turn 结束。
+            assert_eq!(current_mode(&state), TrustMode::FullTrust);
+        }
+
+        // 必须恢复到 turn 中更新的最新基线，而非起点 FullTrust。
+        assert_eq!(current_mode(&state), TrustMode::Supervised);
+    }
+
+    #[test]
+    fn following_unoverridden_message_uses_base_updated_during_turn() {
+        let state = state(TrustMode::Supervised);
+
+        {
+            let guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
+            state.set_base(TrustMode::FullTrust);
+
+            // 先模拟另一条显式覆盖消息，再到达无覆盖消息，
+            // 确认 `None` 读取的是轮次中更新后的基线，而非轮次起点快照。
+            guard
+                .controller()
+                .apply_message_override(Some(TrustMode::Supervised));
+            assert_eq!(current_mode(&state), TrustMode::Supervised);
+            guard.controller().apply_message_override(None);
+            assert_eq!(current_mode(&state), TrustMode::FullTrust);
+        }
+
+        assert_eq!(current_mode(&state), TrustMode::FullTrust);
+    }
+
+    #[test]
+    fn turn_override_is_restored_during_unwind() {
+        let state = state(TrustMode::Supervised);
+        let panic_state = state.clone();
+
+        let unwind = std::panic::catch_unwind(move || {
+            let _guard = TurnTrustModeGuard::new(panic_state.clone(), Some(TrustMode::FullTrust));
+            assert_eq!(current_mode(&panic_state), TrustMode::FullTrust);
+            panic!("simulate turn failure");
+        });
+
+        assert!(unwind.is_err());
+        assert_eq!(current_mode(&state), TrustMode::Supervised);
+    }
 }

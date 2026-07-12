@@ -199,33 +199,33 @@ fn assemble_system_message(parts: Vec<String>) -> Message {
     }
 }
 
-/// Sub Agent 的 system prompt 构建上下文
+/// 角色化执行单元的 system prompt 构建上下文。
 ///
-/// 将基础 SystemPromptConfig（纯配置快照）与运行时上下文
-/// （角色指令、团队成员列表）组合，构建 Sub Agent 专属的 system prompt。
-///
-/// 不修改 SystemPromptConfig，避免配置加载逻辑被运行时状态污染。
-pub struct SubAgentPromptContext<'a> {
+/// 将基础配置与调用方提供的角色指令、附加运行时上下文组合，但不修改
+/// `SystemPromptConfig`，避免配置加载逻辑被领域状态污染。
+pub struct ScopedSystemPromptContext<'a> {
     /// 基础配置快照（引用，不持有）
     base: &'a SystemPromptConfig,
-    /// Main Agent 生成的角色特化指令
+    /// 调用方提供的角色特化指令
     role_prompt: &'a str,
-    /// 当前团队成员列表文本
-    team_roster: &'a str,
+    /// 调用方提供的附加运行时上下文
+    additional_context: &'a str,
 }
 
-impl<'a> SubAgentPromptContext<'a> {
-    pub fn new(base: &'a SystemPromptConfig, role_prompt: &'a str, team_roster: &'a str) -> Self {
+impl<'a> ScopedSystemPromptContext<'a> {
+    pub fn new(
+        base: &'a SystemPromptConfig,
+        role_prompt: &'a str,
+        additional_context: &'a str,
+    ) -> Self {
         Self {
             base,
             role_prompt,
-            team_roster,
+            additional_context,
         }
     }
 
-    /// 构建 Sub Agent 的 system prompt
-    ///
-    /// 与 Main Agent 的区别：用角色特化指令替代通用身份块，附加团队成员列表。
+    /// 用角色特化指令替代通用身份块，并附加调用方运行时上下文。
     pub fn build(&self, session: &Session) -> Message {
         let mut parts = Vec::new();
 
@@ -239,9 +239,8 @@ impl<'a> SubAgentPromptContext<'a> {
         // 动态段
         parts.extend(collect_dynamic_parts(self.base));
 
-        // 团队成员列表（Sub Agent 独有）
-        if !self.team_roster.is_empty() {
-            parts.push(format!("当前团队成员：\n{}", self.team_roster));
+        if !self.additional_context.is_empty() {
+            parts.push(self.additional_context.to_string());
         }
 
         // 摘要段

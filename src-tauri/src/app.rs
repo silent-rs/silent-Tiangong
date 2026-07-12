@@ -5,10 +5,14 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::TiangongCore;
+use tiangong_core::core::{SessionMetadataReceipt, SessionMetadataUpdate, TiangongCore};
 use tiangong_core::core_config::CoreConfigProvider;
+use tiangong_core::permission::TrustMode;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
+
+type RemoteTurnResult = Result<tiangong_types::OutgoingMessage, String>;
+type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 
 /// 天工应用状态
 ///
@@ -18,7 +22,13 @@ use tracing::warn;
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
-    pub cores: Mutex<HashMap<String, TiangongCore>>,
+    pub(crate) cores: Mutex<HashMap<String, TiangongCore>>,
+    /// 覆盖同一会话从首次检查到 Core 插入的完整创建区间。
+    ///
+    /// 当前入口还会统一持有 `session_send_locks` 覆盖完整业务生命周期；这里再独立
+    /// 防御任何未来直接调用 `ensure_core` 的路径，保证 builder 启动 worker 前已经
+    /// 取得唯一资格，避免落选 Core 仍执行插件恢复钩子。
+    core_creation_locks: CoreCreationLocks,
     /// 覆盖单个会话从附件准备到 Core 持久化确认的完整串行区间。
     /// 不同会话使用不同锁，可以并行发送；同一会话不会并发创建 Core 或抢占草稿。
     session_send_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
@@ -39,6 +49,11 @@ pub struct TiangongApp {
     active_session_epoch: AtomicU64,
     pub config: CoreConfigProvider,
     scheduler_context: std::sync::Arc<crate::scheduler::DesktopSchedulerContext>,
+    /// Desktop 定时消息消费者。调度上下文只持 sender；receiver 由 setup 取出后，
+    /// 把所有定时投递收敛到本应用的统一 Core 映射。
+    scheduled_message_rx: Mutex<
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::ScheduledMessageRequest>>,
+    >,
     /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
     plugin_dirty_sessions: Mutex<HashSet<String>>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
@@ -48,6 +63,12 @@ pub struct TiangongApp {
     /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
     /// set_enabled/probe/health）。
     pub mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
+    /// 内嵌 HTTP 的等待者按稳定用户消息 ID 绑定。终态由唯一的桌面流消费者完成，
+    /// 不能按“当前最后一轮”唤醒，否则同会话排队消息会串答。
+    remote_turn_waiters: Mutex<HashMap<(String, String), Vec<RemoteTurnWaiter>>>,
+    /// 内嵌 HTTP 等待型轮次的会话所有权。watch 同时提供无丢唤醒的释放通知，
+    /// 让同会话远端请求串行到终态，调度消息也不会插入正在等待的远端轮次。
+    remote_turn_states: Mutex<HashMap<String, tokio::sync::watch::Sender<Option<String>>>>,
     embedded_server: Mutex<Option<tiangong_server::EmbeddedServerHandle>>,
     /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
@@ -78,6 +99,55 @@ struct DraftSendClaim {
     attachment_paths: Vec<String>,
 }
 
+#[derive(Default)]
+struct CoreCreationLocks {
+    by_session: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
+}
+
+pub(crate) struct EnsuredCore {
+    pub(crate) session_id: String,
+    pub(crate) is_new: bool,
+    /// 与 Core 实例一一绑定的进程内 token，同时供消费者判断事件归属和取消状态。
+    pub(crate) instance_token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn instance_token_matches(
+    current: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    expected: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    std::sync::Arc::ptr_eq(current, expected)
+}
+
+fn take_current_instance_if<T>(
+    instances: &mut HashMap<String, T>,
+    session_id: &str,
+    expected_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    token_of: impl Fn(&T) -> std::sync::Arc<std::sync::atomic::AtomicBool>,
+    condition: impl Fn(&T) -> bool,
+) -> Option<T> {
+    let removable = instances.get(session_id).is_some_and(|instance| {
+        condition(instance) && instance_token_matches(&token_of(instance), expected_token)
+    });
+    removable.then(|| instances.remove(session_id)).flatten()
+}
+
+impl CoreCreationLocks {
+    fn lock_for(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
+        let mut locks = match self.by_session.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                warn!(error = %err, "core_creation_locks 锁已污染，尝试恢复");
+                err.into_inner()
+            }
+        };
+        // 运行期不删除已发布的 Arc，避免旧等待者与新锁并存。
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+}
+
 impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
@@ -88,6 +158,7 @@ impl TiangongApp {
         let config = CoreConfigProvider::new(core_config);
 
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (scheduled_message_tx, scheduled_message_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // 构造 state：load_or_default 经 RuntimeEngine::new 注入 storage_root 到 core
         //（core 运行时持久化需要）。config 加载走自己的 dir，不依赖 core cell。
@@ -96,12 +167,13 @@ impl TiangongApp {
             tiangong_app_state::app_state::TiangongState::load_or_default(),
         ));
         let scheduler_context = std::sync::Arc::new(
-            crate::scheduler::DesktopSchedulerContext::new(state.clone(), config.clone()),
+            crate::scheduler::DesktopSchedulerContext::new(state.clone(), scheduled_message_tx),
         );
 
         Self {
             state,
             cores: Mutex::new(HashMap::new()),
+            core_creation_locks: CoreCreationLocks::default(),
             session_send_locks: Mutex::new(HashMap::new()),
             draft_update_locks: Mutex::new(HashMap::new()),
             draft_redirects: Mutex::new(HashMap::new()),
@@ -111,6 +183,7 @@ impl TiangongApp {
             active_session_epoch: AtomicU64::new(0),
             config,
             scheduler_context,
+            scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
             plugin_dirty_sessions: Mutex::new(HashSet::new()),
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
@@ -118,6 +191,8 @@ impl TiangongApp {
             mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
                 storage_root,
             )),
+            remote_turn_waiters: Mutex::new(HashMap::new()),
+            remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             tool_injection_tx,
@@ -136,6 +211,113 @@ impl TiangongApp {
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动后统一处理。
     pub fn tool_injection_tx(&self) -> tokio::sync::mpsc::UnboundedSender<ToolInjection> {
         self.tool_injection_tx.clone()
+    }
+
+    pub(crate) fn register_remote_turn_waiter(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> tokio::sync::oneshot::Receiver<RemoteTurnResult> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.remote_turn_waiters
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry((session_id.to_string(), message_id.to_string()))
+            .or_default()
+            .push(tx);
+        rx
+    }
+
+    pub(crate) fn complete_remote_turn_waiters(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        result: RemoteTurnResult,
+    ) {
+        let waiters = self
+            .remote_turn_waiters
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&(session_id.to_string(), message_id.to_string()))
+            .unwrap_or_default();
+        for waiter in waiters {
+            let _ = waiter.send(result.clone());
+        }
+    }
+
+    pub(crate) fn fail_remote_session_waiters(&self, session_id: &str, message: &str) {
+        let mut waiters = self
+            .remote_turn_waiters
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let keys = waiters
+            .keys()
+            .filter(|(sid, _)| sid == session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut removed = Vec::new();
+        for key in keys {
+            removed.extend(waiters.remove(&key).unwrap_or_default());
+        }
+        drop(waiters);
+        for waiter in removed {
+            let _ = waiter.send(Err(message.to_string()));
+        }
+    }
+
+    fn remote_turn_state_sender(
+        &self,
+        session_id: &str,
+    ) -> tokio::sync::watch::Sender<Option<String>> {
+        self.remote_turn_states
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(session_id.to_string())
+            .or_insert_with(|| tokio::sync::watch::channel(None).0)
+            .clone()
+    }
+
+    pub(crate) fn remote_turn_owner(&self, session_id: &str) -> Option<String> {
+        self.remote_turn_state_sender(session_id).borrow().clone()
+    }
+
+    pub(crate) fn begin_remote_turn(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<(), String> {
+        let sender = self.remote_turn_state_sender(session_id);
+        if let Some(owner) = sender.borrow().as_ref() {
+            return Err(format!("会话已有远程轮次正在执行：{owner}"));
+        }
+        sender.send_replace(Some(message_id.to_string()));
+        Ok(())
+    }
+
+    pub(crate) fn finish_remote_turn(&self, session_id: &str, message_id: &str) {
+        let sender = self.remote_turn_state_sender(session_id);
+        let owns_turn = sender.borrow().as_deref() == Some(message_id);
+        if owns_turn {
+            sender.send_replace(None);
+        }
+    }
+
+    pub(crate) fn remote_turn_allows_message(&self, session_id: &str, message_id: &str) -> bool {
+        self.remote_turn_owner(session_id)
+            .is_none_or(|owner| owner == message_id)
+    }
+
+    pub(crate) async fn wait_for_remote_turn_release(&self, session_id: &str) {
+        let mut receiver = self.remote_turn_state_sender(session_id).subscribe();
+        loop {
+            let active = receiver.borrow().is_some();
+            if !active {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// 启动工具消息注入消费者任务（main.rs setup 阶段调用一次）。
@@ -168,60 +350,43 @@ impl TiangongApp {
 
                 // 通过 app_handle 获取 TiangongApp
                 let app_state = app_handle.state::<TiangongApp>();
-
-                // core 不存在 → 自动恢复（ensure_core），保证 stream_tx 可用
-                let core_exists = {
-                    let cores = app_state.lock_cores();
-                    cores.get(&session_id).is_some()
+                // 与发送、编辑和删除共享同一会话边界，覆盖快照读取、ensure、消费者
+                // 绑定和最终 deliver，禁止在 take→删除/重建空窗中复活孤立 Core。
+                let session_lock = app_state.session_send_lock(&session_id);
+                let _send_guard = session_lock.lock_owned().await;
+                let session_snapshot = {
+                    let guard = state.lock().await;
+                    guard
+                        .sessions()
+                        .iter()
+                        .find(|s| s.id == session_id)
+                        .cloned()
                 };
-                if !core_exists {
-                    // 从 state 取 session 快照
-                    let session_snapshot = {
-                        let guard = state.lock().await;
-                        guard
-                            .sessions()
-                            .iter()
-                            .find(|s| s.id == session_id)
-                            .cloned()
-                    };
-                    if let Some(session) = session_snapshot {
-                        use std::sync::mpsc;
-                        use tiangong_types::SessionStreamEvent;
-                        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-                        let (_sid, _is_new) =
-                            app_state.ensure_core(&session_id, session, stream_tx).await;
-                        // 启动 stream_consumer 同步 worker session → TiangongState session
-                        let cancel_flag = {
-                            let cores = app_state.lock_cores();
-                            cores.get(&session_id).map(|c| c.cancel_flag())
-                        };
-                        if let Some(cancel_flag) = cancel_flag {
-                            crate::commands::start_stream_consumer(
-                                app_handle.clone(),
-                                session_id.clone(),
-                                stream_rx,
-                                cancel_flag,
-                            );
-                        }
-                        tracing::info!(session_id, "消费者自动恢复 core");
-                    } else {
-                        tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
-                        continue;
-                    }
+                let Some(session_snapshot) = session_snapshot else {
+                    tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
+                    continue;
+                };
+                use std::sync::mpsc;
+                use tiangong_types::SessionStreamEvent;
+                let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+                let ensured = app_state
+                    .ensure_core(&session_id, session_snapshot, stream_tx)
+                    .await;
+                if ensured.is_new {
+                    crate::commands::start_stream_consumer(
+                        app_handle.clone(),
+                        ensured.session_id.clone(),
+                        stream_rx,
+                        ensured.instance_token.clone(),
+                    );
+                    tracing::info!(session_id, "消费者自动恢复 core");
                 }
 
-                // core 存在 → deliver(Tool)，worker 通过 StreamEvent 处理注入
-                let core_sent = {
-                    let cores = app_state.lock_cores();
-                    if let Some(core) = cores.get(&session_id) {
-                        use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-                        let sent = core.deliver(AgentInputKind::Tool(req.tool)).is_ok();
-                        drop(cores);
-                        sent
-                    } else {
-                        false
-                    }
-                };
+                let core_sent = app_state.deliver_to_core_if_current(
+                    &ensured.session_id,
+                    &ensured.instance_token,
+                    AgentInputKind::Tool(req.tool),
+                );
 
                 if !core_sent {
                     tracing::warn!(session_id, tool_name, "deliver 失败（core 通道已关闭）");
@@ -231,6 +396,204 @@ impl TiangongApp {
             }
             tracing::info!("工具消息注入消费者任务结束");
         });
+    }
+
+    /// 启动 Desktop 定时消息消费者（main.rs setup 阶段调用一次）。
+    ///
+    /// 定时消息与前端消息共用 `session_send_lock`、`cores` 和流消费者；这里只等
+    /// Core 确认消息稳定持久化，模型轮次继续在既有 Core 中异步执行。
+    pub fn start_scheduled_message_consumer(&self, app_handle: tauri::AppHandle) {
+        let rx = {
+            let mut guard = self
+                .scheduled_message_rx
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            guard.take()
+        };
+        let Some(mut rx) = rx else {
+            tracing::warn!("Desktop 定时消息消费者已启动，跳过重复启动");
+            return;
+        };
+
+        tauri::async_runtime::spawn(async move {
+            while let Some(request) = rx.recv().await {
+                let request_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let crate::scheduler::ScheduledMessageRequest {
+                        session_id,
+                        content,
+                        stable_enqueue_ack,
+                    } = request;
+                    let app_state = request_app.state::<TiangongApp>();
+                    let result = app_state
+                        .enqueue_scheduled_message(request_app.clone(), session_id, content)
+                        .await;
+                    let _ = stable_enqueue_ack.send(result);
+                });
+            }
+            tracing::info!("Desktop 定时消息消费者任务结束");
+        });
+    }
+
+    async fn enqueue_scheduled_message(
+        &self,
+        app_handle: tauri::AppHandle,
+        session_id: String,
+        content: String,
+    ) -> Result<(), String> {
+        use std::sync::mpsc;
+        use tiangong_types::{ContentBlock, SessionStreamEvent};
+
+        if session_id.trim().is_empty() {
+            return Err("定时消息目标会话 ID 不能为空".to_string());
+        }
+
+        let _send_guard = loop {
+            self.wait_for_remote_turn_release(&session_id).await;
+            let session_lock = self.session_send_lock(&session_id);
+            let guard = session_lock.lock_owned().await;
+            if self.remote_turn_owner(&session_id).is_none() {
+                break guard;
+            }
+            drop(guard);
+        };
+        self.sync_core_config_from_state().await?;
+        let message_id = scru128::new().to_string();
+        let prepared = vec![ContentBlock::text(content)];
+        let stable_prepared = tiangong_types::stable_content_blocks(&prepared);
+        let session_snapshot = self
+            .with_state(|core_state| {
+                let index = core_state
+                    .sessions()
+                    .iter()
+                    .position(|session| session.id == session_id)
+                    .ok_or_else(|| anyhow::anyhow!("定时消息目标会话不存在：{session_id}"))?;
+                let original_session = core_state.sessions()[index].clone();
+                core_state.sessions_mut()[index]
+                    .append_prepared_user_message_with_id(message_id.clone(), stable_prepared);
+                core_state.sessions_mut()[index].updated_at = tiangong_core::session::now_text();
+                core_state.mark_pending_message_for(&session_id, &message_id);
+                if let Err(error) = core_state.persist_session_and_app(&session_id) {
+                    core_state.sessions_mut()[index] = original_session;
+                    core_state.remove_pending_message_for(&session_id, &message_id);
+                    let rollback_error = core_state.persist_session_and_app(&session_id).err();
+                    return Err(match rollback_error {
+                        Some(rollback_error) => anyhow::anyhow!(
+                            "定时消息状态持久化失败：{error}；恢复原状态也失败：{rollback_error}"
+                        ),
+                        None => anyhow::anyhow!("定时消息状态持久化失败：{error}"),
+                    });
+                }
+                let mut runtime_session = core_state.sessions()[index].clone();
+                if runtime_session.cwd.trim().is_empty() {
+                    runtime_session.cwd = core_state.workspace_dir().to_string();
+                }
+                Ok(runtime_session)
+            })
+            .await?;
+
+        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+        let ensured = self
+            .ensure_core(&session_id, session_snapshot, stream_tx)
+            .await;
+        let sid = ensured.session_id.clone();
+        let receipt = match self.enqueue_prepared_with_receipt_and_trust_mode_if_current(
+            &sid,
+            &ensured.instance_token,
+            message_id.clone(),
+            prepared,
+            TrustMode::FullTrust,
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let rollback = self
+                    .rollback_failed_scheduled_message(
+                        &session_id,
+                        &message_id,
+                        &ensured.instance_token,
+                    )
+                    .await;
+                return Err(match rollback {
+                    Ok(()) => format!("定时消息投递失败：{error}"),
+                    Err(rollback_error) => {
+                        format!("定时消息投递失败：{error}；回滚也失败：{rollback_error}")
+                    }
+                });
+            }
+        };
+
+        if let Err(error) = receipt.await_persisted().await {
+            let rollback = self
+                .rollback_failed_scheduled_message(
+                    &session_id,
+                    &message_id,
+                    &ensured.instance_token,
+                )
+                .await;
+            return Err(match rollback {
+                Ok(()) => format!("定时消息投递失败：{error}"),
+                Err(rollback_error) => {
+                    format!("定时消息投递失败：{error}；回滚也失败：{rollback_error}")
+                }
+            });
+        }
+
+        if ensured.is_new {
+            crate::commands::start_stream_consumer(
+                app_handle,
+                sid,
+                stream_rx,
+                ensured.instance_token,
+            );
+        }
+        Ok(())
+    }
+
+    /// 只关闭本次投递绑定的 Core，等待其停止后再回滚宿主消息，防止旧 worker
+    /// 的迟到持久化重新写回失败消息。
+    async fn rollback_failed_scheduled_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), String> {
+        let core = self.take_core_if_current(session_id, instance_token);
+        if core.is_none() && self.lock_cores().contains_key(session_id) {
+            return Err("会话 Core 已被替换，拒绝用旧投递回滚新实例".to_string());
+        }
+        if let Some(core) = core {
+            let sid = session_id.to_string();
+            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(session_id = %sid, %error, "定时消息回滚前关闭 Core 失败");
+                }
+                Err(error) => {
+                    tracing::warn!(session_id = %sid, %error, "定时消息回滚前等待 Core 失败");
+                }
+            }
+        }
+
+        self.with_state(|core_state| {
+            core_state.reload_session_from_disk(session_id)?;
+            let session = core_state
+                .sessions_mut()
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| anyhow::anyhow!("定时消息目标会话已不存在：{session_id}"))?;
+            if let Some(index) = session
+                .messages
+                .iter()
+                .position(|message| message.id == message_id)
+            {
+                session.messages.remove(index);
+                session.summary_up_to = session.summary_up_to.min(session.messages.len());
+                session.updated_at = tiangong_core::session::now_text();
+            }
+            core_state.remove_pending_message_for(session_id, message_id);
+            core_state.persist_session_and_app(session_id)
+        })
+        .await
     }
 
     /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
@@ -243,17 +606,20 @@ impl TiangongApp {
             let guard = self.state.lock().await;
             guard.active_session_id().to_string()
         };
-
-        let cores = self.lock_cores();
-        if let Some(core) = cores.get(&session_id) {
-            use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-            tracing::info!(
-                session_id,
-                tool_name,
-                stopped = core.is_stopped(),
-                "注入工具消息 via deliver"
-            );
-            core.deliver(AgentInputKind::Tool(tool)).is_ok()
+        let session_lock = self.session_send_lock(&session_id);
+        let _send_guard = session_lock.lock_owned().await;
+        let instance_token = self
+            .lock_cores()
+            .get(&session_id)
+            .filter(|core| !core.is_stopped())
+            .map(TiangongCore::cancel_flag);
+        if let Some(instance_token) = instance_token {
+            tracing::info!(session_id, tool_name, "注入工具消息 via deliver");
+            self.deliver_to_core_if_current(
+                &session_id,
+                &instance_token,
+                AgentInputKind::Tool(tool),
+            )
         } else {
             tracing::warn!(
                 session_id,
@@ -286,6 +652,10 @@ impl TiangongApp {
             .entry(session_id.to_string())
             .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
             .clone()
+    }
+
+    fn core_creation_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
+        self.core_creation_locks.lock_for(session_id)
     }
 
     pub fn active_session_epoch(&self) -> u64 {
@@ -614,20 +984,21 @@ impl TiangongApp {
     ///
     /// 如果 core 已存在（多轮对话），直接复用。
     /// stream_tx 只在创建新 core 时使用。
-    pub async fn ensure_core(
+    pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
         mut session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
-    ) -> (String, bool) {
+    ) -> EnsuredCore {
+        let creation_lock = self.core_creation_lock(session_id);
+        let _creation_guard = creation_lock.lock_owned().await;
+
         // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
         // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
         //（普通聊天会话）要么是有效工作区目录。
         //
-        // Invariant: 同一 session 的 ensure_core 调用由上层业务串行化（Tauri 命令
-        // 经 session 级互斥 / 前端单消息流保证），不会并发为同一 session 创建 Core。
-        // 因此这里可以在 await 初始化 memory handle 后直接创建并插入。
-        // 如未来允许同 session 并发入口，需要在 await 后增加二次检查。
+        // 同一 session 的所有入口在本函数内串行化。该边界必须覆盖异步初始化、
+        // builder 启动 worker 和最终插入，不能只依赖调用方各自的业务锁。
 
         let base = self.config.snapshot();
         let (session_config, session_pending) = {
@@ -657,7 +1028,11 @@ impl TiangongApp {
                                 .ok();
                             let _ = core.replace_config(session_config.clone());
                             core.set_trust_mode(session.trust_mode);
-                            return (session_id.to_string(), false);
+                            return EnsuredCore {
+                                session_id: session_id.to_string(),
+                                is_new: false,
+                                instance_token: core.cancel_flag(),
+                            };
                         }
                     }
                 }
@@ -671,7 +1046,11 @@ impl TiangongApp {
                     let _ = core.replace_config(session_config.clone());
                     let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
                     core.set_trust_mode(session.trust_mode);
-                    return (session_id.to_string(), false); // 已存在，复用
+                    return EnsuredCore {
+                        session_id: session_id.to_string(),
+                        is_new: false,
+                        instance_token: core.cancel_flag(),
+                    }; // 已存在，复用
                 }
                 warn!(session_id, "移除已停止的 TiangongCore");
                 cores.remove(session_id)
@@ -709,6 +1088,7 @@ impl TiangongApp {
         .await;
 
         // 3. 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
+        let storage_root = tiangong_app_state::app_state::storage_root();
         let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
         let Some(app_handle) = self.app_handle.get() else {
             panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
@@ -763,33 +1143,41 @@ impl TiangongApp {
         // app 侧经 self.mcp_plugin 做管理（register/update/remove/set_enabled/probe）。
         plugins.push(self.mcp_plugin.clone());
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-        plugins.push(tiangong_plugin_agent_team::build_plugin());
+        plugins.push(tiangong_plugin_agent_team::build_plugin(
+            storage_root.clone(),
+        ));
 
-        // 4. 创建 Core 并插入（重新拿锁）。
+        // 4. builder 会立即启动 worker；最后一次防御检查必须发生在 builder 之前，
+        // 绝不能先启动一个落选实例再 Drop，否则它仍可能执行插件恢复钩子。
+        if let Some(existing) = self
+            .lock_cores()
+            .get(session_id)
+            .filter(|existing| !existing.is_stopped())
+        {
+            return EnsuredCore {
+                session_id: session_id.to_string(),
+                is_new: false,
+                instance_token: existing.cancel_flag(),
+            };
+        }
+
+        // 创建 Core 并插入。`core_creation_lock` 保证同会话没有第二个 ensure 写入者。
         let core = TiangongCore::builder()
             .config(CoreConfigProvider::new(session_config))
             .session(session)
             .event_sender(stream_tx)
             .plugins(plugins)
-            .storage(tiangong_core::core::CoreStorageLocation::new(
-                tiangong_app_state::app_state::storage_root(),
-            ))
+            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
             .build()
             .expect("Builder 必填字段已齐");
         let id = core.session_id().to_string();
-        {
-            let mut cores = self.lock_cores();
-            // Memory/plugin 初始化包含 await；期间另一个入口可能已为同一会话创建 Core。
-            // 二次检查避免后创建者覆盖正在运行的实例。
-            if cores
-                .get(session_id)
-                .is_some_and(|existing| !existing.is_stopped())
-            {
-                return (session_id.to_string(), false);
-            }
-            cores.insert(id.clone(), core);
+        let instance_token = core.cancel_flag();
+        self.lock_cores().insert(id.clone(), core);
+        EnsuredCore {
+            session_id: id,
+            is_new: true,
+            instance_token,
         }
-        (id, true) // 新创建
     }
 
     /// 向指定会话的 core 发送消息
@@ -804,6 +1192,13 @@ impl TiangongApp {
         content: String,
         message_id: Option<String>,
     ) -> bool {
+        if !message_id
+            .as_deref()
+            .is_some_and(|message_id| self.remote_turn_allows_message(session_id, message_id))
+            && self.remote_turn_owner(session_id).is_some()
+        {
+            return false;
+        }
         let mut cores = self.lock_cores();
         if let Some(core) = cores.get(session_id) {
             let sent = if let Some(message_id) = message_id {
@@ -831,34 +1226,145 @@ impl TiangongApp {
         cores.remove(session_id)
     }
 
-    /// 仅移除已经停止的当前 Core。旧消费者晚到的 EOF 不会误删同会话的新实例。
-    pub fn remove_stopped_core(&self, session_id: &str) -> bool {
+    /// 仅当当前映射仍是调用方绑定的实例时才取走 Core。
+    pub fn take_core_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Option<TiangongCore> {
         let mut cores = self.lock_cores();
-        if cores.get(session_id).is_some_and(TiangongCore::is_stopped) {
-            cores.remove(session_id);
-            true
-        } else {
-            false
-        }
+        take_current_instance_if(
+            &mut cores,
+            session_id,
+            instance_token,
+            TiangongCore::cancel_flag,
+            |_| true,
+        )
+    }
+
+    /// 仅移除已经停止的当前 Core。旧消费者晚到的 EOF 不会误删同会话的新实例。
+    pub fn remove_stopped_core_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let mut cores = self.lock_cores();
+        take_current_instance_if(
+            &mut cores,
+            session_id,
+            instance_token,
+            TiangongCore::cancel_flag,
+            TiangongCore::is_stopped,
+        )
+        .is_some()
     }
 
     pub fn is_current_core_instance(
         &self,
         session_id: &str,
-        cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> bool {
         self.lock_cores()
             .get(session_id)
             .map(|core| core.cancel_flag())
-            .is_some_and(|current| std::sync::Arc::ptr_eq(&current, cancel_flag))
+            .is_some_and(|current| instance_token_matches(&current, instance_token))
+    }
+
+    pub fn deliver_to_core_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        input: AgentInputKind,
+    ) -> bool {
+        let cores = self.lock_cores();
+        cores
+            .get(session_id)
+            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
+            .is_some_and(|core| core.deliver(input).is_ok())
+    }
+
+    pub fn enqueue_prepared_with_receipt_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        message_id: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
+    ) -> Result<tiangong_core::core::PreparedMessageReceipt, String> {
+        if !self.remote_turn_allows_message(session_id, &message_id) {
+            return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
+        }
+        let cores = self.lock_cores();
+        let core = cores
+            .get(session_id)
+            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
+            .ok_or_else(|| "会话 Core 已被替换或不存在".to_string())?;
+        core.enqueue_prepared_with_receipt(message_id, prepared)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn enqueue_prepared_with_receipt_and_trust_mode_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        message_id: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
+        trust_mode: TrustMode,
+    ) -> Result<tiangong_core::core::PreparedMessageReceipt, String> {
+        if !self.remote_turn_allows_message(session_id, &message_id) {
+            return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
+        }
+        let cores = self.lock_cores();
+        let core = cores
+            .get(session_id)
+            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
+            .ok_or_else(|| "会话 Core 已被替换或不存在".to_string())?;
+        core.enqueue_prepared_with_receipt_and_trust_mode(message_id, prepared, trust_mode)
+            .map_err(|error| error.to_string())
+    }
+
+    /// 在调用方持有 `session_send_lock` 时，把元数据更新同步入队到当前存活 Core。
+    ///
+    /// 返回 `None` 表示该会话当前没有可写的 Core，调用方应由宿主直接持久化；
+    /// 返回确认句柄后必须先释放 `cores` 锁（本方法返回时已释放），再异步等待确认。
+    pub fn enqueue_session_metadata_update_if_live(
+        &self,
+        session_id: &str,
+        update: SessionMetadataUpdate,
+    ) -> Result<Option<SessionMetadataReceipt>, String> {
+        let cores = self.lock_cores();
+        let Some(core) = cores.get(session_id).filter(|core| !core.is_stopped()) else {
+            return Ok(None);
+        };
+        core.enqueue_session_metadata_update_with_receipt(update)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    /// 与 [`Self::enqueue_session_metadata_update_if_live`] 相同，但仅允许写入调用方
+    /// 绑定的 Core 实例。用于异步自动标题，防止旧实例的迟到结果改写替换后的会话。
+    pub fn enqueue_session_metadata_update_if_current(
+        &self,
+        session_id: &str,
+        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        update: SessionMetadataUpdate,
+    ) -> Result<Option<SessionMetadataReceipt>, String> {
+        let cores = self.lock_cores();
+        let Some(core) = cores.get(session_id).filter(|core| {
+            !core.is_stopped() && instance_token_matches(&core.cancel_flag(), instance_token)
+        }) else {
+            return Ok(None);
+        };
+        core.enqueue_session_metadata_update_with_receipt(update)
+            .map(Some)
+            .map_err(|error| error.to_string())
     }
 
     /// 取消指定会话的执行
-    pub fn cancel_core(&self, session_id: &str) {
+    pub fn cancel_core(&self, session_id: &str) -> bool {
         let cores = self.lock_cores();
-        if let Some(core) = cores.get(session_id) {
-            let _ = core.deliver(AgentInputKind::cancel());
-        }
+        cores
+            .get(session_id)
+            .is_some_and(|core| core.deliver(AgentInputKind::cancel()).is_ok())
     }
 
     /// 取消指定会话中某个 Agent 的当前执行
@@ -866,7 +1372,10 @@ impl TiangongApp {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .map(|core| core.deliver(AgentInputKind::cancel_agent(role)).is_ok())
+            .map(|core| {
+                core.deliver(tiangong_plugin_agent_team::cancel_agent_input(role))
+                    .is_ok()
+            })
             .unwrap_or(false)
     }
 
@@ -933,12 +1442,26 @@ impl TiangongApp {
         if guard.is_some() {
             return Err("Server 已在运行".to_string());
         }
+        let app_handle = self
+            .app_handle
+            .get()
+            .cloned()
+            .ok_or_else(|| "Desktop 应用尚未完成初始化".to_string())?;
+        let event_bus = std::sync::Arc::new(tiangong_server::remote::event::EventBus::default());
+        let core_backend: std::sync::Arc<dyn tiangong_server::remote::backend::ServerCoreBackend> =
+            crate::embedded_server::spawn_desktop_server_core_bridge(app_handle, event_bus.clone());
         let handle = tiangong_server::run_embedded(
             host,
             port,
             token,
-            self.state.clone(),
-            self.config.clone(),
+            tiangong_server::EmbeddedServerDependencies {
+                state: self.state.clone(),
+                config: self.config.clone(),
+                core_backend,
+                scheduler_context: self.create_scheduler_context(),
+                mcp_plugin: self.mcp_plugin.clone(),
+                event_bus,
+            },
         )
         .map_err(|e| e.to_string())?;
         *guard = Some(handle);
@@ -962,10 +1485,167 @@ impl TiangongApp {
         guard.is_some()
     }
 
-    /// 创建调度器执行上下文（用于 Desktop 端独立执行定时任务）
+    /// 创建调度器执行上下文（定时消息通过本应用的统一 Core 路由执行）
     pub fn create_scheduler_context(
         &self,
     ) -> std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext> {
         self.scheduler_context.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn same_session_core_creation_uses_one_serial_boundary() {
+        let locks = CoreCreationLocks::default();
+        let first = locks.lock_for("session-1");
+        let second = locks.lock_for("session-1");
+        let other_session = locks.lock_for("session-2");
+
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!std::sync::Arc::ptr_eq(&first, &other_session));
+
+        let first_guard = first.lock_owned().await;
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered_in_task = std::sync::Arc::clone(&entered);
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let mut waiter = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            let _guard = second.lock_owned().await;
+            entered_in_task.store(true, Ordering::Release);
+        });
+
+        waiting_rx.await.expect("后继创建应开始等待同一把锁");
+        tokio::task::yield_now().await;
+        assert!(!entered.load(Ordering::Acquire));
+        drop(first_guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiter)
+            .await
+            .expect("同会话后继创建应在前一创建离开后继续")
+            .expect("创建锁等待任务不应失败");
+        assert!(entered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn instance_token_rejects_replacement_even_when_flags_have_same_value() {
+        let original = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let original_clone = original.clone();
+        let replacement = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        assert!(instance_token_matches(&original, &original_clone));
+        assert!(!instance_token_matches(&original, &replacement));
+    }
+
+    struct TestInstance {
+        token: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        stopped: bool,
+    }
+
+    #[test]
+    fn stale_token_cannot_take_a_stopped_replacement() {
+        let original_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let replacement_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut instances = HashMap::from([(
+            "session-1".to_string(),
+            TestInstance {
+                token: replacement_token.clone(),
+                stopped: true,
+            },
+        )]);
+
+        assert!(take_current_instance_if(
+            &mut instances,
+            "session-1",
+            &original_token,
+            |instance| instance.token.clone(),
+            |instance| instance.stopped,
+        )
+        .is_none());
+        assert!(instances.contains_key("session-1"));
+
+        assert!(take_current_instance_if(
+            &mut instances,
+            "session-1",
+            &replacement_token,
+            |instance| instance.token.clone(),
+            |instance| instance.stopped,
+        )
+        .is_some());
+        assert!(!instances.contains_key("session-1"));
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_waits_for_lifecycle_boundary_and_preserves_replacement() {
+        let lifecycle = std::sync::Arc::new(AsyncMutex::new(()));
+        let original_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let replacement_token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let instances = std::sync::Arc::new(Mutex::new(HashMap::from([(
+            "session-1".to_string(),
+            TestInstance {
+                token: replacement_token.clone(),
+                stopped: true,
+            },
+        )])));
+        let lifecycle_guard = lifecycle.clone().lock_owned().await;
+        let lifecycle_for_cleanup = lifecycle.clone();
+        let instances_for_cleanup = instances.clone();
+        let token_for_cleanup = original_token.clone();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let mut cleanup = tokio::spawn(async move {
+            let _ = waiting_tx.send(());
+            let _guard = lifecycle_for_cleanup.lock_owned().await;
+            let mut instances = instances_for_cleanup.lock().unwrap();
+            take_current_instance_if(
+                &mut instances,
+                "session-1",
+                &token_for_cleanup,
+                |instance| instance.token.clone(),
+                |instance| instance.stopped,
+            )
+        });
+
+        waiting_rx.await.expect("旧清理任务应开始等待生命周期锁");
+        tokio::task::yield_now().await;
+        assert!(!cleanup.is_finished());
+        drop(lifecycle_guard);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut cleanup)
+                .await
+                .expect("旧清理任务不应死锁")
+                .expect("旧清理任务不应 panic")
+                .is_none()
+        );
+        let instances = instances.lock().unwrap();
+        assert!(instance_token_matches(
+            &instances.get("session-1").unwrap().token,
+            &replacement_token,
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_turn_ownership_serializes_until_exact_owner_finishes() {
+        let app = std::sync::Arc::new(TiangongApp::new());
+        app.begin_remote_turn("session-1", "message-1").unwrap();
+        assert!(app.remote_turn_allows_message("session-1", "message-1"));
+        assert!(!app.remote_turn_allows_message("session-1", "message-2"));
+
+        let waiting_app = app.clone();
+        let mut waiting = tokio::spawn(async move {
+            waiting_app.wait_for_remote_turn_release("session-1").await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "所有者释放前同会话请求必须等待");
+
+        app.finish_remote_turn("session-1", "wrong-message");
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "错误消息 ID 不能释放其他轮次");
+        app.finish_remote_turn("session-1", "message-1");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiting)
+            .await
+            .expect("正确所有者释放后等待方应继续")
+            .expect("等待任务不应失败");
     }
 }

@@ -25,7 +25,9 @@ use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, wait_for_abort_signal};
+use super::cancel::{
+    CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled, wait_for_abort_signal,
+};
 use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
 
 /// 总结阶段的执行结果。
@@ -104,9 +106,7 @@ impl ReactEngine {
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
-        let mut routed_usage = tiangong_types::TokenUsage::default();
         let mut summary_interruption = None;
-        let mut delegated_interruption = false;
         let mut streamed_text = String::new();
         let mut streamed_reasoning = String::new();
 
@@ -125,6 +125,7 @@ impl ReactEngine {
                         Some(Command::Message {
                             prepared,
                             message_id,
+                            trust_mode_override,
                             persistence_ack,
                         }) => {
                             sink.flush();
@@ -141,8 +142,8 @@ impl ReactEngine {
                                 );
                             }
                             match accept_runtime_user_message(
+                                &self.engine,
                                 &self.agent_id,
-                                self.team.as_ref(),
                                 session,
                                 stream_tx,
                                 message_id,
@@ -150,6 +151,7 @@ impl ReactEngine {
                                 persistence_ack,
                             ) {
                                 Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
+                                    self.apply_message_trust_mode_override(trust_mode_override);
                                     summary_interruption = Some(input);
                                     if let Some(handle) = llm_fut.take() {
                                         abort_and_join(handle).await;
@@ -158,52 +160,7 @@ impl ReactEngine {
                                         "总结响应已被新的用户消息中断"
                                     ));
                                 }
-                                Ok(RuntimeMessageDisposition::RoutedToAgent) => {
-                                    if let Err(error) = session.try_persist_to_disk() {
-                                        tracing::warn!(%error, "清理定向消息产生的临时总结失败");
-                                    }
-                                    let sub_result = self
-                                        .drain_sub_agent_inboxes(session, stream_tx, cmd_rx)
-                                        .await;
-                                    routed_usage.accumulate(&sub_result.usage);
-                                    self.flush_deferred_tool_injections(session, stream_tx);
-                                    let delegated_input =
-                                        self.inject_main_agent_messages(session, stream_tx);
-                                    session.persist_to_disk();
-                                    if sub_result.cancelled {
-                                        if let Some(handle) = llm_fut.take() {
-                                            abort_and_join(handle).await;
-                                        }
-                                        sink.finish();
-                                        persist_partial_summary(
-                                            session,
-                                            stream_tx,
-                                            &pending_msg_id,
-                                            &streamed_text,
-                                            &streamed_reasoning,
-                                        );
-                                        routed_usage.accumulate(&streaming_usage);
-                                        return SummaryPhaseResult::Cancelled(routed_usage);
-                                    }
-                                    if let Some(input) = sub_result.current_agent_input {
-                                        summary_interruption = Some(input);
-                                        if let Some(handle) = llm_fut.take() {
-                                            abort_and_join(handle).await;
-                                        }
-                                        break Err(anyhow::anyhow!(
-                                            "总结响应已被新的用户消息中断"
-                                        ));
-                                    }
-                                    if delegated_input.is_some() {
-                                        delegated_interruption = true;
-                                        if let Some(handle) = llm_fut.take() {
-                                            abort_and_join(handle).await;
-                                        }
-                                        break Err(anyhow::anyhow!(
-                                            "总结响应已被 Sub Agent 结果中断"
-                                        ));
-                                    }
-                                }
+                                Ok(RuntimeMessageDisposition::RoutedToPlugin) => {}
                                 Err(err) => {
                                     session.messages.truncate(message_count_before_interruption);
                                     tracing::warn!(
@@ -224,9 +181,25 @@ impl ReactEngine {
                             });
                             break Err(anyhow::Error::new(CancelSignal::Abort));
                         }
+                        Some(Command::UpdateSessionMetadata {
+                            update,
+                            persistence_ack,
+                        }) => {
+                            let trust_mode = self.engine.permission_gate().trust_mode_handle();
+                            if let Err(error) = crate::core::apply_session_metadata_update(
+                                session,
+                                &trust_mode,
+                                update,
+                                persistence_ack,
+                            ) {
+                                tracing::warn!(%error, "总结阶段更新会话元数据失败");
+                            }
+                        }
                         Some(Command::ReloadConfig) => {}
-                        Some(Command::Approval { .. }) => {}
-                        Some(Command::CancelAgent { .. }) => {}
+                        Some(command @ Command::Approval { .. })
+                        | Some(command @ Command::PluginControl { .. }) => {
+                            self.forward_plugin_runtime_command(&command);
+                        }
                         Some(Command::InjectTool { tool_name, payload }) => {
                             crate::react::message::inject_tool_to_session(
                                 session,
@@ -234,6 +207,21 @@ impl ReactEngine {
                                 &tool_name,
                                 &payload,
                             );
+                        }
+                        Some(Command::CommitPluginDeliveries {
+                            delivery_ids,
+                            tool_injections,
+                            persistence_ack,
+                        }) => {
+                            if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                                session,
+                                stream_tx,
+                                delivery_ids,
+                                tool_injections,
+                                persistence_ack,
+                            ) {
+                                tracing::warn!(%error, "提交插件持久投递失败");
+                            }
                         }
                         Some(Command::CompressContext) => {
                             let _ = stream_tx.send(StreamEvent::AgentNotification {
@@ -279,9 +267,11 @@ impl ReactEngine {
                                         &streamed_text,
                                         &streamed_reasoning,
                                     );
-                                    let _ = stream_tx.send(StreamEvent::Error {
-                                        message: "已取消".into(),
-                                    });
+                                    emit_cancel_usage(
+                                        stream_tx,
+                                        &streaming_usage,
+                                        self.engine.context_limit,
+                                    );
                                     return SummaryPhaseResult::Cancelled(streaming_usage);
                                 }
                                 Err(e) => Err(anyhow::anyhow!(e.to_string())),
@@ -302,7 +292,6 @@ impl ReactEngine {
         );
 
         if let Some(current_agent_input) = summary_interruption {
-            streaming_usage.accumulate(&routed_usage);
             if streaming_usage.total_tokens > 0 {
                 emit_token_usage(
                     stream_tx,
@@ -315,14 +304,6 @@ impl ReactEngine {
             }
             return SummaryPhaseResult::Interrupted {
                 current_agent_input,
-                usage: streaming_usage,
-            };
-        }
-
-        if delegated_interruption {
-            streaming_usage.accumulate(&routed_usage);
-            return SummaryPhaseResult::NeedMoreWork {
-                reason: "Sub Agent 返回了需要 Main Agent 继续处理的新结果。".to_string(),
                 usage: streaming_usage,
             };
         }
@@ -357,7 +338,6 @@ impl ReactEngine {
         if usage.total_tokens == 0 {
             usage.accumulate(&streaming_usage);
         }
-        usage.accumulate(&routed_usage);
 
         // 兼容性防御：正常 provider 在 ToolChoice::None 下不应返回 tool_calls，
         // 但部分 OpenAI-compatible / vLLM / 第三方后端可能忽略 tool_choice: "none"。
@@ -402,7 +382,7 @@ impl ReactEngine {
             )
             .await;
             if compression_cancelled {
-                emit_cancel_usage(stream_tx, &usage, self.engine.context_limit);
+                emit_cancelled(stream_tx);
                 return SummaryPhaseResult::Cancelled(usage);
             }
             session.persist_to_disk();
@@ -443,7 +423,7 @@ impl ReactEngine {
         )
         .await;
         if compression_cancelled {
-            emit_cancel_usage(stream_tx, &usage, self.engine.context_limit);
+            emit_cancelled(stream_tx);
             return SummaryPhaseResult::Cancelled(usage);
         }
         session.persist_to_disk();
@@ -559,6 +539,55 @@ fn persist_partial_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::react::test_support::{
+        MockLlmServer, MockResponse, RecordedRuntimeCommand, approval, plugin_control,
+        runtime_with_recorder,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summary_stream_forwards_plugin_runtime_commands() {
+        let server = MockLlmServer::start(MockResponse::Stall);
+        let (engine, recorder) = runtime_with_recorder(server.base_url());
+        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
+            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )));
+        let mut session = Session::new("summary-stream-runtime-command");
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
+
+        let execution = tokio::spawn(async move {
+            let result = react
+                .run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1)
+                .await;
+            assert!(matches!(result, SummaryPhaseResult::Cancelled(_)));
+        });
+        server.wait_until_connected().await;
+        command_tx.send(plugin_control("cancel-child")).unwrap();
+        command_tx.send(approval("child-approval", false)).unwrap();
+        command_tx.send(Command::Cancel).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), execution)
+            .await
+            .expect("总结流式执行未及时退出")
+            .unwrap();
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                RecordedRuntimeCommand::PluginControl {
+                    plugin_id: "test-plugin".to_string(),
+                    action: "cancel-child".to_string(),
+                },
+                RecordedRuntimeCommand::Approval {
+                    request_id: "child-approval".to_string(),
+                    approved: false,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn done_marker_parses_to_done() {

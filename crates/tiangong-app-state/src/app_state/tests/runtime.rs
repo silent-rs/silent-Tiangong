@@ -117,6 +117,11 @@ fn derived_context_metrics_follow_chat_override_for_rebuild_create_and_reload() 
         assert_eq!(session.compression_threshold_tokens, threshold);
         session.current_tokens = 12_345;
         session.token_usage.total_tokens = 678;
+        session
+            .agent_token_usage
+            .entry("researcher".to_string())
+            .or_default()
+            .total_tokens = 77;
         state.persist_session(&session_id)?;
 
         let session_path = paths
@@ -130,6 +135,20 @@ fn derived_context_metrics_follow_chat_override_for_rebuild_create_and_reload() 
         persisted["context_limit_tokens"] = serde_json::json!(1_000_000);
         std::fs::write(&session_path, serde_json::to_vec_pretty(&persisted)?)?;
 
+        // 模拟宿主按流事件维护的临时展示值与 Core 最终落盘值不同。终态重载时
+        // 累计用量必须以 Core 文件为准，不能继续保留宿主镜像。
+        let in_memory = state
+            .sessions_mut()
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .expect("in-memory session");
+        in_memory.token_usage.total_tokens = 9_999;
+        in_memory
+            .agent_token_usage
+            .get_mut("researcher")
+            .expect("agent usage")
+            .total_tokens = 999;
+
         assert!(state.reload_session_from_disk(&session_id)?);
         let restored = state
             .sessions()
@@ -140,6 +159,14 @@ fn derived_context_metrics_follow_chat_override_for_rebuild_create_and_reload() 
         assert_eq!(restored.compression_threshold_tokens, threshold);
         assert_eq!(restored.current_tokens, 12_345);
         assert_eq!(restored.token_usage.total_tokens, 678);
+        assert_eq!(
+            restored
+                .agent_token_usage
+                .get("researcher")
+                .expect("restored agent usage")
+                .total_tokens,
+            77
+        );
 
         state.persist_session(&session_id)?;
         let scrubbed: serde_json::Value =

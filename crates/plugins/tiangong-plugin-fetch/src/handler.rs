@@ -737,7 +737,8 @@ impl ToolOverrideHandler for FetchPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &tiangong_core::session::Session,
+        _session: &mut tiangong_core::session::Session,
+        _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         if call.name != TOOL_WEB_FETCH {
             return Box::pin(async { None });

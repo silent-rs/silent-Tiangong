@@ -47,14 +47,20 @@ pub struct MessageToolCall {
     pub arguments: Value,
 }
 
-/// 已确认但尚未由目标 Agent 完成的用户直达投递。
+/// 已确认但尚未由目标插件完成的持久投递。
 ///
+/// Core 只负责保存稳定标识、所有者与消息负载，不解释插件目标的具体语义。
 /// 该状态随 Session 持久化，并通过流事件同步给宿主镜像，避免重启后丢失。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingAgentDelivery {
+pub struct PendingPluginDelivery {
     pub delivery_id: String,
     pub source_message_id: String,
-    pub target_agent_id: String,
+    /// 所有者插件 ID。旧会话缺少该字段时为空，由插件在兼容边界认领。
+    #[serde(default)]
+    pub plugin_id: String,
+    /// 插件内部的稳定目标 ID；旧版 Agent Team 会话使用 `target_agent_id`。
+    #[serde(alias = "target_agent_id")]
+    pub target_id: String,
     pub content: String,
     pub created_at: String,
     #[serde(default, deserialize_with = "deserialize_stable_content_blocks")]

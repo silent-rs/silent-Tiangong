@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::core::SessionMetadataUpdate;
 use tracing::{debug, warn};
 
 use crate::workspace_tabs::{
@@ -804,6 +805,10 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     let _draft_guard = state.draft_update_lock(&deleted_id).lock_owned().await;
     let _send_guard = state.session_send_lock(&deleted_id).lock_owned().await;
     stop_and_join_core(state.inner(), &deleted_id).await;
+    // stop_and_join_core 会先从 Core 映射中取走实例，旧流消费者的 EOF 因而不会再
+    // 命中 current-instance 清理分支。这里必须主动唤醒内嵌 HTTP 等待者；其 lease
+    // 随请求返回释放 remote owner，避免删除后同会话永久保持“远端执行中”。
+    state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
     let mut draft_attachments = state
         .with_state(|core_state| {
             let mut attachments = core_state.session_input_draft(&deleted_id).attachments;
@@ -867,6 +872,7 @@ pub async fn delete_sessions_by_cwd(
     }
     for id in &deleted_ids {
         stop_and_join_core(state.inner(), id).await;
+        state.fail_remote_session_waiters(id, "目标会话已删除");
     }
     let mut draft_attachments = state
         .with_state(|core_state| {
@@ -916,8 +922,8 @@ pub async fn delete_sessions_by_cwd(
     Ok(())
 }
 
-async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
-    state.cancel_core(session_id);
+pub(crate) async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
+    let _ = state.cancel_core(session_id);
     let Some(core) = state.take_core(session_id) else {
         return;
     };
@@ -933,18 +939,138 @@ async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
     }
 }
 
+/// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
+/// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
+pub(crate) async fn shutdown_join_core_if_current(
+    state: &TiangongApp,
+    session_id: &str,
+    instance_token: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Some(core) = state.take_core_if_current(session_id, instance_token) else {
+        return;
+    };
+    let session_id = session_id.to_string();
+    match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(session_id, error = %error, "失败回滚前关闭 Core 失败");
+        }
+        Err(error) => {
+            tracing::warn!(session_id, error = %error, "失败回滚前等待 Core 关闭任务失败");
+        }
+    }
+}
+
 /// 更新会话标题
 #[tauri::command]
 pub async fn update_session_title(
     title: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state
+    if title.trim().is_empty() {
+        return Err("会话标题不能为空".to_string());
+    }
+
+    let session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .await?;
+    let session_lock = state.session_send_lock(&session_id);
+    let _send_guard = session_lock.lock_owned().await;
+
+    let (previous_title, previous_draft, applied_title) = state
         .with_state(|core_state| {
+            if core_state.active_session_id() != session_id {
+                return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
+            }
+            let previous_title = core_state
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.title.clone())
+                .ok_or_else(|| anyhow::anyhow!("当前会话不存在，无法重命名"))?;
+            let previous_draft = core_state.session_title_draft().to_string();
             core_state.update_session_title_draft(title);
-            core_state.save_active_session_title()
+            let (updated_id, applied_title) = core_state.apply_active_session_title_in_memory()?;
+            if updated_id != session_id {
+                return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
+            }
+            Ok((previous_title, previous_draft, applied_title))
         })
-        .await
+        .await?;
+
+    let update = SessionMetadataUpdate {
+        title: Some(applied_title),
+        ..SessionMetadataUpdate::default()
+    };
+    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            rollback_session_title_mirror(
+                state.inner(),
+                &session_id,
+                previous_title,
+                previous_draft,
+                false,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
+    let persist_without_core = receipt.is_none();
+    let persisted = if let Some(receipt) = receipt {
+        receipt
+            .await_persisted()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        state
+            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+            .await
+    };
+    if let Err(error) = persisted {
+        rollback_session_title_mirror(
+            state.inner(),
+            &session_id,
+            previous_title,
+            previous_draft,
+            persist_without_core,
+        )
+        .await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn rollback_session_title_mirror(
+    state: &TiangongApp,
+    session_id: &str,
+    previous_title: String,
+    previous_draft: String,
+    persist_without_core: bool,
+) {
+    let rollback = state
+        .with_state(|core_state| {
+            let is_active = core_state.active_session_id() == session_id;
+            if let Some(session) = core_state
+                .sessions_mut()
+                .iter_mut()
+                .find(|session| session.id == session_id)
+            {
+                session.title = previous_title;
+            }
+            if is_active {
+                core_state.update_session_title_draft(previous_draft);
+            }
+            if persist_without_core {
+                core_state.persist_session_and_app(session_id)?;
+            }
+            Ok(())
+        })
+        .await;
+    if let Err(error) = rollback {
+        warn!(%error, %session_id, "回滚会话标题失败");
+    }
 }
 
 // ============================================================================
@@ -1067,6 +1193,11 @@ async fn send_message_inner(
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock().await;
 
+    if state.remote_turn_owner(&session_id).is_some() {
+        abort_session_send(state, &session_id, revision, false).await;
+        return Err("目标会话正在处理远端请求，请等待本轮完成".to_string());
+    }
+
     if requires_draft_claim && !state.has_draft_send_claim(&session_id, revision) {
         abort_session_send(state, &session_id, revision, false).await;
         return Err("发送草稿尚未冻结，请基于最新输入重试".to_string());
@@ -1183,23 +1314,20 @@ async fn send_message_inner(
 
     // 获取或创建 TiangongCore
     let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
-    let (sid, is_new_core) = state
+    let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
-    let receipt_result = (|| {
-        let cores = state.cores.lock().map_err(|error| error.to_string())?;
-        let core = cores
-            .get(&sid)
-            .ok_or_else(|| "会话 Core 创建失败".to_string())?;
-        core.enqueue_prepared_with_receipt(user_message_id.clone(), prepared.clone())
-            .map_err(|error| error.to_string())
-    })();
+    let sid = ensured.session_id.clone();
+    let receipt_result = state.enqueue_prepared_with_receipt_if_current(
+        &sid,
+        &ensured.instance_token,
+        user_message_id.clone(),
+        prepared.clone(),
+    );
     let receipt = match receipt_result {
         Ok(receipt) => receipt,
         Err(error) => {
-            if is_new_core {
-                state.take_core(&sid);
-            }
+            shutdown_join_core_if_current(state, &sid, &ensured.instance_token).await;
             let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
             cleanup_unreferenced_draft_attachments(
                 state,
@@ -1212,9 +1340,7 @@ async fn send_message_inner(
     };
 
     if let Err(error) = receipt.await_persisted().await {
-        if is_new_core {
-            state.take_core(&sid);
-        }
+        shutdown_join_core_if_current(state, &sid, &ensured.instance_token).await;
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
         cleanup_unreferenced_draft_attachments(state, raw_attachments_for_paths(created_paths))
             .await;
@@ -1253,9 +1379,8 @@ async fn send_message_inner(
     }
     release_draft_send_claim_and_cleanup(state, &session_id, revision).await;
 
-    if is_new_core {
-        let cancel_flag = get_cancel_flag(state, &sid);
-        start_stream_consumer(app, sid, stream_rx, cancel_flag);
+    if ensured.is_new {
+        start_stream_consumer(app, sid, stream_rx, ensured.instance_token);
     }
 
     Ok(())
@@ -1281,7 +1406,7 @@ async fn release_draft_send_claim_and_cleanup(
     }
 }
 
-async fn restore_failed_user_message_state(
+pub(crate) async fn restore_failed_user_message_state(
     state: &TiangongApp,
     session_id: &str,
     message_id: &str,
@@ -1308,7 +1433,7 @@ async fn restore_failed_user_message_state(
         .await
 }
 
-async fn attachment_capability_snapshot(
+pub(crate) async fn attachment_capability_snapshot(
     state: &TiangongApp,
 ) -> Result<tiangong_media_archive::AttachmentCapabilitySnapshot, String> {
     state
@@ -1332,26 +1457,12 @@ async fn attachment_capability_snapshot(
         .await
 }
 
-fn get_cancel_flag(state: &TiangongApp, sid: &str) -> Arc<std::sync::atomic::AtomicBool> {
-    let cores = match state.cores.lock() {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::warn!(error = %error, "cores 锁已污染，恢复取消标记读取");
-            error.into_inner()
-        }
-    };
-    cores
-        .get(sid)
-        .map(|c| c.cancel_flag())
-        .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
-}
-
 /// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
-    cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+    instance_token: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use tiangong_types::StreamEvent;
 
@@ -1359,18 +1470,19 @@ pub(crate) fn start_stream_consumer(
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
+        let mut remote_turn_correlation = crate::embedded_server::RemoteTurnCorrelation::default();
         for session_event in stream_rx.iter() {
-            if !app
-                .state::<TiangongApp>()
-                .is_current_core_instance(&session_id, &cancel_flag)
-            {
+            let app_state = app.state::<TiangongApp>();
+            let event_lock = app_state.session_send_lock(&session_id);
+            let _event_guard = rt.block_on(event_lock.lock_owned());
+            if !app_state.is_current_core_instance(&session_id, &instance_token) {
                 // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
                 continue;
             }
             let event = &session_event.event;
 
             // 取消时跳过文本增量事件，只处理终止事件
-            if cancel_flag.load(Ordering::Acquire)
+            if instance_token.load(Ordering::Acquire)
                 && matches!(
                     event,
                     StreamEvent::Delta { .. }
@@ -1395,6 +1507,7 @@ pub(crate) fn start_stream_consumer(
             let event = session_event.event;
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
+            let completed_remote_message_id = remote_turn_correlation.observe(&event);
 
             // 更新 session + RunStatus/usage
             let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
@@ -1416,7 +1529,7 @@ pub(crate) fn start_stream_consumer(
                             content_blocks,
                             media,
                             model_excluded,
-                            pending_agent_deliveries,
+                            pending_plugin_deliveries,
                         } => {
                             let prepared = if content_blocks.is_empty() {
                                 let mut blocks = vec![tiangong_types::message::ContentBlock::text(
@@ -1454,11 +1567,12 @@ pub(crate) fn start_stream_consumer(
                                 );
                                 session.set_message_model_excluded(message_id, *model_excluded);
                             }
-                            session.pending_agent_deliveries = pending_agent_deliveries.clone();
+                            session.pending_plugin_deliveries = pending_plugin_deliveries.clone();
                         }
                         StreamEvent::SessionMessageUpsert {
                             message,
-                            pending_agent_deliveries,
+                            pending_plugin_deliveries,
+                            completed_plugin_delivery_ids,
                             deferred_tool_injections,
                         } => {
                             if let Some(existing) = session
@@ -1470,15 +1584,22 @@ pub(crate) fn start_stream_consumer(
                             } else {
                                 session.messages.push(message.clone());
                             }
-                            if let Some(deliveries) = pending_agent_deliveries {
-                                session.pending_agent_deliveries = deliveries.clone();
+                            if let Some(deliveries) = pending_plugin_deliveries {
+                                session.pending_plugin_deliveries = deliveries.clone();
+                            }
+                            if let Some(delivery_ids) = completed_plugin_delivery_ids {
+                                session.completed_plugin_delivery_ids = delivery_ids.clone();
                             }
                             if let Some(injections) = deferred_tool_injections {
                                 session.deferred_tool_injections = injections.clone();
                             }
                         }
-                        StreamEvent::PendingAgentDeliveriesChanged { deliveries } => {
-                            session.pending_agent_deliveries = deliveries.clone();
+                        StreamEvent::PendingPluginDeliveriesChanged {
+                            deliveries,
+                            completed_delivery_ids,
+                        } => {
+                            session.pending_plugin_deliveries = deliveries.clone();
+                            session.completed_plugin_delivery_ids = completed_delivery_ids.clone();
                         }
                         StreamEvent::DeferredToolInjectionsChanged { injections } => {
                             session.deferred_tool_injections = injections.clone();
@@ -1974,7 +2095,7 @@ pub(crate) fn start_stream_consumer(
                     if let Err(error) = core_state.reload_session_from_disk(&final_sid) {
                         tracing::warn!(%error, session_id = %final_sid, "终态重载 Core 会话失败");
                     }
-                    let _ = core_state.persist_session_and_app(&final_sid);
+                    let _ = core_state.persist_app_only();
                     let still_running = done_event_keeps_turn_running(
                         &event,
                         core_state.has_pending_turn_for(&final_sid),
@@ -2023,6 +2144,14 @@ pub(crate) fn start_stream_consumer(
                     Ok(None)
                 }));
 
+                if let Some(message_id) = completed_remote_message_id {
+                    rt.block_on(crate::embedded_server::complete_remote_turn_from_stream(
+                        app.state::<TiangongApp>().inner(),
+                        &final_sid,
+                        &message_id,
+                    ));
+                }
+
                 let _ = app.emit(
                     "stream_event",
                     &tiangong_types::SessionStreamEvent {
@@ -2035,6 +2164,7 @@ pub(crate) fn start_stream_consumer(
                 if let Ok(Some((input, provider_config))) = title_task {
                     let app_for_title = app.clone();
                     let sid_for_title = final_sid.clone();
+                    let title_instance_token = instance_token.clone();
                     let rt2 = rt.clone();
                     thread::spawn(move || {
                         let client =
@@ -2042,30 +2172,78 @@ pub(crate) fn start_stream_consumer(
                         if let Ok(t) = client.complete_lite(&input) {
                             let clean = t.trim().trim_matches('"').to_string();
                             if !clean.is_empty() {
-                                let _ =
-                                    rt2.block_on(app_for_title.state::<TiangongApp>().with_state(
-                                        |core_state| {
-                                            if let Some(s) = core_state
-                                                .sessions_mut()
-                                                .iter_mut()
-                                                .find(|s| s.id == sid_for_title)
-                                            {
-                                                s.title = clean;
-                                                s.updated_at = tiangong_core::session::now_text();
-                                            }
-                                            if !core_state.has_pending_turn_for(&sid_for_title) {
-                                                let _ = core_state
-                                                    .persist_session_and_app(&sid_for_title);
-                                            }
-                                            let snapshot = build_full_snapshot_with_status(
-                                                core_state,
-                                                active_session_is_executing(core_state),
-                                            );
-                                            let _ = app_for_title.emit("run_snapshot", &snapshot);
-                                            let _ = app_for_title.emit("sessions_updated", &());
-                                            Ok(())
+                                let app_state = app_for_title.state::<TiangongApp>();
+                                let title_lock = app_state.session_send_lock(&sid_for_title);
+                                let _title_guard = rt2.block_on(title_lock.lock_owned());
+                                let title_is_still_default = rt2
+                                    .block_on(app_state.with_state_read(|core_state| {
+                                        Ok(core_state
+                                            .sessions()
+                                            .iter()
+                                            .find(|session| session.id == sid_for_title)
+                                            .is_some_and(|session| {
+                                                session.title == "新对话"
+                                                    || session.title.starts_with("会话 ")
+                                            }))
+                                    }))
+                                    .unwrap_or(false);
+                                if !title_is_still_default {
+                                    return;
+                                }
+                                let receipt = match app_state
+                                    .enqueue_session_metadata_update_if_current(
+                                        &sid_for_title,
+                                        &title_instance_token,
+                                        SessionMetadataUpdate {
+                                            title: Some(clean.clone()),
+                                            ..SessionMetadataUpdate::default()
                                         },
-                                    ));
+                                    ) {
+                                    Ok(Some(receipt)) => receipt,
+                                    Ok(None) => return,
+                                    Err(error) => {
+                                        warn!(
+                                            %error,
+                                            session_id = %sid_for_title,
+                                            "自动标题入队失败"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if let Err(error) = rt2.block_on(receipt.await_persisted()) {
+                                    warn!(
+                                        %error,
+                                        session_id = %sid_for_title,
+                                        "自动标题持久化失败"
+                                    );
+                                    return;
+                                }
+                                if !app_state
+                                    .is_current_core_instance(&sid_for_title, &title_instance_token)
+                                {
+                                    return;
+                                }
+                                let _ = rt2.block_on(app_state.with_state(|core_state| {
+                                    let is_active = core_state.active_session_id() == sid_for_title;
+                                    if let Some(s) = core_state
+                                        .sessions_mut()
+                                        .iter_mut()
+                                        .find(|s| s.id == sid_for_title)
+                                    {
+                                        s.title = clean.clone();
+                                        s.updated_at = tiangong_core::session::now_text();
+                                    }
+                                    if is_active {
+                                        core_state.update_session_title_draft(clean.clone());
+                                    }
+                                    let snapshot = build_full_snapshot_with_status(
+                                        core_state,
+                                        active_session_is_executing(core_state),
+                                    );
+                                    let _ = app_for_title.emit("run_snapshot", &snapshot);
+                                    let _ = app_for_title.emit("sessions_updated", &());
+                                    Ok(())
+                                }));
                             }
                         }
                     });
@@ -2075,14 +2253,16 @@ pub(crate) fn start_stream_consumer(
         }
 
         let app_state = app.state::<TiangongApp>();
-        if app_state.remove_stopped_core(&session_id) {
+        let eof_lock = app_state.session_send_lock(&session_id);
+        let _eof_guard = rt.block_on(eof_lock.lock_owned());
+        if app_state.remove_stopped_core_if_current(&session_id, &instance_token) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 if let Err(error) = core_state.reload_session_from_disk(&session_id) {
                     tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
                 }
                 core_state.clear_pending_turn_for(&session_id);
                 core_state.report_run_idle("执行已中断：Core 事件流已关闭".to_string());
-                let _ = core_state.persist_session_and_app(&session_id);
+                let _ = core_state.persist_app_only();
                 let snapshot = build_full_snapshot_with_status(
                     core_state,
                     active_session_is_executing(core_state),
@@ -2091,6 +2271,7 @@ pub(crate) fn start_stream_consumer(
                 let _ = app.emit("sessions_updated", &());
                 Ok(())
             }));
+            app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
             let _ = app.emit(
                 "stream_event",
                 &tiangong_types::SessionStreamEvent {
@@ -2132,6 +2313,9 @@ pub async fn edit_and_resend(
     tracing::debug!(session_id, message_id, revision, "开始编辑重发校验");
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock().await;
+    if state.remote_turn_owner(&session_id).is_some() {
+        return Err("目标会话正在处理远端请求，暂时不能编辑重发".to_string());
+    }
     let has_pending_turn = state
         .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
         .await?;
@@ -2255,24 +2439,20 @@ pub async fn edit_and_resend(
     }
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
-    let (sid, is_new_core) = state
+    let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
-
-    let receipt_result = (|| {
-        let cores = state.cores.lock().map_err(|error| error.to_string())?;
-        let core = cores
-            .get(&sid)
-            .ok_or_else(|| "会话 Core 创建失败".to_string())?;
-        core.enqueue_prepared_with_receipt(message_id.clone(), prepared.clone())
-            .map_err(|error| error.to_string())
-    })();
+    let sid = ensured.session_id.clone();
+    let receipt_result = state.enqueue_prepared_with_receipt_if_current(
+        &sid,
+        &ensured.instance_token,
+        message_id.clone(),
+        prepared.clone(),
+    );
     let receipt = match receipt_result {
         Ok(receipt) => receipt,
         Err(error) => {
-            if is_new_core {
-                state.take_core(&sid);
-            }
+            shutdown_join_core_if_current(state.inner(), &sid, &ensured.instance_token).await;
             restore_edited_session(
                 state.inner(),
                 &session_id,
@@ -2289,9 +2469,7 @@ pub async fn edit_and_resend(
         }
     };
     if let Err(error) = receipt.await_persisted().await {
-        if is_new_core {
-            state.take_core(&sid);
-        }
+        shutdown_join_core_if_current(state.inner(), &sid, &ensured.instance_token).await;
         restore_edited_session(
             state.inner(),
             &session_id,
@@ -2325,9 +2503,8 @@ pub async fn edit_and_resend(
             Ok(())
         })
         .await;
-    if is_new_core {
-        let cancel_flag = get_cancel_flag(state.inner(), &sid);
-        start_stream_consumer(app, sid, stream_rx, cancel_flag);
+    if ensured.is_new {
+        start_stream_consumer(app, sid, stream_rx, ensured.instance_token);
     }
 
     Ok(())
@@ -2384,39 +2561,18 @@ pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> 
     let session_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
         .await?;
-    state.cancel_core(&session_id);
-    Ok(true)
+    let session_lock = state.session_send_lock(&session_id);
+    Ok(cancel_after_session_send_boundary(session_lock, || state.cancel_core(&session_id)).await)
 }
 
-async fn ensure_active_context_core(app: AppHandle, state: &TiangongApp) -> Result<String, String> {
-    use std::sync::mpsc;
-
-    state.sync_core_config_from_state().await?;
-
-    let (session_id, session_snapshot) = state
-        .with_state(|core_state| {
-            let idx = core_state.ensure_active_session_index();
-            let session_id = core_state.sessions()[idx].id.clone();
-            let mut session_snapshot = core_state.sessions()[idx].clone();
-            if session_snapshot.cwd.trim().is_empty() {
-                session_snapshot.cwd = core_state.workspace_dir().to_string();
-            }
-            if !core_state.has_pending_turn_for(&session_id) {
-                core_state.persist_session_and_app(&session_id)?;
-            }
-            Ok((session_id, session_snapshot))
-        })
-        .await?;
-
-    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
-    let (sid, is_new_core) = state
-        .ensure_core(&session_id, session_snapshot, stream_tx)
-        .await;
-    if is_new_core {
-        let cancel_flag = get_cancel_flag(state, &sid);
-        start_stream_consumer(app, sid.clone(), stream_rx, cancel_flag);
-    }
-    Ok(sid)
+async fn cancel_after_session_send_boundary(
+    session_lock: Arc<tokio::sync::Mutex<()>>,
+    cancel: impl FnOnce() -> bool,
+) -> bool {
+    // 发送准备阶段尚未安装 Core。等待同一会话的投递边界后再查找实例，确保取消
+    // 命中本次刚创建的 Core，而不是在附件归档期间静默丢失。
+    let _send_guard = session_lock.lock_owned().await;
+    cancel()
 }
 
 #[derive(Clone, Copy)]
@@ -2438,12 +2594,61 @@ async fn run_context_slash_command(
     app: AppHandle,
     state: &TiangongApp,
 ) -> Result<bool, String> {
-    let session_id = ensure_active_context_core(app, state).await?;
-    let ok = match command {
-        ContextSlashCommand::Compress => state.compress_context_core(&session_id),
-        ContextSlashCommand::Reset => state.reset_context_core(&session_id),
-    };
-    Ok(ok)
+    use std::sync::mpsc;
+
+    state.sync_core_config_from_state().await?;
+    loop {
+        let expected_session_id = state
+            .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+            .await?;
+        let session_lock = state.session_send_lock(&expected_session_id);
+        let _send_guard = session_lock.lock_owned().await;
+        if state.remote_turn_owner(&expected_session_id).is_some() {
+            return Err("目标会话正在处理远端请求，暂时不能修改上下文".to_string());
+        }
+        let prepared = state
+            .with_state(|core_state| {
+                let idx = core_state.ensure_active_session_index();
+                let session_id = core_state.sessions()[idx].id.clone();
+                if session_id != expected_session_id {
+                    return Ok(None);
+                }
+                let mut session_snapshot = core_state.sessions()[idx].clone();
+                if session_snapshot.cwd.trim().is_empty() {
+                    session_snapshot.cwd = core_state.workspace_dir().to_string();
+                }
+                if !core_state.has_pending_turn_for(&session_id) {
+                    core_state.persist_session_and_app(&session_id)?;
+                }
+                Ok(Some((session_id, session_snapshot)))
+            })
+            .await?;
+        let Some((session_id, session_snapshot)) = prepared else {
+            continue;
+        };
+
+        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+        let ensured = state
+            .ensure_core(&session_id, session_snapshot, stream_tx)
+            .await;
+        if ensured.is_new {
+            start_stream_consumer(
+                app.clone(),
+                ensured.session_id.clone(),
+                stream_rx,
+                ensured.instance_token.clone(),
+            );
+        }
+        let input = match command {
+            ContextSlashCommand::Compress => AgentInputKind::compress_context(),
+            ContextSlashCommand::Reset => AgentInputKind::reset_context(),
+        };
+        return Ok(state.deliver_to_core_if_current(
+            &ensured.session_id,
+            &ensured.instance_token,
+            input,
+        ));
+    }
 }
 
 /// 手动触发上下文压缩
@@ -2559,21 +2764,99 @@ pub async fn set_trust_mode(
         serde_json::from_value(serde_json::Value::String(mode))
             .map_err(|e| format!("无效的信任模式: {e}"))?;
 
-    let session_id = state
+    let session_id = match session_id {
+        Some(session_id) => session_id,
+        None => {
+            state
+                .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+                .await?
+        }
+    };
+    let session_lock = state.session_send_lock(&session_id);
+    let _send_guard = session_lock.lock_owned().await;
+
+    let previous_mode = state
         .with_state(|core_state| {
-            let target_id = session_id
-                .clone()
-                .unwrap_or_else(|| core_state.active_session_id().to_string());
-            core_state.set_session_trust_mode(&target_id, trust_mode)?;
-            Ok(target_id)
+            let previous_mode = core_state
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .map(|session| session.trust_mode)
+                .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置信任模式：{session_id}"))?;
+            core_state.set_session_trust_mode_in_memory(&session_id, trust_mode)?;
+            if let Err(error) = core_state.persist_app_only() {
+                let _ = core_state.set_session_trust_mode_in_memory(&session_id, previous_mode);
+                return Err(error);
+            }
+            Ok(previous_mode)
         })
         .await?;
-    state.sync_core_config_from_state().await?;
 
-    // 会话级设置只影响当前会话；其他后台会话保留自己的信任模式。
+    if let Err(error) = state.sync_core_config_from_state().await {
+        rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
+        return Err(error);
+    }
+    // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
     state.set_core_trust_mode(&session_id, trust_mode);
 
+    let update = SessionMetadataUpdate {
+        trust_mode: Some(trust_mode),
+        ..SessionMetadataUpdate::default()
+    };
+    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
+            return Err(error);
+        }
+    };
+    let persist_without_core = receipt.is_none();
+    let persisted = if let Some(receipt) = receipt {
+        receipt
+            .await_persisted()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        state
+            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+            .await
+    };
+    if let Err(error) = persisted {
+        rollback_session_trust_mode(
+            state.inner(),
+            &session_id,
+            previous_mode,
+            persist_without_core,
+        )
+        .await;
+        return Err(error);
+    }
     Ok(())
+}
+
+async fn rollback_session_trust_mode(
+    state: &TiangongApp,
+    session_id: &str,
+    previous_mode: tiangong_core::permission::TrustMode,
+    persist_without_core: bool,
+) {
+    let rollback = state
+        .with_state(|core_state| {
+            core_state.set_session_trust_mode_in_memory(session_id, previous_mode)?;
+            if persist_without_core {
+                core_state.persist_session_and_app(session_id)
+            } else {
+                core_state.persist_app_only()
+            }
+        })
+        .await;
+    if let Err(error) = rollback {
+        warn!(%error, %session_id, "回滚会话信任模式失败");
+    }
+    if let Err(error) = state.sync_core_config_from_state().await {
+        warn!(%error, %session_id, "回滚会话信任模式后同步配置失败");
+    }
+    state.set_core_trust_mode(session_id, previous_mode);
 }
 
 #[tauri::command]
@@ -2662,16 +2945,147 @@ pub async fn set_reasoning_effort(
             valid.join("/")
         ));
     }
-    state
+    let session_id = match session_id {
+        Some(session_id) => session_id,
+        None => {
+            state
+                .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+                .await?
+        }
+    };
+    let session_lock = state.session_send_lock(&session_id);
+    let _send_guard = session_lock.lock_owned().await;
+
+    let (previous_override, previous_compatibility_value) = state
         .with_state(|core_state| {
-            let target_id = session_id
-                .clone()
-                .unwrap_or_else(|| core_state.active_session_id().to_string());
-            core_state.set_session_reasoning_effort(&target_id, effort)
+            let previous_override = core_state
+                .sessions()
+                .iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置思考强度：{session_id}"))?
+                .reasoning_effort
+                .clone();
+            let previous_compatibility_value = core_state.agent_config().reasoning_effort.clone();
+            core_state.set_session_reasoning_effort_in_memory(&session_id, effort.clone())?;
+            if let Err(error) = core_state.persist_app_only() {
+                let _ = restore_session_reasoning_effort_in_memory(
+                    core_state,
+                    &session_id,
+                    previous_override.clone(),
+                    previous_compatibility_value.clone(),
+                );
+                return Err(error);
+            }
+            Ok((previous_override, previous_compatibility_value))
         })
         .await?;
-    state.sync_core_config_from_state().await?;
+
+    if let Err(error) = state.sync_core_config_from_state().await {
+        rollback_session_reasoning_effort(
+            state.inner(),
+            &session_id,
+            previous_override,
+            previous_compatibility_value,
+            false,
+        )
+        .await;
+        return Err(error);
+    }
+
+    let update = SessionMetadataUpdate {
+        reasoning_effort: Some(Some(effort)),
+        ..SessionMetadataUpdate::default()
+    };
+    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            rollback_session_reasoning_effort(
+                state.inner(),
+                &session_id,
+                previous_override,
+                previous_compatibility_value,
+                false,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let persist_without_core = receipt.is_none();
+    let persisted = if let Some(receipt) = receipt {
+        receipt
+            .await_persisted()
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        state
+            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+            .await
+    };
+    if let Err(error) = persisted {
+        rollback_session_reasoning_effort(
+            state.inner(),
+            &session_id,
+            previous_override,
+            previous_compatibility_value,
+            persist_without_core,
+        )
+        .await;
+        return Err(error);
+    }
     Ok(())
+}
+
+fn restore_session_reasoning_effort_in_memory(
+    core_state: &mut tiangong_app_state::app_state::TiangongState,
+    session_id: &str,
+    previous_override: Option<String>,
+    previous_compatibility_value: String,
+) -> anyhow::Result<()> {
+    core_state.set_session_reasoning_effort_in_memory(
+        session_id,
+        previous_override
+            .clone()
+            .unwrap_or(previous_compatibility_value),
+    )?;
+    if previous_override.is_none() {
+        let session = core_state
+            .sessions_mut()
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow::anyhow!("会话不存在，无法回滚思考强度：{session_id}"))?;
+        session.reasoning_effort = None;
+    }
+    Ok(())
+}
+
+async fn rollback_session_reasoning_effort(
+    state: &TiangongApp,
+    session_id: &str,
+    previous_override: Option<String>,
+    previous_compatibility_value: String,
+    persist_without_core: bool,
+) {
+    let rollback = state
+        .with_state(|core_state| {
+            restore_session_reasoning_effort_in_memory(
+                core_state,
+                session_id,
+                previous_override,
+                previous_compatibility_value,
+            )?;
+            if persist_without_core {
+                core_state.persist_session_and_app(session_id)
+            } else {
+                core_state.persist_app_only()
+            }
+        })
+        .await;
+    if let Err(error) = rollback {
+        warn!(%error, %session_id, "回滚会话思考强度失败");
+    }
+    if let Err(error) = state.sync_core_config_from_state().await {
+        warn!(%error, %session_id, "回滚会话思考强度后同步配置失败");
+    }
 }
 
 #[tauri::command]
@@ -3219,7 +3633,7 @@ fn same_draft_attachment_selection(
     incoming == current
 }
 
-async fn cleanup_unreferenced_draft_attachments(
+pub(crate) async fn cleanup_unreferenced_draft_attachments(
     state: &TiangongApp,
     candidates: Vec<tiangong_media_archive::RawAttachment>,
 ) {
@@ -3264,7 +3678,9 @@ async fn cleanup_unreferenced_draft_attachments(
     }
 }
 
-fn raw_attachments_for_paths(paths: Vec<String>) -> Vec<tiangong_media_archive::RawAttachment> {
+pub(crate) fn raw_attachments_for_paths(
+    paths: Vec<String>,
+) -> Vec<tiangong_media_archive::RawAttachment> {
     paths
         .into_iter()
         .map(|source| tiangong_media_archive::RawAttachment {
@@ -3276,7 +3692,7 @@ fn raw_attachments_for_paths(paths: Vec<String>) -> Vec<tiangong_media_archive::
         .collect()
 }
 
-fn session_attachment_candidates(
+pub(crate) fn session_attachment_candidates(
     session: &tiangong_core::session::Session,
 ) -> Vec<tiangong_media_archive::RawAttachment> {
     let paths = session
@@ -4606,7 +5022,47 @@ pub async fn webhook_list_runs(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_tool_result_message, done_event_keeps_turn_running};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::{
+        append_tool_result_message, cancel_after_session_send_boundary,
+        done_event_keeps_turn_running,
+    };
+
+    #[tokio::test]
+    async fn cancel_waits_for_send_boundary_and_returns_delivery_result() {
+        let session_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let send_guard = session_lock.clone().lock_owned().await;
+        let delivered = Arc::new(AtomicBool::new(false));
+        let delivered_in_cancel = delivered.clone();
+        let mut cancel = tokio::spawn(async move {
+            cancel_after_session_send_boundary(session_lock, || {
+                delivered_in_cancel.store(true, Ordering::Release);
+                true
+            })
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!cancel.is_finished(), "发送边界释放前取消必须等待");
+        assert!(!delivered.load(Ordering::Acquire));
+        drop(send_guard);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut cancel)
+                .await
+                .expect("发送边界释放后取消应继续")
+                .expect("取消任务不应 panic")
+        );
+        assert!(delivered.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_when_no_core_accepts_the_command() {
+        let session_lock = Arc::new(tokio::sync::Mutex::new(()));
+        assert!(!cancel_after_session_send_boundary(session_lock, || false).await);
+    }
 
     #[test]
     fn empty_done_keeps_pending_turn_running() {

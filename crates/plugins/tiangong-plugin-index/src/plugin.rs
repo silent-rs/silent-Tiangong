@@ -14,20 +14,20 @@ use std::sync::{Arc, RwLock};
 
 use crate::index::{IndexManager, TurnData};
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::TrustMode;
+use tiangong_core::permission::{TrustMode, TrustModeHandle};
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tool_override::PromptSectionProvider;
 
 /// 索引搜索插件。
 ///
 /// `workspace` 由 core 在 engine 创建及每次会话目录变更时注入（可变）；
-/// `trust_mode` 由 core 在 register 前通过 `set_trust_mode` 注入（共享引用，实时同步）；
+/// `trust_mode` 由 core 在 register 前通过 `set_trust_mode` 注入（基线共享、单轮隔离）；
 /// `index_manager` 在构造时自建（失败降级为 None，工具执行与钩子内兜底）。
 pub struct IndexPlugin {
     /// 当前会话工作目录（可变，由 core 注入）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 共享信任模式引用（FullTrust 时放宽 search_code 路径校验）。
-    trust_mode: RwLock<Option<Arc<RwLock<TrustMode>>>>,
+    /// 信任模式解析句柄（FullTrust 时放宽 search_code 路径校验）。
+    trust_mode: RwLock<Option<TrustModeHandle>>,
     /// 自建并私有持有的 IndexManager（core 不感知）。
     index_manager: RwLock<Option<Arc<IndexManager>>>,
 }
@@ -67,9 +67,7 @@ impl IndexPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.read()
-            .map(|g| *g == TrustMode::FullTrust)
-            .unwrap_or(false)
+        tm.current() == TrustMode::FullTrust
     }
 
     /// 取 IndexManager 引用执行闭包；若未初始化则跳过（用于钩子内的写入操作）。
@@ -133,7 +131,7 @@ impl Plugin for IndexPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: Arc<RwLock<TrustMode>>) {
+    fn set_trust_mode(&self, trust: TrustModeHandle) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

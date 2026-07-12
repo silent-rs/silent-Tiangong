@@ -27,21 +27,25 @@ mod tests {
     use tiangong_config::CoreConfigProvider;
     use tokio::sync::Mutex;
 
-    fn setup_app_ctx() -> (TempDir, Arc<ServerAppContext>) {
-        let dir = TempDir::new().unwrap();
+    fn setup_app_ctx() -> Arc<ServerAppContext> {
         let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
         let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
         let event_bus = Arc::new(EventBus::default());
-        let app_ctx = Arc::new(ServerAppContext::new(state, config, event_bus));
-        (dir, app_ctx)
+        Arc::new(ServerAppContext::new(state, config, event_bus))
     }
 
     #[tokio::test]
     async fn server_context_resolve_creates_session() {
-        let (_dir, app_ctx) = setup_app_ctx();
+        let _storage_guard = crate::remote::core::test_support::STORAGE_TEST_LOCK
+            .lock()
+            .await;
+        let root = TempDir::new().unwrap();
+        let _home_guard =
+            crate::remote::core::test_support::TestHomeGuard::new(&root.path().join("home"));
+        let app_ctx = setup_app_ctx();
         let ctx = ServerSchedulerContext {
             state: app_ctx.state.clone(),
-            cores: app_ctx.cores.clone(),
+            core_backend: app_ctx.core_backend.clone(),
         };
 
         let (sid, created) = ctx

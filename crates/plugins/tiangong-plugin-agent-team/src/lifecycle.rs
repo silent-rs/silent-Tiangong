@@ -15,21 +15,40 @@
 //! - `stream_tx` 仍为 `&StdSender<StreamEvent>`，由 handler.rs 桥接到 feedback_tx。
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender as StdSender;
 
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::session::{now_text, PendingAgentDelivery, Session};
+use tiangong_core::session::{now_text, PendingPluginDelivery, Session};
 use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
-use tiangong_types::{content_blocks_text, stable_content_blocks, ContentBlock, StreamEvent};
+use tiangong_types::{
+    content_blocks_are_empty, content_blocks_text, stable_content_blocks, ContentBlock, StreamEvent,
+};
 
-use crate::constants::MAX_AGENTS;
+use crate::constants::{MAX_AGENTS, PLUGIN_ID};
 use crate::state::message_bus::AgentInboxEntry;
 use crate::state::{AgentDescriptor, AgentMessage, AgentStatus, MessagePriority};
 use crate::TeamContext;
 
 fn normalize_agent_role(role: &str) -> String {
     role.trim().trim_start_matches('@').to_string()
+}
+
+/// 团队工具消息使用调用尝试与目标派生的稳定 ID，确保 shutdown/重试不会生成
+/// 第二份 durable 工作。极早期缺失 tool call ID 时回退到新 SCRU128。
+fn team_tool_message_id(current_agent_id: &str, call: &ToolCall, target_agent_id: &str) -> String {
+    if call.id.is_empty() {
+        return scru128::new().to_string();
+    }
+    format!(
+        "team-tool:{}:{}:{}:{}:{}:{}",
+        current_agent_id.len(),
+        current_agent_id,
+        call.id.len(),
+        call.id,
+        target_agent_id.len(),
+        target_agent_id
+    )
 }
 
 pub(crate) fn prepared_agent_message_for_prompt(
@@ -74,6 +93,7 @@ pub fn restore_agents_from_session_history(
     team: &mut TeamContext,
     parent_session: &Session,
     parent_tools: &[ToolSpec],
+    storage_root: &Path,
 ) -> usize {
     let mut restored: Vec<RestoredAgent> = Vec::new();
 
@@ -137,7 +157,7 @@ pub fn restore_agents_from_session_history(
             tools: agent.tools.unwrap_or_else(|| tool_names.clone()),
             status: AgentStatus::Idle,
         };
-        let child_session = load_child_session(parent_session, &agent.agent_id)
+        let child_session = load_child_session(storage_root, parent_session, &agent.agent_id)
             .unwrap_or_else(|| create_child_session(parent_session, &agent.label, &agent.agent_id));
         team.registry
             .register_with_session(descriptor, child_session);
@@ -145,6 +165,38 @@ pub fn restore_agents_from_session_history(
     }
 
     count
+}
+
+/// 从会话历史提取最终处于显式 terminated 状态的稳定 Agent ID。
+///
+/// 用于恢复“解散记录已经落盘、父会话投递取消确认尚未来得及落盘”的崩溃窗口。
+pub(crate) fn explicitly_terminated_agent_ids(
+    parent_session: &Session,
+) -> std::collections::HashSet<String> {
+    let mut terminated = std::collections::HashSet::new();
+    for message in &parent_session.messages {
+        if message.role != tiangong_core::session::MessageRole::System {
+            continue;
+        }
+        if let Some(agent) = parse_persisted_agent_descriptor(message) {
+            terminated.remove(&agent.agent_id);
+            continue;
+        }
+        if let Some(agent) = parse_agent_created_message(&message.text_content()) {
+            terminated.remove(&agent.agent_id);
+            continue;
+        }
+        if let Some((_label, status, Some(agent_id))) =
+            parse_agent_status_message(&message.text_content())
+        {
+            if status == AgentStatus::Terminated {
+                terminated.insert(agent_id);
+            } else {
+                terminated.remove(&agent_id);
+            }
+        }
+    }
+    terminated
 }
 
 fn parse_persisted_agent_descriptor(
@@ -363,6 +415,10 @@ pub fn execute_create_agent(
 }
 
 /// 处理 dismiss_agent 工具调用
+pub(crate) fn agent_is_running(team: &TeamContext, descriptor: &AgentDescriptor) -> bool {
+    descriptor.status == AgentStatus::Running || team.is_agent_active(&descriptor.agent_id)
+}
+
 pub fn execute_dismiss_agent(
     team: &mut TeamContext,
     call: &ToolCall,
@@ -383,6 +439,16 @@ pub fn execute_dismiss_agent(
     let Some(descriptor) = team.registry.find_by_role(&role).cloned() else {
         return error_tool_result("dismiss_agent", &format!("未找到角色 '{role}'"));
     };
+
+    if agent_is_running(team, &descriptor) {
+        return error_tool_result(
+            "dismiss_agent",
+            &format!(
+                "Agent '{}' 正在运行，请先取消该 Agent，等待任务收敛后再重试解散",
+                descriptor.label
+            ),
+        );
+    }
 
     let agent_id = descriptor.agent_id.clone();
     let label = descriptor.label.clone();
@@ -457,7 +523,7 @@ pub fn execute_send_message(
 
     if to == "main" {
         let message = AgentMessage {
-            id: scru128::new().to_string(),
+            id: team_tool_message_id(current_agent_id, call, "main"),
             from: current_agent_id.to_string(),
             to: "main".to_string(),
             content: content.clone(),
@@ -494,7 +560,7 @@ pub fn execute_send_message(
     };
 
     let message = AgentMessage {
-        id: scru128::new().to_string(),
+        id: team_tool_message_id(current_agent_id, call, &target.agent_id),
         from: current_agent_id.to_string(),
         to: target.agent_id.clone(),
         content: content.clone(),
@@ -575,14 +641,7 @@ pub fn execute_broadcast_message(
             .collect()
     };
 
-    let message = AgentMessage {
-        id: scru128::new().to_string(),
-        from: current_agent_id.to_string(),
-        to: "all".to_string(),
-        content: content.clone(),
-        priority: MessagePriority::Normal,
-        created_at: now_text(),
-    };
+    let created_at = now_text();
 
     let event_targets: Vec<_> = {
         let targets = team.registry.alive_agents();
@@ -600,8 +659,12 @@ pub fn execute_broadcast_message(
         .collect::<Vec<_>>();
     for agent_id in &targets {
         let msg = AgentMessage {
+            id: team_tool_message_id(current_agent_id, call, agent_id),
+            from: current_agent_id.to_string(),
             to: agent_id.clone(),
-            ..message.clone()
+            content: content.clone(),
+            priority: MessagePriority::Normal,
+            created_at: created_at.clone(),
         };
         team.registry.deliver_message(agent_id, msg);
     }
@@ -712,6 +775,19 @@ pub fn execute_lock_file(
 
     let path_buf = PathBuf::from(&path);
     let now = chrono::Local::now().naive_local();
+
+    if let Some(expired) = team.file_locks.take_expired(&path_buf, &now) {
+        let holder_agent_label = team
+            .registry
+            .get(&expired.holder)
+            .map(|descriptor| descriptor.label.clone());
+        let _ = stream_tx.send(StreamEvent::FileLockChanged {
+            path: path.clone(),
+            holder_agent_id: Some(expired.holder),
+            holder_agent_label,
+            action: "expired".to_string(),
+        });
+    }
 
     match team.file_locks.try_lock(&path_buf, current_agent_id, &now) {
         Ok(()) => {
@@ -926,7 +1002,8 @@ fn append_team_history_message(
         message.clear_transient_data();
         let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
             message,
-            pending_agent_deliveries: None,
+            pending_plugin_deliveries: None,
+            completed_plugin_delivery_ids: None,
             deferred_tool_injections: None,
         });
     }
@@ -1001,13 +1078,14 @@ pub(crate) fn plan_user_mention_deliveries(
     team: &TeamContext,
     source_message_id: &str,
     prepared: &[ContentBlock],
-) -> Vec<PendingAgentDelivery> {
+) -> Vec<PendingPluginDelivery> {
     build_user_mention_entries(team, Some(source_message_id), prepared.to_vec())
         .into_iter()
-        .map(|(target_agent_id, _label, entry)| PendingAgentDelivery {
+        .map(|(target_agent_id, _label, entry)| PendingPluginDelivery {
             delivery_id: entry.message.id,
             source_message_id: source_message_id.to_string(),
-            target_agent_id,
+            plugin_id: PLUGIN_ID.to_string(),
+            target_id: target_agent_id,
             content: entry.message.content,
             created_at: entry.message.created_at,
             additional_content: entry.additional_content,
@@ -1025,14 +1103,17 @@ pub(crate) fn dispatch_pending_agent_deliveries(
     team.registry
         .remove_pending_source_message(source_message_id);
     let deliveries = parent_session
-        .pending_agent_deliveries
+        .pending_plugin_deliveries
         .iter()
-        .filter(|delivery| delivery.source_message_id == source_message_id)
+        .filter(|delivery| {
+            (delivery.plugin_id.is_empty() || delivery.plugin_id == PLUGIN_ID)
+                && delivery.source_message_id == source_message_id
+        })
         .cloned()
         .collect::<Vec<_>>();
     let mut dispatched = false;
     for delivery in deliveries {
-        let Some(agent) = team.registry.get(&delivery.target_agent_id) else {
+        let Some(agent) = team.registry.get(&delivery.target_id) else {
             continue;
         };
         if agent.status == AgentStatus::Terminated {
@@ -1041,12 +1122,12 @@ pub(crate) fn dispatch_pending_agent_deliveries(
         let label = agent.label.clone();
         let content = delivery.content.clone();
         team.registry.deliver_inbox_entry(
-            &delivery.target_agent_id,
+            &delivery.target_id,
             AgentInboxEntry {
                 message: AgentMessage {
                     id: delivery.delivery_id,
                     from: "user".to_string(),
-                    to: delivery.target_agent_id.clone(),
+                    to: delivery.target_id.clone(),
                     content: delivery.content,
                     priority: MessagePriority::Normal,
                     created_at: delivery.created_at,
@@ -1058,7 +1139,7 @@ pub(crate) fn dispatch_pending_agent_deliveries(
         let _ = stream_tx.send(StreamEvent::AgentMessage {
             from_agent_id: "user".to_string(),
             from_agent_label: "User".to_string(),
-            to_agent_id: delivery.target_agent_id,
+            to_agent_id: delivery.target_id,
             to_agent_label: label,
             content,
         });
@@ -1073,20 +1154,23 @@ pub(crate) fn restore_pending_agent_deliveries(
     parent_session: &Session,
 ) -> usize {
     let mut restored = 0usize;
-    for delivery in &parent_session.pending_agent_deliveries {
-        let Some(agent) = team.registry.get(&delivery.target_agent_id) else {
+    for delivery in &parent_session.pending_plugin_deliveries {
+        if !delivery.plugin_id.is_empty() && delivery.plugin_id != PLUGIN_ID {
+            continue;
+        }
+        let Some(agent) = team.registry.get(&delivery.target_id) else {
             continue;
         };
         if agent.status == AgentStatus::Terminated {
             continue;
         }
         team.registry.deliver_inbox_entry(
-            &delivery.target_agent_id,
+            &delivery.target_id,
             AgentInboxEntry {
                 message: AgentMessage {
                     id: delivery.delivery_id.clone(),
                     from: "user".to_string(),
-                    to: delivery.target_agent_id.clone(),
+                    to: delivery.target_id.clone(),
                     content: delivery.content.clone(),
                     priority: MessagePriority::Normal,
                     created_at: delivery.created_at.clone(),
@@ -1135,10 +1219,6 @@ fn build_user_mention_entries(
     let Some(route) = parse_agent_mention_route(&content) else {
         return Vec::new();
     };
-    if route.content.trim().is_empty() {
-        return Vec::new();
-    }
-
     let mut targets: Vec<_> = if route.broadcast {
         team.registry
             .alive_agents()
@@ -1190,6 +1270,9 @@ fn build_user_mention_entries(
     }
 
     let routed_content = stable_content_blocks(&routed_content);
+    if content_blocks_are_empty(&routed_content) {
+        return Vec::new();
+    }
     let routed_revision = serde_json::to_string(&routed_content).unwrap_or_default();
     targets
         .into_iter()
@@ -1245,8 +1328,8 @@ pub fn error_tool_result(name: &str, message: &str) -> ToolResult {
 
 /// 创建 Sub Agent 的独立 Session
 ///
-/// `agent_id` 写入 `child.active_agent_id`，供团队工具 handler 经 `&Session`
-/// 反查当前调用方身份（主 Agent session 该字段为 None）。
+/// `agent_id` 写入 `child.active_agent_id`，供会话恢复和前端状态归属使用；
+/// 工具调用方身份始终由 ReactEngine 显式传入。
 fn create_child_session(parent: &Session, title: &str, agent_id: &str) -> Session {
     let mut child = Session::new(title);
     child.cwd = parent.cwd.clone();
@@ -1258,13 +1341,27 @@ fn create_child_session(parent: &Session, title: &str, agent_id: &str) -> Sessio
 
 /// 持久化 child_session 到磁盘
 pub fn persist_child_session(
+    storage_root: &Path,
     parent_session: &Session,
     agent_id: &str,
     session: &Session,
 ) -> Result<(), String> {
-    let agents_dir = tiangong_core::storage::storage_root()
+    persist_child_session_for_parent_id(storage_root, &parent_session.id, agent_id, session)
+}
+
+/// 仅使用宿主注入的存储根与稳定父会话 ID 保存 child session。
+///
+/// 后台回执确认没有完整父 Session，也不应为计算路径而构造依赖 Core 全局存储的
+/// 临时 Session；插件自己的持久化路径由这两个显式参数唯一决定。
+pub fn persist_child_session_for_parent_id(
+    storage_root: &Path,
+    parent_session_id: &str,
+    agent_id: &str,
+    session: &Session,
+) -> Result<(), String> {
+    let agents_dir = storage_root
         .join("sessions")
-        .join(&parent_session.id)
+        .join(parent_session_id)
         .join("agents");
     std::fs::create_dir_all(&agents_dir)
         .map_err(|error| format!("创建 agents 目录失败：{error}"))?;
@@ -1276,8 +1373,12 @@ pub fn persist_child_session(
 }
 
 /// 从磁盘加载 child_session
-pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Session> {
-    let path = tiangong_core::storage::storage_root()
+pub fn load_child_session(
+    storage_root: &Path,
+    parent_session: &Session,
+    agent_id: &str,
+) -> Option<Session> {
+    let path = storage_root
         .join("sessions")
         .join(&parent_session.id)
         .join("agents")
@@ -1290,24 +1391,22 @@ pub fn load_child_session(parent_session: &Session, agent_id: &str) -> Option<Se
     Some(session)
 }
 
-fn normalize_agent_role(role: &str) -> String {
-    role.trim().trim_start_matches('@').to_string()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::sync::{mpsc, Arc};
 
     use serde_json::json;
 
     use super::*;
 
-    /// 把 storage_root 注入为临时目录，供触及持久化的用例使用。
+    /// 创建独立存储根，供触及 child session 持久化的用例使用。
     /// 返回的 TempDir 须保持存活到用例结束。
     fn isolated_storage_root() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("创建临时目录失败");
-        tiangong_core::storage::set_storage_root(dir.path().to_path_buf());
-        dir
+        let root = tempfile::tempdir().expect("创建临时目录失败");
+        // execute_team_tool 仍通过真实 Session 持久化团队历史；测试需像宿主一样
+        // 注入 Core 存储根，同时 child session 继续显式使用 root.path()。
+        tiangong_core::storage::set_storage_root(root.path().to_path_buf());
+        root
     }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
@@ -1496,23 +1595,56 @@ mod tests {
         let _ = team.registry.drain_inbox(&test_id);
         let _ = team.registry.drain_inbox(&pm_id);
 
-        let result = execute_broadcast_message(
-            &mut team,
-            &dev_id,
-            &call(
-                "broadcast_message",
-                json!({
-                    "content": "sync status",
-                    "exclude": ["@dev"]
-                }),
-            ),
-            &tx,
+        let broadcast_call = call(
+            "broadcast_message",
+            json!({
+                "content": "sync status",
+                "exclude": ["@dev"]
+            }),
         );
+        let result = execute_broadcast_message(&mut team, &dev_id, &broadcast_call, &tx);
 
         assert!(result.ok);
         assert!(team.registry.drain_inbox(&dev_id).is_empty());
-        assert_eq!(team.registry.drain_inbox(&test_id).len(), 1);
-        assert_eq!(team.registry.drain_inbox(&pm_id).len(), 1);
+        let test_inbox = team.registry.drain_inbox(&test_id);
+        let pm_inbox = team.registry.drain_inbox(&pm_id);
+        assert_eq!(test_inbox.len(), 1);
+        assert_eq!(pm_inbox.len(), 1);
+
+        let test_delivery_id = test_inbox[0].id.clone();
+        let pm_delivery_id = pm_inbox[0].id.clone();
+        assert_ne!(test_delivery_id, pm_delivery_id);
+        assert_eq!(test_inbox[0].from, dev_id);
+        assert_eq!(test_inbox[0].to, test_id);
+        assert_eq!(pm_inbox[0].from, dev_id);
+        assert_eq!(pm_inbox[0].to, pm_id);
+        assert_eq!(test_inbox[0].content, pm_inbox[0].content);
+        assert_eq!(test_inbox[0].priority, pm_inbox[0].priority);
+        assert_eq!(test_inbox[0].created_at, pm_inbox[0].created_at);
+
+        let retry = execute_broadcast_message(&mut team, &dev_id, &broadcast_call, &tx);
+        assert!(retry.ok);
+        assert!(team.registry.drain_inbox(&dev_id).is_empty());
+        let retried_test = team.registry.drain_inbox(&test_id);
+        let retried_pm = team.registry.drain_inbox(&pm_id);
+        assert_eq!(retried_test[0].id, test_delivery_id);
+        assert_eq!(retried_pm[0].id, pm_delivery_id);
+
+        let protocol_root = tempfile::tempdir().unwrap();
+        let protocol_store = crate::cancellation::CancellationTombstoneStore::new(
+            protocol_root.path().to_path_buf(),
+        );
+        let state = protocol_store
+            .settle("parent", std::slice::from_ref(&test_delivery_id))
+            .unwrap();
+        assert!(state.settled_ids.contains(&test_delivery_id));
+        assert!(!state.settled_ids.contains(&pm_delivery_id));
+
+        let state = protocol_store
+            .settle("parent", std::slice::from_ref(&pm_delivery_id))
+            .unwrap();
+        assert!(state.settled_ids.contains(&test_delivery_id));
+        assert!(state.settled_ids.contains(&pm_delivery_id));
     }
 
     #[test]
@@ -1644,8 +1776,75 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_running_agent_keeps_descriptor_and_owned_locks() {
+        let (tx, rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        let result = execute_create_agent(
+            &mut team,
+            &call(
+                "create_agent",
+                json!({
+                    "role": "dev",
+                    "label": "Developer",
+                    "system_prompt": "agent"
+                }),
+            ),
+            &parent,
+            &[tool("lock_file")],
+            &tx,
+        );
+        assert!(result.ok);
+
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+        let locked_path = PathBuf::from("src/lib.rs");
+        assert!(
+            execute_lock_file(
+                &mut team,
+                &dev_id,
+                &call("lock_file", json!({"path": locked_path})),
+                &tx,
+            )
+            .ok
+        );
+        team.registry.update_status(&dev_id, AgentStatus::Running);
+        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+        team.register_active_agent(
+            dev_id.clone(),
+            command_tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Some("delivery-1".to_string()),
+        );
+        for _ in rx.try_iter() {}
+
+        let result = execute_dismiss_agent(
+            &mut team,
+            &call("dismiss_agent", json!({"role": "dev"})),
+            &tx,
+        );
+
+        assert!(!result.ok);
+        assert!(result.stderr.contains("请先取消"));
+        assert!(result.stderr.contains("等待任务收敛后再重试"));
+        assert_eq!(
+            team.registry.find_by_role("dev").map(|agent| &agent.status),
+            Some(&AgentStatus::Running)
+        );
+        assert!(team.is_agent_active(&dev_id));
+        assert_eq!(team.file_locks.holder(&locked_path), Some(dev_id.as_str()));
+        assert!(!rx.try_iter().any(|event| matches!(
+            &event,
+            StreamEvent::FileLockChanged { action, .. } if action == "unlocked"
+        ) || matches!(
+            &event,
+            StreamEvent::AgentStatusChanged { status, .. } if status == "terminated"
+        )));
+    }
+
+    #[test]
     fn restored_agent_from_session_history_can_be_dismissed() {
-        let _root = isolated_storage_root();
+        let root = isolated_storage_root();
         let (tx, _rx) = mpsc::channel();
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
@@ -1666,6 +1865,7 @@ mod tests {
                 tool("dismiss_agent"),
                 tool("create_agent"),
             ],
+            root.path(),
         );
         assert_eq!(restored, 2);
         assert!(team.registry.find_by_role("dev").is_some());
@@ -1683,6 +1883,7 @@ mod tests {
 
     #[test]
     fn restore_agents_ignores_terminated_history_entries() {
+        let root = isolated_storage_root();
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
         parent.append_message(
@@ -1694,15 +1895,23 @@ mod tests {
             "[Agent] 开发者 状态变更: terminated id=agent-dev".to_string(),
         );
 
-        let restored =
-            restore_agents_from_session_history(&mut team, &parent, &[tool("read_file")]);
+        let restored = restore_agents_from_session_history(
+            &mut team,
+            &parent,
+            &[tool("read_file")],
+            root.path(),
+        );
         assert_eq!(restored, 0);
         assert!(team.registry.find_by_role("dev").is_none());
+        assert_eq!(
+            explicitly_terminated_agent_ids(&parent),
+            std::collections::HashSet::from(["agent-dev".to_string()])
+        );
     }
 
     #[test]
     fn restore_status_with_id_does_not_terminate_same_label_agent() {
-        let _root = isolated_storage_root();
+        let root = isolated_storage_root();
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
         parent.append_message(
@@ -1718,8 +1927,12 @@ mod tests {
             "[Agent] Worker 状态变更: terminated id=agent-dev".to_string(),
         );
 
-        let restored =
-            restore_agents_from_session_history(&mut team, &parent, &[tool("read_file")]);
+        let restored = restore_agents_from_session_history(
+            &mut team,
+            &parent,
+            &[tool("read_file")],
+            root.path(),
+        );
         assert_eq!(restored, 1);
         assert!(team.registry.find_by_role("dev").is_none());
         assert_eq!(
@@ -1730,7 +1943,7 @@ mod tests {
 
     #[test]
     fn persisted_agent_descriptor_restores_prompt_and_tool_scope_exactly() {
-        let _root = isolated_storage_root();
+        let root = isolated_storage_root();
         let (tx, _rx) = mpsc::channel();
         let mut team = TeamContext::new();
         let mut parent = Session::new("parent");
@@ -1757,7 +1970,12 @@ mod tests {
         let restored_parent: Session = serde_json::from_str(&json).unwrap();
         let mut restored_team = TeamContext::new();
         assert_eq!(
-            restore_agents_from_session_history(&mut restored_team, &restored_parent, &tools),
+            restore_agents_from_session_history(
+                &mut restored_team,
+                &restored_parent,
+                &tools,
+                root.path(),
+            ),
             1
         );
         let restored = restored_team.registry.find_by_role("dev").unwrap();
@@ -1814,7 +2032,7 @@ mod tests {
         ];
         let mut parent = Session::new("parent");
         let deliveries = plan_user_mention_deliveries(&team, "source-1", &prepared);
-        parent.replace_pending_agent_deliveries("source-1", deliveries);
+        parent.pending_plugin_deliveries = deliveries;
 
         assert_eq!(restore_pending_agent_deliveries(&mut team, &parent), 1);
         assert_eq!(restore_pending_agent_deliveries(&mut team, &parent), 1);
@@ -1852,7 +2070,13 @@ mod tests {
         assert!(result.ok);
         let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
         let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
-        team.register_active_agent(dev_id.clone(), command_tx);
+        team.register_active_agent(
+            dev_id.clone(),
+            command_tx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+        );
 
         let asset = tiangong_types::StoredAsset {
             asset_id: "asset-1".to_string(),

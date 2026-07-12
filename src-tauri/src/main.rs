@@ -508,6 +508,7 @@ fn run_gui() {
             });
 
             let scheduler_ctx = state.create_scheduler_context();
+            state.start_scheduled_message_consumer(app.handle().clone());
             tauri::async_runtime::spawn(async move {
                 tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
                 silent::Scheduler::schedule(silent::SCHEDULER.clone()).await;

@@ -9835,6 +9835,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10057,6 +10058,7 @@ version = "0.12.1"
 dependencies = [
  "anyhow",
  "descape",
+ "libc",
  "portable-pty",
  "scru128",
  "serde",

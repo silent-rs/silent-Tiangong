@@ -41,17 +41,13 @@ impl TiangongState {
             .iter_mut()
             .find(|session| session.id == session_id)
         {
-            // 宿主可在执行期间修改这些会话元数据；Core 只拥有消息/上下文执行状态。
-            // 终态重载时保留宿主值，再由调用方统一落盘，避免异步标题更新丢失。
-            loaded.title = existing.title.clone();
+            // 标题、信任模式、思考强度和执行状态均由 Core 单写者落盘；终态重载
+            // 必须采用磁盘权威值。cwd/cwd_mode 仍由宿主工作区操作维护，暂时保留镜像。
             loaded.cwd = existing.cwd.clone();
             loaded.cwd_mode = existing.cwd_mode.clone();
-            loaded.trust_mode = existing.trust_mode;
-            loaded.reasoning_effort = existing.reasoning_effort.clone();
             loaded.updated_at = loaded.updated_at.max(existing.updated_at.clone());
-            // Token 用量由宿主按流事件累计，Core 文件不维护这部分运行指标。
-            loaded.token_usage = existing.token_usage.clone();
-            loaded.agent_token_usage = existing.agent_token_usage.clone();
+            // 累计用量由 Core 在终态前写入会话文件；宿主流事件只负责实时展示，
+            // 终态重载必须采用 Core 值，避免不同宿主形成第二套持久化口径。
             loaded.current_tokens = loaded.current_tokens.max(existing.current_tokens);
             loaded.active_agent_current_tokens = existing.active_agent_current_tokens;
             loaded.active_agent_id = existing.active_agent_id.clone();
@@ -67,7 +63,11 @@ impl TiangongState {
         Ok(true)
     }
 
-    pub(in crate::app_state) fn persist_app_only(&mut self) -> Result<()> {
+    /// 仅持久化宿主应用状态，不写入任何 Session JSON。
+    ///
+    /// Core 运行期间及终态同步后，Session 文件仍由 Core 独占写入；宿主若只需保存
+    /// 活跃会话、草稿或全局配置，必须使用此入口，避免用内存镜像覆盖 Core 的更新。
+    pub fn persist_app_only(&mut self) -> Result<()> {
         self.normalize_sessions_for_storage();
         self.services.repository.persist_app_only(&self.store)
     }

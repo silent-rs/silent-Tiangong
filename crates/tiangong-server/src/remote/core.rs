@@ -411,6 +411,7 @@ impl ServerCoreManager {
 
         let models = tiangong_config::registry::models();
         let attachment_capabilities = attachment_capability_snapshot(&models);
+        let storage_root = tiangong_app_state::app_state::storage_root();
         let core = tiangong_core::core::TiangongCore::builder()
             .config(isolated_core_config_provider(&session_config))
             .session(session.clone())
@@ -459,12 +460,12 @@ impl ServerCoreManager {
                 //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
                 plugins.push(self.mcp_plugin.clone());
                 // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-                plugins.extend(tiangong_plugin_agent_team::default_plugins());
+                plugins.extend(tiangong_plugin_agent_team::default_plugins(
+                    storage_root.clone(),
+                ));
                 plugins
             })
-            .storage(tiangong_core::core::CoreStorageLocation::new(
-                tiangong_app_state::app_state::storage_root(),
-            ))
+            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
             .build()?;
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
@@ -604,15 +605,38 @@ impl ServerCoreManager {
 }
 
 fn assistant_outgoing_after_last_user(session: &Session) -> (OutgoingMessage, bool) {
-    let last_user_index = session
+    let Some(last_user) = session
         .messages
         .iter()
-        .rposition(|message| message.role == MessageRole::User)
-        .unwrap_or(0);
+        .rfind(|message| message.role == MessageRole::User)
+    else {
+        return (text_outgoing("处理完成"), false);
+    };
+    assistant_outgoing_after_user(session, &last_user.id)
+}
+
+/// 提取某一条稳定用户消息对应的回复。
+///
+/// 以用户消息 ID 划定区间，而不是读取“最后一轮”，供 Desktop 内嵌 Server 在同一
+/// 会话存在排队轮次时准确返回各自的结果。
+pub fn assistant_outgoing_after_user(
+    session: &Session,
+    user_message_id: &str,
+) -> (OutgoingMessage, bool) {
+    let Some(user_index) = session
+        .messages
+        .iter()
+        .position(|message| message.id == user_message_id && message.role == MessageRole::User)
+    else {
+        return (text_outgoing("处理完成"), false);
+    };
     let assistant_messages = session
         .messages
         .iter()
-        .skip(last_user_index + 1)
+        .skip(user_index + 1)
+        .take_while(|message| {
+            message.role != MessageRole::User || message.worker_id.as_deref().is_some()
+        })
         .filter(|message| message.role == MessageRole::Assistant)
         .collect::<Vec<_>>();
     let has_direct_agent_reply = assistant_messages.iter().any(|message| {
@@ -623,12 +647,15 @@ fn assistant_outgoing_after_last_user(session: &Session) -> (OutgoingMessage, bo
                 .is_some_and(|worker_id| worker_id.starts_with("agent:"))
     });
     let selected = assistant_messages.into_iter().filter(|message| {
-        !has_direct_agent_reply
-            || (message.model_excluded
+        if has_direct_agent_reply {
+            message.model_excluded
                 && message
                     .worker_id
                     .as_deref()
-                    .is_some_and(|worker_id| worker_id.starts_with("agent:")))
+                    .is_some_and(|worker_id| worker_id.starts_with("agent:"))
+        } else {
+            message.worker_id.is_none()
+        }
     });
     let mut texts = Vec::new();
     let mut media_items = Vec::new();
@@ -987,7 +1014,7 @@ fn sync_stream_event_to_state(
         if let Err(error) = state.reload_session_from_disk(session_id) {
             tracing::warn!(%error, %session_id, "终态重载 Core 会话失败");
         }
-        let _ = state.persist_session(session_id);
+        let _ = state.persist_app_only();
         drop(state);
         event_bus.publish(TiangongEvent::TurnCompleted {
             session_id: session_id.to_string(),
@@ -1007,7 +1034,7 @@ fn sync_stream_event_to_state(
             content_blocks,
             media,
             model_excluded,
-            pending_agent_deliveries,
+            pending_plugin_deliveries,
         } => {
             apply_user_message_event(
                 session,
@@ -1017,11 +1044,12 @@ fn sync_stream_event_to_state(
                 media,
                 *model_excluded,
             );
-            session.pending_agent_deliveries = pending_agent_deliveries.clone();
+            session.pending_plugin_deliveries = pending_plugin_deliveries.clone();
         }
         StreamEvent::SessionMessageUpsert {
             message,
-            pending_agent_deliveries,
+            pending_plugin_deliveries,
+            completed_plugin_delivery_ids,
             deferred_tool_injections,
         } => {
             if let Some(existing) = session
@@ -1033,15 +1061,22 @@ fn sync_stream_event_to_state(
             } else {
                 session.messages.push(message.clone());
             }
-            if let Some(deliveries) = pending_agent_deliveries {
-                session.pending_agent_deliveries = deliveries.clone();
+            if let Some(deliveries) = pending_plugin_deliveries {
+                session.pending_plugin_deliveries = deliveries.clone();
+            }
+            if let Some(delivery_ids) = completed_plugin_delivery_ids {
+                session.completed_plugin_delivery_ids = delivery_ids.clone();
             }
             if let Some(injections) = deferred_tool_injections {
                 session.deferred_tool_injections = injections.clone();
             }
         }
-        StreamEvent::PendingAgentDeliveriesChanged { deliveries } => {
-            session.pending_agent_deliveries = deliveries.clone();
+        StreamEvent::PendingPluginDeliveriesChanged {
+            deliveries,
+            completed_delivery_ids,
+        } => {
+            session.pending_plugin_deliveries = deliveries.clone();
+            session.completed_plugin_delivery_ids = completed_delivery_ids.clone();
         }
         StreamEvent::DeferredToolInjectionsChanged { injections } => {
             session.deferred_tool_injections = injections.clone();
@@ -1303,26 +1338,18 @@ fn ensure_assistant_message(session: &mut Session, message_id: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    use tiangong_core::core::{CoreStorageLocation, Plugin, TiangongCore};
-    use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
-    use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-    };
-    use tiangong_types::{ContentBlock, StoredAsset};
+    pub(crate) static STORAGE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    static STORAGE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    struct TestHomeGuard {
+    pub(crate) struct TestHomeGuard {
         previous_home: Option<OsString>,
     }
 
     impl TestHomeGuard {
-        fn new(home: &Path) -> Self {
+        pub(crate) fn new(home: &Path) -> Self {
             std::fs::create_dir_all(home).unwrap();
             let previous_home = std::env::var_os("HOME");
             // SAFETY: 所有修改 HOME 的 Server 测试均由 STORAGE_TEST_LOCK 串行。
@@ -1345,6 +1372,21 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    use tiangong_core::core::{CoreStorageLocation, Plugin, TiangongCore};
+    use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+    use tiangong_core::tool_override::{
+        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    };
+    use tiangong_types::{ContentBlock, StoredAsset};
+
+    use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
 
     struct BlockingEndPlugin {
         entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -1475,6 +1517,51 @@ mod tests {
         let error = attachment_delivery_failure("receipt failed", &created_paths);
         assert!(error.to_string().contains("receipt failed"));
         assert!(!created_paths[0].exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_state_sync_reloads_core_metadata_without_rewriting_session_file() {
+        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
+        let (_manager, session, session_path, state) = isolated_test_manager(root.path());
+        let authoritative_title = session.title.clone();
+        let authoritative_session = std::fs::read(&session_path).unwrap();
+
+        state
+            .lock()
+            .await
+            .sessions_mut()
+            .iter_mut()
+            .find(|candidate| candidate.id == session.id)
+            .expect("测试会话应存在")
+            .title = "宿主内存标题".to_string();
+
+        let state_for_sync = state.clone();
+        let session_id = session.id.clone();
+        tokio::task::spawn_blocking(move || {
+            sync_stream_event_to_state(
+                &state_for_sync,
+                &Arc::new(EventBus::default()),
+                &session_id,
+                &StreamEvent::Done { usage: None },
+            );
+        })
+        .await
+        .expect("终态同步不应 panic");
+
+        assert_eq!(std::fs::read(&session_path).unwrap(), authoritative_session);
+        assert_eq!(
+            state
+                .lock()
+                .await
+                .sessions()
+                .iter()
+                .find(|candidate| candidate.id == session.id)
+                .expect("终态同步后会话镜像应存在")
+                .title,
+            authoritative_title
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1695,7 +1782,7 @@ mod tests {
             content_blocks: Vec::new(),
             media: Vec::new(),
             model_excluded: false,
-            pending_agent_deliveries: Vec::new(),
+            pending_plugin_deliveries: Vec::new(),
         });
         tracker.observe_event(&StreamEvent::Done { usage: None });
         assert!(matches!(
@@ -1718,7 +1805,7 @@ mod tests {
             content_blocks: Vec::new(),
             media: Vec::new(),
             model_excluded: false,
-            pending_agent_deliveries: Vec::new(),
+            pending_plugin_deliveries: Vec::new(),
         });
 
         tracker.fail_all("Core 事件流已关闭");
@@ -1768,6 +1855,31 @@ mod tests {
             &outgoing.attachments[0],
             MessageContent::Image { url, .. } if url == "/tmp/server-image.png"
         ));
+    }
+
+    #[test]
+    fn outgoing_is_correlated_to_the_requested_user_message_id() {
+        let mut session = Session::new("correlated-outgoing");
+        session.append_prepared_user_message_with_id(
+            "user-1".to_string(),
+            vec![ContentBlock::text("first")],
+        );
+        session.append_worker_message(MessageRole::User, "worker input", "agent:dev:one");
+        session.append_worker_message(MessageRole::Assistant, "worker output", "agent:dev:one");
+        session.append_message(MessageRole::Assistant, "first reply");
+        session.append_prepared_user_message_with_id(
+            "user-2".to_string(),
+            vec![ContentBlock::text("second")],
+        );
+        session.append_message(MessageRole::Assistant, "second reply");
+
+        let (first, first_is_direct) = assistant_outgoing_after_user(&session, "user-1");
+        let (second, second_is_direct) = assistant_outgoing_after_user(&session, "user-2");
+
+        assert!(!first_is_direct);
+        assert!(!second_is_direct);
+        assert!(matches!(first.content, MessageContent::Text(ref text) if text == "first reply"));
+        assert!(matches!(second.content, MessageContent::Text(ref text) if text == "second reply"));
     }
 
     #[test]
