@@ -1,14 +1,9 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { api, type MediaAsset } from '@/api/tauri';
+import type { ContentBlock, RawAttachment } from '@/api/tauri';
 
 export const MAX_ATTACHMENT_BASE64_BYTES = 50 * 1024 * 1024;
 
-export type Attachment = {
-  kind: 'image' | 'file';
-  url: string;
-  title: string;
-  mime_type?: string;
-};
+export type Attachment = RawAttachment;
 
 export function imageMimeType(path: string): string | undefined {
   const lower = path.toLowerCase();
@@ -37,7 +32,23 @@ export function fileMimeType(path: string): string | undefined {
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'text/markdown';
   if (lower.endsWith('.json')) return 'application/json';
   if (lower.endsWith('.csv')) return 'text/csv';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.mov')) return 'video/quicktime';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mkv')) return 'video/x-matroska';
   return undefined;
+}
+
+export function attachmentKindFromMime(mimeType: string | undefined): Attachment['kind'] {
+  if (mimeType?.startsWith('image/')) return 'image';
+  if (mimeType?.startsWith('audio/')) return 'audio';
+  if (mimeType?.startsWith('video/')) return 'video';
+  return 'file';
 }
 
 export function imageExtFromMime(mimeType: string): string {
@@ -52,7 +63,7 @@ export function resolveAttachmentUrl(url: string): string {
   if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('asset://')) {
     return url;
   }
-  if (url.startsWith('/')) {
+  if (url.startsWith('/') || /^[A-Za-z]:[\\/]/.test(url) || url.startsWith('\\\\')) {
     return convertFileSrc(url);
   }
   return url;
@@ -84,14 +95,36 @@ export function fileToDataUrl(file: File): Promise<string> {
 }
 
 export function attachmentFromPath(path: string): Attachment {
-  const lower = path.toLowerCase();
-  const isImage = /\.(png|jpe?g|webp|gif)$/.test(lower);
+  const mimeType = fileMimeType(path);
   return {
-    kind: isImage ? 'image' : 'file',
-    url: path,
-    title: path.split('/').pop() || path,
-    mime_type: fileMimeType(path),
+    kind: attachmentKindFromMime(mimeType),
+    source: path,
+    original_name: path.split(/[\\/]/).pop() || path,
+    mime_type: mimeType,
   };
+}
+
+export function attachmentsFromContentBlocks(blocks: ContentBlock[]): Attachment[] {
+  return blocks.flatMap((block): Attachment[] => {
+    if (block.type === 'asset_reference' || block.type === 'image') {
+      if (block.asset.local_path === '<legacy-inline-data-unavailable>') return [];
+      return [{
+        kind: block.asset.kind,
+        source: block.asset.local_path,
+        original_name: block.asset.original_name,
+        mime_type: block.asset.mime_type,
+      }];
+    }
+    if (block.type === 'media') {
+      return [{
+        kind: block.kind,
+        source: block.url,
+        original_name: block.title,
+        mime_type: block.mime_type,
+      }];
+    }
+    return [];
+  });
 }
 
 export function base64SizeFromDataUrl(dataUrl: string): number {
@@ -112,51 +145,4 @@ export function assertBase64Size(dataUrl: string, title: string) {
 
 export function estimatedBase64Size(rawBytes: number): number {
   return Math.ceil(rawBytes / 3) * 4;
-}
-
-/** 判断 URL 是否为已归档到本地的媒体路径（~/.tiangong/media/...）。
- *  统一正反斜杠后判断（Windows 路径兼容）。 */
-export function isArchivedMediaPath(url: string): boolean {
-  return url.replace(/\\/g, '/').includes('/.tiangong/media/');
-}
-
-export async function attachmentToBase64Media(item: Attachment): Promise<MediaAsset> {
-  if (item.url.startsWith('data:')) {
-    assertBase64Size(item.url, item.title);
-    return {
-      kind: item.kind,
-      url: item.url,
-      title: item.title,
-      mime_type: item.mime_type || mimeTypeFromDataUrl(item.url),
-      capability: 'multimodal',
-    };
-  }
-
-  // 已归档到本地的路径直接复用，不重新读取为 base64——避免编辑时反复产生重复附件。
-  if (isArchivedMediaPath(item.url)) {
-    return {
-      kind: item.kind,
-      url: item.url,
-      title: item.title,
-      mime_type: item.mime_type,
-      capability: 'multimodal',
-    };
-  }
-
-  const encoded = await api.readAttachmentAsDataUrl(item.url, MAX_ATTACHMENT_BASE64_BYTES);
-  return {
-    kind: item.kind,
-    url: encoded.data_url,
-    title: item.title || encoded.title,
-    mime_type: item.mime_type || encoded.mime_type,
-    capability: 'multimodal',
-  };
-}
-
-export async function attachmentsToBase64Media(items: Attachment[]): Promise<MediaAsset[]> {
-  const media: MediaAsset[] = [];
-  for (const item of items) {
-    media.push(await attachmentToBase64Media(item));
-  }
-  return media;
 }

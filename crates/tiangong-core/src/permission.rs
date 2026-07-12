@@ -526,7 +526,7 @@ fn infer_tool_name_scope(
     let scope = match tool_name {
         "read_file" | "write_file" | "replace_in_file" | "list_dir" | "tree_dir" => "path",
         "web_fetch" => "network",
-        "analyze_attachment" | "generate_image" | "speech_to_text" | "text_to_speech" => "external",
+        "generate_image" | "speech_to_text" | "text_to_speech" => "external",
         "run_command" | "run_shell" | "terminal_send" => "command",
         "web_form_extract" | "web_form_fill" | "web_click" | "web_load_html" => "browser",
         _ => return (None, summary),
@@ -708,6 +708,27 @@ mod tests {
         // 声明，classify_tool 不再中心化维护，走未知工具默认 Critical 分支。
         assert_eq!(classify_tool("spawn_task"), PermissionLevel::Critical);
         assert_eq!(classify_tool("unknown_tool"), PermissionLevel::Critical);
+    }
+
+    #[test]
+    fn plugin_owned_tool_has_no_core_owned_audit_scope() {
+        let call = crate::model::ToolCall {
+            id: "call-1".to_string(),
+            name: "plugin_owned_tool".to_string(),
+            arguments: serde_json::json!({}),
+        };
+
+        assert_eq!(infer_audit_target(&call), (None, None));
+
+        let existing_external_tool = crate::model::ToolCall {
+            id: "call-2".to_string(),
+            name: "generate_image".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        assert_eq!(
+            infer_audit_target(&existing_external_tool),
+            (Some("external".to_string()), None)
+        );
     }
 
     #[test]

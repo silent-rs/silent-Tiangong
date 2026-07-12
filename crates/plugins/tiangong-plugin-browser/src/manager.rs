@@ -201,35 +201,25 @@ impl BrowserManager {
     /// 从 state 读出 session_id + tabs + active_tab_id，写入 per-session store。
     /// 用于应用重启后恢复各 session 上次的浏览器页面（review #6）。
     /// 从 BrowserState 持久化（静态 helper，供闭包/轮询线程使用）。
-    /// 与 persist_session_tabs 走同一套过滤逻辑。
+    /// `about:blank` 也属于浏览器插件的恢复元数据，只延迟创建 WebView，不得丢弃。
     pub(crate) fn persist_from_state(state: &BrowserState) {
         if state.session_id.is_empty() {
             return;
         }
-        let tabs: Vec<_> = state
-            .tabs
-            .iter()
-            .filter(|tab| {
-                let url = tab.url.trim();
-                !url.is_empty() && !url.starts_with("about:")
-            })
-            .cloned()
-            .collect();
+        let tabs = state.tabs.clone();
         let active_tab_id = state
             .active_tab_id
             .as_ref()
             .filter(|id| tabs.iter().any(|t| &t.id == *id))
             .cloned();
-        if tabs.is_empty() {
-            crate::session_store::BrowserSessionStore::remove(&state.session_id);
-        } else {
-            crate::session_store::BrowserSessionStore::save(
-                &state.session_id,
-                &crate::session_store::BrowserSessionPersisted {
-                    tabs,
-                    active_tab_id,
-                },
-            );
+        if let Err(error) = crate::session_store::BrowserSessionStore::save(
+            &state.session_id,
+            &crate::session_store::BrowserSessionPersisted {
+                tabs,
+                active_tab_id,
+            },
+        ) {
+            warn!(%error, session_id = %state.session_id, "持久化浏览器会话状态失败");
         }
     }
 
@@ -238,33 +228,20 @@ impl BrowserManager {
             if s.session_id.is_empty() {
                 return;
             }
-            // 过滤空页面/about:blank，只持久化有真实 URL 的 tab
-            let tabs: Vec<_> = s
-                .tabs
-                .iter()
-                .filter(|tab| {
-                    let url = tab.url.trim();
-                    !url.is_empty() && !url.starts_with("about:")
-                })
-                .cloned()
-                .collect();
-            // active_tab_id 只保留仍存在于过滤后 tabs 的 id
+            let tabs = s.tabs.clone();
             let active_tab_id = s
                 .active_tab_id
                 .as_ref()
                 .filter(|id| tabs.iter().any(|t| &t.id == *id))
                 .cloned();
-            if tabs.is_empty() {
-                // 无有效 tab：删除 store（不保留空状态）
-                crate::session_store::BrowserSessionStore::remove(&s.session_id);
-            } else {
-                crate::session_store::BrowserSessionStore::save(
-                    &s.session_id,
-                    &crate::session_store::BrowserSessionPersisted {
-                        tabs,
-                        active_tab_id,
-                    },
-                );
+            if let Err(error) = crate::session_store::BrowserSessionStore::save(
+                &s.session_id,
+                &crate::session_store::BrowserSessionPersisted {
+                    tabs,
+                    active_tab_id,
+                },
+            ) {
+                warn!(%error, session_id = %s.session_id, "持久化浏览器会话状态失败");
             }
         }
     }

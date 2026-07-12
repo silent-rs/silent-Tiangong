@@ -9581,6 +9581,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-runtime",
  "tauri-runtime-wry",
+ "tempfile",
  "tiangong-app-state",
  "tiangong-cli",
  "tiangong-config",
@@ -9626,6 +9627,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-media-archive",
  "tiangong-types",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -9786,6 +9788,7 @@ dependencies = [
  "base64 0.22.1",
  "reqwest 0.13.4",
  "scru128",
+ "serde",
  "tiangong-types",
  "tracing",
 ]
@@ -9836,12 +9839,15 @@ dependencies = [
 name = "tiangong-plugin-browser"
 version = "0.12.1"
 dependencies = [
+ "anyhow",
  "base64-url",
  "scru128",
  "serde",
  "serde_json",
  "tauri",
  "tauri-plugin",
+ "tempfile",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-types",
  "tokio",
@@ -10039,6 +10045,8 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-plugin",
+ "tempfile",
+ "tiangong-config",
  "tiangong-core",
  "tiangong-toolkit",
  "tiangong-types",

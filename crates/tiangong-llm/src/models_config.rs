@@ -422,7 +422,7 @@ impl ModelsConfig {
         false
     }
 
-    /// 判断 chat 路由指向的模型是否应直接处理图片（跳过 analyze_attachment 工具）
+    /// 判断 chat 路由指向的模型是否支持直接处理图片。
     /// 以模型定义中声明的 capabilities 为准
     pub fn chat_is_multimodal(&self) -> bool {
         let Some(entry) = self.routing.get(&RoutingSlot::Chat) else {

@@ -12,20 +12,18 @@
 //! （`ToolOverrideHandler::handle` 返回值不携带 usage，故走语义反馈通道）。
 
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::pin::Pin;
 use std::time::Instant;
 
 use serde_json::json;
-use tiangong_core::model::{ModelClient, ModelRequest, ToolCall, ToolSpec};
+use tiangong_core::model::{ModelRequest, ToolCall, ToolSpec};
 use tiangong_core::session::{Message, MessageRole, Session};
 use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
-use tiangong_types::{ContentBlock, MediaAsset};
+use tiangong_types::{ContentBlock, MediaKind, StoredAsset};
 
-use crate::plugin::AnalyzeAttachmentPlugin;
-
-/// 工具名常量。
-const TOOL_ANALYZE_ATTACHMENT: &str = "analyze_attachment";
+use crate::plugin::{AnalyzeAttachmentPlugin, TOOL_ANALYZE_ATTACHMENT};
 
 impl AnalyzeAttachmentPlugin {
     /// 主分发入口：同步解析参数并返回 owned Future（借用不逃逸到 async 上下文）。
@@ -90,9 +88,9 @@ impl AnalyzeAttachmentPlugin {
         };
 
         // 按序号筛选或收集全部媒体资源。
-        let media = match attachment_index {
+        let assets = match attachment_index {
             Some(index) => {
-                let all = collect_message_media(source);
+                let all = collect_message_assets(source);
                 match all.get(index) {
                     Some(asset) => vec![asset.clone()],
                     None => {
@@ -107,15 +105,18 @@ impl AnalyzeAttachmentPlugin {
                     }
                 }
             }
-            None => collect_message_media(source),
-        };
+            None => collect_message_assets(source),
+        }
+        .into_iter()
+        .filter(|asset| asset.kind == MediaKind::Image)
+        .collect::<Vec<_>>();
 
-        if media.is_empty() {
+        if assets.is_empty() {
             return Box::pin(async move {
                 attachment_error(
                     &tool_name,
-                    "未找到可解析的附件",
-                    "selected message has no attachments",
+                    "未找到可解析的图片附件",
+                    "selected resources contain no image attachment",
                     started,
                 )
             });
@@ -142,13 +143,10 @@ impl AnalyzeAttachmentPlugin {
                 instruction
             ),
         );
-        for asset in media {
-            user_message.content.push(ContentBlock::Media {
-                kind: asset.kind,
-                url: asset.url,
-                mime_type: asset.mime_type,
-                title: asset.title,
-            });
+        for asset in assets {
+            user_message
+                .content
+                .push(ContentBlock::Image { asset, data: None });
         }
         attachment_context.push(user_message);
 
@@ -159,18 +157,16 @@ impl AnalyzeAttachmentPlugin {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
-            include_media: true,
         };
 
         let feedback_tx = self.feedback_tx();
 
         Box::pin(async move {
-            // `complete` 是阻塞调用，放到 spawn_blocking 避免占用 reactor。
-            let result = tokio::task::spawn_blocking(move || client.complete(&req)).await;
+            let result = client.complete_async(&req).await;
             let duration_ms = started.elapsed().as_millis() as u64;
 
             match result {
-                Ok(Ok(response)) => {
+                Ok(response) => {
                     // 经语义反馈通道把 multimodal 子调用的 token 用量上报给 core，
                     // 由 turn-scoped usage sink 即时累加到本轮 accumulated_usage 并发送
                     // StreamEvent::TokenUsage，确保成本统计与 Done.usage 都包含该消耗
@@ -180,13 +176,7 @@ impl AnalyzeAttachmentPlugin {
                     }
                     attachment_success(&response.text, &tool_name, duration_ms)
                 }
-                Ok(Err(err)) => attachment_failure(&tool_name, "附件解析失败", &err, duration_ms),
-                Err(join_err) => attachment_failure(
-                    &tool_name,
-                    "附件解析失败",
-                    &anyhow::anyhow!("multimodal 调用任务异常：{join_err}"),
-                    duration_ms,
-                ),
+                Err(err) => attachment_failure(&tool_name, "附件解析失败", &err, duration_ms),
             }
         })
     }
@@ -197,7 +187,7 @@ impl ToolSpecProvider for AnalyzeAttachmentPlugin {
         // app 层已保证满足条件才构造插件，无条件暴露工具规格。
         vec![ToolSpec {
             name: TOOL_ANALYZE_ATTACHMENT.to_string(),
-            description: "按需调用多模态模型解析用户上传的图片或文件附件。只有当用户问题确实需要查看附件内容时才调用；普通文本对话不要调用。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
+            description: "按需调用多模态模型解析用户上传的图片附件。只有当用户问题确实需要查看图片内容时才调用；文档和其他文件应使用对应文件工具。重要：message_id 必须使用用户消息中提示文字所标注的 ID，不要使用其他消息的 ID。".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -237,7 +227,7 @@ impl ToolOverrideHandler for AnalyzeAttachmentPlugin {
 
 /// 判断消息是否携带媒体附件。
 fn has_media(msg: &Message) -> bool {
-    msg.has_media()
+    !collect_message_assets(msg).is_empty()
 }
 
 /// 定位用于附件解析的源用户消息。
@@ -260,9 +250,115 @@ fn find_attachment_source_message<'a>(
         .find(|message| message.role == MessageRole::User && has_media(message))
 }
 
-/// 收集消息中的全部媒体资源（content blocks 是媒体的唯一真相源）。
-fn collect_message_media(message: &Message) -> Vec<MediaAsset> {
-    message.extract_media_assets()
+/// 收集消息中的全部稳定资源，保持 content block 原始顺序。
+///
+/// 新合同直接复用宿主提供的 [`StoredAsset`]；旧 `Media` 块只在此兼容边界转换，
+/// 不把旧格式重新泄漏给 Core 或 Provider。
+fn collect_message_assets(message: &Message) -> Vec<StoredAsset> {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { asset, .. } | ContentBlock::AssetReference { asset } => {
+                Some(asset.clone())
+            }
+            ContentBlock::Media {
+                kind,
+                url,
+                mime_type,
+                title,
+            } => Some(stored_asset_from_legacy_media(
+                *kind,
+                url,
+                mime_type.as_deref(),
+                title.as_deref(),
+            )),
+            ContentBlock::Text { .. } | ContentBlock::ModelInstruction { .. } => None,
+        })
+        .collect()
+}
+
+fn stored_asset_from_legacy_media(
+    kind: MediaKind,
+    url: &str,
+    mime_type: Option<&str>,
+    title: Option<&str>,
+) -> StoredAsset {
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    let original_name = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| legacy_resource_name(url));
+    let mime_type = mime_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| inferred_mime_type(kind, url));
+    let size = if url.trim_start().starts_with("data:")
+        || url.trim_start().starts_with("http://")
+        || url.trim_start().starts_with("https://")
+    {
+        0
+    } else {
+        std::fs::metadata(url)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+    };
+
+    StoredAsset {
+        asset_id: format!("legacy-{:016x}", hasher.finish()),
+        local_path: url.to_string(),
+        original_name,
+        mime_type,
+        size,
+        kind,
+    }
+}
+
+fn legacy_resource_name(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("data:") {
+        return "legacy-attachment".to_string();
+    }
+
+    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
+    without_query
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "legacy-attachment".to_string())
+}
+
+fn inferred_mime_type(kind: MediaKind, url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(data_mime) = trimmed
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(';').map(|(mime, _)| mime))
+        .filter(|mime| mime.contains('/'))
+    {
+        return data_mime.to_string();
+    }
+
+    let path = trimmed
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    match kind {
+        MediaKind::Image if path.ends_with(".jpg") || path.ends_with(".jpeg") => "image/jpeg",
+        MediaKind::Image if path.ends_with(".webp") => "image/webp",
+        MediaKind::Image if path.ends_with(".gif") => "image/gif",
+        MediaKind::Image => "image/png",
+        MediaKind::Video if path.ends_with(".webm") => "video/webm",
+        MediaKind::Video => "video/mp4",
+        MediaKind::Audio if path.ends_with(".wav") => "audio/wav",
+        MediaKind::Audio if path.ends_with(".ogg") => "audio/ogg",
+        MediaKind::Audio => "audio/mpeg",
+        MediaKind::File => "application/octet-stream",
+    }
+    .to_string()
 }
 
 // ── ToolResult 构造辅助 ──────────────────────────────────────────
@@ -330,5 +426,81 @@ fn attachment_error(tool_name: &str, summary: &str, stderr: &str, started: Insta
             exit_code: 1,
             summary: summary.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored_asset(asset_id: &str, local_path: &str) -> StoredAsset {
+        StoredAsset {
+            asset_id: asset_id.to_string(),
+            local_path: local_path.to_string(),
+            original_name: format!("{asset_id}.png"),
+            mime_type: "image/png".to_string(),
+            size: 4,
+            kind: MediaKind::Image,
+        }
+    }
+
+    #[test]
+    fn collects_new_and_legacy_resources_in_content_order() {
+        let first = stored_asset("asset-1", "/tmp/asset-1.png");
+        let second = stored_asset("asset-2", "/tmp/asset-2.png");
+        let mut message = Message::new(MessageRole::User, "查看附件");
+        message.content.extend([
+            ContentBlock::Image {
+                asset: first.clone(),
+                data: Some("CURRENT_BASE64".to_string()),
+            },
+            ContentBlock::AssetReference {
+                asset: second.clone(),
+            },
+            ContentBlock::Media {
+                kind: MediaKind::Image,
+                url: "/tmp/legacy.jpg".to_string(),
+                mime_type: Some("image/jpeg".to_string()),
+                title: Some("legacy.jpg".to_string()),
+            },
+        ]);
+
+        let assets = collect_message_assets(&message);
+
+        assert_eq!(assets.len(), 3);
+        assert_eq!(assets[0], first);
+        assert_eq!(assets[1], second);
+        assert_eq!(assets[2].local_path, "/tmp/legacy.jpg");
+        assert_eq!(assets[2].original_name, "legacy.jpg");
+        assert_eq!(assets[2].mime_type, "image/jpeg");
+        assert!(assets[2].asset_id.starts_with("legacy-"));
+    }
+
+    #[test]
+    fn legacy_data_url_does_not_become_a_resource_name() {
+        let asset = stored_asset_from_legacy_media(
+            MediaKind::Image,
+            "data:image/png;base64,AAAA",
+            None,
+            None,
+        );
+
+        assert_eq!(asset.original_name, "legacy-attachment");
+        assert_eq!(asset.mime_type, "image/png");
+        assert_eq!(asset.size, 0);
+    }
+
+    #[test]
+    fn legacy_image_mime_is_inferred_from_path() {
+        let asset = stored_asset_from_legacy_media(
+            MediaKind::Image,
+            "https://example.com/photo.jpg?size=large",
+            None,
+            None,
+        );
+
+        assert_eq!(asset.original_name, "photo.jpg");
+        assert_eq!(asset.mime_type, "image/jpeg");
+        assert_eq!(asset.size, 0);
     }
 }

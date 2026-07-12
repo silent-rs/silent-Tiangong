@@ -10,6 +10,12 @@ pub(in crate::app_state) struct PersistedAppState {
     pub(in crate::app_state) model_list: Vec<String>,
     #[serde(default)]
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
+    /// 会话级输入草稿。发送状态为运行时字段，不会写入此映射。
+    #[serde(default)]
+    pub(in crate::app_state) input_drafts: HashMap<String, SessionInputDraft>,
+    /// 旧版全局草稿兼容字段。加载后迁移到当时的 active_session_id，后续不再写回。
+    #[serde(default, skip_serializing)]
+    pub(in crate::app_state) input_draft: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,6 +26,8 @@ pub(in crate::app_state) struct LegacyPersistedState {
     // 旧 app.json 中残留的同名字段会被 serde 默认忽略。
     #[serde(default)]
     pub(in crate::app_state) model_list: Vec<String>,
+    #[serde(default)]
+    pub(in crate::app_state) input_draft: String,
 }
 
 #[derive(Debug)]
@@ -29,6 +37,7 @@ pub(in crate::app_state) struct LoadedState {
     pub(in crate::app_state) workspace_dir: String,
     pub(in crate::app_state) model_list: Vec<String>,
     pub(in crate::app_state) agent_config: Option<AgentConfig>,
+    pub(in crate::app_state) input_drafts: HashMap<String, SessionInputDraft>,
 }
 
 pub use tiangong_types::StreamEvent;

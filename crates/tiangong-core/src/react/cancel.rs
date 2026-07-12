@@ -1,42 +1,19 @@
 //! 取消原语：ReAct 主循环与总结阶段共享的取消处理基础设施。
 //!
-//! LLM 流式请求在被用户取消时，不同 Provider 协议对 usage 的返回时机不同，
-//! 因此需要按协议区分处理策略；同时 `select!` 循环 break 时需要携带一个可
-//! 被 anyhow downcast 的取消信号类型，替代裸字符串。本模块集中这两类原语。
+//! `select!` 循环 break 时使用可被 anyhow downcast 的取消信号类型，替代裸字符串。
 
 use std::sync::mpsc::Sender as StdSender;
+use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
 
 use tiangong_types::StreamEvent;
 
 use crate::react::context::emit_token_usage;
-
-/// 取消时 LLM 请求的处理策略，按 Provider 协议区分。
-pub(super) enum CancelStrategy {
-    /// Anthropic: usage 在 message_start 就返回 prompt_tokens，可直接 abort
-    AbortWithStreamingUsage,
-    /// OpenAI 兼容: usage 仅在流式最后一个 chunk 返回，需等请求完成
-    WaitForUsage,
-}
-
-impl CancelStrategy {
-    pub(super) fn from_protocol(protocol: tiangong_llm::model::ProviderProtocol) -> Self {
-        match protocol {
-            tiangong_llm::model::ProviderProtocol::Anthropic => {
-                CancelStrategy::AbortWithStreamingUsage
-            }
-            tiangong_llm::model::ProviderProtocol::OpenAiChatCompletions
-            | tiangong_llm::model::ProviderProtocol::DeepSeek => CancelStrategy::WaitForUsage,
-        }
-    }
-}
 
 /// select! 循环 break 时携带的取消信号，替代魔术字符串。
 #[derive(Clone, Copy)]
 pub(super) enum CancelSignal {
     /// 直接 abort LLM future，上报已累积的 streaming_usage
     Abort,
-    /// 在后台等待 LLM 自然完成以获取 usage，前端立即响应取消
-    WaitForUsage,
 }
 
 impl CancelSignal {
@@ -50,7 +27,6 @@ impl std::fmt::Display for CancelSignal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CancelSignal::Abort => write!(f, "cancelled (abort)"),
-            CancelSignal::WaitForUsage => write!(f, "cancelled (wait for usage)"),
         }
     }
 }
@@ -75,4 +51,28 @@ pub(super) fn emit_cancel_usage(
     let _ = stream_tx.send(StreamEvent::Error {
         message: "已取消".into(),
     });
+}
+
+/// 等待同步取消或会话关闭信号。工具 future 与此 future 竞争，保证挂起工具不会
+/// 阻塞 `into_session`、`shutdown_join`、会话删除或应用退出。
+pub(crate) async fn wait_for_abort_signal(
+    cancel_flag: Arc<AtomicBool>,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+) {
+    loop {
+        if cancel_flag.load(Ordering::Acquire)
+            || shutdown_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// 请求取消异步 LLM 任务并等待其真正退出，确保它不再越过轮次屏障发送迟到事件。
+pub(super) async fn abort_and_join<T>(handle: tokio::task::JoinHandle<T>) {
+    handle.abort();
+    let _ = handle.await;
 }

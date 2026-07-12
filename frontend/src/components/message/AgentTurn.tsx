@@ -8,7 +8,7 @@ import { HighlightText } from "../HighlightText";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { AgentReplyCard } from "./AgentReplyCard";
 import { useResolvedTheme } from "@/hooks/useTheme";
-import { textContent } from "@/api/tauri";
+import { hasMediaBlocks, textContent } from "@/api/tauri";
 import {
   formatMessageTime,
   msgReasoning,
@@ -133,7 +133,7 @@ function AgentTurnView({
     } else if (msg.role === "assistant") {
       const isStreaming = msg.id === streamingMessageId;
       const assistantReasoning = msgReasoning(msg);
-      const hasVisibleAssistantContent = isStreaming || textContent(msg).trim().length > 0 || assistantReasoning.length > 0 || !!msg.media?.length || msg.content.some((b) => b.type === "media");
+      const hasVisibleAssistantContent = isStreaming || textContent(msg).trim().length > 0 || assistantReasoning.length > 0 || !!msg.media?.length || hasMediaBlocks(msg);
       if (!hasVisibleAssistantContent) continue;
       flushTools();
       const prevFrag = fragments[fragments.length - 1];
@@ -276,7 +276,7 @@ function AgentTurnView({
             <div key={msg.id} className="text-foreground" title={formatMessageTime(msg.created_at)}>
               {isStreaming ? (
                 <StreamingMessage content={visibleStreamingContent} reasoningContent={streamingReasoningContent} />
-              ) : visibleText || (msg.media && msg.media.length > 0) || msg.content.some((b) => b.type === "media") ? (
+              ) : visibleText || (msg.media && msg.media.length > 0) || hasMediaBlocks(msg) ? (
                 <div>
                   <ContentMedia message={msg} />
                   {searchQuery && findTextOccurrences(visibleText, searchQuery, caseSensitive).length > 0

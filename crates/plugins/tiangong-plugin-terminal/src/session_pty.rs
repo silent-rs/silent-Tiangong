@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Emitter;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::collaboration::{TerminalActivityTracker, TerminalBusyState};
 use crate::manager::{spawn_command_loop, TerminalManager};
 use crate::output_processor;
+use crate::session_store::{TerminalSessionPersisted, TerminalSessionStore, TerminalTabPersisted};
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
@@ -67,6 +68,13 @@ struct TerminalRoute {
     tab_id: Option<String>,
 }
 
+struct TerminalTabCreation {
+    title: Option<String>,
+    created_at: Option<String>,
+    activate: bool,
+    preferred_active: Option<String>,
+}
+
 fn parse_terminal_id(value: &str) -> Option<TerminalRoute> {
     if value.trim().is_empty() {
         return None;
@@ -108,6 +116,8 @@ fn sanitize_path_segment(value: &str) -> String {
 /// 按对话管理的 PTY 注册表
 pub struct SessionPtyRegistry {
     sessions: Mutex<HashMap<String, Arc<SessionTabs>>>,
+    /// 串行化终端插件元数据的读改写，避免并发创建/关闭互相覆盖。
+    persistence: Mutex<()>,
     app: tauri::AppHandle,
     /// 懒创建 PTY 时使用的默认 cwd，由 `set_cwd` / workspace 切换同步
     default_cwd: Mutex<String>,
@@ -117,6 +127,7 @@ impl SessionPtyRegistry {
     pub fn new(app: tauri::AppHandle, default_cwd: String) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            persistence: Mutex::new(()),
             app,
             default_cwd: Mutex::new(default_cwd),
         }
@@ -151,7 +162,7 @@ impl SessionPtyRegistry {
             sessions.keys().cloned().collect()
         };
         for id in ids {
-            self.destroy(&id);
+            self.destroy_runtime_session(&id);
         }
     }
 
@@ -178,25 +189,106 @@ impl SessionPtyRegistry {
         );
     }
 
+    fn persisted_snapshot(&self, session_id: &str) -> anyhow::Result<TerminalSessionPersisted> {
+        let persisted = TerminalSessionStore::load_or_migrate_legacy(session_id)?;
+        Ok(self.merge_runtime_metadata(session_id, persisted))
+    }
+
+    fn merge_runtime_metadata(
+        &self,
+        session_id: &str,
+        persisted: TerminalSessionPersisted,
+    ) -> TerminalSessionPersisted {
+        let mut by_id = persisted
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.id.clone(), tab))
+            .collect::<HashMap<_, _>>();
+        let mut runtime_active = None;
+        if let Some(session_tabs) = self.existing_session_tabs(session_id) {
+            let tabs = session_tabs.tabs.lock().unwrap();
+            runtime_active = session_tabs.active_tab_id.lock().unwrap().clone();
+            for tab in tabs.values() {
+                by_id.insert(
+                    tab.tab_id.clone(),
+                    TerminalTabPersisted {
+                        id: tab.tab_id.clone(),
+                        title: tab.title.clone(),
+                        created_at: tab.created_at.clone(),
+                    },
+                );
+            }
+        }
+        let mut persisted_tabs = by_id.into_values().collect::<Vec<_>>();
+        persisted_tabs.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let active_tab_id = runtime_active
+            .filter(|active| persisted_tabs.iter().any(|tab| tab.id == *active))
+            .or_else(|| {
+                persisted
+                    .active_tab_id
+                    .filter(|active| persisted_tabs.iter().any(|tab| tab.id == *active))
+            })
+            .or_else(|| persisted_tabs.first().map(|tab| tab.id.clone()));
+        TerminalSessionPersisted {
+            tabs: persisted_tabs,
+            active_tab_id,
+        }
+    }
+
+    fn persist_session_metadata(&self, session_id: &str) {
+        let _guard = self.persistence.lock().unwrap();
+        let state = match self.persisted_snapshot(session_id) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(%error, session_id, "加载终端会话状态失败，取消本次覆盖写入");
+                return;
+            }
+        };
+        if let Err(error) = TerminalSessionStore::save(session_id, &state) {
+            warn!(%error, session_id, "持久化终端会话状态失败");
+        }
+    }
+
     /// 懒创建：获取或创建指定 session / terminal id 的 PTY。返回 true 表示 PTY 存活。
     ///
     /// 若注册表里已存在该 Tab 的条目但底层 PTY 已死亡（子进程退出、
     /// `cmd_tx` 失效），会先销毁陈旧条目再重建，避免复用死掉的 PTY 导致
     /// 「终端未就绪」（草稿态固定 id 复用场景的根因，见 issue #156 后续修复）。
     pub fn ensure(&self, terminal_id: &str, cwd: &str) -> bool {
-        self.ensure_with_title(terminal_id, cwd, None)
+        self.ensure_with_title(terminal_id, cwd, None, true)
     }
 
-    fn ensure_with_title(&self, terminal_id: &str, cwd: &str, title: Option<String>) -> bool {
+    fn ensure_with_title(
+        &self,
+        terminal_id: &str,
+        cwd: &str,
+        title: Option<String>,
+        activate: bool,
+    ) -> bool {
         let Some(route) = parse_terminal_id(terminal_id) else {
             return false;
         };
         let session_tabs = self.session_tabs(&route.session_id);
+        let persisted = TerminalSessionStore::load_or_migrate_legacy(&route.session_id)
+            .unwrap_or_else(|error| {
+                warn!(%error, session_id = %route.session_id, "加载终端会话状态失败");
+                TerminalSessionPersisted::default()
+            });
         let tab_id = route
             .tab_id
             .clone()
             .or_else(|| session_tabs.active_or_first_tab_id())
+            .or_else(|| persisted.active_tab_id.clone())
+            .or_else(|| persisted.tabs.first().map(|tab| tab.id.clone()))
             .unwrap_or_else(|| scru128::new().to_string());
+        let persisted_tab = persisted.tabs.iter().find(|tab| tab.id == tab_id);
+        let title = title.or_else(|| persisted_tab.map(|tab| tab.title.clone()));
+        let created_at = persisted_tab.map(|tab| tab.created_at.clone());
+        let preferred_active = persisted.active_tab_id.clone();
 
         {
             let mut tabs = session_tabs.tabs.lock().unwrap();
@@ -206,7 +298,10 @@ impl SessionPtyRegistry {
                         tabs.get_mut(&tab_id).expect("tab exists").title = title;
                     }
                     drop(tabs);
-                    session_tabs.set_active_tab(tab_id);
+                    if activate || preferred_active.as_deref() == Some(&tab_id) {
+                        session_tabs.set_active_tab(tab_id);
+                    }
+                    self.persist_session_metadata(&route.session_id);
                     return true;
                 }
                 Some(_) => {
@@ -217,7 +312,13 @@ impl SessionPtyRegistry {
         }
 
         let instance_id = terminal_instance_id(&route.session_id, &tab_id);
-        self.create_pty(&route.session_id, &tab_id, &instance_id, cwd, title)
+        let creation = TerminalTabCreation {
+            title,
+            created_at,
+            activate,
+            preferred_active,
+        };
+        self.create_pty(&route.session_id, &tab_id, &instance_id, cwd, creation)
     }
 
     /// 创建指定终端 Tab 的 PTY（调用方负责保证注册表里无该 Tab 的存活条目）。
@@ -227,7 +328,7 @@ impl SessionPtyRegistry {
         tab_id: &str,
         instance_id: &str,
         cwd: &str,
-        title: Option<String>,
+        creation: TerminalTabCreation,
     ) -> bool {
         let default_cwd = self
             .default_cwd
@@ -283,15 +384,21 @@ impl SessionPtyRegistry {
             tab_id.to_string(),
             SessionPty {
                 tab_id: tab_id.to_string(),
-                title: title.unwrap_or_else(|| "终端".to_string()),
-                created_at: tiangong_types::now_text(),
+                title: creation.title.unwrap_or_else(|| "终端".to_string()),
+                created_at: creation
+                    .created_at
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(tiangong_types::now_text),
                 manager,
                 cmd_tx: tx,
                 activity,
             },
         );
         drop(tabs);
-        session_tabs.set_active_tab(tab_id.to_string());
+        if creation.activate || creation.preferred_active.as_deref() == Some(tab_id) {
+            session_tabs.set_active_tab(tab_id.to_string());
+        }
+        self.persist_session_metadata(session_id);
         info!(session_id, tab_id, "终端 Tab PTY 已创建");
         true
     }
@@ -309,8 +416,8 @@ impl SessionPtyRegistry {
 
     fn interactive_slot_for_session(&self, session_id: &str) -> Option<SessionPty> {
         let session_tabs = self.existing_session_tabs(session_id)?;
-        let active = session_tabs.active_tab_id.lock().unwrap().clone();
         let tabs = session_tabs.tabs.lock().unwrap();
+        let active = session_tabs.active_tab_id.lock().unwrap().clone();
 
         if let Some(active) = active {
             if let Some(slot) = tabs.get(&active) {
@@ -337,37 +444,57 @@ impl SessionPtyRegistry {
     }
 
     pub fn list_tabs(&self, session_id: &str) -> crate::types::TerminalTabListResponse {
-        let Some(session_tabs) = self.existing_session_tabs(session_id) else {
-            return crate::types::TerminalTabListResponse {
-                tabs: Vec::new(),
-                active_tab_id: None,
-            };
-        };
-
-        let active = session_tabs.active_tab_id.lock().unwrap().clone();
-        let tabs = session_tabs.tabs.lock().unwrap();
-        let active_tab_id = if let Some(active) = active {
-            if tabs.contains_key(&active) {
-                Some(active)
-            } else {
-                tabs.keys().next().cloned()
-            }
-        } else {
-            tabs.keys().next().cloned()
-        };
-        let mut tab_infos: Vec<_> = tabs
-            .values()
-            .map(|slot| crate::types::TerminalTabInfo {
-                id: slot.tab_id.clone(),
-                title: slot.title.clone(),
-                created_at: slot.created_at.clone(),
-                alive: slot.manager.is_alive(),
-                cwd: slot.manager.cwd(),
-                shell: slot.manager.shell(),
-                phase: slot.activity.busy_state().phase_label().to_string(),
+        let persisted =
+            TerminalSessionStore::load_or_migrate_legacy(session_id).unwrap_or_else(|error| {
+                warn!(%error, session_id, "加载终端会话状态失败");
+                TerminalSessionPersisted::default()
+            });
+        let mut tab_infos = persisted
+            .tabs
+            .into_iter()
+            .map(|tab| {
+                (
+                    tab.id.clone(),
+                    crate::types::TerminalTabInfo {
+                        id: tab.id,
+                        title: tab.title,
+                        created_at: tab.created_at,
+                        alive: false,
+                        cwd: String::new(),
+                        shell: String::new(),
+                        phase: "idle".to_string(),
+                    },
+                )
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        let mut active_tab_id = persisted.active_tab_id;
+
+        if let Some(session_tabs) = self.existing_session_tabs(session_id) {
+            let tabs = session_tabs.tabs.lock().unwrap();
+            let active = session_tabs.active_tab_id.lock().unwrap().clone();
+            for slot in tabs.values() {
+                tab_infos.insert(
+                    slot.tab_id.clone(),
+                    crate::types::TerminalTabInfo {
+                        id: slot.tab_id.clone(),
+                        title: slot.title.clone(),
+                        created_at: slot.created_at.clone(),
+                        alive: slot.manager.is_alive(),
+                        cwd: slot.manager.cwd(),
+                        shell: slot.manager.shell(),
+                        phase: slot.activity.busy_state().phase_label().to_string(),
+                    },
+                );
+            }
+            active_tab_id = active
+                .filter(|active| tab_infos.contains_key(active))
+                .or(active_tab_id);
+        }
+        let mut tab_infos = tab_infos.into_values().collect::<Vec<_>>();
         tab_infos.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let active_tab_id = active_tab_id
+            .filter(|active| tab_infos.iter().any(|tab| tab.id == *active))
+            .or_else(|| tab_infos.first().map(|tab| tab.id.clone()));
         crate::types::TerminalTabListResponse {
             tabs: tab_infos,
             active_tab_id,
@@ -386,7 +513,7 @@ impl SessionPtyRegistry {
         let tab_id = scru128::new().to_string();
         let terminal_id = terminal_instance_id(session_id, &tab_id);
         let cwd = cwd.unwrap_or_default();
-        if !self.ensure_with_title(&terminal_id, &cwd, title) {
+        if !self.ensure_with_title(&terminal_id, &cwd, title, true) {
             return Err(format!("终端 Tab PTY 启动失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.clone()), "user");
@@ -403,7 +530,7 @@ impl SessionPtyRegistry {
             return Err("终端 Tab 恢复失败：session_id 或 tab_id 为空".to_string());
         }
         let terminal_id = terminal_instance_id(session_id, tab_id);
-        if !self.ensure_with_title(&terminal_id, "", title) {
+        if !self.ensure_with_title(&terminal_id, "", title, false) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
@@ -418,21 +545,20 @@ impl SessionPtyRegistry {
             return false;
         }
         session_tabs.set_active_tab(tab_id.to_string());
+        self.persist_session_metadata(session_id);
         self.emit_tab_updated(session_id, Some(tab_id.to_string()), "user");
         true
     }
 
-    pub fn tab_close(&self, session_id: &str, tab_id: &str) -> bool {
-        let terminal_id = terminal_instance_id(session_id, tab_id);
-        let existed = self.get(&terminal_id).is_some();
-        self.destroy(&terminal_id);
+    pub fn tab_close(&self, session_id: &str, tab_id: &str) -> Result<bool, String> {
+        let existed = self.close_tab_persisted(session_id, tab_id)?;
         if existed {
             let next_active = self
                 .existing_session_tabs(session_id)
                 .and_then(|tabs| tabs.active_or_first_tab_id());
             self.emit_tab_updated(session_id, next_active, "user");
         }
-        existed
+        Ok(existed)
     }
 
     /// 为 Agent 命令执行选择终端：优先复用当前会话空闲终端，全部繁忙时创建新终端。
@@ -450,6 +576,7 @@ impl SessionPtyRegistry {
                 if slot.manager.is_alive() {
                     if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
                         session_tabs.set_active_tab(tab_id.clone());
+                        self.persist_session_metadata(&route.session_id);
                         self.emit_tab_updated(
                             &route.session_id,
                             Some(tab_id.clone()),
@@ -521,6 +648,7 @@ impl SessionPtyRegistry {
 
         if let Some(tab_id) = idle_tab_id {
             session_tabs.set_active_tab(tab_id.clone());
+            self.persist_session_metadata(&route.session_id);
             self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
             return Some(crate::capability::TerminalSelection {
                 session_id: route.session_id.clone(),
@@ -558,25 +686,69 @@ impl SessionPtyRegistry {
             return;
         };
         if let Some(tab_id) = route.tab_id {
-            let Some(session_tabs) = self.existing_session_tabs(&route.session_id) else {
-                return;
-            };
-            let removed = {
-                let mut tabs = session_tabs.tabs.lock().unwrap();
-                tabs.remove(&tab_id)
-            };
-            if removed.is_some() {
-                let next_active = session_tabs.active_or_first_tab_id();
-                *session_tabs.active_tab_id.lock().unwrap() = next_active.clone();
-                info!(session_id = %route.session_id, tab_id = %tab_id, "终端 Tab PTY 已销毁");
+            if let Err(error) = self.close_tab_persisted(&route.session_id, &tab_id) {
+                warn!(%error, session_id = %route.session_id, tab_id, "删除终端 Tab 失败");
             }
             return;
         }
 
-        let slot = self.sessions.lock().unwrap().remove(&route.session_id);
+        let slot = self.destroy_runtime_session(&route.session_id);
+        let _guard = self.persistence.lock().unwrap();
+        if let Err(error) = TerminalSessionStore::remove(&route.session_id) {
+            warn!(%error, session_id = %route.session_id, "删除终端会话状态失败");
+        }
         if slot.is_some() {
             info!(session_id = %route.session_id, "对话所有终端 Tab PTY 已销毁");
         }
+    }
+
+    /// 仅销毁运行中的 PTY，不删除插件持久化的 Tab 元数据。
+    fn destroy_runtime_session(&self, session_id: &str) -> Option<Arc<SessionTabs>> {
+        self.sessions.lock().unwrap().remove(session_id)
+    }
+
+    fn close_tab_persisted(&self, session_id: &str, tab_id: &str) -> Result<bool, String> {
+        let _guard = self.persistence.lock().unwrap();
+        let persisted = TerminalSessionStore::load_or_migrate_legacy(session_id)
+            .map_err(|error| format!("加载终端会话状态失败：{error}"))?;
+        let session_tabs = self.existing_session_tabs(session_id);
+        let previous_active = session_tabs
+            .as_ref()
+            .and_then(|tabs| tabs.active_tab_id.lock().unwrap().clone());
+        let removed = session_tabs.as_ref().and_then(|session_tabs| {
+            let mut tabs = session_tabs.tabs.lock().unwrap();
+            let removed = tabs.remove(tab_id);
+            drop(tabs);
+            let next_active = session_tabs.active_or_first_tab_id();
+            *session_tabs.active_tab_id.lock().unwrap() = next_active;
+            removed
+        });
+
+        let mut state = self.merge_runtime_metadata(session_id, persisted);
+        let existed = removed.is_some() || state.tabs.iter().any(|tab| tab.id == tab_id);
+        if !existed {
+            return Ok(false);
+        }
+        state.tabs.retain(|tab| tab.id != tab_id);
+        state.active_tab_id = state
+            .active_tab_id
+            .filter(|active| state.tabs.iter().any(|tab| tab.id == *active))
+            .or_else(|| state.tabs.first().map(|tab| tab.id.clone()));
+        if let Err(error) = TerminalSessionStore::save(session_id, &state) {
+            if let (Some(session_tabs), Some(removed)) = (session_tabs.as_ref(), removed) {
+                session_tabs
+                    .tabs
+                    .lock()
+                    .unwrap()
+                    .insert(tab_id.to_string(), removed);
+            }
+            if let Some(session_tabs) = session_tabs {
+                *session_tabs.active_tab_id.lock().unwrap() = previous_active;
+            }
+            return Err(format!("持久化终端 Tab 删除失败：{error}"));
+        }
+        info!(session_id, tab_id, "终端 Tab 已删除");
+        Ok(true)
     }
 
     /// 把临时草稿 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）。
@@ -585,7 +757,7 @@ impl SessionPtyRegistry {
     /// session 拿到真实 id 后调用此方法完成迁移：
     /// - 注册表 key：临时 id → 真实 id
     /// - manager 内部 session_id：更新（命令循环/输出线程后续用新 id）
-    /// - 持久化日志文件：临时目录 → 真实目录（rename，保留草稿期已产生的历史）
+    /// - 插件 Tab 元数据：临时 id → 真实 id（先写目标，再删除草稿状态）
     ///
     /// 幂等：真实 id 已存在或临时 id 不存在时安全返回（不破坏已有状态）。
     /// 前端调用前应保证真实 id 尚未创建 PTY（否则会与转正迁移冲突）。
@@ -598,54 +770,88 @@ impl SessionPtyRegistry {
             sessions.remove(draft_id)
         };
 
-        let Some(draft_tabs) = draft_tabs else {
-            // 草稿 id 不存在（用户草稿态没打开终端就没创建），无需迁移
-            return;
-        };
+        if let Some(draft_tabs) = draft_tabs {
+            {
+                let tabs = draft_tabs.tabs.lock().unwrap();
+                for (tab_id, slot) in tabs.iter() {
+                    let new_instance_id = terminal_instance_id(persistent_id, tab_id);
+                    slot.manager.set_session_id(new_instance_id);
+                }
+            }
 
-        {
-            let tabs = draft_tabs.tabs.lock().unwrap();
-            for (tab_id, slot) in tabs.iter() {
-                let new_instance_id = terminal_instance_id(persistent_id, tab_id);
-                slot.manager.set_session_id(new_instance_id);
+            let existing_tabs = {
+                let sessions = self.sessions.lock().unwrap();
+                sessions.get(persistent_id).cloned()
+            };
+
+            if let Some(existing_tabs) = existing_tabs {
+                let mut existing = existing_tabs.tabs.lock().unwrap();
+                let mut draft = draft_tabs.tabs.lock().unwrap();
+                for (tab_id, slot) in draft.drain() {
+                    existing.entry(tab_id).or_insert(slot);
+                }
+                if existing_tabs.active_tab_id.lock().unwrap().is_none() {
+                    *existing_tabs.active_tab_id.lock().unwrap() =
+                        draft_tabs.active_tab_id.lock().unwrap().clone();
+                }
+            } else {
+                let mut sessions = self.sessions.lock().unwrap();
+                match sessions.entry(persistent_id.to_string()) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(draft_tabs);
+                    }
+                    Entry::Occupied(entry) => {
+                        let existing_tabs = entry.get().clone();
+                        drop(sessions);
+                        let mut existing = existing_tabs.tabs.lock().unwrap();
+                        let mut draft = draft_tabs.tabs.lock().unwrap();
+                        for (tab_id, slot) in draft.drain() {
+                            existing.entry(tab_id).or_insert(slot);
+                        }
+                        if existing_tabs.active_tab_id.lock().unwrap().is_none() {
+                            *existing_tabs.active_tab_id.lock().unwrap() =
+                                draft_tabs.active_tab_id.lock().unwrap().clone();
+                        }
+                    }
+                }
             }
         }
 
-        let existing_tabs = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions.get(persistent_id).cloned()
+        let _guard = self.persistence.lock().unwrap();
+        let draft_state = match TerminalSessionStore::load(draft_id) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(%error, draft_id, "加载草稿终端会话状态失败，保留原状态");
+                return;
+            }
         };
-
-        if let Some(existing_tabs) = existing_tabs {
-            let mut existing = existing_tabs.tabs.lock().unwrap();
-            let mut draft = draft_tabs.tabs.lock().unwrap();
-            for (tab_id, slot) in draft.drain() {
-                existing.entry(tab_id).or_insert(slot);
+        let mut target_state = match TerminalSessionStore::load_or_migrate_legacy(persistent_id) {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(%error, persistent_id, "加载目标终端会话状态失败，保留草稿状态");
+                return;
             }
-            if existing_tabs.active_tab_id.lock().unwrap().is_none() {
-                *existing_tabs.active_tab_id.lock().unwrap() =
-                    draft_tabs.active_tab_id.lock().unwrap().clone();
+        };
+        let mut target_ids = target_state
+            .tabs
+            .iter()
+            .map(|tab| tab.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for tab in draft_state.tabs {
+            if target_ids.insert(tab.id.clone()) {
+                target_state.tabs.push(tab);
             }
-        } else {
-            let mut sessions = self.sessions.lock().unwrap();
-            match sessions.entry(persistent_id.to_string()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(draft_tabs);
-                }
-                Entry::Occupied(entry) => {
-                    let existing_tabs = entry.get().clone();
-                    drop(sessions);
-                    let mut existing = existing_tabs.tabs.lock().unwrap();
-                    let mut draft = draft_tabs.tabs.lock().unwrap();
-                    for (tab_id, slot) in draft.drain() {
-                        existing.entry(tab_id).or_insert(slot);
-                    }
-                    if existing_tabs.active_tab_id.lock().unwrap().is_none() {
-                        *existing_tabs.active_tab_id.lock().unwrap() =
-                            draft_tabs.active_tab_id.lock().unwrap().clone();
-                    }
-                }
-            }
+        }
+        if target_state.active_tab_id.is_none() {
+            target_state.active_tab_id = draft_state.active_tab_id;
+        }
+        target_state = self.merge_runtime_metadata(persistent_id, target_state);
+        if let Err(error) = TerminalSessionStore::save(persistent_id, &target_state) {
+            warn!(%error, persistent_id, "保存目标终端会话状态失败，保留草稿状态");
+            return;
+        }
+        if let Err(error) = TerminalSessionStore::remove(draft_id) {
+            warn!(%error, draft_id, "删除草稿终端会话状态失败");
         }
         info!(
             draft_id,
@@ -739,11 +945,7 @@ const DEFAULT_LOG_TAIL_LINES: usize = 5000;
 
 /// 分对话、分终端 Tab 的 PTY 持久化日志路径。
 fn terminal_log_path(session_id: &str, tab_id: &str) -> std::path::PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home)
-        .join(".tiangong")
+    tiangong_config::io::storage_root()
         .join("sessions")
         .join(sanitize_path_segment(session_id))
         .join(format!("terminal-{}.log", sanitize_path_segment(tab_id)))

@@ -16,14 +16,15 @@ import 'md-editor-rt/lib/preview.css';
 import { open } from '@tauri-apps/plugin-dialog';
 import { AgentPanel } from "./AgentPanel";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
-import { api, textContent, type ContentBlock } from "@/api/tauri";
+import { api, hasMediaBlocks, textContent, type ContentBlock } from "@/api/tauri";
 import {
   type Attachment,
+  attachmentKindFromMime,
   imageExtFromMime,
   fileToDataUrl,
   attachmentFromPath,
+  attachmentsFromContentBlocks,
   estimatedBase64Size,
-  attachmentsToBase64Media,
 } from '@/utils/attachments';
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -70,10 +71,13 @@ export function MessageList() {
   const prevSelectedAgentTabRef = useRef<string | null>(null);
   const [hasTts, setHasTts] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [editingAttachments, setEditingAttachments] = useState<Attachment[]>([]);
+  const editingRevisionRef = useRef(0);
+  const editingGenerationRef = useRef(0);
+  const editingBaseContentRef = useRef<ContentBlock[]>([]);
   const editingTextareaRef = useRef<HTMLTextAreaElement>(null!);
-  const [hasMultimodal, setHasMultimodal] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
   // 百分比轨道：鼠标 Y 比例映射到的用户提问序号，-1 表示未在轨道内
@@ -93,11 +97,6 @@ export function MessageList() {
   // 检查 TTS 能力
   useEffect(() => {
     api.hasTtsCapability().then(setHasTts).catch(() => setHasTts(false));
-  }, []);
-
-  // 检查多模态能力
-  useEffect(() => {
-    api.hasModelCapability('multimodal').then(setHasMultimodal).catch(() => setHasMultimodal(false));
   }, []);
 
   // 切换会话时关闭搜索
@@ -240,7 +239,7 @@ export function MessageList() {
       const group = completedGroups[index];
       if (group.type === "user") {
         const msg = group.messages[0];
-        const hasMedia = msg.media?.length || msg.content.some(b => b.type === "media");
+        const hasMedia = msg.media?.length || hasMediaBlocks(msg);
         return hasMedia ? 300 : 80;
       }
       if (group.type === "worker") return 120;
@@ -449,21 +448,21 @@ export function MessageList() {
 
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
-    if (runStatus !== "idle") return;
+    if (runStatus !== "idle" || !activeSessionId) return;
     setEditingMessageId(messageId);
+    setEditingSessionId(activeSessionId);
     setEditingContent(text);
+    editingRevisionRef.current = 0;
+    editingGenerationRef.current += 1;
     const msg = messages.find(m => m.id === messageId);
-    if (msg && hasMultimodal) {
-      const mediaAttachments: Attachment[] = (Array.isArray(msg.content) ? msg.content : [])
-        .filter((b: ContentBlock) => b.type === 'media' && b.url)
-        .map((b: ContentBlock) => ({
-          kind: b.kind === 'image' ? 'image' : 'file',
-          url: b.url!,
-          title: b.title || '',
-          mime_type: b.mime_type,
-        }));
+    if (msg) {
+      editingBaseContentRef.current = msg.content.map((block) => structuredClone(block));
+      const mediaAttachments = attachmentsFromContentBlocks(
+        Array.isArray(msg.content) ? msg.content : [],
+      );
       setEditingAttachments(mediaAttachments);
     } else {
+      editingBaseContentRef.current = [];
       setEditingAttachments([]);
     }
     setTimeout(() => {
@@ -473,30 +472,64 @@ export function MessageList() {
         textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
       }
     }, 0);
-  }, [runStatus, messages, hasMultimodal]);
+  }, [activeSessionId, runStatus, messages]);
 
   const handleConfirmEdit = useCallback(async () => {
-    if (!editingMessageId || !editingContent.trim()) return;
-    let media: Awaited<ReturnType<typeof attachmentsToBase64Media>> = [];
-    if (editingAttachments.length > 0 && hasMultimodal) {
-      try {
-        media = await attachmentsToBase64Media(editingAttachments);
-      } catch (err) {
-        console.error('附件转换失败:', err);
-        alert(err instanceof Error ? err.message : '附件转换失败');
-        return;
-      }
-    }
-    editAndResend(editingMessageId, editingContent.trim(), media);
+    if (!editingSessionId || !editingMessageId || !editingContent.trim()) return;
+    const targetSessionId = editingSessionId;
+    const messageId = editingMessageId;
+    const content = editingContent.trim();
+    const attachments = editingAttachments.map((attachment) => ({ ...attachment }));
+    const revision = editingRevisionRef.current;
+    const baseContent = editingBaseContentRef.current.map((block) => structuredClone(block));
+    const generation = editingGenerationRef.current;
+    const succeeded = await editAndResend(
+      targetSessionId,
+      messageId,
+      content,
+      attachments,
+      revision,
+      baseContent,
+    );
+    if (
+      !succeeded
+      || editingGenerationRef.current !== generation
+      || editingRevisionRef.current !== revision
+    ) return;
     setEditingMessageId(null);
+    setEditingSessionId(null);
     setEditingContent("");
     setEditingAttachments([]);
-  }, [editingMessageId, editingContent, editingAttachments, hasMultimodal, editAndResend]);
+    editingRevisionRef.current = 0;
+    editingBaseContentRef.current = [];
+  }, [
+    editingSessionId,
+    editingMessageId,
+    editingContent,
+    editingAttachments,
+    editAndResend,
+  ]);
 
   const handleCancelEdit = useCallback(() => {
+    editingGenerationRef.current += 1;
+    editingRevisionRef.current = 0;
+    editingBaseContentRef.current = [];
     setEditingMessageId(null);
+    setEditingSessionId(null);
     setEditingContent("");
     setEditingAttachments([]);
+  }, []);
+
+  const handleSetEditingContent = useCallback((content: string) => {
+    setEditingContent(content);
+    editingRevisionRef.current += 1;
+  }, []);
+
+  const handleSetEditingAttachments = useCallback((update: React.SetStateAction<Attachment[]>) => {
+    setEditingAttachments((current) => (
+      typeof update === 'function' ? update(current) : update
+    ));
+    editingRevisionRef.current += 1;
   }, []);
 
   const handleAttachFilesForEdit = useCallback(async () => {
@@ -506,16 +539,24 @@ export function MessageList() {
         directory: false,
         title: '选择图片或文件',
         filters: [
-          { name: '图片和文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'pdf', 'txt', 'md', 'json', 'csv'] },
+          {
+            name: '图片、音视频和文件',
+            extensions: [
+              'png', 'jpg', 'jpeg', 'webp', 'gif',
+              'mp3', 'wav', 'm4a', 'ogg', 'flac',
+              'mp4', 'mov', 'webm', 'mkv',
+              'pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'json', 'csv',
+            ],
+          },
         ],
       });
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (paths.length === 0) return;
       const newAttachments = paths.map(attachmentFromPath);
-      setEditingAttachments(prev => {
+      handleSetEditingAttachments(prev => {
         const next = [...prev];
         for (const item of newAttachments) {
-          if (!next.some(existing => existing.url === item.url)) {
+          if (!next.some(existing => existing.source === item.source)) {
             next.push(item);
           }
         }
@@ -524,35 +565,34 @@ export function MessageList() {
     } catch (e) {
       console.error('选择附件失败:', e);
     }
-  }, []);
+  }, [handleSetEditingAttachments]);
 
   const handleEditPaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!hasMultimodal) return;
-    const files = Array.from(e.clipboardData.files).filter(file =>
-      file.type.startsWith('image/')
-    );
+    const files = Array.from(e.clipboardData.files);
     if (files.length === 0) return;
     e.preventDefault();
     try {
       const pasted = await Promise.all(files.map(async (file, index) => {
-        const mimeType = file.type || 'image/png';
-        const title = file.name || `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`;
+        const mimeType = file.type || 'application/octet-stream';
+        const title = file.name || (mimeType.startsWith('image/')
+          ? `pasted-image-${Date.now()}-${index + 1}.${imageExtFromMime(mimeType)}`
+          : `pasted-file-${Date.now()}-${index + 1}`);
         if (estimatedBase64Size(file.size) > 50 * 1024 * 1024) {
           throw new Error(`附件"${title}"超过 50MB，已停止添加。`);
         }
         return {
-          kind: 'image' as const,
-          url: await fileToDataUrl(file),
-          title,
+          kind: attachmentKindFromMime(mimeType),
+          source: await fileToDataUrl(file),
+          original_name: title,
           mime_type: mimeType,
         };
       }));
-      setEditingAttachments(prev => [...prev, ...pasted]);
+      handleSetEditingAttachments(prev => [...prev, ...pasted]);
     } catch (err) {
       console.error('读取粘贴图片失败:', err);
       alert(err instanceof Error ? err.message : '读取粘贴图片失败');
     }
-  }, [hasMultimodal]);
+  }, [handleSetEditingAttachments]);
 
   // 拦截 MdPreview 内的链接点击：左键在嵌入浏览器中打开，右键保留系统默认
   useEffect(() => {
@@ -679,12 +719,11 @@ export function MessageList() {
                           editingContent={editingContent}
                           editingAttachments={editingAttachments}
                           editingTextareaRef={editingTextareaRef}
-                          hasMultimodal={hasMultimodal}
                           onStartEdit={handleStartEdit}
                           onConfirmEdit={handleConfirmEdit}
                           onCancelEdit={handleCancelEdit}
-                          onSetEditingContent={setEditingContent}
-                          onSetEditingAttachments={setEditingAttachments}
+                          onSetEditingContent={handleSetEditingContent}
+                          onSetEditingAttachments={handleSetEditingAttachments}
                           onAttachFiles={handleAttachFilesForEdit}
                           onEditPaste={handleEditPaste}
                         />

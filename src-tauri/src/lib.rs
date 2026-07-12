@@ -4,5 +4,6 @@ pub mod app;
 pub mod commands;
 pub mod scheduler;
 pub mod view;
+pub mod workspace_tabs;
 
 pub use app::{TiangongApp, ToolInjection};

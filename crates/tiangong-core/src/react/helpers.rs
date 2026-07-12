@@ -10,11 +10,13 @@
 //! core 不再感知浏览器快照注入。
 
 use std::sync::mpsc::Sender as StdSender;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::agent_team::lifecycle::TeamContext;
 use crate::core::command::{Command, PendingCommandEffect};
-use crate::react::message::append_or_reuse_user_message;
+use crate::react::message::{RuntimeMessageDisposition, accept_runtime_user_message};
 use crate::runtime::RuntimeEngine;
 use crate::session::Session;
 use tiangong_types::StreamEvent;
@@ -58,10 +60,13 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 pub(super) fn drain_pending_commands_async(
     session: &mut Session,
     engine: &RuntimeEngine,
+    agent_id: &str,
+    team: Option<&Arc<Mutex<TeamContext>>>,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> PendingCommandEffect {
-    let mut injected_message = false;
+    let mut current_agent_input = None;
+    let mut agent_routed = false;
 
     while let Ok(cmd) = cmd_rx.try_recv() {
         match cmd {
@@ -72,52 +77,69 @@ pub(super) fn drain_pending_commands_async(
                 return PendingCommandEffect::Terminate;
             }
             Command::CancelAgent { .. } => {}
-            Command::Shutdown => return PendingCommandEffect::Terminate,
+            Command::Shutdown => return PendingCommandEffect::Shutdown,
             Command::Message {
-                content,
+                prepared,
                 message_id,
-                media,
+                persistence_ack,
             } => {
-                let mid = append_or_reuse_user_message(session, &content, message_id, media);
-                let msg_media = session
-                    .messages
-                    .iter()
-                    .find(|message| message.id == mid)
-                    .map(|message| message.extract_media_assets())
-                    .unwrap_or_default();
-                let _ = stream_tx.send(StreamEvent::UserMessage {
-                    message_id: mid,
-                    content: content.clone(),
-                    media: msg_media,
-                });
-                injected_message = true;
+                match accept_runtime_user_message(
+                    agent_id,
+                    team,
+                    session,
+                    stream_tx,
+                    message_id,
+                    prepared,
+                    persistence_ack,
+                ) {
+                    Ok(RuntimeMessageDisposition::CurrentAgentInput(text)) => {
+                        current_agent_input = Some(text);
+                    }
+                    Ok(RuntimeMessageDisposition::RoutedToAgent) => {
+                        agent_routed = true;
+                    }
+                    Err(err) => tracing::warn!(
+                        error = %err,
+                        "排空队列时追加用户消息持久化失败"
+                    ),
+                }
             }
             Command::UpdateCwd { cwd } => {
                 session.cwd = cwd;
                 crate::core::apply_session_cwd(session);
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
+                });
+                return PendingCommandEffect::Terminate;
             }
             Command::ReloadConfig => {}
             Command::Approval { .. } => {}
             Command::InjectTool { tool_name, payload } => {
-                crate::react::message::inject_tool_to_session(
-                    session, stream_tx, &tool_name, &payload,
-                );
-                injected_message = true;
+                crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
             }
             Command::CompressContext => {
-                crate::core::compress_context_for_session(session, engine, stream_tx);
+                let _ = stream_tx.send(StreamEvent::AgentNotification {
+                    agent_id: "system".to_string(),
+                    agent_label: "系统".to_string(),
+                    content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
+                    level: "warning".to_string(),
+                });
             }
             Command::ResetContext => {
                 crate::core::reset_context_for_session(session, stream_tx, engine);
             }
             Command::EmitStreamEvent(ev) => {
+                let ev = *ev;
                 let _ = stream_tx.send(ev);
             }
         }
     }
 
-    if injected_message {
-        PendingCommandEffect::MessageInjected
+    if current_agent_input.is_some() || agent_routed {
+        PendingCommandEffect::MessagesInjected {
+            current_agent_input,
+            agent_routed,
+        }
     } else {
         PendingCommandEffect::None
     }
@@ -145,15 +167,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // 放入消息1、消息2、压缩、取消
         tx.send(Command::Message {
-            content: "msg1".into(),
+            prepared: vec![tiangong_types::ContentBlock::text("msg1")],
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
         tx.send(Command::Message {
-            content: "msg2".into(),
+            prepared: vec![tiangong_types::ContentBlock::text("msg2")],
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
         tx.send(Command::CompressContext).unwrap();
@@ -166,11 +188,15 @@ mod tests {
         let c2 = rx.try_recv().unwrap();
         let c3 = rx.try_recv().unwrap();
         match c1 {
-            Command::Message { content, .. } => assert_eq!(content, "msg1"),
+            Command::Message { prepared, .. } => {
+                assert_eq!(tiangong_types::content_blocks_text(&prepared), "msg1")
+            }
             _ => panic!("第一个应为 msg1"),
         }
         match c2 {
-            Command::Message { content, .. } => assert_eq!(content, "msg2"),
+            Command::Message { prepared, .. } => {
+                assert_eq!(tiangong_types::content_blocks_text(&prepared), "msg2")
+            }
             _ => panic!("第二个应为 msg2"),
         }
         assert!(
@@ -185,9 +211,9 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(Command::Message {
-            content: "msg".into(),
+            prepared: vec![tiangong_types::ContentBlock::text("msg")],
             message_id: None,
-            media: Vec::new(),
+            persistence_ack: None,
         })
         .unwrap();
 

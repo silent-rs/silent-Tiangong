@@ -1,19 +1,20 @@
 //! Sub Agent 生命周期管理
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender as StdSender;
 
 use crate::agent_team::descriptor::{AgentDescriptor, AgentStatus};
 use crate::agent_team::file_lock::FileLockManager;
-use crate::agent_team::message_bus::AgentMessage;
+use crate::agent_team::message_bus::{AgentInboxEntry, AgentMessage};
 use crate::agent_team::registry::AgentRegistry;
 use crate::agent_team::tools::MAX_AGENTS;
 use crate::core::command::Command;
 use crate::model::{ToolCall, ToolSpec};
-use crate::session::{Session, now_text};
+use crate::session::{PendingAgentDelivery, Session, now_text};
 use crate::tool::ToolResult;
-use tiangong_types::StreamEvent;
+use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks};
 use tokio::sync::mpsc as tokio_mpsc;
 
 /// 团队执行上下文，随 ReactEngine 的 execute_turn 传递
@@ -73,24 +74,31 @@ impl TeamContext {
         &mut self,
         agent_id: &str,
         message: AgentMessage,
-        media: Vec<tiangong_types::MediaAsset>,
+        additional_content: Vec<ContentBlock>,
+        session_message_id: Option<String>,
     ) {
-        let dispatched = if let Some(tx) = self.active_agent_senders.get(agent_id) {
-            tx.send(Command::Message {
-                content: format_agent_message_for_prompt(&message),
-                message_id: Some(message.id.clone()),
-                media,
-            })
-            .is_ok()
-        } else {
-            false
-        };
+        // Agent 输入按消息来源分批串行执行；运行中追加会让 direct-user 与
+        // delegated 结果共享一次总结，无法可靠决定结果应展示还是回灌 Main。
+        self.queue_agent_message(agent_id, message, additional_content, session_message_id);
+    }
 
-        if !dispatched {
-            self.registry.deliver_message(agent_id, message);
-            if let Some(waker) = &self.dispatch_waker {
-                let _ = waker.send(());
-            }
+    pub(crate) fn queue_agent_message(
+        &mut self,
+        agent_id: &str,
+        message: AgentMessage,
+        additional_content: Vec<ContentBlock>,
+        session_message_id: Option<String>,
+    ) {
+        self.registry.deliver_inbox_entry(
+            agent_id,
+            AgentInboxEntry {
+                message,
+                additional_content,
+                session_message_id,
+            },
+        );
+        if let Some(waker) = &self.dispatch_waker {
+            let _ = waker.send(());
         }
     }
 }
@@ -105,11 +113,27 @@ fn normalize_agent_role(role: &str) -> String {
     role.trim().trim_start_matches('@').to_string()
 }
 
-fn format_agent_message_for_prompt(message: &AgentMessage) -> String {
-    format!(
-        "[from:{} at {}]\n{}",
-        message.from, message.created_at, message.content
-    )
+pub(crate) fn prepared_agent_message_for_prompt(
+    message: &AgentMessage,
+    mut additional_content: Vec<ContentBlock>,
+) -> Vec<ContentBlock> {
+    let source_prefix = format!("[from:{} at {}]\n", message.from, message.created_at);
+    if additional_content.is_empty() {
+        return vec![ContentBlock::text(format!(
+            "{source_prefix}{}",
+            message.content
+        ))];
+    }
+
+    if let Some(ContentBlock::Text { text }) = additional_content
+        .iter_mut()
+        .find(|block| matches!(block, ContentBlock::Text { .. }))
+    {
+        text.insert_str(0, &source_prefix);
+    } else {
+        additional_content.insert(0, ContentBlock::text(source_prefix));
+    }
+    additional_content
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +142,11 @@ struct RestoredAgent {
     role: String,
     label: String,
     status: AgentStatus,
+    system_prompt: Option<String>,
+    tools: Option<Vec<String>>,
 }
+
+const AGENT_DESCRIPTOR_MARKER: &str = "tiangong-agent-descriptor:";
 
 /// 从会话历史中的 Agent 事件恢复团队注册表。
 ///
@@ -136,6 +164,12 @@ pub fn restore_agents_from_session_history(
             continue;
         }
 
+        if let Some(agent) = parse_persisted_agent_descriptor(message) {
+            restored.retain(|existing| existing.role != agent.role);
+            restored.push(agent);
+            continue;
+        }
+
         if let Some(agent) = parse_agent_created_message(&message.text_content()) {
             restored.retain(|existing| existing.role != agent.role);
             restored.push(agent);
@@ -145,8 +179,13 @@ pub fn restore_agents_from_session_history(
         if let Some((label, status, agent_id)) = parse_agent_status_message(&message.text_content())
         {
             for agent in &mut restored {
-                let id_matches = agent_id.as_deref() == Some(agent.agent_id.as_str());
-                if id_matches || agent.label == label {
+                // 新日志带稳定 ID 时只能按 ID 匹配；label 仅用于兼容没有 ID 的旧日志。
+                // 不同角色允许使用相同显示名，不能因其中一个被销毁而误删另一个。
+                let matches = match agent_id.as_deref() {
+                    Some(agent_id) => agent.agent_id == agent_id,
+                    None => agent.label == label,
+                };
+                if matches {
                     agent.status = status.clone();
                 }
             }
@@ -171,11 +210,13 @@ pub fn restore_agents_from_session_history(
             agent_id: agent.agent_id.clone(),
             role: agent.role.clone(),
             label: agent.label.clone(),
-            system_prompt: format!(
-                "你是从会话历史恢复的子 Agent，角色为 {}（{}）。请延续当前会话上下文，按该角色职责处理用户和主 Agent 分配的任务。",
-                agent.label, agent.role
-            ),
-            tools: tool_names.clone(),
+            system_prompt: agent.system_prompt.unwrap_or_else(|| {
+                format!(
+                    "你是从会话历史恢复的子 Agent，角色为 {}（{}）。请延续当前会话上下文，按该角色职责处理用户和主 Agent 分配的任务。",
+                    agent.label, agent.role
+                )
+            }),
+            tools: agent.tools.unwrap_or_else(|| tool_names.clone()),
             status: AgentStatus::Idle,
         };
         let child_session = load_child_session(parent_session, &agent.agent_id)
@@ -186,6 +227,24 @@ pub fn restore_agents_from_session_history(
     }
 
     count
+}
+
+fn parse_persisted_agent_descriptor(message: &crate::session::Message) -> Option<RestoredAgent> {
+    message.content.iter().find_map(|block| {
+        let ContentBlock::ModelInstruction { text } = block else {
+            return None;
+        };
+        let json = text.strip_prefix(AGENT_DESCRIPTOR_MARKER)?;
+        let descriptor = serde_json::from_str::<AgentDescriptor>(json).ok()?;
+        Some(RestoredAgent {
+            agent_id: descriptor.agent_id,
+            role: descriptor.role,
+            label: descriptor.label,
+            status: descriptor.status,
+            system_prompt: Some(descriptor.system_prompt),
+            tools: Some(descriptor.tools),
+        })
+    })
 }
 
 fn parse_agent_created_message(content: &str) -> Option<RestoredAgent> {
@@ -205,6 +264,8 @@ fn parse_agent_created_message(content: &str) -> Option<RestoredAgent> {
         role: role.trim().to_string(),
         label: label.trim().to_string(),
         status: AgentStatus::Idle,
+        system_prompt: None,
+        tools: None,
     })
 }
 
@@ -354,6 +415,7 @@ pub fn execute_create_agent(
                 created_at: now_text(),
             },
             Vec::new(),
+            None,
         );
     }
 
@@ -522,7 +584,7 @@ pub fn execute_send_message(
         created_at: now_text(),
     };
 
-    team.dispatch_agent_message(&target.agent_id, message, Vec::new());
+    team.dispatch_agent_message(&target.agent_id, message, Vec::new(), None);
 
     let _ = stream_tx.send(StreamEvent::AgentMessage {
         from_agent_id: current_agent_id.to_string(),
@@ -623,7 +685,7 @@ pub fn execute_broadcast_message(
             to: agent_id.clone(),
             ..message.clone()
         };
-        team.dispatch_agent_message(agent_id, msg, Vec::new());
+        team.dispatch_agent_message(agent_id, msg, Vec::new(), None);
     }
 
     // 为每个目标发送事件
@@ -875,13 +937,49 @@ pub fn execute_team_tool(
     team: &mut TeamContext,
     current_agent_id: &str,
     call: &ToolCall,
-    parent_session: &Session,
+    parent_session: &mut Session,
     parent_tools: &[ToolSpec],
     stream_tx: &StdSender<StreamEvent>,
 ) -> ToolResult {
     match call.name.as_str() {
-        "create_agent" => execute_create_agent(team, call, parent_session, parent_tools, stream_tx),
-        "dismiss_agent" => execute_dismiss_agent(team, call, stream_tx),
+        "create_agent" => {
+            let result = execute_create_agent(team, call, parent_session, parent_tools, stream_tx);
+            if result.ok
+                && let Some(role) = call.arguments.get("role").and_then(|value| value.as_str())
+                && let Some(agent) = team.registry.find_by_role(role)
+            {
+                append_team_history_message(
+                    parent_session,
+                    stream_tx,
+                    format!(
+                        "[Agent] {} ({}) 已加入团队 id={}",
+                        agent.label, agent.role, agent.agent_id
+                    ),
+                    Some(agent),
+                );
+            }
+            result
+        }
+        "dismiss_agent" => {
+            let previous = call
+                .arguments
+                .get("role")
+                .and_then(|value| value.as_str())
+                .and_then(|role| team.registry.find_by_role(role))
+                .map(|agent| (agent.agent_id.clone(), agent.label.clone()));
+            let result = execute_dismiss_agent(team, call, stream_tx);
+            if result.ok
+                && let Some((agent_id, label)) = previous
+            {
+                append_team_history_message(
+                    parent_session,
+                    stream_tx,
+                    format!("[Agent] {label} 状态变更: terminated id={agent_id}"),
+                    None,
+                );
+            }
+            result
+        }
         "send_message" => execute_send_message(team, current_agent_id, call, stream_tx),
         "broadcast_message" => execute_broadcast_message(team, current_agent_id, call, stream_tx),
         "notify_user" => execute_notify_user(team, current_agent_id, call, stream_tx),
@@ -889,6 +987,31 @@ pub fn execute_team_tool(
         "unlock_file" => execute_unlock_file(team, current_agent_id, call, stream_tx),
         _ => error_tool_result(&call.name, &format!("未知团队工具: {}", call.name)),
     }
+}
+
+fn append_team_history_message(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    content: String,
+    descriptor: Option<&AgentDescriptor>,
+) {
+    let mut message = crate::session::Message::new(crate::session::MessageRole::System, content);
+    message.model_excluded = true;
+    if let Some(descriptor) = descriptor
+        && let Ok(json) = serde_json::to_string(descriptor)
+    {
+        message
+            .content
+            .push(ContentBlock::model_instruction(format!(
+                "{AGENT_DESCRIPTOR_MARKER}{json}"
+            )));
+    }
+    let message_id = message.id.clone();
+    session.messages.push(message);
+    if let Err(error) = session.try_persist_to_disk() {
+        tracing::warn!(%error, "持久化 Agent 生命周期记录失败");
+    }
+    crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
 }
 
 /// 用户输入中的 Agent @ 路由结果。
@@ -952,25 +1075,154 @@ pub fn route_user_mentions(
     content: &str,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
-    route_user_mentions_with_media(team, content, Vec::new(), stream_tx)
+    route_user_mentions_with_content(team, None, vec![ContentBlock::text(content)], stream_tx)
+}
+
+/// 在用户消息持久化前生成确定性的直达投递计划。
+pub(crate) fn plan_user_mention_deliveries(
+    team: &TeamContext,
+    source_message_id: &str,
+    prepared: &[ContentBlock],
+) -> Vec<PendingAgentDelivery> {
+    build_user_mention_entries(team, Some(source_message_id), prepared.to_vec())
+        .into_iter()
+        .map(|(target_agent_id, _label, entry)| PendingAgentDelivery {
+            delivery_id: entry.message.id,
+            source_message_id: source_message_id.to_string(),
+            target_agent_id,
+            content: entry.message.content,
+            created_at: entry.message.created_at,
+            additional_content: entry.additional_content,
+        })
+        .collect()
+}
+
+/// 把已经随父 Session 落盘的投递计划放入内存收件箱。
+pub(crate) fn dispatch_pending_agent_deliveries(
+    team: &mut TeamContext,
+    parent_session: &Session,
+    source_message_id: &str,
+    stream_tx: &StdSender<StreamEvent>,
+) -> bool {
+    team.registry
+        .remove_pending_source_message(source_message_id);
+    let deliveries = parent_session
+        .pending_agent_deliveries
+        .iter()
+        .filter(|delivery| delivery.source_message_id == source_message_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut dispatched = false;
+    for delivery in deliveries {
+        let Some(agent) = team.registry.get(&delivery.target_agent_id) else {
+            continue;
+        };
+        if agent.status == AgentStatus::Terminated {
+            continue;
+        }
+        let label = agent.label.clone();
+        let content = delivery.content.clone();
+        team.queue_agent_message(
+            &delivery.target_agent_id,
+            AgentMessage {
+                id: delivery.delivery_id,
+                from: "user".to_string(),
+                to: delivery.target_agent_id.clone(),
+                content: delivery.content,
+                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                created_at: delivery.created_at,
+            },
+            delivery.additional_content,
+            Some(delivery.source_message_id),
+        );
+        let _ = stream_tx.send(StreamEvent::AgentMessage {
+            from_agent_id: "user".to_string(),
+            from_agent_label: "User".to_string(),
+            to_agent_id: delivery.target_agent_id,
+            to_agent_label: label,
+            content,
+        });
+        dispatched = true;
+    }
+    dispatched
+}
+
+/// Core 重建后恢复尚未完成的直达投递；注册表按 delivery id 幂等去重。
+pub(crate) fn restore_pending_agent_deliveries(
+    team: &mut TeamContext,
+    parent_session: &Session,
+) -> usize {
+    let mut restored = 0usize;
+    for delivery in &parent_session.pending_agent_deliveries {
+        let Some(agent) = team.registry.get(&delivery.target_agent_id) else {
+            continue;
+        };
+        if agent.status == AgentStatus::Terminated {
+            continue;
+        }
+        team.queue_agent_message(
+            &delivery.target_agent_id,
+            AgentMessage {
+                id: delivery.delivery_id.clone(),
+                from: "user".to_string(),
+                to: delivery.target_agent_id.clone(),
+                content: delivery.content.clone(),
+                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                created_at: delivery.created_at.clone(),
+            },
+            delivery.additional_content.clone(),
+            Some(delivery.source_message_id.clone()),
+        );
+        restored += 1;
+    }
+    restored
 }
 
 /// 将用户 @提及消息投递给目标 Agent。运行中的 Agent 会实时注入当前循环，
 /// 空闲 Agent 会进入收件箱并唤醒调度器启动新一轮执行。
-pub fn route_user_mentions_with_media(
+pub fn route_user_mentions_with_content(
     team: &mut TeamContext,
-    content: &str,
-    media: Vec<tiangong_types::MediaAsset>,
+    source_message_id: Option<&str>,
+    prepared: Vec<ContentBlock>,
     stream_tx: &StdSender<StreamEvent>,
 ) -> bool {
-    let Some(route) = parse_agent_mention_route(content) else {
-        return false;
-    };
-    if route.content.trim().is_empty() {
+    let entries = build_user_mention_entries(team, source_message_id, prepared);
+    if entries.is_empty() {
         return false;
     }
+    for (agent_id, label, entry) in entries {
+        let content = entry.message.content.clone();
+        team.queue_agent_message(
+            &agent_id,
+            entry.message,
+            entry.additional_content,
+            entry.session_message_id,
+        );
+        let _ = stream_tx.send(StreamEvent::AgentMessage {
+            from_agent_id: "user".to_string(),
+            from_agent_label: "User".to_string(),
+            to_agent_id: agent_id,
+            to_agent_label: label,
+            content,
+        });
+    }
+    true
+}
 
-    let targets: Vec<_> = if route.broadcast {
+fn build_user_mention_entries(
+    team: &TeamContext,
+    source_message_id: Option<&str>,
+    prepared: Vec<ContentBlock>,
+) -> Vec<(String, String, AgentInboxEntry)> {
+    let content = content_blocks_text(&prepared);
+    let Some(route) = parse_agent_mention_route(&content) else {
+        return Vec::new();
+    };
+    if route.content.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut targets: Vec<_> = if route.broadcast {
         team.registry
             .alive_agents()
             .iter()
@@ -997,31 +1249,63 @@ pub fn route_user_mentions_with_media(
             })
             .collect()
     };
+    let mut seen_targets = std::collections::HashSet::new();
+    targets.retain(|(agent_id, _, _)| seen_targets.insert(agent_id.clone()));
 
-    if targets.is_empty() {
-        return false;
-    }
-
-    for (agent_id, _role, label) in targets {
-        let message = AgentMessage {
-            id: scru128::new().to_string(),
-            from: "user".to_string(),
-            to: agent_id.clone(),
-            content: route.content.clone(),
-            priority: crate::agent_team::message_bus::MessagePriority::Normal,
-            created_at: now_text(),
+    // 只移除开头的 @Agent 路由前缀，完整保留宿主已准备内容块的相对顺序。
+    let mut routed_content = prepared;
+    let mut prefix_bytes = content.len().saturating_sub(route.content.len());
+    for block in &mut routed_content {
+        let ContentBlock::Text { text } = block else {
+            continue;
         };
-        team.dispatch_agent_message(&agent_id, message, media.clone());
-        let _ = stream_tx.send(StreamEvent::AgentMessage {
-            from_agent_id: "user".to_string(),
-            from_agent_label: "User".to_string(),
-            to_agent_id: agent_id,
-            to_agent_label: label,
-            content: route.content.clone(),
-        });
+        if prefix_bytes == 0 {
+            break;
+        }
+        if prefix_bytes >= text.len() {
+            prefix_bytes -= text.len();
+            text.clear();
+        } else {
+            debug_assert!(text.is_char_boundary(prefix_bytes));
+            text.drain(..prefix_bytes);
+            prefix_bytes = 0;
+        }
     }
 
-    true
+    let routed_content = stable_content_blocks(&routed_content);
+    let routed_revision = serde_json::to_string(&routed_content).unwrap_or_default();
+    targets
+        .into_iter()
+        .map(|(agent_id, _role, label)| {
+            let delivery_id = source_message_id.map_or_else(
+                || scru128::new().to_string(),
+                |source| {
+                    let mut hasher = DefaultHasher::new();
+                    source.hash(&mut hasher);
+                    agent_id.hash(&mut hasher);
+                    routed_revision.hash(&mut hasher);
+                    format!("{source}:{agent_id}:{:016x}", hasher.finish())
+                },
+            );
+            let message = AgentMessage {
+                id: delivery_id,
+                from: "user".to_string(),
+                to: agent_id.clone(),
+                content: route.content.clone(),
+                priority: crate::agent_team::message_bus::MessagePriority::Normal,
+                created_at: now_text(),
+            };
+            (
+                agent_id,
+                label,
+                AgentInboxEntry {
+                    message,
+                    additional_content: routed_content.clone(),
+                    session_message_id: source_message_id.map(str::to_owned),
+                },
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn error_tool_result(name: &str, message: &str) -> ToolResult {
@@ -1052,26 +1336,22 @@ fn create_child_session(parent: &Session, title: &str) -> Session {
 }
 
 /// 持久化 child_session 到磁盘
-pub fn persist_child_session(parent_session: &Session, agent_id: &str, session: &Session) {
+pub fn persist_child_session(
+    parent_session: &Session,
+    agent_id: &str,
+    session: &Session,
+) -> Result<(), String> {
     let agents_dir = crate::storage::storage_root()
         .join("sessions")
         .join(&parent_session.id)
         .join("agents");
-    if std::fs::create_dir_all(&agents_dir).is_err() {
-        tracing::warn!("创建 agents 目录失败");
-        return;
-    }
+    std::fs::create_dir_all(&agents_dir)
+        .map_err(|error| format!("创建 agents 目录失败：{error}"))?;
     let path = agents_dir.join(format!("{agent_id}.json"));
-    match serde_json::to_string_pretty(session) {
-        Ok(content) => {
-            if let Err(err) = std::fs::write(&path, content) {
-                tracing::warn!(error = %err, "child session 持久化写入失败");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, "child session 序列化失败");
-        }
-    }
+    let content = serde_json::to_string_pretty(session)
+        .map_err(|error| format!("child session 序列化失败：{error}"))?;
+    crate::session::atomic_replace_file(&path, content.as_bytes())
+        .map_err(|error| format!("child session 持久化写入失败：{error}"))
 }
 
 /// 从磁盘加载 child_session
@@ -1495,6 +1775,71 @@ mod tests {
     }
 
     #[test]
+    fn restore_status_with_id_does_not_terminate_same_label_agent() {
+        let _root = isolated_storage_root();
+        let mut team = TeamContext::new();
+        let mut parent = Session::new("parent");
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] Worker (dev) 已加入团队 id=agent-dev".to_string(),
+        );
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] Worker (test) 已加入团队 id=agent-test".to_string(),
+        );
+        parent.append_message(
+            crate::session::MessageRole::System,
+            "[Agent] Worker 状态变更: terminated id=agent-dev".to_string(),
+        );
+
+        let restored =
+            restore_agents_from_session_history(&mut team, &parent, &[tool("read_file")]);
+        assert_eq!(restored, 1);
+        assert!(team.registry.find_by_role("dev").is_none());
+        assert_eq!(
+            team.registry.find_by_role("test").unwrap().agent_id,
+            "agent-test"
+        );
+    }
+
+    #[test]
+    fn persisted_agent_descriptor_restores_prompt_and_tool_scope_exactly() {
+        let _root = isolated_storage_root();
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let mut parent = Session::new("parent");
+        let tools = [tool("read_file"), tool("write_file")];
+        let result = execute_team_tool(
+            &mut team,
+            "main",
+            &call(
+                "create_agent",
+                json!({
+                    "role": "dev",
+                    "label": "Developer",
+                    "system_prompt": "只做只读审计",
+                    "tools": ["read_file"]
+                }),
+            ),
+            &mut parent,
+            &tools,
+            &tx,
+        );
+        assert!(result.ok);
+
+        let json = serde_json::to_string(&parent).unwrap();
+        let restored_parent: Session = serde_json::from_str(&json).unwrap();
+        let mut restored_team = TeamContext::new();
+        assert_eq!(
+            restore_agents_from_session_history(&mut restored_team, &restored_parent, &tools),
+            1
+        );
+        let restored = restored_team.registry.find_by_role("dev").unwrap();
+        assert_eq!(restored.system_prompt, "只做只读审计");
+        assert_eq!(restored.tools, vec!["read_file"]);
+    }
+
+    #[test]
     fn user_mentions_route_directly_to_target_agent() {
         let (tx, _rx) = mpsc::channel();
         let mut team = TeamContext::new();
@@ -1524,6 +1869,153 @@ mod tests {
     }
 
     #[test]
+    fn pending_user_delivery_restores_idempotently_with_ready_content() {
+        let mut team = TeamContext::new();
+        team.registry.register_with_session(
+            AgentDescriptor {
+                agent_id: "agent-dev".to_string(),
+                role: "dev".to_string(),
+                label: "Developer".to_string(),
+                system_prompt: "agent".to_string(),
+                tools: Vec::new(),
+                status: AgentStatus::Idle,
+            },
+            Session::new("child"),
+        );
+        let prepared = vec![
+            ContentBlock::text("@dev 检查附件"),
+            ContentBlock::model_instruction("保持块顺序"),
+        ];
+        let mut parent = Session::new("parent");
+        let deliveries = plan_user_mention_deliveries(&team, "source-1", &prepared);
+        parent.replace_pending_agent_deliveries("source-1", deliveries);
+
+        assert_eq!(restore_pending_agent_deliveries(&mut team, &parent), 1);
+        assert_eq!(restore_pending_agent_deliveries(&mut team, &parent), 1);
+        let inbox = team.registry.drain_inbox("agent-dev");
+        assert_eq!(inbox.len(), 1);
+        assert!(inbox[0].message.id.starts_with("source-1:agent-dev:"));
+        assert_eq!(
+            inbox[0].additional_content,
+            vec![
+                ContentBlock::text("检查附件"),
+                ContentBlock::model_instruction("保持块顺序"),
+            ]
+        );
+    }
+
+    #[test]
+    fn prepared_mention_waits_for_a_separate_run_when_agent_is_active() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        let result = execute_create_agent(
+            &mut team,
+            &call(
+                "create_agent",
+                json!({
+                    "role": "dev",
+                    "label": "Developer",
+                    "system_prompt": "agent"
+                }),
+            ),
+            &parent,
+            &[tool("read_file")],
+            &tx,
+        );
+        assert!(result.ok);
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        team.register_active_agent(dev_id.clone(), command_tx);
+
+        let asset = tiangong_types::StoredAsset {
+            asset_id: "asset-1".to_string(),
+            local_path: "/tmp/report.pdf".to_string(),
+            original_name: "report.pdf".to_string(),
+            mime_type: "application/pdf".to_string(),
+            size: 12,
+            kind: tiangong_types::MediaKind::File,
+        };
+        let expected_additional = vec![
+            ContentBlock::asset_reference(asset),
+            ContentBlock::model_instruction("使用 message_id=source-message、attachment_index=0"),
+        ];
+        let mut content = vec![ContentBlock::text("@dev 检查附件")];
+        content.extend(expected_additional.clone());
+
+        assert!(route_user_mentions_with_content(
+            &mut team,
+            Some("source-message"),
+            content,
+            &tx,
+        ));
+
+        assert!(command_rx.try_recv().is_err());
+        let entry = team
+            .registry
+            .drain_inbox(&dev_id)
+            .pop()
+            .expect("direct user message should wait in the persistent inbox");
+        assert_eq!(entry.session_message_id.as_deref(), Some("source-message"));
+        let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
+        assert!(content_blocks_text(&prepared).contains("检查附件"));
+        assert_eq!(&prepared[1..], expected_additional.as_slice());
+    }
+
+    #[test]
+    fn prepared_mention_waits_in_idle_inbox_without_losing_content() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        let parent = Session::new("parent");
+        assert!(
+            execute_create_agent(
+                &mut team,
+                &call(
+                    "create_agent",
+                    json!({
+                        "role": "dev",
+                        "label": "Developer",
+                        "system_prompt": "agent"
+                    }),
+                ),
+                &parent,
+                &[tool("read_file")],
+                &tx,
+            )
+            .ok
+        );
+        let dev_id = team.registry.find_by_role("dev").unwrap().agent_id.clone();
+        let instruction =
+            ContentBlock::model_instruction("使用 message_id=source-message、attachment_index=0");
+
+        assert!(route_user_mentions_with_content(
+            &mut team,
+            Some("source-message"),
+            vec![ContentBlock::text("@dev 检查附件"), instruction.clone(),],
+            &tx,
+        ));
+
+        let entry = team
+            .registry
+            .drain_inbox(&dev_id)
+            .pop()
+            .expect("idle agent should retain the routed message");
+        assert_eq!(entry.session_message_id.as_deref(), Some("source-message"));
+        assert!(matches!(
+            &entry.additional_content[0],
+            ContentBlock::Text { text } if text == "检查附件"
+        ));
+        assert_eq!(entry.additional_content[1], instruction);
+        let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
+        assert!(content_blocks_text(&prepared).contains("检查附件"));
+        assert!(matches!(
+            &prepared[1],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("message_id=source-message")
+        ));
+    }
+
+    #[test]
     fn mention_parser_supports_multiple_roles_and_all() {
         let route = parse_agent_mention_route("@dev @test 检查这个改动").unwrap();
         assert_eq!(route.roles, vec!["dev", "test"]);
@@ -1533,5 +2025,61 @@ mod tests {
         let route = parse_agent_mention_route("@all 同步状态").unwrap();
         assert!(route.broadcast);
         assert_eq!(route.content, "同步状态");
+    }
+
+    #[test]
+    fn routed_message_preserves_interleaved_text_and_images() {
+        let (tx, _rx) = mpsc::channel();
+        let mut team = TeamContext::new();
+        team.registry.register_with_session(
+            AgentDescriptor {
+                agent_id: "dev-agent".to_string(),
+                role: "dev".to_string(),
+                label: "Developer".to_string(),
+                system_prompt: "agent".to_string(),
+                tools: Vec::new(),
+                status: AgentStatus::Idle,
+            },
+            Session::new("child"),
+        );
+        let image = |asset_id: &str| ContentBlock::Image {
+            asset: tiangong_types::StoredAsset {
+                asset_id: asset_id.to_string(),
+                local_path: format!("/tmp/{asset_id}.png"),
+                original_name: format!("{asset_id}.png"),
+                mime_type: "image/png".to_string(),
+                size: 1,
+                kind: tiangong_types::MediaKind::Image,
+            },
+            data: None,
+        };
+
+        assert!(route_user_mentions_with_content(
+            &mut team,
+            Some("source-message"),
+            vec![
+                ContentBlock::text("@dev 比较"),
+                image("one"),
+                ContentBlock::text("第一张"),
+                image("two"),
+                ContentBlock::text("第二张"),
+            ],
+            &tx,
+        ));
+
+        let entry = team.registry.drain_inbox("dev-agent").remove(0);
+        let prepared = prepared_agent_message_for_prompt(&entry.message, entry.additional_content);
+        assert!(matches!(
+            &prepared[0],
+            ContentBlock::Text { text } if text.ends_with("比较")
+        ));
+        assert!(
+            matches!(&prepared[1], ContentBlock::Image { asset, .. } if asset.asset_id == "one")
+        );
+        assert!(matches!(&prepared[2], ContentBlock::Text { text } if text == "第一张"));
+        assert!(
+            matches!(&prepared[3], ContentBlock::Image { asset, .. } if asset.asset_id == "two")
+        );
+        assert!(matches!(&prepared[4], ContentBlock::Text { text } if text == "第二张"));
     }
 }

@@ -134,16 +134,12 @@ fn build_openai_messages(req: &ProviderRequest) -> Result<Vec<ChatCompletionRequ
 fn build_openai_user_message(
     message: &ChatMessage,
 ) -> Result<Option<ChatCompletionRequestMessage>> {
-    let images = message
+    let has_images = message
         .content
         .iter()
-        .filter_map(|content| match content {
-            MessageContent::Image(image) => Some(image),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+        .any(|content| matches!(content, MessageContent::Image(_)));
     let text = extract_message_text(message);
-    if images.is_empty() {
+    if !has_images {
         if text.is_empty() {
             return Ok(None);
         }
@@ -157,14 +153,20 @@ fn build_openai_user_message(
     }
 
     let mut content = Vec::new();
-    if !text.is_empty() {
-        content.push(json!({ "type": "text", "text": text }));
-    }
-    for image in images {
-        content.push(json!({
-            "type": "image_url",
-            "image_url": { "url": image.data }
-        }));
+    for block in &message.content {
+        match block {
+            MessageContent::Image(image) => content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": image.data }
+            })),
+            _ => {
+                if let Some(text) = user_text_part(block)
+                    && !text.trim().is_empty()
+                {
+                    content.push(json!({ "type": "text", "text": text }));
+                }
+            }
+        }
     }
     Ok(Some(
         serde_json::from_value(json!({
@@ -175,24 +177,31 @@ fn build_openai_user_message(
     ))
 }
 
+fn user_text_part(content: &MessageContent) -> Option<String> {
+    match content {
+        MessageContent::Text(text) => Some(text.clone()),
+        MessageContent::ToolResult(result) => Some(match &result.content {
+            crate::tool::ToolResultContent::Text(text) => text.clone(),
+            crate::tool::ToolResultContent::Json(value) => value.to_string(),
+        }),
+        MessageContent::File(file) => Some(format!(
+            "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
+            file.title.as_deref().unwrap_or("attachment"),
+            file.mime_type,
+            file.data
+        )),
+        MessageContent::Thinking(_)
+        | MessageContent::RedactedThinking(_)
+        | MessageContent::ToolCall(_)
+        | MessageContent::Image(_) => None,
+    }
+}
+
 fn extract_message_text(message: &ChatMessage) -> String {
     message
         .content
         .iter()
-        .filter_map(|content| match content {
-            MessageContent::Text(text) => Some(text.clone()),
-            MessageContent::ToolResult(result) => Some(match &result.content {
-                crate::tool::ToolResultContent::Text(text) => text.clone(),
-                crate::tool::ToolResultContent::Json(value) => value.to_string(),
-            }),
-            MessageContent::File(file) => Some(format!(
-                "<attachment title=\"{}\" mime_type=\"{}\">\n{}\n</attachment>",
-                file.title.as_deref().unwrap_or("attachment"),
-                file.mime_type,
-                file.data
-            )),
-            _ => None,
-        })
+        .filter_map(user_text_part)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -434,7 +443,42 @@ pub fn strip_think_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::MessageContent;
+    use crate::message::{ImageContent, MessageContent};
+
+    #[test]
+    fn multimodal_user_content_preserves_interleaved_order() {
+        let message = ChatMessage::new(
+            MessageRole::User,
+            vec![
+                MessageContent::Text("图一".to_string()),
+                MessageContent::Image(ImageContent {
+                    mime_type: "image/png".to_string(),
+                    data: "data:image/png;base64,A".to_string(),
+                }),
+                MessageContent::Text("图二".to_string()),
+                MessageContent::Image(ImageContent {
+                    mime_type: "image/png".to_string(),
+                    data: "data:image/png;base64,B".to_string(),
+                }),
+            ],
+        );
+
+        let mapped = build_openai_user_message(&message)
+            .expect("mapping")
+            .expect("user message");
+        let value = serde_json::to_value(mapped).unwrap();
+        let content = value["content"].as_array().unwrap();
+        assert_eq!(content[0]["text"], json!("图一"));
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            json!("data:image/png;base64,A")
+        );
+        assert_eq!(content[2]["text"], json!("图二"));
+        assert_eq!(
+            content[3]["image_url"]["url"],
+            json!("data:image/png;base64,B")
+        );
+    }
 
     #[test]
     fn invalid_tool_arguments_become_parse_error() {

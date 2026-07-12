@@ -56,6 +56,7 @@ impl MessageRouter {
                 msg.channel_id.clone(),
                 OutgoingMessage {
                     content: MessageContent::Text(denied_text),
+                    attachments: Vec::new(),
                     reply_to: Some(msg.id.clone()),
                 },
             ));
@@ -97,6 +98,7 @@ impl MessageRouter {
                 msg.channel_id,
                 OutgoingMessage {
                     content: MessageContent::Text("处理完成".to_string()),
+                    attachments: Vec::new(),
                     reply_to: Some(msg.id.clone()),
                 },
             ));
@@ -262,6 +264,7 @@ impl MessageRouter {
 
                 let outgoing = OutgoingMessage {
                     content: MessageContent::Text(summary),
+                    attachments: Vec::new(),
                     reply_to,
                 };
                 let session_id = event.session_id.clone();

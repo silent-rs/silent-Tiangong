@@ -8,8 +8,27 @@ use std::sync::RwLock;
 
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
+use tiangong_core::permission::PermissionLevel;
 use tiangong_core::tool_override::PromptSectionProvider;
 use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+
+pub(crate) const TOOL_ANALYZE_ATTACHMENT: &str = "analyze_attachment";
+
+fn permission_overrides() -> std::collections::BTreeMap<String, PermissionLevel> {
+    std::collections::BTreeMap::from([(
+        TOOL_ANALYZE_ATTACHMENT.to_string(),
+        PermissionLevel::Critical,
+    )])
+}
+
+fn prompt_section() -> String {
+    format!(
+        "## 附件分析工具\n\
+         当用户消息明确列出需要分析的图片资源，且回答确实需要查看图片内容时，可调用 `{TOOL_ANALYZE_ATTACHMENT}`。\n\
+         调用时必须使用该用户消息标注的 `message_id`；`attachment_index` 从 0 开始，对应消息中的资源顺序。\n\
+         文档和其他文件应使用对应文件工具；普通文本对话、无需查看图片内容或消息未提供可分析图片时，不要调用此工具。"
+    )
+}
 
 /// 附件分析插件。
 pub struct AnalyzeAttachmentPlugin {
@@ -57,6 +76,10 @@ impl Plugin for AnalyzeAttachmentPlugin {
         }
     }
 
+    fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
+        permission_overrides()
+    }
+
     fn on_config_updated(&self, _config: &tiangong_core::core_config::CoreConfig) {
         let models = tiangong_config::registry::models();
         if !models.chat_is_multimodal() {
@@ -69,4 +92,25 @@ impl Plugin for AnalyzeAttachmentPlugin {
     }
 }
 
-impl PromptSectionProvider for AnalyzeAttachmentPlugin {}
+impl PromptSectionProvider for AnalyzeAttachmentPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        vec![prompt_section()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owns_its_prompt_and_permission_metadata() {
+        let prompt = prompt_section();
+        assert!(prompt.contains(TOOL_ANALYZE_ATTACHMENT));
+        assert!(prompt.contains("message_id"));
+        assert!(prompt.contains("attachment_index"));
+        assert_eq!(
+            permission_overrides().get(TOOL_ANALYZE_ATTACHMENT),
+            Some(&PermissionLevel::Critical)
+        );
+    }
+}

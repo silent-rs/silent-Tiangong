@@ -35,6 +35,7 @@ impl AppRepository {
                 workspace_dir: default_workspace_dir(),
                 model_list: Vec::new(),
                 agent_config,
+                input_drafts: HashMap::new(),
             }));
         }
 
@@ -44,9 +45,9 @@ impl AppRepository {
                 self.paths.app_storage_path.display()
             )
         })?;
-        let persisted: PersistedAppState =
+        let mut persisted: PersistedAppState =
             serde_json::from_str(&content).context("解析应用存储失败")?;
-        let agent_config = self.load_agent_config_with_fallback(persisted.agent_config)?;
+        let agent_config = self.load_agent_config_with_fallback(persisted.agent_config.take())?;
         let legacy_trust_mode = agent_config
             .as_ref()
             .map(|config| config.trust_mode)
@@ -67,6 +68,17 @@ impl AppRepository {
         }
         let active_session_id =
             resolve_active_session_id(&sessions, Some(&persisted.active_session_id));
+        let mut input_drafts = std::mem::take(&mut persisted.input_drafts);
+        for draft in input_drafts.values_mut() {
+            draft.is_sending = false;
+        }
+        if !persisted.input_draft.trim().is_empty() && !active_session_id.is_empty() {
+            let draft = input_drafts.entry(active_session_id.clone()).or_default();
+            if draft.text.is_empty() {
+                draft.text = persisted.input_draft;
+                draft.revision = draft.revision.max(1);
+            }
+        }
 
         Ok(Some(LoadedState {
             sessions,
@@ -78,6 +90,7 @@ impl AppRepository {
             },
             model_list: persisted.model_list,
             agent_config,
+            input_drafts,
         }))
     }
 
@@ -92,12 +105,25 @@ impl AppRepository {
         let persisted: LegacyPersistedState =
             serde_json::from_str(&content).context("解析旧会话存储失败")?;
 
+        let active_session_id = persisted.active_session_id;
+        let mut input_drafts = HashMap::new();
+        if !persisted.input_draft.trim().is_empty() && !active_session_id.is_empty() {
+            input_drafts.insert(
+                active_session_id.clone(),
+                SessionInputDraft {
+                    text: persisted.input_draft,
+                    revision: 1,
+                    ..SessionInputDraft::default()
+                },
+            );
+        }
         Ok(Some(LoadedState {
             sessions: persisted.sessions,
-            active_session_id: persisted.active_session_id,
+            active_session_id,
             workspace_dir: default_workspace_dir(),
             model_list: persisted.model_list,
             agent_config: None,
+            input_drafts,
         }))
     }
 

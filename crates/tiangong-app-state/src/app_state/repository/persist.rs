@@ -1,4 +1,5 @@
 use super::*;
+use tiangong_core::session::atomic_replace_file;
 
 impl AppRepository {
     pub(in crate::app_state) fn persist_session(
@@ -18,7 +19,7 @@ impl AppRepository {
         let session_path = session_storage_path(&self.paths.sessions_dir_path, session_id);
         let content = serde_json::to_string_pretty(session)
             .with_context(|| format!("序列化会话失败：{session_id}"))?;
-        fs::write(&session_path, content)
+        atomic_replace_file(&session_path, content.as_bytes())
             .with_context(|| format!("写入会话文件失败：{}", session_path.display()))
     }
 
@@ -31,14 +32,18 @@ impl AppRepository {
             workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
+            input_drafts: persisted_input_drafts(store),
+            input_draft: String::new(),
         };
         let content = self.serialize_app_payload_stripped_external_configs(&payload)?;
-        fs::write(&self.paths.app_storage_path, content).with_context(|| {
-            format!(
-                "写入应用存储失败：{}",
-                self.paths.app_storage_path.display()
-            )
-        })?;
+        atomic_replace_file(&self.paths.app_storage_path, content.as_bytes()).with_context(
+            || {
+                format!(
+                    "写入应用存储失败：{}",
+                    self.paths.app_storage_path.display()
+                )
+            },
+        )?;
         // 注意：扩展能力配置仅由显式修改它们的插件写入，
         // 避免多进程共享数据目录时互相覆盖。
         Ok(())
@@ -52,7 +57,7 @@ impl AppRepository {
             let session_path = session_storage_path(&self.paths.sessions_dir_path, &session.id);
             let content = serde_json::to_string_pretty(session)
                 .with_context(|| format!("序列化会话失败：{}", session.id))?;
-            fs::write(&session_path, content)
+            atomic_replace_file(&session_path, content.as_bytes())
                 .with_context(|| format!("写入会话文件失败：{}", session_path.display()))?;
         }
 
@@ -66,14 +71,18 @@ impl AppRepository {
             workspace_dir: store.session.workspace_dir.clone(),
             model_list: store.provider.model_list.clone(),
             agent_config: Some(app_agent_config),
+            input_drafts: persisted_input_drafts(store),
+            input_draft: String::new(),
         };
         let content = self.serialize_app_payload_stripped_external_configs(&payload)?;
-        fs::write(&self.paths.app_storage_path, content).with_context(|| {
-            format!(
-                "写入应用存储失败：{}",
-                self.paths.app_storage_path.display()
-            )
-        })?;
+        atomic_replace_file(&self.paths.app_storage_path, content.as_bytes()).with_context(
+            || {
+                format!(
+                    "写入应用存储失败：{}",
+                    self.paths.app_storage_path.display()
+                )
+            },
+        )?;
         // 注意：扩展能力配置由各自插件写入，理由同 persist_app_only。
         Ok(())
     }
@@ -102,4 +111,18 @@ impl AppRepository {
         }
         Ok(())
     }
+}
+
+fn persisted_input_drafts(store: &AppStore) -> HashMap<String, SessionInputDraft> {
+    store
+        .session
+        .input_drafts
+        .iter()
+        .map(|(session_id, draft)| {
+            let mut persisted = draft.clone();
+            // 进程中断后发送事务已不存在，重启必须允许用户重试。
+            persisted.is_sending = false;
+            (session_id.clone(), persisted)
+        })
+        .collect()
 }

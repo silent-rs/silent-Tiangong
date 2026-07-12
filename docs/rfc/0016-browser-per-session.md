@@ -2,6 +2,8 @@
 
 关联需求：`docs/browser/05-per-session-architecture.md`
 
+> 后续状态（2026-07-12）：双写过渡已结束，Core `Session.tabs` / `active_tab_id` 已废弃；浏览器和终端分别以插件 per-session store 为真相源，Desktop 只保存跨插件顺序和活跃项的 `{kind, id}` 引用。
+
 ## 完成标准
 
 浏览器从「全局单例 + 切换时销毁重建」改为「每个 session 独立 browser state，多 webview 并发存活，切换不销毁」。每个 session 拥有独立的 webview/tab/历史/cookie-storage/恢复数据，浏览器插件自管 per-session 持久化。core 不感知浏览器 session 细节。

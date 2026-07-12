@@ -5,7 +5,8 @@ impl TiangongState {
     ///
     /// 将 Core 的最终 session 合并到 TiangongState 并持久化。
     /// 如果该 session 已存在则替换，否则插入。
-    pub fn save_core_session(&mut self, session: Session) {
+    pub fn save_core_session(&mut self, mut session: Session) {
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         let session_id = session.id.clone();
         if let Some(existing) = self
             .store
@@ -34,6 +35,7 @@ impl TiangongState {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
         session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.agent.agent_config.trust_mode = session.trust_mode;
         self.services
             .runtime
@@ -41,10 +43,50 @@ impl TiangongState {
             .set_trust_mode(session.trust_mode);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
+        self.store
+            .session
+            .input_drafts
+            .entry(session.id.clone())
+            .or_default();
         self.store.session.sessions.push(session);
         // 仅更新 app.json 中的 active_session_id，不持久化空会话文件
         // 会话文件将在用户发送第一条消息时自动持久化
         let _ = self.persist_app_only();
+    }
+
+    /// 为草稿转正创建会话，但不改变全局活动会话。
+    pub fn create_session_without_activation(
+        &mut self,
+        cwd: String,
+        trust_mode: tiangong_core::permission::TrustMode,
+        reasoning_effort: String,
+    ) -> Result<Session> {
+        let mut session = Session::new("新对话");
+        session.cwd = cwd;
+        session.cwd_mode = if session.cwd == self.store.session.workspace_dir {
+            tiangong_core::session::SessionCwdMode::Inherit
+        } else {
+            tiangong_core::session::SessionCwdMode::Custom
+        };
+        session.trust_mode = trust_mode;
+        session.reasoning_effort = Some(reasoning_effort);
+        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
+        let session_id = session.id.clone();
+        self.store.session.sessions.push(session.clone());
+        self.store
+            .session
+            .input_drafts
+            .entry(session_id.clone())
+            .or_default();
+        if let Err(error) = self.persist_app_only() {
+            self.store
+                .session
+                .sessions
+                .retain(|candidate| candidate.id != session_id);
+            self.store.session.input_drafts.remove(&session_id);
+            return Err(error);
+        }
+        Ok(session)
     }
 
     pub fn switch_session(&mut self, session_id: &str) {
@@ -91,26 +133,40 @@ impl TiangongState {
 
     pub fn delete_active_session(&mut self) -> Result<()> {
         let active_id = self.store.session.active_session_id.clone();
+        self.delete_session_by_id(&active_id)
+    }
+
+    /// 按显式 ID 删除会话。调用方可以在等待 Core 停止期间仍固定原目标，
+    /// 不会因用户切换活动会话而删错对象。
+    pub fn delete_session_by_id(&mut self, session_id: &str) -> Result<()> {
         let Some(remove_idx) = self
             .store
             .session
             .sessions
             .iter()
-            .position(|session| session.id == active_id)
+            .position(|session| session.id == session_id)
         else {
-            return Err(anyhow!("当前会话不存在，无法删除"));
+            return Err(anyhow!("会话不存在，无法删除：{session_id}"));
         };
+        let active_was_deleted = self.store.session.active_session_id == session_id;
 
         self.store.session.sessions.remove(remove_idx);
+        self.store.session.input_drafts.remove(session_id);
 
         if self.store.session.sessions.is_empty() {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
+            self.store
+                .session
+                .input_drafts
+                .entry(session.id.clone())
+                .or_default();
             self.store.session.sessions.push(session);
-        } else {
+        } else if active_was_deleted {
             let next_idx = if remove_idx >= self.store.session.sessions.len() {
                 self.store.session.sessions.len() - 1
             } else {
@@ -119,6 +175,9 @@ impl TiangongState {
             self.store.session.active_session_id = self.store.session.sessions[next_idx].id.clone();
             self.store.session.session_title_draft =
                 self.store.session.sessions[next_idx].title.clone();
+        } else if let Some(active_title) = self.active_session().map(|active| active.title.clone())
+        {
+            self.store.session.session_title_draft = active_title;
         }
         if let Some(trust_mode) = self.active_session().map(|session| session.trust_mode) {
             self.store.agent.agent_config.trust_mode = trust_mode;
@@ -128,7 +187,7 @@ impl TiangongState {
                 .set_trust_mode(trust_mode);
         }
 
-        self.remove_session_file(&active_id)?;
+        self.remove_session_file(session_id)?;
         if self.store.session.sessions.len() == 1
             && self.store.session.sessions[0].messages.is_empty()
         {
@@ -164,6 +223,7 @@ impl TiangongState {
         self.store.session.sessions.retain(|s| s.cwd != cwd);
         for id in &deleted_ids {
             let _ = self.remove_session_file(id);
+            self.store.session.input_drafts.remove(id);
         }
 
         if self.store.session.sessions.is_empty() {
@@ -171,8 +231,14 @@ impl TiangongState {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
+            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
+            self.store
+                .session
+                .input_drafts
+                .entry(session.id.clone())
+                .or_default();
             self.store.session.sessions.push(session);
             let current_id = self.store.session.sessions[0].id.clone();
             self.persist_session(&current_id)?;

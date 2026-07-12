@@ -6,6 +6,7 @@ license = "Apache-2.0"
 links = "terminal"
 
 [dependencies]
+tiangong-config = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-toolkit = { workspace = true }
 tiangong-types = { workspace = true }
@@ -18,6 +19,9 @@ scru128 = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 descape = "3"
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

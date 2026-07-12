@@ -63,6 +63,9 @@ tauri-runtime = { workspace = true }
 tauri-runtime-wry = { workspace = true }
 wry = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [build-dependencies]
 tauri-build = { workspace = true, features = [] }
 

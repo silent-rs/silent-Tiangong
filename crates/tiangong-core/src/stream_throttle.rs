@@ -106,6 +106,11 @@ impl ThrottledStreamSink {
         buffers.reasoning.push_str(&chunk.reasoning_content);
     }
 
+    /// 在发送具有顺序语义的非流式事件前同步排空缓冲，保证事件 FIFO。
+    pub(crate) fn flush(&self) {
+        flush_buffers(&self.buffers, &self.tx, &self.message_id, self.text_kind);
+    }
+
     pub(crate) fn finish(mut self) {
         self.stop_and_join();
     }
@@ -132,15 +137,12 @@ fn flush_buffers(
     message_id: &str,
     text_kind: StreamTextKind,
 ) {
-    let (content, reasoning) = {
-        let Ok(mut buffers) = buffers.lock() else {
-            return;
-        };
-        (
-            mem::take(&mut buffers.content),
-            mem::take(&mut buffers.reasoning),
-        )
+    // 持锁直到事件发送完成，使显式 flush 返回时与定时 flush 建立严格先后关系。
+    let Ok(mut buffers) = buffers.lock() else {
+        return;
     };
+    let content = mem::take(&mut buffers.content);
+    let reasoning = mem::take(&mut buffers.reasoning);
 
     if !content.is_empty() {
         let event = match text_kind {

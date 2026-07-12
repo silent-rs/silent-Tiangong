@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,9 +10,33 @@ use crate::permission::TrustMode;
 use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, Message, MessagePhase, MessageRole, MessageToolCall,
-    now_text,
+    ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
+    MessageToolCall, PendingAgentDelivery, StoredAsset, now_text,
 };
+
+/// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。
+static PERSISTENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// 在目标文件所在目录写入临时文件，并原子替换目标文件。
+///
+/// 所有调用共享同一把进程内锁。临时文件与目标文件位于同一文件系统，
+/// `NamedTempFile::persist` 会在 Windows、macOS 与 Linux 上替换已有目标文件。
+pub fn atomic_replace_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let _write_guard = PERSISTENCE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    let mut temp_file = tempfile::NamedTempFile::new_in(parent)?;
+    temp_file.as_file_mut().write_all(content)?;
+    temp_file.as_file().sync_all()?;
+    temp_file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
 
 /// 会话工作目录模式
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -22,22 +49,6 @@ pub enum SessionCwdMode {
     Isolated,
     /// 用户手动指定
     Custom,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TabKind {
-    Browser,
-    Terminal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TabState {
-    pub id: String,
-    pub kind: TabKind,
-    pub title: String,
-    pub url: String,
-    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,10 +66,10 @@ pub struct Session {
     #[serde(default)]
     pub current_tokens: usize,
     /// 当前模型配置下触发上下文压缩的 token 阈值。
-    #[serde(default)]
+    #[serde(skip)]
     pub compression_threshold_tokens: usize,
     /// 当前模型配置下的上下文窗口上限。
-    #[serde(default)]
+    #[serde(skip)]
     pub context_limit_tokens: usize,
     /// 当前活跃 sub agent 的上下文 token 数
     #[serde(default)]
@@ -76,12 +87,6 @@ pub struct Session {
     pub task_records: Vec<SessionTaskRecord>,
     #[serde(default)]
     pub task_plans: Vec<SessionTaskPlan>,
-    /// 当前会话的工作区 Tab 元数据列表。
-    #[serde(default)]
-    pub tabs: Vec<TabState>,
-    /// 当前会话最后活跃的工作区 Tab。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_tab_id: Option<String>,
     /// 会话级工作目录，工具执行时以此为根目录
     #[serde(default)]
     pub cwd: String,
@@ -115,6 +120,12 @@ pub struct Session {
     /// 父会话 ID（Worker 子会话标注所属的父会话）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// 工具调用批次闭合前收到的外部工具输入；下一安全边界按顺序注入。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_tool_injections: Vec<DeferredToolInjection>,
+    /// 已确认但尚未由目标 Agent 完成的用户直达投递。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_agent_deliveries: Vec<PendingAgentDelivery>,
 }
 
 /// 待审批请求记录（存储在独立的 approval_store 中）
@@ -262,8 +273,6 @@ impl Session {
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
-            tabs: Vec::new(),
-            active_tab_id: None,
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
             trust_mode: TrustMode::default(),
@@ -274,6 +283,8 @@ impl Session {
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
+            deferred_tool_injections: Vec::new(),
+            pending_agent_deliveries: Vec::new(),
         }
     }
 
@@ -298,8 +309,6 @@ impl Session {
             agent_token_usage: HashMap::new(),
             task_records: Vec::new(),
             task_plans: Vec::new(),
-            tabs: Vec::new(),
-            active_tab_id: None,
             cwd: workspace_dir.to_string_lossy().to_string(),
             cwd_mode: SessionCwdMode::Isolated,
             trust_mode: TrustMode::default(),
@@ -310,6 +319,8 @@ impl Session {
             created_at: now.clone(),
             updated_at: now,
             parent_session_id: None,
+            deferred_tool_injections: Vec::new(),
+            pending_agent_deliveries: Vec::new(),
         }
     }
 
@@ -317,22 +328,21 @@ impl Session {
     ///
     /// Core 在工具调用等关键节点调用此方法，确保中间数据不会因崩溃丢失。
     pub fn persist_to_disk(&self) {
-        let sessions_dir = crate::storage::storage_root().join("sessions");
-        if std::fs::create_dir_all(&sessions_dir).is_err() {
-            tracing::warn!("创建 sessions 目录失败");
-            return;
+        if let Err(err) = self.try_persist_to_disk() {
+            tracing::warn!(error = %err, "session 持久化失败");
         }
-        let path = sessions_dir.join(format!("{}.json", self.id));
-        match serde_json::to_string_pretty(self) {
-            Ok(content) => {
-                if let Err(err) = std::fs::write(&path, content) {
-                    tracing::warn!(error = %err, "session 持久化写入失败");
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "session 序列化失败");
-            }
-        }
+    }
+
+    /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
+    /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
+    pub fn try_persist_to_disk(&self) -> Result<(), String> {
+        let path = crate::storage::storage_root()
+            .join("sessions")
+            .join(format!("{}.json", self.id));
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|err| format!("session 序列化失败：{err}"))?;
+        atomic_replace_file(&path, content.as_bytes())
+            .map_err(|err| format!("session 持久化写入失败：{err}"))
     }
 
     pub fn append_message(&mut self, role: MessageRole, content: impl Into<String>) {
@@ -363,6 +373,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -388,6 +399,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -431,9 +443,110 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
+    }
+
+    /// 使用预生成 ID 原样追加宿主准备好的用户消息。
+    pub fn append_prepared_user_message_with_id(&mut self, id: String, content: Vec<ContentBlock>) {
+        self.messages.push(Message {
+            id,
+            role: MessageRole::User,
+            content,
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            elapsed_ms: None,
+            turn_status: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            model_excluded: false,
+            phase: crate::session::MessagePhase::Normal,
+            created_at: now_text(),
+        });
+        self.updated_at = now_text();
+    }
+
+    /// 用宿主准备好的内容原样替换已有用户消息。
+    pub fn update_prepared_user_message(
+        &mut self,
+        message_id: &str,
+        content: Vec<ContentBlock>,
+    ) -> bool {
+        let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id && message.role == MessageRole::User)
+        else {
+            return false;
+        };
+        message.content = content;
+        self.updated_at = now_text();
+        true
+    }
+
+    pub(crate) fn clear_transient_content(&mut self) {
+        for message in &mut self.messages {
+            message.clear_transient_data();
+        }
+    }
+
+    /// 清除指定消息的瞬时图片数据；稳定图片路径不受影响。
+    pub fn clear_transient_content_for_message(&mut self, message_id: &str) {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            message.clear_transient_data();
+        }
+    }
+
+    /// 保留消息历史与展示，但控制它是否进入当前 Agent 的模型上下文。
+    pub fn set_message_model_excluded(&mut self, message_id: &str, excluded: bool) -> bool {
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            message.model_excluded = excluded;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn defer_tool_injection(&mut self, tool_name: String, payload: serde_json::Value) {
+        self.deferred_tool_injections
+            .push(DeferredToolInjection { tool_name, payload });
+    }
+
+    pub(crate) fn replace_pending_agent_deliveries(
+        &mut self,
+        source_message_id: &str,
+        deliveries: Vec<PendingAgentDelivery>,
+    ) {
+        self.pending_agent_deliveries
+            .retain(|delivery| delivery.source_message_id != source_message_id);
+        self.pending_agent_deliveries.extend(deliveries);
+        self.updated_at = now_text();
+    }
+
+    pub(crate) fn complete_pending_agent_deliveries(&mut self, delivery_ids: &[String]) {
+        if delivery_ids.is_empty() {
+            return;
+        }
+        let completed = delivery_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        self.pending_agent_deliveries
+            .retain(|delivery| !completed.contains(&delivery.delivery_id));
+        self.updated_at = now_text();
     }
 
     pub fn append_worker_message(
@@ -466,6 +579,7 @@ impl Session {
             tool_name: None,
             tool_result_is_error: false,
             compact: false,
+            model_excluded: false,
             phase: crate::session::MessagePhase::Normal,
             created_at: now_text(),
         });
@@ -800,7 +914,14 @@ impl Session {
         if let Some(ref msg) = self.system_prompt_message {
             context.push(msg.clone());
         }
-        context.extend(self.messages[self.summary_up_to..].iter().cloned());
+        context.extend(
+            self.messages[self.summary_up_to..]
+                .iter()
+                // 持久化 System 消息是 UI/恢复日志；唯一模型系统提示由
+                // system_prompt_message 提供，避免日志覆盖完整规则。
+                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+                .cloned(),
+        );
         context
     }
 
@@ -848,10 +969,244 @@ impl Session {
         };
         let remove_count = self.messages.len() - idx - 1;
         self.messages.truncate(idx + 1);
+        let retained_message_ids = self
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        self.pending_agent_deliveries.retain(|delivery| {
+            delivery.source_message_id != message_id
+                && retained_message_ids.contains(delivery.source_message_id.as_str())
+        });
         remove_count
     }
 }
 
 fn new_id() -> String {
     scru128::new().to_string()
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    #[test]
+    fn atomic_replace_file_serializes_complete_replacements() -> io::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let target = temp_dir.path().join("sessions").join("session.json");
+        atomic_replace_file(&target, b"initial")?;
+
+        let payloads = (0..4)
+            .map(|writer| format!("writer-{writer}:{}", "x".repeat(16 * 1024)).into_bytes())
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(payloads.len()));
+        std::thread::scope(|scope| -> io::Result<()> {
+            let mut writers = Vec::new();
+            for payload in &payloads {
+                let target = target.clone();
+                let barrier = Arc::clone(&barrier);
+                writers.push(scope.spawn(move || {
+                    barrier.wait();
+                    atomic_replace_file(&target, payload)
+                }));
+            }
+            for writer in writers {
+                writer.join().expect("原子写入线程不应 panic")?;
+            }
+            Ok(())
+        })?;
+
+        let persisted = std::fs::read(&target)?;
+        assert!(payloads.contains(&persisted));
+        let entries = std::fs::read_dir(target.parent().expect("目标文件应有父目录"))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entries.len(), 1, "成功替换后不应遗留临时文件");
+        assert_eq!(entries[0].path(), target);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_workspace_tabs_are_ignored_and_never_serialized_again() {
+        let mut value = serde_json::to_value(Session::new("legacy-tabs")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert(
+            "tabs".to_string(),
+            serde_json::json!([{
+                "id": "terminal-1",
+                "kind": "terminal",
+                "title": "终端",
+                "url": "",
+                "created_at": "now"
+            }]),
+        );
+        object.insert("active_tab_id".to_string(), serde_json::json!("terminal-1"));
+
+        let restored: Session = serde_json::from_value(value).unwrap();
+        let serialized = serde_json::to_value(restored).unwrap();
+        assert!(serialized.get("tabs").is_none());
+        assert!(serialized.get("active_tab_id").is_none());
+    }
+
+    #[test]
+    fn derived_context_metrics_are_not_persisted_but_usage_is() {
+        let mut session = Session::new("derived-context-metrics");
+        session.compression_threshold_tokens = 190_000;
+        session.context_limit_tokens = 200_000;
+        session.current_tokens = 12_345;
+        session.token_usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: Some(10),
+            prompt_cache_miss_tokens: Some(90),
+        };
+
+        let mut value = serde_json::to_value(&session).unwrap();
+        assert!(value.get("compression_threshold_tokens").is_none());
+        assert!(value.get("context_limit_tokens").is_none());
+        assert_eq!(value["current_tokens"], 12_345);
+        assert_eq!(value["token_usage"]["total_tokens"], 120);
+
+        value["compression_threshold_tokens"] = serde_json::json!(999_999);
+        value["context_limit_tokens"] = serde_json::json!(1_000_000);
+        let restored: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.compression_threshold_tokens, 0);
+        assert_eq!(restored.context_limit_tokens, 0);
+        assert_eq!(restored.current_tokens, 12_345);
+        assert_eq!(restored.token_usage.total_tokens, 120);
+    }
+}
+
+#[cfg(test)]
+mod ready_content_tests {
+    use super::*;
+
+    fn prepared_message(data: &str) -> Vec<ContentBlock> {
+        vec![
+            ContentBlock::text("分析图片"),
+            ContentBlock::Image {
+                asset: StoredAsset {
+                    asset_id: "asset-1".to_string(),
+                    local_path: "/tmp/asset-1.png".to_string(),
+                    original_name: "asset-1.png".to_string(),
+                    mime_type: "image/png".to_string(),
+                    size: 4,
+                    kind: MediaKind::Image,
+                },
+                data: Some(data.to_string()),
+            },
+        ]
+    }
+
+    #[test]
+    fn transient_image_data_is_available_to_context_but_never_serialized() {
+        let secret_data = "data:image/png;base64,THIS_MUST_NOT_PERSIST";
+        let mut session = Session::new("ready-content");
+        session.append_prepared_user_message_with_id(
+            "message-1".to_string(),
+            prepared_message(secret_data),
+        );
+
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("THIS_MUST_NOT_PERSIST"));
+        assert!(json.contains("\"type\":\"image\""));
+        assert!(json.contains("/tmp/asset-1.png"));
+
+        let context = session.context();
+        assert!(context[0].content.iter().any(|block| matches!(
+            block,
+            ContentBlock::Image { data: Some(data), .. } if data == secret_data
+        )));
+        assert!(
+            !serde_json::to_string(&context)
+                .unwrap()
+                .contains("THIS_MUST_NOT_PERSIST")
+        );
+        session.clear_transient_content_for_message("message-1");
+        assert!(matches!(
+            &session.context()[0].content[1],
+            ContentBlock::Image { data: None, .. }
+        ));
+    }
+
+    #[test]
+    fn model_excluded_round_trips_and_stays_out_of_context() {
+        let mut session = Session::new("excluded-message");
+        session.append_prepared_user_message_with_id(
+            "routed-user".to_string(),
+            vec![ContentBlock::text("@dev handle this")],
+        );
+        assert!(session.set_message_model_excluded("routed-user", true));
+        assert!(session.context().is_empty());
+
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert!(restored.messages[0].model_excluded);
+        assert!(restored.context().is_empty());
+
+        let mut legacy_value = serde_json::to_value(&session).unwrap();
+        legacy_value["messages"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("model_excluded");
+        let legacy: Session = serde_json::from_value(legacy_value).unwrap();
+        assert!(!legacy.messages[0].model_excluded);
+        assert_eq!(legacy.context().len(), 1);
+    }
+
+    #[test]
+    fn pending_agent_deliveries_round_trip_without_transient_image_data() {
+        let mut session = Session::new("pending-agent-delivery");
+        session.pending_agent_deliveries = vec![PendingAgentDelivery {
+            delivery_id: "delivery-1".to_string(),
+            source_message_id: "source-1".to_string(),
+            target_agent_id: "agent-dev".to_string(),
+            content: "检查图片".to_string(),
+            created_at: now_text(),
+            additional_content: tiangong_types::stable_content_blocks(&prepared_message(
+                "SECRET_PENDING_BASE64",
+            )),
+        }];
+
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("SECRET_PENDING_BASE64"));
+        let restored: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.pending_agent_deliveries.len(), 1);
+        assert_eq!(
+            restored.pending_agent_deliveries[0].delivery_id,
+            "delivery-1"
+        );
+        assert!(matches!(
+            &restored.pending_agent_deliveries[0].additional_content[1],
+            ContentBlock::Image { data: None, .. }
+        ));
+    }
+
+    #[test]
+    fn completing_one_agent_delivery_keeps_other_targets_pending() {
+        let mut session = Session::new("broadcast-delivery");
+        for (delivery_id, target_agent_id) in [
+            ("delivery-dev", "agent-dev"),
+            ("delivery-test", "agent-test"),
+        ] {
+            session.pending_agent_deliveries.push(PendingAgentDelivery {
+                delivery_id: delivery_id.to_string(),
+                source_message_id: "source-all".to_string(),
+                target_agent_id: target_agent_id.to_string(),
+                content: "同步检查".to_string(),
+                created_at: now_text(),
+                additional_content: vec![ContentBlock::text("同步检查")],
+            });
+        }
+
+        session.complete_pending_agent_deliveries(&["delivery-dev".to_string()]);
+
+        assert_eq!(session.pending_agent_deliveries.len(), 1);
+        assert_eq!(
+            session.pending_agent_deliveries[0].delivery_id,
+            "delivery-test"
+        );
+    }
 }

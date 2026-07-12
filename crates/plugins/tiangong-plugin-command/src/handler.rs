@@ -332,6 +332,7 @@ async fn exec_and_collect(
 
     let mut command = Command::new(cmd);
     tiangong_types::process::configure_tokio_no_window(&mut command);
+    command.kill_on_drop(true);
     command
         .args(args)
         .current_dir(cwd)

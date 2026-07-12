@@ -6,7 +6,6 @@ impl TiangongState {
     /// 统一处理：
     /// - 解析活动会话
     /// - 固定用户消息并立即持久化
-    /// - 清空输入草稿
     /// - 更新运行状态
     /// - 返回用于创建/复用 TiangongCore 的会话快照
     pub fn prepare_active_user_message_ingress(
@@ -21,7 +20,11 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
-        // 调用方负责在持锁前完成附件归档（远程下载可能阻塞 60s，不能在状态锁内执行）。
+        if !media.is_empty() {
+            return Err(anyhow!(
+                "旧消息入口不再接收媒体；请先通过宿主附件准备管线生成已就绪内容块"
+            ));
+        }
         let content = content.into();
         let idx = self.ensure_active_session_index();
         let message_id = scru128::new().to_string();
@@ -36,14 +39,13 @@ impl TiangongState {
         self.store.session.sessions[idx].updated_at = now_text();
         self.persist_session_and_app(&session_id)?;
         let session = self.store.session.sessions[idx].clone();
-        self.store.session.input_draft.clear();
         self.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
         self.store.runtime.run.last_session_id = Some(session.id.clone());
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        self.mark_pending_turn_for(session.id.clone());
+        self.mark_pending_message_for(&session.id, &message_id);
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
             runtime_session.cwd = self.store.session.workspace_dir.clone();
@@ -54,6 +56,7 @@ impl TiangongState {
     /// 为指定会话（而非全局活动会话）准备用户消息入口。
     ///
     /// 调用方先固定 session_id 再归档附件，避免归档期间活动会话切换导致串线。
+    /// 草稿清理由调用方在相同 revision 的投递成功后完成，本方法不再无条件清空。
     /// 若目标会话不存在则明确失败，不回退到活动会话。
     pub fn prepare_user_message_ingress_for_session(
         &mut self,
@@ -61,6 +64,11 @@ impl TiangongState {
         content: impl Into<String>,
         media: Vec<tiangong_types::MediaAsset>,
     ) -> Result<(String, String, Session)> {
+        if !media.is_empty() {
+            return Err(anyhow!(
+                "旧消息入口不再接收媒体；请先通过宿主附件准备管线生成已就绪内容块"
+            ));
+        }
         let content = content.into();
         let idx = self
             .store
@@ -80,14 +88,13 @@ impl TiangongState {
         self.store.session.sessions[idx].updated_at = now_text();
         self.persist_session_and_app(session_id)?;
         let session = self.store.session.sessions[idx].clone();
-        self.store.session.input_draft.clear();
         self.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
         self.store.runtime.run.last_session_id = Some(session.id.clone());
         let usage = session.total_usage();
         self.store.runtime.run.last_usage = (usage.total_tokens > 0).then_some(usage);
         self.store.runtime.run.updated_at = now_text();
-        self.mark_pending_turn_for(session.id.clone());
+        self.mark_pending_message_for(&session.id, &message_id);
         let mut runtime_session = session.clone();
         if runtime_session.cwd.trim().is_empty() {
             runtime_session.cwd = self.store.session.workspace_dir.clone();

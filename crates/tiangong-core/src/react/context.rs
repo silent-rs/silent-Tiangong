@@ -3,6 +3,7 @@
 //! 最终化相关逻辑（总结阶段、强制最终回复）已迁移到 `summary.rs`。
 
 use std::sync::mpsc::Sender as StdSender;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
@@ -70,25 +71,35 @@ pub(crate) fn emit_token_usage(
     });
 }
 
-pub(crate) fn maybe_update_context_summary(
+pub(crate) async fn maybe_update_context_summary(
     session: &mut Session,
     engine: &RuntimeEngine,
     observed_usage: &TokenUsage,
     stream_tx: &StdSender<StreamEvent>,
-) {
+    cancel_flag: Arc<AtomicBool>,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+) -> bool {
     let organizer = ContextOrganizer::new(engine.context_limit)
         .with_threshold(0.95)
         .with_keep_recent_turns(6);
     let observed_tokens = observed_total_tokens(observed_usage);
     if !organizer.needs_compression(observed_tokens) {
-        return;
+        return false;
     }
     let total_messages = session.messages.len();
     let _ = stream_tx.send(StreamEvent::ContextCompressing {
         summary_up_to: session.summary_up_to,
         total_messages,
     });
-    match organizer.maybe_update_summary_with_usage(session, engine.client(), observed_tokens) {
+    let update = tokio::select! {
+        update = organizer.maybe_update_summary_with_usage_async(
+            session,
+            engine.client(),
+            observed_tokens,
+        ) => update,
+        _ = crate::react::cancel::wait_for_abort_signal(cancel_flag, shutdown_flag) => return true,
+    };
+    match update {
         Ok(update) if update.compressed => {
             // 重置 current_tokens，压缩后上下文已大幅缩减
             session.current_tokens = 0;
@@ -133,6 +144,7 @@ pub(crate) fn maybe_update_context_summary(
             );
         }
     }
+    false
 }
 
 pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {

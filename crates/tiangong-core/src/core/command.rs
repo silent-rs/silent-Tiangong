@@ -4,9 +4,9 @@
 pub(crate) enum Command {
     /// 发送消息
     Message {
-        content: String,
+        prepared: Vec<tiangong_types::ContentBlock>,
         message_id: Option<String>,
-        media: Vec<tiangong_types::MediaAsset>,
+        persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     },
     /// 更新当前会话工作目录
     UpdateCwd { cwd: String },
@@ -38,7 +38,7 @@ pub(crate) enum Command {
     /// 插件通过 [`crate::core::plugin::feedback::PluginFeedbackTx::send_stream_event`]
     /// 投递，worker 收到后直接转发到 `stream_tx`，与 worker 自身发出的流事件
     /// 走同一出口。用于让插件复用 UI 实时事件通道，无需各自持有 stream_tx。
-    EmitStreamEvent(tiangong_types::StreamEvent),
+    EmitStreamEvent(Box<tiangong_types::StreamEvent>),
     /// 关闭
     Shutdown,
 }
@@ -46,6 +46,10 @@ pub(crate) enum Command {
 /// 命令排空后的副作用
 pub(crate) enum PendingCommandEffect {
     None,
-    MessageInjected,
+    MessagesInjected {
+        current_agent_input: Option<String>,
+        agent_routed: bool,
+    },
     Terminate,
+    Shutdown,
 }
