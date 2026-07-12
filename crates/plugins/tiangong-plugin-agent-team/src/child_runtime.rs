@@ -126,7 +126,7 @@ impl ChildRuntime {
         self.state
             .lock()
             .map(|state| *state == RuntimeState::Running)
-            .unwrap_or(true)
+            .unwrap_or_else(|poison| *poison.into_inner() == RuntimeState::Running)
     }
 
     pub(crate) fn accepts_deliveries(&self) -> bool {
@@ -431,7 +431,8 @@ struct TurnCollector {
 impl TurnCollector {
     fn append_text(
         &mut self,
-        message_id: &str,
+        source_message_id: &str,
+        output_message_id: String,
         content: &str,
         phase: MessagePhase,
         kind: TextKind,
@@ -443,20 +444,29 @@ impl TurnCollector {
         }
         let stream = self
             .streamed_messages
-            .entry(message_id.to_string())
+            .entry(source_message_id.to_string())
             .or_default();
         stream.content.push_str(content);
         stream.phase = phase;
-        stream.to_message(message_id)
+        let mut message = Message::new(MessageRole::Assistant, content).with_phase(phase);
+        message.id = output_message_id;
+        message
     }
 
-    fn append_reasoning(&mut self, message_id: &str, content: &str) -> Message {
+    fn append_reasoning(
+        &mut self,
+        source_message_id: &str,
+        output_message_id: String,
+        content: &str,
+    ) -> Message {
         let stream = self
             .streamed_messages
-            .entry(message_id.to_string())
+            .entry(source_message_id.to_string())
             .or_default();
         stream.reasoning.push_str(content);
-        stream.to_message(message_id)
+        let mut message = Message::with_reasoning(MessageRole::Assistant, String::new(), content);
+        message.id = output_message_id;
+        message
     }
 
     fn observe_persisted_message(&mut self, message: &Message) {
@@ -468,12 +478,53 @@ impl TurnCollector {
         }
     }
 
+    fn snapshot_delta(&mut self, message: &Message) -> Option<Message> {
+        self.observe_persisted_message(message);
+        let full_content = message.text_content();
+        let full_reasoning = message.reasoning_content.clone();
+        let stream = match self.streamed_messages.entry(message.id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(StreamedMessage {
+                    content: full_content,
+                    reasoning: full_reasoning,
+                    phase: message.phase,
+                });
+                return Some(message.clone());
+            }
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+        };
+        let content_delta = full_content
+            .strip_prefix(&stream.content)
+            .unwrap_or_default()
+            .to_string();
+        let reasoning_delta = full_reasoning
+            .strip_prefix(&stream.reasoning)
+            .unwrap_or_default()
+            .to_string();
+        let phase_changed = stream.phase != message.phase;
+        if full_content.starts_with(&stream.content) {
+            stream.content = full_content;
+        }
+        if full_reasoning.starts_with(&stream.reasoning) {
+            stream.reasoning = full_reasoning;
+        }
+        stream.phase = message.phase;
+        if content_delta.is_empty() && reasoning_delta.is_empty() && !phase_changed {
+            return None;
+        }
+        let mut delta =
+            Message::with_reasoning(MessageRole::Assistant, content_delta, reasoning_delta);
+        delta.phase = message.phase;
+        Some(delta)
+    }
+
     fn assistant_text(&self) -> Option<String> {
-        [&self.summary_text, &self.delta_text, &self.react_text]
-            .into_iter()
-            .find(|text| !text.trim().is_empty())
-            .cloned()
-            .or_else(|| self.persisted_assistant_text.clone())
+        self.persisted_assistant_text.clone().or_else(|| {
+            [&self.summary_text, &self.delta_text, &self.react_text]
+                .into_iter()
+                .find(|text| !text.trim().is_empty())
+                .cloned()
+        })
     }
 
     fn finish(self, terminal: StreamEvent) -> ChildTurnResult {
@@ -512,19 +563,6 @@ struct StreamedMessage {
     content: String,
     reasoning: String,
     phase: MessagePhase,
-}
-
-impl StreamedMessage {
-    fn to_message(&self, message_id: &str) -> Message {
-        let mut message = Message::with_reasoning(
-            MessageRole::Assistant,
-            self.content.clone(),
-            self.reasoning.clone(),
-        );
-        message.id = message_id.to_string();
-        message.phase = self.phase;
-        message
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -724,18 +762,16 @@ fn handle_child_event(
             descriptor,
             active_turn,
             base_feedback,
-            message_id,
+            "tool-calls",
+            format!("{message_id}:{}", scru128::new()),
             format!("tool_calls: {}", names.join(", ")),
         ),
         StreamEvent::ToolStart { name, args_summary } => forward_system_output(
             descriptor,
             active_turn,
             base_feedback,
-            format!(
-                "agent:{}:tool-start:{}",
-                descriptor.agent_id,
-                scru128::new()
-            ),
+            "tool-start",
+            scru128::new().to_string(),
             if args_summary.is_empty() {
                 format!("工具开始 [{name}]")
             } else {
@@ -753,13 +789,12 @@ fn handle_child_event(
             descriptor,
             active_turn,
             base_feedback,
-            tool_call_id.unwrap_or_else(|| {
-                format!(
-                    "agent:{}:tool-result:{}",
-                    descriptor.agent_id,
-                    scru128::new()
-                )
-            }),
+            "tool-result",
+            format!(
+                "{}:{}",
+                tool_call_id.unwrap_or_else(|| "unknown".to_string()),
+                scru128::new()
+            ),
             format!(
                 "工具执行 [{name}]\nok={ok}\n{}",
                 full_output.unwrap_or(output)
@@ -819,11 +854,19 @@ fn handle_child_event(
             message_id,
             content,
         } => {
+            if content.is_empty() {
+                return;
+            }
+            let output_message_id = namespaced_message_id(descriptor, "assistant", &message_id);
             let pair = if let Ok(mut active) = active_turn.lock() {
                 active.as_mut().filter(|turn| turn.started).map(|turn| {
                     (
                         turn.feedback.clone(),
-                        turn.collector.append_reasoning(&message_id, &content),
+                        turn.collector.append_reasoning(
+                            &message_id,
+                            output_message_id.clone(),
+                            &content,
+                        ),
                     )
                 })
             } else {
@@ -833,7 +876,7 @@ fn handle_child_event(
                 shared_feedback(base_feedback).map(|feedback| {
                     let mut message =
                         Message::with_reasoning(MessageRole::Assistant, String::new(), content);
-                    message.id = message_id;
+                    message.id = output_message_id;
                     (feedback, message)
                 })
             });
@@ -846,18 +889,23 @@ fn handle_child_event(
             if message.role != MessageRole::Assistant {
                 return;
             }
-            let feedback = if let Ok(mut active) = active_turn.lock() {
-                if let Some(turn) = active.as_mut().filter(|turn| turn.started) {
-                    turn.collector.observe_persisted_message(&message);
-                    Some(turn.feedback.clone())
-                } else {
-                    None
+            let source_message_id = message.id.clone();
+            let delivery = match active_turn.lock() {
+                Ok(mut active) => {
+                    if let Some(turn) = active.as_mut().filter(|turn| turn.started) {
+                        turn.collector
+                            .snapshot_delta(&message)
+                            .map(|message| (turn.feedback.clone(), message))
+                    } else {
+                        shared_feedback(base_feedback).map(|feedback| (feedback, message.clone()))
+                    }
                 }
-            } else {
-                None
-            }
-            .or_else(|| shared_feedback(base_feedback));
-            if let Some(feedback) = feedback {
+                Err(_) => {
+                    shared_feedback(base_feedback).map(|feedback| (feedback, message.clone()))
+                }
+            };
+            if let Some((feedback, mut message)) = delivery {
+                message.id = namespaced_message_id(descriptor, "assistant", &source_message_id);
                 forward_agent_output(&feedback, descriptor, vec![message]);
             }
         }
@@ -922,11 +970,21 @@ fn forward_text_event(
     phase: MessagePhase,
     kind: TextKind,
 ) {
+    if content.is_empty() {
+        return;
+    }
+    let output_message_id = namespaced_message_id(descriptor, "assistant", message_id);
     let pair = if let Ok(mut active) = active_turn.lock() {
         active.as_mut().filter(|turn| turn.started).map(|turn| {
             (
                 turn.feedback.clone(),
-                turn.collector.append_text(message_id, content, phase, kind),
+                turn.collector.append_text(
+                    message_id,
+                    output_message_id.clone(),
+                    content,
+                    phase,
+                    kind,
+                ),
             )
         })
     } else {
@@ -936,7 +994,7 @@ fn forward_text_event(
         forward_agent_output(&feedback, descriptor, vec![message]);
     } else if let Some(feedback) = shared_feedback(base_feedback) {
         let mut message = Message::new(MessageRole::Assistant, content).with_phase(phase);
-        message.id = message_id.to_string();
+        message.id = output_message_id;
         forward_agent_output(&feedback, descriptor, vec![message]);
     }
 }
@@ -981,15 +1039,27 @@ fn forward_system_output(
     descriptor: &AgentDescriptor,
     active_turn: &Mutex<Option<ActiveTurn>>,
     base_feedback: &SharedFeedback,
-    message_id: String,
+    namespace: &str,
+    source_message_id: String,
     content: String,
 ) {
     let Some(feedback) = feedback_for_event(active_turn, base_feedback) else {
         return;
     };
     let mut message = Message::new(MessageRole::System, content);
-    message.id = message_id;
+    message.id = namespaced_message_id(descriptor, namespace, &source_message_id);
     forward_agent_output(&feedback, descriptor, vec![message]);
+}
+
+fn namespaced_message_id(
+    descriptor: &AgentDescriptor,
+    namespace: &str,
+    source_message_id: &str,
+) -> String {
+    format!(
+        "agent:{}:{namespace}:{source_message_id}",
+        descriptor.agent_id
+    )
 }
 
 fn forward_event(feedback: &PluginFeedbackTx, event: StreamEvent) {
@@ -1228,9 +1298,16 @@ mod tests {
     #[test]
     fn done_usage_is_authoritative_and_summary_has_text_priority() {
         let mut collector = TurnCollector::default();
-        collector.append_text("delta", "普通文本", MessagePhase::Normal, TextKind::Delta);
+        collector.append_text(
+            "delta",
+            "agent:test:assistant:delta".to_string(),
+            "普通文本",
+            MessagePhase::Normal,
+            TextKind::Delta,
+        );
         collector.append_text(
             "summary",
+            "agent:test:assistant:summary".to_string(),
             "最终总结",
             MessagePhase::Summary,
             TextKind::Summary,
@@ -1243,6 +1320,102 @@ mod tests {
         assert_eq!(result.status, TurnStatus::Success);
         assert_eq!(result.assistant_text.as_deref(), Some("最终总结"));
         assert_eq!(result.usage.total_tokens, 25);
+    }
+
+    #[test]
+    fn streamed_agent_output_uses_incremental_chunks_and_namespaced_ids() {
+        let descriptor = AgentDescriptor {
+            agent_id: "child-session".to_string(),
+            role: "dev".to_string(),
+            label: "Developer".to_string(),
+            system_prompt: "work".to_string(),
+            status: crate::state::AgentStatus::Idle,
+        };
+        let mut collector = TurnCollector::default();
+        let output_id = namespaced_message_id(&descriptor, "assistant", "assistant-1");
+        let first = collector.append_text(
+            "assistant-1",
+            output_id.clone(),
+            "第一段",
+            MessagePhase::Normal,
+            TextKind::Delta,
+        );
+        let second = collector.append_text(
+            "assistant-1",
+            output_id.clone(),
+            "第二段",
+            MessagePhase::Normal,
+            TextKind::Delta,
+        );
+        let reasoning = collector.append_reasoning(
+            "assistant-1",
+            namespaced_message_id(&descriptor, "assistant", "assistant-1"),
+            "思考片段",
+        );
+
+        assert_eq!(first.id, "agent:child-session:assistant:assistant-1");
+        assert_eq!(first.text_content(), "第一段");
+        assert_eq!(second.id, output_id);
+        assert_eq!(second.text_content(), "第二段");
+        assert_eq!(reasoning.id, "agent:child-session:assistant:assistant-1");
+        assert_eq!(reasoning.reasoning_content, "思考片段");
+        assert_eq!(
+            namespaced_message_id(&descriptor, "tool-calls", "assistant-1"),
+            "agent:child-session:tool-calls:assistant-1"
+        );
+        assert_eq!(collector.delta_text, "第一段第二段");
+        assert_eq!(
+            collector
+                .streamed_messages
+                .get("assistant-1")
+                .map(|message| message.content.as_str()),
+            Some("第一段第二段")
+        );
+    }
+
+    #[test]
+    fn persisted_snapshot_only_forwards_missing_components_and_phase() {
+        let mut snapshot = Message::new(MessageRole::Assistant, "最终快照");
+        snapshot.id = "assistant-1".to_string();
+
+        let mut fallback_collector = TurnCollector::default();
+        assert_eq!(
+            fallback_collector
+                .snapshot_delta(&snapshot)
+                .map(|message| message.text_content()),
+            Some("最终快照".to_string())
+        );
+        assert!(fallback_collector.snapshot_delta(&snapshot).is_none());
+        snapshot.phase = MessagePhase::Summary;
+        let phase_update = fallback_collector
+            .snapshot_delta(&snapshot)
+            .expect("最终阶段变化仍应同步");
+        assert!(phase_update.text_content().is_empty());
+        assert_eq!(phase_update.phase, MessagePhase::Summary);
+
+        let mut streamed_collector = TurnCollector::default();
+        streamed_collector.append_text(
+            "assistant-1",
+            "agent:child-session:assistant:assistant-1".to_string(),
+            "流式",
+            MessagePhase::Normal,
+            TextKind::Delta,
+        );
+        let mut completed = Message::with_reasoning(MessageRole::Assistant, "流式文本", "完整思考");
+        completed.id = "assistant-1".to_string();
+        let missing = streamed_collector
+            .snapshot_delta(&completed)
+            .expect("快照应补齐未流式的文本和思考");
+        assert_eq!(missing.text_content(), "文本");
+        assert_eq!(missing.reasoning_content, "完整思考");
+        assert_eq!(
+            streamed_collector.persisted_assistant_text.as_deref(),
+            Some("流式文本")
+        );
+        assert_eq!(
+            streamed_collector.assistant_text().as_deref(),
+            Some("流式文本")
+        );
     }
 
     #[test]
@@ -1275,6 +1448,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn independent_core_waits_for_external_terminal_and_persists_child_session() {
+        let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
         tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let server = OneShotSseServer::start();

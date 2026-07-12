@@ -23,6 +23,11 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     pub(crate) cores: Mutex<HashMap<String, TiangongCore>>,
+    /// 子 Agent 的过程消息仅供桌面端视图展示，不能进入父 Session 权威状态。
+    ///
+    /// 按父 Session 保存；构建 RunSnapshot 时合并到消息副本。这样 Core 重建、
+    /// 编辑重发和 Session 持久化永远不会读到这些临时 worker 消息。
+    agent_worker_views: Mutex<HashMap<String, Vec<tiangong_types::Message>>>,
     /// 覆盖同一会话从首次检查到 Core 插入的完整创建区间。
     ///
     /// 当前入口还会统一持有 `session_send_locks` 覆盖完整业务生命周期；这里再独立
@@ -131,6 +136,62 @@ fn take_current_instance_if<T>(
     removable.then(|| instances.remove(session_id)).flatten()
 }
 
+fn merge_agent_output_messages(
+    view: &mut Vec<tiangong_types::Message>,
+    agent_id: &str,
+    agent_role: &str,
+    agent_label: &str,
+    messages: &[tiangong_types::Message],
+) {
+    let worker_id = format!("agent:{agent_role}:{agent_id}");
+    let header_id = format!("agent:{agent_id}:header");
+    if !view.iter().any(|message| {
+        message.id == header_id && message.worker_id.as_deref() == Some(worker_id.as_str())
+    }) {
+        let mut header = tiangong_core::session::Message::new(
+            tiangong_core::session::MessageRole::System,
+            format!("🔧 Worker: {agent_label} (@{agent_role})"),
+        );
+        header.id = header_id;
+        header.worker_id = Some(worker_id.clone());
+        header.model_excluded = true;
+        view.push(header);
+    }
+
+    for message in messages {
+        let role = match message.role {
+            tiangong_core::session::MessageRole::Assistant => {
+                tiangong_core::session::MessageRole::Assistant
+            }
+            tiangong_core::session::MessageRole::System
+            | tiangong_core::session::MessageRole::Tool => {
+                tiangong_core::session::MessageRole::System
+            }
+            tiangong_core::session::MessageRole::User => tiangong_core::session::MessageRole::User,
+        };
+
+        if let Some(existing) = view.iter_mut().find(|item| {
+            item.id == message.id && item.worker_id.as_deref() == Some(worker_id.as_str())
+        }) {
+            if role == tiangong_core::session::MessageRole::Assistant {
+                existing.content.extend(message.content.iter().cloned());
+                existing
+                    .reasoning_content
+                    .push_str(&message.reasoning_content);
+                existing.phase = message.phase;
+            }
+            continue;
+        }
+
+        let mut worker_message = message.clone();
+        worker_message.role = role;
+        worker_message.worker_id = Some(worker_id.clone());
+        // 即使未来误把缓存副本传入 Core，也不得进入父 Agent 上下文。
+        worker_message.model_excluded = true;
+        view.push(worker_message);
+    }
+}
+
 impl CoreCreationLocks {
     fn lock_for(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
         let mut locks = match self.by_session.lock() {
@@ -173,6 +234,7 @@ impl TiangongApp {
         Self {
             state,
             cores: Mutex::new(HashMap::new()),
+            agent_worker_views: Mutex::new(HashMap::new()),
             core_creation_locks: CoreCreationLocks::default(),
             session_send_locks: Mutex::new(HashMap::new()),
             draft_update_locks: Mutex::new(HashMap::new()),
@@ -198,6 +260,41 @@ impl TiangongApp {
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
+    }
+
+    pub(crate) fn merge_agent_output_view(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        agent_role: &str,
+        agent_label: &str,
+        messages: &[tiangong_types::Message],
+    ) {
+        let mut views = self
+            .agent_worker_views
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let view = views.entry(session_id.to_string()).or_default();
+        merge_agent_output_messages(view, agent_id, agent_role, agent_label, messages);
+    }
+
+    pub(crate) fn agent_worker_view_messages(
+        &self,
+        session_id: &str,
+    ) -> Vec<tiangong_types::Message> {
+        self.agent_worker_views
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn clear_agent_worker_view(&self, session_id: &str) {
+        self.agent_worker_views
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(session_id);
     }
 
     /// 注入 Tauri 应用句柄（setup 阶段调用，仅一次）。
@@ -1639,6 +1736,37 @@ mod tests {
         )
         .is_some());
         assert!(!instances.contains_key("session-1"));
+    }
+
+    #[test]
+    fn agent_worker_view_is_session_scoped_and_never_model_visible() {
+        let app = TiangongApp::new();
+        let mut first = tiangong_core::session::Message::new(
+            tiangong_core::session::MessageRole::Assistant,
+            "first",
+        );
+        first.id = "agent:child:assistant:reply".to_string();
+        let mut second = tiangong_core::session::Message::new(
+            tiangong_core::session::MessageRole::Assistant,
+            " second",
+        );
+        second.id = first.id.clone();
+
+        app.merge_agent_output_view("parent-a", "child", "dev", "Developer", &[first]);
+        app.merge_agent_output_view("parent-a", "child", "dev", "Developer", &[second]);
+
+        let messages = app.agent_worker_view_messages("parent-a");
+        assert_eq!(messages.len(), 2, "应包含稳定标题和一条合并后的回复");
+        assert!(messages.iter().all(|message| message.model_excluded));
+        let reply = messages
+            .iter()
+            .find(|message| message.id == "agent:child:assistant:reply")
+            .unwrap();
+        assert_eq!(reply.text_content(), "first second");
+        assert!(app.agent_worker_view_messages("parent-b").is_empty());
+
+        app.clear_agent_worker_view("parent-a");
+        assert!(app.agent_worker_view_messages("parent-a").is_empty());
     }
 
     #[tokio::test]

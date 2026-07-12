@@ -32,6 +32,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   groupMessages,
   workerContentMessages,
+  workerBelongsToAgent,
   extractAgentRoles,
   UserMessageGroup,
   AgentTurn,
@@ -168,6 +169,9 @@ export function MessageList() {
 
   // 消息分组
   const messageGroups = useMemo(() => groupMessages(messages), [messages]);
+  const selectedAgentId = selectedAgentTab
+    ? agents.find((agent) => agent.role === selectedAgentTab)?.agentId
+    : undefined;
 
   // agent_tab 过滤前置：将渲染时的 return null 改为数据层过滤
   const filteredGroups = useMemo(() => {
@@ -184,7 +188,11 @@ export function MessageList() {
     return messageGroups.filter(group => {
       if (group.type === "user") return false;
       if (group.type === "worker") {
-        return group.worker_id?.startsWith(`agent:${selectedAgentTab}:`);
+        return workerBelongsToAgent(
+          group.worker_id,
+          selectedAgentTab,
+          selectedAgentId,
+        );
       }
       if (group.type === "agent_turn") {
         return group.messages.some(m =>
@@ -194,7 +202,7 @@ export function MessageList() {
       }
       return true;
     });
-  }, [messageGroups, selectedAgentTab, agents]);
+  }, [messageGroups, selectedAgentTab, selectedAgentId, agents]);
 
   // 分离流式消息：正在流式输出的 agent_turn 不参与虚拟化
   const { completedGroups, streamingGroup } = useMemo(() => {

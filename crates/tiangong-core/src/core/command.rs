@@ -17,6 +17,8 @@ pub enum Command {
     Message {
         prepared: Vec<tiangong_types::ContentBlock>,
         message_id: Option<String>,
+        /// 继续处理已经持久化、且插件投递已完成的用户消息，不再次规划或追加。
+        resume_existing: bool,
         /// 仅对该消息所属 turn 生效，轮次结束后恢复原模式。
         trust_mode_override: Option<crate::permission::TrustMode>,
         persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
@@ -63,6 +65,8 @@ pub enum Command {
     CommitPluginDeliveries {
         delivery_ids: Vec<String>,
         tool_injections: Vec<crate::core::plugin::PluginFeedback>,
+        /// 本次提交用于明确取消这些投递，并原子标记来源用户消息为已取消。
+        cancelled: bool,
         persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     },
     /// 插件投递的流事件（如 MemoryRecallStart/Progress/Done）。

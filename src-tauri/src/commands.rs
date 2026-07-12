@@ -38,6 +38,67 @@ fn done_event_keeps_turn_running(
     matches!(event, tiangong_types::StreamEvent::Done { .. }) && has_pending_turn
 }
 
+fn upsert_agent_status_message(
+    session: &mut tiangong_core::session::Session,
+    agent_id: &str,
+    label: &str,
+    status: &str,
+) {
+    let message_id = format!("agent-status:{agent_id}");
+    let content = format!("[Agent] {label} 状态变更: {status} id={agent_id}");
+    if let Some(message) = session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == message_id)
+    {
+        message.content = vec![tiangong_types::ContentBlock::text(content)];
+        message.model_excluded = true;
+    } else {
+        let mut message = tiangong_core::session::Message::new(
+            tiangong_core::session::MessageRole::System,
+            content,
+        );
+        message.id = message_id;
+        message.model_excluded = true;
+        session.messages.push(message);
+    }
+    session.updated_at = tiangong_core::session::now_text();
+}
+
+fn merge_agent_worker_messages(
+    messages: &mut Vec<tiangong_types::Message>,
+    cached: &[tiangong_types::Message],
+) {
+    let mut indices = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let worker_id = message.worker_id.as_deref()?;
+            worker_id
+                .starts_with("agent:")
+                .then(|| ((worker_id.to_string(), message.id.clone()), index))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    for message in cached {
+        let Some(worker_id) = message
+            .worker_id
+            .as_deref()
+            .filter(|worker_id| worker_id.starts_with("agent:"))
+        else {
+            continue;
+        };
+        let key = (worker_id.to_string(), message.id.clone());
+        if let Some(index) = indices.get(&key).copied() {
+            messages[index] = message.clone();
+        } else {
+            let index = messages.len();
+            messages.push(message.clone());
+            indices.insert(key, index);
+        }
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct AttachmentDataUrl {
     pub data_url: String,
@@ -400,11 +461,13 @@ fn has_capability_in_state(
 // ============================================================================
 
 pub fn build_full_snapshot_with_status(
+    app_state: &TiangongApp,
     core_state: &tiangong_app_state::app_state::TiangongState,
     is_executing: bool,
 ) -> RunSnapshotView {
     let sid = core_state.active_session_id();
-    build_session_snapshot(core_state, sid, is_executing)
+    let agent_worker_messages = app_state.agent_worker_view_messages(sid);
+    build_session_snapshot(core_state, sid, is_executing, &agent_worker_messages)
 }
 
 fn active_session_is_executing(core_state: &tiangong_app_state::app_state::TiangongState) -> bool {
@@ -419,15 +482,17 @@ fn build_session_snapshot(
     core_state: &tiangong_app_state::app_state::TiangongState,
     session_id: &str,
     is_session_executing: bool,
+    agent_worker_messages: &[tiangong_types::Message],
 ) -> RunSnapshotView {
     let core_snapshot = core_state.run_snapshot();
     let input_draft = core_state.session_input_draft(session_id).text;
 
     let selected_session = core_state.sessions().iter().find(|s| s.id == session_id);
 
-    let messages: Vec<tiangong_types::Message> = selected_session
+    let mut messages: Vec<tiangong_types::Message> = selected_session
         .map(|s| s.messages.clone())
         .unwrap_or_default();
+    merge_agent_worker_messages(&mut messages, agent_worker_messages);
 
     let current_plan = core_state
         .active_task_plans()
@@ -779,14 +844,14 @@ pub async fn switch_session(
             }
 
             if need_snapshot {
-                if let Ok(snapshot) =
-                    rt.block_on(app_clone.state::<TiangongApp>().with_state_read(|s| {
-                        Ok(build_full_snapshot_with_status(
-                            s,
-                            active_session_is_executing(s),
-                        ))
-                    }))
-                {
+                let app_state = app_clone.state::<TiangongApp>();
+                if let Ok(snapshot) = rt.block_on(app_state.with_state_read(|s| {
+                    Ok(build_full_snapshot_with_status(
+                        app_state.inner(),
+                        s,
+                        active_session_is_executing(s),
+                    ))
+                })) {
                     let _ = app_clone.emit("run_snapshot", &snapshot);
                 }
             }
@@ -830,6 +895,7 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     draft_attachments.extend(raw_attachments_for_paths(
         state.release_any_draft_send_claim(&deleted_id),
     ));
+    state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
     // 删除对话后同步销毁终端和浏览器运行时。
     tiangong_plugin_terminal::destroy_session_pty(&app, &deleted_id);
@@ -911,6 +977,7 @@ pub async fn delete_sessions_by_cwd(
     for id in &deleted_ids {
         tiangong_plugin_terminal::destroy_session_pty(&app, id);
         browser_state.registry.destroy_session(id);
+        state.clear_agent_worker_view(id);
         if let Err(error) = crate::workspace_tabs::remove_layout(id) {
             warn!(%error, session_id = %id, "删除工作区标签页布局失败");
         }
@@ -1508,6 +1575,21 @@ pub(crate) fn start_stream_consumer(
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
             let completed_remote_message_id = remote_turn_correlation.observe(&event);
+            if let StreamEvent::AgentOutput {
+                agent_id,
+                agent_role,
+                agent_label,
+                messages,
+            } = &event
+            {
+                app_state.merge_agent_output_view(
+                    &sid,
+                    agent_id,
+                    agent_role,
+                    agent_label,
+                    messages,
+                );
+            }
 
             // 更新 session + RunStatus/usage
             let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
@@ -1721,9 +1803,10 @@ pub(crate) fn start_stream_consumer(
                         } => {}
                         StreamEvent::AgentStatusChanged {
                             ref agent_id,
-                            label: _,
+                            ref label,
                             ref status,
                         } => {
+                            upsert_agent_status_message(session, agent_id, label, status);
                             if status == "terminated" {
                                 session.agent_current_tokens.remove(agent_id);
                                 session.agent_token_usage.remove(agent_id);
@@ -1758,63 +1841,7 @@ pub(crate) fn start_stream_consumer(
                                 let _ = (from_agent_label, content);
                             }
                         }
-                        StreamEvent::AgentOutput {
-                            ref agent_id,
-                            ref agent_role,
-                            ref agent_label,
-                            ref messages,
-                        } => {
-                            // Sub Agent 的内部对话（工具调用、过程文本、中间推理）以 worker_id
-                            // 标记写入 session.messages，主对话视图按 worker_id 过滤不显示，
-                            // 但 GUI 顶部 Agent Tab 切换时可查看子 Agent 的完整执行过程。
-                            let worker_id = format!("agent:{agent_role}:{agent_id}");
-                            let header = format!("🔧 Worker: {agent_label} (@{agent_role})");
-                            if !session.messages.iter().any(|message| {
-                                message.worker_id.as_deref() == Some(worker_id.as_str())
-                                    && message.text_content() == header
-                            }) {
-                                session.append_worker_message(
-                                    tiangong_core::session::MessageRole::System,
-                                    header,
-                                    &worker_id,
-                                );
-                            }
-                            for message in messages {
-                                let role = match message.role {
-                                    tiangong_core::session::MessageRole::Assistant => {
-                                        tiangong_core::session::MessageRole::Assistant
-                                    }
-                                    tiangong_core::session::MessageRole::System
-                                    | tiangong_core::session::MessageRole::Tool => {
-                                        tiangong_core::session::MessageRole::System
-                                    }
-                                    tiangong_core::session::MessageRole::User => {
-                                        tiangong_core::session::MessageRole::User
-                                    }
-                                };
-
-                                if let Some(existing) = session.messages.iter_mut().find(|item| {
-                                    item.id == message.id
-                                        && item.worker_id.as_deref() == Some(worker_id.as_str())
-                                }) {
-                                    if role == tiangong_core::session::MessageRole::Assistant {
-                                        for block in &message.content {
-                                            existing.content.push(block.clone());
-                                        }
-                                        existing
-                                            .reasoning_content
-                                            .push_str(&message.reasoning_content);
-                                    }
-                                    continue;
-                                }
-
-                                let mut worker_message = message.clone();
-                                worker_message.role = role;
-                                worker_message.worker_id = Some(worker_id.clone());
-                                session.messages.push(worker_message);
-                                session.updated_at = tiangong_core::session::now_text();
-                            }
-                        }
+                        StreamEvent::AgentOutput { .. } => {}
                         StreamEvent::FileLockChanged {
                             ref path,
                             ref holder_agent_label,
@@ -2060,6 +2087,7 @@ pub(crate) fn start_stream_consumer(
                 if let Ok(snapshot) =
                     rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
                         Ok(build_full_snapshot_with_status(
+                            app_state.inner(),
                             core_state,
                             active_session_is_executing(core_state),
                         ))
@@ -2101,6 +2129,7 @@ pub(crate) fn start_stream_consumer(
                         core_state.has_pending_turn_for(&final_sid),
                     );
                     let snapshot = build_full_snapshot_with_status(
+                        app_state.inner(),
                         core_state,
                         active_session_is_executing(core_state),
                     );
@@ -2237,6 +2266,7 @@ pub(crate) fn start_stream_consumer(
                                         core_state.update_session_title_draft(clean.clone());
                                     }
                                     let snapshot = build_full_snapshot_with_status(
+                                        app_state.inner(),
                                         core_state,
                                         active_session_is_executing(core_state),
                                     );
@@ -2264,6 +2294,7 @@ pub(crate) fn start_stream_consumer(
                 core_state.report_run_idle("执行已中断：Core 事件流已关闭".to_string());
                 let _ = core_state.persist_app_only();
                 let snapshot = build_full_snapshot_with_status(
+                    app_state.inner(),
                     core_state,
                     active_session_is_executing(core_state),
                 );
@@ -3481,6 +3512,7 @@ pub async fn get_run_snapshot(state: State<'_, TiangongApp>) -> Result<RunSnapsh
     state
         .with_state_read(|core_state| {
             Ok(build_full_snapshot_with_status(
+                state.inner(),
                 core_state,
                 active_session_is_executing(core_state),
             ))
@@ -5027,7 +5059,7 @@ mod tests {
 
     use super::{
         append_tool_result_message, cancel_after_session_send_boundary,
-        done_event_keeps_turn_running,
+        done_event_keeps_turn_running, merge_agent_worker_messages, upsert_agent_status_message,
     };
 
     #[tokio::test]
@@ -5085,6 +5117,86 @@ mod tests {
             message: "failed".to_string(),
         };
         assert!(!done_event_keeps_turn_running(&event, true));
+    }
+
+    #[test]
+    fn agent_status_message_uses_stable_frontend_protocol() {
+        use tiangong_core::session::{MessageRole, Session};
+
+        let mut session = Session::new("desktop-agent-status");
+        upsert_agent_status_message(&mut session, "agent-dev", "开发者", "running");
+        upsert_agent_status_message(&mut session, "agent-dev", "开发者", "idle");
+
+        let status_messages = session
+            .messages
+            .iter()
+            .filter(|message| message.id == "agent-status:agent-dev")
+            .collect::<Vec<_>>();
+        assert_eq!(status_messages.len(), 1);
+        assert_eq!(status_messages[0].role, MessageRole::System);
+        assert!(status_messages[0].model_excluded);
+        assert_eq!(
+            status_messages[0].text_content(),
+            "[Agent] 开发者 状态变更: idle id=agent-dev"
+        );
+    }
+
+    #[test]
+    fn agent_worker_merge_is_scoped_by_worker_and_message_id() {
+        use tiangong_core::session::{Message, MessageRole, Session};
+
+        fn worker_message(id: &str, worker_id: &str, content: &str) -> Message {
+            let mut message = Message::new(MessageRole::Assistant, content);
+            message.id = id.to_string();
+            message.worker_id = Some(worker_id.to_string());
+            message
+        }
+
+        let mut session = Session::new("desktop-agent-workers");
+        let mut main = Message::new(MessageRole::Assistant, "main");
+        main.id = "shared".to_string();
+        session.messages.push(main);
+
+        let cached = vec![
+            worker_message("shared", "agent:dev:agent-dev", "latest"),
+            worker_message("next", "agent:dev:agent-dev", "next"),
+            worker_message("shared", "agent:test:agent-test", "tester"),
+            worker_message("ignored", "background:worker", "ignored"),
+        ];
+        let authoritative_messages = session.messages.clone();
+        let mut snapshot_messages = authoritative_messages.clone();
+        snapshot_messages.push(worker_message("shared", "agent:dev:agent-dev", "stale"));
+        merge_agent_worker_messages(&mut snapshot_messages, &cached);
+
+        assert_eq!(session.messages.len(), authoritative_messages.len());
+        assert_eq!(session.messages[0].id, authoritative_messages[0].id);
+        assert_eq!(session.messages[0].text_content(), "main");
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.worker_id.is_none()));
+        assert_eq!(snapshot_messages[0].text_content(), "main");
+        let workers = snapshot_messages
+            .iter()
+            .filter(|message| {
+                message
+                    .worker_id
+                    .as_deref()
+                    .is_some_and(|worker_id| worker_id.starts_with("agent:"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(workers.len(), 3);
+        assert!(workers.iter().any(|message| {
+            message.id == "shared"
+                && message.worker_id.as_deref() == Some("agent:dev:agent-dev")
+                && message.text_content() == "latest"
+        }));
+        assert!(workers.iter().any(|message| {
+            message.id == "shared"
+                && message.worker_id.as_deref() == Some("agent:test:agent-test")
+                && message.text_content() == "tester"
+        }));
+        assert!(workers.iter().any(|message| message.id == "next"));
     }
 
     #[test]

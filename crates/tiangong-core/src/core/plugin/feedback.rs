@@ -302,6 +302,7 @@ impl PluginFeedbackTx {
             .send(Command::CommitPluginDeliveries {
                 delivery_ids,
                 tool_injections,
+                cancelled: false,
                 persistence_ack: Some(persistence_ack),
             })
             .map_err(|_| "Core 已关闭，无法提交插件持久投递".to_string())?;
@@ -312,15 +313,39 @@ impl PluginFeedbackTx {
 
     /// 无等待地确认一组插件持久投递已经完成。
     ///
-    /// 兼容取消路径：会话更新仍由 Core 所在线程串行执行，但调用方不等待持久化
-    /// 确认。需要同时注入处理结果时应使用 [`commit_pending_deliveries`](Self::commit_pending_deliveries)。
+    /// 会话更新仍由 Core 所在线程串行执行，但调用方不等待持久化确认。需要同时
+    /// 注入处理结果时应使用 [`commit_pending_deliveries`](Self::commit_pending_deliveries)；
+    /// 明确取消则使用 [`cancel_pending_deliveries`](Self::cancel_pending_deliveries)。
     pub fn complete_pending_deliveries(&self, delivery_ids: Vec<String>) {
+        self.commit_pending_deliveries_without_ack(delivery_ids, Vec::new());
+    }
+
+    /// 无等待地提交投递结果；适合生命周期恢复阶段，不能阻塞 Core 的单写 worker。
+    pub fn commit_pending_deliveries_without_ack(
+        &self,
+        delivery_ids: Vec<String>,
+        tool_injections: Vec<PluginFeedback>,
+    ) {
+        if delivery_ids.is_empty() {
+            return;
+        }
+        let _ = self.tx.send(Command::CommitPluginDeliveries {
+            delivery_ids,
+            tool_injections,
+            cancelled: false,
+            persistence_ack: None,
+        });
+    }
+
+    /// 无等待地取消一组插件持久投递，并原子标记来源用户消息为已取消。
+    pub fn cancel_pending_deliveries(&self, delivery_ids: Vec<String>) {
         if delivery_ids.is_empty() {
             return;
         }
         let _ = self.tx.send(Command::CommitPluginDeliveries {
             delivery_ids,
             tool_injections: Vec::new(),
+            cancelled: true,
             persistence_ack: None,
         });
     }
@@ -556,6 +581,7 @@ mod tests {
         let Command::CommitPluginDeliveries {
             delivery_ids,
             tool_injections,
+            cancelled,
             persistence_ack,
         } = command
         else {
@@ -563,10 +589,28 @@ mod tests {
         };
         assert_eq!(delivery_ids, ["delivery-1"]);
         assert_eq!(tool_injections.len(), 1);
+        assert!(!cancelled);
         assert_eq!(tool_injections[0].tool_name, "agent_report");
         assert!(!commit.is_finished());
 
         persistence_ack.unwrap().send(Ok(())).unwrap();
         assert!(commit.await.unwrap().is_ok());
+    }
+
+    #[test]
+    fn cancel_pending_deliveries_sets_explicit_cancel_marker() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let feedback = PluginFeedbackTx::new(command_tx, Arc::new(TurnUsageSink::new()));
+
+        feedback.cancel_pending_deliveries(vec!["delivery-cancelled".to_string()]);
+
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::CommitPluginDeliveries {
+                cancelled: true,
+                tool_injections,
+                ..
+            } if tool_injections.is_empty()
+        ));
     }
 }

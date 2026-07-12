@@ -75,7 +75,7 @@ pub(super) fn drain_pending_commands_async(
 }
 
 /// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
-pub(super) fn process_buffered_commands(
+pub(crate) fn process_buffered_commands(
     session: &mut Session,
     engine: &RuntimeEngine,
     agent_id: &str,
@@ -119,6 +119,7 @@ fn process_commands(
             Command::Message {
                 prepared,
                 message_id,
+                resume_existing,
                 trust_mode_override,
                 persistence_ack,
             } => {
@@ -130,6 +131,7 @@ fn process_commands(
                     message_id,
                     prepared,
                     persistence_ack,
+                    resume_existing,
                 ) {
                     Ok(RuntimeMessageDisposition::CurrentAgentInput(text)) => {
                         if let Some(controller) = turn_trust_mode {
@@ -178,6 +180,7 @@ fn process_commands(
             Command::CommitPluginDeliveries {
                 delivery_ids,
                 tool_injections,
+                cancelled,
                 persistence_ack,
             } => {
                 if let Err(error) = crate::react::message::commit_plugin_deliveries(
@@ -185,6 +188,7 @@ fn process_commands(
                     stream_tx,
                     delivery_ids,
                     tool_injections,
+                    cancelled,
                     persistence_ack,
                 ) {
                     tracing::warn!(%error, "提交插件持久投递失败");
@@ -312,6 +316,7 @@ mod tests {
             vec![Command::Message {
                 prepared: vec![invalid],
                 message_id: Some("invalid-message".to_string()),
+                resume_existing: false,
                 trust_mode_override: Some(TrustMode::FullTrust),
                 persistence_ack: None,
             }],
@@ -344,6 +349,7 @@ mod tests {
             vec![Command::Message {
                 prepared: vec![tiangong_types::ContentBlock::text("@worker routed")],
                 message_id: Some("routed-message".to_string()),
+                resume_existing: false,
                 trust_mode_override: Some(TrustMode::FullTrust),
                 persistence_ack: None,
             }],
@@ -437,6 +443,7 @@ mod tests {
         tx.send(Command::Message {
             prepared: vec![tiangong_types::ContentBlock::text("msg1")],
             message_id: None,
+            resume_existing: false,
             trust_mode_override: None,
             persistence_ack: None,
         })
@@ -444,6 +451,7 @@ mod tests {
         tx.send(Command::Message {
             prepared: vec![tiangong_types::ContentBlock::text("msg2")],
             message_id: None,
+            resume_existing: false,
             trust_mode_override: None,
             persistence_ack: None,
         })
@@ -483,6 +491,7 @@ mod tests {
         tx.send(Command::Message {
             prepared: vec![tiangong_types::ContentBlock::text("msg")],
             message_id: None,
+            resume_existing: false,
             trust_mode_override: None,
             persistence_ack: None,
         })

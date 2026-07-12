@@ -92,6 +92,26 @@ struct BackgroundTaskEntry {
     handle: tokio::task::JoinHandle<()>,
 }
 
+pub(crate) struct PendingDismissal {
+    runtime: Arc<ChildRuntime>,
+    descriptor: AgentDescriptor,
+    role: String,
+}
+
+impl PendingDismissal {
+    pub(crate) async fn finish(self) -> ToolResult {
+        if let Err(error) = self.runtime.shutdown().await {
+            return error_result(TOOL_DISMISS_AGENT, error);
+        }
+        ok_result(
+            TOOL_DISMISS_AGENT,
+            format!("{} 已解散", self.descriptor.label),
+            format!("Agent '{}' 已关闭", self.descriptor.label),
+            vec![self.role],
+        )
+    }
+}
+
 impl Coordinator {
     pub(crate) fn new(
         storage_root: PathBuf,
@@ -206,16 +226,75 @@ impl Coordinator {
             }
         }
 
+        let cancelled_sources = parent
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::User
+                    && message.turn_status == Some(tiangong_types::TurnStatus::Cancelled)
+            })
+            .map(|message| message.id.clone())
+            .collect::<HashSet<_>>();
+        let cancelled_delivery_ids = parent
+            .pending_plugin_deliveries
+            .iter()
+            .filter(|delivery| cancelled_sources.contains(&delivery.source_message_id))
+            .map(|delivery| delivery.delivery_id.clone())
+            .collect::<Vec<_>>();
+        if !cancelled_delivery_ids.is_empty() {
+            if let Some(feedback) = self.feedback() {
+                feedback.cancel_pending_deliveries(cancelled_delivery_ids);
+            } else {
+                self.notify_system_error("清理已取消的团队投递时反馈通道不可用".to_string());
+            }
+        }
+
         let source_ids = parent
             .pending_plugin_deliveries
             .iter()
             .filter(|delivery| delivery.plugin_id.is_empty() || delivery.plugin_id == PLUGIN_ID)
+            .filter(|delivery| !cancelled_sources.contains(&delivery.source_message_id))
             .map(|delivery| delivery.source_message_id.clone())
             .collect::<BTreeSet<_>>();
         let trust_mode = self.current_trust_mode();
         for source_id in source_ids {
             self.dispatch_deliveries(parent, &source_id, trust_mode);
         }
+    }
+
+    fn settle_undispatchable_deliveries(&self, deliveries: Vec<PendingPluginDelivery>) -> bool {
+        if deliveries.is_empty() {
+            return false;
+        }
+        let Some(feedback) = self.feedback() else {
+            self.notify_system_error("结算无法派发的团队消息时反馈通道不可用".to_string());
+            return false;
+        };
+        let delivery_ids = deliveries
+            .iter()
+            .map(|delivery| delivery.delivery_id.clone())
+            .collect::<Vec<_>>();
+        let injections = deliveries
+            .into_iter()
+            .map(|delivery| {
+                let descriptor = self
+                    .record(&delivery.target_id)
+                    .map(|record| record.descriptor);
+                PluginFeedback::new(
+                    "agent_team_report",
+                    json!({
+                        "agent_id": delivery.target_id,
+                        "agent_role": descriptor.as_ref().map(|item| item.role.as_str()).unwrap_or("unknown"),
+                        "agent_label": descriptor.as_ref().map(|item| item.label.as_str()).unwrap_or("未知 Agent"),
+                        "delivery_id": delivery.delivery_id,
+                        "success": false,
+                        "report": "恢复投递失败：目标子 Core 不可用，本次请求已交回 Main Agent 继续处理",
+                    }),
+                )
+            })
+            .collect();
+        feedback.commit_pending_deliveries_without_ack(delivery_ids, injections);
+        true
     }
 
     pub(crate) fn create_agent(
@@ -253,9 +332,8 @@ impl Coordinator {
                     format!("团队 Agent 数量已达上限（{MAX_AGENTS}）"),
                 );
             }
-            let agent_id = scru128::new().to_string();
             let mut child = Session::new(&label);
-            child.id = agent_id.clone();
+            let agent_id = child.id.clone();
             child.cwd = parent.cwd.clone();
             child.reasoning_effort = parent.reasoning_effort.clone();
             child.trust_mode = parent.trust_mode;
@@ -291,7 +369,13 @@ impl Coordinator {
         if let Ok(mut runtimes) = self.runtimes.lock() {
             runtimes.insert(record.descriptor.agent_id.clone(), runtime);
         }
-        append_descriptor_message(parent, &record.descriptor);
+        let descriptor_message = append_descriptor_message(parent, &record.descriptor);
+        self.emit(StreamEvent::SessionMessageUpsert {
+            message: descriptor_message,
+            pending_plugin_deliveries: None,
+            completed_plugin_delivery_ids: None,
+            deferred_tool_injections: None,
+        });
         self.emit(StreamEvent::AgentCreated {
             agent_id: record.descriptor.agent_id.clone(),
             role: role.clone(),
@@ -325,7 +409,6 @@ impl Coordinator {
             TOOL_NOTIFY_USER => self.notify_user(&call, &actor_id),
             TOOL_LOCK_FILE => self.lock_file(&call, &actor_id),
             TOOL_UNLOCK_FILE => self.unlock_file(&call, &actor_id),
-            TOOL_DISMISS_AGENT => self.dismiss_agent(&call).await,
             _ => error_result(&call.name, "未注册的 Agent Team 工具"),
         }
     }
@@ -588,18 +671,22 @@ impl Coordinator {
         )
     }
 
-    async fn dismiss_agent(&self, call: &ToolCall) -> ToolResult {
+    pub(crate) fn prepare_dismiss_agent(
+        &self,
+        call: &ToolCall,
+        parent: &mut Session,
+    ) -> Result<PendingDismissal, String> {
         let role = normalize_role(argument_str(call, "role"));
         let Some(record) = self.record_by_role(&role) else {
-            return error_result(TOOL_DISMISS_AGENT, format!("未找到角色 '{role}'"));
+            return Err(format!("未找到角色 '{role}'"));
         };
         let Some(runtime) = self.runtime(&record.descriptor.agent_id) else {
-            return error_result(TOOL_DISMISS_AGENT, "目标子 Core 不可用");
+            return Err("目标子 Core 不可用".to_string());
         };
         {
             let mut background_tasks = match self.background_tasks.lock() {
                 Ok(background_tasks) => background_tasks,
-                Err(_) => return error_result(TOOL_DISMISS_AGENT, "投递队列状态锁定失败"),
+                Err(_) => return Err("投递队列状态锁定失败".to_string()),
             };
             background_tasks.remove_finished();
             if background_tasks
@@ -607,25 +694,19 @@ impl Coordinator {
                 .iter()
                 .any(|entry| entry.target_id == record.descriptor.agent_id)
             {
-                return error_result(
-                    TOOL_DISMISS_AGENT,
-                    format!("{} 仍有排队或执行中的消息", record.descriptor.label),
-                );
+                return Err(format!(
+                    "{} 仍有排队或执行中的消息",
+                    record.descriptor.label
+                ));
             }
             if background_tasks
                 .closing_targets
                 .contains(&record.descriptor.agent_id)
             {
-                return error_result(
-                    TOOL_DISMISS_AGENT,
-                    format!("{} 正在关闭", record.descriptor.label),
-                );
+                return Err(format!("{} 正在关闭", record.descriptor.label));
             }
             if !runtime.begin_closing() {
-                return error_result(
-                    TOOL_DISMISS_AGENT,
-                    format!("{} 正在运行或关闭", record.descriptor.label),
-                );
+                return Err(format!("{} 正在运行或关闭", record.descriptor.label));
             }
             background_tasks
                 .closing_targets
@@ -638,26 +719,29 @@ impl Coordinator {
             .and_then(|mut runtimes| runtimes.remove(&record.descriptor.agent_id));
         let Some(runtime) = removed else {
             self.rollback_target_closing(&record.descriptor.agent_id, &runtime);
-            return error_result(TOOL_DISMISS_AGENT, "目标子 Core 已被移除");
+            return Err("目标子 Core 已被移除".to_string());
         };
         if let Err(error) = self.mark_terminated(&record.descriptor.agent_id) {
             self.rollback_target_closing(&record.descriptor.agent_id, &runtime);
             if let Ok(mut runtimes) = self.runtimes.lock() {
                 runtimes.insert(record.descriptor.agent_id.clone(), runtime);
             }
-            return error_result(TOOL_DISMISS_AGENT, error);
+            return Err(error);
         }
         self.release_agent_locks(&record.descriptor);
+        let status_message = append_agent_status_message(parent, &record.descriptor, "terminated");
+        self.emit(StreamEvent::SessionMessageUpsert {
+            message: status_message,
+            pending_plugin_deliveries: None,
+            completed_plugin_delivery_ids: None,
+            deferred_tool_injections: None,
+        });
         self.emit_status(&record.descriptor, "terminated");
-        if let Err(error) = runtime.shutdown().await {
-            return error_result(TOOL_DISMISS_AGENT, error);
-        }
-        ok_result(
-            TOOL_DISMISS_AGENT,
-            format!("{} 已解散", record.descriptor.label),
-            format!("Agent '{}' 已关闭", record.descriptor.label),
-            vec![role],
-        )
+        Ok(PendingDismissal {
+            runtime,
+            descriptor: record.descriptor,
+            role,
+        })
     }
 
     pub(crate) fn plan_deliveries(
@@ -709,7 +793,6 @@ impl Coordinator {
             .filter(|delivery| {
                 delivery.source_message_id == source_message_id
                     && (delivery.plugin_id.is_empty() || delivery.plugin_id == PLUGIN_ID)
-                    && self.runtime(&delivery.target_id).is_some()
             })
             .cloned()
             .map(|mut delivery| {
@@ -728,11 +811,17 @@ impl Coordinator {
         if deliveries.is_empty() {
             return false;
         }
-        let mut scheduled = false;
+        let mut handled = false;
+        let mut undispatchable = Vec::new();
         for delivery in deliveries {
-            scheduled |= self.spawn_pending_delivery(delivery, trust_mode);
+            if self.spawn_pending_delivery(delivery.clone(), trust_mode) {
+                handled = true;
+            } else {
+                undispatchable.push(delivery);
+            }
         }
-        scheduled
+        let settled = self.settle_undispatchable_deliveries(undispatchable);
+        handled || settled
     }
 
     fn spawn_pending_delivery(
@@ -822,7 +911,7 @@ impl Coordinator {
         let delivery_ids = self.abort_background_deliveries(None);
         if !delivery_ids.is_empty() {
             if let Some(feedback) = self.feedback() {
-                feedback.complete_pending_deliveries(delivery_ids.clone());
+                feedback.cancel_pending_deliveries(delivery_ids.clone());
             }
         }
         delivery_ids
@@ -868,26 +957,28 @@ impl Coordinator {
             )
             .await;
         cancel_target.disarm();
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::warn!(delivery_id = %delivery.delivery_id, %error, "子 Agent 持久投递未完成，将在恢复时重试");
-                return;
+        let (succeeded, report) = match result {
+            Ok(result) => {
+                let succeeded = result.status == tiangong_types::TurnStatus::Success;
+                let report = if succeeded {
+                    result
+                        .assistant_text
+                        .unwrap_or_else(|| "子 Agent 已完成，但没有生成文本输出".to_string())
+                } else {
+                    format!(
+                        "子 Agent 本轮未成功：{}",
+                        result
+                            .error
+                            .or(result.assistant_text)
+                            .unwrap_or_else(|| "未提供错误详情".to_string())
+                    )
+                };
+                (succeeded, report)
             }
-        };
-        let succeeded = result.status == tiangong_types::TurnStatus::Success;
-        let report = if succeeded {
-            result
-                .assistant_text
-                .unwrap_or_else(|| "子 Agent 已完成，但没有生成文本输出".to_string())
-        } else {
-            format!(
-                "子 Agent 本轮未成功：{}",
-                result
-                    .error
-                    .or(result.assistant_text)
-                    .unwrap_or_else(|| "未提供错误详情".to_string())
-            )
+            Err(error) => {
+                tracing::warn!(delivery_id = %delivery.delivery_id, %error, "子 Agent 持久投递执行失败，向主 Agent 提交失败报告");
+                (false, format!("子 Agent 投递失败：{error}"))
+            }
         };
         let injection = PluginFeedback::new(
             "agent_team_report",
@@ -1226,7 +1317,9 @@ impl Coordinator {
 
     fn emit(&self, event: StreamEvent) {
         if let Some(feedback) = self.feedback() {
-            feedback.send_stream_event(event);
+            if !feedback.send_turn_stream_event(event.clone()) {
+                feedback.send_stream_event(event);
+            }
         }
     }
 
@@ -1480,11 +1573,11 @@ fn migrate_legacy_manifest(manifest: &mut TeamManifest, parent: &Session) {
     }
 }
 
-fn append_descriptor_message(parent: &mut Session, descriptor: &AgentDescriptor) {
+fn append_descriptor_message(parent: &mut Session, descriptor: &AgentDescriptor) -> Message {
     let mut message = Message::new(
         MessageRole::System,
         format!(
-            "[Agent] {} 已创建 (role={}, id={})",
+            "[Agent] {} ({}) 已加入团队 id={}",
             descriptor.label, descriptor.role, descriptor.agent_id
         ),
     );
@@ -1496,7 +1589,35 @@ fn append_descriptor_message(parent: &mut Session, descriptor: &AgentDescriptor)
                 "{AGENT_DESCRIPTOR_MARKER}{json}"
             )));
     }
-    parent.messages.push(message);
+    parent.messages.push(message.clone());
+    message
+}
+
+fn append_agent_status_message(
+    parent: &mut Session,
+    descriptor: &AgentDescriptor,
+    status: &str,
+) -> Message {
+    let message_id = format!("agent-status:{}", descriptor.agent_id);
+    let mut message = Message::new(
+        MessageRole::System,
+        format!(
+            "[Agent] {} 状态变更: {status} id={}",
+            descriptor.label, descriptor.agent_id
+        ),
+    );
+    message.id = message_id.clone();
+    message.model_excluded = true;
+    if let Some(existing) = parent
+        .messages
+        .iter_mut()
+        .find(|existing| existing.id == message_id)
+    {
+        *existing = message.clone();
+    } else {
+        parent.messages.push(message.clone());
+    }
+    message
 }
 
 fn mentioned_roles(text: &str) -> HashSet<String> {
@@ -1542,6 +1663,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_agent_uses_session_id_as_agent_id_and_persists_under_teams() {
+        let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
         tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let coordinator = Coordinator::new(storage.path().to_path_buf(), empty_factory());
@@ -1562,6 +1684,23 @@ mod tests {
         assert!(result.ok, "{}", result.stderr);
 
         let record = coordinator.record_by_role("dev").unwrap();
+        let descriptor_message = parent
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ModelInstruction { text } if text.starts_with(AGENT_DESCRIPTOR_MARKER)))
+            })
+            .expect("创建 Agent 应追加可恢复的描述消息");
+        assert_eq!(
+            descriptor_message.text_content(),
+            format!(
+                "[Agent] Developer (dev) 已加入团队 id={}",
+                record.descriptor.agent_id
+            )
+        );
         let session_path = child_root(storage.path(), &parent.id, &record.descriptor.agent_id)
             .join("sessions")
             .join(format!("{}.json", record.descriptor.agent_id));
@@ -1606,8 +1745,11 @@ mod tests {
             name: TOOL_DISMISS_AGENT.to_string(),
             arguments: json!({ "role": "dev" }),
         };
-        let result = coordinator.dismiss_agent(&dismiss_call).await;
-        assert!(!result.ok);
+        let result = match coordinator.prepare_dismiss_agent(&dismiss_call, &mut parent) {
+            Err(result) => result,
+            Ok(_) => panic!("存在后台投递时不得开始解散"),
+        };
+        assert!(result.contains("仍有排队或执行中的消息"));
         assert!(coordinator.runtime(&record.descriptor.agent_id).is_some());
 
         assert_eq!(
@@ -1662,9 +1804,21 @@ mod tests {
         .await
         .expect("全局取消应结束全部后台投递");
 
-        let result = coordinator.dismiss_agent(&dismiss_call).await;
+        let result = coordinator
+            .prepare_dismiss_agent(&dismiss_call, &mut parent)
+            .expect("空闲 Agent 应允许解散")
+            .finish()
+            .await;
         assert!(result.ok, "{}", result.stderr);
         assert!(coordinator.runtime(&record.descriptor.agent_id).is_none());
+        assert!(parent.messages.iter().any(|message| {
+            message.id == format!("agent-status:{}", record.descriptor.agent_id)
+                && message.text_content()
+                    == format!(
+                        "[Agent] {} 状态变更: terminated id={}",
+                        record.descriptor.label, record.descriptor.agent_id
+                    )
+        }));
 
         coordinator.shutdown().await;
     }
@@ -1675,5 +1829,61 @@ mod tests {
             mentioned_roles("请 @Dev_2 和 @all 处理，邮箱 a@b.com 不算"),
             HashSet::from(["dev_2".to_string(), "all".to_string()])
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_never_restarts_cancelled_deliveries() {
+        let _guard = crate::test_support::storage_test_guard_async().await;
+        let storage = tempfile::tempdir().unwrap();
+        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
+        let mut parent = Session::new("cancelled-parent");
+        parent.cwd = storage.path().to_string_lossy().into_owned();
+        parent.bind_storage_root(storage.path());
+        parent.append_prepared_user_message_with_id(
+            "cancelled-source".to_string(),
+            vec![ContentBlock::text("@worker cancelled")],
+        );
+        parent.messages[0].model_excluded = true;
+        parent.messages[0].turn_status = Some(tiangong_types::TurnStatus::Cancelled);
+
+        let agent_id = "cancelled-child".to_string();
+        let mut manifest = TeamManifest::empty(&parent.id);
+        let topology_order = manifest.allocate_order();
+        manifest.upsert(AgentRecord {
+            descriptor: AgentDescriptor {
+                agent_id: agent_id.clone(),
+                role: "worker".to_string(),
+                label: "Worker".to_string(),
+                system_prompt: "work".to_string(),
+                status: AgentStatus::Idle,
+            },
+            topology_order,
+        });
+        manifest
+            .persist(&team_root(storage.path(), &parent.id))
+            .unwrap();
+        parent
+            .pending_plugin_deliveries
+            .push(PendingPluginDelivery {
+                delivery_id: "cancelled-delivery".to_string(),
+                source_message_id: "cancelled-source".to_string(),
+                plugin_id: PLUGIN_ID.to_string(),
+                target_id: agent_id,
+                content: "cancelled".to_string(),
+                created_at: now_text(),
+                additional_content: Vec::new(),
+            });
+
+        let coordinator = Coordinator::new(storage.path().to_path_buf(), empty_factory());
+        coordinator.initialize(&mut parent);
+
+        assert_eq!(parent.pending_plugin_deliveries.len(), 1);
+        assert!(coordinator
+            .background_tasks
+            .lock()
+            .unwrap()
+            .entries
+            .is_empty());
+        coordinator.shutdown().await;
     }
 }

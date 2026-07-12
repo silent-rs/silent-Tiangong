@@ -10,8 +10,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::core::command::PendingCommandEffect;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
+use crate::react::helpers::process_buffered_commands;
 use crate::react::message::{accept_user_message_with_plugin_routes, append_runtime_tool_message};
 use crate::runtime::RuntimeEngine;
 use crate::session::{MessageRole, Session};
@@ -274,6 +276,7 @@ impl TiangongCore {
         self.send_cmd(Command::Message {
             prepared,
             message_id: Some(message_id.into()),
+            resume_existing: false,
             trust_mode_override,
             persistence_ack: Some(sender),
         })?;
@@ -415,6 +418,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }) => self.send_cmd(Command::Message {
                 prepared,
                 message_id,
+                resume_existing: false,
                 trust_mode_override,
                 persistence_ack: None,
             }),
@@ -603,6 +607,7 @@ async fn worker_loop_async(
     // 空闲/关闭阶段的后台插件事件不经过主 turn 提交；保留一份连续去重状态，
     // 既能即时持久化增量，也能识别随后到达的 cancelled 累计事件。
     let mut background_usage_capture = TurnUsageCapture::default();
+    let mut scheduled_plugin_route_resumes = std::collections::HashSet::new();
 
     apply_session_cwd(&session);
 
@@ -735,6 +740,11 @@ async fn worker_loop_async(
                 for plugin in &plugins {
                     plugin.on_session_ready(&mut session);
                 }
+                enqueue_ready_plugin_route_resumes(
+                    &session,
+                    &cmd_tx,
+                    &mut scheduled_plugin_route_resumes,
+                );
             }
             // engine 创建/重建完成：回调插件生命周期钩子
             for plugin in &plugins {
@@ -787,9 +797,13 @@ async fn worker_loop_async(
             Command::Message {
                 prepared,
                 message_id,
+                resume_existing,
                 trust_mode_override,
                 persistence_ack,
             } => {
+                if resume_existing && let Some(message_id) = message_id.as_ref() {
+                    scheduled_plugin_route_resumes.remove(message_id);
+                }
                 // 覆盖在处理该 Message 的第一个副作用前生效。守卫的
                 // Drop 覆盖持久化失败、插件路由、正常终态、取消与
                 // shutdown 等所有出口，防止信任模式泄漏到下条消息。
@@ -820,6 +834,7 @@ async fn worker_loop_async(
                     prepared,
                     persistence_ack,
                     true,
+                    resume_existing,
                 ) {
                     Ok(accepted) => accepted,
                     Err(err) => {
@@ -843,11 +858,23 @@ async fn worker_loop_async(
                     plugin.on_turn_started(&mut session, turn_start_idx);
                 }
 
-                if routed_to_plugin {
-                    // 插件已接管该消息；用户消息和待投递计划已经原子落盘，当前主
-                    // Agent 不再重复读取。插件完成后通过反馈命令提交结果与完成确认。
-                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
+                let run_main_agent = if routed_to_plugin {
+                    // 插件接管消息后，本轮保持打开，直到该消息的全部持久投递都已
+                    // 提交。报告进入父 Session 后再恢复用户消息的模型可见性，让主
+                    // Agent 基于原请求与子 Agent 结果继续完成同一个 turn。
+                    wait_for_routed_plugin_deliveries(
+                        &mut session,
+                        &accepted.message_id,
+                        engine.as_ref().expect("engine 已完成构建"),
+                        &stream_tx,
+                        &mut cmd_rx,
+                        turn_trust_mode.controller(),
+                    )
+                    .await
                 } else {
+                    true
+                };
+                if run_main_agent {
                     // 执行普通主 Agent 对话轮次。
                     execute_turn_async(
                         &mut session,
@@ -995,6 +1022,11 @@ async fn worker_loop_async(
                     terminal,
                 );
                 cancel_flag.store(false, Ordering::Release);
+                enqueue_ready_plugin_route_resumes(
+                    &session,
+                    &cmd_tx,
+                    &mut scheduled_plugin_route_resumes,
+                );
 
                 if shutdown_flag.load(Ordering::Acquire) {
                     break;
@@ -1072,18 +1104,25 @@ async fn worker_loop_async(
             Command::CommitPluginDeliveries {
                 delivery_ids,
                 tool_injections,
+                cancelled,
                 persistence_ack,
-            } => {
-                if let Err(error) = crate::react::message::commit_plugin_deliveries(
-                    &mut session,
-                    &stream_tx,
-                    delivery_ids,
-                    tool_injections,
-                    persistence_ack,
-                ) {
-                    tracing::warn!(%error, "提交插件持久投递失败");
+            } => match crate::react::message::commit_plugin_deliveries(
+                &mut session,
+                &stream_tx,
+                delivery_ids,
+                tool_injections,
+                cancelled,
+                persistence_ack,
+            ) {
+                Ok(_) => {
+                    enqueue_ready_plugin_route_resumes(
+                        &session,
+                        &cmd_tx,
+                        &mut scheduled_plugin_route_resumes,
+                    );
                 }
-            }
+                Err(error) => tracing::warn!(%error, "提交插件持久投递失败"),
+            },
             Command::EmitStreamEvent(ev) => {
                 let ev = *ev;
                 // 没有主 Agent turn 时，插件后台任务的用量事件会直接到达 worker。
@@ -1209,6 +1248,7 @@ fn process_shutdown_feedback_command(
         Command::CommitPluginDeliveries {
             delivery_ids,
             tool_injections,
+            cancelled,
             persistence_ack,
         } => {
             if let Err(error) = crate::react::message::commit_plugin_deliveries(
@@ -1216,6 +1256,7 @@ fn process_shutdown_feedback_command(
                 stream_tx,
                 delivery_ids,
                 tool_injections,
+                cancelled,
                 persistence_ack,
             ) {
                 tracing::warn!(%error, "关闭阶段提交插件持久投递失败");
@@ -1858,6 +1899,190 @@ impl TurnOutcome {
         };
         Self { status }
     }
+}
+
+fn enqueue_ready_plugin_route_resumes(
+    session: &Session,
+    cmd_tx: &tokio_mpsc::UnboundedSender<Command>,
+    scheduled: &mut std::collections::HashSet<String>,
+) {
+    let ready = session
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::User
+                && message.model_excluded
+                && message.worker_id.is_none()
+        })
+        .filter(|message| message.turn_status != Some(tiangong_types::TurnStatus::Cancelled))
+        .filter(|message| {
+            !session
+                .pending_plugin_deliveries
+                .iter()
+                .any(|delivery| delivery.source_message_id == message.id)
+        })
+        .map(|message| (message.id.clone(), message.content.clone()))
+        .collect::<Vec<_>>();
+    for (message_id, prepared) in ready {
+        if !scheduled.insert(message_id.clone()) {
+            continue;
+        }
+        if cmd_tx
+            .send(Command::Message {
+                prepared,
+                message_id: Some(message_id.clone()),
+                resume_existing: true,
+                trust_mode_override: None,
+                persistence_ack: None,
+            })
+            .is_err()
+        {
+            scheduled.remove(&message_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod plugin_route_resume_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_routes_are_not_resumed_but_failed_routes_can_recover() {
+        let mut session = Session::new("plugin-route-resume");
+        session.append_prepared_user_message_with_id(
+            "cancelled-route".to_string(),
+            vec![ContentBlock::text("@worker cancelled")],
+        );
+        session.append_prepared_user_message_with_id(
+            "failed-route".to_string(),
+            vec![ContentBlock::text("@worker recover")],
+        );
+        for (message_id, status) in [
+            ("cancelled-route", tiangong_types::TurnStatus::Cancelled),
+            ("failed-route", tiangong_types::TurnStatus::Failed),
+        ] {
+            let message = session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == message_id)
+                .unwrap();
+            message.model_excluded = true;
+            message.turn_status = Some(status);
+        }
+
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut scheduled = std::collections::HashSet::new();
+        enqueue_ready_plugin_route_resumes(&session, &tx, &mut scheduled);
+
+        let command = rx.try_recv().expect("失败投递应安排恢复");
+        assert!(matches!(
+            command,
+            Command::Message {
+                message_id: Some(message_id),
+                resume_existing: true,
+                ..
+            } if message_id == "failed-route"
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+/// 等待插件完成当前用户消息的全部持久投递。
+///
+/// 这里仍由父 Core 的单写 worker 消费插件反馈，避免子任务直接修改父 Session。
+/// 等待期间不向外发送父 turn 终态；只有报告全部提交并由主 Agent 继续执行后，
+/// 才会走统一的终态提交路径。
+async fn wait_for_routed_plugin_deliveries(
+    session: &mut Session,
+    source_message_id: &str,
+    engine: &RuntimeEngine,
+    stream_tx: &StdSender<StreamEvent>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    turn_trust_mode: TurnTrustModeController,
+) -> bool {
+    let mut waiting_sources = std::collections::BTreeSet::from([source_message_id.to_string()]);
+    while waiting_sources.iter().any(|source_message_id| {
+        session
+            .pending_plugin_deliveries
+            .iter()
+            .any(|delivery| &delivery.source_message_id == source_message_id)
+    }) {
+        let Some(command) = cmd_rx.recv().await else {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: "插件投递等待期间 Core 命令通道已关闭".to_string(),
+            });
+            return false;
+        };
+        let cancels_deliveries = matches!(
+            &command,
+            Command::Cancel | Command::Shutdown | Command::UpdateCwd { .. }
+        );
+        if cancels_deliveries {
+            engine.handle_plugin_runtime_command(&Command::Cancel);
+        }
+        let command = match command {
+            Command::CommitPluginDeliveries {
+                delivery_ids,
+                tool_injections,
+                cancelled,
+                persistence_ack,
+            } => {
+                if let Err(error) = crate::react::message::commit_plugin_deliveries(
+                    session,
+                    stream_tx,
+                    delivery_ids,
+                    tool_injections,
+                    cancelled,
+                    persistence_ack,
+                ) {
+                    let _ = stream_tx.send(StreamEvent::Error {
+                        message: format!("提交插件投递结果失败：{error}"),
+                    });
+                    return false;
+                }
+                continue;
+            }
+            command => command,
+        };
+        let actor_id = session.id.clone();
+        match process_buffered_commands(
+            session,
+            engine,
+            &actor_id,
+            stream_tx,
+            vec![command],
+            Some(&turn_trust_mode),
+        ) {
+            PendingCommandEffect::Terminate => return false,
+            PendingCommandEffect::Shutdown => {
+                let _ = stream_tx.send(StreamEvent::Error {
+                    message: "执行已取消".to_string(),
+                });
+                return false;
+            }
+            PendingCommandEffect::None | PendingCommandEffect::MessagesInjected { .. } => {}
+        }
+        waiting_sources.extend(
+            session
+                .pending_plugin_deliveries
+                .iter()
+                .map(|delivery| delivery.source_message_id.clone()),
+        );
+    }
+
+    for source_message_id in waiting_sources {
+        if let Err(error) = crate::react::message::reveal_routed_user_message(
+            session,
+            stream_tx,
+            &source_message_id,
+        ) {
+            let _ = stream_tx.send(StreamEvent::Error {
+                message: format!("恢复主 Agent 处理失败：{error}"),
+            });
+            return false;
+        }
+    }
+    true
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版

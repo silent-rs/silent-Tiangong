@@ -115,10 +115,10 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
     // [Agent] {label} 状态变更: {status}
     const statusMatch = text.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
     if (statusMatch) {
-      const [, label, status, agentId] = statusMatch;
+      const [, , status, agentId] = statusMatch;
       if (status === 'terminated') {
         for (const [role, info] of agents) {
-          if (info.agentId === agentId || info.label === label) {
+          if (info.agentId === agentId) {
             agents.delete(role);
             break;
           }
@@ -131,7 +131,7 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
         || status === 'error'
       ) {
         for (const [, info] of agents) {
-          if (info.agentId === agentId || info.label === label) {
+          if (info.agentId === agentId) {
             info.status = status;
             break;
           }

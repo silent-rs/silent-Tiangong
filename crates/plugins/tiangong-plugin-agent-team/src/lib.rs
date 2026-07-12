@@ -47,3 +47,21 @@ pub fn cancel_agent_input(role: impl Into<String>) -> tiangong_core::agent_input
         serde_json::json!({ "role": role.into() }),
     )
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::OnceLock;
+
+    fn storage_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    pub(crate) fn storage_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        storage_test_lock().blocking_lock()
+    }
+
+    pub(crate) async fn storage_test_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+        storage_test_lock().lock().await
+    }
+}
