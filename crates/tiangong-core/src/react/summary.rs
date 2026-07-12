@@ -125,7 +125,6 @@ impl ReactEngine {
                         Some(Command::Message {
                             prepared,
                             message_id,
-                            resume_existing,
                             trust_mode_override,
                             persistence_ack,
                         }) => {
@@ -150,7 +149,6 @@ impl ReactEngine {
                                 message_id,
                                 prepared,
                                 persistence_ack,
-                                resume_existing,
                             ) {
                                 Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
                                     self.apply_message_trust_mode_override(trust_mode_override);
@@ -213,7 +211,6 @@ impl ReactEngine {
                         Some(Command::CommitPluginDeliveries {
                             delivery_ids,
                             tool_injections,
-                            cancelled,
                             persistence_ack,
                         }) => {
                             if let Err(error) = crate::react::message::commit_plugin_deliveries(
@@ -221,7 +218,6 @@ impl ReactEngine {
                                 stream_tx,
                                 delivery_ids,
                                 tool_injections,
-                                cancelled,
                                 persistence_ack,
                             ) {
                                 tracing::warn!(%error, "提交插件持久投递失败");
@@ -287,15 +283,15 @@ impl ReactEngine {
             }
         };
         sink.finish();
-        persist_partial_summary(
-            session,
-            stream_tx,
-            &pending_msg_id,
-            &streamed_text,
-            &streamed_reasoning,
-        );
 
         if let Some(current_agent_input) = summary_interruption {
+            persist_partial_summary(
+                session,
+                stream_tx,
+                &pending_msg_id,
+                &streamed_text,
+                &streamed_reasoning,
+            );
             if streaming_usage.total_tokens > 0 {
                 emit_token_usage(
                     stream_tx,
@@ -315,6 +311,13 @@ impl ReactEngine {
         let response = match response_result {
             Ok(response) => response,
             Err(err) => {
+                persist_partial_summary(
+                    session,
+                    stream_tx,
+                    &pending_msg_id,
+                    &streamed_text,
+                    &streamed_reasoning,
+                );
                 if let Some(signal) = CancelSignal::from_error(&err) {
                     let CancelSignal::Abort = signal;
                     if let Some(handle) = llm_fut.take() {
@@ -591,6 +594,126 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_done_marker_is_not_persisted_as_a_second_summary() {
+        let server = MockLlmServer::start(MockResponse::Text {
+            content: "[DONE]".to_string(),
+            complete: true,
+        });
+        let (engine, _) = runtime_with_recorder(server.base_url());
+        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
+            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )));
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("summary-done-marker").with_storage_root(storage.path());
+        session.append_message(MessageRole::User, "完成任务");
+        session.append_message_with_id(
+            "react-answer".to_string(),
+            MessageRole::Assistant,
+            "任务已经完成。",
+            String::new(),
+        );
+        session.messages.last_mut().unwrap().phase = MessagePhase::React;
+        let session_id = session.id.clone();
+        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+        let (_command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            react.run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1),
+        )
+        .await
+        .expect("总结阶段未及时完成");
+
+        assert!(matches!(result, SummaryPhaseResult::Completed(_)));
+        let assistant_messages = session
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(assistant_messages.len(), 1, "纯 [DONE] 不应产生第二条回复");
+        assert_eq!(assistant_messages[0].phase, MessagePhase::Summary);
+        assert_eq!(assistant_messages[0].text_content(), "任务已经完成。");
+
+        let persisted = Session::load_from_storage(storage.path(), &session_id).unwrap();
+        let persisted_assistant_messages = persisted
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Assistant)
+            .collect::<Vec<_>>();
+        assert_eq!(persisted_assistant_messages.len(), 1);
+        assert_eq!(persisted_assistant_messages[0].phase, MessagePhase::Summary);
+        assert_eq!(
+            persisted_assistant_messages[0].text_content(),
+            "任务已经完成。"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupted_summary_keeps_streamed_partial_text() {
+        let server = MockLlmServer::start(MockResponse::Text {
+            content: "部分总结".to_string(),
+            complete: false,
+        });
+        let (engine, _) = runtime_with_recorder(server.base_url());
+        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
+            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )))
+            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )));
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("summary-interrupted").with_storage_root(storage.path());
+        session.append_message(MessageRole::User, "完成任务");
+        let session_id = session.id.clone();
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
+
+        let execution = tokio::spawn(async move {
+            let result = react
+                .run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1)
+                .await;
+            (result, session)
+        });
+        server.wait_until_connected().await;
+        tokio::task::spawn_blocking(move || {
+            loop {
+                match stream_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                    Ok(StreamEvent::SummaryText { content, .. }) if content == "部分总结" => {
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("未收到部分总结：{error}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        command_tx.send(Command::Cancel).unwrap();
+
+        let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(3), execution)
+            .await
+            .expect("总结阶段未及时中断")
+            .unwrap();
+        assert!(matches!(result, SummaryPhaseResult::Cancelled(_)));
+        let partial = session
+            .messages
+            .iter()
+            .find(|message| message.role == MessageRole::Assistant)
+            .expect("中断后应保留部分总结");
+        assert_eq!(partial.text_content(), "部分总结");
+
+        let persisted = Session::load_from_storage(storage.path(), &session_id).unwrap();
+        assert!(persisted.messages.iter().any(|message| {
+            message.role == MessageRole::Assistant && message.text_content() == "部分总结"
+        }));
     }
 
     #[test]

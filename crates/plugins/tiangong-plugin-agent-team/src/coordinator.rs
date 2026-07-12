@@ -1,21 +1,21 @@
 //! 父会话团队清单、独立子 Core 与团队工具协调。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use serde_json::json;
 use tiangong_core::core::command::Command;
-use tiangong_core::core::plugin::{PluginFeedback, PluginFeedbackTx};
+use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::{PermissionLevel, TrustMode, TrustModeHandle};
-use tiangong_core::session::{now_text, Message, MessageRole, PendingPluginDelivery, Session};
+use tiangong_core::session::{now_text, Message, MessageRole, Session};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
-use tiangong_types::{content_blocks_text, stable_content_blocks, ContentBlock, StreamEvent};
+use tiangong_types::{ContentBlock, StreamEvent};
 
 use crate::child_runtime::{
     child_config, ApprovalRoutes, ChildPluginFactory, ChildRuntime, SharedFeedback,
@@ -38,11 +38,9 @@ pub(crate) struct Coordinator {
     file_locks: Mutex<FileLockManager>,
     base_config: RwLock<CoreConfig>,
     workspace: RwLock<Option<PathBuf>>,
-    trust_mode: RwLock<Option<TrustModeHandle>>,
     feedback: SharedFeedback,
     approval_routes: ApprovalRoutes,
     stopping: AtomicBool,
-    background_tasks: Mutex<BackgroundTasks>,
 }
 
 /// 同步等待链被上游取消时，立即把取消继续传给正在等待的目标 Core。
@@ -72,24 +70,6 @@ impl Drop for CancelTargetOnDrop {
             let _ = self.runtime.cancel_if_active(&self.message_id);
         }
     }
-}
-
-#[derive(Default)]
-struct BackgroundTasks {
-    entries: Vec<BackgroundTaskEntry>,
-    closing_targets: HashSet<String>,
-}
-
-impl BackgroundTasks {
-    fn remove_finished(&mut self) {
-        self.entries.retain(|entry| !entry.handle.is_finished());
-    }
-}
-
-struct BackgroundTaskEntry {
-    target_id: String,
-    delivery_id: String,
-    handle: tokio::task::JoinHandle<()>,
 }
 
 pub(crate) struct PendingDismissal {
@@ -125,11 +105,9 @@ impl Coordinator {
             file_locks: Mutex::new(FileLockManager::new()),
             base_config: RwLock::new(CoreConfig::default()),
             workspace: RwLock::new(None),
-            trust_mode: RwLock::new(None),
             feedback: Arc::new(RwLock::new(None)),
             approval_routes: Arc::new(Mutex::new(HashMap::new())),
             stopping: AtomicBool::new(false),
-            background_tasks: Mutex::new(BackgroundTasks::default()),
         })
     }
 
@@ -160,12 +138,6 @@ impl Coordinator {
             if let Err(error) = runtime.update_workspace(workspace) {
                 tracing::warn!(agent_id = %runtime.descriptor().agent_id, %error, "同步子 Core 工作目录失败");
             }
-        }
-    }
-
-    pub(crate) fn set_trust_mode(&self, trust_mode: TrustModeHandle) {
-        if let Ok(mut current) = self.trust_mode.write() {
-            *current = Some(trust_mode);
         }
     }
 
@@ -205,7 +177,6 @@ impl Coordinator {
         if let Ok(mut current) = self.manifest.lock() {
             *current = Some(manifest);
         }
-
         for record in records {
             match self.start_record(parent, &record) {
                 Ok(runtime) => {
@@ -225,76 +196,6 @@ impl Coordinator {
                 )),
             }
         }
-
-        let cancelled_sources = parent
-            .messages
-            .iter()
-            .filter(|message| {
-                message.role == MessageRole::User
-                    && message.turn_status == Some(tiangong_types::TurnStatus::Cancelled)
-            })
-            .map(|message| message.id.clone())
-            .collect::<HashSet<_>>();
-        let cancelled_delivery_ids = parent
-            .pending_plugin_deliveries
-            .iter()
-            .filter(|delivery| cancelled_sources.contains(&delivery.source_message_id))
-            .map(|delivery| delivery.delivery_id.clone())
-            .collect::<Vec<_>>();
-        if !cancelled_delivery_ids.is_empty() {
-            if let Some(feedback) = self.feedback() {
-                feedback.cancel_pending_deliveries(cancelled_delivery_ids);
-            } else {
-                self.notify_system_error("清理已取消的团队投递时反馈通道不可用".to_string());
-            }
-        }
-
-        let source_ids = parent
-            .pending_plugin_deliveries
-            .iter()
-            .filter(|delivery| delivery.plugin_id.is_empty() || delivery.plugin_id == PLUGIN_ID)
-            .filter(|delivery| !cancelled_sources.contains(&delivery.source_message_id))
-            .map(|delivery| delivery.source_message_id.clone())
-            .collect::<BTreeSet<_>>();
-        let trust_mode = self.current_trust_mode();
-        for source_id in source_ids {
-            self.dispatch_deliveries(parent, &source_id, trust_mode);
-        }
-    }
-
-    fn settle_undispatchable_deliveries(&self, deliveries: Vec<PendingPluginDelivery>) -> bool {
-        if deliveries.is_empty() {
-            return false;
-        }
-        let Some(feedback) = self.feedback() else {
-            self.notify_system_error("结算无法派发的团队消息时反馈通道不可用".to_string());
-            return false;
-        };
-        let delivery_ids = deliveries
-            .iter()
-            .map(|delivery| delivery.delivery_id.clone())
-            .collect::<Vec<_>>();
-        let injections = deliveries
-            .into_iter()
-            .map(|delivery| {
-                let descriptor = self
-                    .record(&delivery.target_id)
-                    .map(|record| record.descriptor);
-                PluginFeedback::new(
-                    "agent_team_report",
-                    json!({
-                        "agent_id": delivery.target_id,
-                        "agent_role": descriptor.as_ref().map(|item| item.role.as_str()).unwrap_or("unknown"),
-                        "agent_label": descriptor.as_ref().map(|item| item.label.as_str()).unwrap_or("未知 Agent"),
-                        "delivery_id": delivery.delivery_id,
-                        "success": false,
-                        "report": "恢复投递失败：目标子 Core 不可用，本次请求已交回 Main Agent 继续处理",
-                    }),
-                )
-            })
-            .collect();
-        feedback.commit_pending_deliveries_without_ack(delivery_ids, injections);
-        true
     }
 
     pub(crate) fn create_agent(
@@ -683,34 +584,8 @@ impl Coordinator {
         let Some(runtime) = self.runtime(&record.descriptor.agent_id) else {
             return Err("目标子 Core 不可用".to_string());
         };
-        {
-            let mut background_tasks = match self.background_tasks.lock() {
-                Ok(background_tasks) => background_tasks,
-                Err(_) => return Err("投递队列状态锁定失败".to_string()),
-            };
-            background_tasks.remove_finished();
-            if background_tasks
-                .entries
-                .iter()
-                .any(|entry| entry.target_id == record.descriptor.agent_id)
-            {
-                return Err(format!(
-                    "{} 仍有排队或执行中的消息",
-                    record.descriptor.label
-                ));
-            }
-            if background_tasks
-                .closing_targets
-                .contains(&record.descriptor.agent_id)
-            {
-                return Err(format!("{} 正在关闭", record.descriptor.label));
-            }
-            if !runtime.begin_closing() {
-                return Err(format!("{} 正在运行或关闭", record.descriptor.label));
-            }
-            background_tasks
-                .closing_targets
-                .insert(record.descriptor.agent_id.clone());
+        if !runtime.begin_closing() {
+            return Err(format!("{} 正在运行或关闭", record.descriptor.label));
         }
         let removed = self
             .runtimes
@@ -718,11 +593,11 @@ impl Coordinator {
             .ok()
             .and_then(|mut runtimes| runtimes.remove(&record.descriptor.agent_id));
         let Some(runtime) = removed else {
-            self.rollback_target_closing(&record.descriptor.agent_id, &runtime);
+            self.rollback_target_closing(&runtime);
             return Err("目标子 Core 已被移除".to_string());
         };
         if let Err(error) = self.mark_terminated(&record.descriptor.agent_id) {
-            self.rollback_target_closing(&record.descriptor.agent_id, &runtime);
+            self.rollback_target_closing(&runtime);
             if let Ok(mut runtimes) = self.runtimes.lock() {
                 runtimes.insert(record.descriptor.agent_id.clone(), runtime);
             }
@@ -744,259 +619,8 @@ impl Coordinator {
         })
     }
 
-    pub(crate) fn plan_deliveries(
-        &self,
-        actor_id: &str,
-        source_message_id: &str,
-        prepared: &[ContentBlock],
-    ) -> Vec<PendingPluginDelivery> {
-        if !self.is_parent_actor(actor_id) || self.stopping.load(Ordering::Acquire) {
-            return Vec::new();
-        }
-        let text = content_blocks_text(prepared);
-        let mentions = mentioned_roles(&text);
-        if mentions.is_empty() {
-            return Vec::new();
-        }
-        let all = mentions.contains("all");
-        self.alive_records()
-            .into_iter()
-            .filter(|record| self.runtime(&record.descriptor.agent_id).is_some())
-            .filter(|record| all || mentions.contains(record.descriptor.role.as_str()))
-            .map(|record| PendingPluginDelivery {
-                delivery_id: format!(
-                    "agent-team:{}:{}",
-                    source_message_id, record.descriptor.agent_id
-                ),
-                source_message_id: source_message_id.to_string(),
-                plugin_id: PLUGIN_ID.to_string(),
-                target_id: record.descriptor.agent_id,
-                content: text.clone(),
-                created_at: now_text(),
-                additional_content: stable_content_blocks(prepared),
-            })
-            .collect()
-    }
-
-    pub(crate) fn dispatch_deliveries(
-        self: &Arc<Self>,
-        session: &Session,
-        source_message_id: &str,
-        trust_mode: TrustMode,
-    ) -> bool {
-        if self.stopping.load(Ordering::Acquire) {
-            return false;
-        }
-        let deliveries = session
-            .pending_plugin_deliveries
-            .iter()
-            .filter(|delivery| {
-                delivery.source_message_id == source_message_id
-                    && (delivery.plugin_id.is_empty() || delivery.plugin_id == PLUGIN_ID)
-            })
-            .cloned()
-            .map(|mut delivery| {
-                // 首次派发复用父 Session 内仍保留的本轮瞬时图片数据；崩溃恢复时
-                // pending 中的稳定本地引用仍可由 Provider 重新编码。
-                if let Some(source) = session
-                    .messages
-                    .iter()
-                    .find(|message| message.id == delivery.source_message_id)
-                {
-                    delivery.additional_content = source.content.clone();
-                }
-                delivery
-            })
-            .collect::<Vec<_>>();
-        if deliveries.is_empty() {
-            return false;
-        }
-        let mut handled = false;
-        let mut undispatchable = Vec::new();
-        for delivery in deliveries {
-            if self.spawn_pending_delivery(delivery.clone(), trust_mode) {
-                handled = true;
-            } else {
-                undispatchable.push(delivery);
-            }
-        }
-        let settled = self.settle_undispatchable_deliveries(undispatchable);
-        handled || settled
-    }
-
-    fn spawn_pending_delivery(
-        self: &Arc<Self>,
-        delivery: PendingPluginDelivery,
-        trust_mode: TrustMode,
-    ) -> bool {
-        if self.stopping.load(Ordering::Acquire) {
-            return false;
-        }
-        let Some(runtime) = self.runtime(&delivery.target_id) else {
-            return false;
-        };
-        let target_id = delivery.target_id.clone();
-        let delivery_id = delivery.delivery_id.clone();
-        let coordinator = Arc::clone(self);
-        self.spawn_background_task(&runtime, target_id, delivery_id, async move {
-            coordinator.run_pending_delivery(delivery, trust_mode).await;
-        })
-    }
-
-    fn spawn_background_task<F>(
-        &self,
-        runtime: &ChildRuntime,
-        target_id: String,
-        delivery_id: String,
-        future: F,
-    ) -> bool
-    where
-        F: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let Ok(mut tasks) = self.background_tasks.lock() else {
-            return false;
-        };
-        tasks.remove_finished();
-        if tasks
-            .entries
-            .iter()
-            .any(|entry| entry.delivery_id == delivery_id)
-        {
-            return true;
-        }
-        if self.stopping.load(Ordering::Acquire)
-            || tasks.closing_targets.contains(&target_id)
-            || !runtime.accepts_deliveries()
-        {
-            return false;
-        }
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return false;
-        };
-        let task = handle.spawn(future);
-        tasks.entries.push(BackgroundTaskEntry {
-            target_id,
-            delivery_id,
-            handle: task,
-        });
-        true
-    }
-
-    fn abort_background_deliveries(&self, target_id: Option<&str>) -> Vec<String> {
-        let Ok(mut tasks) = self.background_tasks.lock() else {
-            return Vec::new();
-        };
-        tasks.remove_finished();
-        let mut delivery_ids = Vec::new();
-        for entry in &tasks.entries {
-            if target_id.is_none_or(|target_id| entry.target_id == target_id) {
-                entry.handle.abort();
-                delivery_ids.push(entry.delivery_id.clone());
-            }
-        }
-        delivery_ids
-    }
-
-    fn cancel_background_deliveries_for_target(&self, target_id: &str) -> Vec<String> {
-        let delivery_ids = self.abort_background_deliveries(Some(target_id));
-        if !delivery_ids.is_empty() {
-            if let Some(feedback) = self.feedback() {
-                feedback.complete_pending_deliveries(delivery_ids.clone());
-            }
-        }
-        delivery_ids
-    }
-
-    fn cancel_all_background_deliveries(&self) -> Vec<String> {
-        let delivery_ids = self.abort_background_deliveries(None);
-        if !delivery_ids.is_empty() {
-            if let Some(feedback) = self.feedback() {
-                feedback.cancel_pending_deliveries(delivery_ids.clone());
-            }
-        }
-        delivery_ids
-    }
-
-    fn rollback_target_closing(&self, target_id: &str, runtime: &ChildRuntime) {
-        match self.background_tasks.lock() {
-            Ok(mut tasks) => {
-                tasks.closing_targets.remove(target_id);
-                runtime.reopen();
-            }
-            Err(_) => runtime.reopen(),
-        }
-    }
-
-    async fn run_pending_delivery(
-        self: Arc<Self>,
-        delivery: PendingPluginDelivery,
-        trust_mode: TrustMode,
-    ) {
-        let Some(runtime) = self.runtime(&delivery.target_id) else {
-            return;
-        };
-        let Some(record) = self.record(&delivery.target_id) else {
-            return;
-        };
-        let Some(feedback) = self.feedback() else {
-            return;
-        };
-        let prepared = if delivery.additional_content.is_empty() {
-            vec![ContentBlock::text(delivery.content.clone())]
-        } else {
-            delivery.additional_content.clone()
-        };
-        let mut cancel_target =
-            CancelTargetOnDrop::new(Arc::clone(&runtime), delivery.delivery_id.clone());
-        let result = runtime
-            .deliver_and_wait(
-                delivery.delivery_id.clone(),
-                prepared,
-                feedback.clone(),
-                trust_mode,
-            )
-            .await;
-        cancel_target.disarm();
-        let (succeeded, report) = match result {
-            Ok(result) => {
-                let succeeded = result.status == tiangong_types::TurnStatus::Success;
-                let report = if succeeded {
-                    result
-                        .assistant_text
-                        .unwrap_or_else(|| "子 Agent 已完成，但没有生成文本输出".to_string())
-                } else {
-                    format!(
-                        "子 Agent 本轮未成功：{}",
-                        result
-                            .error
-                            .or(result.assistant_text)
-                            .unwrap_or_else(|| "未提供错误详情".to_string())
-                    )
-                };
-                (succeeded, report)
-            }
-            Err(error) => {
-                tracing::warn!(delivery_id = %delivery.delivery_id, %error, "子 Agent 持久投递执行失败，向主 Agent 提交失败报告");
-                (false, format!("子 Agent 投递失败：{error}"))
-            }
-        };
-        let injection = PluginFeedback::new(
-            "agent_team_report",
-            json!({
-                "agent_id": record.descriptor.agent_id,
-                "agent_role": record.descriptor.role,
-                "agent_label": record.descriptor.label,
-                "delivery_id": delivery.delivery_id,
-                "success": succeeded,
-                "report": report,
-            }),
-        );
-        if let Err(error) = feedback
-            .commit_pending_deliveries(vec![delivery.delivery_id], vec![injection])
-            .await
-        {
-            tracing::warn!(%error, "提交 Agent Team 持久投递失败，将在恢复时重试");
-        }
+    fn rollback_target_closing(&self, runtime: &ChildRuntime) {
+        runtime.reopen();
     }
 
     pub(crate) fn guard_child_tool(
@@ -1063,16 +687,13 @@ impl Coordinator {
                 let Some(record) = self.record_by_role(role) else {
                     return false;
                 };
-                let cancelled =
-                    self.cancel_background_deliveries_for_target(&record.descriptor.agent_id);
-                let mut handled = !cancelled.is_empty();
                 if let Some(runtime) = self.runtime(&record.descriptor.agent_id) {
-                    handled |= runtime.is_running() && runtime.cancel();
+                    return runtime.is_running() && runtime.cancel();
                 }
-                handled
+                false
             }
             Command::Cancel => {
-                let mut handled = !self.cancel_all_background_deliveries().is_empty();
+                let mut handled = false;
                 for runtime in self.runtime_snapshot() {
                     if runtime.is_running() {
                         handled |= runtime.cancel();
@@ -1081,7 +702,7 @@ impl Coordinator {
                 handled
             }
             Command::Shutdown => {
-                let mut handled = !self.abort_background_deliveries(None).is_empty();
+                let mut handled = false;
                 for runtime in self.runtime_snapshot() {
                     if runtime.is_running() {
                         handled |= runtime.cancel();
@@ -1095,14 +716,6 @@ impl Coordinator {
 
     pub(crate) async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
-        let tasks = self
-            .background_tasks
-            .lock()
-            .map(|mut tasks| std::mem::take(&mut tasks.entries))
-            .unwrap_or_default();
-        for task in &tasks {
-            task.handle.abort();
-        }
         let runtimes = self
             .runtimes
             .lock()
@@ -1110,9 +723,6 @@ impl Coordinator {
             .unwrap_or_default();
         for runtime in runtimes.values() {
             runtime.prepare_shutdown();
-        }
-        for task in tasks {
-            let _ = task.handle.await;
         }
         for (agent_id, runtime) in runtimes {
             if let Err(error) = runtime.shutdown().await {
@@ -1205,14 +815,6 @@ impl Coordinator {
 
     fn is_parent_actor(&self, actor_id: &str) -> bool {
         self.parent_session_id().as_deref() == Some(actor_id)
-    }
-
-    fn current_trust_mode(&self) -> TrustMode {
-        self.trust_mode
-            .read()
-            .ok()
-            .and_then(|trust| trust.as_ref().map(TrustModeHandle::current))
-            .unwrap_or_default()
     }
 
     fn descriptor(&self, agent_id: &str) -> Option<AgentDescriptor> {
@@ -1409,7 +1011,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
 impl PromptSectionProvider for ChildTeamClientPlugin {
     fn prompt_sections(&self) -> Vec<String> {
         vec![
-            "团队协作：可用 send_message、broadcast_message、notify_user、lock_file、unlock_file。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。修改文件前必须先加锁。"
+            "团队协作：可用 send_message、broadcast_message、notify_user、lock_file、unlock_file。用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。修改文件前必须先加锁。"
                 .to_string(),
         ]
     }
@@ -1620,16 +1222,6 @@ fn append_agent_status_message(
     message
 }
 
-fn mentioned_roles(text: &str) -> HashSet<String> {
-    text.split(|character: char| {
-        !(character.is_alphanumeric() || character == '_' || character == '@')
-    })
-    .filter_map(|part| part.strip_prefix('@'))
-    .map(str::to_lowercase)
-    .filter(|role| !role.is_empty())
-    .collect()
-}
-
 fn stable_tool_message_id(actor_id: &str, call: &ToolCall, target_id: &str) -> String {
     format!("agent-team-tool:{actor_id}:{}:{target_id}", call.id)
 }
@@ -1655,7 +1247,6 @@ fn validate_path_segment(value: &str, label: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     fn empty_factory() -> Arc<dyn ChildPluginFactory> {
         Arc::new(Vec::<Arc<dyn Plugin>>::new)
@@ -1712,98 +1303,11 @@ mod tests {
         .unwrap();
         assert_eq!(restored.id, record.descriptor.agent_id);
 
-        let runtime = coordinator.runtime(&record.descriptor.agent_id).unwrap();
-        assert!(coordinator.spawn_background_task(
-            &runtime,
-            record.descriptor.agent_id.clone(),
-            "delivery-deduplicated".to_string(),
-            std::future::pending(),
-        ));
-        parent
-            .pending_plugin_deliveries
-            .push(PendingPluginDelivery {
-                delivery_id: "delivery-deduplicated".to_string(),
-                source_message_id: "source-deduplicated".to_string(),
-                plugin_id: PLUGIN_ID.to_string(),
-                target_id: record.descriptor.agent_id.clone(),
-                content: "重复消息".to_string(),
-                created_at: now_text(),
-                additional_content: Vec::new(),
-            });
-        assert!(coordinator.dispatch_deliveries(
-            &parent,
-            "source-deduplicated",
-            TrustMode::FullTrust,
-        ));
-        assert_eq!(
-            coordinator.background_tasks.lock().unwrap().entries.len(),
-            1,
-            "重复投递应复用已接受的后台任务"
-        );
         let dismiss_call = ToolCall {
             id: "dismiss-call".to_string(),
             name: TOOL_DISMISS_AGENT.to_string(),
             arguments: json!({ "role": "dev" }),
         };
-        let result = match coordinator.prepare_dismiss_agent(&dismiss_call, &mut parent) {
-            Err(result) => result,
-            Ok(_) => panic!("存在后台投递时不得开始解散"),
-        };
-        assert!(result.contains("仍有排队或执行中的消息"));
-        assert!(coordinator.runtime(&record.descriptor.agent_id).is_some());
-
-        assert_eq!(
-            coordinator.cancel_background_deliveries_for_target(&record.descriptor.agent_id),
-            ["delivery-deduplicated"]
-        );
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let empty = coordinator
-                    .background_tasks
-                    .lock()
-                    .map(|mut tasks| {
-                        tasks.remove_finished();
-                        tasks.entries.is_empty()
-                    })
-                    .unwrap_or(false);
-                if empty {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("被取消的后台投递应及时结束");
-
-        assert!(coordinator.spawn_background_task(
-            &runtime,
-            record.descriptor.agent_id.clone(),
-            "delivery-cancel-all".to_string(),
-            std::future::pending(),
-        ));
-        assert_eq!(
-            coordinator.cancel_all_background_deliveries(),
-            ["delivery-cancel-all"]
-        );
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let empty = coordinator
-                    .background_tasks
-                    .lock()
-                    .map(|mut tasks| {
-                        tasks.remove_finished();
-                        tasks.entries.is_empty()
-                    })
-                    .unwrap_or(false);
-                if empty {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("全局取消应结束全部后台投递");
-
         let result = coordinator
             .prepare_dismiss_agent(&dismiss_call, &mut parent)
             .expect("空闲 Agent 应允许解散")
@@ -1820,70 +1324,6 @@ mod tests {
                     )
         }));
 
-        coordinator.shutdown().await;
-    }
-
-    #[test]
-    fn mention_parser_only_returns_explicit_at_roles() {
-        assert_eq!(
-            mentioned_roles("请 @Dev_2 和 @all 处理，邮箱 a@b.com 不算"),
-            HashSet::from(["dev_2".to_string(), "all".to_string()])
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn initialize_never_restarts_cancelled_deliveries() {
-        let _guard = crate::test_support::storage_test_guard_async().await;
-        let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
-        let mut parent = Session::new("cancelled-parent");
-        parent.cwd = storage.path().to_string_lossy().into_owned();
-        parent.bind_storage_root(storage.path());
-        parent.append_prepared_user_message_with_id(
-            "cancelled-source".to_string(),
-            vec![ContentBlock::text("@worker cancelled")],
-        );
-        parent.messages[0].model_excluded = true;
-        parent.messages[0].turn_status = Some(tiangong_types::TurnStatus::Cancelled);
-
-        let agent_id = "cancelled-child".to_string();
-        let mut manifest = TeamManifest::empty(&parent.id);
-        let topology_order = manifest.allocate_order();
-        manifest.upsert(AgentRecord {
-            descriptor: AgentDescriptor {
-                agent_id: agent_id.clone(),
-                role: "worker".to_string(),
-                label: "Worker".to_string(),
-                system_prompt: "work".to_string(),
-                status: AgentStatus::Idle,
-            },
-            topology_order,
-        });
-        manifest
-            .persist(&team_root(storage.path(), &parent.id))
-            .unwrap();
-        parent
-            .pending_plugin_deliveries
-            .push(PendingPluginDelivery {
-                delivery_id: "cancelled-delivery".to_string(),
-                source_message_id: "cancelled-source".to_string(),
-                plugin_id: PLUGIN_ID.to_string(),
-                target_id: agent_id,
-                content: "cancelled".to_string(),
-                created_at: now_text(),
-                additional_content: Vec::new(),
-            });
-
-        let coordinator = Coordinator::new(storage.path().to_path_buf(), empty_factory());
-        coordinator.initialize(&mut parent);
-
-        assert_eq!(parent.pending_plugin_deliveries.len(), 1);
-        assert!(coordinator
-            .background_tasks
-            .lock()
-            .unwrap()
-            .entries
-            .is_empty());
         coordinator.shutdown().await;
     }
 }

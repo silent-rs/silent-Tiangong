@@ -184,6 +184,8 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.tool_name === right.tool_name
     && left.tool_result_is_error === right.tool_result_is_error
     && left.compact === right.compact
+    && left.model_excluded === right.model_excluded
+    && left.phase === right.phase
     && left.created_at === right.created_at
     && sameJsonValue(left.media, right.media)
     && sameJsonValue(left.tool_calls, right.tool_calls)

@@ -129,13 +129,6 @@ impl ChildRuntime {
             .unwrap_or_else(|poison| *poison.into_inner() == RuntimeState::Running)
     }
 
-    pub(crate) fn accepts_deliveries(&self) -> bool {
-        self.state
-            .lock()
-            .map(|state| *state != RuntimeState::Closing)
-            .unwrap_or(false)
-    }
-
     pub(crate) fn begin_closing(&self) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;

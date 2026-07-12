@@ -220,7 +220,7 @@ export function sameMessageRefs(left: MessageItem[], right: MessageItem[]): bool
 }
 
 export function hasMessage(messages: MessageItem[], id: string | null): boolean {
-  return !!id && messages.some((message) => message.id === message.id);
+  return !!id && messages.some((message) => message.id === id);
 }
 
 export function extractAgentRoles(content: string, agents: { role: string; label: string }[]): string[] {

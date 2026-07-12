@@ -384,7 +384,6 @@ impl ReactEngine {
                                 Some(Command::Message {
                                     prepared,
                                     message_id,
-                                    resume_existing,
                                     trust_mode_override,
                                     persistence_ack,
                                 }) => {
@@ -409,7 +408,6 @@ impl ReactEngine {
                                         message_id,
                                         prepared,
                                         persistence_ack,
-                                        resume_existing,
                                     ) {
                                         Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
                                             self.apply_message_trust_mode_override(
@@ -477,7 +475,6 @@ impl ReactEngine {
                                 Some(Command::CommitPluginDeliveries {
                                     delivery_ids,
                                     tool_injections,
-                                    cancelled,
                                     persistence_ack,
                                 }) => {
                                     if let Err(error) = crate::react::message::commit_plugin_deliveries(
@@ -485,7 +482,6 @@ impl ReactEngine {
                                         stream_tx,
                                         delivery_ids,
                                         tool_injections,
-                                        cancelled,
                                         persistence_ack,
                                     ) {
                                         tracing::warn!(%error, "提交插件持久投递失败");
@@ -1076,7 +1072,6 @@ impl ReactEngine {
                                     Some(Command::Message {
                                         prepared,
                                         message_id,
-                                        resume_existing,
                                         trust_mode_override,
                                         persistence_ack,
                                     }) => {
@@ -1088,7 +1083,6 @@ impl ReactEngine {
                                             message_id,
                                             prepared,
                                             persistence_ack,
-                                            resume_existing,
                                         ) {
                                             Ok(RuntimeMessageDisposition::CurrentAgentInput(
                                                 input,
@@ -1152,7 +1146,6 @@ impl ReactEngine {
                                     Some(Command::CommitPluginDeliveries {
                                         delivery_ids,
                                         tool_injections,
-                                        cancelled,
                                         persistence_ack,
                                     }) => {
                                         if let Err(error) =
@@ -1161,7 +1154,6 @@ impl ReactEngine {
                                                 stream_tx,
                                                 delivery_ids,
                                                 tool_injections,
-                                                cancelled,
                                                 persistence_ack,
                                             )
                                         {
@@ -1313,7 +1305,6 @@ impl ReactEngine {
                                     Some(Command::CommitPluginDeliveries {
                                         delivery_ids,
                                         tool_injections,
-                                        cancelled,
                                         persistence_ack,
                                     }) => {
                                         if let Err(error) = crate::react::message::commit_plugin_deliveries(
@@ -1321,7 +1312,6 @@ impl ReactEngine {
                                             stream_tx,
                                             delivery_ids,
                                             tool_injections,
-                                            cancelled,
                                             persistence_ack,
                                         ) {
                                             tracing::warn!(%error, "工具执行期间提交插件持久投递失败");

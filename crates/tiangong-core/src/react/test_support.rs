@@ -88,6 +88,7 @@ pub(crate) fn runtime_with_recorder(base_url: String) -> (RuntimeEngine, Arc<Rec
 
 pub(crate) enum MockResponse {
     Stall,
+    Text { content: String, complete: bool },
     ToolCall { name: String },
 }
 
@@ -114,6 +115,46 @@ impl MockLlmServer {
             match response {
                 MockResponse::Stall => {
                     let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                }
+                MockResponse::Text { content, complete } => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let payload = serde_json::json!({
+                        "id": "chatcmpl-test",
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": "test-model",
+                        "choices": [{
+                            "index": 0,
+                            "delta": { "content": content },
+                            "finish_reason": "stop"
+                        }]
+                    });
+                    let body = format!("data: {payload}\n\n");
+                    let response = if complete {
+                        let body = format!("{body}data: [DONE]\n\n");
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+                        )
+                    };
+                    stream.write_all(response.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                    if !complete {
+                        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                    }
                 }
                 MockResponse::ToolCall { name } => {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
