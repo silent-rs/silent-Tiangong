@@ -96,7 +96,11 @@ impl ToolOverrideHandler for TerminalPlugin {
         // 嵌套执行单元不能沿用用户终端可能已经切换过的 cwd，否则外层按工作区
         // 声明的写入边界与真实进程目录不一致。显式切回插件收到的会话工作区。
         let workspace = self.workspace.read().ok().and_then(|guard| guard.clone());
-        let normalized = normalize_nested_terminal_call(call, actor_id, workspace.as_deref());
+        let normalized = normalize_nested_terminal_call(
+            call,
+            session.parent_session_id.is_some(),
+            workspace.as_deref(),
+        );
         ToolOverrideHandler::handle(
             &self.override_handler,
             normalized.as_ref().unwrap_or(call),
@@ -108,10 +112,10 @@ impl ToolOverrideHandler for TerminalPlugin {
 
 fn normalize_nested_terminal_call(
     call: &ToolCall,
-    actor_id: &str,
+    is_child_session: bool,
     workspace: Option<&std::path::Path>,
 ) -> Option<ToolCall> {
-    if actor_id == "main" || !matches!(call.name.as_str(), "run_command" | "run_shell") {
+    if !is_child_session || !matches!(call.name.as_str(), "run_command" | "run_shell") {
         return None;
     }
     workspace.map(|workspace| {
@@ -193,14 +197,11 @@ mod tests {
             arguments: serde_json::json!({ "script": "cargo check", "cwd": "/other" }),
         };
 
-        let normalized = normalize_nested_terminal_call(
-            &call,
-            "agent-dev",
-            Some(std::path::Path::new("/workspace")),
-        )
-        .unwrap();
+        let normalized =
+            normalize_nested_terminal_call(&call, true, Some(std::path::Path::new("/workspace")))
+                .unwrap();
 
         assert_eq!(normalized.arguments["cwd"], "/workspace");
-        assert!(normalize_nested_terminal_call(&call, "main", None).is_none());
+        assert!(normalize_nested_terminal_call(&call, false, None).is_none());
     }
 }

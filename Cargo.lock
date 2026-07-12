@@ -9829,7 +9829,6 @@ name = "tiangong-plugin-agent-team"
 version = "0.12.1"
 dependencies = [
  "chrono",
- "futures-util",
  "scru128",
  "serde",
  "serde_json",

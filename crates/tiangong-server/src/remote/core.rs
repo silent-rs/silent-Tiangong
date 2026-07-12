@@ -426,30 +426,39 @@ impl ServerCoreManager {
                         .resolve_for_capability(cap)
                         .map(ModelEndpoint::from_resolved)
                 };
+                let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+                let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+                let tts_endpoint = resolve_ep(ModelCapability::Tts);
+                let stt_endpoint = resolve_ep(ModelCapability::Stt);
+                let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
+                    && !models.chat_is_multimodal()
+                {
+                    resolve_ep(ModelCapability::Multimodal)
+                } else {
+                    None
+                };
                 let mut plugins = tiangong_plugin_fs::default_plugins();
                 plugins.extend(tiangong_plugin_index::default_plugins());
-                if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+                if let Some(ep) = image_endpoint.clone() {
                     plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                 }
-                if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+                if let Some(ep) = video_endpoint.clone() {
                     plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
                 }
-                if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+                if let Some(ep) = tts_endpoint.clone() {
                     plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
                 }
-                if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+                if let Some(ep) = stt_endpoint.clone() {
                     plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                 }
-                plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
+                plugins.extend(tiangong_plugin_memory::default_plugins(
+                    memory_handle.clone(),
+                ));
                 plugins.extend(tiangong_plugin_fetch::default_plugins());
                 plugins.extend(tiangong_plugin_command::default_plugins());
                 plugins.extend(tiangong_plugin_scheduler::default_plugins());
                 plugins.extend(tiangong_plugin_task::default_plugins());
-                if models.has_capability(ModelCapability::Multimodal)
-                    && !models.chat_is_multimodal()
-                    && let Some(client) =
-                        resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
-                {
+                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                     plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
                 }
                 // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
@@ -460,8 +469,54 @@ impl ServerCoreManager {
                 //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
                 plugins.push(self.mcp_plugin.clone());
                 // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+                // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
+                let child_plugin_factory: Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
+                    Arc::new({
+                        let storage_root = storage_root.clone();
+                        move || {
+                            let mut child_plugins = tiangong_plugin_fs::default_plugins();
+                            child_plugins.extend(tiangong_plugin_index::default_plugins());
+                            if let Some(ep) = image_endpoint.clone() {
+                                child_plugins
+                                    .push(tiangong_plugin_generate_image::build_plugin(ep));
+                            }
+                            if let Some(ep) = video_endpoint.clone() {
+                                child_plugins
+                                    .push(tiangong_plugin_generate_video::build_plugin(ep));
+                            }
+                            if let Some(ep) = tts_endpoint.clone() {
+                                child_plugins
+                                    .push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                            }
+                            if let Some(ep) = stt_endpoint.clone() {
+                                child_plugins
+                                    .push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                            }
+                            child_plugins.extend(tiangong_plugin_memory::default_plugins(
+                                memory_handle.clone(),
+                            ));
+                            child_plugins.extend(tiangong_plugin_fetch::default_plugins());
+                            child_plugins.extend(tiangong_plugin_command::default_plugins());
+                            child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                            child_plugins.extend(tiangong_plugin_task::default_plugins());
+                            if let Some(client) =
+                                multimodal_endpoint.clone().map(SingleProviderClient::new)
+                            {
+                                child_plugins
+                                    .push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                            }
+                            child_plugins.extend(tiangong_plugin_skill::default_plugins());
+                            child_plugins.push(Arc::new(
+                                tiangong_plugin_mcp::McpPlugin::with_storage_root(
+                                    storage_root.clone(),
+                                ),
+                            ));
+                            child_plugins
+                        }
+                    });
                 plugins.extend(tiangong_plugin_agent_team::default_plugins(
                     storage_root.clone(),
+                    child_plugin_factory,
                 ));
                 plugins
             })

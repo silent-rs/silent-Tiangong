@@ -125,16 +125,13 @@ impl FileLockManager {
 
     /// 检查当前 Agent 是否允许写入文件。
     ///
-    /// 主 Agent 由调用方放行；Sub Agent 必须持有目标文件锁。
+    /// 调用方只会把子 Agent 写入交给这里；子 Agent 必须持有目标文件锁。
     pub fn ensure_can_write(
         &mut self,
         path: &Path,
         agent_id: &str,
         now: &chrono::NaiveDateTime,
     ) -> Result<(), String> {
-        if agent_id == "main" {
-            return Ok(());
-        }
         let _ = self.release_expired(now);
         if let Some((locked_path, lock)) = self
             .locks

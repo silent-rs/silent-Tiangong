@@ -71,31 +71,40 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                     .resolve_for_capability(cap)
                     .map(ModelEndpoint::from_resolved)
             };
+            let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+            let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+            let tts_endpoint = resolve_ep(ModelCapability::Tts);
+            let stt_endpoint = resolve_ep(ModelCapability::Stt);
+            let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
+                && !models.chat_is_multimodal()
+            {
+                resolve_ep(ModelCapability::Multimodal)
+            } else {
+                None
+            };
             let mut plugins = tiangong_plugin_fs::default_plugins();
             plugins.extend(tiangong_plugin_index::default_plugins());
-            if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+            if let Some(ep) = image_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }
-            if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+            if let Some(ep) = video_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
             }
-            if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+            if let Some(ep) = tts_endpoint.clone() {
                 plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
             }
-            if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+            if let Some(ep) = stt_endpoint.clone() {
                 plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
-            plugins.extend(tiangong_plugin_memory::default_plugins(memory_handle));
+            plugins.extend(tiangong_plugin_memory::default_plugins(
+                memory_handle.clone(),
+            ));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_scheduler::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
             // analyze-attachment：仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册。
-            if models.has_capability(ModelCapability::Multimodal)
-                && !models.chat_is_multimodal()
-                && let Some(client) =
-                    resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
-            {
+            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                 plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
             }
             // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
@@ -105,8 +114,53 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             // CLI 侧经 mcp_plugin 做管理。
             plugins.push(mcp_plugin.clone());
             // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+            // 每次创建子 Core 都返回全新的插件外壳；MCP/Skill 重新从同一宿主
+            // 存储根读取配置，避免复用主会话的运行时状态。
+            let child_plugin_factory: std::sync::Arc<
+                dyn tiangong_plugin_agent_team::ChildPluginFactory,
+            > = std::sync::Arc::new({
+                let storage_root = storage_root.clone();
+                move || {
+                    let mut child_plugins = tiangong_plugin_fs::default_plugins();
+                    child_plugins.extend(tiangong_plugin_index::default_plugins());
+                    if let Some(ep) = image_endpoint.clone() {
+                        child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+                    }
+                    if let Some(ep) = video_endpoint.clone() {
+                        child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                    }
+                    if let Some(ep) = tts_endpoint.clone() {
+                        child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                    }
+                    if let Some(ep) = stt_endpoint.clone() {
+                        child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                    }
+                    child_plugins.extend(tiangong_plugin_memory::default_plugins(
+                        memory_handle.clone(),
+                    ));
+                    child_plugins.extend(tiangong_plugin_fetch::default_plugins());
+                    child_plugins.extend(tiangong_plugin_command::default_plugins());
+                    child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                    child_plugins.extend(tiangong_plugin_task::default_plugins());
+                    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new)
+                    {
+                        child_plugins
+                            .push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                    }
+                    child_plugins.push(std::sync::Arc::new(
+                        tiangong_plugin_skill::SkillPlugin::with_storage_root(
+                            storage_root.join("skills"),
+                        ),
+                    ));
+                    child_plugins.push(std::sync::Arc::new(
+                        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+                    ));
+                    child_plugins
+                }
+            });
             plugins.extend(tiangong_plugin_agent_team::default_plugins(
                 storage_root.clone(),
+                child_plugin_factory,
             ));
             plugins
         })

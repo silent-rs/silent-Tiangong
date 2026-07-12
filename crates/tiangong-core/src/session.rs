@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -139,6 +139,9 @@ pub struct Session {
     /// 最近完成的稳定投递 ID，用于提交 ACK 丢失后的幂等重试。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub completed_plugin_delivery_ids: Vec<String>,
+    /// 当前 Session 独立的持久化根，仅用于运行时，不写入会话 JSON。
+    #[serde(skip)]
+    storage_root: Option<PathBuf>,
 }
 
 /// 待审批请求记录（存储在独立的 approval_store 中）
@@ -299,6 +302,7 @@ impl Session {
             deferred_tool_injections: Vec::new(),
             pending_plugin_deliveries: Vec::new(),
             completed_plugin_delivery_ids: Vec::new(),
+            storage_root: None,
         }
     }
 
@@ -336,7 +340,50 @@ impl Session {
             deferred_tool_injections: Vec::new(),
             pending_plugin_deliveries: Vec::new(),
             completed_plugin_delivery_ids: Vec::new(),
+            storage_root: None,
         }
+    }
+
+    /// 将该 Session 的持久化固定到指定根目录。
+    pub fn bind_storage_root(&mut self, storage_root: impl Into<PathBuf>) {
+        self.storage_root = Some(storage_root.into());
+    }
+
+    /// 绑定独立持久化根并返回 Session。
+    pub fn with_storage_root(mut self, storage_root: impl Into<PathBuf>) -> Self {
+        self.bind_storage_root(storage_root);
+        self
+    }
+
+    /// 当前绑定的独立持久化根。
+    pub fn bound_storage_root(&self) -> Option<&Path> {
+        self.storage_root.as_deref()
+    }
+
+    /// 从指定存储根加载 Session，并保留该根作为后续持久化位置。
+    pub fn load_from_storage(storage_root: &Path, session_id: &str) -> Result<Self, String> {
+        let mut components = Path::new(session_id).components();
+        let valid_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
+            && components.next().is_none();
+        if !valid_id {
+            return Err("会话 ID 必须是单个安全路径片段".to_string());
+        }
+
+        let path = storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("session 读取失败（{}）：{error}", path.display()))?;
+        let mut session: Self = serde_json::from_str(&content)
+            .map_err(|error| format!("session 反序列化失败（{}）：{error}", path.display()))?;
+        if session.id != session_id {
+            return Err(format!(
+                "session 文件 ID 不匹配：期望 {session_id}，实际 {}",
+                session.id
+            ));
+        }
+        session.bind_storage_root(storage_root.to_path_buf());
+        Ok(session)
     }
 
     /// 将 session 持久化到 `~/.tiangong/sessions/{id}.json`
@@ -351,7 +398,11 @@ impl Session {
     /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
-        let path = crate::storage::storage_root()
+        let storage_root = self
+            .storage_root
+            .clone()
+            .unwrap_or_else(crate::storage::storage_root);
+        let path = storage_root
             .join("sessions")
             .join(format!("{}.json", self.id));
         let content = serde_json::to_string_pretty(self)
@@ -1114,6 +1165,36 @@ mod persistence_tests {
         assert_eq!(restored.context_limit_tokens, 0);
         assert_eq!(restored.current_tokens, 12_345);
         assert_eq!(restored.token_usage.total_tokens, 120);
+    }
+
+    #[test]
+    fn bound_storage_root_is_used_and_restored_on_load() {
+        let root = tempfile::tempdir().unwrap();
+        let session = Session::new("child").with_storage_root(root.path());
+        session.try_persist_to_disk().unwrap();
+
+        let path = root
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", session.id));
+        assert!(path.is_file());
+        assert!(
+            serde_json::to_value(&session)
+                .unwrap()
+                .get("storage_root")
+                .is_none()
+        );
+
+        let restored = Session::load_from_storage(root.path(), &session.id).unwrap();
+        assert_eq!(restored.title, "child");
+        assert_eq!(restored.bound_storage_root(), Some(root.path()));
+    }
+
+    #[test]
+    fn load_from_storage_rejects_path_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let error = Session::load_from_storage(root.path(), "../outside").unwrap_err();
+        assert!(error.contains("会话 ID"));
     }
 }
 

@@ -813,7 +813,7 @@ async fn worker_loop_async(
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
                 let (accepted, routed_to_plugin) = match accept_user_message_with_plugin_routes(
                     engine.as_ref().expect("engine 已完成构建"),
-                    "main",
+                    &session_id,
                     &mut session,
                     &stream_tx,
                     Some(message_id),
@@ -860,6 +860,7 @@ async fn worker_loop_async(
                         &cancel_flag,
                         &shutdown_flag,
                         turn_trust_mode.controller(),
+                        &session_id,
                     )
                     .await;
                 }
@@ -1872,6 +1873,7 @@ async fn execute_turn_async(
     cancel_flag: &Arc<AtomicBool>,
     shutdown_flag: &Arc<AtomicBool>,
     turn_trust_mode: TurnTrustModeController,
+    session_id: &str,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
         engine.clone(),
@@ -1881,6 +1883,8 @@ async fn execute_turn_async(
     )
     .with_cancel_flag(cancel_flag.clone())
     .with_shutdown_flag(shutdown_flag.clone())
+    // Core 的执行身份只有一个来源：当前 Session ID。
+    .with_agent_id(session_id.to_string())
     .with_turn_trust_mode_controller(turn_trust_mode);
     react
         .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)

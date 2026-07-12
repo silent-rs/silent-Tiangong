@@ -141,16 +141,11 @@ impl ReactEngine {
         }
     }
 
-    /// 只有 Core 的主执行单元负责把宿主控制命令交给插件。
+    /// 把当前 Core 收到的宿主控制命令交给该 Core 自己的插件。
     ///
-    /// 插件启动的嵌套 ReactEngine 共享同一份 RuntimeEngine；若子执行单元把自己
-    /// 收到的 Approval/Cancel/Shutdown 再广播回插件，Agent Team 会把命令重新投递
-    /// 给包括当前子 Agent 在内的所有执行单元，形成命令回声，定向取消还会升级为
-    /// 全团队取消。
+    /// 每个 Agent 现在由独立 Core 与独立 RuntimeEngine 承载，不再共享插件注册表，
+    /// 因此不能按 Agent 身份阻断控制命令。
     pub(super) fn forward_plugin_runtime_command(&self, command: &Command) -> bool {
-        if self.agent_id != "main" {
-            return false;
-        }
         self.engine.handle_plugin_runtime_command(command)
     }
 
@@ -1750,13 +1745,13 @@ mod tests {
     }
 
     #[test]
-    fn nested_engine_does_not_forward_control_back_to_shared_plugins() {
+    fn non_main_core_forwards_control_to_its_own_plugins() {
         let (engine, recorder) = runtime_with_recorder("http://127.0.0.1:1/v1".to_string());
         let react = test_react_engine(engine, Vec::new()).with_agent_id("child-agent".to_string());
 
-        assert!(!react.forward_plugin_runtime_command(&plugin_control("cancel-sibling")));
-        assert!(!react.forward_plugin_runtime_command(&approval("sibling-approval", true,)));
-        assert!(recorder.commands().is_empty());
+        assert!(react.forward_plugin_runtime_command(&plugin_control("cancel-sibling")));
+        assert!(react.forward_plugin_runtime_command(&approval("sibling-approval", true,)));
+        assert_eq!(recorder.commands().len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

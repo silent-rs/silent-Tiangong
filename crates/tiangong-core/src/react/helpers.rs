@@ -113,9 +113,7 @@ fn process_commands(
                 return PendingCommandEffect::Terminate;
             }
             command @ Command::PluginControl { .. } => {
-                if agent_id == "main" {
-                    engine.handle_plugin_runtime_command(&command);
-                }
+                engine.handle_plugin_runtime_command(&command);
             }
             Command::Shutdown => return PendingCommandEffect::Shutdown,
             Command::Message {
@@ -172,9 +170,7 @@ fn process_commands(
             }
             Command::ReloadConfig => {}
             command @ Command::Approval { .. } => {
-                if agent_id == "main" {
-                    engine.handle_plugin_runtime_command(&command);
-                }
+                engine.handle_plugin_runtime_command(&command);
             }
             Command::InjectTool { tool_name, payload } => {
                 crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
@@ -399,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_between_round_drain_does_not_rebroadcast_runtime_commands() {
+    fn non_main_core_between_round_drain_forwards_runtime_commands() {
         let (engine, recorder) = runtime_with_recorder("http://127.0.0.1:1/v1".to_string());
         let mut session = Session::new("nested-runtime-command-drain");
         let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
@@ -417,7 +413,19 @@ mod tests {
         );
 
         assert!(matches!(effect, PendingCommandEffect::None));
-        assert!(recorder.commands().is_empty());
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                RecordedRuntimeCommand::PluginControl {
+                    plugin_id: "test-plugin".to_string(),
+                    action: "cancel-sibling".to_string(),
+                },
+                RecordedRuntimeCommand::Approval {
+                    request_id: "sibling-approval".to_string(),
+                    approved: true,
+                },
+            ]
+        );
     }
 
     #[test]

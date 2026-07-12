@@ -1093,16 +1093,22 @@ impl TiangongApp {
         let Some(app_handle) = self.app_handle.get() else {
             panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
         };
-        if let Some(browser) = tiangong_plugin_browser::build_plugin(app_handle) {
-            plugins.push(browser);
-        } else {
-            warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
-        }
-        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(app_handle) {
-            plugins.push(terminal);
-        } else {
-            warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
-        }
+        let browser_available =
+            if let Some(browser) = tiangong_plugin_browser::build_plugin(app_handle) {
+                plugins.push(browser);
+                true
+            } else {
+                warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
+                false
+            };
+        let terminal_available =
+            if let Some(terminal) = tiangong_plugin_terminal::build_plugin(app_handle) {
+                plugins.push(terminal);
+                true
+            } else {
+                warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
+                false
+            };
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
@@ -1114,27 +1120,33 @@ impl TiangongApp {
                 .resolve_for_capability(cap)
                 .map(ModelEndpoint::from_resolved)
         };
-        if let Some(ep) = resolve_ep(ModelCapability::ImageGeneration) {
+        let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+        let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+        let tts_endpoint = resolve_ep(ModelCapability::Tts);
+        let stt_endpoint = resolve_ep(ModelCapability::Stt);
+        let multimodal_endpoint =
+            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
+                resolve_ep(ModelCapability::Multimodal)
+            } else {
+                None
+            };
+        if let Some(ep) = image_endpoint.clone() {
             plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
         }
-        if let Some(ep) = resolve_ep(ModelCapability::VideoGeneration) {
+        if let Some(ep) = video_endpoint.clone() {
             plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
         }
-        if let Some(ep) = resolve_ep(ModelCapability::Tts) {
+        if let Some(ep) = tts_endpoint.clone() {
             plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
         }
-        if let Some(ep) = resolve_ep(ModelCapability::Stt) {
+        if let Some(ep) = stt_endpoint.clone() {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
-        plugins.push(tiangong_plugin_memory::build_plugin(memory_handle));
+        plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
         plugins.push(tiangong_plugin_scheduler::build_plugin());
         plugins.push(tiangong_plugin_task::build_plugin());
-        if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-            if let Some(client) =
-                resolve_ep(ModelCapability::Multimodal).map(SingleProviderClient::new)
-            {
-                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-            }
+        if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+            plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
         }
         // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
         // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
@@ -1143,8 +1155,60 @@ impl TiangongApp {
         // app 侧经 self.mcp_plugin 做管理（register/update/remove/set_enabled/probe）。
         plugins.push(self.mcp_plugin.clone());
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+        // 工厂只保存当前主 Core 的能力快照；每次创建子 Core 都重新构造一套
+        // 会话级插件外壳，Agent Team 自身由插件内部追加受限客户端。
+        let child_plugin_factory: std::sync::Arc<
+            dyn tiangong_plugin_agent_team::ChildPluginFactory,
+        > = std::sync::Arc::new({
+            let app_handle = app_handle.clone();
+            let storage_root = storage_root.clone();
+            move || {
+                let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
+                    Vec::new();
+                if browser_available {
+                    if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
+                        child_plugins.push(browser);
+                    }
+                }
+                if terminal_available {
+                    if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle) {
+                        child_plugins.push(terminal);
+                    }
+                }
+                child_plugins.push(tiangong_plugin_fs::build_plugin());
+                child_plugins.push(tiangong_plugin_index::build_plugin());
+                if let Some(ep) = image_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+                }
+                if let Some(ep) = video_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                }
+                if let Some(ep) = tts_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                }
+                if let Some(ep) = stt_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                }
+                child_plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
+                child_plugins.push(tiangong_plugin_scheduler::build_plugin());
+                child_plugins.push(tiangong_plugin_task::build_plugin());
+                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                }
+                child_plugins.push(std::sync::Arc::new(
+                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
+                        storage_root.join("skills"),
+                    ),
+                ));
+                child_plugins.push(std::sync::Arc::new(
+                    tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+                ));
+                child_plugins
+            }
+        });
         plugins.push(tiangong_plugin_agent_team::build_plugin(
             storage_root.clone(),
+            child_plugin_factory,
         ));
 
         // 4. builder 会立即启动 worker；最后一次防御检查必须发生在 builder 之前，

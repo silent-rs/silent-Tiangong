@@ -28,6 +28,12 @@
 - 未来拆分会话持久数据与 Core 运行时状态时，必须先固定字段所有权和重启语义，保持旧版主会话、子会话与扁平磁盘格式无损读取，并覆盖 Desktop、Server、CLI 和插件生命周期的恢复路径。
 - `TiangongCore` 必须提供真正等待 worker、事件转发和插件结束钩子全部退出的关闭栅栏；不需要最终会话的删除和编辑重发路径必须使用该栅栏，仍需取回最终会话的重建与 CLI 路径必须保留原有语义。
 
+#### Agent Team 子 Core 边界
+- 每个子 Agent 必须由独立、完整的 `TiangongCore` 实例承载，并拥有独立 worker、runtime 与 Session；Agent Team 插件不得绕过 Core worker 直接调用裸 `ReactEngine::execute_turn`。
+- 子 Core 必须继承所属宿主主 Core 的模型配置、信任模式、工作目录和插件能力集合，不设置独立工具白名单；子 Agent 身份直接使用其 Session ID，仅以受限团队客户端替换完整团队插件以防递归创建。
+- Agent Team 当前通过子 Core 已有外部事件流等待 `Done` / `Error`，不得在本阶段为此新增轮次完成回执或扩展 `Plugin` trait。
+- 子 Core 会话按 `<storage_root>/teams/<parent_session_id>/<session_id>/` 隔离保存；解散与插件停止必须调用 Core 自身关闭栅栏并等待线程退出。
+
 #### 发布与分发
 - 必须提供 GitHub Actions 发布流水线，支持手动触发和 `v*` 版本标签触发。
 - 发布流水线必须构建 Tauri 桌面安装包，并将 macOS、Windows、Linux 产物上传到 GitHub Release。
@@ -158,7 +164,7 @@
 - Tool 化回忆在返回长期记忆时应能补充相关 workspace 文件和符号线索；没有历史记忆但存在相关文件线索时，也应返回 workspace index 结果。
 
 #### 多智能体协作
-- 主 Agent 必须能够在会话中动态创建、解散 Sub Agent，并为每个 Sub Agent 维护独立角色、状态、工具范围和会话上下文。
+- 主 Agent 必须能够在会话中动态创建、解散 Sub Agent，并为每个 Sub Agent 维护独立角色、状态和会话上下文；Sub Agent 继承所属主 Core 的插件与工具能力，不维护独立工具白名单。
 - 持久 Sub Agent 必须在当前会话内跨用户消息保留，临时 Sub Agent 必须在单次任务完成后自动释放。
 - Sub Agent 之间必须支持定向消息和广播消息，用户也必须能够通过 `@role`、多角色 `@role @role` 和 `@all` 将消息直接路由给存活 Agent。
 - Sub Agent 必须能够通过通知事件直接向用户推送进度、阻塞、问题和错误信息，前端应能按 Agent 查看相关事件。
