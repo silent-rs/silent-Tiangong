@@ -2,7 +2,8 @@
 //!
 //! 用于 [`crate::core::TiangongCoreBuilder::build`]、
 //! [`crate::agent_input::AgentInput::deliver`] 与
-//! [`crate::core::TiangongCore::into_session`] 的失败语义，
+//! [`crate::core::TiangongCore::into_session`]、
+//! [`crate::core::TiangongCore::shutdown_join`] 的失败语义，
 //! 让调用方能够区分失败原因，而非依赖布尔值或静默兜底。
 
 use std::fmt;
@@ -20,7 +21,7 @@ pub enum CoreError {
     MessagePersistenceFailed(String),
     /// 消息已入队，但 worker 未返回持久化确认。
     PersistenceConfirmationDropped,
-    /// worker 线程 panic，会话不可恢复——`into_session` 无法取回会话。
+    /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
 }
 

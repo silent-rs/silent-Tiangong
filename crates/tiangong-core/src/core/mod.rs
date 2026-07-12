@@ -244,7 +244,16 @@ impl TiangongCore {
     ///
     /// worker panic 时返回 [`CoreError::WorkerPanicked`]，不再静默兜底为
     /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
-    pub fn into_session(mut self) -> Result<Session, CoreError> {
+    pub fn into_session(self) -> Result<Session, CoreError> {
+        self.shutdown_and_take_session()
+    }
+
+    /// 关闭 Core 并等待 worker 与插件结束钩子全部完成，不取回最终 session。
+    pub fn shutdown_join(self) -> Result<(), CoreError> {
+        self.shutdown_and_take_session().map(drop)
+    }
+
+    fn shutdown_and_take_session(mut self) -> Result<Session, CoreError> {
         self.shutdown_flag.store(true, Ordering::Release);
         self.cancel_flag.store(true, Ordering::Release);
         let _ = self.send_cmd(Command::Shutdown);
@@ -917,7 +926,7 @@ async fn worker_loop_async(
     }
 
     // RuntimeEngine 的重试回调持有 stream_tx clone；先释放 engine，确保内部通道
-    // 能在 drop(stream_tx) 后真正关闭，避免 Shutdown/into_session 永久等待转发线程。
+    // 能在 drop(stream_tx) 后真正关闭，避免 Shutdown/join 永久等待转发线程。
     drop(engine);
     // 关闭内部通道，等待转发线程结束
     drop(stream_tx);

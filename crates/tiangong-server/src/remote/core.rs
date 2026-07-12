@@ -247,8 +247,8 @@ impl ServerCoreManager {
                 tracing::warn!(session_id, error = %error, "删除会话前触发 Core 取消失败");
             }
             let joined_session_id = session_id.clone();
-            match tokio::task::spawn_blocking(move || core.into_session()).await {
-                Ok(Ok(_)) => {}
+            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+                Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     // worker 已完成 join；即使它以 panic 结束，也不再有后台写入者。
                     tracing::warn!(

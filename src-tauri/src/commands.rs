@@ -922,8 +922,8 @@ async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
         return;
     };
     let session_id = session_id.to_string();
-    match tokio::task::spawn_blocking(move || core.into_session()).await {
-        Ok(Ok(_)) => {}
+    match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+        Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(session_id, error = %error, "删除会话前关闭 Core 失败");
         }
@@ -2203,8 +2203,8 @@ pub async fn edit_and_resend(
     // 最终校验及稳定消息落盘均成功后，才终止旧 Core。
     if let Some(core) = state.take_core(&session_id) {
         let _ = core.deliver(AgentInputKind::cancel());
-        match tokio::task::spawn_blocking(move || core.into_session()).await {
-            Ok(Ok(_)) => {}
+        match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+            Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, %session_id, "编辑重发前关闭旧 Core 失败"),
             Err(error) => tracing::warn!(%error, %session_id, "编辑重发前等待旧 Core 失败"),
         }

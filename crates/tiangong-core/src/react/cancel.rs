@@ -54,7 +54,7 @@ pub(super) fn emit_cancel_usage(
 }
 
 /// 等待同步取消或会话关闭信号。工具 future 与此 future 竞争，保证挂起工具不会
-/// 阻塞 `into_session`、会话删除或应用退出。
+/// 阻塞 `into_session`、`shutdown_join`、会话删除或应用退出。
 pub(crate) async fn wait_for_abort_signal(
     cancel_flag: Arc<AtomicBool>,
     shutdown_flag: Option<Arc<AtomicBool>>,
