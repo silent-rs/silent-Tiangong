@@ -5,12 +5,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::TrustMode;
+use tiangong_core::permission::{TrustMode, TrustModeHandle};
 
 /// command 插件。
 pub struct CommandPlugin {
     workspace: RwLock<Option<PathBuf>>,
-    trust_mode: RwLock<Option<Arc<RwLock<TrustMode>>>>,
+    trust_mode: RwLock<Option<TrustModeHandle>>,
     /// 各插件贡献的环境变量共享句柄（register 时从 engine 获取）。
     ///
     /// core 在「所有插件注册完成后」汇总各插件的 `collect_exec_env` 写入同一句柄，
@@ -60,9 +60,7 @@ impl CommandPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.read()
-            .map(|g| *g == TrustMode::FullTrust)
-            .unwrap_or(false)
+        tm.current() == TrustMode::FullTrust
     }
 
     /// 读取用户自定义允许命令列表快照。
@@ -95,7 +93,7 @@ impl Plugin for CommandPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: Arc<RwLock<TrustMode>>) {
+    fn set_trust_mode(&self, trust: TrustModeHandle) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

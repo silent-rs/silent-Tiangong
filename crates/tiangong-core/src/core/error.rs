@@ -19,8 +19,12 @@ pub enum CoreError {
     WorkerStopped,
     /// Prepared 用户消息未能持久化，Core 已恢复投递前的内存状态。
     MessagePersistenceFailed(String),
+    /// 会话元数据未能持久化，Core 已恢复更新前的内存状态。
+    MetadataPersistenceFailed(String),
     /// 消息已入队，但 worker 未返回持久化确认。
     PersistenceConfirmationDropped,
+    /// 元数据更新已入队，但 worker 未返回持久化确认。
+    MetadataPersistenceConfirmationDropped,
     /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
 }
@@ -35,8 +39,14 @@ impl fmt::Display for CoreError {
             CoreError::MessagePersistenceFailed(message) => {
                 write!(f, "用户消息持久化失败：{message}")
             }
+            CoreError::MetadataPersistenceFailed(message) => {
+                write!(f, "会话元数据持久化失败：{message}")
+            }
             CoreError::PersistenceConfirmationDropped => {
                 write!(f, "worker 未返回用户消息持久化确认")
+            }
+            CoreError::MetadataPersistenceConfirmationDropped => {
+                write!(f, "worker 未返回会话元数据持久化确认")
             }
             CoreError::WorkerPanicked => write!(f, "worker 线程 panic，会话不可恢复"),
         }

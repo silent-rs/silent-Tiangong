@@ -109,6 +109,109 @@ fn repository_atomically_replaces_files_from_each_write_entry_point() -> Result<
 }
 
 #[test]
+fn terminal_mirror_sync_and_app_only_persist_never_rewrite_session() -> Result<()> {
+    with_isolated_state("tiangong-terminal-app-only-persist", |paths, state| {
+        let session_id = state.active_session_id().to_string();
+        let session_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+
+        let core_session = state
+            .sessions_mut()
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .expect("活动会话应存在");
+        core_session.title = "Core 权威标题".to_string();
+        core_session.trust_mode = tiangong_core::permission::TrustMode::Supervised;
+        core_session.reasoning_effort = Some("high".to_string());
+        state.persist_session(&session_id)?;
+        let authoritative_session = fs::read(&session_path)?;
+
+        // 模拟终态到达时宿主仍持有过期元数据。reload 必须恢复 Core 权威标题，
+        // 随后的 app-only 持久化也不得改写 Core 的会话文件。
+        let host_session = state
+            .sessions_mut()
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .expect("活动会话应存在");
+        host_session.title = "宿主内存标题".to_string();
+        host_session.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
+        host_session.reasoning_effort = Some("low".to_string());
+        assert!(state.reload_session_from_disk(&session_id)?);
+        state.store.session.input_drafts.insert(
+            session_id.clone(),
+            SessionInputDraft {
+                text: "终态后仍需保存的应用草稿".to_string(),
+                revision: 7,
+                ..SessionInputDraft::default()
+            },
+        );
+        state.persist_app_only()?;
+
+        assert_eq!(fs::read(&session_path)?, authoritative_session);
+        let reloaded = state
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("终态镜像应保留");
+        assert_eq!(reloaded.title, "Core 权威标题");
+        assert_eq!(
+            reloaded.trust_mode,
+            tiangong_core::permission::TrustMode::Supervised
+        );
+        assert_eq!(reloaded.reasoning_effort.as_deref(), Some("high"));
+        let app_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(
+            paths.fake_home.join(".tiangong").join("app.json"),
+        )?)?;
+        assert_eq!(
+            app_json["input_drafts"][&session_id]["text"],
+            "终态后仍需保存的应用草稿"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn core_owned_metadata_updates_can_change_memory_without_rewriting_session() -> Result<()> {
+    with_isolated_state("tiangong-core-owned-metadata", |paths, state| {
+        let session_id = state.active_session_id().to_string();
+        state.persist_session(&session_id)?;
+        let session_path = paths
+            .fake_home
+            .join(".tiangong")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        let before = fs::read(&session_path)?;
+
+        state.update_session_title_draft("Core 持久化标题".to_string());
+        let (updated_id, title) = state.apply_active_session_title_in_memory()?;
+        state.set_session_trust_mode_in_memory(
+            &session_id,
+            tiangong_core::permission::TrustMode::FullTrust,
+        )?;
+        state.set_session_reasoning_effort_in_memory(&session_id, "high".to_string())?;
+
+        assert_eq!(updated_id, session_id);
+        assert_eq!(title, "Core 持久化标题");
+        let session = state
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("updated session");
+        assert_eq!(session.title, "Core 持久化标题");
+        assert_eq!(
+            session.trust_mode,
+            tiangong_core::permission::TrustMode::FullTrust
+        );
+        assert_eq!(session.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(fs::read(&session_path)?, before);
+        Ok(())
+    })
+}
+
+#[test]
 fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Result<()> {
     with_isolated_state(
         "tiangong-repository-recover-latest-without-app",

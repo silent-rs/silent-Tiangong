@@ -5,6 +5,7 @@
 //! core 不再硬编码特判这 5 个工具。
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
@@ -19,12 +20,14 @@ use crate::handler::{TaskStatus, task_registry, wait_tasks};
 pub struct TaskPlugin {
     /// 各插件贡献的环境变量共享句柄（register 时从 engine 获取）。
     runtime_env: RwLock<Arc<Mutex<BTreeMap<String, String>>>>,
+    workspace: RwLock<Option<PathBuf>>,
 }
 
 impl Default for TaskPlugin {
     fn default() -> Self {
         Self {
             runtime_env: RwLock::new(Arc::new(Mutex::new(BTreeMap::new()))),
+            workspace: RwLock::new(None),
         }
     }
 }
@@ -320,6 +323,12 @@ impl Plugin for TaskPlugin {
         "task"
     }
 
+    fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        if let Ok(mut guard) = self.workspace.write() {
+            *guard = workspace.map(std::path::Path::to_path_buf);
+        }
+    }
+
     fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
         // 持有 engine 的 runtime_env 共享句柄——core 在所有插件注册完成后会汇总
         // 各插件的 collect_exec_env 写入同一句柄，spawn_task 时读取即为最新值。
@@ -385,7 +394,8 @@ impl ToolOverrideHandler for TaskPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        session: &Session,
+        session: &mut Session,
+        _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let result = self.dispatch(call, session);
         Box::pin(async move { result })

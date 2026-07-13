@@ -18,8 +18,8 @@ use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
+use self::remote::backend::ServerCoreBackend;
 use self::remote::event::EventBus;
-use self::scheduler::context::ServerSchedulerContext;
 
 /// 启动 Server 模式（前台运行，阻塞）
 #[allow(deprecated)]
@@ -55,10 +55,7 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     route.set_configs(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
-    let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
-        state: app.state.clone(),
-        cores: app.cores.clone(),
-    });
+    let scheduler_ctx = app.scheduler_context.clone();
     tokio::spawn(async move {
         tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
@@ -103,20 +100,42 @@ impl EmbeddedServerHandle {
 
 /// 启动嵌入式 Server（非阻塞，在独立线程中运行）
 ///
-/// 创建独立的 tokio runtime 运行 server，通过 `Arc<Mutex<TiangongState>>`
-/// 与 Desktop app 共享状态。不依赖调用方是否处于 tokio 上下文。
+/// 创建独立的 tokio runtime 运行 HTTP，但 Core、调度上下文和 MCP 管理实例均由
+/// Desktop 注入。HTTP runtime 不拥有会话写入器，也不会恢复或启动全局调度器。
+pub struct EmbeddedServerDependencies {
+    pub state: SharedState,
+    pub config: tiangong_core::core_config::CoreConfigProvider,
+    pub core_backend: Arc<dyn ServerCoreBackend>,
+    pub scheduler_context: Arc<dyn SchedulerContext>,
+    pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    pub event_bus: Arc<EventBus>,
+}
+
 #[allow(deprecated)]
 pub fn run_embedded(
     host: &str,
     port: u16,
     token: Option<String>,
-    state: SharedState,
-    config: tiangong_core::core_config::CoreConfigProvider,
+    dependencies: EmbeddedServerDependencies,
 ) -> Result<EmbeddedServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
+    let EmbeddedServerDependencies {
+        state,
+        config,
+        core_backend,
+        scheduler_context,
+        mcp_plugin,
+        event_bus,
+    } = dependencies;
+    let app = Arc::new(ServerAppContext::with_backend(
+        state,
+        config,
+        event_bus.clone(),
+        core_backend,
+        scheduler_context,
+        mcp_plugin,
+    ));
 
     tracing::info!("构建嵌入式 Server 路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
@@ -135,16 +154,7 @@ pub fn run_embedded(
                 .build()
                 .expect("failed to build embedded server runtime");
             rt.block_on(async move {
-                // 初始化调度器
-                let scheduler_ctx: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
-                    state: app.state.clone(),
-                    cores: app.cores.clone(),
-                });
-                tokio::spawn(async move {
-                    tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
-                    Scheduler::schedule(silent::SCHEDULER.clone()).await;
-                });
-
+                // Desktop 已经恢复并启动全局调度器；内嵌 HTTP 只复用注入的执行上下文。
                 let server = Server::new()
                     .bind(addr)
                     .with_shutdown(std::time::Duration::from_secs(5));

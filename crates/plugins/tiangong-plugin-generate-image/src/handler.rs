@@ -150,7 +150,8 @@ impl ToolOverrideHandler for GenerateImagePlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &tiangong_core::session::Session,
+        _session: &mut tiangong_core::session::Session,
+        _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         match self.dispatch(call) {
             Some(future) => Box::pin(async move { Some(future.await) }),

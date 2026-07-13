@@ -4,18 +4,17 @@
 //! 工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //!
 //! core 通过 trait 默认方法统一注入两类运行时上下文（均在 `register` 之前调用）：
-//! - [`Plugin::set_trust_mode`]：共享信任模式引用（插件可据此放宽校验）。
+//! - [`Plugin::set_trust_mode`]：会话信任模式解析句柄（插件可据此放宽校验）。
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
 //! 两者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
 //! 各插件自定义的 `is_full_trust` 固有方法）是插件内部工具，不作为 trait 能力暴露，
-//! 插件按需读取注入的共享引用并判等即可。
+//! 插件按需读取注入的解析句柄即可。
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 use crate::core::plugin::feedback::PluginFeedbackTx;
-use crate::permission::TrustMode;
+use crate::permission::TrustModeHandle;
 use crate::runtime::RuntimeEngine;
 use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
@@ -26,7 +25,7 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 ///
 /// core 在 engine 创建时遍历插件，依次：
 /// 1. [`set_workspace`](Plugin::set_workspace) 注入会话工作目录；
-/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入共享信任模式引用；
+/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式解析句柄；
 /// 3. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入状态反馈通道；
 /// 4. [`register`](Plugin::register) 让插件初始化内部状态（如克隆配置）。
 ///
@@ -44,7 +43,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 工具规格、工具覆盖、Prompt 段落由 core 通过 supertrait 自动收集，无需在此手动注册。
     /// 调用此方法前，core 已通过 [`set_workspace`](Plugin::set_workspace)、
     /// [`set_trust_mode`](Plugin::set_trust_mode) 与 [`set_feedback_tx`](Plugin::set_feedback_tx)
-    /// 注入会话工作目录、共享信任模式引用与状态反馈通道，插件可在此安全读取/存储。
+    /// 注入会话工作目录、信任模式解析句柄与状态反馈通道，插件可在此安全读取/存储。
     fn register(&self, _engine: &RuntimeEngine) {}
 
     /// 注入当前会话的工作目录。
@@ -57,7 +56,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 存入内部状态，供后续工具调用使用。
     fn set_workspace(&self, _workspace: Option<&Path>) {}
 
-    /// 注入共享信任模式引用（与 [`crate::permission::PermissionGate`] 共享同一个 `RwLock`）。
+    /// 注入信任模式解析句柄（与 [`crate::permission::PermissionGate`] 共享同一解析器）。
     ///
     /// core 在 engine 创建时于 [`Plugin::register`] 之前调用一次。需要感知信任模式的
     /// 插件（如 `fs` / `command` / `fetch`）应覆写此方法，把入参存入内部字段，
@@ -67,8 +66,8 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 无需覆写；这些插件的工具执行仍受 engine 层 [`PermissionGate::check`] 统一兜底。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
-    /// 插件自行读取存入的共享引用并判等（如 `*g == TrustMode::FullTrust`）。
-    fn set_trust_mode(&self, _trust: Arc<RwLock<TrustMode>>) {}
+    /// 插件调用句柄的 `current()` 读取当前会话的有效模式。
+    fn set_trust_mode(&self, _trust: TrustModeHandle) {}
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
     ///
@@ -116,6 +115,16 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
         &self,
     ) -> std::collections::BTreeMap<String, crate::permission::PermissionLevel> {
         std::collections::BTreeMap::new()
+    }
+
+    /// 会话 worker 退出前等待插件内部任务收敛。
+    ///
+    /// 实现应停止继续接收新工作，并等待或取消已启动的后台任务。Core 会在该 Future
+    /// 完成后再关闭事件通道并返回最终 Session，从而形成真实关闭栅栏。
+    fn shutdown<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
     }
 
     // ── 配置与生命周期钩子 ──

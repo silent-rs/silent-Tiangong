@@ -47,20 +47,6 @@ pub struct MessageToolCall {
     pub arguments: Value,
 }
 
-/// 已确认但尚未由目标 Agent 完成的用户直达投递。
-///
-/// 该状态随 Session 持久化，并通过流事件同步给宿主镜像，避免重启后丢失。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingAgentDelivery {
-    pub delivery_id: String,
-    pub source_message_id: String,
-    pub target_agent_id: String,
-    pub content: String,
-    pub created_at: String,
-    #[serde(default, deserialize_with = "deserialize_stable_content_blocks")]
-    pub additional_content: Vec<ContentBlock>,
-}
-
 /// 工具调用批次闭合前收到、等待安全边界注入的外部工具内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredToolInjection {
@@ -118,17 +104,6 @@ pub enum ContentBlock {
     AssetReference {
         asset: StoredAsset,
     },
-}
-
-fn deserialize_stable_content_blocks<'de, D>(deserializer: D) -> Result<Vec<ContentBlock>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mut content = Vec::<ContentBlock>::deserialize(deserializer)?;
-    for block in &mut content {
-        block.clear_transient_data();
-    }
-    Ok(content)
 }
 
 impl ContentBlock {

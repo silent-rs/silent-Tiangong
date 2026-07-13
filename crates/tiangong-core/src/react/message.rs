@@ -1,10 +1,8 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
 use std::sync::mpsc::Sender as StdSender;
-use std::sync::{Arc, Mutex};
 
-use crate::agent_team::lifecycle::TeamContext;
-use crate::session::{Message, MessageRole, MessageToolCall, PendingAgentDelivery, Session};
+use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{
     ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
@@ -12,7 +10,7 @@ use tiangong_types::{
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub(crate) fn append_or_reuse_user_message(
+pub fn append_or_reuse_user_message(
     session: &mut Session,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
@@ -44,25 +42,18 @@ pub(crate) struct AcceptedUserMessage {
     pub prepared: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeMessageDisposition {
-    CurrentAgentInput(String),
-    RoutedToAgent,
-}
-
 pub(crate) fn emit_session_message_upsert(
     session: &Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: &str,
 ) {
-    emit_session_message_upsert_with_state(session, stream_tx, message_id, false, false);
+    emit_session_message_upsert_with_state(session, stream_tx, message_id, false);
 }
 
 pub(crate) fn emit_session_message_upsert_with_state(
     session: &Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: &str,
-    include_pending_agent_deliveries: bool,
     include_deferred_tool_injections: bool,
 ) {
     let Some(mut message) = session
@@ -76,24 +67,9 @@ pub(crate) fn emit_session_message_upsert_with_state(
     message.clear_transient_data();
     let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
         message,
-        pending_agent_deliveries: include_pending_agent_deliveries
-            .then(|| session.pending_agent_deliveries.clone()),
         deferred_tool_injections: include_deferred_tool_injections
             .then(|| session.deferred_tool_injections.clone()),
     });
-}
-
-pub(crate) fn emit_pending_agent_deliveries_changed(
-    session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
-) {
-    let mut deliveries = session.pending_agent_deliveries.clone();
-    for delivery in &mut deliveries {
-        for block in &mut delivery.additional_content {
-            block.clear_transient_data();
-        }
-    }
-    let _ = stream_tx.send(StreamEvent::PendingAgentDeliveriesChanged { deliveries });
 }
 
 pub(crate) fn emit_deferred_tool_injections_changed(
@@ -119,15 +95,12 @@ pub(crate) fn defer_tool_injection(
 /// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
 ///
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn accept_prepared_user_message_with_options(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    pending_agent_deliveries: Vec<PendingAgentDelivery>,
-    model_excluded: bool,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
     if let Err(err) = validate_ready_content_blocks(&prepared) {
@@ -176,11 +149,6 @@ pub(crate) fn accept_prepared_user_message_with_options(
             return Err(err);
         }
     };
-    if let Some(message) = session.messages.get_mut(turn_start_idx) {
-        message.model_excluded = model_excluded;
-    }
-    session.replace_pending_agent_deliveries(&message_id, pending_agent_deliveries);
-
     if let Err(err) = session.try_persist_to_disk() {
         *session = before;
         if let Some(ack) = persistence_ack {
@@ -213,8 +181,7 @@ pub(crate) fn accept_prepared_user_message_with_options(
         content: text.clone(),
         content_blocks: stable_content,
         media: media.clone(),
-        model_excluded,
-        pending_agent_deliveries: session.pending_agent_deliveries.clone(),
+        model_excluded: false,
     });
     Ok(AcceptedUserMessage {
         message_id,
@@ -291,81 +258,42 @@ fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 持久化执行中的追加消息，并在主 Agent 上统一处理 `@Agent` 定向投递。
-///
-/// 子 Agent 收到的内部 `Command::Message` 已经完成定向，不再重复解析提及。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn accept_runtime_user_message(
-    agent_id: &str,
-    team: Option<&Arc<Mutex<TeamContext>>>,
+/// 持久化用户消息，并直接交给当前 Agent 处理。
+pub(crate) fn accept_user_message(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-) -> Result<RuntimeMessageDisposition, String> {
-    // 路由预判和实际投递使用同一把团队锁，避免两次加锁之间目标 Agent 状态变化，
-    // 导致消息已按“仅子 Agent 可见”持久化后又回退成主输入。
-    let mut locked_team = if agent_id == "main" {
-        team.and_then(|team| team.lock().ok())
-    } else {
-        None
-    };
-    let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-    let pending_agent_deliveries = locked_team
-        .as_deref()
-        .map(|team| {
-            crate::agent_team::lifecycle::plan_user_mention_deliveries(team, &message_id, &prepared)
-        })
-        .unwrap_or_default();
-    let route_planned = !pending_agent_deliveries.is_empty();
-    let accepted = accept_prepared_user_message_with_options(
+    close_pending_tools: bool,
+) -> Result<AcceptedUserMessage, String> {
+    accept_prepared_user_message_with_options(
         session,
         stream_tx,
-        Some(message_id),
+        message_id,
         prepared,
         persistence_ack,
-        pending_agent_deliveries,
-        route_planned,
-        !route_planned,
-    )?;
+        close_pending_tools,
+    )
+}
 
-    let routed = route_planned
-        && locked_team.as_deref_mut().is_some_and(|team| {
-            crate::agent_team::lifecycle::dispatch_pending_agent_deliveries(
-                team,
-                session,
-                &accepted.message_id,
-                stream_tx,
-            )
-        });
-    if routed {
-        Ok(RuntimeMessageDisposition::RoutedToAgent)
-    } else {
-        if route_planned {
-            if let Some(message) = session
-                .messages
-                .iter_mut()
-                .find(|message| message.id == accepted.message_id)
-            {
-                message.model_excluded = false;
-            }
-            session.replace_pending_agent_deliveries(&accepted.message_id, Vec::new());
-            if let Err(error) = session.try_persist_to_disk() {
-                tracing::warn!(%error, "定向消息路由失效后恢复主模型可见性失败");
-            }
-            emit_session_message_upsert_with_state(
-                session,
-                stream_tx,
-                &accepted.message_id,
-                true,
-                false,
-            );
-        }
-        Ok(RuntimeMessageDisposition::CurrentAgentInput(
-            content_blocks_text(&accepted.prepared),
-        ))
-    }
+/// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
+pub(crate) fn accept_runtime_user_message(
+    session: &mut Session,
+    stream_tx: &StdSender<StreamEvent>,
+    message_id: Option<String>,
+    prepared: Vec<ContentBlock>,
+    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+) -> Result<String, String> {
+    let accepted = accept_user_message(
+        session,
+        stream_tx,
+        message_id,
+        prepared,
+        persistence_ack,
+        true,
+    )?;
+    Ok(content_blocks_text(&accepted.prepared))
 }
 
 fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
@@ -457,11 +385,7 @@ pub(crate) fn append_tool_result_message(
     session.messages.push(message);
 }
 
-pub(crate) fn append_runtime_tool_message(
-    _session: &mut Session,
-    tool_name: &str,
-    content: String,
-) {
+pub fn append_runtime_tool_message(_session: &mut Session, tool_name: &str, content: String) {
     tracing::info!(tool_name, content, "runtime trace");
 }
 
@@ -899,7 +823,7 @@ pub fn inject_tool_to_messages(
 }
 
 /// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
-pub(crate) fn inject_tool_to_session(
+pub fn inject_tool_to_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     tool_name: &str,
@@ -1091,6 +1015,51 @@ mod tests {
             false,
         );
         assert!(!has_unfinished_tool_calls(&session));
+    }
+
+    #[test]
+    fn deferred_injection_flushes_after_terminal_tool_close() {
+        let storage_root = std::env::temp_dir().join(format!(
+            "tiangong-core-terminal-flush-test-{}",
+            scru128::new()
+        ));
+        std::fs::create_dir_all(&storage_root).unwrap();
+        crate::storage::set_storage_root(storage_root);
+        let mut session = Session::new("terminal-deferred-injection");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![MessageToolCall {
+            id: "call-pending".to_string(),
+            name: "write_file".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        session.messages.push(assistant);
+        session.defer_tool_injection(
+            "agent_report".to_string(),
+            serde_json::json!({ "content": "done" }),
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+
+        flush_deferred_tool_injections(&mut session, &tx);
+        assert_eq!(session.deferred_tool_injections.len(), 1);
+
+        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
+        assert_eq!(interrupted.len(), 1);
+        flush_deferred_tool_injections(&mut session, &tx);
+
+        assert!(session.deferred_tool_injections.is_empty());
+        assert_eq!(session.messages.len(), 4);
+        let injected_call = session.messages[2].tool_calls.first().unwrap();
+        assert_eq!(injected_call.name, INJECTION_TOOL_NAME);
+        assert_eq!(injected_call.arguments["source"], "agent_report");
+        assert_eq!(injected_call.arguments["content"], "done");
+        assert_eq!(
+            session.messages[3].tool_name.as_deref(),
+            Some(INJECTION_TOOL_NAME)
+        );
+        assert_eq!(
+            session.messages[3].tool_call_id.as_deref(),
+            Some(injected_call.id.as_str())
+        );
     }
 
     #[test]

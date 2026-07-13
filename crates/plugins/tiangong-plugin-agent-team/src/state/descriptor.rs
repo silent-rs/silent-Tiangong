@@ -19,7 +19,7 @@ pub enum AgentStatus {
 /// Agent 描述符
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDescriptor {
-    /// 唯一标识（会话内唯一）
+    /// 唯一标识；值恒等于承载该成员的 Session ID。
     pub agent_id: String,
     /// 角色标识（用于 @提及，如 "pm"、"dev"、"test"）
     pub role: String,
@@ -27,8 +27,6 @@ pub struct AgentDescriptor {
     pub label: String,
     /// Agent 专属系统 prompt
     pub system_prompt: String,
-    /// 可用工具列表（从主 Agent 工具集中选取）
-    pub tools: Vec<String>,
     /// 当前状态
     pub status: AgentStatus,
 }

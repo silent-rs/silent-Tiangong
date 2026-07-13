@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::agent_config::AgentConfig;
-use crate::model::ToolSpec;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
 use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
@@ -108,6 +109,30 @@ impl std::fmt::Debug for RuntimeEngine {
 }
 
 impl RuntimeEngine {
+    #[cfg(test)]
+    pub(crate) fn for_react_test(client: SingleProviderClient) -> Self {
+        let agent_config = AgentConfig::default();
+        let permission_gate =
+            crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
+                trust_mode: agent_config.trust_mode,
+                ..Default::default()
+            });
+        Self {
+            client,
+            lite_client: None,
+            runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            context_limit: 8_192,
+            agent_config,
+            models_config: ModelsConfig::default(),
+            core_config: None,
+            permission_gate,
+            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
+            tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
+            prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
+            turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
+        }
+    }
+
     pub fn new(
         client: SingleProviderClient,
         context_limit: usize,
@@ -143,7 +168,7 @@ impl RuntimeEngine {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
-        shared_trust_mode: std::sync::Arc<std::sync::RwLock<crate::permission::TrustMode>>,
+        trust_mode: crate::permission::TrustModeHandle,
         storage_root: std::path::PathBuf,
     ) -> Self {
         crate::storage::set_storage_root(storage_root);
@@ -152,7 +177,7 @@ impl RuntimeEngine {
                 trust_mode: agent_config.trust_mode,
                 ..Default::default()
             },
-            shared_trust_mode.clone(),
+            trust_mode,
         );
         Self {
             client,
@@ -337,20 +362,27 @@ impl RuntimeEngine {
     /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
     ///
     /// 所有工具均由各插件经 tool_overrides 统一分发，此方法不再持有具体领域参数。
-    pub(crate) async fn execute_tool_call(&self, call: &ToolCall, session: &Session) -> ToolResult {
+    pub(crate) fn start_tool_call(
+        &self,
+        call: &ToolCall,
+        session: &mut Session,
+        actor_id: &str,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
         // 权限检查
         use crate::permission::PermissionDecision;
         match self.permission_gate.check(&call.name) {
             PermissionDecision::Approved => {}
             PermissionDecision::Denied { reason } => {
-                return ToolResult {
-                    ok: false,
-                    summary: format!("权限拒绝：{reason}"),
-                    stdout: String::new(),
-                    stderr: reason,
-                    exit_code: 1,
-                    execution: None,
-                };
+                return Box::pin(async move {
+                    ToolResult {
+                        ok: false,
+                        summary: format!("权限拒绝：{reason}"),
+                        stdout: String::new(),
+                        stderr: reason,
+                        exit_code: 1,
+                        execution: None,
+                    }
+                });
             }
             PermissionDecision::NeedsApproval { .. } => {
                 // 审批已由调用方（core/mod.rs execute_turn_inner）完成，此处放行
@@ -365,33 +397,42 @@ impl RuntimeEngine {
             .lock()
             .ok()
             .and_then(|g| g.get(&call.name).cloned())
-            && let Some(result) = handler.handle(call, session).await
         {
-            return result;
+            let handler_future = handler.handle(call, session, actor_id);
+            let tool_name = call.name.clone();
+            return Box::pin(async move {
+                if let Some(result) = handler_future.await {
+                    return result;
+                }
+
+                ToolResult {
+                    ok: false,
+                    summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
+                    stdout: String::new(),
+                    stderr: format!("tool {tool_name} not handled by any plugin"),
+                    exit_code: 1,
+                    execution: None,
+                }
+            });
         }
 
         // 无任何处理器命中的工具：LocalToolExecutor 已删除，所有工具均由插件提供。
-        ToolResult {
-            ok: false,
-            summary: format!("未注册的工具：{}（请确认对应插件已启用）", call.name),
-            stdout: String::new(),
-            stderr: format!("tool {} not handled by any plugin", call.name),
-            exit_code: 1,
-            execution: None,
-        }
+        let tool_name = call.name.clone();
+        Box::pin(async move {
+            ToolResult {
+                ok: false,
+                summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
+                stdout: String::new(),
+                stderr: format!("tool {tool_name} not handled by any plugin"),
+                exit_code: 1,
+                execution: None,
+            }
+        })
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {
         format!("执行失败：{err}")
     }
-}
-
-/// 注入增强工具定义（团队协作等 core 内置增强工具）。
-///
-/// 其他扩展能力均由插件经 ToolSpecProvider / tool_overrides 贡献，不在此注入。
-pub(crate) fn inject_enhanced_tools(tools: &mut Vec<ToolSpec>) {
-    // 多智能体团队工具
-    crate::agent_team::tools::inject_agent_team_tools(tools);
 }
 
 /// 清理 LLM 响应中混入的工具执行 trace 文本

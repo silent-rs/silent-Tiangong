@@ -23,6 +23,7 @@ tiangong-plugin-task = { workspace = true }
 tiangong-plugin-analyze-attachment = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
 tiangong-plugin-mcp = { workspace = true }
+tiangong-plugin-agent-team = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-media-archive = { workspace = true }

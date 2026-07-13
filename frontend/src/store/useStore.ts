@@ -115,10 +115,10 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
     // [Agent] {label} 状态变更: {status}
     const statusMatch = text.match(/^\[Agent\] (.+?) 状态变更: (\w+).*?id=([^\s]+)/);
     if (statusMatch) {
-      const [, label, status, agentId] = statusMatch;
+      const [, , status, agentId] = statusMatch;
       if (status === 'terminated') {
         for (const [role, info] of agents) {
-          if (info.agentId === agentId || info.label === label) {
+          if (info.agentId === agentId) {
             agents.delete(role);
             break;
           }
@@ -131,7 +131,7 @@ export function parseAgentsFromMessages(messages: Message[]): AgentInfo[] {
         || status === 'error'
       ) {
         for (const [, info] of agents) {
-          if (info.agentId === agentId || info.label === label) {
+          if (info.agentId === agentId) {
             info.status = status;
             break;
           }
@@ -184,6 +184,8 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.tool_name === right.tool_name
     && left.tool_result_is_error === right.tool_result_is_error
     && left.compact === right.compact
+    && left.model_excluded === right.model_excluded
+    && left.phase === right.phase
     && left.created_at === right.created_at
     && sameJsonValue(left.media, right.media)
     && sameJsonValue(left.tool_calls, right.tool_calls)

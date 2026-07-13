@@ -107,10 +107,12 @@ fn new_path_system_prompt_includes_all_sections() {
     let config = SystemPromptConfig {
         custom_prompt: "回复必须使用中文".to_string(),
         media_text: "已配置的多媒体能力：\n- 图片生成：已配置".to_string(),
-        team_text: "团队协作能力".to_string(),
         plugin_sections: vec![
             "已安装的 Skills：\n- test-skill (id=s1): 测试技能".to_string(),
             "插件规则段：终端交互引导".to_string(),
+            // 团队协作指引现由 team 插件的 PromptSectionProvider 提供，
+            // 经 plugin_sections 合并注入（原 team_text 字段已移除）。
+            "团队协作能力".to_string(),
             "用户偏好深色主题".to_string(),
         ],
     };

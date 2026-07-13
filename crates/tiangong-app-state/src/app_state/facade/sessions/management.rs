@@ -110,6 +110,15 @@ impl TiangongState {
     }
 
     pub fn save_active_session_title(&mut self) -> Result<()> {
+        let (active_id, _) = self.apply_active_session_title_in_memory()?;
+        self.persist_session_and_app(&active_id)
+    }
+
+    /// 校验标题草稿并只更新宿主内存镜像，不写 Session 文件。
+    ///
+    /// Desktop 在 Core 存活时先调用本方法，再把标题交给 Core 的单写者命令持久化；
+    /// 没有 Core 的调用方仍可继续使用 [`Self::save_active_session_title`]。
+    pub fn apply_active_session_title_in_memory(&mut self) -> Result<(String, String)> {
         let new_title = self.store.session.session_title_draft.trim();
         if new_title.is_empty() {
             return Err(anyhow!("会话标题不能为空"));
@@ -128,7 +137,7 @@ impl TiangongState {
 
         session.title = new_title.to_string();
         self.store.session.session_title_draft = session.title.clone();
-        self.persist_session_and_app(&active_id)
+        Ok((active_id, session.title.clone()))
     }
 
     pub fn delete_active_session(&mut self) -> Result<()> {

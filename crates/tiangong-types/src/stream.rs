@@ -142,23 +142,13 @@ pub enum StreamEvent {
         /// 消息保留在会话历史中，但不进入当前 Agent 的模型上下文。
         #[serde(default, skip_serializing_if = "is_false")]
         model_excluded: bool,
-        /// 与本条消息同一次持久化确认产生的待投递快照，宿主必须原子同步。
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        pending_agent_deliveries: Vec<crate::PendingAgentDelivery>,
     },
     /// Core 会话中的稳定消息快照，供宿主按 ID 更新本地镜像。
     SessionMessageUpsert {
         message: crate::Message,
-        /// 与消息快照同一原子状态变更中的待投递列表；None 表示不修改。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pending_agent_deliveries: Option<Vec<crate::PendingAgentDelivery>>,
         /// 与消息快照同一原子状态变更中的延迟注入列表；None 表示不修改。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deferred_tool_injections: Option<Vec<crate::DeferredToolInjection>>,
-    },
-    /// 尚未完成的用户直达 Agent 投递快照，供宿主同步 Session 顶层状态。
-    PendingAgentDeliveriesChanged {
-        deliveries: Vec<crate::PendingAgentDelivery>,
     },
     /// 尚未到达安全注入边界的外部工具内容快照。
     DeferredToolInjectionsChanged {

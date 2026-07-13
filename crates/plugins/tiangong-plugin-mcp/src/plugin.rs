@@ -10,12 +10,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::permission::TrustMode;
+use tiangong_core::permission::TrustModeHandle;
 use tiangong_core::runtime::RuntimeEngine;
 
 use crate::capability::McpCapabilityIndex;
@@ -205,7 +205,7 @@ impl Plugin for McpPlugin {
         }
     }
 
-    fn set_trust_mode(&self, _trust: Arc<RwLock<TrustMode>>) {
+    fn set_trust_mode(&self, _trust: TrustModeHandle) {
         // MCP 工具执行受 engine 层 PermissionGate 统一兜底，无需插件自行感知。
     }
 

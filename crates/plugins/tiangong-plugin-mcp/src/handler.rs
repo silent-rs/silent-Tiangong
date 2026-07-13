@@ -66,7 +66,8 @@ impl ToolOverrideHandler for McpPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &Session,
+        _session: &mut Session,
+        _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
         match self.dispatch(call) {
             Some(fut) => Box::pin(async move { Some(fut.await) }),

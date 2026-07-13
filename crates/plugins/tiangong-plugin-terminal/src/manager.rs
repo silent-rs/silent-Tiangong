@@ -240,6 +240,8 @@ pub(crate) async fn spawn_command_loop(
                 command,
                 timeout_secs,
                 response_tx,
+                cancellation,
+                completion,
             } => {
                 command_protocol::handle_exec(
                     &manager,
@@ -248,6 +250,8 @@ pub(crate) async fn spawn_command_loop(
                     &command,
                     timeout_secs,
                     response_tx,
+                    cancellation,
+                    completion,
                     activity.as_ref(),
                 )
                 .await;

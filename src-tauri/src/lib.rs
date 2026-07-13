@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod commands;
+mod embedded_server;
 pub mod scheduler;
 pub mod view;
 pub mod workspace_tabs;

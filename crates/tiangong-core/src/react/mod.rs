@@ -4,4 +4,5 @@ pub mod engine;
 mod helpers;
 pub mod message;
 mod summary;
-mod team_bridge;
+#[cfg(test)]
+mod test_support;

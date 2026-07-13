@@ -200,6 +200,17 @@ export function workerContentMessages(messages: MessageItem[]): MessageItem[] {
   return messages.filter((m) => m.worker_id);
 }
 
+export function workerBelongsToAgent(
+  workerId: string | undefined,
+  role: string,
+  agentId: string | undefined,
+): boolean {
+  if (!workerId) return false;
+  if (agentId) return workerId === `agent:${role}:${agentId}`;
+  // 兼容没有持久 Agent ID 的旧会话。
+  return workerId.startsWith(`agent:${role}:`);
+}
+
 export function sameMessageRefs(left: MessageItem[], right: MessageItem[]): boolean {
   if (left.length !== right.length) return false;
   for (let i = 0; i < left.length; i++) {
@@ -209,7 +220,7 @@ export function sameMessageRefs(left: MessageItem[], right: MessageItem[]): bool
 }
 
 export function hasMessage(messages: MessageItem[], id: string | null): boolean {
-  return !!id && messages.some((message) => message.id === message.id);
+  return !!id && messages.some((message) => message.id === id);
 }
 
 export function extractAgentRoles(content: string, agents: { role: string; label: string }[]): string[] {

@@ -602,7 +602,8 @@ impl ToolOverrideHandler for FsPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        _session: &tiangong_core::session::Session,
+        _session: &mut tiangong_core::session::Session,
+        _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let result = self.dispatch(call);
         Box::pin(async move { result })

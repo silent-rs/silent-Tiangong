@@ -8,7 +8,7 @@
 //!   工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //! - [`Plugin::register`] 接收 `&RuntimeEngine`（engine 内部用 `Arc` + interior
 //!   mutability，`&self` 即可修改），core 在调用前会先通过 [`Plugin::set_workspace`]
-//!   注入当前会话工作目录、通过 [`Plugin::set_trust_mode`] 注入共享信任模式引用、
+//!   注入当前会话工作目录、通过 [`Plugin::set_trust_mode`] 注入会话信任解析句柄、
 //!   并通过 [`Plugin::set_feedback_tx`] 注入反馈通道。
 //! - `PageFetcher` / `TerminalProvider` 等外部能力 trait 已随能力下沉重构（#225）
 //!   迁入对应插件 crate，core 不再持有这些 trait；插件经 [`Plugin::set_feedback_tx`]

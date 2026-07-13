@@ -28,6 +28,15 @@
 - 未来拆分会话持久数据与 Core 运行时状态时，必须先固定字段所有权和重启语义，保持旧版主会话、子会话与扁平磁盘格式无损读取，并覆盖 Desktop、Server、CLI 和插件生命周期的恢复路径。
 - `TiangongCore` 必须提供真正等待 worker、事件转发和插件结束钩子全部退出的关闭栅栏；不需要最终会话的删除和编辑重发路径必须使用该栅栏，仍需取回最终会话的重建与 CLI 路径必须保留原有语义。
 
+#### Agent Team 子 Core 边界
+- 每个子 Agent 必须由独立、完整的 `TiangongCore` 实例承载，并拥有独立 worker、runtime 与 Session；Agent Team 插件不得绕过 Core worker 直接调用裸 `ReactEngine::execute_turn`。
+- 子 Core 必须继承所属宿主主 Core 的模型配置、工作目录和插件能力集合，不设置独立工具白名单；子 Agent 身份直接使用其 Session ID，仅以轻量团队客户端替换完整团队插件以防递归创建。子 Core 固定使用 `FullTrust`，将父会话工作目录作为默认工作范围，不传递主 Core 的审批链。普通插件使用现有注册与执行流程；workspace 硬隔离不属于当前 PR 范围。
+- Agent Team 当前通过子 Core 已有外部事件流等待 `Done` / `Error`，不得在本阶段为此新增轮次完成回执或扩展 `Plugin` trait。
+- 子 Core 会话按 `<storage_root>/teams/<parent_session_id>/<session_id>/` 隔离保存；解散与插件停止必须调用 Core 自身关闭栅栏并等待线程退出。
+- `@role`、多角色 `@role @role` 和 `@all` 对 Core 必须保持为普通用户文本；当前 Agent 只能依据 Agent Team 插件贡献的 system prompt 与工具定义调用 `send_message` / `broadcast_message` handler，不得由 Core 或 Agent Team 的 Core 路由钩子提前隐藏、接管或恢复原用户消息。
+- 团队 handler 必须把目标子 Core 的完成结果作为普通 `ToolResult` 返回调用方，使调用方 Core 沿原有 Agent Loop 自然继续；不得为团队消息在 Core `Command::Message` 增加恢复标记、专用等待循环或自动扫描状态机。
+- 父 Core 与子 Core 必须复用同一套插件驱动交互：当前 Core 理解消息、调用团队 handler、目标 Core 完整执行、结果回到当前 Core。子 Agent 向父 Agent 的消息只能单向异步通知且不得等待父 Core，避免形成循环等待。
+
 #### 发布与分发
 - 必须提供 GitHub Actions 发布流水线，支持手动触发和 `v*` 版本标签触发。
 - 发布流水线必须构建 Tauri 桌面安装包，并将 macOS、Windows、Linux 产物上传到 GitHub Release。
@@ -158,11 +167,11 @@
 - Tool 化回忆在返回长期记忆时应能补充相关 workspace 文件和符号线索；没有历史记忆但存在相关文件线索时，也应返回 workspace index 结果。
 
 #### 多智能体协作
-- 主 Agent 必须能够在会话中动态创建、解散 Sub Agent，并为每个 Sub Agent 维护独立角色、状态、工具范围和会话上下文。
+- 主 Agent 必须能够在会话中动态创建、解散 Sub Agent，并为每个 Sub Agent 维护独立角色、状态和会话上下文；Sub Agent 继承所属主 Core 的插件与工具能力，不维护独立工具白名单。
 - 持久 Sub Agent 必须在当前会话内跨用户消息保留，临时 Sub Agent 必须在单次任务完成后自动释放。
 - Sub Agent 之间必须支持定向消息和广播消息，用户也必须能够通过 `@role`、多角色 `@role @role` 和 `@all` 将消息直接路由给存活 Agent。
 - Sub Agent 必须能够通过通知事件直接向用户推送进度、阻塞、问题和错误信息，前端应能按 Agent 查看相关事件。
-- 已向用户确认接收、但尚未由目标 Agent 完成的直达投递必须作为可恢复工作持久化；应用重启后必须按稳定投递 ID 幂等恢复，只能在目标 Agent 完成或用户明确取消后删除。
+- 团队消息通过 `ToolOverrideHandler` 同步等待目标子 Core 的轮次终态并返回普通工具结果；目标子 Core 负责持久化自身会话。Core 不保存插件投递计划、完成 ID 或运行时路由状态，也不为 `@mention` 提供消息预路由能力。
 - 已接收但因工具调用尚未闭合而延迟处理的外部工具输入必须随会话持久化；重启后必须在下一个安全边界继续注入，不得将其当作可丢弃的纯运行时缓存。
 - 多 Agent 共享同一工作区时，Sub Agent 编辑文件前必须先获取文件锁；未持有锁时不得执行写入或替换，主 Agent 保留最高释放权限。
 - 文件锁必须支持超时释放、Agent 销毁时释放和前端锁状态变更事件。

@@ -4,22 +4,23 @@ use async_trait::async_trait;
 use tiangong_scheduler::executor::SchedulerContext;
 
 use crate::api::SharedState;
-use crate::remote::core::ServerCoreManager;
+use crate::remote::backend::ServerCoreBackend;
 
 /// Server 端调度器执行上下文
 ///
-/// 通过 ServerCoreManager 发送消息，通过 SharedState 管理会话。
+/// 通过注入的 Core 后端发送消息，通过 SharedState 管理会话。
 pub struct ServerSchedulerContext {
     pub state: SharedState,
-    pub cores: Arc<ServerCoreManager>,
+    pub core_backend: Arc<dyn ServerCoreBackend>,
 }
 
 #[async_trait]
 impl SchedulerContext for ServerSchedulerContext {
     async fn send_message(&self, session_id: &str, content: String) -> anyhow::Result<()> {
-        self.cores
-            .send_message(session_id, content, None, vec![])
+        self.core_backend
+            .send_message_and_wait(session_id, content, None, vec![])
             .await
+            .map(|_| ())
     }
 
     async fn resolve_or_create_session(

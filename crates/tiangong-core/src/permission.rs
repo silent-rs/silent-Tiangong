@@ -12,6 +12,38 @@ use serde::{Deserialize, Serialize};
 /// `tiangong_core::permission::TrustMode` 路径稳定，core 内部用法无需改动。
 pub use tiangong_types::TrustMode;
 
+/// 会话信任模式的共享解析句柄。
+///
+/// 所有执行只读取同一个会话基线，更新后立即对共享该句柄的权限门和插件生效。
+#[derive(Debug, Clone)]
+pub struct TrustModeHandle {
+    base_mode: Arc<RwLock<TrustMode>>,
+}
+
+impl TrustModeHandle {
+    pub fn new(base_mode: TrustMode) -> Self {
+        Self {
+            base_mode: Arc::new(RwLock::new(base_mode)),
+        }
+    }
+
+    /// 更新会话共享基线。
+    pub fn set_base(&self, mode: TrustMode) {
+        *self
+            .base_mode
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = mode;
+    }
+
+    /// 读取当前会话的有效信任模式。
+    pub fn current(&self) -> TrustMode {
+        *self
+            .base_mode
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
 /// 工具风险等级
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionLevel {
@@ -85,12 +117,11 @@ pub struct PermissionAuditEntry {
 
 /// 权限检查网关
 ///
-/// trust_mode 通过 `Arc<RwLock>` 共享，允许运行中的任务实时感知权限模式变更。
+/// trust_mode 通过 [`TrustModeHandle`] 解析，使会话基线实时更新。
 #[derive(Debug, Clone)]
 pub struct PermissionGate {
     policy: PermissionPolicy,
-    /// 共享的信任模式引用，clone 后仍指向同一个 RwLock
-    shared_trust_mode: Arc<RwLock<TrustMode>>,
+    trust_mode: TrustModeHandle,
     /// 插件贡献的工具权限覆盖表（由 core/mod.rs 汇总各插件的
     /// `tool_permission_overrides` 写入）。check 时优先于 classify_tool 查询。
     plugin_overrides: Arc<RwLock<std::collections::BTreeMap<String, PermissionLevel>>>,
@@ -99,10 +130,10 @@ pub struct PermissionGate {
 impl Default for PermissionGate {
     fn default() -> Self {
         let policy = PermissionPolicy::default();
-        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        let trust_mode = TrustModeHandle::new(policy.trust_mode);
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
@@ -110,36 +141,31 @@ impl Default for PermissionGate {
 
 impl PermissionGate {
     pub fn new(policy: PermissionPolicy) -> Self {
-        let shared = Arc::new(RwLock::new(policy.trust_mode));
+        let trust_mode = TrustModeHandle::new(policy.trust_mode);
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
     /// 使用外部共享的信任模式创建（确保所有持有该 Gate clone 共享同一引用）
-    pub fn with_shared_trust_mode(
-        policy: PermissionPolicy,
-        shared: Arc<RwLock<TrustMode>>,
-    ) -> Self {
+    pub fn with_shared_trust_mode(policy: PermissionPolicy, trust_mode: TrustModeHandle) -> Self {
         Self {
             policy,
-            shared_trust_mode: shared,
+            trust_mode,
             plugin_overrides: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
     /// 获取共享的信任模式引用（用于跨 RuntimeEngine 实例共享）
-    pub fn shared_trust_mode_ref(&self) -> Arc<RwLock<TrustMode>> {
-        self.shared_trust_mode.clone()
+    pub fn trust_mode_handle(&self) -> TrustModeHandle {
+        self.trust_mode.clone()
     }
 
     /// 实时更新信任模式（所有持有该 Gate clone 的线程立即生效）
     pub fn set_trust_mode(&self, mode: TrustMode) {
-        if let Ok(mut guard) = self.shared_trust_mode.write() {
-            *guard = mode;
-        }
+        self.trust_mode.set_base(mode);
     }
 
     /// 写入插件贡献的工具权限覆盖表（供 core/mod.rs 汇总插件能力时调用）。
@@ -155,11 +181,7 @@ impl PermissionGate {
     /// 对工具调用进行权限检查
     pub fn check(&self, tool_name: &str) -> PermissionDecision {
         // 读取共享的信任模式（实时值）
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         // 完全信任模式：直接放行
         if trust_mode == TrustMode::FullTrust {
@@ -200,10 +222,7 @@ impl PermissionGate {
 
     /// 获取当前信任模式（实时值）
     pub fn trust_mode(&self) -> TrustMode {
-        self.shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode)
+        self.trust_mode.current()
     }
 
     /// 检查路径访问权限
@@ -211,11 +230,7 @@ impl PermissionGate {
     /// 按路径规则顺序匹配，首条命中生效。
     /// 无匹配规则时默认允许。
     pub fn check_path(&self, path: &str) -> PermissionDecision {
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         if trust_mode == TrustMode::FullTrust {
             return PermissionDecision::Approved;
@@ -241,11 +256,7 @@ impl PermissionGate {
     /// 按网络规则顺序匹配，首条命中生效。
     /// 无匹配规则时默认允许。
     pub fn check_network(&self, target: &str) -> PermissionDecision {
-        let trust_mode = self
-            .shared_trust_mode
-            .read()
-            .map(|g| *g)
-            .unwrap_or(self.policy.trust_mode);
+        let trust_mode = self.trust_mode.current();
 
         if trust_mode == TrustMode::FullTrust {
             return PermissionDecision::Approved;

@@ -64,7 +64,8 @@ impl ToolOverrideHandler for MemoryPlugin {
     fn handle(
         &self,
         call: &ToolCall,
-        session: &Session,
+        session: &mut Session,
+        _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         // 本轮已回忆 → 去重分支（补发 Start/Done 让状态栏有过渡）。
         if self.mark_recall_attempted(&session.id) {

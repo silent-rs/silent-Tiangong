@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -39,6 +40,8 @@ pub enum TerminalCommand {
         command: String,
         timeout_secs: Option<u64>,
         response_tx: oneshot::Sender<TerminalExecResponse>,
+        cancellation: Arc<TerminalExecCancellation>,
+        completion: TerminalExecCompletion,
     },
     /// 交互式命令执行，不使用 marker 协议，直接 CR 提交并等待初始输出
     ExecInteractive {
@@ -74,6 +77,66 @@ pub enum TerminalCommand {
         cols: u16,
         rows: u16,
     },
+}
+
+/// 一次非交互 PTY 命令的取消/完成栅栏。
+///
+/// 调用 Future 被 drop 时同步请求取消并等待 command loop 确认命令边界闭合，
+/// 或完成不可忽略的强制终止；Agent Team 因而只会在真实命令停止后释放文件锁。
+#[derive(Default)]
+pub struct TerminalExecCancellation {
+    requested: AtomicBool,
+    finished: Mutex<bool>,
+    ready: Condvar,
+}
+
+/// 随排队的 Exec 命令移动的完成所有权。
+///
+/// 即使 command loop 在取出请求前退出、队列 receiver 被 drop，payload 的 Drop
+/// 仍会释放调用 Future 正在等待的完成栅栏。
+pub struct TerminalExecCompletion {
+    cancellation: Arc<TerminalExecCancellation>,
+}
+
+impl TerminalExecCompletion {
+    pub(crate) fn new(cancellation: Arc<TerminalExecCancellation>) -> Self {
+        Self { cancellation }
+    }
+}
+
+impl Drop for TerminalExecCompletion {
+    fn drop(&mut self) {
+        self.cancellation.mark_finished();
+    }
+}
+
+impl TerminalExecCancellation {
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_and_wait(&self) {
+        self.requested.store(true, Ordering::Release);
+        let mut finished = self
+            .finished
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while !*finished {
+            finished = self
+                .ready
+                .wait(finished)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+
+    pub(crate) fn mark_finished(&self) {
+        let mut finished = self
+            .finished
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *finished = true;
+        self.ready.notify_all();
+    }
 }
 
 /// 终端命令执行响应

@@ -97,11 +97,6 @@ impl AgentInputKind {
         AgentInputKind::Command(CommandInput::Cancel)
     }
 
-    /// 便捷构造：取消指定 Agent。
-    pub fn cancel_agent(role: impl Into<String>) -> Self {
-        AgentInputKind::Command(CommandInput::CancelAgent { role: role.into() })
-    }
-
     /// 便捷构造：更新工作目录。
     pub fn update_cwd(cwd: impl Into<String>) -> Self {
         AgentInputKind::Command(CommandInput::UpdateCwd { cwd: cwd.into() })
@@ -149,8 +144,6 @@ pub enum ApprovalInput {
 pub enum CommandInput {
     /// 取消当前执行。
     Cancel,
-    /// 取消指定 Agent 的当前执行。
-    CancelAgent { role: String },
     /// 更新当前会话工作目录。
     UpdateCwd { cwd: String },
     /// 重新加载共享配置。
