@@ -49,4 +49,12 @@ impl Plugin for GenerateVideoPlugin {
     }
 }
 
-impl PromptSectionProvider for GenerateVideoPlugin {}
+impl PromptSectionProvider for GenerateVideoPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        let ep = self.endpoint();
+        if ep.base_url.is_empty() || ep.model.is_empty() {
+            return Vec::new();
+        }
+        vec![format!("视频生成：已配置（模型：{}）", ep.model)]
+    }
+}

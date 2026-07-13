@@ -51,4 +51,13 @@ impl Plugin for GenerateImagePlugin {
     }
 }
 
-impl PromptSectionProvider for GenerateImagePlugin {}
+impl PromptSectionProvider for GenerateImagePlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        // 仅在已配置有效端点时注入能力说明，遵循「能力拥有者提供」。
+        let ep = self.endpoint();
+        if ep.base_url.is_empty() || ep.model.is_empty() {
+            return Vec::new();
+        }
+        vec![format!("图片生成：已配置（模型：{}）", ep.model)]
+    }
+}

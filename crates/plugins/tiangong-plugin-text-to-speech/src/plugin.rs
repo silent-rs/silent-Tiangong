@@ -49,4 +49,12 @@ impl Plugin for TextToSpeechPlugin {
     }
 }
 
-impl PromptSectionProvider for TextToSpeechPlugin {}
+impl PromptSectionProvider for TextToSpeechPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        let ep = self.endpoint();
+        if ep.base_url.is_empty() || ep.model.is_empty() {
+            return Vec::new();
+        }
+        vec![format!("语音合成：已配置（模型：{}）", ep.model)]
+    }
+}
