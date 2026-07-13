@@ -53,9 +53,6 @@ pub struct TiangongCore {
     config: CoreConfigProvider,
     /// 会话信任模式基线。
     trust_mode: crate::permission::TrustModeHandle,
-    /// Core 实例身份标识：每个 Core 实例独有，供 app 层通过 `Arc::ptr_eq` 判断
-    /// HashMap 中的 Core 是否还是当初绑定的实例（Core 重建后旧 token 不匹配新实例）。
-    instance_token: Arc<AtomicBool>,
     /// 保证"设置取消信号 + 入队取消命令"与并发消息入队具有单一顺序。
     command_delivery_lock: Mutex<()>,
 }
@@ -137,7 +134,6 @@ impl TiangongCore {
         let trust_mode = crate::permission::TrustModeHandle::new(initial_trust_mode);
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-        let instance_token = Arc::new(AtomicBool::new(false));
 
         let worker_trust_mode = trust_mode.clone();
         let worker_config = config.clone();
@@ -163,7 +159,6 @@ impl TiangongCore {
             session_id,
             config,
             trust_mode,
-            instance_token,
             command_delivery_lock: Mutex::new(()),
         }
     }
@@ -213,10 +208,6 @@ impl TiangongCore {
     ) -> Result<(), CoreError> {
         self.enqueue_prepared_with_receipt(message_id, prepared)?
             .await
-    }
-
-    pub fn instance_token(&self) -> Arc<AtomicBool> {
-        self.instance_token.clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -311,7 +302,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
             .unwrap_or_else(|poison| poison.into_inner());
 
         // 取消完全由 Command::Cancel 队列承载：select! 的 cmd_rx 分支和 drain
-        // 会消费它并终止 turn。cancel_flag 仅作实例标识（instance_token），不再承担信号职责。
+        // 会消费它并终止 turn。
         if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
             return self.send_cmd(Command::Cancel);
         }
