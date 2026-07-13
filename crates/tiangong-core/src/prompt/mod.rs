@@ -1,8 +1,8 @@
 //! Prompt 构建系统
 //!
-//! 通过 `build_full_system_prompt()` 构建完整的 system prompt 消息，
-//! 包含身份、规则、自定义指令、环境信息、动态段和对话摘要。
+//! core 只负责 Prompt 段落的顺序组装、会话运行上下文与摘要合并。
+//! 产品文案由各插件经 `PromptSectionProvider` 注入（见 `tiangong-plugin-prompt`）。
 
 pub mod sections;
 
-pub use sections::{ScopedSystemPromptContext, SystemPromptConfig};
+pub use sections::SystemPromptConfig;

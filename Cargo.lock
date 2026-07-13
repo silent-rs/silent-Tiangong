@@ -9600,6 +9600,7 @@ dependencies = [
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
+ "tiangong-plugin-prompt",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
@@ -9657,6 +9658,7 @@ dependencies = [
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
+ "tiangong-plugin-prompt",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
@@ -9996,6 +9998,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-prompt"
+version = "0.12.1"
+dependencies = [
+ "tiangong-core",
+]
+
+[[package]]
 name = "tiangong-plugin-scheduler"
 version = "0.12.1"
 dependencies = [
@@ -10142,6 +10151,7 @@ dependencies = [
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
+ "tiangong-plugin-prompt",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",

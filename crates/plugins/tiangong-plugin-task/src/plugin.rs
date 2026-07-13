@@ -402,4 +402,9 @@ impl ToolOverrideHandler for TaskPlugin {
     }
 }
 
-impl PromptSectionProvider for TaskPlugin {}
+impl PromptSectionProvider for TaskPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        // 原 core rules 第 9 条：后台任务使用边界。
+        vec!["只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。".to_string()]
+    }
+}

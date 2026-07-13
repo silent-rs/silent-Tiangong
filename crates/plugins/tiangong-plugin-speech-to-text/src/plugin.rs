@@ -49,4 +49,12 @@ impl Plugin for SpeechToTextPlugin {
     }
 }
 
-impl PromptSectionProvider for SpeechToTextPlugin {}
+impl PromptSectionProvider for SpeechToTextPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        let ep = self.endpoint();
+        if ep.base_url.is_empty() || ep.model.is_empty() {
+            return Vec::new();
+        }
+        vec![format!("语音识别：已配置（模型：{}）", ep.model)]
+    }
+}

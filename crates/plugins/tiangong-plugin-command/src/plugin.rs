@@ -108,4 +108,9 @@ impl Plugin for CommandPlugin {
     }
 }
 
-impl tiangong_core::tool_override::PromptSectionProvider for CommandPlugin {}
+impl tiangong_core::tool_override::PromptSectionProvider for CommandPlugin {
+    fn prompt_sections(&self) -> Vec<String> {
+        // 原 core rules 第 8 条（run_command 部分）：命令执行默认走 run_command。
+        vec!["命令执行默认使用 run_command，并根据工具结果继续推进。".to_string()]
+    }
+}

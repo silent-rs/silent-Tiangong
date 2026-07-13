@@ -1185,6 +1185,8 @@ impl TiangongApp {
         // 3. 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。
         let storage_root = tiangong_app_state::app_state::storage_root();
         let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
+        // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
+        plugins.extend(tiangong_plugin_prompt::default_plugins());
         let Some(app_handle) = self.app_handle.get() else {
             panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
         };
@@ -1260,6 +1262,8 @@ impl TiangongApp {
             move || {
                 let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
                     Vec::new();
+                // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
+                child_plugins.extend(tiangong_plugin_prompt::default_plugins());
                 if browser_available {
                     if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
                         child_plugins.push(browser);
