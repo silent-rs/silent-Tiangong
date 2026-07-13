@@ -221,7 +221,10 @@ jobs:
   tauri:
     name: Tauri Shell Check
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    # 仅当 src-tauri/ 本身被直接改动时才跑。matrix 把 src-tauri/ 映射成包名
+    # tiangong-app，所以判断 matrix 是否含该包即可；避免仅改 ci.yml / Cargo.lock
+    # 等无关 Rust 改动也拉起 tauri 校验。
+    if: contains(fromJson(needs.changes.outputs.matrix), 'tiangong-app')
     runs-on: ubuntu-latest
     steps:
       - name: Free disk space
