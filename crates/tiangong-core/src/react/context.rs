@@ -14,11 +14,13 @@ use crate::runtime::RuntimeEngine;
 use crate::session::Session;
 use tiangong_types::StreamEvent;
 
-/// 从 RuntimeEngine 配置构建 SystemPromptConfig 并重建 session 的 system prompt
+/// 从 RuntimeEngine 收集插件段落并重建 session 的 system prompt
+///
+/// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
+/// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
 pub(crate) fn rebuild_system_prompt(session: &mut Session, engine: &RuntimeEngine) {
     let plugin_sections = engine.collect_plugin_prompt_sections();
-    let config = SystemPromptConfig::from_configs(engine.models_config(), engine.agent_config())
-        .with_plugin_sections(plugin_sections);
+    let config = SystemPromptConfig::from_plugin_sections(plugin_sections);
     session.rebuild_system_prompt(&config);
 }
 

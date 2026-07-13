@@ -33,6 +33,7 @@ members = [
     "crates/plugins/tiangong-plugin-skill",
     "crates/plugins/tiangong-plugin-mcp",
     "crates/plugins/tiangong-plugin-agent-team",
+    "crates/plugins/tiangong-plugin-prompt",
     "src-tauri",
 ]
 
@@ -68,6 +69,7 @@ tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-an
 tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
 tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
+tiangong-plugin-prompt = { path = "crates/plugins/tiangong-plugin-prompt" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }

@@ -82,7 +82,9 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             } else {
                 None
             };
-            let mut plugins = tiangong_plugin_fs::default_plugins();
+            // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
+            let mut plugins = tiangong_plugin_prompt::default_plugins();
+            plugins.extend(tiangong_plugin_fs::default_plugins());
             plugins.extend(tiangong_plugin_index::default_plugins());
             if let Some(ep) = image_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
@@ -121,7 +123,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             > = std::sync::Arc::new({
                 let storage_root = storage_root.clone();
                 move || {
-                    let mut child_plugins = tiangong_plugin_fs::default_plugins();
+                    let mut child_plugins = tiangong_plugin_prompt::default_plugins();
+                    child_plugins.extend(tiangong_plugin_fs::default_plugins());
                     child_plugins.extend(tiangong_plugin_index::default_plugins());
                     if let Some(ep) = image_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));

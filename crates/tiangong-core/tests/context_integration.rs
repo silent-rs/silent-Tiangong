@@ -1,10 +1,12 @@
 //! 上下文系统集成测试
 //!
 //! 验证 session.context() + build_full_system_prompt 路径：
-//! - system prompt 包含摘要和所有动态段
+//! - system prompt 包含插件段、环境段和摘要段
 //! - 消息零丢失：所有 session.messages 完整传递给 LLM
+//!
+//! 产品身份 / 规则 / 自定义指令等文案由各插件经 PromptSectionProvider 注入
+//! （见 tiangong-plugin-prompt），core 只负责组装，故本测试用模拟段落验证组装框架。
 
-use tiangong_core::agent_config::AgentConfig;
 use tiangong_core::prompt::SystemPromptConfig;
 use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session};
 
@@ -64,10 +66,7 @@ fn multi_turn_session() -> Session {
 }
 
 fn rebuild_session(session: &mut Session) {
-    let config = SystemPromptConfig::from_configs(
-        &tiangong_core::models_config::ModelsConfig::default(),
-        &AgentConfig::default(),
-    );
+    let config = SystemPromptConfig::from_plugin_sections(Vec::new());
     session.rebuild_system_prompt(&config);
 }
 
@@ -104,34 +103,29 @@ fn new_path_system_prompt_includes_summary() {
 #[test]
 fn new_path_system_prompt_includes_all_sections() {
     let session = helper_session();
-    let config = SystemPromptConfig {
-        custom_prompt: "回复必须使用中文".to_string(),
-        media_text: "已配置的多媒体能力：\n- 图片生成：已配置".to_string(),
-        plugin_sections: vec![
-            "已安装的 Skills：\n- test-skill (id=s1): 测试技能".to_string(),
-            "插件规则段：终端交互引导".to_string(),
-            // 团队协作指引现由 team 插件的 PromptSectionProvider 提供，
-            // 经 plugin_sections 合并注入（原 team_text 字段已移除）。
-            "团队协作能力".to_string(),
-            "用户偏好深色主题".to_string(),
-        ],
-    };
+    // 产品文案 / 能力说明 / 自定义指令等均经 plugin_sections 注入。
+    let config = SystemPromptConfig::from_plugin_sections(vec![
+        "产品身份段".to_string(),
+        "通用规则段".to_string(),
+        "自定义指令段".to_string(),
+        "已安装的 Skills：\n- test-skill (id=s1): 测试技能".to_string(),
+        "插件规则段：终端交互引导".to_string(),
+        "团队协作能力".to_string(),
+        "用户偏好深色主题".to_string(),
+    ]);
     let msg = tiangong_core::prompt::sections::build_full_system_prompt(&session, &config);
     assert_eq!(msg.role, MessageRole::System);
     let text = msg.text_content();
-    // 静态段
-    assert!(text.contains("天工智能助手"), "应包含身份段");
-    assert!(text.contains("规则"), "应包含规则段");
-    // 自定义指令
-    assert!(text.contains("回复必须使用中文"), "应包含自定义指令");
+    // 插件段（按注册顺序保留）
+    assert!(text.contains("产品身份段"), "应包含产品身份段");
+    assert!(text.contains("通用规则段"), "应包含通用规则段");
+    assert!(text.contains("自定义指令段"), "应包含自定义指令段");
     // 环境段
     assert!(text.contains("当前会话"), "应包含会话标题");
     assert!(text.contains("当前工作目录"), "应包含工作目录");
-    // 动态段
+    // 各能力插件段落
     assert!(text.contains("test-skill"), "应包含 Skills 列表");
-    assert!(text.contains("图片生成"), "应包含多媒体能力");
     assert!(text.contains("团队协作"), "应包含团队协作");
-    // 用户上下文（经 plugin_sections 注入，含 memory injection）
     assert!(text.contains("用户偏好深色主题"), "应包含用户上下文");
 }
 
