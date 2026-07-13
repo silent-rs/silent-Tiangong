@@ -162,82 +162,58 @@ jobs:
         # 格式校验必须保证整个 workspace 一致，因此仅做一次、不按 crate 拆分
         run: cargo fmt --all -- --check
 
-  # 单作业批量校验所有受影响 crate：changes 作业已筛出被直接改动的 crate，
-  # 这里把它们合并到同一条 cargo 命令（cargo -p a -p b ...）。
-  # 合并后所有 crate 共享同一个 target/ 目录与 rust-cache，共享依赖只编译一次，
-  # 避免「逐 crate 矩阵作业各自全量编译依赖闭包」导致的重复构建。
-  rust-crate:
-    name: Rust (affected crates)
+  # check / clippy / nextest 三条作业并行调度、互不阻塞，wall-clock 取最慢的一条。
+  # 三者均把受影响 crate 合并成「-p a -p b ...」，共享同一 target/ 与 rust-cache，
+  # 公共依赖只编译一次；共享 .github/actions/setup-rust 复合 action，避免磁盘释放、
+  # 工具链、系统依赖、缓存、package 解析等步骤重复书写。
+  rust-check:
+    name: Rust check (affected crates)
     needs: changes
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
+      - id: setup
+        uses: ./.github/actions/setup-rust
         with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install Linux system dependencies
-        # tiangong-core / tiangong-memory 间接引入 tantivy/lancedb/rusqlite/scraper，
-        # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库。
-        run: |
-          # GitHub runner 预装的 Microsoft apt 源偶发 403，提前移除避免污染 apt-get update
-          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
-          sudo apt-get update
-          sudo apt-get install -y \
-            protobuf-compiler \
-            pkg-config \
-            libglib2.0-dev \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Resolve package args
-        id: pkgs
-        env:
-          MATRIX: ${{ needs.changes.outputs.matrix }}
-        run: |
-          # 把受影响 crate 的 JSON 数组展开为 "-p a -p b ..." 形式，
-          # 后续 cargo 命令通过 $PKGS 复用，确保依赖闭包在同一 target/ 下只编译一次。
-          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
-          echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+          matrix: ${{ needs.changes.outputs.matrix }}
 
       - name: Check crate
         env:
-          PKGS: ${{ steps.pkgs.outputs.pkgs }}
+          PKGS: ${{ steps.setup.outputs.pkgs }}
         run: cargo check $PKGS
+
+  rust-clippy:
+    name: Rust clippy (affected crates)
+    needs: changes
+    if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    steps:
+      - id: setup
+        uses: ./.github/actions/setup-rust
+        with:
+          matrix: ${{ needs.changes.outputs.matrix }}
+          components: clippy
 
       - name: Run clippy
         env:
-          PKGS: ${{ steps.pkgs.outputs.pkgs }}
+          PKGS: ${{ steps.setup.outputs.pkgs }}
         run: cargo clippy $PKGS --all-targets --tests --benches -- -D warnings
+
+  rust-test:
+    name: Rust nextest (affected crates)
+    needs: changes
+    if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
+    runs-on: ubuntu-latest
+    steps:
+      - id: setup
+        uses: ./.github/actions/setup-rust
+        with:
+          matrix: ${{ needs.changes.outputs.matrix }}
+          install-nextest: true
 
       - name: Run nextest
         env:
-          PKGS: ${{ steps.pkgs.outputs.pkgs }}
+          PKGS: ${{ steps.setup.outputs.pkgs }}
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
         run: cargo nextest run $PKGS --no-tests pass

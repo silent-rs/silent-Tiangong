@@ -1,0 +1,81 @@
+name: Setup Rust environment
+description: >
+  为 clippy / nextest 等并行 Rust 作业准备共享的运行环境：释放磁盘空间、
+  checkout、安装工具链与系统依赖、可选安装 cargo-nextest、缓存 target/、
+  并把受影响 crate 列表展开成 "-p a -p b ..." 供后续 cargo 命令复用。
+
+inputs:
+  components:
+    description: 传给 dtolnay/rust-toolchain 的 components（如 clippy），留空则不追加。
+    default: ""
+  install-nextest:
+    description: 是否安装 cargo-nextest。
+    type: boolean
+    default: false
+  matrix:
+    description: 受影响 crate 的 JSON 数组（来自 changes 作业的 matrix 输出）。
+    required: true
+
+outputs:
+  pkgs:
+    description: 展开后的 "-p a -p b ..." 参数串。
+    value: ${{ steps.pkgs.outputs.pkgs }}
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    - name: Install Linux system dependencies
+      # tiangong-core / tiangong-memory 间接引入 tantivy/lancedb/rusqlite/scraper，
+      # tiangong-plugin-* 与 tiangong-app 引入 tauri，均需下列系统库。
+      shell: bash
+      run: |
+        # GitHub runner 预装的 Microsoft apt 源偶发 403，提前移除避免污染 apt-get update
+        sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+        sudo apt-get update
+        sudo apt-get install -y \
+          protobuf-compiler \
+          pkg-config \
+          libglib2.0-dev \
+          libwebkit2gtk-4.1-dev \
+          libgtk-3-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          patchelf
+
+    - name: Install cargo-nextest
+      if: ${{ inputs.install-nextest == 'true' }}
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-nextest
+
+    - name: Cache Rust artifacts
+      uses: Swatinem/rust-cache@v2
+
+    - name: Resolve package args
+      id: pkgs
+      shell: bash
+      env:
+        MATRIX: ${{ inputs.matrix }}
+      run: |
+        # 把受影响 crate 的 JSON 数组展开为 "-p a -p b ..." 形式，
+        # 后续 cargo 命令通过 $PKGS 复用，确保依赖闭包在同一 target/ 下只编译一次。
+        pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
+        echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
