@@ -8,7 +8,6 @@ mod adapter;
 mod child_runtime;
 mod constants;
 mod coordinator;
-mod guarded_plugin;
 mod manifest;
 mod state;
 mod tools;

@@ -18,7 +18,6 @@ use tiangong_types::{ContentBlock, StreamEvent};
 
 use crate::child_runtime::{child_config, ChildPluginFactory, ChildRuntime, SharedFeedback};
 use crate::constants::*;
-use crate::guarded_plugin::{child_write_targets, GuardedChildPlugin};
 use crate::manifest::{
     child_root, normalize_role, team_root, validate_role_identifier, AgentRecord, TeamManifest,
 };
@@ -616,37 +615,6 @@ impl Coordinator {
         runtime.reopen();
     }
 
-    pub(crate) fn guard_child_tool_call(
-        &self,
-        actor_id: &str,
-        call: &ToolCall,
-        session: &Session,
-    ) -> Result<(), String> {
-        if session.parent_session_id.is_none() {
-            return Ok(());
-        }
-        if self.descriptor(actor_id).is_none() {
-            return Err(format!("未知子 Agent：{actor_id}"));
-        }
-        let workspace = Path::new(&session.cwd);
-        if session.cwd.trim().is_empty() || !workspace.is_dir() {
-            return Err("当前子 Agent 没有可用工作区".to_string());
-        }
-        let targets = child_write_targets(call, workspace)?;
-        if targets.is_empty() {
-            return Ok(());
-        }
-        let now = chrono::Local::now().naive_local();
-        let mut locks = self
-            .file_locks
-            .lock()
-            .map_err(|_| "文件锁状态锁定失败".to_string())?;
-        for target in targets {
-            locks.ensure_can_write(&target, actor_id, &now)?;
-        }
-        Ok(())
-    }
-
     pub(crate) async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(parent_session_id) = self.parent_session_id() {
@@ -725,15 +693,10 @@ impl Coordinator {
         )
     }
 
-    fn fresh_child_plugins(self: &Arc<Self>) -> Vec<Arc<dyn Plugin>> {
-        self.child_plugins
-            .create_plugins()
-            .into_iter()
-            .filter(|plugin| plugin.id() != PLUGIN_ID && plugin.id() != CHILD_PLUGIN_ID)
-            .map(|plugin| {
-                Arc::new(GuardedChildPlugin::new(plugin, Arc::downgrade(self))) as Arc<dyn Plugin>
-            })
-            .collect()
+    fn fresh_child_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        // 子 Agent 与主 Agent 使用同一套插件工厂，直接获得独立但同构的插件实例。
+        // ChildRuntime::start 会再剥离团队插件并注入团队客户端，这里无需额外过滤。
+        self.child_plugins.create_plugins()
     }
 
     fn runtime(&self, agent_id: &str) -> Option<Arc<ChildRuntime>> {
@@ -959,7 +922,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
 impl PromptSectionProvider for ChildTeamClientPlugin {
     fn prompt_sections(&self) -> Vec<String> {
         vec![
-            "团队协作：可用 send_message、broadcast_message、notify_user、lock_file、unlock_file。用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。修改文件前必须先加锁。"
+            "团队协作：可用 send_message、broadcast_message、notify_user、lock_file、unlock_file。用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。默认在父会话工作区中工作，不得读写或执行工作区外部的资源；修改工作区文件前必须先加锁。"
                 .to_string(),
         ]
     }
