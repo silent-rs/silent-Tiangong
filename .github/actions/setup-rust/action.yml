@@ -1,8 +1,9 @@
 name: Setup Rust environment
 description: >
   为 clippy / nextest 等并行 Rust 作业准备共享的运行环境：释放磁盘空间、
-  checkout、安装工具链与系统依赖、可选安装 cargo-nextest、缓存 target/、
+  安装工具链与系统依赖、可选安装 cargo-nextest、缓存 target/、
   并把受影响 crate 列表展开成 "-p a -p b ..." 供后续 cargo 命令复用。
+  调用方必须先执行 actions/checkout，否则本地 action 的 action.yml 不可达。
 
 inputs:
   components:
@@ -34,8 +35,6 @@ runs:
         large-packages: true
         docker-images: true
         swap-storage: true
-
-    - uses: actions/checkout@v4
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable

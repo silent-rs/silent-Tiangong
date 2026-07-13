@@ -117,12 +117,20 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
         std::collections::BTreeMap::new()
     }
 
-    /// 会话 worker 退出前等待插件内部任务收敛。
+    /// 用户取消当前 turn 时通知插件响应取消意图。
     ///
-    /// 实现应停止继续接收新工作，并等待或取消已启动的后台任务。Core 会在该 Future
-    /// 完成后再关闭事件通道并返回最终 Session，从而形成真实关闭栅栏。
-    fn shutdown<'a>(
+    /// Core 在判定 turn 终态为 `Cancelled` 后、`on_turn_finished` 之前调用。
+    /// 插件可在此中断与当前 turn 关联的副作用（如取消子 Agent 执行、暂停页面
+    /// 观察），但**不应销毁自身状态**——Core 仍会存活，用户可能继续发消息。
+    ///
+    /// 与 `on_session_ended` 的区别：
+    /// - `on_cancel`：turn 被取消，Core 继续存活，插件保留状态。
+    /// - `on_session_ended`：Core 即将退出，插件做最终清理。
+    ///
+    /// 默认实现为空——不关心取消的插件无需覆写。
+    fn on_cancel<'a>(
         &'a self,
+        _session: &mut crate::session::Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }

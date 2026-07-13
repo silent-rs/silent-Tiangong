@@ -3,9 +3,11 @@
 //! 最终化相关逻辑（总结阶段、强制最终回复）已迁移到 `summary.rs`。
 
 use std::sync::mpsc::Sender as StdSender;
-use std::sync::{Arc, atomic::AtomicBool};
+
+use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::context::organizer::ContextOrganizer;
+use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::runtime::RuntimeEngine;
@@ -76,8 +78,7 @@ pub(crate) async fn maybe_update_context_summary(
     engine: &RuntimeEngine,
     observed_usage: &TokenUsage,
     stream_tx: &StdSender<StreamEvent>,
-    cancel_flag: Arc<AtomicBool>,
-    shutdown_flag: Option<Arc<AtomicBool>>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> bool {
     let organizer = ContextOrganizer::new(engine.context_limit)
         .with_threshold(0.95)
@@ -97,7 +98,13 @@ pub(crate) async fn maybe_update_context_summary(
             engine.client(),
             observed_tokens,
         ) => update,
-        _ = crate::react::cancel::wait_for_abort_signal(cancel_flag, shutdown_flag) => return true,
+        _cmd = cmd_rx.recv() => {
+            // 收到任意命令时中止压缩（Cancel/Shutdown 表示用户要停，其他命令
+            // 排在压缩期间到达的概率极低——turn 内排空后才压缩）。
+            // 被中断的命令无法放回 unbounded channel，但 turn 会立即终止，
+            // 后续 drain 不会再执行。此处 return true 让调用方发"已取消"。
+            return true;
+        }
     };
     match update {
         Ok(update) if update.compressed => {

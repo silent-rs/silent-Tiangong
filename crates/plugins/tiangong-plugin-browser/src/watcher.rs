@@ -55,6 +55,9 @@ pub struct BrowserWatcher {
     last_snapshot: RwLock<Option<(String, usize)>>,
     /// 上一次观察时间，用于节流。
     last_check: RwLock<Option<Instant>>,
+    /// 暂停标志：turn 被取消时置位，watcher 停止 observe/inject；
+    /// 新 turn 开始时清除，恢复推送。
+    paused: AtomicBool,
 }
 
 impl BrowserWatcher {
@@ -65,7 +68,18 @@ impl BrowserWatcher {
             started: AtomicBool::new(false),
             last_snapshot: RwLock::new(None),
             last_check: RwLock::new(None),
+            paused: AtomicBool::new(false),
         }
+    }
+
+    /// 暂停页面观察与 inject（turn 被取消时调用）。
+    pub fn pause_inject(&self) {
+        self.paused.store(true, Ordering::Release);
+    }
+
+    /// 恢复页面观察与 inject（新 turn 开始时调用）。
+    pub fn resume_inject(&self) {
+        self.paused.store(false, Ordering::Release);
     }
 
     /// 注入当前 session 的 feedback 通道并懒启动后台观察任务。
@@ -117,6 +131,10 @@ impl BrowserWatcher {
 
     /// 执行一次节流检查 + observe + 变化检测 + 向当前 session 通道投递。
     async fn maybe_observe_and_inject(&self) {
+        // turn 被取消时暂停推送，避免向已终止的 turn 注入滞留内容。
+        if self.paused.load(Ordering::Acquire) {
+            return;
+        }
         // 通道未注入或已关闭时跳过（没有会话需要通知）
         let tx = match self.feedback_tx.read() {
             Ok(g) => g.clone(),

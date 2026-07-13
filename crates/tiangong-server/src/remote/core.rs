@@ -1610,8 +1610,8 @@ mod tests {
         let (manager, session, _session_path, _state) = isolated_test_manager(root.path());
         let first_core = test_core(session.clone(), root.path(), Vec::new());
         let second_core = test_core(session.clone(), root.path(), Vec::new());
-        let first_flag = first_core.cancel_flag();
-        let second_flag = second_core.cancel_flag();
+        let first_flag = first_core.instance_token();
+        let second_flag = second_core.instance_token();
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
         let first_task = {
@@ -1656,7 +1656,7 @@ mod tests {
             .unwrap()
             .get(&session.id)
             .unwrap()
-            .cancel_flag();
+            .instance_token();
         let winner_flag = if first_installed {
             first_flag
         } else {

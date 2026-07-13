@@ -172,6 +172,7 @@ jobs:
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - id: setup
         uses: ./.github/actions/setup-rust
         with:
@@ -188,6 +189,7 @@ jobs:
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - id: setup
         uses: ./.github/actions/setup-rust
         with:
@@ -205,6 +207,7 @@ jobs:
     if: needs.changes.outputs.matrix != '[]' && needs.changes.outputs.matrix != ''
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - id: setup
         uses: ./.github/actions/setup-rust
         with:

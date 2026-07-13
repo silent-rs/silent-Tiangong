@@ -72,6 +72,25 @@ impl Plugin for BrowserPlugin {
         // session store（on_session_ready 时序晚于前端 hydrate，在此注入不可靠）。
     }
 
+    fn on_turn_started(
+        &self,
+        _session: &mut tiangong_core::session::Session,
+        _turn_start_idx: usize,
+    ) {
+        // 新 turn 开始时恢复 watcher 推送（on_cancel 暂停的观察恢复）。
+        self.watcher.resume_inject();
+    }
+
+    fn on_cancel<'a>(
+        &'a self,
+        _session: &mut tiangong_core::session::Session,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        let watcher = self.watcher.clone();
+        Box::pin(async move {
+            watcher.pause_inject();
+        })
+    }
+
     fn tool_permission_overrides(
         &self,
     ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {

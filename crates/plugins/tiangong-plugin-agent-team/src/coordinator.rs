@@ -615,6 +615,18 @@ impl Coordinator {
         runtime.reopen();
     }
 
+    /// 取消所有正在运行的子 Agent 当前执行，但保留团队结构。
+    ///
+    /// 与 [`shutdown`] 的区别：不设置 `stopping`、不清空 `runtimes`、不销毁子 Core。
+    /// 用户取消主 turn 时调用，子 Agent 停止当前工作但团队仍可继续使用。
+    pub(crate) fn cancel_all_running(&self) {
+        for runtime in self.runtime_snapshot() {
+            if runtime.is_running() {
+                runtime.cancel();
+            }
+        }
+    }
+
     pub(crate) async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
         if let Some(parent_session_id) = self.parent_session_id() {

@@ -23,9 +23,7 @@ use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
-use super::cancel::{
-    CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled, wait_for_abort_signal,
-};
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
 use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
 
 /// 总结阶段的执行结果。
@@ -114,7 +112,6 @@ impl ReactEngine {
                 cmd_opt = cmd_rx.recv() => {
                     match cmd_opt {
                         Some(Command::Shutdown) => {
-                            self.request_shutdown();
                             break Err(anyhow::Error::new(CancelSignal::Abort));
                         }
                         Some(Command::Cancel) | None => {
@@ -351,18 +348,9 @@ impl ReactEngine {
             if let Some(message_id) = promote_last_react_message_to_summary(session) {
                 crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
             }
-            let compression_cancelled = maybe_update_context_summary(
-                session,
-                &self.engine,
-                &usage,
-                stream_tx,
-                self.cancel_flag
-                    .as_ref()
-                    .expect("cancel_flag 必须在 execute_turn 前注入")
-                    .clone(),
-                self.shutdown_flag.clone(),
-            )
-            .await;
+            let compression_cancelled =
+                maybe_update_context_summary(session, &self.engine, &usage, stream_tx, cmd_rx)
+                    .await;
             if compression_cancelled {
                 emit_cancelled(stream_tx);
                 return SummaryPhaseResult::Cancelled(usage);
@@ -392,18 +380,8 @@ impl ReactEngine {
             };
         }
         crate::react::message::emit_session_message_upsert(session, stream_tx, &pending_msg_id);
-        let compression_cancelled = maybe_update_context_summary(
-            session,
-            &self.engine,
-            &usage,
-            stream_tx,
-            self.cancel_flag
-                .as_ref()
-                .expect("cancel_flag 必须在 execute_turn 前注入")
-                .clone(),
-            self.shutdown_flag.clone(),
-        )
-        .await;
+        let compression_cancelled =
+            maybe_update_context_summary(session, &self.engine, &usage, stream_tx, cmd_rx).await;
         if compression_cancelled {
             emit_cancelled(stream_tx);
             return SummaryPhaseResult::Cancelled(usage);
@@ -530,13 +508,7 @@ mod tests {
             complete: true,
         });
         let engine = test_runtime(server.base_url());
-        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
-            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )))
-            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )));
+        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1);
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("summary-done-marker").with_storage_root(storage.path());
         session.append_message(MessageRole::User, "完成任务");
@@ -589,13 +561,7 @@ mod tests {
             complete: false,
         });
         let engine = test_runtime(server.base_url());
-        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
-            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )))
-            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )));
+        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1);
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("summary-interrupted").with_storage_root(storage.path());
         session.append_message(MessageRole::User, "完成任务");
@@ -915,6 +881,7 @@ impl ReactEngine {
         &self,
         session: &mut Session,
         stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         reason: ForceFinalReason,
     ) -> bool {
         // 确保 system prompt 已构建
@@ -954,7 +921,7 @@ impl ReactEngine {
         let pending_msg_id = scru128::new().to_string();
 
         let resp = match self
-            .run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx)
+            .run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx, cmd_rx)
             .await
         {
             Some(r) => r,
@@ -966,21 +933,6 @@ impl ReactEngine {
                 return false;
             }
         };
-
-        if self
-            .cancel_flag
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
-            || self
-                .shutdown_flag
-                .as_ref()
-                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
-        {
-            let _ = stream_tx.send(StreamEvent::Error {
-                message: "已取消".to_string(),
-            });
-            return false;
-        }
 
         if !self.commit_summary_message(
             session,
@@ -1010,6 +962,7 @@ impl ReactEngine {
         req: &ModelRequest,
         pending_msg_id: &str,
         stream_tx: &StdSender<StreamEvent>,
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> Option<crate::model::ModelFunctionResponse> {
         let final_tools = tools_for_current_turn(&self.tools, session, "");
         let sink = ThrottledStreamSink::with_text_kind(
@@ -1030,18 +983,15 @@ impl ReactEngine {
                 )
                 .await
         });
-        let cancel_flag = self
-            .cancel_flag
-            .as_ref()
-            .expect("cancel_flag 必须在 execute_turn 前注入")
-            .clone();
-        let shutdown_flag = self.shutdown_flag.clone();
+        let mut llm_fut = Some(llm_fut);
         let response_result = loop {
             tokio::select! {
                 biased;
-                _ = wait_for_abort_signal(cancel_flag.clone(), shutdown_flag.clone()) => {
-                    llm_fut.abort();
-                    let _ = llm_fut.await;
+                _cmd = cmd_rx.recv() => {
+                    // 收到任意命令时中止（Cancel/Shutdown 表示用户要停）。
+                    if let Some(handle) = llm_fut.take() {
+                        crate::react::cancel::abort_and_join(handle).await;
+                    }
                     sink.finish();
                     let _ = stream_tx.send(StreamEvent::Error {
                         message: "已取消".to_string(),
@@ -1052,7 +1002,7 @@ impl ReactEngine {
                     if let Some(chunk) = chunk {
                         sink.push_chunk(&chunk);
                     } else {
-                        break match llm_fut.await {
+                        break match llm_fut.take().unwrap().await {
                             Ok(result) => result,
                             Err(error) => Err(anyhow::anyhow!(error.to_string())),
                         };

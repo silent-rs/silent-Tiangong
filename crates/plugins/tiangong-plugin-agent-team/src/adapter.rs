@@ -116,10 +116,26 @@ impl Plugin for AgentTeamPlugin {
         self.coordinator.initialize(session);
     }
 
-    fn shutdown<'a>(
+    fn on_cancel<'a>(
         &'a self,
+        _session: &mut Session,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move { self.coordinator.shutdown().await })
+        let coordinator = self.coordinator.clone();
+        Box::pin(async move {
+            coordinator.cancel_all_running();
+        })
+    }
+
+    fn on_session_ended(&self, session: &mut Session) {
+        // Core 即将退出，销毁团队（关闭子 Core、清空 runtimes）。
+        // coordinator.shutdown 是 async，但 on_session_ended 是同步钩子——
+        // fire-and-forget spawn 后台执行，不阻塞 worker 退出。
+        let coordinator = self.coordinator.clone();
+        let session_id = session.id.clone();
+        tokio::spawn(async move {
+            tracing::info!(session_id, "后台销毁 Agent Team 团队");
+            coordinator.shutdown().await;
+        });
     }
 
     fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
