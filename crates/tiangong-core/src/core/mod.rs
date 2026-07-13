@@ -53,11 +53,10 @@ pub struct TiangongCore {
     config: CoreConfigProvider,
     /// 会话信任模式基线。
     trust_mode: crate::permission::TrustModeHandle,
-    /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
-    cancel_flag: Arc<AtomicBool>,
-    /// 关闭标志由 Core 句柄直接设置，不能依赖正在阻塞的 worker 先消费命令。
-    shutdown_flag: Arc<AtomicBool>,
-    /// 保证“设置取消信号 + 入队取消命令”与并发消息入队具有单一顺序。
+    /// Core 实例身份标识：每个 Core 实例独有，供 app 层通过 `Arc::ptr_eq` 判断
+    /// HashMap 中的 Core 是否还是当初绑定的实例（Core 重建后旧 token 不匹配新实例）。
+    instance_token: Arc<AtomicBool>,
+    /// 保证"设置取消信号 + 入队取消命令"与并发消息入队具有单一顺序。
     command_delivery_lock: Mutex<()>,
 }
 
@@ -138,12 +137,9 @@ impl TiangongCore {
         let trust_mode = crate::permission::TrustModeHandle::new(initial_trust_mode);
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let instance_token = Arc::new(AtomicBool::new(false));
 
         let worker_trust_mode = trust_mode.clone();
-        let worker_cancel_flag = cancel_flag.clone();
-        let worker_shutdown_flag = shutdown_flag.clone();
         let worker_config = config.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
@@ -157,8 +153,6 @@ impl TiangongCore {
                 worker_trust_mode,
                 plugins,
                 worker_cmd_tx,
-                worker_cancel_flag,
-                worker_shutdown_flag,
                 storage_root,
             )
         });
@@ -169,8 +163,7 @@ impl TiangongCore {
             session_id,
             config,
             trust_mode,
-            cancel_flag,
-            shutdown_flag,
+            instance_token,
             command_delivery_lock: Mutex::new(()),
         }
     }
@@ -222,8 +215,8 @@ impl TiangongCore {
             .await
     }
 
-    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.cancel_flag.clone()
+    pub fn instance_token(&self) -> Arc<AtomicBool> {
+        self.instance_token.clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -296,8 +289,6 @@ impl TiangongCore {
     }
 
     fn shutdown_and_take_session(mut self) -> Result<Session, CoreError> {
-        self.shutdown_flag.store(true, Ordering::Release);
-        self.cancel_flag.store(true, Ordering::Release);
         let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
         if let Some(w) = self.worker.take() {
@@ -319,10 +310,9 @@ impl crate::agent_input::AgentInput for TiangongCore {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
 
-        // AtomicBool 供工具执行中的同步检查；队列命令用于唤醒流式请求、审批等待
-        // 等正阻塞在命令接收器上的状态。worker 消费命令后会清除标志，不会跨轮残留。
+        // 取消完全由 Command::Cancel 队列承载：select! 的 cmd_rx 分支和 drain
+        // 会消费它并终止 turn。cancel_flag 仅作实例标识（instance_token），不再承担信号职责。
         if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
-            self.cancel_flag.store(true, Ordering::Release);
             return self.send_cmd(Command::Cancel);
         }
 
@@ -359,8 +349,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
 
 impl Drop for TiangongCore {
     fn drop(&mut self) {
-        self.shutdown_flag.store(true, Ordering::Release);
-        self.cancel_flag.store(true, Ordering::Release);
         if let Some(ref tx) = self.cmd_tx {
             let _ = tx.send(Command::Shutdown);
         }
@@ -380,8 +368,6 @@ fn worker_loop(
     trust_mode: crate::permission::TrustModeHandle,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
-    cancel_flag: Arc<AtomicBool>,
-    shutdown_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     // 在专用的 tokio runtime 上运行 async 工作循环，
@@ -402,8 +388,6 @@ fn worker_loop(
         trust_mode,
         plugins,
         cmd_tx,
-        cancel_flag,
-        shutdown_flag,
         storage_root,
     ))
 }
@@ -418,8 +402,6 @@ async fn worker_loop_async(
     trust_mode: crate::permission::TrustModeHandle,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
-    cancel_flag: Arc<AtomicBool>,
-    shutdown_flag: Arc<AtomicBool>,
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
@@ -697,8 +679,6 @@ async fn worker_loop_async(
                 message_id,
                 persistence_ack,
             } => {
-                // 新一轮开始：清除上一轮的取消信号。
-                cancel_flag.store(false, Ordering::Release);
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
                 let turn_started = std::time::Instant::now();
@@ -751,8 +731,6 @@ async fn worker_loop_async(
                     &tools,
                     &stream_tx,
                     &mut cmd_rx,
-                    &cancel_flag,
-                    &shutdown_flag,
                     &session_id,
                 )
                 .await;
@@ -772,16 +750,7 @@ async fn worker_loop_async(
                     }
                     capture.terminal.take()
                 })
-                .unwrap_or_else(|| {
-                    if shutdown_flag.load(Ordering::Acquire) || cancel_flag.load(Ordering::Acquire)
-                    {
-                        StreamEvent::Error {
-                            message: "执行已取消".to_string(),
-                        }
-                    } else {
-                        StreamEvent::Done { usage: None }
-                    }
-                });
+                .unwrap_or(StreamEvent::Done { usage: None });
 
                 if session.cwd != turn_start_cwd {
                     let workspace_path = std::path::PathBuf::from(&session.cwd);
@@ -845,6 +814,15 @@ async fn worker_loop_async(
                 // 所有终态分支（成功/失败/取消）都会回到这里，故统一处理。
                 let elapsed_ms = turn_started.elapsed().as_millis() as u64;
                 let mut status = TurnOutcome::from_terminal(&terminal).status;
+
+                // turn 被取消时通知插件响应取消意图（如中断子 Agent、暂停页面观察）。
+                // 在 on_turn_finished 之前调用，让插件先响应取消再做统一收尾。
+                if status == tiangong_types::TurnStatus::Cancelled {
+                    for plugin in &plugins {
+                        plugin.on_cancel(&mut session).await;
+                    }
+                }
+
                 let mut user_msg_updated = false;
                 if let Some(msg) = session
                     .messages
@@ -886,17 +864,16 @@ async fn worker_loop_async(
                     &mut turn_boundary_id,
                     terminal,
                 );
-                cancel_flag.store(false, Ordering::Release);
 
-                if shutdown_flag.load(Ordering::Acquire) {
-                    break;
-                }
+                // shutdown 由 Command::Shutdown 在下一轮 cmd_rx.recv() 时处理。
+                // 置位（mod.rs:300），turn 会通过 cancel 信号尽快终止；终止后回到 recv
+                // 取到 Command::Shutdown 即 break。
 
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
-                // 活跃执行会消费命令并结束；空闲时在此清除同步取消标志。
-                cancel_flag.store(false, Ordering::Release);
+                // 活跃执行会在 select!/drain 中消费 Cancel 并终止 turn；
+                // 空闲时到达此处说明 turn 已结束，无需处理。
             }
             Command::Approval {
                 request_id,
@@ -980,8 +957,7 @@ async fn worker_loop_async(
                     &mut session,
                     engine.as_ref().unwrap(),
                     &stream_tx,
-                    cancel_flag.clone(),
-                    Some(shutdown_flag.clone()),
+                    &mut cmd_rx,
                 )
                 .await;
                 continue;
@@ -993,33 +969,7 @@ async fn worker_loop_async(
         }
     }
 
-    // 等待插件内部任务收敛时继续处理反馈命令。插件的 shutdown 可能等待一次带
-    // ACK 的原子提交；若此处只 await shutdown、之后才排空命令，会形成互相等待。
-    for plugin in &plugins {
-        let shutdown = plugin.shutdown();
-        tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                () = shutdown.as_mut() => break,
-                command = cmd_rx.recv() => {
-                    let Some(command) = command else {
-                        shutdown.as_mut().await;
-                        break;
-                    };
-                    process_shutdown_feedback_command(
-                        &mut session,
-                        &stream_tx,
-                        command,
-                        &mut background_usage_capture,
-                        &trust_mode,
-                    );
-                }
-            }
-        }
-    }
-
-    // 插件可能在收敛前最后提交完成确认或报告；worker 已退出主循环，因此在关闭
-    // 通道前做一次有界排空，确保这些已提交状态进入最终 Session。
+    // worker 已退出主循环，关闭通道前做一次有界排空，确保已提交状态进入最终 Session。
     while let Ok(command) = cmd_rx.try_recv() {
         process_shutdown_feedback_command(
             &mut session,
@@ -1188,8 +1138,7 @@ pub(crate) async fn compress_context_for_session(
     session: &mut Session,
     engine: &RuntimeEngine,
     stream_tx: &StdSender<StreamEvent>,
-    cancel_flag: Arc<AtomicBool>,
-    shutdown_flag: Option<Arc<AtomicBool>>,
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) {
     let _ = stream_tx.send(StreamEvent::ContextCompressing {
         summary_up_to: session.summary_up_to,
@@ -1199,7 +1148,8 @@ pub(crate) async fn compress_context_for_session(
         .with_keep_recent_turns(6);
     let update = tokio::select! {
         update = organizer.force_update_summary_with_usage_async(session, engine.client()) => update,
-        _ = crate::react::cancel::wait_for_abort_signal(cancel_flag, shutdown_flag) => {
+        cmd = cmd_rx.recv() => {
+            let _ = cmd;
             let _ = stream_tx.send(StreamEvent::AgentNotification {
                 agent_id: "system".to_string(),
                 agent_label: "系统".to_string(),
@@ -1715,8 +1665,6 @@ async fn execute_turn_async(
     tools: &[ToolSpec],
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    cancel_flag: &Arc<AtomicBool>,
-    shutdown_flag: &Arc<AtomicBool>,
     session_id: &str,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -1725,8 +1673,6 @@ async fn execute_turn_async(
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
     )
-    .with_cancel_flag(cancel_flag.clone())
-    .with_shutdown_flag(shutdown_flag.clone())
     // Core 的执行身份只有一个来源：当前 Session ID。
     .with_agent_id(session_id.to_string());
     react

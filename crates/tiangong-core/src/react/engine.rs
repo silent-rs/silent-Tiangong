@@ -25,11 +25,9 @@ use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
 use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
 
-use super::cancel::{
-    CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled, wait_for_abort_signal,
-};
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
 use super::helpers::{
-    check_cancel, drain_pending_commands_async, looks_like_final_answer, process_buffered_commands,
+    drain_pending_commands_async, looks_like_final_answer, process_buffered_commands,
 };
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
@@ -60,10 +58,6 @@ pub struct ReactEngine {
     pub agent_id: String,
     /// 调用方提供的完整 system prompt；用于插件启动的嵌套 Agent。
     system_prompt_override: Option<Message>,
-    /// 取消信号（独立于命令队列）：check_cancel 读取此标志判断是否取消，
-    /// 不排空命令队列，避免乱序。
-    pub(super) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    pub(super) shutdown_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ReactEngine {
@@ -80,8 +74,6 @@ impl ReactEngine {
             max_outer_iterations,
             agent_id: "main".to_string(),
             system_prompt_override: None,
-            cancel_flag: None,
-            shutdown_flag: None,
         }
     }
 
@@ -102,29 +94,6 @@ impl ReactEngine {
         stream_tx: &StdSender<StreamEvent>,
     ) {
         crate::react::message::flush_deferred_tool_injections(session, stream_tx);
-    }
-
-    /// 注入取消信号，供 check_cancel 读取（独立于命令队列，不排空队列）。
-    pub fn with_cancel_flag(
-        mut self,
-        cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        self.cancel_flag = Some(cancel_flag);
-        self
-    }
-
-    pub fn with_shutdown_flag(
-        mut self,
-        shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> Self {
-        self.shutdown_flag = Some(shutdown_flag);
-        self
-    }
-
-    pub(super) fn request_shutdown(&self) {
-        if let Some(flag) = &self.shutdown_flag {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-        }
     }
 
     fn build_thinking_config(
@@ -208,7 +177,7 @@ impl ReactEngine {
         let mut accumulated_usage = TokenUsage::default();
         // 绑定本轮 turn-scoped 插件 usage sink：插件经 PluginFeedbackTx.report_token_usage
         // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
-        // check_cancel 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
+        // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
         // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
         let usage_sink = self.engine.turn_usage_sink().clone();
         let _usage_guard = usage_sink.bind(stream_tx.clone(), self.engine.context_limit);
@@ -253,7 +222,6 @@ impl ReactEngine {
                         return accumulated_usage;
                     }
                     PendingCommandEffect::Shutdown => {
-                        self.request_shutdown();
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
@@ -340,7 +308,6 @@ impl ReactEngine {
                         cmd_opt = cmd_rx.recv() => {
                             match cmd_opt {
                                 Some(Command::Shutdown) => {
-                                    self.request_shutdown();
                                     break Err(anyhow::Error::new(CancelSignal::Abort));
                                 }
                                 Some(Command::Cancel) | None => {
@@ -558,11 +525,7 @@ impl ReactEngine {
                                         prompt_cache_miss_tokens: None,
                                     },
                                     stream_tx,
-                                    self.cancel_flag
-                                        .as_ref()
-                                        .expect("cancel_flag 必须在 execute_turn 前注入")
-                                        .clone(),
-                                    self.shutdown_flag.clone(),
+                                    cmd_rx,
                                 )
                                 .await;
                             if compression_cancelled {
@@ -644,11 +607,7 @@ impl ReactEngine {
                         &self.engine,
                         &response.usage,
                         stream_tx,
-                        self.cancel_flag
-                            .as_ref()
-                            .expect("cancel_flag 必须在 execute_turn 前注入")
-                            .clone(),
-                        self.shutdown_flag.clone(),
+                        cmd_rx,
                     )
                     .await;
                     if compression_cancelled {
@@ -779,7 +738,6 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                         PendingCommandEffect::Shutdown => {
-                            self.request_shutdown();
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -978,7 +936,6 @@ impl ReactEngine {
                                         break ApprovalWaitOutcome::Decision(approved);
                                     }
                                     Some(Command::Shutdown) => {
-                                        self.request_shutdown();
                                         crate::approval_store::remove_pending(
                                             &session.id,
                                             &request_id,
@@ -1151,32 +1108,12 @@ impl ReactEngine {
                         }
                     }
 
-                    if check_cancel(
-                        self.cancel_flag
-                            .as_ref()
-                            .expect("cancel_flag 必须在 execute_turn 前注入"),
-                    ) {
-                        {
-                            let _ = stream_tx.send(StreamEvent::Error {
-                                message: "已取消".into(),
-                            });
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
-                    }
-
                     let _ = stream_tx.send(StreamEvent::ToolStart {
                         name: call.name.clone(),
                         args_summary: args_summary.clone(),
                     });
                     let tool_start_time = std::time::Instant::now();
 
-                    let cancel_flag = self
-                        .cancel_flag
-                        .as_ref()
-                        .expect("cancel_flag 必须在 execute_turn 前注入")
-                        .clone();
-                    let shutdown_flag = self.shutdown_flag.clone();
                     let mut buffered_tool_commands = Vec::new();
                     // 工具处理器只在启动瞬间借用 Session；执行 Future 不再持有借用。
                     let mut tool_future =
@@ -1184,9 +1121,6 @@ impl ReactEngine {
                     let result = loop {
                         tokio::select! {
                             biased;
-                            _ = wait_for_abort_signal(cancel_flag.clone(), shutdown_flag.clone()) => {
-                                break None;
-                            }
                             result = &mut tool_future => break Some(result),
                             command = cmd_rx.recv() => {
                                 match command {
@@ -1215,7 +1149,6 @@ impl ReactEngine {
                                         break None;
                                     }
                                     Some(Command::Shutdown) => {
-                                        self.request_shutdown();
                                         break None;
                                     }
                                     Some(command) => buffered_tool_commands.push(command),
@@ -1248,10 +1181,6 @@ impl ReactEngine {
                             current_agent_input: Some(input),
                             ..
                         } = buffered_effect
-                            && !self
-                                .shutdown_flag
-                                .as_ref()
-                                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
                         {
                             successful_tool_call_keys.clear();
                             failed_tool_call_keys.clear();
@@ -1333,7 +1262,6 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                         PendingCommandEffect::Shutdown => {
-                            self.request_shutdown();
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1353,22 +1281,6 @@ impl ReactEngine {
                         PendingCommandEffect::MessagesInjected { .. }
                         | PendingCommandEffect::None => {}
                     }
-                    if !result.ok
-                        && check_cancel(
-                            self.cancel_flag
-                                .as_ref()
-                                .expect("cancel_flag 必须在 execute_turn 前注入"),
-                        )
-                    {
-                        {
-                            let _ = stream_tx.send(StreamEvent::Error {
-                                message: "已取消".into(),
-                            });
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
-                    }
-
                     if result.ok {
                         failed_tool_call_keys.remove(&tool_call_key);
                         failed_tool_names.remove(&call.name);
@@ -1387,19 +1299,6 @@ impl ReactEngine {
                         need_failure_recovery_prompt = true;
                     }
 
-                    if check_cancel(
-                        self.cancel_flag
-                            .as_ref()
-                            .expect("cancel_flag 必须在 execute_turn 前注入"),
-                    ) {
-                        {
-                            let _ = stream_tx.send(StreamEvent::Error {
-                                message: "已取消".into(),
-                            });
-                            merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
-                        }
-                    }
                     // 记忆候选评估已下沉到 memory 插件 on_turn_finished（从 session 重建候选，
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     let compression_cancelled = maybe_update_context_summary(
@@ -1407,11 +1306,7 @@ impl ReactEngine {
                         &self.engine,
                         &response.usage,
                         stream_tx,
-                        self.cancel_flag
-                            .as_ref()
-                            .expect("cancel_flag 必须在 execute_turn 前注入")
-                            .clone(),
-                        self.shutdown_flag.clone(),
+                        cmd_rx,
                     )
                     .await;
                     if compression_cancelled {
@@ -1426,7 +1321,6 @@ impl ReactEngine {
                             return accumulated_usage;
                         }
                         PendingCommandEffect::Shutdown => {
-                            self.request_shutdown();
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -1500,8 +1394,13 @@ impl ReactEngine {
                     outer_iteration += 1;
                     if outer_iteration >= self.max_outer_iterations {
                         // 重入次数已达上限，强制输出最终回复。
-                        self.force_final_response(session, stream_tx, ForceFinalReason::OuterLimit)
-                            .await;
+                        self.force_final_response(
+                            session,
+                            stream_tx,
+                            cmd_rx,
+                            ForceFinalReason::OuterLimit,
+                        )
+                        .await;
                         {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1538,8 +1437,13 @@ impl ReactEngine {
                     // 初次总结失败只是可恢复的中间状态；只有强制终结也失败时，
                     // run_text_finalization_llm 才发送唯一终态 Error。
                     persist_error(session, format!("总结阶段失败：{message}"));
-                    self.force_final_response(session, stream_tx, ForceFinalReason::SummaryError)
-                        .await;
+                    self.force_final_response(
+                        session,
+                        stream_tx,
+                        cmd_rx,
+                        ForceFinalReason::SummaryError,
+                    )
+                    .await;
                     {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;

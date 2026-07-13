@@ -707,7 +707,7 @@ impl TiangongApp {
             .lock_cores()
             .get(&session_id)
             .filter(|core| !core.is_stopped())
-            .map(TiangongCore::cancel_flag);
+            .map(TiangongCore::instance_token);
         if let Some(instance_token) = instance_token {
             tracing::info!(session_id, tool_name, "注入工具消息 via deliver");
             self.deliver_to_core_if_current(
@@ -1126,7 +1126,7 @@ impl TiangongApp {
                             return EnsuredCore {
                                 session_id: session_id.to_string(),
                                 is_new: false,
-                                instance_token: core.cancel_flag(),
+                                instance_token: core.instance_token(),
                             };
                         }
                     }
@@ -1144,7 +1144,7 @@ impl TiangongApp {
                     return EnsuredCore {
                         session_id: session_id.to_string(),
                         is_new: false,
-                        instance_token: core.cancel_flag(),
+                        instance_token: core.instance_token(),
                     }; // 已存在，复用
                 }
                 warn!(session_id, "移除已停止的 TiangongCore");
@@ -1316,7 +1316,7 @@ impl TiangongApp {
             return EnsuredCore {
                 session_id: session_id.to_string(),
                 is_new: false,
-                instance_token: existing.cancel_flag(),
+                instance_token: existing.instance_token(),
             };
         }
 
@@ -1330,7 +1330,7 @@ impl TiangongApp {
             .build()
             .expect("Builder 必填字段已齐");
         let id = core.session_id().to_string();
-        let instance_token = core.cancel_flag();
+        let instance_token = core.instance_token();
         self.lock_cores().insert(id.clone(), core);
         EnsuredCore {
             session_id: id,
@@ -1396,7 +1396,7 @@ impl TiangongApp {
             &mut cores,
             session_id,
             instance_token,
-            TiangongCore::cancel_flag,
+            TiangongCore::instance_token,
             |_| true,
         )
     }
@@ -1412,7 +1412,7 @@ impl TiangongApp {
             &mut cores,
             session_id,
             instance_token,
-            TiangongCore::cancel_flag,
+            TiangongCore::instance_token,
             TiangongCore::is_stopped,
         )
         .is_some()
@@ -1425,7 +1425,7 @@ impl TiangongApp {
     ) -> bool {
         self.lock_cores()
             .get(session_id)
-            .map(|core| core.cancel_flag())
+            .map(|core| core.instance_token())
             .is_some_and(|current| instance_token_matches(&current, instance_token))
     }
 
@@ -1438,7 +1438,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
+            .filter(|core| instance_token_matches(&core.instance_token(), instance_token))
             .is_some_and(|core| core.deliver(input).is_ok())
     }
 
@@ -1455,7 +1455,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         let core = cores
             .get(session_id)
-            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
+            .filter(|core| instance_token_matches(&core.instance_token(), instance_token))
             .ok_or_else(|| "会话 Core 已被替换或不存在".to_string())?;
         core.enqueue_prepared_with_receipt(message_id, prepared)
             .map_err(|error| error.to_string())
@@ -1489,7 +1489,7 @@ impl TiangongApp {
     ) -> Result<Option<SessionMetadataReceipt>, String> {
         let cores = self.lock_cores();
         let Some(core) = cores.get(session_id).filter(|core| {
-            !core.is_stopped() && instance_token_matches(&core.cancel_flag(), instance_token)
+            !core.is_stopped() && instance_token_matches(&core.instance_token(), instance_token)
         }) else {
             return Ok(None);
         };

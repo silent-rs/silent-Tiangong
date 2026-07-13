@@ -3,7 +3,6 @@
 //! `select!` 循环 break 时使用可被 anyhow downcast 的取消信号类型，替代裸字符串。
 
 use std::sync::mpsc::Sender as StdSender;
-use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
 
 use tiangong_types::StreamEvent;
 
@@ -66,24 +65,6 @@ pub(super) fn emit_cancelled(stream_tx: &StdSender<StreamEvent>) {
     let _ = stream_tx.send(StreamEvent::Error {
         message: "已取消".into(),
     });
-}
-
-/// 等待同步取消或会话关闭信号。工具 future 与此 future 竞争，保证挂起工具不会
-/// 阻塞 `into_session`、`shutdown_join`、会话删除或应用退出。
-pub(crate) async fn wait_for_abort_signal(
-    cancel_flag: Arc<AtomicBool>,
-    shutdown_flag: Option<Arc<AtomicBool>>,
-) {
-    loop {
-        if cancel_flag.load(Ordering::Acquire)
-            || shutdown_flag
-                .as_ref()
-                .is_some_and(|flag| flag.load(Ordering::Acquire))
-        {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
 }
 
 /// 请求取消异步 LLM 任务并等待其真正退出，确保它不再越过轮次屏障发送迟到事件。
