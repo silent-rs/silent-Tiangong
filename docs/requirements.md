@@ -30,7 +30,7 @@
 
 #### Agent Team 子 Core 边界
 - 每个子 Agent 必须由独立、完整的 `TiangongCore` 实例承载，并拥有独立 worker、runtime 与 Session；Agent Team 插件不得绕过 Core worker 直接调用裸 `ReactEngine::execute_turn`。
-- 子 Core 必须继承所属宿主主 Core 的模型配置、工作目录和插件能力集合，不设置独立工具白名单；子 Agent 身份直接使用其 Session ID，仅以受限团队客户端替换完整团队插件以防递归创建。子 Core 固定使用 `FullTrust`，其写入安全边界由 Agent Team 插件在 workspace 内部约束，不传递主 Core 的审批链。
+- 子 Core 必须继承所属宿主主 Core 的模型配置、工作目录和插件能力集合，不设置独立工具白名单；子 Agent 身份直接使用其 Session ID，仅以轻量团队客户端替换完整团队插件以防递归创建。子 Core 固定使用 `FullTrust`，将父会话工作目录作为默认工作范围，不传递主 Core 的审批链。普通插件使用现有注册与执行流程；workspace 硬隔离不属于当前 PR 范围。
 - Agent Team 当前通过子 Core 已有外部事件流等待 `Done` / `Error`，不得在本阶段为此新增轮次完成回执或扩展 `Plugin` trait。
 - 子 Core 会话按 `<storage_root>/teams/<parent_session_id>/<session_id>/` 隔离保存；解散与插件停止必须调用 Core 自身关闭栅栏并等待线程退出。
 - `@role`、多角色 `@role @role` 和 `@all` 对 Core 必须保持为普通用户文本；当前 Agent 只能依据 Agent Team 插件贡献的 system prompt 与工具定义调用 `send_message` / `broadcast_message` handler，不得由 Core 或 Agent Team 的 Core 路由钩子提前隐藏、接管或恢复原用户消息。
