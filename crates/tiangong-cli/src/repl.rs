@@ -326,9 +326,6 @@ impl ResponseState {
             StreamEvent::SessionMessageUpsert { .. } => {
                 // Core 已持有权威会话；CLI 不维护第二份消息镜像。
             }
-            StreamEvent::PendingPluginDeliveriesChanged { .. } => {
-                // Core 已持久化；CLI 不维护第二份会话镜像。
-            }
             StreamEvent::DeferredToolInjectionsChanged { .. } => {
                 // Core 已持久化；CLI 不维护第二份会话镜像。
             }

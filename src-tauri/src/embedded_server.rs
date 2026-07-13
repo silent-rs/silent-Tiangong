@@ -683,8 +683,6 @@ mod tests {
             message.turn_status = Some(TurnStatus::Success);
             tiangong_types::StreamEvent::SessionMessageUpsert {
                 message,
-                pending_plugin_deliveries: None,
-                completed_plugin_delivery_ids: None,
                 deferred_tool_injections: None,
             }
         };

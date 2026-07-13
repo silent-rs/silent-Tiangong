@@ -329,18 +329,6 @@ impl Plugin for TaskPlugin {
         }
     }
 
-    fn tool_write_targets(&self, call: &ToolCall) -> Result<Vec<PathBuf>, String> {
-        if call.name != "spawn_task" {
-            return Ok(Vec::new());
-        }
-        self.workspace
-            .read()
-            .map_err(|_| "后台任务工作目录状态锁定失败".to_string())?
-            .clone()
-            .map(|workspace| vec![workspace])
-            .ok_or_else(|| "后台任务缺少工作目录，无法声明写入边界".to_string())
-    }
-
     fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
         // 持有 engine 的 runtime_env 共享句柄——core 在所有插件注册完成后会汇总
         // 各插件的 collect_exec_env 写入同一句柄，spawn_task 时读取即为最新值。
@@ -415,25 +403,3 @@ impl ToolOverrideHandler for TaskPlugin {
 }
 
 impl PromptSectionProvider for TaskPlugin {}
-
-#[cfg(test)]
-mod write_target_tests {
-    use super::*;
-
-    #[test]
-    fn spawn_task_declares_workspace_as_possible_write_target() {
-        let plugin = TaskPlugin::new();
-        let workspace = std::path::Path::new("/tmp/tiangong-task-workspace");
-        plugin.set_workspace(Some(workspace));
-        let call = ToolCall {
-            id: "call".to_string(),
-            name: "spawn_task".to_string(),
-            arguments: serde_json::json!({"cmd": "cargo"}),
-        };
-
-        assert_eq!(
-            plugin.tool_write_targets(&call).unwrap(),
-            vec![workspace.to_path_buf()]
-        );
-    }
-}

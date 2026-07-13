@@ -370,7 +370,6 @@ fn user_message_event_preserves_content_blocks_without_serializing_image_data() 
         }],
         media: Vec::new(),
         model_excluded: true,
-        pending_plugin_deliveries: Vec::new(),
     };
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("content_blocks"));

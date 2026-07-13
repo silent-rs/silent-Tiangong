@@ -29,7 +29,6 @@ where
 }
 
 pub(crate) type SharedFeedback = Arc<RwLock<Option<PluginFeedbackTx>>>;
-pub(crate) type ApprovalRoutes = Arc<Mutex<HashMap<String, String>>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChildTurnResult {
@@ -63,7 +62,6 @@ impl ChildRuntime {
         mut plugins: Vec<Arc<dyn Plugin>>,
         team_client: Arc<dyn Plugin>,
         base_feedback: SharedFeedback,
-        approval_routes: ApprovalRoutes,
     ) -> Result<Arc<Self>, String> {
         if session.id != descriptor.agent_id {
             return Err(format!(
@@ -87,7 +85,6 @@ impl ChildRuntime {
             Arc::clone(&state),
             Arc::clone(&completed_messages),
             base_feedback,
-            approval_routes,
             event_rx,
         );
         let core = match TiangongCore::builder()
@@ -160,7 +157,6 @@ impl ChildRuntime {
         message_id: String,
         prepared: Vec<ContentBlock>,
         feedback: PluginFeedbackTx,
-        trust_mode: tiangong_core::permission::TrustMode,
     ) -> Result<ChildTurnResult, String> {
         let _delivery_guard = self.delivery_gate.lock().await;
         let command_guard = self
@@ -202,11 +198,7 @@ impl ChildRuntime {
                 .map_err(|_| "子 Agent Core 状态锁定失败".to_string())?;
             core.as_ref()
                 .ok_or_else(|| "子 Agent Core 已关闭".to_string())?
-                .enqueue_prepared_with_receipt_and_trust_mode(
-                    message_id.clone(),
-                    prepared,
-                    trust_mode,
-                )
+                .enqueue_prepared_with_receipt(message_id.clone(), prepared)
                 .map_err(|error| format!("投递子 Agent 消息失败：{error}"))
         })() {
             Ok(receipt) => receipt,
@@ -238,19 +230,6 @@ impl ChildRuntime {
                 *active = None;
             }
         }
-    }
-
-    pub(crate) fn deliver_approval(&self, request_id: String, approved: bool) -> bool {
-        self.core
-            .lock()
-            .ok()
-            .and_then(|core| {
-                core.as_ref().map(|core| {
-                    core.deliver(AgentInputKind::approval(request_id, approved))
-                        .is_ok()
-                })
-            })
-            .unwrap_or(false)
     }
 
     pub(crate) fn cancel(&self) -> bool {
@@ -642,7 +621,6 @@ fn spawn_event_bridge(
     state: Arc<Mutex<RuntimeState>>,
     completed_messages: Arc<Mutex<HashMap<String, ChildTurnResult>>>,
     base_feedback: SharedFeedback,
-    approval_routes: ApprovalRoutes,
     event_rx: std::sync::mpsc::Receiver<SessionStreamEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -653,7 +631,6 @@ fn spawn_event_bridge(
                 &state,
                 &completed_messages,
                 &base_feedback,
-                &approval_routes,
                 event.event,
             );
         }
@@ -683,7 +660,6 @@ fn handle_child_event(
     state: &Mutex<RuntimeState>,
     completed_messages: &Mutex<HashMap<String, ChildTurnResult>>,
     base_feedback: &SharedFeedback,
-    approval_routes: &ApprovalRoutes,
     event: StreamEvent,
 ) {
     match event {
@@ -907,11 +883,6 @@ fn handle_child_event(
             tool_name,
             args_summary,
         } => {
-            if let Ok(mut routes) = approval_routes.lock() {
-                routes
-                    .entry(request_id.clone())
-                    .or_insert_with(|| descriptor.agent_id.clone());
-            }
             if let Some(feedback) = feedback_for_event(active_turn, base_feedback) {
                 forward_event(
                     &feedback,
@@ -942,9 +913,7 @@ fn handle_child_event(
                 forward_status(&feedback, descriptor, "running");
             }
         }
-        StreamEvent::PendingPluginDeliveriesChanged { .. }
-        | StreamEvent::DeferredToolInjectionsChanged { .. }
-        | StreamEvent::TurnBoundary { .. } => {}
+        StreamEvent::DeferredToolInjectionsChanged { .. } | StreamEvent::TurnBoundary { .. } => {}
         other => {
             if let Some(feedback) = feedback_for_event(active_turn, base_feedback) {
                 forward_event(&feedback, other);
@@ -1108,6 +1077,8 @@ fn recover_completed_messages(session: &Session) -> HashMap<String, ChildTurnRes
 
 pub(crate) fn child_config(base: &CoreConfig, descriptor: &AgentDescriptor) -> CoreConfig {
     let mut config = base.clone();
+    config.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
+    config.default_trust_mode = tiangong_core::permission::TrustMode::FullTrust;
     let inherited = config.custom_system_prompt.trim();
     let role_prompt = format!(
         "你是团队成员 {}（@{}，Session ID={}）。\n{}",
@@ -1506,7 +1477,6 @@ mod tests {
         // 旧的空闲终态不能抢先完成刚注册的 waiter；只有看到相同稳定消息 ID
         // 的 UserMessage 后，后续 Done 才属于这轮。
         let correlated_cache = Mutex::new(HashMap::new());
-        let correlated_routes = Arc::new(Mutex::new(HashMap::new()));
         let correlated_state = Mutex::new(RuntimeState::Running);
         let (correlated_tx, mut correlated_rx) = tokio::sync::oneshot::channel();
         let correlated_active = Mutex::new(Some(ActiveTurn {
@@ -1522,7 +1492,6 @@ mod tests {
             &correlated_state,
             &correlated_cache,
             &base_feedback,
-            &correlated_routes,
             StreamEvent::Done { usage: None },
         );
         assert!(matches!(
@@ -1536,14 +1505,12 @@ mod tests {
             &correlated_state,
             &correlated_cache,
             &base_feedback,
-            &correlated_routes,
             StreamEvent::UserMessage {
                 message_id: "delivery-correlated".to_string(),
                 content: "test".to_string(),
                 content_blocks: Vec::new(),
                 media: Vec::new(),
                 model_excluded: false,
-                pending_plugin_deliveries: Vec::new(),
             },
         );
         handle_child_event(
@@ -1552,7 +1519,6 @@ mod tests {
             &correlated_state,
             &correlated_cache,
             &base_feedback,
-            &correlated_routes,
             StreamEvent::Done {
                 usage: Some(usage(3, 2)),
             },
@@ -1584,7 +1550,6 @@ mod tests {
             &cancelled_state,
             &cancelled_cache,
             &base_feedback,
-            &correlated_routes,
             StreamEvent::Done {
                 usage: Some(usage(8, 1)),
             },
@@ -1610,7 +1575,6 @@ mod tests {
             Vec::new(),
             Arc::new(EmptyPlugin),
             base_feedback,
-            Arc::new(Mutex::new(HashMap::new())),
         )
         .unwrap();
 
@@ -1620,7 +1584,6 @@ mod tests {
                 "delivery-real-sse".to_string(),
                 vec![ContentBlock::text("执行真实事件流测试")],
                 feedback.clone(),
-                tiangong_core::permission::TrustMode::FullTrust,
             ),
         )
         .await
@@ -1662,7 +1625,6 @@ mod tests {
                     "delivery-cancel-order".to_string(),
                     vec![ContentBlock::text("等待取消")],
                     active_feedback,
-                    tiangong_core::permission::TrustMode::FullTrust,
                 )
                 .await
         });
@@ -1682,7 +1644,6 @@ mod tests {
                     "delivery-queued".to_string(),
                     vec![ContentBlock::text("排队等待")],
                     feedback,
-                    tiangong_core::permission::TrustMode::FullTrust,
                 )
                 .await
         });

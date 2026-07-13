@@ -4,7 +4,7 @@
 //! 工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //!
 //! core 通过 trait 默认方法统一注入两类运行时上下文（均在 `register` 之前调用）：
-//! - [`Plugin::set_trust_mode`]：任务隔离的信任模式解析句柄（插件可据此放宽校验）。
+//! - [`Plugin::set_trust_mode`]：会话信任模式解析句柄（插件可据此放宽校验）。
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
 //! 两者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
@@ -66,7 +66,7 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 无需覆写；这些插件的工具执行仍受 engine 层 [`PermissionGate::check`] 统一兜底。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
-    /// 插件调用句柄的 `current()` 读取当前执行任务的有效模式。
+    /// 插件调用句柄的 `current()` 读取当前会话的有效模式。
     fn set_trust_mode(&self, _trust: TrustModeHandle) {}
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
@@ -115,68 +115,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
         &self,
     ) -> std::collections::BTreeMap<String, crate::permission::PermissionLevel> {
         std::collections::BTreeMap::new()
-    }
-
-    /// 声明一次工具调用实际会写入的文件目标。
-    ///
-    /// 返回值必须是工具执行时使用的、已经过工作区与允许根校验的绝对路径。Core 会在
-    /// 工具真正执行前汇总所有插件的声明，再把完整目标列表交给通用策略钩子检查。这样
-    /// 文件锁等跨插件策略无需识别具体工具名或重复解析其他插件的参数格式。
-    ///
-    /// 只读工具以及不修改文件系统的插件保持默认空结果。参数或路径无法可靠解析时应
-    /// 返回错误，Core 将拒绝本次工具调用，避免在写入目标不明确时绕过策略检查。
-    fn tool_write_targets(
-        &self,
-        _call: &crate::model::ToolCall,
-    ) -> Result<Vec<std::path::PathBuf>, String> {
-        Ok(Vec::new())
-    }
-
-    /// 在用户消息落盘前规划由插件接管的持久投递。
-    ///
-    /// Core 只负责把返回值与用户消息原子保存；目标解析、稳定投递 ID 和内容拆分
-    /// 均由插件实现。没有消息路由能力的插件保持默认空结果。
-    fn plan_plugin_deliveries(
-        &self,
-        _actor_id: &str,
-        _source_message_id: &str,
-        _prepared: &[tiangong_types::ContentBlock],
-    ) -> Vec<crate::session::PendingPluginDelivery> {
-        Vec::new()
-    }
-
-    /// 用户消息及其投递计划成功落盘后，通知插件开始派发。
-    ///
-    /// 返回 `true` 表示至少一个计划已被插件接收。返回 `false` 时 Core 会撤销该
-    /// 消息的仅插件可见状态，让当前 Agent 正常处理，避免静默丢失用户输入。
-    fn dispatch_plugin_deliveries(
-        &self,
-        _session: &crate::session::Session,
-        _source_message_id: &str,
-    ) -> bool {
-        false
-    }
-
-    /// 工具执行前的插件策略检查。
-    ///
-    /// Core 不识别领域工具或插件状态，只统一执行所有插件贡献的检查，并把
-    /// [`Plugin::tool_write_targets`] 的汇总结果一并传入。返回错误会阻止工具调用，
-    /// 并以普通工具失败返回给当前 Agent。
-    fn guard_tool_call(
-        &self,
-        _actor_id: &str,
-        _call: &crate::model::ToolCall,
-        _write_targets: &[std::path::PathBuf],
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// 把工具执行期间到达的控制命令转交给插件内部执行单元。
-    ///
-    /// 典型用途是把审批、定向取消和关闭信号路由到插件启动的嵌套 Agent。返回值
-    /// 表示命令是否被消费；Core 自身仍保留取消和关闭的最终决定权。
-    fn handle_runtime_command(&self, _command: &crate::core::command::Command) -> bool {
-        false
     }
 
     /// 会话 worker 退出前等待插件内部任务收敛。

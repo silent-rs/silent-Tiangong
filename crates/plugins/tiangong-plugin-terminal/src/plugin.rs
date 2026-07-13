@@ -69,21 +69,6 @@ impl Plugin for TerminalPlugin {
             *guard = workspace.map(std::path::Path::to_path_buf);
         }
     }
-
-    fn tool_write_targets(&self, call: &ToolCall) -> Result<Vec<PathBuf>, String> {
-        if !matches!(
-            call.name.as_str(),
-            "run_command" | "run_shell" | "terminal_send"
-        ) {
-            return Ok(Vec::new());
-        }
-        self.workspace
-            .read()
-            .map_err(|_| "终端工作目录状态锁定失败".to_string())?
-            .clone()
-            .map(|workspace| vec![workspace])
-            .ok_or_else(|| "终端工具缺少工作目录，无法声明写入边界".to_string())
-    }
 }
 
 impl ToolOverrideHandler for TerminalPlugin {

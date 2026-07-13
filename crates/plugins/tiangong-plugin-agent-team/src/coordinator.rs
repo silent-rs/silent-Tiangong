@@ -3,25 +3,22 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use serde_json::json;
-use tiangong_core::core::command::Command;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::{PermissionLevel, TrustMode, TrustModeHandle};
+use tiangong_core::permission::{PermissionLevel, TrustMode};
 use tiangong_core::session::{now_text, Message, MessageRole, Session};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 use tiangong_types::{ContentBlock, StreamEvent};
 
-use crate::child_runtime::{
-    child_config, ApprovalRoutes, ChildPluginFactory, ChildRuntime, SharedFeedback,
-};
-use crate::command_safety::guard_sub_agent_command;
+use crate::child_runtime::{child_config, ChildPluginFactory, ChildRuntime, SharedFeedback};
 use crate::constants::*;
+use crate::guarded_plugin::{child_write_targets, GuardedChildPlugin};
 use crate::manifest::{
     child_root, normalize_role, team_root, validate_role_identifier, AgentRecord, TeamManifest,
 };
@@ -29,6 +26,11 @@ use crate::state::{AgentDescriptor, AgentStatus, FileLockManager};
 use crate::tools::{child_tool_specs, error_result, ok_result};
 
 const AGENT_DESCRIPTOR_MARKER: &str = "tiangong-agent-descriptor:";
+
+fn active_teams() -> &'static Mutex<HashMap<String, Weak<Coordinator>>> {
+    static ACTIVE_TEAMS: OnceLock<Mutex<HashMap<String, Weak<Coordinator>>>> = OnceLock::new();
+    ACTIVE_TEAMS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub(crate) struct Coordinator {
     storage_root: PathBuf,
@@ -39,7 +41,6 @@ pub(crate) struct Coordinator {
     base_config: RwLock<CoreConfig>,
     workspace: RwLock<Option<PathBuf>>,
     feedback: SharedFeedback,
-    approval_routes: ApprovalRoutes,
     stopping: AtomicBool,
 }
 
@@ -106,7 +107,6 @@ impl Coordinator {
             base_config: RwLock::new(CoreConfig::default()),
             workspace: RwLock::new(None),
             feedback: Arc::new(RwLock::new(None)),
-            approval_routes: Arc::new(Mutex::new(HashMap::new())),
             stopping: AtomicBool::new(false),
         })
     }
@@ -177,6 +177,9 @@ impl Coordinator {
         if let Ok(mut current) = self.manifest.lock() {
             *current = Some(manifest);
         }
+        if let Ok(mut teams) = active_teams().lock() {
+            teams.insert(parent.id.clone(), Arc::downgrade(self));
+        }
         for record in records {
             match self.start_record(parent, &record) {
                 Ok(runtime) => {
@@ -237,7 +240,7 @@ impl Coordinator {
             let agent_id = child.id.clone();
             child.cwd = parent.cwd.clone();
             child.reasoning_effort = parent.reasoning_effort.clone();
-            child.trust_mode = parent.trust_mode;
+            child.trust_mode = TrustMode::FullTrust;
             child.parent_session_id = Some(parent.id.clone());
             let record = AgentRecord {
                 descriptor: AgentDescriptor {
@@ -273,8 +276,6 @@ impl Coordinator {
         let descriptor_message = append_descriptor_message(parent, &record.descriptor);
         self.emit(StreamEvent::SessionMessageUpsert {
             message: descriptor_message,
-            pending_plugin_deliveries: None,
-            completed_plugin_delivery_ids: None,
             deferred_tool_injections: None,
         });
         self.emit(StreamEvent::AgentCreated {
@@ -299,14 +300,10 @@ impl Coordinator {
         call: ToolCall,
         actor_id: String,
         feedback: PluginFeedbackTx,
-        trust_mode: TrustMode,
     ) -> ToolResult {
         match call.name.as_str() {
-            TOOL_SEND_MESSAGE => {
-                self.send_message(&call, &actor_id, feedback, trust_mode)
-                    .await
-            }
-            TOOL_BROADCAST_MESSAGE => self.broadcast(&call, &actor_id, feedback, trust_mode).await,
+            TOOL_SEND_MESSAGE => self.send_message(&call, &actor_id, feedback).await,
+            TOOL_BROADCAST_MESSAGE => self.broadcast(&call, &actor_id, feedback).await,
             TOOL_NOTIFY_USER => self.notify_user(&call, &actor_id),
             TOOL_LOCK_FILE => self.lock_file(&call, &actor_id),
             TOOL_UNLOCK_FILE => self.unlock_file(&call, &actor_id),
@@ -319,7 +316,6 @@ impl Coordinator {
         call: &ToolCall,
         actor_id: &str,
         feedback: PluginFeedbackTx,
-        trust_mode: TrustMode,
     ) -> ToolResult {
         let target_role = normalize_role(argument_str(call, "to"));
         let content = argument_str(call, "content").trim().to_string();
@@ -399,7 +395,7 @@ impl Coordinator {
         let message_id = stable_tool_message_id(actor_id, call, &target.descriptor.agent_id);
         let mut cancel_target = CancelTargetOnDrop::new(Arc::clone(&runtime), message_id.clone());
         let result = runtime
-            .deliver_and_wait(message_id, prepared, feedback.clone(), trust_mode)
+            .deliver_and_wait(message_id, prepared, feedback.clone())
             .await;
         cancel_target.disarm();
         match result {
@@ -431,7 +427,6 @@ impl Coordinator {
         call: &ToolCall,
         actor_id: &str,
         feedback: PluginFeedbackTx,
-        trust_mode: TrustMode,
     ) -> ToolResult {
         let content = argument_str(call, "content").trim().to_string();
         if content.is_empty() {
@@ -468,7 +463,7 @@ impl Coordinator {
                 "content": content,
             });
             let result = self
-                .send_message(&target_call, actor_id, feedback.clone(), trust_mode)
+                .send_message(&target_call, actor_id, feedback.clone())
                 .await;
             reports.push(format!("{}: {}", target.descriptor.label, result.summary));
         }
@@ -607,8 +602,6 @@ impl Coordinator {
         let status_message = append_agent_status_message(parent, &record.descriptor, "terminated");
         self.emit(StreamEvent::SessionMessageUpsert {
             message: status_message,
-            pending_plugin_deliveries: None,
-            completed_plugin_delivery_ids: None,
             deferred_tool_injections: None,
         });
         self.emit_status(&record.descriptor, "terminated");
@@ -623,99 +616,49 @@ impl Coordinator {
         runtime.reopen();
     }
 
-    pub(crate) fn guard_child_tool(
+    pub(crate) fn guard_child_tool_call(
         &self,
         actor_id: &str,
         call: &ToolCall,
-        write_targets: &[PathBuf],
-        workspace: Option<&Path>,
+        session: &Session,
     ) -> Result<(), String> {
-        if self.is_parent_actor(actor_id) {
+        if session.parent_session_id.is_none() {
             return Ok(());
         }
         if self.descriptor(actor_id).is_none() {
             return Err(format!("未知子 Agent：{actor_id}"));
         }
-        if matches!(
-            call.name.as_str(),
-            "run_command" | "run_shell" | "terminal_send"
-        ) {
-            let workspace = workspace.ok_or_else(|| "当前子 Core 没有可用工作目录".to_string())?;
-            guard_sub_agent_command(call, workspace)?;
+        let workspace = Path::new(&session.cwd);
+        if session.cwd.trim().is_empty() || !workspace.is_dir() {
+            return Err("当前子 Agent 没有可用工作区".to_string());
         }
-        if write_targets.is_empty() {
+        let targets = child_write_targets(call, workspace)?;
+        if targets.is_empty() {
             return Ok(());
-        }
-        if call.name == "spawn_task" {
-            return Err("Sub Agent 不得启动脱离当前轮次的后台写入任务".to_string());
         }
         let now = chrono::Local::now().naive_local();
         let mut locks = self
             .file_locks
             .lock()
             .map_err(|_| "文件锁状态锁定失败".to_string())?;
-        for target in write_targets {
-            locks.ensure_can_write(target, actor_id, &now)?;
+        for target in targets {
+            locks.ensure_can_write(&target, actor_id, &now)?;
         }
         Ok(())
     }
 
-    pub(crate) fn handle_runtime_command(&self, command: &Command) -> bool {
-        match command {
-            Command::Approval {
-                request_id,
-                approved,
-            } => {
-                let agent_id = self
-                    .approval_routes
-                    .lock()
-                    .ok()
-                    .and_then(|mut routes| routes.remove(request_id));
-                agent_id
-                    .and_then(|agent_id| self.runtime(&agent_id))
-                    .is_some_and(|runtime| runtime.deliver_approval(request_id.clone(), *approved))
-            }
-            Command::PluginControl {
-                plugin_id,
-                action,
-                payload,
-            } if plugin_id == PLUGIN_ID && action == CONTROL_CANCEL_AGENT => {
-                let role = payload
-                    .get("role")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                let Some(record) = self.record_by_role(role) else {
-                    return false;
-                };
-                if let Some(runtime) = self.runtime(&record.descriptor.agent_id) {
-                    return runtime.is_running() && runtime.cancel();
-                }
-                false
-            }
-            Command::Cancel => {
-                let mut handled = false;
-                for runtime in self.runtime_snapshot() {
-                    if runtime.is_running() {
-                        handled |= runtime.cancel();
-                    }
-                }
-                handled
-            }
-            Command::Shutdown => {
-                let mut handled = false;
-                for runtime in self.runtime_snapshot() {
-                    if runtime.is_running() {
-                        handled |= runtime.cancel();
-                    }
-                }
-                handled
-            }
-            _ => false,
-        }
-    }
-
     pub(crate) async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
+        if let Some(parent_session_id) = self.parent_session_id() {
+            if let Ok(mut teams) = active_teams().lock() {
+                let owns_entry = teams
+                    .get(&parent_session_id)
+                    .is_some_and(|team| std::ptr::eq(team.as_ptr(), self));
+                if owns_entry {
+                    teams.remove(&parent_session_id);
+                }
+            }
+        }
         let runtimes = self
             .runtimes
             .lock()
@@ -779,15 +722,17 @@ impl Coordinator {
             self.fresh_child_plugins(),
             Arc::new(ChildTeamClientPlugin::new(Arc::downgrade(self))),
             Arc::clone(&self.feedback),
-            Arc::clone(&self.approval_routes),
         )
     }
 
-    fn fresh_child_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+    fn fresh_child_plugins(self: &Arc<Self>) -> Vec<Arc<dyn Plugin>> {
         self.child_plugins
             .create_plugins()
             .into_iter()
             .filter(|plugin| plugin.id() != PLUGIN_ID && plugin.id() != CHILD_PLUGIN_ID)
+            .map(|plugin| {
+                Arc::new(GuardedChildPlugin::new(plugin, Arc::downgrade(self))) as Arc<dyn Plugin>
+            })
             .collect()
     }
 
@@ -941,13 +886,28 @@ impl Coordinator {
             level: "error".to_string(),
         });
     }
+
+    pub(crate) fn cancel_registered(parent_session_id: &str, role: &str) -> bool {
+        let coordinator = active_teams()
+            .lock()
+            .ok()
+            .and_then(|teams| teams.get(parent_session_id).cloned())
+            .and_then(|coordinator| coordinator.upgrade());
+        coordinator.is_some_and(|coordinator| coordinator.cancel_agent(role))
+    }
+
+    fn cancel_agent(&self, role: &str) -> bool {
+        let Some(record) = self.record_by_role(role) else {
+            return false;
+        };
+        self.runtime(&record.descriptor.agent_id)
+            .is_some_and(|runtime| runtime.is_running() && runtime.cancel())
+    }
 }
 
 pub(crate) struct ChildTeamClientPlugin {
     coordinator: Weak<Coordinator>,
     feedback: RwLock<Option<PluginFeedbackTx>>,
-    trust_mode: RwLock<Option<TrustModeHandle>>,
-    workspace: RwLock<Option<PathBuf>>,
 }
 
 impl ChildTeamClientPlugin {
@@ -955,8 +915,6 @@ impl ChildTeamClientPlugin {
         Self {
             coordinator,
             feedback: RwLock::new(None),
-            trust_mode: RwLock::new(None),
-            workspace: RwLock::new(None),
         }
     }
 }
@@ -984,12 +942,6 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
             .ok()
             .and_then(|feedback| feedback.clone())
             .map(PluginFeedbackTx::for_current_turn);
-        let trust_mode = self
-            .trust_mode
-            .read()
-            .ok()
-            .and_then(|trust| trust.as_ref().map(TrustModeHandle::current))
-            .unwrap_or_default();
         let call = call.clone();
         let actor_id = actor_id.to_string();
         Box::pin(async move {
@@ -999,11 +951,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
             let Some(feedback) = feedback else {
                 return Some(error_result(&call.name, "Agent Team 反馈通道不可用"));
             };
-            Some(
-                coordinator
-                    .handle_tool(call, actor_id, feedback, trust_mode)
-                    .await,
-            )
+            Some(coordinator.handle_tool(call, actor_id, feedback).await)
         })
     }
 }
@@ -1022,40 +970,10 @@ impl Plugin for ChildTeamClientPlugin {
         CHILD_PLUGIN_ID
     }
 
-    fn set_workspace(&self, workspace: Option<&Path>) {
-        if let Ok(mut current) = self.workspace.write() {
-            *current = workspace.map(Path::to_path_buf);
-        }
-    }
-
     fn set_feedback_tx(&self, feedback: PluginFeedbackTx) {
         if let Ok(mut current) = self.feedback.write() {
             *current = Some(feedback);
         }
-    }
-
-    fn set_trust_mode(&self, trust_mode: TrustModeHandle) {
-        if let Ok(mut current) = self.trust_mode.write() {
-            *current = Some(trust_mode);
-        }
-    }
-
-    fn guard_tool_call(
-        &self,
-        actor_id: &str,
-        call: &ToolCall,
-        write_targets: &[PathBuf],
-    ) -> Result<(), String> {
-        let coordinator = self
-            .coordinator
-            .upgrade()
-            .ok_or_else(|| "所属 Agent Team 已关闭".to_string())?;
-        let workspace = self
-            .workspace
-            .read()
-            .ok()
-            .and_then(|workspace| workspace.clone());
-        coordinator.guard_child_tool(actor_id, call, write_targets, workspace.as_deref())
     }
 
     fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
@@ -1079,7 +997,12 @@ fn load_or_create_child_session(
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!("子 Session 文件不得是符号链接：{}", path.display()));
         }
-        Ok(_) => return Session::load_from_storage(&root, &record.descriptor.agent_id),
+        Ok(_) => {
+            let mut session = Session::load_from_storage(&root, &record.descriptor.agent_id)?;
+            session.trust_mode = TrustMode::FullTrust;
+            session.parent_session_id = Some(parent.id.clone());
+            return Ok(session);
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
@@ -1115,6 +1038,8 @@ fn load_or_create_child_session(
         let mut session: Session =
             serde_json::from_str(&content).map_err(|error| format!("解析旧子会话失败：{error}"))?;
         session.id = record.descriptor.agent_id.clone();
+        session.trust_mode = TrustMode::FullTrust;
+        session.parent_session_id = Some(parent.id.clone());
         session.bind_storage_root(root);
         session.try_persist_to_disk()?;
         return Ok(session);
@@ -1123,7 +1048,7 @@ fn load_or_create_child_session(
     child.id = record.descriptor.agent_id.clone();
     child.cwd = parent.cwd.clone();
     child.reasoning_effort = parent.reasoning_effort.clone();
-    child.trust_mode = parent.trust_mode;
+    child.trust_mode = TrustMode::FullTrust;
     child.parent_session_id = Some(parent.id.clone());
     child.bind_storage_root(root);
     Ok(child)

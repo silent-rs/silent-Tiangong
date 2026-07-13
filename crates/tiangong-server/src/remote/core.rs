@@ -1089,7 +1089,6 @@ fn sync_stream_event_to_state(
             content_blocks,
             media,
             model_excluded,
-            pending_plugin_deliveries,
         } => {
             apply_user_message_event(
                 session,
@@ -1099,12 +1098,9 @@ fn sync_stream_event_to_state(
                 media,
                 *model_excluded,
             );
-            session.pending_plugin_deliveries = pending_plugin_deliveries.clone();
         }
         StreamEvent::SessionMessageUpsert {
             message,
-            pending_plugin_deliveries,
-            completed_plugin_delivery_ids,
             deferred_tool_injections,
         } => {
             if let Some(existing) = session
@@ -1116,22 +1112,9 @@ fn sync_stream_event_to_state(
             } else {
                 session.messages.push(message.clone());
             }
-            if let Some(deliveries) = pending_plugin_deliveries {
-                session.pending_plugin_deliveries = deliveries.clone();
-            }
-            if let Some(delivery_ids) = completed_plugin_delivery_ids {
-                session.completed_plugin_delivery_ids = delivery_ids.clone();
-            }
             if let Some(injections) = deferred_tool_injections {
                 session.deferred_tool_injections = injections.clone();
             }
-        }
-        StreamEvent::PendingPluginDeliveriesChanged {
-            deliveries,
-            completed_delivery_ids,
-        } => {
-            session.pending_plugin_deliveries = deliveries.clone();
-            session.completed_plugin_delivery_ids = completed_delivery_ids.clone();
         }
         StreamEvent::DeferredToolInjectionsChanged { injections } => {
             session.deferred_tool_injections = injections.clone();
@@ -1837,7 +1820,6 @@ mod tests {
             content_blocks: Vec::new(),
             media: Vec::new(),
             model_excluded: false,
-            pending_plugin_deliveries: Vec::new(),
         });
         tracker.observe_event(&StreamEvent::Done { usage: None });
         assert!(matches!(
@@ -1860,7 +1842,6 @@ mod tests {
             content_blocks: Vec::new(),
             media: Vec::new(),
             model_excluded: false,
-            pending_plugin_deliveries: Vec::new(),
         });
 
         tracker.fail_all("Core 事件流已关闭");

@@ -18,9 +18,7 @@ use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, rebuild_system_prompt,
     select_client_for_request,
 };
-use crate::react::message::{
-    RuntimeMessageDisposition, accept_runtime_user_message, upsert_assistant_text_message,
-};
+use crate::react::message::{accept_runtime_user_message, upsert_assistant_text_message};
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
@@ -125,7 +123,6 @@ impl ReactEngine {
                         Some(Command::Message {
                             prepared,
                             message_id,
-                            trust_mode_override,
                             persistence_ack,
                         }) => {
                             sink.flush();
@@ -142,16 +139,13 @@ impl ReactEngine {
                                 );
                             }
                             match accept_runtime_user_message(
-                                &self.engine,
-                                &self.agent_id,
                                 session,
                                 stream_tx,
                                 message_id,
                                 prepared,
                                 persistence_ack,
                             ) {
-                                Ok(RuntimeMessageDisposition::CurrentAgentInput(input)) => {
-                                    self.apply_message_trust_mode_override(trust_mode_override);
+                                Ok(input) => {
                                     summary_interruption = Some(input);
                                     if let Some(handle) = llm_fut.take() {
                                         abort_and_join(handle).await;
@@ -160,7 +154,6 @@ impl ReactEngine {
                                         "总结响应已被新的用户消息中断"
                                     ));
                                 }
-                                Ok(RuntimeMessageDisposition::RoutedToPlugin) => {}
                                 Err(err) => {
                                     session.messages.truncate(message_count_before_interruption);
                                     tracing::warn!(
@@ -196,10 +189,7 @@ impl ReactEngine {
                             }
                         }
                         Some(Command::ReloadConfig) => {}
-                        Some(command @ Command::Approval { .. })
-                        | Some(command @ Command::PluginControl { .. }) => {
-                            self.forward_plugin_runtime_command(&command);
-                        }
+                        Some(Command::Approval { .. }) => {}
                         Some(Command::InjectTool { tool_name, payload }) => {
                             crate::react::message::inject_tool_to_session(
                                 session,
@@ -207,21 +197,6 @@ impl ReactEngine {
                                 &tool_name,
                                 &payload,
                             );
-                        }
-                        Some(Command::CommitPluginDeliveries {
-                            delivery_ids,
-                            tool_injections,
-                            persistence_ack,
-                        }) => {
-                            if let Err(error) = crate::react::message::commit_plugin_deliveries(
-                                session,
-                                stream_tx,
-                                delivery_ids,
-                                tool_injections,
-                                persistence_ack,
-                            ) {
-                                tracing::warn!(%error, "提交插件持久投递失败");
-                            }
                         }
                         Some(Command::CompressContext) => {
                             let _ = stream_tx.send(StreamEvent::AgentNotification {
@@ -546,55 +521,7 @@ fn persist_partial_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::react::test_support::{
-        MockLlmServer, MockResponse, RecordedRuntimeCommand, approval, plugin_control,
-        runtime_with_recorder,
-    };
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn summary_stream_forwards_plugin_runtime_commands() {
-        let server = MockLlmServer::start(MockResponse::Stall);
-        let (engine, recorder) = runtime_with_recorder(server.base_url());
-        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
-            .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )))
-            .with_shutdown_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-                false,
-            )));
-        let mut session = Session::new("summary-stream-runtime-command");
-        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
-        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
-
-        let execution = tokio::spawn(async move {
-            let result = react
-                .run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1)
-                .await;
-            assert!(matches!(result, SummaryPhaseResult::Cancelled(_)));
-        });
-        server.wait_until_connected().await;
-        command_tx.send(plugin_control("cancel-child")).unwrap();
-        command_tx.send(approval("child-approval", false)).unwrap();
-        command_tx.send(Command::Cancel).unwrap();
-
-        tokio::time::timeout(std::time::Duration::from_secs(3), execution)
-            .await
-            .expect("总结流式执行未及时退出")
-            .unwrap();
-        assert_eq!(
-            recorder.commands(),
-            vec![
-                RecordedRuntimeCommand::PluginControl {
-                    plugin_id: "test-plugin".to_string(),
-                    action: "cancel-child".to_string(),
-                },
-                RecordedRuntimeCommand::Approval {
-                    request_id: "child-approval".to_string(),
-                    approved: false,
-                },
-            ]
-        );
-    }
+    use crate::react::test_support::{MockLlmServer, MockResponse, test_runtime};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn completed_done_marker_is_not_persisted_as_a_second_summary() {
@@ -602,7 +529,7 @@ mod tests {
             content: "[DONE]".to_string(),
             complete: true,
         });
-        let (engine, _) = runtime_with_recorder(server.base_url());
+        let engine = test_runtime(server.base_url());
         let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
             .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
@@ -661,7 +588,7 @@ mod tests {
             content: "部分总结".to_string(),
             complete: false,
         });
-        let (engine, _) = runtime_with_recorder(server.base_url());
+        let engine = test_runtime(server.base_url());
         let mut react = ReactEngine::new(engine, Vec::new(), 2, 1)
             .with_cancel_flag(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,

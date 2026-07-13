@@ -288,43 +288,6 @@ impl PluginFeedbackTx {
         });
     }
 
-    /// 原子提交一组持久投递的完成状态与对应工具注入，并等待父 Session 落盘。
-    ///
-    /// Core 会在同一次持久化中删除 `delivery_ids` 并把 `tool_injections` 写入
-    /// deferred 队列。失败时父 Session 回滚，本方法返回错误；调用方可安全重试。
-    pub async fn commit_pending_deliveries(
-        &self,
-        delivery_ids: Vec<String>,
-        tool_injections: Vec<PluginFeedback>,
-    ) -> Result<(), String> {
-        let (persistence_ack, receiver) = tokio::sync::oneshot::channel();
-        self.tx
-            .send(Command::CommitPluginDeliveries {
-                delivery_ids,
-                tool_injections,
-                persistence_ack: Some(persistence_ack),
-            })
-            .map_err(|_| "Core 已关闭，无法提交插件持久投递".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "Core 未返回插件持久投递确认".to_string())?
-    }
-
-    /// 无等待地确认一组插件持久投递已经完成。
-    ///
-    /// 兼容取消路径：会话更新仍由 Core 所在线程串行执行，但调用方不等待持久化
-    /// 确认。需要同时注入处理结果时应使用 [`commit_pending_deliveries`](Self::commit_pending_deliveries)。
-    pub fn complete_pending_deliveries(&self, delivery_ids: Vec<String>) {
-        if delivery_ids.is_empty() {
-            return;
-        }
-        let _ = self.tx.send(Command::CommitPluginDeliveries {
-            delivery_ids,
-            tool_injections: Vec::new(),
-            persistence_ack: None,
-        });
-    }
-
     /// 上报一笔插件内部产生的 LLM token 用量。
     ///
     /// **即时**累加到本轮 usage 并立即发送 `StreamEvent::TokenUsage`，确保最终
@@ -534,39 +497,5 @@ mod tests {
         assert_usage_event(first_event, 3, 5, 3_000, "first");
         assert_usage(&second_usage, 7, 11);
         assert_usage_event(second_event, 7, 11, 4_000, "second");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn commit_pending_deliveries_waits_for_core_ack() {
-        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(command_tx, Arc::new(TurnUsageSink::new()));
-        let commit = tokio::spawn(async move {
-            feedback
-                .commit_pending_deliveries(
-                    vec!["delivery-1".to_string()],
-                    vec![PluginFeedback::new(
-                        "agent_report",
-                        serde_json::json!({ "content": "done" }),
-                    )],
-                )
-                .await
-        });
-
-        let command = command_rx.recv().await.unwrap();
-        let Command::CommitPluginDeliveries {
-            delivery_ids,
-            tool_injections,
-            persistence_ack,
-        } = command
-        else {
-            panic!("expected plugin delivery commit");
-        };
-        assert_eq!(delivery_ids, ["delivery-1"]);
-        assert_eq!(tool_injections.len(), 1);
-        assert_eq!(tool_injections[0].tool_name, "agent_report");
-        assert!(!commit.is_finished());
-
-        persistence_ack.unwrap().send(Ok(())).unwrap();
-        assert!(commit.await.unwrap().is_ok());
     }
 }

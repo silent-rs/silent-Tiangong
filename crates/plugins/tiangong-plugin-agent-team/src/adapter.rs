@@ -3,11 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use tiangong_core::core::command::Command;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::{PermissionLevel, TrustModeHandle};
+use tiangong_core::permission::PermissionLevel;
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -20,7 +19,6 @@ use crate::tools::{error_result, root_tool_specs};
 pub struct AgentTeamPlugin {
     coordinator: Arc<Coordinator>,
     feedback: RwLock<Option<PluginFeedbackTx>>,
-    trust_mode: RwLock<Option<TrustModeHandle>>,
 }
 
 impl AgentTeamPlugin {
@@ -28,7 +26,6 @@ impl AgentTeamPlugin {
         Self {
             coordinator: Coordinator::new(storage_root, child_plugins),
             feedback: RwLock::new(None),
-            trust_mode: RwLock::new(None),
         }
     }
 
@@ -37,14 +34,6 @@ impl AgentTeamPlugin {
             .read()
             .ok()
             .and_then(|feedback| feedback.clone())
-    }
-
-    fn current_trust_mode(&self) -> tiangong_core::permission::TrustMode {
-        self.trust_mode
-            .read()
-            .ok()
-            .and_then(|trust| trust.as_ref().map(TrustModeHandle::current))
-            .unwrap_or_default()
     }
 }
 
@@ -80,16 +69,11 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         let call = call.clone();
         let actor_id = actor_id.to_string();
         let feedback = self.feedback().map(PluginFeedbackTx::for_current_turn);
-        let trust_mode = self.current_trust_mode();
         Box::pin(async move {
             let Some(feedback) = feedback else {
                 return Some(error_result(&call.name, "Agent Team 反馈通道不可用"));
             };
-            Some(
-                coordinator
-                    .handle_tool(call, actor_id, feedback, trust_mode)
-                    .await,
-            )
+            Some(coordinator.handle_tool(call, actor_id, feedback).await)
         })
     }
 }
@@ -117,12 +101,6 @@ impl Plugin for AgentTeamPlugin {
         self.coordinator.set_workspace(workspace);
     }
 
-    fn set_trust_mode(&self, trust_mode: TrustModeHandle) {
-        if let Ok(mut current) = self.trust_mode.write() {
-            *current = Some(trust_mode);
-        }
-    }
-
     fn set_feedback_tx(&self, feedback: PluginFeedbackTx) {
         if let Ok(mut current) = self.feedback.write() {
             *current = Some(feedback.clone());
@@ -136,10 +114,6 @@ impl Plugin for AgentTeamPlugin {
 
     fn on_session_ready(&self, session: &mut Session) {
         self.coordinator.initialize(session);
-    }
-
-    fn handle_runtime_command(&self, command: &Command) -> bool {
-        self.coordinator.handle_runtime_command(command)
     }
 
     fn shutdown<'a>(
@@ -431,12 +405,11 @@ mod tests {
             .build()
             .unwrap();
         parent_core
-            .deliver(AgentInputKind::prepared_with_id_and_trust_mode(
+            .deliver(AgentInputKind::prepared_with_id(
                 "parent-turn",
                 vec![ContentBlock::text(
                     "创建检查 Agent，让它完成检查，再根据结果回复我",
                 )],
-                TrustMode::FullTrust,
             ))
             .unwrap();
 

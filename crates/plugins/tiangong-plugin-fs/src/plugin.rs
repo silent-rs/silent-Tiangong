@@ -1,7 +1,7 @@
 //! 基础文件工具插件：聚合工具规格与覆盖处理器。
 //!
 //! [`FsPlugin`] 通过 [`Plugin::set_workspace`] 接收 core 注入的会话工作目录，
-//! 通过 [`Plugin::set_trust_mode`] 接收 core 注入的任务隔离信任解析句柄。工具规格与
+//! 通过 [`Plugin::set_trust_mode`] 接收 core 注入的会话信任解析句柄。工具规格与
 //! 覆盖处理器直接在本类型上实现，core 通过 supertrait 自动收集。
 
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ use tiangong_core::permission::{TrustMode, TrustModeHandle};
 /// 基础文件工具插件。
 ///
 /// `workspace` 由 core 在 engine 创建及每次会话目录变更时注入（可变）；
-/// `trust_mode` 由 core 在 register 前通过 `set_trust_mode` 注入（基线共享、单轮隔离）。
+/// `trust_mode` 由 core 在 register 前通过 `set_trust_mode` 注入（共享会话基线）。
 #[derive(Default)]
 pub struct FsPlugin {
     /// 当前会话工作目录（可变，由 core 注入）。
@@ -59,14 +59,6 @@ impl Plugin for FsPlugin {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }
-    }
-
-    fn tool_write_targets(
-        &self,
-        call: &tiangong_core::model::ToolCall,
-    ) -> Result<Vec<PathBuf>, String> {
-        self.resolve_tool_write_targets(call)
-            .map_err(|error| error.to_string())
     }
 
     // register 留空：信任模式已由 core 通过 set_trust_mode 统一注入，

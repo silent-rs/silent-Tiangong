@@ -62,7 +62,6 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared: vec![tiangong_types::ContentBlock::text(content)],
             message_id: None,
-            trust_mode_override: None,
         })
     }
 
@@ -71,22 +70,6 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: None,
-            trust_mode_override: None,
-        })
-    }
-
-    /// 便捷构造：指定单轮信任模式的 Prepared 用户消息。
-    ///
-    /// 覆盖只在该消息触发的 turn 内生效，轮次结束后 Core
-    /// 会自动恢复之前的信任模式。
-    pub fn prepared_with_trust_mode(
-        prepared: Vec<tiangong_types::ContentBlock>,
-        trust_mode: crate::permission::TrustMode,
-    ) -> Self {
-        AgentInputKind::Message(MessageInput::UserMessage {
-            prepared,
-            message_id: None,
-            trust_mode_override: Some(trust_mode),
         })
     }
 
@@ -98,20 +81,6 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: Some(message_id.into()),
-            trust_mode_override: None,
-        })
-    }
-
-    /// 便捷构造：带稳定消息 ID 和单轮信任模式的 Prepared 用户消息。
-    pub fn prepared_with_id_and_trust_mode(
-        message_id: impl Into<String>,
-        prepared: Vec<tiangong_types::ContentBlock>,
-        trust_mode: crate::permission::TrustMode,
-    ) -> Self {
-        AgentInputKind::Message(MessageInput::UserMessage {
-            prepared,
-            message_id: Some(message_id.into()),
-            trust_mode_override: Some(trust_mode),
         })
     }
 
@@ -126,19 +95,6 @@ impl AgentInputKind {
     /// 便捷构造：取消当前执行（cancel_flag 由 deliver 内部设置）。
     pub fn cancel() -> Self {
         AgentInputKind::Command(CommandInput::Cancel)
-    }
-
-    /// 便捷构造：向指定插件发送结构化控制指令。
-    pub fn plugin_control(
-        plugin_id: impl Into<String>,
-        action: impl Into<String>,
-        payload: serde_json::Value,
-    ) -> Self {
-        AgentInputKind::Command(CommandInput::PluginControl {
-            plugin_id: plugin_id.into(),
-            action: action.into(),
-            payload,
-        })
     }
 
     /// 便捷构造：更新工作目录。
@@ -171,10 +127,6 @@ pub enum MessageInput {
         prepared: Vec<tiangong_types::ContentBlock>,
         /// 前端预生成的消息 ID（用于流式复用），None 则由后端生成。
         message_id: Option<String>,
-        /// 仅对该消息触发的 turn 生效的信任模式覆盖。
-        ///
-        /// `None` 保持现有行为，使用 Core 当前的信任模式。
-        trust_mode_override: Option<crate::permission::TrustMode>,
     },
 }
 
@@ -192,12 +144,6 @@ pub enum ApprovalInput {
 pub enum CommandInput {
     /// 取消当前执行。
     Cancel,
-    /// 向指定插件发送结构化运行时控制指令。
-    PluginControl {
-        plugin_id: String,
-        action: String,
-        payload: serde_json::Value,
-    },
     /// 更新当前会话工作目录。
     UpdateCwd { cwd: String },
     /// 重新加载共享配置。
@@ -225,45 +171,4 @@ pub trait ToolInput: Send + Sync {
     /// 返回 JSON 而非文本，让 worker 侧根据 tool_name 决定呈现格式，
     /// 同时保留结构化数据供去重等逻辑使用。
     fn render(&self) -> serde_json::Value;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::permission::TrustMode;
-
-    #[test]
-    fn existing_prepared_constructor_has_no_trust_override() {
-        let input = AgentInputKind::prepared_with_id(
-            "message-1",
-            vec![tiangong_types::ContentBlock::text("hello")],
-        );
-
-        let AgentInputKind::Message(MessageInput::UserMessage {
-            trust_mode_override,
-            ..
-        }) = input
-        else {
-            panic!("expected user message");
-        };
-        assert_eq!(trust_mode_override, None);
-    }
-
-    #[test]
-    fn prepared_constructor_can_request_single_turn_trust_override() {
-        let input = AgentInputKind::prepared_with_id_and_trust_mode(
-            "message-2",
-            vec![tiangong_types::ContentBlock::text("scheduled task")],
-            TrustMode::FullTrust,
-        );
-
-        let AgentInputKind::Message(MessageInput::UserMessage {
-            trust_mode_override,
-            ..
-        }) = input
-        else {
-            panic!("expected user message");
-        };
-        assert_eq!(trust_mode_override, Some(TrustMode::FullTrust));
-    }
 }

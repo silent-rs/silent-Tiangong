@@ -11,17 +11,11 @@ use crate::planner::{PlanItem, PlanStepSource, PlanStepStatus};
 
 pub use tiangong_types::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
-    MessageToolCall, PendingPluginDelivery, StoredAsset, now_text,
+    MessageToolCall, StoredAsset, now_text,
 };
 
 /// 同一进程内的持久化写入共用此锁，避免 Core 与宿主同时替换会话文件。
 static PERSISTENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
-
-/// 单次插件投递提交可安全记录的最大未完成 ID 数量。
-///
-/// 完成账本至少保留完整的最近一次提交，既支持崩溃重试幂等，也避免同批 ID 在写入
-/// 时被静默淘汰。插件应按此稳定上限分批提交。
-pub const MAX_PLUGIN_DELIVERIES_PER_COMMIT: usize = 1_024;
 
 /// 在目标文件所在目录写入临时文件，并原子替换目标文件。
 ///
@@ -129,16 +123,6 @@ pub struct Session {
     /// 工具调用批次闭合前收到的外部工具输入；下一安全边界按顺序注入。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tool_injections: Vec<DeferredToolInjection>,
-    /// 已确认但尚未由所有者插件完成的持久投递。
-    #[serde(
-        default,
-        alias = "pending_agent_deliveries",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub pending_plugin_deliveries: Vec<PendingPluginDelivery>,
-    /// 最近完成的稳定投递 ID，用于提交 ACK 丢失后的幂等重试。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub completed_plugin_delivery_ids: Vec<String>,
     /// 当前 Session 独立的持久化根，仅用于运行时，不写入会话 JSON。
     #[serde(skip)]
     storage_root: Option<PathBuf>,
@@ -300,8 +284,6 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
-            pending_plugin_deliveries: Vec::new(),
-            completed_plugin_delivery_ids: Vec::new(),
             storage_root: None,
         }
     }
@@ -338,8 +320,6 @@ impl Session {
             updated_at: now,
             parent_session_id: None,
             deferred_tool_injections: Vec::new(),
-            pending_plugin_deliveries: Vec::new(),
-            completed_plugin_delivery_ids: Vec::new(),
             storage_root: None,
         }
     }
@@ -590,52 +570,6 @@ impl Session {
     pub(crate) fn defer_tool_injection(&mut self, tool_name: String, payload: serde_json::Value) {
         self.deferred_tool_injections
             .push(DeferredToolInjection { tool_name, payload });
-    }
-
-    pub(crate) fn replace_pending_plugin_deliveries(
-        &mut self,
-        source_message_id: &str,
-        mut deliveries: Vec<PendingPluginDelivery>,
-    ) {
-        self.pending_plugin_deliveries
-            .retain(|delivery| delivery.source_message_id != source_message_id);
-        let completed = self
-            .completed_plugin_delivery_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
-        deliveries.retain(|delivery| !completed.contains(delivery.delivery_id.as_str()));
-        self.pending_plugin_deliveries.extend(deliveries);
-        self.updated_at = now_text();
-    }
-
-    pub(crate) fn complete_plugin_deliveries(&mut self, delivery_ids: &[String]) {
-        if delivery_ids.is_empty() {
-            return;
-        }
-        let completed = delivery_ids
-            .iter()
-            .collect::<std::collections::HashSet<_>>();
-        self.pending_plugin_deliveries
-            .retain(|delivery| !completed.contains(&delivery.delivery_id));
-        let mut recorded = self
-            .completed_plugin_delivery_ids
-            .iter()
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        for delivery_id in delivery_ids {
-            if recorded.insert(delivery_id.clone()) {
-                self.completed_plugin_delivery_ids.push(delivery_id.clone());
-            }
-        }
-        let overflow = self
-            .completed_plugin_delivery_ids
-            .len()
-            .saturating_sub(MAX_PLUGIN_DELIVERIES_PER_COMMIT);
-        if overflow > 0 {
-            self.completed_plugin_delivery_ids.drain(..overflow);
-        }
-        self.updated_at = now_text();
     }
 
     pub fn append_worker_message(
@@ -1058,15 +992,6 @@ impl Session {
         };
         let remove_count = self.messages.len() - idx - 1;
         self.messages.truncate(idx + 1);
-        let retained_message_ids = self
-            .messages
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        self.pending_plugin_deliveries.retain(|delivery| {
-            delivery.source_message_id != message_id
-                && retained_message_ids.contains(delivery.source_message_id.as_str())
-        });
         remove_count
     }
 }
@@ -1273,114 +1198,5 @@ mod ready_content_tests {
         let legacy: Session = serde_json::from_value(legacy_value).unwrap();
         assert!(!legacy.messages[0].model_excluded);
         assert_eq!(legacy.context().len(), 1);
-    }
-
-    #[test]
-    fn pending_plugin_deliveries_round_trip_without_transient_image_data() {
-        let mut session = Session::new("pending-plugin-delivery");
-        session.pending_plugin_deliveries = vec![PendingPluginDelivery {
-            delivery_id: "delivery-1".to_string(),
-            source_message_id: "source-1".to_string(),
-            plugin_id: "example_plugin".to_string(),
-            target_id: "target-dev".to_string(),
-            content: "检查图片".to_string(),
-            created_at: now_text(),
-            additional_content: tiangong_types::stable_content_blocks(&prepared_message(
-                "SECRET_PENDING_BASE64",
-            )),
-        }];
-
-        let json = serde_json::to_string(&session).unwrap();
-        assert!(!json.contains("SECRET_PENDING_BASE64"));
-        let restored: Session = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.pending_plugin_deliveries.len(), 1);
-        assert_eq!(
-            restored.pending_plugin_deliveries[0].delivery_id,
-            "delivery-1"
-        );
-        assert!(matches!(
-            &restored.pending_plugin_deliveries[0].additional_content[1],
-            ContentBlock::Image { data: None, .. }
-        ));
-    }
-
-    #[test]
-    fn legacy_pending_delivery_deserializes_into_generic_contract() {
-        let mut session = Session::new("legacy-plugin-delivery");
-        session.pending_plugin_deliveries = vec![PendingPluginDelivery {
-            delivery_id: "delivery-legacy".to_string(),
-            source_message_id: "source-legacy".to_string(),
-            plugin_id: "example_plugin".to_string(),
-            target_id: "target-legacy".to_string(),
-            content: "legacy".to_string(),
-            created_at: now_text(),
-            additional_content: Vec::new(),
-        }];
-        let mut value = serde_json::to_value(session).unwrap();
-        let object = value.as_object_mut().unwrap();
-        let mut deliveries = object.remove("pending_plugin_deliveries").unwrap();
-        let delivery = deliveries.as_array_mut().unwrap()[0]
-            .as_object_mut()
-            .unwrap();
-        delivery.remove("plugin_id");
-        let target = delivery.remove("target_id").unwrap();
-        delivery.insert("target_agent_id".to_string(), target);
-        object.insert("pending_agent_deliveries".to_string(), deliveries);
-
-        let restored: Session = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.pending_plugin_deliveries.len(), 1);
-        assert_eq!(restored.pending_plugin_deliveries[0].plugin_id, "");
-        assert_eq!(
-            restored.pending_plugin_deliveries[0].target_id,
-            "target-legacy"
-        );
-    }
-
-    #[test]
-    fn completing_one_plugin_delivery_keeps_other_targets_pending() {
-        let mut session = Session::new("broadcast-delivery");
-        for (delivery_id, target_id) in [
-            ("delivery-dev", "target-dev"),
-            ("delivery-test", "target-test"),
-        ] {
-            session
-                .pending_plugin_deliveries
-                .push(PendingPluginDelivery {
-                    delivery_id: delivery_id.to_string(),
-                    source_message_id: "source-all".to_string(),
-                    plugin_id: "example_plugin".to_string(),
-                    target_id: target_id.to_string(),
-                    content: "同步检查".to_string(),
-                    created_at: now_text(),
-                    additional_content: vec![ContentBlock::text("同步检查")],
-                });
-        }
-
-        session.complete_plugin_deliveries(&["delivery-dev".to_string()]);
-
-        assert_eq!(session.pending_plugin_deliveries.len(), 1);
-        assert_eq!(
-            session.pending_plugin_deliveries[0].delivery_id,
-            "delivery-test"
-        );
-        assert_eq!(session.completed_plugin_delivery_ids, ["delivery-dev"]);
-
-        session.complete_plugin_deliveries(&["delivery-dev".to_string()]);
-        assert_eq!(session.completed_plugin_delivery_ids, ["delivery-dev"]);
-    }
-
-    #[test]
-    fn completed_plugin_delivery_history_is_bounded() {
-        let mut session = Session::new("bounded-delivery-history");
-        let ids = (0..=MAX_PLUGIN_DELIVERIES_PER_COMMIT)
-            .map(|index| format!("delivery-{index}"))
-            .collect::<Vec<_>>();
-        session.complete_plugin_deliveries(&ids);
-
-        assert_eq!(
-            session.completed_plugin_delivery_ids.len(),
-            MAX_PLUGIN_DELIVERIES_PER_COMMIT
-        );
-        assert_eq!(session.completed_plugin_delivery_ids[0], "delivery-1");
     }
 }

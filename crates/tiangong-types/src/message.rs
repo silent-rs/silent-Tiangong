@@ -47,26 +47,6 @@ pub struct MessageToolCall {
     pub arguments: Value,
 }
 
-/// 已确认但尚未由目标插件完成的持久投递。
-///
-/// Core 只负责保存稳定标识、所有者与消息负载，不解释插件目标的具体语义。
-/// 该状态随 Session 持久化，并通过流事件同步给宿主镜像，避免重启后丢失。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingPluginDelivery {
-    pub delivery_id: String,
-    pub source_message_id: String,
-    /// 所有者插件 ID。旧会话缺少该字段时为空，由插件在兼容边界认领。
-    #[serde(default)]
-    pub plugin_id: String,
-    /// 插件内部的稳定目标 ID；旧版 Agent Team 会话使用 `target_agent_id`。
-    #[serde(alias = "target_agent_id")]
-    pub target_id: String,
-    pub content: String,
-    pub created_at: String,
-    #[serde(default, deserialize_with = "deserialize_stable_content_blocks")]
-    pub additional_content: Vec<ContentBlock>,
-}
-
 /// 工具调用批次闭合前收到、等待安全边界注入的外部工具内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferredToolInjection {
@@ -124,17 +104,6 @@ pub enum ContentBlock {
     AssetReference {
         asset: StoredAsset,
     },
-}
-
-fn deserialize_stable_content_blocks<'de, D>(deserializer: D) -> Result<Vec<ContentBlock>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mut content = Vec::<ContentBlock>::deserialize(deserializer)?;
-    for block in &mut content {
-        block.clear_transient_data();
-    }
-    Ok(content)
 }
 
 impl ContentBlock {

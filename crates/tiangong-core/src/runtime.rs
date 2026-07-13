@@ -90,8 +90,6 @@ pub struct RuntimeEngine {
     tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
     /// Plugin 注册的 Prompt 段落提供者
     prompt_section_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>>,
-    /// 已注册插件实例（供通用消息投递、工具策略和运行时控制钩子使用）。
-    plugins: Arc<Mutex<Vec<Arc<dyn crate::core::Plugin>>>>,
     /// Turn-scoped 插件 usage 收集器（由插件经 PluginFeedbackTx.report_token_usage
     /// 即时累加，turn 开始绑定 / 结束解绑，见 core::plugin::feedback::TurnUsageSink）。
     turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
@@ -112,10 +110,7 @@ impl std::fmt::Debug for RuntimeEngine {
 
 impl RuntimeEngine {
     #[cfg(test)]
-    pub(crate) fn for_react_test(
-        client: SingleProviderClient,
-        plugin: Arc<dyn crate::core::Plugin>,
-    ) -> Self {
+    pub(crate) fn for_react_test(client: SingleProviderClient) -> Self {
         let agent_config = AgentConfig::default();
         let permission_gate =
             crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
@@ -134,7 +129,6 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
-            plugins: Arc::new(Mutex::new(vec![plugin])),
             turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
@@ -165,7 +159,6 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
-            plugins: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
@@ -198,7 +191,6 @@ impl RuntimeEngine {
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
-            plugins: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
         }
     }
@@ -347,55 +339,6 @@ impl RuntimeEngine {
             .unwrap_or_default()
     }
 
-    /// 注册插件实例，供工具规格之外的通用生命周期扩展点使用。
-    pub(crate) fn register_plugin(&self, plugin: Arc<dyn crate::core::Plugin>) {
-        if let Ok(mut guard) = self.plugins.lock() {
-            guard.push(plugin);
-        }
-    }
-
-    fn plugins(&self) -> Vec<Arc<dyn crate::core::Plugin>> {
-        self.plugins.lock().map(|g| g.clone()).unwrap_or_default()
-    }
-
-    /// 汇总插件为用户消息规划的持久投递。
-    pub(crate) fn plan_plugin_deliveries(
-        &self,
-        actor_id: &str,
-        source_message_id: &str,
-        prepared: &[tiangong_types::ContentBlock],
-    ) -> Vec<crate::session::PendingPluginDelivery> {
-        self.plugins()
-            .iter()
-            .flat_map(|plugin| plugin.plan_plugin_deliveries(actor_id, source_message_id, prepared))
-            .collect()
-    }
-
-    /// 通知插件派发已成功持久化的用户消息计划。
-    pub(crate) fn dispatch_plugin_deliveries(
-        &self,
-        session: &Session,
-        source_message_id: &str,
-    ) -> bool {
-        let mut dispatched = false;
-        for plugin in self.plugins() {
-            dispatched |= plugin.dispatch_plugin_deliveries(session, source_message_id);
-        }
-        dispatched
-    }
-
-    /// 把工具执行期间到达的控制命令广播给插件内部执行单元。
-    pub(crate) fn handle_plugin_runtime_command(
-        &self,
-        command: &crate::core::command::Command,
-    ) -> bool {
-        let mut handled = false;
-        for plugin in self.plugins() {
-            handled |= plugin.handle_runtime_command(command);
-        }
-        handled
-    }
-
     pub fn provider_label(&self) -> String {
         format!(
             "{} @ {} · {}ms",
@@ -425,44 +368,6 @@ impl RuntimeEngine {
         session: &mut Session,
         actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
-        // 同一份插件快照既贡献写入目标也执行策略检查，避免两次竞争注册表锁。
-        let plugins = self.plugins();
-        let mut write_targets = Vec::new();
-        for plugin in &plugins {
-            match plugin.tool_write_targets(call) {
-                Ok(targets) => write_targets.extend(targets),
-                Err(reason) => {
-                    return Box::pin(async move {
-                        ToolResult {
-                            ok: false,
-                            summary: format!("工具策略拒绝：{reason}"),
-                            stdout: String::new(),
-                            stderr: reason,
-                            exit_code: 1,
-                            execution: None,
-                        }
-                    });
-                }
-            }
-        }
-        write_targets.sort();
-        write_targets.dedup();
-        let guard_result = plugins
-            .iter()
-            .try_for_each(|plugin| plugin.guard_tool_call(actor_id, call, &write_targets));
-        if let Err(reason) = guard_result {
-            return Box::pin(async move {
-                ToolResult {
-                    ok: false,
-                    summary: format!("工具策略拒绝：{reason}"),
-                    stdout: String::new(),
-                    stderr: reason,
-                    exit_code: 1,
-                    execution: None,
-                }
-            });
-        }
-
         // 权限检查
         use crate::permission::PermissionDecision;
         match self.permission_gate.check(&call.name) {

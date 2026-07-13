@@ -4,12 +4,8 @@ pub const PLUGIN_ID: &str = "agent_team";
 pub(crate) const CHILD_PLUGIN_ID: &str = "agent_team_child";
 /// 工具中用于寻址父 Core 的稳定角色名；实际 actor ID 是父 Session ID。
 pub(crate) const MAIN_ROLE: &str = "main";
-/// 定向取消控制动作。
-pub const CONTROL_CANCEL_AGENT: &str = "cancel_agent";
-
 pub const MAX_AGENTS: usize = 8;
 pub(crate) const FILE_LOCK_LEASE_SECS: i64 = 300;
-pub(crate) const MAX_SUB_AGENT_COMMAND_TIMEOUT_SECS: u64 = FILE_LOCK_LEASE_SECS as u64 - 60;
 
 pub const TOOL_CREATE_AGENT: &str = "create_agent";
 pub const TOOL_DISMISS_AGENT: &str = "dismiss_agent";

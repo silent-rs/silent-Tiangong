@@ -6,9 +6,9 @@
 
 mod adapter;
 mod child_runtime;
-mod command_safety;
 mod constants;
 mod coordinator;
+mod guarded_plugin;
 mod manifest;
 mod state;
 mod tools;
@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tiangong_core::core::Plugin;
+
+use crate::coordinator::Coordinator;
 
 /// 构造一个父 Core 使用的 Agent Team 插件。
 pub fn build_plugin(
@@ -39,13 +41,9 @@ pub fn default_plugins(
     vec![build_plugin(storage_root, child_plugins)]
 }
 
-/// 把宿主的“取消 Agent”操作适配为 Core 的通用插件控制输入。
-pub fn cancel_agent_input(role: impl Into<String>) -> tiangong_core::agent_input::AgentInputKind {
-    tiangong_core::agent_input::AgentInputKind::plugin_control(
-        PLUGIN_ID,
-        CONTROL_CANCEL_AGENT,
-        serde_json::json!({ "role": role.into() }),
-    )
+/// 由宿主直接请求 Agent Team 插件取消指定子 Agent，不经过 Core 命令路由。
+pub fn cancel_agent(parent_session_id: &str, role: &str) -> bool {
+    Coordinator::cancel_registered(parent_session_id, role)
 }
 
 #[cfg(test)]

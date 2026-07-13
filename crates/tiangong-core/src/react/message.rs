@@ -2,11 +2,7 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use crate::core::plugin::PluginFeedback;
-use crate::session::{
-    MAX_PLUGIN_DELIVERIES_PER_COMMIT, Message, MessageRole, MessageToolCall, PendingPluginDelivery,
-    Session,
-};
+use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{
     ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
@@ -46,25 +42,18 @@ pub(crate) struct AcceptedUserMessage {
     pub prepared: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeMessageDisposition {
-    CurrentAgentInput(String),
-    RoutedToPlugin,
-}
-
 pub(crate) fn emit_session_message_upsert(
     session: &Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: &str,
 ) {
-    emit_session_message_upsert_with_state(session, stream_tx, message_id, false, false);
+    emit_session_message_upsert_with_state(session, stream_tx, message_id, false);
 }
 
 pub(crate) fn emit_session_message_upsert_with_state(
     session: &Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: &str,
-    include_plugin_delivery_state: bool,
     include_deferred_tool_injections: bool,
 ) {
     let Some(mut message) = session
@@ -78,153 +67,9 @@ pub(crate) fn emit_session_message_upsert_with_state(
     message.clear_transient_data();
     let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
         message,
-        pending_plugin_deliveries: include_plugin_delivery_state
-            .then(|| session.pending_plugin_deliveries.clone()),
-        completed_plugin_delivery_ids: include_plugin_delivery_state
-            .then(|| session.completed_plugin_delivery_ids.clone()),
         deferred_tool_injections: include_deferred_tool_injections
             .then(|| session.deferred_tool_injections.clone()),
     });
-}
-
-pub(crate) fn emit_plugin_delivery_state_changed(
-    session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
-) {
-    let mut deliveries = session.pending_plugin_deliveries.clone();
-    for delivery in &mut deliveries {
-        for block in &mut delivery.additional_content {
-            block.clear_transient_data();
-        }
-    }
-    let _ = stream_tx.send(StreamEvent::PendingPluginDeliveriesChanged {
-        deliveries,
-        completed_delivery_ids: session.completed_plugin_delivery_ids.clone(),
-    });
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct PluginDeliveryCommitOutcome {
-    pub pending_deliveries_removed: bool,
-    pub completion_ids_recorded: bool,
-    pub deferred_injections_added: bool,
-    source_message_ids: std::collections::BTreeSet<String>,
-}
-
-/// 原子提交插件投递完成状态与对应工具注入，并同步父会话快照。
-pub(crate) fn commit_plugin_deliveries(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    delivery_ids: Vec<String>,
-    tool_injections: Vec<PluginFeedback>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-) -> Result<PluginDeliveryCommitOutcome, String> {
-    let result = persist_plugin_delivery_commit(
-        session,
-        &delivery_ids,
-        tool_injections,
-        Session::try_persist_to_disk,
-    );
-
-    match result {
-        Ok(outcome) => {
-            if outcome.pending_deliveries_removed || outcome.completion_ids_recorded {
-                emit_plugin_delivery_state_changed(session, stream_tx);
-            }
-            if outcome.pending_deliveries_removed {
-                for source_message_id in &outcome.source_message_ids {
-                    emit_session_message_upsert_with_state(
-                        session,
-                        stream_tx,
-                        source_message_id,
-                        true,
-                        true,
-                    );
-                }
-            }
-            if outcome.deferred_injections_added {
-                emit_deferred_tool_injections_changed(session, stream_tx);
-            }
-            // flush 自行检查未闭合工具调用；不安全时保持 deferred 状态等待下一边界。
-            flush_deferred_tool_injections(session, stream_tx);
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Ok(()));
-            }
-            Ok(outcome)
-        }
-        Err(error) => {
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Err(error.clone()));
-            }
-            Err(error)
-        }
-    }
-}
-
-fn persist_plugin_delivery_commit(
-    session: &mut Session,
-    delivery_ids: &[String],
-    tool_injections: Vec<PluginFeedback>,
-    persist: impl FnOnce(&Session) -> Result<(), String>,
-) -> Result<PluginDeliveryCommitOutcome, String> {
-    let already_completed = session
-        .completed_plugin_delivery_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let mut seen = std::collections::HashSet::new();
-    let uncommitted_delivery_ids = delivery_ids
-        .iter()
-        .filter(|delivery_id| {
-            !already_completed.contains(delivery_id.as_str()) && seen.insert(delivery_id.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if uncommitted_delivery_ids.len() > MAX_PLUGIN_DELIVERIES_PER_COMMIT {
-        return Err(format!(
-            "单次插件投递提交包含 {} 个未完成 ID，超过安全上限 {}，请分批提交",
-            uncommitted_delivery_ids.len(),
-            MAX_PLUGIN_DELIVERIES_PER_COMMIT
-        ));
-    }
-    let uncommitted = uncommitted_delivery_ids
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-    let source_message_ids = session
-        .pending_plugin_deliveries
-        .iter()
-        .filter(|delivery| uncommitted.contains(delivery.delivery_id.as_str()))
-        .map(|delivery| delivery.source_message_id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    // 带稳定 delivery_id 的提交按 ID 幂等：全部已完成时，重试不能重复写入报告。
-    if !delivery_ids.is_empty() && uncommitted_delivery_ids.is_empty() {
-        return Ok(PluginDeliveryCommitOutcome::default());
-    }
-    if delivery_ids.is_empty() && tool_injections.is_empty() {
-        return Ok(PluginDeliveryCommitOutcome::default());
-    }
-
-    let before = session.clone();
-    if !uncommitted_delivery_ids.is_empty() {
-        session.complete_plugin_deliveries(&uncommitted_delivery_ids);
-    }
-    let deferred_injections_added = !tool_injections.is_empty();
-    for injection in tool_injections {
-        session.defer_tool_injection(injection.tool_name, injection.payload);
-    }
-    if let Err(error) = persist(session) {
-        *session = before;
-        return Err(error);
-    }
-
-    Ok(PluginDeliveryCommitOutcome {
-        pending_deliveries_removed: !source_message_ids.is_empty(),
-        completion_ids_recorded: !uncommitted_delivery_ids.is_empty(),
-        deferred_injections_added,
-        source_message_ids,
-    })
 }
 
 pub(crate) fn emit_deferred_tool_injections_changed(
@@ -250,15 +95,12 @@ pub(crate) fn defer_tool_injection(
 /// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
 ///
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn accept_prepared_user_message_with_options(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    pending_plugin_deliveries: Vec<PendingPluginDelivery>,
-    model_excluded: bool,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
     if let Err(err) = validate_ready_content_blocks(&prepared) {
@@ -307,11 +149,6 @@ pub(crate) fn accept_prepared_user_message_with_options(
             return Err(err);
         }
     };
-    if let Some(message) = session.messages.get_mut(turn_start_idx) {
-        message.model_excluded = model_excluded;
-    }
-    session.replace_pending_plugin_deliveries(&message_id, pending_plugin_deliveries);
-
     if let Err(err) = session.try_persist_to_disk() {
         *session = before;
         if let Some(ack) = persistence_ack {
@@ -344,8 +181,7 @@ pub(crate) fn accept_prepared_user_message_with_options(
         content: text.clone(),
         content_blocks: stable_content,
         media: media.clone(),
-        model_excluded,
-        pending_plugin_deliveries: session.pending_plugin_deliveries.clone(),
+        model_excluded: false,
     });
     Ok(AcceptedUserMessage {
         message_id,
@@ -422,71 +258,34 @@ fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 持久化用户消息，并在落盘前后执行插件贡献的通用投递规划与派发。
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn accept_user_message_with_plugin_routes(
-    engine: &crate::runtime::RuntimeEngine,
-    actor_id: &str,
+/// 持久化用户消息，并直接交给当前 Agent 处理。
+pub(crate) fn accept_user_message(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     close_pending_tools: bool,
-) -> Result<(AcceptedUserMessage, bool), String> {
-    let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-    let pending_plugin_deliveries = engine.plan_plugin_deliveries(actor_id, &message_id, &prepared);
-    let route_planned = !pending_plugin_deliveries.is_empty();
-    let accepted = accept_prepared_user_message_with_options(
+) -> Result<AcceptedUserMessage, String> {
+    accept_prepared_user_message_with_options(
         session,
         stream_tx,
-        Some(message_id),
+        message_id,
         prepared,
         persistence_ack,
-        pending_plugin_deliveries,
-        route_planned,
-        close_pending_tools && !route_planned,
-    )?;
-
-    let routed = route_planned && engine.dispatch_plugin_deliveries(session, &accepted.message_id);
-    if route_planned && !routed {
-        if let Some(message) = session
-            .messages
-            .iter_mut()
-            .find(|message| message.id == accepted.message_id)
-        {
-            message.model_excluded = false;
-        }
-        session.replace_pending_plugin_deliveries(&accepted.message_id, Vec::new());
-        if let Err(error) = session.try_persist_to_disk() {
-            tracing::warn!(%error, "插件消息路由失效后恢复当前 Agent 可见性失败");
-        }
-        emit_session_message_upsert_with_state(
-            session,
-            stream_tx,
-            &accepted.message_id,
-            true,
-            false,
-        );
-    }
-
-    Ok((accepted, routed))
+        close_pending_tools,
+    )
 }
 
-/// 持久化执行中的追加消息；插件接管时保持当前 Agent 的流式执行不被打断。
-#[allow(clippy::too_many_arguments)]
+/// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
 pub(crate) fn accept_runtime_user_message(
-    engine: &crate::runtime::RuntimeEngine,
-    actor_id: &str,
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-) -> Result<RuntimeMessageDisposition, String> {
-    let (accepted, routed) = accept_user_message_with_plugin_routes(
-        engine,
-        actor_id,
+) -> Result<String, String> {
+    let accepted = accept_user_message(
         session,
         stream_tx,
         message_id,
@@ -494,13 +293,7 @@ pub(crate) fn accept_runtime_user_message(
         persistence_ack,
         true,
     )?;
-    if routed {
-        Ok(RuntimeMessageDisposition::RoutedToPlugin)
-    } else {
-        Ok(RuntimeMessageDisposition::CurrentAgentInput(
-            content_blocks_text(&accepted.prepared),
-        ))
-    }
+    Ok(content_blocks_text(&accepted.prepared))
 }
 
 fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
@@ -1127,167 +920,6 @@ fn format_payload_value(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pending_delivery(delivery_id: &str) -> PendingPluginDelivery {
-        PendingPluginDelivery {
-            delivery_id: delivery_id.to_string(),
-            source_message_id: "source-message".to_string(),
-            plugin_id: "example_plugin".to_string(),
-            target_id: "target-dev".to_string(),
-            content: "work".to_string(),
-            created_at: "2026-07-12 12:00:00".to_string(),
-            additional_content: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn plugin_delivery_commit_is_atomic_and_idempotent() {
-        let mut session = Session::new("plugin-delivery-commit");
-        session
-            .pending_plugin_deliveries
-            .push(pending_delivery("delivery-1"));
-        let delivery_ids = vec!["delivery-1".to_string()];
-        let report =
-            || PluginFeedback::new("agent_report", serde_json::json!({ "content": "done" }));
-
-        let outcome =
-            persist_plugin_delivery_commit(&mut session, &delivery_ids, vec![report()], |_| Ok(()))
-                .unwrap();
-        assert!(outcome.pending_deliveries_removed);
-        assert!(outcome.completion_ids_recorded);
-        assert!(outcome.deferred_injections_added);
-        assert!(session.pending_plugin_deliveries.is_empty());
-        assert_eq!(session.completed_plugin_delivery_ids, ["delivery-1"]);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-
-        let retry = persist_plugin_delivery_commit(
-            &mut session,
-            &delivery_ids,
-            vec![report()],
-            |_| -> Result<(), String> { panic!("幂等重试不应再次持久化") },
-        )
-        .unwrap();
-        assert!(!retry.pending_deliveries_removed);
-        assert!(!retry.completion_ids_recorded);
-        assert!(!retry.deferred_injections_added);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-    }
-
-    #[test]
-    fn plugin_delivery_commit_rolls_back_both_changes_on_persist_failure() {
-        let mut session = Session::new("plugin-delivery-rollback");
-        session
-            .pending_plugin_deliveries
-            .push(pending_delivery("delivery-1"));
-
-        let result = persist_plugin_delivery_commit(
-            &mut session,
-            &["delivery-1".to_string()],
-            vec![PluginFeedback::new(
-                "agent_report",
-                serde_json::json!({ "content": "done" }),
-            )],
-            |_| Err("persist failed".to_string()),
-        );
-
-        assert_eq!(result.unwrap_err(), "persist failed");
-        assert_eq!(session.pending_plugin_deliveries.len(), 1);
-        assert_eq!(
-            session.pending_plugin_deliveries[0].delivery_id,
-            "delivery-1"
-        );
-        assert!(session.completed_plugin_delivery_ids.is_empty());
-        assert!(session.deferred_tool_injections.is_empty());
-    }
-
-    #[test]
-    fn plugin_delivery_commit_records_non_pending_ids_for_safe_retry() {
-        let mut session = Session::new("plugin-internal-delivery-commit");
-        let ids = vec!["internal-message-1".to_string()];
-        let report = || {
-            PluginFeedback::new(
-                "plugin_async_report",
-                serde_json::json!({ "content": "done" }),
-            )
-        };
-
-        let outcome =
-            persist_plugin_delivery_commit(&mut session, &ids, vec![report()], |_| Ok(())).unwrap();
-        assert!(!outcome.pending_deliveries_removed);
-        assert!(outcome.completion_ids_recorded);
-        assert!(outcome.deferred_injections_added);
-        assert_eq!(session.completed_plugin_delivery_ids, ids);
-
-        let retry = persist_plugin_delivery_commit(
-            &mut session,
-            &["internal-message-1".to_string()],
-            vec![report()],
-            |_| -> Result<(), String> { panic!("完成 ID 重试不应再次持久化") },
-        )
-        .unwrap();
-        assert!(!retry.completion_ids_recorded);
-        assert!(!retry.deferred_injections_added);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-    }
-
-    #[test]
-    fn plugin_delivery_commit_rejects_oversized_uncommitted_batch_without_mutation() {
-        let mut session = Session::new("plugin-delivery-oversized");
-        let delivery_ids = (0..=MAX_PLUGIN_DELIVERIES_PER_COMMIT)
-            .map(|index| format!("delivery-{index}"))
-            .collect::<Vec<_>>();
-
-        let error = persist_plugin_delivery_commit(
-            &mut session,
-            &delivery_ids,
-            vec![PluginFeedback::new(
-                "agent_report",
-                serde_json::json!({ "content": "must not persist" }),
-            )],
-            |_| -> Result<(), String> { panic!("超限提交不应尝试持久化") },
-        )
-        .unwrap_err();
-
-        assert!(error.contains("超过安全上限"));
-        assert!(error.contains(&(MAX_PLUGIN_DELIVERIES_PER_COMMIT + 1).to_string()));
-        assert!(session.completed_plugin_delivery_ids.is_empty());
-        assert!(session.deferred_tool_injections.is_empty());
-    }
-
-    #[test]
-    fn plugin_delivery_commit_accepts_exact_limit_and_retry_is_idempotent() {
-        let mut session = Session::new("plugin-delivery-limit");
-        let delivery_ids = (0..MAX_PLUGIN_DELIVERIES_PER_COMMIT)
-            .map(|index| format!("delivery-{index}"))
-            .collect::<Vec<_>>();
-        let report = || {
-            PluginFeedback::new(
-                "agent_report",
-                serde_json::json!({ "content": "bounded batch" }),
-            )
-        };
-
-        let outcome =
-            persist_plugin_delivery_commit(&mut session, &delivery_ids, vec![report()], |_| Ok(()))
-                .unwrap();
-        assert!(outcome.completion_ids_recorded);
-        assert!(outcome.deferred_injections_added);
-        assert_eq!(
-            session.completed_plugin_delivery_ids.len(),
-            MAX_PLUGIN_DELIVERIES_PER_COMMIT
-        );
-
-        let retry = persist_plugin_delivery_commit(
-            &mut session,
-            &delivery_ids,
-            vec![report()],
-            |_| -> Result<(), String> { panic!("边界批次重试不应再次持久化") },
-        )
-        .unwrap();
-        assert!(!retry.completion_ids_recorded);
-        assert!(!retry.deferred_injections_added);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-    }
 
     #[test]
     fn preloaded_same_id_message_uses_its_actual_index_as_turn_start() {

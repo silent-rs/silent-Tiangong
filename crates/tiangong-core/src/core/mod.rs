@@ -12,7 +12,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::{accept_user_message_with_plugin_routes, append_runtime_tool_message};
+use crate::react::message::{accept_user_message, append_runtime_tool_message};
 use crate::runtime::RuntimeEngine;
 use crate::session::{MessageRole, Session};
 use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
@@ -51,7 +51,7 @@ pub struct TiangongCore {
     ///
     /// 宿主可以按会话原子替换配置，不会影响同进程中的其他 Core。
     config: CoreConfigProvider,
-    /// 会话信任模式基线与按执行任务隔离的 turn 覆盖。
+    /// 会话信任模式基线。
     trust_mode: crate::permission::TrustModeHandle,
     /// 取消标志（stream consumer 检查此标志跳过 Delta/Reasoning 事件）
     cancel_flag: Arc<AtomicBool>,
@@ -71,50 +71,6 @@ pub struct PreparedMessageReceipt {
 /// 会话元数据入队后返回的持久化确认句柄。
 pub struct SessionMetadataReceipt {
     receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
-}
-
-/// 单个 turn 内的信任模式控制器。
-///
-/// 运行中收到新的 `Command::Message` 时，ReAct 循环会复用该控制器
-/// 切换到新消息的覆盖；新消息没有覆盖时立即使用最新会话基线。
-#[derive(Clone)]
-pub(crate) struct TurnTrustModeController {
-    binding: crate::permission::TrustModeBindingController,
-}
-
-impl TurnTrustModeController {
-    pub(crate) fn apply_message_override(
-        &self,
-        trust_mode_override: Option<crate::permission::TrustMode>,
-    ) {
-        self.binding.apply_override(trust_mode_override);
-    }
-}
-
-/// 工作循环的 RAII 轮次边界；任何 `continue` / `break` / unwind
-/// 都会恢复轮次开始前的信任模式。
-pub(crate) struct TurnTrustModeGuard {
-    _binding_guard: crate::permission::TrustModeBindingGuard,
-    controller: TurnTrustModeController,
-}
-
-impl TurnTrustModeGuard {
-    pub(crate) fn new(
-        trust_mode: crate::permission::TrustModeHandle,
-        trust_mode_override: Option<crate::permission::TrustMode>,
-    ) -> Self {
-        let binding_guard = trust_mode.bind_override(trust_mode_override);
-        Self {
-            controller: TurnTrustModeController {
-                binding: binding_guard.controller(),
-            },
-            _binding_guard: binding_guard,
-        }
-    }
-
-    pub(crate) fn controller(&self) -> TurnTrustModeController {
-        self.controller.clone()
-    }
 }
 
 impl PreparedMessageReceipt {
@@ -243,29 +199,6 @@ impl TiangongCore {
         message_id: impl Into<String>,
         prepared: Vec<ContentBlock>,
     ) -> Result<PreparedMessageReceipt, CoreError> {
-        self.enqueue_prepared_with_receipt_inner(message_id, prepared, None)
-    }
-
-    /// 同步入队 Prepared 用户消息，并仅在该轮使用指定信任模式。
-    ///
-    /// 返回的确认句柄与 [`enqueue_prepared_with_receipt`](Self::enqueue_prepared_with_receipt)
-    /// 语义相同；无论消息持久化、插件路由、执行、取消或关闭如何结束，
-    /// Core 都会在该 turn 后恢复原信任模式。
-    pub fn enqueue_prepared_with_receipt_and_trust_mode(
-        &self,
-        message_id: impl Into<String>,
-        prepared: Vec<ContentBlock>,
-        trust_mode: crate::permission::TrustMode,
-    ) -> Result<PreparedMessageReceipt, CoreError> {
-        self.enqueue_prepared_with_receipt_inner(message_id, prepared, Some(trust_mode))
-    }
-
-    fn enqueue_prepared_with_receipt_inner(
-        &self,
-        message_id: impl Into<String>,
-        prepared: Vec<ContentBlock>,
-        trust_mode_override: Option<crate::permission::TrustMode>,
-    ) -> Result<PreparedMessageReceipt, CoreError> {
         let _delivery_guard = self
             .command_delivery_lock
             .lock()
@@ -274,7 +207,6 @@ impl TiangongCore {
         self.send_cmd(Command::Message {
             prepared,
             message_id: Some(message_id.into()),
-            trust_mode_override,
             persistence_ack: Some(sender),
         })?;
         Ok(PreparedMessageReceipt { receiver })
@@ -287,17 +219,6 @@ impl TiangongCore {
         prepared: Vec<ContentBlock>,
     ) -> Result<(), CoreError> {
         self.enqueue_prepared_with_receipt(message_id, prepared)?
-            .await
-    }
-
-    /// 入队 Prepared 用户消息，仅在该轮使用指定信任模式，并等待持久化。
-    pub async fn deliver_prepared_and_wait_with_trust_mode(
-        &self,
-        message_id: impl Into<String>,
-        prepared: Vec<ContentBlock>,
-        trust_mode: crate::permission::TrustMode,
-    ) -> Result<(), CoreError> {
-        self.enqueue_prepared_with_receipt_and_trust_mode(message_id, prepared, trust_mode)?
             .await
     }
 
@@ -356,9 +277,7 @@ impl TiangongCore {
 
     /// 设置会话信任模式。
     ///
-    /// 普通轮次中实时生效。若当前消息携带显式的单轮覆盖，
-    /// 新设置先更新会话基线，当前覆盖仍持续到该消息结束；
-    /// 随后立即恢复到最新基线，不会写回轮次起点的旧值。
+    /// 更新后对当前会话的权限门与插件实时生效。
     pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
         self.trust_mode.set_base(mode);
     }
@@ -411,11 +330,9 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
-                trust_mode_override,
             }) => self.send_cmd(Command::Message {
                 prepared,
                 message_id,
-                trust_mode_override,
                 persistence_ack: None,
             }),
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
@@ -431,15 +348,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
-                CommandInput::PluginControl {
-                    plugin_id,
-                    action,
-                    payload,
-                } => self.send_cmd(Command::PluginControl {
-                    plugin_id,
-                    action,
-                    payload,
-                }),
                 CommandInput::UpdateCwd { cwd } => self.send_cmd(Command::UpdateCwd { cwd }),
                 CommandInput::ReloadConfig => self.send_cmd(Command::ReloadConfig),
                 CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
@@ -787,14 +695,8 @@ async fn worker_loop_async(
             Command::Message {
                 prepared,
                 message_id,
-                trust_mode_override,
                 persistence_ack,
             } => {
-                // 覆盖在处理该 Message 的第一个副作用前生效。守卫的
-                // Drop 覆盖持久化失败、插件路由、正常终态、取消与
-                // shutdown 等所有出口，防止信任模式泄漏到下条消息。
-                let turn_trust_mode =
-                    TurnTrustModeGuard::new(trust_mode.clone(), trust_mode_override);
                 // 新一轮开始：清除上一轮的取消信号。
                 cancel_flag.store(false, Ordering::Release);
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -811,9 +713,7 @@ async fn worker_loop_async(
                 // 宿主入口已完成输入准备。Core 原样持久化已就绪消息并确认，
                 // 再进入 Agent Loop。
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-                let (accepted, routed_to_plugin) = match accept_user_message_with_plugin_routes(
-                    engine.as_ref().expect("engine 已完成构建"),
-                    &session_id,
+                let accepted = match accept_user_message(
                     &mut session,
                     &stream_tx,
                     Some(message_id),
@@ -843,27 +743,19 @@ async fn worker_loop_async(
                     plugin.on_turn_started(&mut session, turn_start_idx);
                 }
 
-                if routed_to_plugin {
-                    // 插件已接管该消息；用户消息和待投递计划已经原子落盘，当前主
-                    // Agent 不再重复读取。插件完成后通过反馈命令提交结果与完成确认。
-                    let _ = stream_tx.send(StreamEvent::Done { usage: None });
-                } else {
-                    // 执行普通主 Agent 对话轮次。
-                    execute_turn_async(
-                        &mut session,
-                        &accepted.message_id,
-                        &accepted.prepared,
-                        engine.as_ref().unwrap(),
-                        &tools,
-                        &stream_tx,
-                        &mut cmd_rx,
-                        &cancel_flag,
-                        &shutdown_flag,
-                        turn_trust_mode.controller(),
-                        &session_id,
-                    )
-                    .await;
-                }
+                execute_turn_async(
+                    &mut session,
+                    &accepted.message_id,
+                    &accepted.prepared,
+                    engine.as_ref().unwrap(),
+                    &tools,
+                    &stream_tx,
+                    &mut cmd_rx,
+                    &cancel_flag,
+                    &shutdown_flag,
+                    &session_id,
+                )
+                .await;
 
                 // 等转发线程消费完 execute_turn_async 在返回前产生的所有事件，取得
                 // 本轮最后一个内部终态。屏障不对外可见。
@@ -1003,27 +895,13 @@ async fn worker_loop_async(
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
             }
             Command::Cancel => {
-                if let Some(runtime) = engine.as_ref() {
-                    runtime.handle_plugin_runtime_command(&Command::Cancel);
-                }
                 // 活跃执行会消费命令并结束；空闲时在此清除同步取消标志。
                 cancel_flag.store(false, Ordering::Release);
-            }
-            command @ Command::PluginControl { .. } => {
-                if let Some(runtime) = engine.as_ref() {
-                    runtime.handle_plugin_runtime_command(&command);
-                }
             }
             Command::Approval {
                 request_id,
                 approved,
             } => {
-                if let Some(runtime) = engine.as_ref() {
-                    runtime.handle_plugin_runtime_command(&Command::Approval {
-                        request_id: request_id.clone(),
-                        approved,
-                    });
-                }
                 // 恢复场景的审批响应：清除 pending 状态
                 let pending = crate::approval_store::get_pending(&session_id);
                 let had_pending = pending.iter().any(|a| a.request_id == request_id);
@@ -1047,9 +925,6 @@ async fn worker_loop_async(
                 }
             }
             Command::Shutdown => {
-                if let Some(runtime) = engine.as_ref() {
-                    runtime.handle_plugin_runtime_command(&Command::Shutdown);
-                }
                 break;
             }
             Command::InjectTool { tool_name, payload } => {
@@ -1068,21 +943,6 @@ async fn worker_loop_async(
                     &mut turn_boundary_id,
                     StreamEvent::Done { usage: None },
                 );
-            }
-            Command::CommitPluginDeliveries {
-                delivery_ids,
-                tool_injections,
-                persistence_ack,
-            } => {
-                if let Err(error) = crate::react::message::commit_plugin_deliveries(
-                    &mut session,
-                    &stream_tx,
-                    delivery_ids,
-                    tool_injections,
-                    persistence_ack,
-                ) {
-                    tracing::warn!(%error, "提交插件持久投递失败");
-                }
             }
             Command::EmitStreamEvent(ev) => {
                 let ev = *ev;
@@ -1204,21 +1064,6 @@ fn process_shutdown_feedback_command(
                 apply_session_metadata_update(session, trust_mode, update, persistence_ack)
             {
                 tracing::warn!(%error, "关闭阶段更新会话元数据失败");
-            }
-        }
-        Command::CommitPluginDeliveries {
-            delivery_ids,
-            tool_injections,
-            persistence_ack,
-        } => {
-            if let Err(error) = crate::react::message::commit_plugin_deliveries(
-                session,
-                stream_tx,
-                delivery_ids,
-                tool_injections,
-                persistence_ack,
-            ) {
-                tracing::warn!(%error, "关闭阶段提交插件持久投递失败");
             }
         }
         Command::InjectTool { tool_name, payload } => {
@@ -1872,7 +1717,6 @@ async fn execute_turn_async(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     cancel_flag: &Arc<AtomicBool>,
     shutdown_flag: &Arc<AtomicBool>,
-    turn_trust_mode: TurnTrustModeController,
     session_id: &str,
 ) {
     let mut react = crate::react::engine::ReactEngine::new(
@@ -1884,8 +1728,7 @@ async fn execute_turn_async(
     .with_cancel_flag(cancel_flag.clone())
     .with_shutdown_flag(shutdown_flag.clone())
     // Core 的执行身份只有一个来源：当前 Session ID。
-    .with_agent_id(session_id.to_string())
-    .with_turn_trust_mode_controller(turn_trust_mode);
+    .with_agent_id(session_id.to_string());
     react
         .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
@@ -1894,7 +1737,7 @@ async fn execute_turn_async(
 /// 从 CoreConfig 快照构建 RuntimeEngine
 ///
 /// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
-/// `trust_mode` 是 TiangongCore 持有的任务隔离信任解析句柄，RuntimeEngine 共享它。
+/// `trust_mode` 是 TiangongCore 持有的会话信任解析句柄，RuntimeEngine 共享它。
 fn build_engine_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
@@ -1997,98 +1840,4 @@ fn build_engine_from_config(
         );
     }
     engine
-}
-
-#[cfg(test)]
-mod trust_mode_override_tests {
-    use super::*;
-    use crate::permission::TrustMode;
-
-    fn state(initial_mode: TrustMode) -> crate::permission::TrustModeHandle {
-        crate::permission::TrustModeHandle::new(initial_mode)
-    }
-
-    fn current_mode(state: &crate::permission::TrustModeHandle) -> TrustMode {
-        state.current()
-    }
-
-    #[test]
-    fn turn_override_is_restored_after_scope_exit() {
-        let state = state(TrustMode::Supervised);
-
-        {
-            let _guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
-            assert_eq!(current_mode(&state), TrustMode::FullTrust);
-        }
-
-        assert_eq!(current_mode(&state), TrustMode::Supervised);
-    }
-
-    #[test]
-    fn following_message_without_override_uses_current_base_mode() {
-        let state = state(TrustMode::Supervised);
-
-        {
-            let guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
-            assert_eq!(current_mode(&state), TrustMode::FullTrust);
-
-            // 运行中连续到达的第二条普通消息会复用当前 turn，
-            // 它必须立即回到最新会话基线，不能继承首条的覆盖。
-            guard.controller().apply_message_override(None);
-            assert_eq!(current_mode(&state), TrustMode::Supervised);
-        }
-
-        assert_eq!(current_mode(&state), TrustMode::Supervised);
-    }
-
-    #[test]
-    fn external_update_during_override_survives_turn_finish() {
-        let state = state(TrustMode::FullTrust);
-
-        {
-            let _guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
-            state.set_base(TrustMode::Supervised);
-            // 会话基线已更新，但显式的单轮覆盖仍持续到 turn 结束。
-            assert_eq!(current_mode(&state), TrustMode::FullTrust);
-        }
-
-        // 必须恢复到 turn 中更新的最新基线，而非起点 FullTrust。
-        assert_eq!(current_mode(&state), TrustMode::Supervised);
-    }
-
-    #[test]
-    fn following_unoverridden_message_uses_base_updated_during_turn() {
-        let state = state(TrustMode::Supervised);
-
-        {
-            let guard = TurnTrustModeGuard::new(state.clone(), Some(TrustMode::FullTrust));
-            state.set_base(TrustMode::FullTrust);
-
-            // 先模拟另一条显式覆盖消息，再到达无覆盖消息，
-            // 确认 `None` 读取的是轮次中更新后的基线，而非轮次起点快照。
-            guard
-                .controller()
-                .apply_message_override(Some(TrustMode::Supervised));
-            assert_eq!(current_mode(&state), TrustMode::Supervised);
-            guard.controller().apply_message_override(None);
-            assert_eq!(current_mode(&state), TrustMode::FullTrust);
-        }
-
-        assert_eq!(current_mode(&state), TrustMode::FullTrust);
-    }
-
-    #[test]
-    fn turn_override_is_restored_during_unwind() {
-        let state = state(TrustMode::Supervised);
-        let panic_state = state.clone();
-
-        let unwind = std::panic::catch_unwind(move || {
-            let _guard = TurnTrustModeGuard::new(panic_state.clone(), Some(TrustMode::FullTrust));
-            assert_eq!(current_mode(&panic_state), TrustMode::FullTrust);
-            panic!("simulate turn failure");
-        });
-
-        assert!(unwind.is_err());
-        assert_eq!(current_mode(&state), TrustMode::Supervised);
-    }
 }

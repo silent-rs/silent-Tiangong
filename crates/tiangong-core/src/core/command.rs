@@ -17,8 +17,6 @@ pub enum Command {
     Message {
         prepared: Vec<tiangong_types::ContentBlock>,
         message_id: Option<String>,
-        /// 仅对该消息所属 turn 生效，轮次结束后恢复原模式。
-        trust_mode_override: Option<crate::permission::TrustMode>,
         persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     },
     /// 更新当前会话工作目录
@@ -32,12 +30,6 @@ pub enum Command {
     ReloadConfig,
     /// 取消当前执行
     Cancel,
-    /// 向指定插件发送结构化运行时控制指令。
-    PluginControl {
-        plugin_id: String,
-        action: String,
-        payload: serde_json::Value,
-    },
     /// 审批响应
     #[allow(dead_code)]
     Approval { request_id: String, approved: bool },
@@ -55,16 +47,6 @@ pub enum Command {
         tool_name: String,
         payload: serde_json::Value,
     },
-    /// 原子提交插件持久投递的完成状态与工具注入。
-    ///
-    /// Core 在父 Session 的同一次持久化中删除 `delivery_ids` 并把
-    /// `tool_injections` 写入 deferred 队列。`persistence_ack` 仅在事务成功或
-    /// 明确失败后响应，供插件避免先确认投递、后注入结果造成状态丢失。
-    CommitPluginDeliveries {
-        delivery_ids: Vec<String>,
-        tool_injections: Vec<crate::core::plugin::PluginFeedback>,
-        persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    },
     /// 插件投递的流事件（如 MemoryRecallStart/Progress/Done）。
     ///
     /// 插件通过 [`crate::core::plugin::feedback::PluginFeedbackTx::send_stream_event`]
@@ -78,10 +60,7 @@ pub enum Command {
 /// 命令排空后的副作用
 pub enum PendingCommandEffect {
     None,
-    MessagesInjected {
-        current_agent_input: Option<String>,
-        agent_routed: bool,
-    },
+    MessagesInjected { current_agent_input: Option<String> },
     Terminate,
     Shutdown,
 }

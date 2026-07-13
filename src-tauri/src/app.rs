@@ -7,7 +7,6 @@ use tauri::Manager;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::{SessionMetadataReceipt, SessionMetadataUpdate, TiangongCore};
 use tiangong_core::core_config::CoreConfigProvider;
-use tiangong_core::permission::TrustMode;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 
@@ -594,12 +593,11 @@ impl TiangongApp {
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
         let sid = ensured.session_id.clone();
-        let receipt = match self.enqueue_prepared_with_receipt_and_trust_mode_if_current(
+        let receipt = match self.enqueue_prepared_with_receipt_if_current(
             &sid,
             &ensured.instance_token,
             message_id.clone(),
             prepared,
-            TrustMode::FullTrust,
         ) {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1463,26 +1461,6 @@ impl TiangongApp {
             .map_err(|error| error.to_string())
     }
 
-    pub fn enqueue_prepared_with_receipt_and_trust_mode_if_current(
-        &self,
-        session_id: &str,
-        instance_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-        message_id: String,
-        prepared: Vec<tiangong_types::ContentBlock>,
-        trust_mode: TrustMode,
-    ) -> Result<tiangong_core::core::PreparedMessageReceipt, String> {
-        if !self.remote_turn_allows_message(session_id, &message_id) {
-            return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
-        }
-        let cores = self.lock_cores();
-        let core = cores
-            .get(session_id)
-            .filter(|core| instance_token_matches(&core.cancel_flag(), instance_token))
-            .ok_or_else(|| "会话 Core 已被替换或不存在".to_string())?;
-        core.enqueue_prepared_with_receipt_and_trust_mode(message_id, prepared, trust_mode)
-            .map_err(|error| error.to_string())
-    }
-
     /// 在调用方持有 `session_send_lock` 时，把元数据更新同步入队到当前存活 Core。
     ///
     /// 返回 `None` 表示该会话当前没有可写的 Core，调用方应由宿主直接持久化；
@@ -1530,14 +1508,7 @@ impl TiangongApp {
 
     /// 取消指定会话中某个 Agent 的当前执行
     pub fn cancel_agent_core(&self, session_id: &str, role: String) -> bool {
-        let cores = self.lock_cores();
-        cores
-            .get(session_id)
-            .map(|core| {
-                core.deliver(tiangong_plugin_agent_team::cancel_agent_input(role))
-                    .is_ok()
-            })
-            .unwrap_or(false)
+        tiangong_plugin_agent_team::cancel_agent(session_id, &role)
     }
 
     /// 向指定会话的 core 发送审批响应

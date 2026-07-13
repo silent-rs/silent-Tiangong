@@ -99,31 +99,6 @@ impl Plugin for CommandPlugin {
         }
     }
 
-    fn tool_write_targets(
-        &self,
-        call: &tiangong_core::model::ToolCall,
-    ) -> Result<Vec<PathBuf>, String> {
-        if !matches!(call.name.as_str(), "run_command" | "run_shell") {
-            return Ok(Vec::new());
-        }
-        let workspace = self
-            .workspace()
-            .ok_or_else(|| "命令工具缺少工作目录，无法声明写入边界".to_string())?;
-        let workspace = workspace.canonicalize().unwrap_or(workspace);
-        let requested_cwd = call
-            .arguments
-            .get("cwd")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|cwd| !cwd.is_empty());
-        let effective_cwd = tiangong_toolkit::resolve_effective_cwd_with(requested_cwd, &workspace)
-            .map_err(|error| format!("命令工具无法解析实际工作目录：{error}"))?;
-        let mut targets = vec![workspace, effective_cwd];
-        targets.sort();
-        targets.dedup();
-        Ok(targets)
-    }
-
     fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
         // 持有 engine 的 runtime_env 共享句柄——core 在所有插件注册完成后会汇总
         // 各插件的 collect_exec_env 写入同一句柄，此处读取即为最新值。
@@ -134,49 +109,3 @@ impl Plugin for CommandPlugin {
 }
 
 impl tiangong_core::tool_override::PromptSectionProvider for CommandPlugin {}
-
-#[cfg(test)]
-mod tests {
-    use tiangong_core::model::ToolCall;
-
-    use super::*;
-
-    #[test]
-    fn command_tools_declare_workspace_as_possible_write_target() {
-        let workspace = tempfile::tempdir().unwrap();
-        let plugin = CommandPlugin::new();
-        plugin.set_workspace(Some(workspace.path()));
-        let call = ToolCall {
-            id: "call".to_string(),
-            name: "run_command".to_string(),
-            arguments: serde_json::json!({"cmd": "cargo"}),
-        };
-
-        assert_eq!(
-            plugin.tool_write_targets(&call).unwrap(),
-            vec![workspace.path().canonicalize().unwrap()]
-        );
-    }
-
-    #[test]
-    fn command_tools_declare_their_effective_cwd() {
-        let workspace = tempfile::tempdir().unwrap();
-        let nested = workspace.path().join("nested");
-        std::fs::create_dir(&nested).unwrap();
-        let plugin = CommandPlugin::new();
-        plugin.set_workspace(Some(workspace.path()));
-        let call = ToolCall {
-            id: "call".to_string(),
-            name: "run_shell".to_string(),
-            arguments: serde_json::json!({"script": "cargo check", "cwd": "nested"}),
-        };
-
-        let mut expected = vec![
-            workspace.path().canonicalize().unwrap(),
-            nested.canonicalize().unwrap(),
-        ];
-        expected.sort();
-        expected.dedup();
-        assert_eq!(plugin.tool_write_targets(&call).unwrap(), expected);
-    }
-}
