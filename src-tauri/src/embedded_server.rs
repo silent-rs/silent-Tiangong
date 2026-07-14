@@ -460,44 +460,15 @@ async fn send_message_and_wait(
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
     let waiter = state.register_remote_turn_waiter(&session_id, &message_id);
-    let receipt = match state.enqueue_prepared_with_receipt_if_current(
-        &ensured.session_id,
-        &ensured.instance_token,
-        message_id.clone(),
-        prepared,
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            rollback_failed_delivery(
-                state,
-                &session_id,
-                &message_id,
-                &ensured.instance_token,
-                created_paths,
-            )
-            .await;
-            return Err(format!("消息投递失败：{error}"));
-        }
-    };
-    if let Err(error) = receipt.await_persisted().await {
-        rollback_failed_delivery(
-            state,
-            &session_id,
-            &message_id,
-            &ensured.instance_token,
-            created_paths,
-        )
-        .await;
+    if let Err(error) =
+        state.deliver_prepared_if_live(&ensured.session_id, message_id.clone(), prepared)
+    {
+        rollback_failed_delivery(state, &session_id, &message_id, created_paths).await;
         return Err(format!("消息投递失败：{error}"));
     }
 
     if ensured.is_new {
-        crate::commands::start_stream_consumer(
-            app,
-            ensured.session_id.clone(),
-            stream_rx,
-            ensured.instance_token,
-        );
+        crate::commands::start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
     }
     drop(send_guard);
 
@@ -519,7 +490,6 @@ async fn rollback_failed_delivery(
     state: &TiangongApp,
     session_id: &str,
     message_id: &str,
-    instance_token: &Arc<std::sync::atomic::AtomicBool>,
     created_paths: Vec<String>,
 ) {
     state.complete_remote_turn_waiters(
@@ -527,7 +497,7 @@ async fn rollback_failed_delivery(
         message_id,
         Err("消息稳定持久化失败".to_string()),
     );
-    crate::commands::shutdown_join_core_if_current(state, session_id, instance_token).await;
+    crate::commands::shutdown_join_core_if_current(state, session_id).await;
     if let Err(error) =
         crate::commands::restore_failed_user_message_state(state, session_id, message_id).await
     {

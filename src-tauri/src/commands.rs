@@ -4,14 +4,12 @@ use base64::{engine::general_purpose, Engine as _};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::SessionMetadataUpdate;
 use tracing::{debug, warn};
 
 use crate::workspace_tabs::{
@@ -990,42 +988,13 @@ pub async fn delete_sessions_by_cwd(
 }
 
 pub(crate) async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
-    let _ = state.cancel_core(session_id);
-    let Some(core) = state.take_core(session_id) else {
-        return;
-    };
-    let session_id = session_id.to_string();
-    match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(session_id, error = %error, "删除会话前关闭 Core 失败");
-        }
-        Err(error) => {
-            tracing::warn!(session_id, error = %error, "删除会话前等待 Core 关闭任务失败");
-        }
-    }
+    state.retire_core(session_id, true).await;
 }
 
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
-pub(crate) async fn shutdown_join_core_if_current(
-    state: &TiangongApp,
-    session_id: &str,
-    instance_token: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    let Some(core) = state.take_core_if_current(session_id, instance_token) else {
-        return;
-    };
-    let session_id = session_id.to_string();
-    match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(session_id, error = %error, "失败回滚前关闭 Core 失败");
-        }
-        Err(error) => {
-            tracing::warn!(session_id, error = %error, "失败回滚前等待 Core 关闭任务失败");
-        }
-    }
+pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
+    state.retire_core(session_id, false).await;
 }
 
 /// 更新会话标题
@@ -1044,7 +1013,7 @@ pub async fn update_session_title(
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
 
-    let (previous_title, previous_draft, applied_title) = state
+    let (previous_title, previous_draft, _applied_title) = state
         .with_state(|core_state| {
             if core_state.active_session_id() != session_id {
                 return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
@@ -1065,46 +1034,20 @@ pub async fn update_session_title(
         })
         .await?;
 
-    let update = SessionMetadataUpdate {
-        title: Some(applied_title),
-        ..SessionMetadataUpdate::default()
-    };
-    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            rollback_session_title_mirror(
-                state.inner(),
-                &session_id,
-                previous_title,
-                previous_draft,
-                false,
-            )
-            .await;
-            return Err(error);
-        }
-    };
-
-    let persist_without_core = receipt.is_none();
-    let persisted = if let Some(receipt) = receipt {
-        receipt
-            .await_persisted()
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        state
-            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-            .await
-    };
-    if let Err(error) = persisted {
+    // 标题已由 app 内存快照更新，直接持久化。
+    if let Err(error) = state
+        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+        .await
+    {
         rollback_session_title_mirror(
             state.inner(),
             &session_id,
             previous_title,
             previous_draft,
-            persist_without_core,
+            false,
         )
         .await;
-        return Err(error);
+        return Err(error.to_string());
     }
     Ok(())
 }
@@ -1385,29 +1328,10 @@ async fn send_message_inner(
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
     let sid = ensured.session_id.clone();
-    let receipt_result = state.enqueue_prepared_with_receipt_if_current(
-        &sid,
-        &ensured.instance_token,
-        user_message_id.clone(),
-        prepared.clone(),
-    );
-    let receipt = match receipt_result {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            shutdown_join_core_if_current(state, &sid, &ensured.instance_token).await;
-            let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
-            cleanup_unreferenced_draft_attachments(
-                state,
-                raw_attachments_for_paths(created_paths.clone()),
-            )
-            .await;
-            abort_session_send(state, &session_id, revision, true).await;
-            return Err(format!("消息投递失败：{error}"));
-        }
-    };
-
-    if let Err(error) = receipt.await_persisted().await {
-        shutdown_join_core_if_current(state, &sid, &ensured.instance_token).await;
+    if let Err(error) =
+        state.deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
+    {
+        shutdown_join_core_if_current(state, &sid).await;
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
         cleanup_unreferenced_draft_attachments(state, raw_attachments_for_paths(created_paths))
             .await;
@@ -1415,7 +1339,7 @@ async fn send_message_inner(
         return Err(format!("消息投递失败：{error}"));
     }
 
-    // Core 与 App 的稳定消息均已落盘，附件从此由消息引用持有，不能再自动回滚。
+    // 消息已投递给 Core（Core 内部会持久化），附件从此由消息引用持有，不能再自动回滚。
     state.mark_draft_revision_delivered(&session_id, revision);
     let finish_result = state
         .with_state(|core_state| {
@@ -1447,7 +1371,7 @@ async fn send_message_inner(
     release_draft_send_claim_and_cleanup(state, &session_id, revision).await;
 
     if ensured.is_new {
-        start_stream_consumer(app, sid, stream_rx, ensured.instance_token);
+        start_stream_consumer(app, sid, stream_rx);
     }
 
     Ok(())
@@ -1529,7 +1453,6 @@ pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
     stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
-    instance_token: Arc<std::sync::atomic::AtomicBool>,
 ) {
     use tiangong_types::StreamEvent;
 
@@ -1542,22 +1465,8 @@ pub(crate) fn start_stream_consumer(
             let app_state = app.state::<TiangongApp>();
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
-            if !app_state.is_current_core_instance(&session_id, &instance_token) {
+            if !app_state.has_live_core(&session_id) {
                 // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
-                continue;
-            }
-            let event = &session_event.event;
-
-            // 取消时跳过文本增量事件，只处理终止事件
-            if instance_token.load(Ordering::Acquire)
-                && matches!(
-                    event,
-                    StreamEvent::Delta { .. }
-                        | StreamEvent::ReactText { .. }
-                        | StreamEvent::SummaryText { .. }
-                        | StreamEvent::Reasoning { .. }
-                )
-            {
                 continue;
             }
 
@@ -2176,7 +2085,6 @@ pub(crate) fn start_stream_consumer(
                 if let Ok(Some((input, provider_config))) = title_task {
                     let app_for_title = app.clone();
                     let sid_for_title = final_sid.clone();
-                    let title_instance_token = instance_token.clone();
                     let rt2 = rt.clone();
                     thread::spawn(move || {
                         let client =
@@ -2202,39 +2110,7 @@ pub(crate) fn start_stream_consumer(
                                 if !title_is_still_default {
                                     return;
                                 }
-                                let receipt = match app_state
-                                    .enqueue_session_metadata_update_if_current(
-                                        &sid_for_title,
-                                        &title_instance_token,
-                                        SessionMetadataUpdate {
-                                            title: Some(clean.clone()),
-                                            ..SessionMetadataUpdate::default()
-                                        },
-                                    ) {
-                                    Ok(Some(receipt)) => receipt,
-                                    Ok(None) => return,
-                                    Err(error) => {
-                                        warn!(
-                                            %error,
-                                            session_id = %sid_for_title,
-                                            "自动标题入队失败"
-                                        );
-                                        return;
-                                    }
-                                };
-                                if let Err(error) = rt2.block_on(receipt.await_persisted()) {
-                                    warn!(
-                                        %error,
-                                        session_id = %sid_for_title,
-                                        "自动标题持久化失败"
-                                    );
-                                    return;
-                                }
-                                if !app_state
-                                    .is_current_core_instance(&sid_for_title, &title_instance_token)
-                                {
-                                    return;
-                                }
+                                // 标题直接由 app 层写入内存快照 + 持久化 + 推送 UI。
                                 let _ = rt2.block_on(app_state.with_state(|core_state| {
                                     let is_active = core_state.active_session_id() == sid_for_title;
                                     if let Some(s) = core_state
@@ -2248,6 +2124,7 @@ pub(crate) fn start_stream_consumer(
                                     if is_active {
                                         core_state.update_session_title_draft(clean.clone());
                                     }
+                                    let _ = core_state.persist_session_and_app(&sid_for_title);
                                     let snapshot = build_full_snapshot_with_status(
                                         app_state.inner(),
                                         core_state,
@@ -2268,7 +2145,7 @@ pub(crate) fn start_stream_consumer(
         let app_state = app.state::<TiangongApp>();
         let eof_lock = app_state.session_send_lock(&session_id);
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
-        if app_state.remove_stopped_core_if_current(&session_id, &instance_token) {
+        if app_state.remove_stopped_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 if let Err(error) = core_state.reload_session_from_disk(&session_id) {
                     tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
@@ -2437,53 +2314,21 @@ pub async fn edit_and_resend(
         .collect::<Vec<_>>();
     transaction.commit();
 
-    // 最终校验及稳定消息落盘均成功后，才终止旧 Core。
-    if let Some(core) = state.take_core(&session_id) {
-        let _ = core.deliver(AgentInputKind::cancel());
-        match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, %session_id, "编辑重发前关闭旧 Core 失败"),
-            Err(error) => tracing::warn!(%error, %session_id, "编辑重发前等待旧 Core 失败"),
-        }
-        // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
-        // 此后已无旧写入者可覆盖。
-        state
-            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-            .await?;
-    }
+    // 最终校验及稳定消息落盘均成功后，才终止旧 Core（cancel + take + join）。
+    // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
+    // 此后已无旧写入者可覆盖。
+    state.retire_core(&session_id, true).await;
+    state
+        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+        .await?;
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
     let sid = ensured.session_id.clone();
-    let receipt_result = state.enqueue_prepared_with_receipt_if_current(
-        &sid,
-        &ensured.instance_token,
-        message_id.clone(),
-        prepared.clone(),
-    );
-    let receipt = match receipt_result {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            shutdown_join_core_if_current(state.inner(), &sid, &ensured.instance_token).await;
-            restore_edited_session(
-                state.inner(),
-                &session_id,
-                original_session,
-                originally_pending,
-            )
-            .await;
-            cleanup_unreferenced_draft_attachments(
-                state.inner(),
-                raw_attachments_for_paths(created_paths.clone()),
-            )
-            .await;
-            return Err(format!("编辑消息投递失败：{error}"));
-        }
-    };
-    if let Err(error) = receipt.await_persisted().await {
-        shutdown_join_core_if_current(state.inner(), &sid, &ensured.instance_token).await;
+    if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
+        shutdown_join_core_if_current(state.inner(), &sid).await;
         restore_edited_session(
             state.inner(),
             &session_id,
@@ -2493,10 +2338,10 @@ pub async fn edit_and_resend(
         .await;
         cleanup_unreferenced_draft_attachments(
             state.inner(),
-            raw_attachments_for_paths(created_paths),
+            raw_attachments_for_paths(created_paths.clone()),
         )
         .await;
-        return Err(format!("编辑消息持久化失败：{error}"));
+        return Err(format!("编辑消息投递失败：{error}"));
     }
 
     cleanup_unreferenced_draft_attachments(
@@ -2518,7 +2363,7 @@ pub async fn edit_and_resend(
         })
         .await;
     if ensured.is_new {
-        start_stream_consumer(app, sid, stream_rx, ensured.instance_token);
+        start_stream_consumer(app, sid, stream_rx);
     }
 
     Ok(())
@@ -2646,22 +2491,13 @@ async fn run_context_slash_command(
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
         if ensured.is_new {
-            start_stream_consumer(
-                app.clone(),
-                ensured.session_id.clone(),
-                stream_rx,
-                ensured.instance_token.clone(),
-            );
+            start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
         }
         let input = match command {
             ContextSlashCommand::Compress => AgentInputKind::compress_context(),
             ContextSlashCommand::Reset => AgentInputKind::reset_context(),
         };
-        return Ok(state.deliver_to_core_if_current(
-            &ensured.session_id,
-            &ensured.instance_token,
-            input,
-        ));
+        return Ok(state.deliver_to_core_if_live(&ensured.session_id, input));
     }
 }
 
@@ -2813,37 +2649,13 @@ pub async fn set_trust_mode(
     // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
     state.set_core_trust_mode(&session_id, trust_mode);
 
-    let update = SessionMetadataUpdate {
-        trust_mode: Some(trust_mode),
-        ..SessionMetadataUpdate::default()
-    };
-    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
-            return Err(error);
-        }
-    };
-    let persist_without_core = receipt.is_none();
-    let persisted = if let Some(receipt) = receipt {
-        receipt
-            .await_persisted()
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        state
-            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-            .await
-    };
-    if let Err(error) = persisted {
-        rollback_session_trust_mode(
-            state.inner(),
-            &session_id,
-            previous_mode,
-            persist_without_core,
-        )
-        .await;
-        return Err(error);
+    // 信任模式已由 app 内存快照更新（含 persist_app_only），再持久化完整 session 文件。
+    if let Err(error) = state
+        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+        .await
+    {
+        rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
+        return Err(error.to_string());
     }
     Ok(())
 }
@@ -3006,45 +2818,20 @@ pub async fn set_reasoning_effort(
         return Err(error);
     }
 
-    let update = SessionMetadataUpdate {
-        reasoning_effort: Some(Some(effort)),
-        ..SessionMetadataUpdate::default()
-    };
-    let receipt = match state.enqueue_session_metadata_update_if_live(&session_id, update) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            rollback_session_reasoning_effort(
-                state.inner(),
-                &session_id,
-                previous_override,
-                previous_compatibility_value,
-                false,
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    let persist_without_core = receipt.is_none();
-    let persisted = if let Some(receipt) = receipt {
-        receipt
-            .await_persisted()
-            .await
-            .map_err(|error| error.to_string())
-    } else {
-        state
-            .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-            .await
-    };
-    if let Err(error) = persisted {
+    // 思考强度已由 app 内存快照更新（含 persist_app_only），再持久化完整 session 文件。
+    if let Err(error) = state
+        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
+        .await
+    {
         rollback_session_reasoning_effort(
             state.inner(),
             &session_id,
             previous_override,
             previous_compatibility_value,
-            persist_without_core,
+            false,
         )
         .await;
-        return Err(error);
+        return Err(error.to_string());
     }
     Ok(())
 }

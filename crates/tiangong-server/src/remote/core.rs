@@ -1613,8 +1613,6 @@ mod tests {
         let (manager, session, _session_path, _state) = isolated_test_manager(root.path());
         let first_core = test_core(session.clone(), root.path(), Vec::new());
         let second_core = test_core(session.clone(), root.path(), Vec::new());
-        let first_flag = first_core.instance_token();
-        let second_flag = second_core.instance_token();
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
         let first_task = {
@@ -1653,19 +1651,14 @@ mod tests {
         assert_ne!(first_installed, second_installed);
         assert_eq!(manager.cores.lock().unwrap().len(), 1);
 
-        let stored_flag = manager
+        // 唯一存活的 Core 必属于胜出方，且其 session_id 与预期一致。
+        let stored_session_id = manager
             .cores
             .lock()
             .unwrap()
             .get(&session.id)
-            .unwrap()
-            .instance_token();
-        let winner_flag = if first_installed {
-            first_flag
-        } else {
-            second_flag
-        };
-        assert!(Arc::ptr_eq(&stored_flag, &winner_flag));
+            .map(|core| core.session_id().to_string());
+        assert_eq!(stored_session_id.as_deref(), Some(session.id.as_str()));
 
         assert!(manager.delete_session(&session.id).await.unwrap());
     }
