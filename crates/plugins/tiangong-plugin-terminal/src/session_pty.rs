@@ -6,7 +6,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -121,6 +121,11 @@ pub struct SessionPtyRegistry {
     app: tauri::AppHandle,
     /// 懒创建 PTY 时使用的默认 cwd，由 `set_cwd` / workspace 切换同步
     default_cwd: Mutex<String>,
+    /// 插件贡献的环境变量（由 core 经 `set_exec_env` 回注）。
+    ///
+    /// PTY 创建时快照注入（与 `default_cwd` 一致的快照语义）。
+    /// 共享句柄供 `TerminalPlugin::set_exec_env` 更新、`create_pty` 读取。
+    runtime_env: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
 
 impl SessionPtyRegistry {
@@ -130,6 +135,7 @@ impl SessionPtyRegistry {
             persistence: Mutex::new(()),
             app,
             default_cwd: Mutex::new(default_cwd),
+            runtime_env: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -140,6 +146,21 @@ impl SessionPtyRegistry {
         if let Ok(mut guard) = self.default_cwd.lock() {
             *guard = cwd;
         }
+    }
+
+    /// 更新插件贡献的环境变量（由 `TerminalPlugin::set_exec_env` 调用）。
+    ///
+    /// 仅影响后续懒创建的 PTY；已存在 PTY 保持创建时的快照（快照语义，与
+    /// `default_cwd` 一致）。workspace 切换销毁重建或新建对话时新 PTY 才用最新 env。
+    pub fn set_runtime_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut guard) = self.runtime_env.write() {
+            *guard = env;
+        }
+    }
+
+    /// 返回 runtime_env 共享句柄（供 `TerminalPlugin` 在 `set_exec_env` 时写入）。
+    pub fn runtime_env_handle(&self) -> Arc<RwLock<std::collections::BTreeMap<String, String>>> {
+        Arc::clone(&self.runtime_env)
     }
 
     /// workspace 切换时同步：更新默认 cwd，并销毁所有存活 PTY。
@@ -341,7 +362,13 @@ impl SessionPtyRegistry {
             cwd.to_string()
         };
 
-        let mut manager = TerminalManager::new(instance_id.to_string(), effective_cwd.clone());
+        let pty_env = self
+            .runtime_env
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let mut manager =
+            TerminalManager::with_pty_env(instance_id.to_string(), effective_cwd.clone(), pty_env);
 
         let log_path = terminal_log_path(session_id, tab_id);
         if let Some(logger) = output_processor::OutputLogger::open(log_path) {

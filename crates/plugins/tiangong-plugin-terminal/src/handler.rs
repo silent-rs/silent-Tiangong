@@ -53,6 +53,22 @@ impl TerminalToolOverride {
         value
     }
 
+    /// 构造「终端暂不可用」的失败结果。
+    ///
+    /// provider 返回 None 表示 PTY 暂不可用（子进程退出 / 命令循环关闭 / 等
+    /// 待回执超时）。此处返回明确的失败结果，而非 trait 的 None（None 会被
+    /// runtime 翻译成误导性的「未注册的工具」）。
+    fn terminal_unavailable() -> ToolResult {
+        ToolResult {
+            ok: false,
+            summary: "终端暂不可用，请稍后重试".to_string(),
+            stdout: String::new(),
+            stderr: "terminal pty unavailable (child exited or command loop closed)".to_string(),
+            exit_code: -1,
+            execution: None,
+        }
+    }
+
     /// run_command：校验后经 PTY 执行受控命令。
     fn handle_run_command(
         provider: &Arc<dyn TerminalProvider>,
@@ -143,7 +159,7 @@ impl TerminalToolOverride {
         Box::pin(async move {
             let selection = match provider.select_for_command(&session_id).await {
                 Some(s) => s,
-                None => return None,
+                None => return Some(Self::terminal_unavailable()),
             };
             let terminal_id = selection.terminal_id.clone();
 
@@ -168,25 +184,36 @@ impl TerminalToolOverride {
 
             let result = match provider.exec(&terminal_id, &command, timeout_secs).await {
                 Some(r) => r,
-                None => return None,
+                None => return Some(Self::terminal_unavailable()),
             };
 
             let stdout = Self::truncate_text(&result.stdout, OUTPUT_THRESHOLD);
+            // summary 反馈命令的执行状态信息，但不影响 ok：退出码、超时等都是
+            // 命令的业务结果，由 agent 阅读 stdout/summary 自行判断是否符合预期。
+            // 只有工具层故障（PTY 不可用等）才标记 ok:false。
             let mut summary = if result.interactive_mode {
                 "命令进入交互模式（未声明 interactive:true）".to_string()
             } else if result.timed_out {
                 "命令执行超时".to_string()
             } else if result.exit_code != 0 {
-                format!("命令执行失败（退出码 {}）", result.exit_code)
+                format!(
+                    "命令退出码 {}（请阅读 stdout/stderr 判断是否符合预期）",
+                    result.exit_code
+                )
             } else {
-                "命令执行成功".to_string()
+                "命令执行完成".to_string()
             };
             if !result.cwd_after.is_empty() {
                 summary.push_str(&format!("（cwd: {}）", result.cwd_after));
             }
             summary.push_str(&selection.feedback_text());
 
-            let ok = result.exit_code == 0 && !result.timed_out && !result.interactive_mode;
+            // ok 只反映工具层是否正常工作：命令提交了、PTY 正常，即为 true。
+            // 退出码非 0（如 grep 无匹配、测试失败）是命令的业务结果，不是工具故障。
+            // 超时也只是状态信息（summary/stderr 说明），数据照常返回，agent 看
+            // stdout 自行判断是否符合预期——不应触发 recovery 封禁工具。
+            // 只有非预期的 interactive_mode（命令卡在交互态）才是真正的工具层异常。
+            let ok = !result.interactive_mode;
 
             Some(ToolResult {
                 ok,
@@ -206,7 +233,18 @@ impl TerminalToolOverride {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
         let command = match call.arguments.get("script").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
-            None => return Box::pin(async { None }),
+            None => {
+                return Box::pin(async {
+                    Some(ToolResult {
+                        ok: false,
+                        summary: "run_shell 缺少 script 参数".to_string(),
+                        stdout: String::new(),
+                        stderr: "script 参数为必填".to_string(),
+                        exit_code: 2,
+                        execution: None,
+                    })
+                });
+            }
         };
         let timeout_secs = call.arguments.get("timeout").and_then(|v| v.as_u64());
         // 读取 interactive 标志：Agent 显式声明要启动交互程序。
@@ -230,7 +268,7 @@ impl TerminalToolOverride {
         Box::pin(async move {
             let selection = match provider.select_for_command(&session_id).await {
                 Some(selection) => selection,
-                None => return None,
+                None => return Some(Self::terminal_unavailable()),
             };
             let terminal_id = selection.terminal_id.clone();
 
@@ -258,23 +296,20 @@ impl TerminalToolOverride {
                 // wait_secs=3 给交互程序足够时间绘制首屏。
                 match provider.exec_interactive(&terminal_id, &command, 3).await {
                     Some(r) => r,
-                    None => return None, // 终端不可用，回退到默认 run_shell
+                    None => return Some(Self::terminal_unavailable()),
                 }
             } else {
                 match provider.exec(&terminal_id, &command, timeout_secs).await {
                     Some(r) => r,
-                    None => return None, // 终端不可用，回退到默认 run_shell
+                    None => return Some(Self::terminal_unavailable()),
                 }
             };
 
             let stdout = Self::truncate_text(&result.stdout, OUTPUT_THRESHOLD);
 
-            // 成功判定随交互模式分流：
-            // - 交互模式：interactive_mode=true 是预期的成功（命令已进入交互态），
-            //   报告 ok=true。stdout 携带终端首次变化后的完整可见内容，
-            //   由 Agent 自行阅读判断当前状态。
-            // - 非交互模式：interactive_mode=true 意味着命令意外进入交互（兜底检测），
-            //   前台进程仍在运行，必须报告失败，避免 Agent 误判后在卡住的 PTY 继续操作。
+            // summary 反馈命令的执行状态信息，但不影响 ok：退出码、超时等都是
+            // 命令的业务结果，由 agent 阅读 stdout/summary 自行判断是否符合预期。
+            // 只有工具层故障（PTY 不可用等）才标记 ok:false。
             let mut summary = if interactive && result.interactive_mode {
                 "命令已进入交互态（终端当前显示见 stdout）".to_string()
             } else if result.interactive_mode {
@@ -284,9 +319,12 @@ impl TerminalToolOverride {
             } else if result.interrupted_by_user {
                 "命令被用户中断".to_string()
             } else if result.exit_code != 0 {
-                format!("命令执行失败（退出码 {}）", result.exit_code)
+                format!(
+                    "命令退出码 {}（请阅读 stdout/stderr 判断是否符合预期）",
+                    result.exit_code
+                )
             } else {
-                "命令执行成功".to_string()
+                "命令执行完成".to_string()
             };
 
             if !result.cwd_after.is_empty() {
@@ -313,11 +351,16 @@ impl TerminalToolOverride {
                 stderr.push_str("\n[提示] 命令被用户中断，建议询问用户是否需要调整执行计划");
             }
 
-            // 交互模式且成功进入交互态视为成功
+            // ok 只反映工具层是否正常工作：
+            // - 交互模式进入交互态：预期行为，ok:true
+            // - 非交互模式：命令提交了、PTY 正常即为 true。退出码非 0（如 grep
+            //   无匹配、测试失败）是命令的业务结果，不是工具故障，不应触发 recovery。
+            // - 超时也只是状态信息，数据照常返回，agent 看 stdout 判断。
+            // - 只有非预期的 interactive_mode（命令卡在交互态）才是真正的工具层异常。
             let ok = if interactive && result.interactive_mode {
                 true
             } else {
-                result.exit_code == 0 && !result.timed_out && !result.interactive_mode
+                !result.interactive_mode
             };
 
             Some(ToolResult {
@@ -372,7 +415,7 @@ impl TerminalToolOverride {
                 .await
             {
                 Some(r) => r,
-                None => return None, // 终端不可用，回退到默认逻辑
+                None => return Some(Self::terminal_unavailable()),
             };
 
             let stdout = Self::truncate_text(&result.stdout, OUTPUT_THRESHOLD);

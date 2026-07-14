@@ -618,4 +618,58 @@ mod tests {
         let out2 = f.filter("TIANGONG_START_x__\n");
         assert_eq!(out2, ""); // 完整行含 marker，被过滤
     }
+
+    #[test]
+    fn test_line_processor_gh_spinner_plus_markers() {
+        // 模拟 gh 在 PTY 下的完整输出：spinner 动画 + 彩色 JSON + marker 行。
+        // 验证 TerminalLineProcessor 能正确 push marker 行（不被 spinner 的
+        // CR/清行序列破坏行模拟），这是 #237 超时 bug 的核心时序场景。
+        let mut p = TerminalLineProcessor::new();
+
+        // gh 的 spinner：隐藏光标 + 多帧动画（CR + spinner字符 + CR + ESC[K）
+        let spinner = "\x1b[?25l\r\x1b[K\r⣾\r\x1b[K\r⣽\r\x1b[K\r⣻\r\x1b[K\r\x1b[?25h\r\x1b[K";
+
+        // gh 的彩色 JSON 输出（每行以 \r\n 结尾）
+        let gh_json = "\x1b[1;37m{\x1b[m\r\n  \x1b[1;34m\"number\"\x1b[m\x1b[1;37m:\x1b[m 237\r\n\x1b[1;37m}\x1b[m\r\n";
+
+        // wrapper 注入的 marker 行
+        let markers =
+            "__TIANGONG_CWD_abc__/tmp\r\n__TIANGONG_RC_abc__0\r\n__TIANGONG_END_abc__\r\n";
+
+        // 场景1：分两个 chunk 喂入（模拟 PTY 读取线程的实际行为）
+        let lines = p.process(&format!("{}{}", spinner, gh_json));
+        // spinner 不产生完整行；JSON 产生 3 行（ANSI 已剥离）
+        assert_eq!(lines, vec!["{", "  \"number\": 237", "}"]);
+
+        let lines2 = p.process(markers);
+        // marker 行必须被正确 push
+        assert_eq!(
+            lines2,
+            vec![
+                "__TIANGONG_CWD_abc__/tmp",
+                "__TIANGONG_RC_abc__0",
+                "__TIANGONG_END_abc__",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_line_processor_gh_single_mega_chunk() {
+        // 场景2：spinner + JSON + markers 合并到一个超大 chunk（PTY 读取线程
+        // 可能一次性读取 4096 字节，所有内容在一个 chunk 里）。
+        let mut p = TerminalLineProcessor::new();
+        let spinner = "\x1b[?25l\r\x1b[K\r⣾\r\x1b[K\r⣽\r\x1b[K\r⣻\r\x1b[K\r\x1b[?25h\r\x1b[K";
+        let gh_json = "\x1b[1;37m{\x1b[m\r\n  \x1b[1;34m\"number\"\x1b[m\x1b[1;37m:\x1b[m 237\r\n\x1b[1;37m}\x1b[m\r\n";
+        let markers =
+            "__TIANGONG_CWD_abc__/tmp\r\n__TIANGONG_RC_abc__0\r\n__TIANGONG_END_abc__\r\n";
+
+        let all = format!("{}{}{}", spinner, gh_json, markers);
+        let lines = p.process(&all);
+
+        // 必须包含 marker 行——如果行模拟被 spinner 破坏，marker 可能丢失
+        let has_rc = lines.iter().any(|l| l.contains("__TIANGONG_RC_abc__"));
+        let has_end = lines.iter().any(|l| l.contains("__TIANGONG_END_abc__"));
+        assert!(has_rc, "RC marker 行丢失！lines: {:?}", lines);
+        assert!(has_end, "END marker 行丢失！lines: {:?}", lines);
+    }
 }

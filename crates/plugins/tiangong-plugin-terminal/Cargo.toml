@@ -19,6 +19,7 @@ scru128 = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 descape = "3"
+strip-ansi-escapes = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

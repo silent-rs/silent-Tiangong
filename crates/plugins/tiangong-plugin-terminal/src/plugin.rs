@@ -29,6 +29,9 @@ pub struct TerminalPlugin {
     override_handler: TerminalToolOverride,
     prompt_provider: TerminalPromptSectionProvider,
     workspace: RwLock<Option<PathBuf>>,
+    /// 插件贡献环境变量的共享句柄（与 `SessionPtyRegistry` 共享同一实例）。
+    /// `set_exec_env` 写入此句柄，PTY 创建时读取快照注入。
+    runtime_env: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
 }
 
 impl TerminalPlugin {
@@ -39,6 +42,7 @@ impl TerminalPlugin {
     /// 返回 `None` 表示插件 state 未就绪（与旧 `get_*` 工厂一致）。
     pub fn from_app_handle(app: &tauri::AppHandle<Wry>) -> Option<Self> {
         let state = app.state::<crate::TerminalPluginState>();
+        let runtime_env = state.registry.runtime_env_handle();
         let provider: Arc<dyn TerminalProvider> =
             Arc::new(SessionAwareTerminalProvider::new(state.registry.clone()));
         let override_handler = TerminalToolOverride::new(provider);
@@ -47,6 +51,7 @@ impl TerminalPlugin {
             override_handler,
             prompt_provider,
             workspace: RwLock::new(None),
+            runtime_env,
         })
     }
 }
@@ -67,6 +72,17 @@ impl Plugin for TerminalPlugin {
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         if let Ok(mut guard) = self.workspace.write() {
             *guard = workspace.map(std::path::Path::to_path_buf);
+        }
+    }
+
+    /// 接收 core 汇总的插件贡献环境变量，写入共享句柄供后续 PTY 创建时注入。
+    ///
+    /// PTY 是长期复用的交互式 shell，env 在创建时快照注入（与 command 插件的
+    /// `env_clear()` 沙箱语义不同——PTY 继承主进程完整环境，只追加、不过滤）。
+    /// 已存在的 PTY 不更新；新建 PTY（新对话/workspace 切换重建）才用最新 env。
+    fn set_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut guard) = self.runtime_env.write() {
+            *guard = env;
         }
     }
 }
