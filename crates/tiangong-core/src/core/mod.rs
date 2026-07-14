@@ -28,7 +28,6 @@ const MAX_OUTER_ITERATIONS: u32 = 3;
 
 pub mod command;
 pub(crate) use command::Command;
-pub use command::SessionMetadataUpdate;
 pub mod plugin;
 pub use plugin::Plugin;
 pub mod builder;
@@ -55,58 +54,6 @@ pub struct TiangongCore {
     trust_mode: crate::permission::TrustModeHandle,
     /// 保证"设置取消信号 + 入队取消命令"与并发消息入队具有单一顺序。
     command_delivery_lock: Mutex<()>,
-}
-
-/// Prepared 消息入队后返回的持久化确认句柄。
-///
-/// 宿主可在持有 Core 容器锁时同步入队，随后释放锁，再异步等待该句柄。
-pub struct PreparedMessageReceipt {
-    receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
-}
-
-/// 会话元数据入队后返回的持久化确认句柄。
-pub struct SessionMetadataReceipt {
-    receiver: tokio::sync::oneshot::Receiver<Result<(), String>>,
-}
-
-impl PreparedMessageReceipt {
-    pub async fn await_persisted(self) -> Result<(), CoreError> {
-        match self.receiver.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(CoreError::MessagePersistenceFailed(message)),
-            Err(_) => Err(CoreError::PersistenceConfirmationDropped),
-        }
-    }
-}
-
-impl std::future::IntoFuture for PreparedMessageReceipt {
-    type Output = Result<(), CoreError>;
-    type IntoFuture =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'static>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.await_persisted())
-    }
-}
-
-impl SessionMetadataReceipt {
-    pub async fn await_persisted(self) -> Result<(), CoreError> {
-        match self.receiver.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(message)) => Err(CoreError::MetadataPersistenceFailed(message)),
-            Err(_) => Err(CoreError::MetadataPersistenceConfirmationDropped),
-        }
-    }
-}
-
-impl std::future::IntoFuture for SessionMetadataReceipt {
-    type Output = Result<(), CoreError>;
-    type IntoFuture =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'static>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(self.await_persisted())
-    }
 }
 
 impl TiangongCore {
@@ -181,60 +128,17 @@ impl TiangongCore {
         }
     }
 
-    /// 同步入队 Prepared 用户消息并返回可在释放外部锁后等待的确认句柄。
-    pub fn enqueue_prepared_with_receipt(
-        &self,
-        message_id: impl Into<String>,
-        prepared: Vec<ContentBlock>,
-    ) -> Result<PreparedMessageReceipt, CoreError> {
-        let _delivery_guard = self
-            .command_delivery_lock
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.send_cmd(Command::Message {
-            prepared,
-            message_id: Some(message_id.into()),
-            persistence_ack: Some(sender),
-        })?;
-        Ok(PreparedMessageReceipt { receiver })
-    }
-
-    /// 入队 Prepared 用户消息并等待其稳定内容成功持久化。
-    pub async fn deliver_prepared_and_wait(
-        &self,
-        message_id: impl Into<String>,
-        prepared: Vec<ContentBlock>,
-    ) -> Result<(), CoreError> {
-        self.enqueue_prepared_with_receipt(message_id, prepared)?
-            .await
-    }
-
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// 替换该 Core 的独立配置，并通知 worker 在下一个外层命令边界重载。
+    /// 替换该 Core 的独立配置。
+    ///
+    /// 配置在下一次 turn 构建 engine 时自动生效（每 turn 现建 engine 会读取最新
+    /// generation），无需显式通知 worker。
     pub fn replace_config(&self, config: CoreConfig) -> Result<(), CoreError> {
         self.config.replace(config);
-        self.send_cmd(Command::ReloadConfig)
-    }
-
-    /// 同步入队会话元数据更新，并返回可在释放宿主锁后等待的持久化确认。
-    pub fn enqueue_session_metadata_update_with_receipt(
-        &self,
-        update: SessionMetadataUpdate,
-    ) -> Result<SessionMetadataReceipt, CoreError> {
-        let _delivery_guard = self
-            .command_delivery_lock
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        self.send_cmd(Command::UpdateSessionMetadata {
-            update,
-            persistence_ack: Some(sender),
-        })?;
-        Ok(SessionMetadataReceipt { receiver })
+        Ok(())
     }
 
     /// 是否已停止（worker 已结束或命令通道已关闭）。
@@ -314,7 +218,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }) => self.send_cmd(Command::Message {
                 prepared,
                 message_id,
-                persistence_ack: None,
             }),
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
                 tool_name: tool.tool_name().to_string(),
@@ -329,8 +232,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
-                CommandInput::UpdateCwd { cwd } => self.send_cmd(Command::UpdateCwd { cwd }),
-                CommandInput::ReloadConfig => self.send_cmd(Command::ReloadConfig),
                 CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
                 CommandInput::ResetContext => self.send_cmd(Command::ResetContext),
             },
@@ -611,45 +512,9 @@ async fn worker_loop_async(
         }
 
         match cmd {
-            Command::UpdateCwd { cwd } => {
-                session.cwd = cwd;
-                apply_session_cwd(&session);
-                // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）。
-                // cwd 无效时传 None，让插件清空缓存的旧 workspace，避免在旧目录上继续操作。
-                // index 插件在 set_workspace 内对变更目录触发重扫，无需单独的 cwd 钩子。
-                let workspace = std::path::Path::new(&session.cwd);
-                let workspace = if workspace.is_dir() {
-                    Some(workspace)
-                } else {
-                    None
-                };
-                for plugin in &plugins {
-                    plugin.set_workspace(workspace);
-                }
-
-                continue;
-            }
-            Command::UpdateSessionMetadata {
-                update,
-                persistence_ack,
-            } => {
-                if let Err(error) = apply_session_metadata_update(
-                    &mut session,
-                    &trust_mode,
-                    update,
-                    persistence_ack,
-                ) {
-                    tracing::warn!(%error, "更新会话元数据失败");
-                }
-                continue;
-            }
-            Command::ReloadConfig => {
-                continue;
-            }
             Command::Message {
                 prepared,
                 message_id,
-                persistence_ack,
             } => {
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
@@ -670,7 +535,6 @@ async fn worker_loop_async(
                     &stream_tx,
                     Some(message_id),
                     prepared,
-                    persistence_ack,
                     true,
                 ) {
                     Ok(accepted) => accepted,
@@ -976,17 +840,8 @@ fn process_shutdown_feedback_command(
     usage_capture: &mut TurnUsageCapture,
     trust_mode: &crate::permission::TrustModeHandle,
 ) {
+    let _ = trust_mode;
     match command {
-        Command::UpdateSessionMetadata {
-            update,
-            persistence_ack,
-        } => {
-            if let Err(error) =
-                apply_session_metadata_update(session, trust_mode, update, persistence_ack)
-            {
-                tracing::warn!(%error, "关闭阶段更新会话元数据失败");
-            }
-        }
         Command::InjectTool { tool_name, payload } => {
             crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
             crate::react::message::flush_deferred_tool_injections(session, stream_tx);
@@ -1011,85 +866,6 @@ fn process_shutdown_feedback_command(
         Command::EmitStreamEvent(_) => {}
         _ => {}
     }
-}
-
-/// 在 Core worker 内原子更新会话元数据；写盘失败时同时恢复内存状态和信任基线。
-pub(crate) fn apply_session_metadata_update(
-    session: &mut Session,
-    trust_mode: &crate::permission::TrustModeHandle,
-    update: SessionMetadataUpdate,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-) -> Result<(), String> {
-    apply_session_metadata_update_with_persist(
-        session,
-        trust_mode,
-        update,
-        persistence_ack,
-        Session::try_persist_to_disk,
-    )
-}
-
-fn apply_session_metadata_update_with_persist<F>(
-    session: &mut Session,
-    trust_mode: &crate::permission::TrustModeHandle,
-    update: SessionMetadataUpdate,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    persist: F,
-) -> Result<(), String>
-where
-    F: FnOnce(&Session) -> Result<(), String>,
-{
-    let SessionMetadataUpdate {
-        title,
-        trust_mode: next_trust_mode,
-        reasoning_effort,
-    } = update;
-
-    if title.is_none() && next_trust_mode.is_none() && reasoning_effort.is_none() {
-        if let Some(ack) = persistence_ack {
-            let _ = ack.send(Ok(()));
-        }
-        return Ok(());
-    }
-
-    let before_title = session.title.clone();
-    let before_trust_mode = session.trust_mode;
-    let before_reasoning_effort = session.reasoning_effort.clone();
-    let before_updated_at = session.updated_at.clone();
-
-    let result = (|| {
-        if let Some(title) = title {
-            let title = title.trim();
-            if title.is_empty() {
-                return Err("会话标题不能为空".to_string());
-            }
-            session.title = title.to_string();
-        }
-        if let Some(mode) = next_trust_mode {
-            session.trust_mode = mode;
-            trust_mode.set_base(mode);
-        }
-        if let Some(effort) = reasoning_effort {
-            session.reasoning_effort = effort
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-        }
-        session.updated_at = crate::session::now_text();
-        persist(session)
-    })();
-
-    if result.is_err() {
-        session.title = before_title;
-        session.trust_mode = before_trust_mode;
-        session.reasoning_effort = before_reasoning_effort;
-        session.updated_at = before_updated_at;
-        trust_mode.set_base(before_trust_mode);
-    }
-
-    if let Some(ack) = persistence_ack {
-        let _ = ack.send(result.clone());
-    }
-    result
 }
 
 pub(crate) fn apply_session_cwd(session: &Session) {
@@ -1480,76 +1256,6 @@ mod turn_usage_capture_tests {
             37
         );
         assert_eq!(stream_rx.try_iter().count(), 2);
-    }
-}
-
-#[cfg(test)]
-mod session_metadata_update_tests {
-    use super::*;
-    use crate::permission::TrustMode;
-
-    #[test]
-    fn metadata_update_commits_all_fields_and_acknowledges() {
-        let mut session = Session::new("旧标题");
-        session.trust_mode = TrustMode::Supervised;
-        session.reasoning_effort = Some("low".to_string());
-        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
-        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
-
-        apply_session_metadata_update_with_persist(
-            &mut session,
-            &trust_mode,
-            SessionMetadataUpdate {
-                title: Some("  新标题  ".to_string()),
-                trust_mode: Some(TrustMode::FullTrust),
-                reasoning_effort: Some(Some("high".to_string())),
-            },
-            Some(ack_tx),
-            |persisted| {
-                assert_eq!(persisted.title, "新标题");
-                assert_eq!(persisted.trust_mode, TrustMode::FullTrust);
-                assert_eq!(persisted.reasoning_effort.as_deref(), Some("high"));
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(ack_rx.try_recv().unwrap(), Ok(()));
-        assert_eq!(session.title, "新标题");
-        assert_eq!(session.trust_mode, TrustMode::FullTrust);
-        assert_eq!(session.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(trust_mode.current(), TrustMode::FullTrust);
-    }
-
-    #[test]
-    fn metadata_update_rolls_back_memory_and_trust_when_persist_fails() {
-        let mut session = Session::new("原标题");
-        session.trust_mode = TrustMode::Supervised;
-        session.reasoning_effort = Some("medium".to_string());
-        let before_updated_at = session.updated_at.clone();
-        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
-        let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
-
-        let error = apply_session_metadata_update_with_persist(
-            &mut session,
-            &trust_mode,
-            SessionMetadataUpdate {
-                title: Some("失败标题".to_string()),
-                trust_mode: Some(TrustMode::FullTrust),
-                reasoning_effort: Some(None),
-            },
-            Some(ack_tx),
-            |_| Err("模拟写盘失败".to_string()),
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "模拟写盘失败");
-        assert_eq!(ack_rx.try_recv().unwrap(), Err(error));
-        assert_eq!(session.title, "原标题");
-        assert_eq!(session.trust_mode, TrustMode::Supervised);
-        assert_eq!(session.reasoning_effort.as_deref(), Some("medium"));
-        assert_eq!(session.updated_at, before_updated_at);
-        assert_eq!(trust_mode.current(), TrustMode::Supervised);
     }
 }
 

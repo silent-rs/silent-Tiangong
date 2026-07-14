@@ -316,7 +316,6 @@ impl ReactEngine {
                                 Some(Command::Message {
                                     prepared,
                                     message_id,
-                                    persistence_ack,
                                 }) => {
                                     sink.flush();
                                     let message_count_before_interruption = session.messages.len();
@@ -336,7 +335,6 @@ impl ReactEngine {
                                         stream_tx,
                                         message_id,
                                         prepared,
-                                        persistence_ack,
                                     ) {
                                         Ok(input) => {
                                             stream_interruption = Some(input);
@@ -358,33 +356,6 @@ impl ReactEngine {
                                         }
                                     }
                                 }
-                                Some(Command::UpdateCwd { cwd }) => {
-                                    session.cwd = cwd;
-                                    crate::core::apply_session_cwd(session);
-                                    if let Some(handle) = llm_fut.take() {
-                                        abort_and_join(handle).await;
-                                    }
-                                    let _ = stream_tx.send(StreamEvent::Error {
-                                        message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
-                                    });
-                                    break Err(anyhow::Error::new(CancelSignal::Abort));
-                                }
-                                Some(Command::UpdateSessionMetadata {
-                                    update,
-                                    persistence_ack,
-                                }) => {
-                                    let trust_mode =
-                                        self.engine.permission_gate().trust_mode_handle();
-                                    if let Err(error) = crate::core::apply_session_metadata_update(
-                                        session,
-                                        &trust_mode,
-                                        update,
-                                        persistence_ack,
-                                    ) {
-                                        tracing::warn!(%error, "流式阶段更新会话元数据失败");
-                                    }
-                                }
-                                Some(Command::ReloadConfig) => {}
                                 Some(Command::Approval { .. }) => {}
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     crate::react::message::inject_tool_to_session(
@@ -962,14 +933,9 @@ impl ReactEngine {
                                     Some(Command::Message {
                                         prepared,
                                         message_id,
-                                        persistence_ack,
                                     }) => {
                                         match accept_runtime_user_message(
-                                            session,
-                                            stream_tx,
-                                            message_id,
-                                            prepared,
-                                            persistence_ack,
+                                            session, stream_tx, message_id, prepared,
                                         ) {
                                             Ok(input) => {
                                                 break ApprovalWaitOutcome::CurrentInput(input);
@@ -980,39 +946,6 @@ impl ReactEngine {
                                             ),
                                         }
                                     }
-                                    Some(Command::UpdateCwd { cwd }) => {
-                                        session.cwd = cwd;
-                                        crate::core::apply_session_cwd(session);
-                                        crate::approval_store::remove_pending(
-                                            &session.id,
-                                            &request_id,
-                                        );
-                                        let _ = stream_tx.send(StreamEvent::Error {
-                                            message:
-                                                "工作目录已更新，本轮已安全中断，请重新发送消息"
-                                                    .to_string(),
-                                        });
-                                        merge_plugin_usage(&mut accumulated_usage);
-                                        return accumulated_usage;
-                                    }
-                                    Some(Command::UpdateSessionMetadata {
-                                        update,
-                                        persistence_ack,
-                                    }) => {
-                                        let trust_mode =
-                                            self.engine.permission_gate().trust_mode_handle();
-                                        if let Err(error) =
-                                            crate::core::apply_session_metadata_update(
-                                                session,
-                                                &trust_mode,
-                                                update,
-                                                persistence_ack,
-                                            )
-                                        {
-                                            tracing::warn!(%error, "审批等待阶段更新会话元数据失败");
-                                        }
-                                    }
-                                    Some(Command::ReloadConfig) => {}
                                     Some(Command::Approval { .. }) => {}
                                     Some(Command::InjectTool { tool_name, payload }) => {
                                         self.defer_tool_injections(
@@ -1127,23 +1060,6 @@ impl ReactEngine {
                                     Some(Command::Approval { .. }) => {}
                                     Some(Command::EmitStreamEvent(event)) => {
                                         let _ = stream_tx.send(*event);
-                                    }
-                                    Some(Command::UpdateSessionMetadata {
-                                        update,
-                                        persistence_ack,
-                                    }) => {
-                                        let trust_mode =
-                                            self.engine.permission_gate().trust_mode_handle();
-                                        if let Err(error) =
-                                            crate::core::apply_session_metadata_update(
-                                                session,
-                                                &trust_mode,
-                                                update,
-                                                persistence_ack,
-                                            )
-                                        {
-                                            tracing::warn!(%error, "工具执行期间更新会话元数据失败");
-                                        }
                                     }
                                     Some(Command::Cancel) => {
                                         break None;

@@ -41,6 +41,8 @@ pub(crate) struct ChildTurnResult {
 pub(crate) struct ChildRuntime {
     descriptor: AgentDescriptor,
     core: Mutex<Option<TiangongCore>>,
+    /// 子 Agent 会话存储根目录，用于在工作目录变更时直接更新磁盘 session。
+    storage_root: PathBuf,
     /// 串行化“进入 Running + waiter 登记 + Message 入队”与 Cancel 入队。
     command_gate: Mutex<()>,
     delivery_gate: tokio::sync::Mutex<()>,
@@ -70,7 +72,7 @@ impl ChildRuntime {
             ));
         }
         let completed_messages = Arc::new(Mutex::new(recover_completed_messages(&session)));
-        session.bind_storage_root(child_storage_root);
+        session.bind_storage_root(child_storage_root.clone());
         session.try_persist_to_disk()?;
 
         plugins.retain(|plugin| plugin.id() != PLUGIN_ID && plugin.id() != CHILD_PLUGIN_ID);
@@ -105,6 +107,7 @@ impl ChildRuntime {
         Ok(Arc::new(Self {
             descriptor,
             core: Mutex::new(Some(core)),
+            storage_root: child_storage_root,
             command_gate: Mutex::new(()),
             delivery_gate: tokio::sync::Mutex::new(()),
             shutdown_gate: tokio::sync::Mutex::new(()),
@@ -191,30 +194,30 @@ impl ChildRuntime {
             });
         }
 
-        let receipt = match (|| {
+        // fire-and-forget：deliver 后不等持久化确认。worker 在消息持久化失败时会
+        // 发出 Error 终态，由下方 terminal_rx 的 Err 路径接管。
+        if let Err(error) = (|| {
             let core = self
                 .core
                 .lock()
                 .map_err(|_| "子 Agent Core 状态锁定失败".to_string())?;
             core.as_ref()
                 .ok_or_else(|| "子 Agent Core 已关闭".to_string())?
-                .enqueue_prepared_with_receipt(message_id.clone(), prepared)
+                .deliver(
+                    tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                        message_id.clone(),
+                        prepared,
+                    ),
+                )
                 .map_err(|error| format!("投递子 Agent 消息失败：{error}"))
         })() {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.remove_active_turn(&message_id);
-                return Err(error);
-            }
-        };
+            self.remove_active_turn(&message_id);
+            return Err(error);
+        }
         // Message 已经与 Running/waiter 一起原子排在任何后续 Cancel 之前；异步
-        // 等待持久化和终态时不持有同步锁。
+        // 等待终态时不持有同步锁。
         drop(command_guard);
 
-        if let Err(error) = receipt.await {
-            self.remove_active_turn(&message_id);
-            return Err(format!("子 Agent 消息持久化失败：{error}"));
-        }
         let result = terminal_rx
             .await
             .map_err(|_| "子 Agent 外部事件流在终态前关闭".to_string())??;
@@ -281,14 +284,13 @@ impl ChildRuntime {
         let cwd = workspace
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| "子 Agent Core 状态锁定失败".to_string())?;
-        core.as_ref()
-            .ok_or_else(|| "子 Agent Core 已关闭".to_string())?
-            .deliver(AgentInputKind::update_cwd(cwd))
-            .map_err(|error| format!("同步子 Agent 工作目录失败：{error}"))
+        // 工作目录变更直接更新磁盘 session；下次 turn 从磁盘重载 cwd。
+        let mut session = Session::load_from_storage(&self.storage_root, &self.descriptor.agent_id)
+            .map_err(|error| format!("加载子 Agent 会话失败：{error}"))?;
+        session.cwd = cwd;
+        session
+            .try_persist_to_disk()
+            .map_err(|error| format!("持久化子 Agent 工作目录失败：{error}"))
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -1418,6 +1420,7 @@ mod tests {
         let server = OneShotSseServer::start();
 
         // 真实 Core 注册一个最小插件，取得合法的父反馈通道供子事件桥转发。
+        // 投递一条消息触发 worker 循环（engine 构建 + 插件注册），不等 turn 完成。
         let capture = Arc::new(FeedbackCapturePlugin::default());
         let mut parent_session = Session::new("parent");
         parent_session.cwd = storage.path().to_string_lossy().into_owned();
@@ -1432,9 +1435,7 @@ mod tests {
             .build()
             .unwrap();
         parent_core
-            .deliver(AgentInputKind::update_cwd(
-                storage.path().to_string_lossy().into_owned(),
-            ))
+            .deliver(AgentInputKind::message("trigger plugin registration"))
             .unwrap();
         let feedback = tokio::time::timeout(Duration::from_secs(3), async {
             loop {

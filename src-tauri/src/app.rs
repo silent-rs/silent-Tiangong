@@ -1014,10 +1014,10 @@ impl TiangongApp {
         {
             let mut cores = self.lock_cores();
             if cores.get(session_id).is_some_and(|core| !core.is_stopped()) {
-                // 复用存活 Core：热更配置/cwd/trust。
+                // 复用存活 Core：热更配置/trust。cwd 由 app-state 快照维护，下次
+                // turn 从快照重载，无需投递到 worker。
                 let core = cores.get(session_id).expect("上文已确认存活");
                 let _ = core.replace_config(session_config.clone());
-                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
                 core.set_trust_mode(session.trust_mode);
                 return EnsuredCore {
                     session_id: session_id.to_string(),

@@ -183,19 +183,15 @@ impl ServerCoreManager {
             .await?;
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
-        let receipt = match self.enqueue_prepared(&session_id, &msg_id, prepared) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                tracker.cancel_turn(turn_id);
-                return Err(error);
-            }
-        };
+        // fire-and-forget：enqueue 成功即提交附件。worker 在消息持久化失败时会发出
+        // Error 终态，由下方 wait_for_turn 捕获并转为失败返回。
         let created_paths = commit_enqueued_attachment_transaction(transaction);
-        if let Err(error) = receipt.await_persisted().await {
+        if let Err(error) = self.enqueue_prepared(&session_id, &msg_id, prepared) {
+            cleanup_created_attachment_paths(&created_paths).ok();
             tracker.cancel_turn(turn_id);
-            return Err(attachment_delivery_failure(error, &created_paths));
+            return Err(error);
         }
-        // 消息稳定内容已确认；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
+        // 消息已入队；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
         drop(session_guard);
 
         let tracker_for_wait = tracker.clone();
@@ -310,7 +306,7 @@ impl ServerCoreManager {
         session_id: &str,
         message_id: &str,
         prepared: Vec<ContentBlock>,
-    ) -> Result<tiangong_core::core::PreparedMessageReceipt> {
+    ) -> Result<()> {
         let cores = self
             .cores
             .lock()
@@ -318,8 +314,13 @@ impl ServerCoreManager {
         let core = cores
             .get(session_id)
             .ok_or_else(|| anyhow!("会话 core 不存在：{session_id}"))?;
-        core.enqueue_prepared_with_receipt(message_id.to_string(), prepared)
-            .map_err(|error| anyhow!("消息投递失败：{error}"))
+        core.deliver(
+            tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                message_id.to_string(),
+                prepared,
+            ),
+        )
+        .map_err(|error| anyhow!("消息投递失败：{error}"))
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
@@ -789,16 +790,6 @@ fn commit_enqueued_attachment_transaction(
     let created_paths = transaction.newly_created_paths().to_vec();
     transaction.commit();
     created_paths
-}
-
-fn attachment_delivery_failure(
-    error: impl std::fmt::Display,
-    created_paths: &[std::path::PathBuf],
-) -> anyhow::Error {
-    match cleanup_created_attachment_paths(created_paths) {
-        Ok(()) => anyhow!("消息持久化失败：{error}"),
-        Err(cleanup_error) => anyhow!("消息持久化失败：{error}；清理本批附件失败：{cleanup_error}"),
-    }
 }
 
 fn cleanup_created_attachment_paths(paths: &[std::path::PathBuf]) -> Result<()> {
@@ -1555,8 +1546,7 @@ mod tests {
         assert_eq!(created_paths.len(), 1);
         assert!(created_paths[0].is_file());
 
-        let error = attachment_delivery_failure("receipt failed", &created_paths);
-        assert!(error.to_string().contains("receipt failed"));
+        cleanup_created_attachment_paths(&created_paths).unwrap();
         assert!(!created_paths[0].exists());
     }
 
@@ -2022,13 +2012,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prepared_receipt_confirms_stable_message_persistence() {
+    async fn fire_and_forget_message_persists_stable_content() {
         let _guard = STORAGE_TEST_LOCK.lock().await;
         let root = tempfile::tempdir().unwrap();
         tiangong_core::storage::set_storage_root(root.path().to_path_buf());
-        let session = Session::new("receipt");
+        let session = Session::new("fire-and-forget");
         let session_id = session.id.clone();
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
         let core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
             .session(session)
@@ -2037,24 +2027,43 @@ mod tests {
             .build()
             .unwrap();
 
-        let receipt = core
-            .enqueue_prepared_with_receipt(
-                "receipt-message",
+        // fire-and-forget：deliver 后不等持久化确认，靠终态事件确认 turn 完成。
+        core.deliver(
+            tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                "fire-and-forget-message".to_string(),
                 vec![
                     ContentBlock::Text {
                         text: "hello".to_string(),
                     },
                     ContentBlock::Image {
                         asset: image_asset(),
-                        data: Some("RECEIPT_RUNTIME_SECRET".to_string()),
+                        data: Some("FIRE_AND_FORGET_RUNTIME_SECRET".to_string()),
                     },
                 ],
-            )
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), receipt.await_persisted())
-            .await
-            .expect("持久化确认不应超时")
-            .expect("Prepared 消息应持久化成功");
+            ),
+        )
+        .unwrap();
+
+        // 等待终态事件（Done 或 Error）确认 turn 已落盘。
+        let mut saw_terminal = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match event_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(event) => {
+                    if matches!(
+                        event.event,
+                        tiangong_types::StreamEvent::Done { .. }
+                            | tiangong_types::StreamEvent::Error { .. }
+                    ) {
+                        saw_terminal = true;
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(saw_terminal, "应在超时前收到终态事件");
 
         let json = std::fs::read_to_string(
             root.path()
@@ -2062,10 +2071,10 @@ mod tests {
                 .join(format!("{session_id}.json")),
         )
         .unwrap();
-        assert!(json.contains("receipt-message"));
+        assert!(json.contains("fire-and-forget-message"));
         assert!(json.contains("\"type\": \"image\""));
         assert!(json.contains("asset-server"));
-        assert!(!json.contains("RECEIPT_RUNTIME_SECRET"));
+        assert!(!json.contains("FIRE_AND_FORGET_RUNTIME_SECRET"));
 
         drop(core);
     }

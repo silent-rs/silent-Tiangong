@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::agent_input::AgentInputKind;
 use tracing::{debug, warn};
 
 use crate::workspace_tabs::{
@@ -3622,24 +3622,7 @@ pub async fn set_workspace_dir(
     // 发送 cd 使已打开的终端进入新 workspace。
     tiangong_plugin_terminal::sync_workspace_cwd(&app, &workspace_dir);
 
-    // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
-    let active_session_id = state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .sessions()
-                .iter()
-                .find(|s| s.id == core_state.active_session_id())
-                .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
-                .filter(|s| !s.has_user_messages())
-                .map(|s| s.id.clone()))
-        })
-        .await?;
-    if let Some(sid) = &active_session_id {
-        let cores = state.cores.lock().map_err(|e| e.to_string())?;
-        if let Some(core) = cores.get(sid) {
-            let _ = core.deliver(AgentInputKind::update_cwd(workspace_dir.clone()));
-        }
-    }
+    // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 
     Ok(())
 }
@@ -3662,13 +3645,7 @@ pub async fn set_session_cwd(
         .with_state(|core_state| core_state.update_session_cwd(&session_id, cwd.clone()))
         .await?;
 
-    // 只同步目标会话 Core，不受此时活动会话切换影响。
-    {
-        let cores = state.cores.lock().map_err(|e| e.to_string())?;
-        if let Some(core) = cores.get(&session_id) {
-            let _ = core.deliver(AgentInputKind::update_cwd(cwd.clone()));
-        }
-    }
+    // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 
     Ok(())
 }

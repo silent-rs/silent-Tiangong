@@ -97,16 +97,6 @@ impl AgentInputKind {
         AgentInputKind::Command(CommandInput::Cancel)
     }
 
-    /// 便捷构造：更新工作目录。
-    pub fn update_cwd(cwd: impl Into<String>) -> Self {
-        AgentInputKind::Command(CommandInput::UpdateCwd { cwd: cwd.into() })
-    }
-
-    /// 便捷构造：重新加载配置。
-    pub fn reload_config() -> Self {
-        AgentInputKind::Command(CommandInput::ReloadConfig)
-    }
-
     /// 便捷构造：手动触发上下文压缩。
     pub fn compress_context() -> Self {
         AgentInputKind::Command(CommandInput::CompressContext)
@@ -144,10 +134,6 @@ pub enum ApprovalInput {
 pub enum CommandInput {
     /// 取消当前执行。
     Cancel,
-    /// 更新当前会话工作目录。
-    UpdateCwd { cwd: String },
-    /// 重新加载共享配置。
-    ReloadConfig,
     /// 手动触发上下文压缩。
     CompressContext,
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）。

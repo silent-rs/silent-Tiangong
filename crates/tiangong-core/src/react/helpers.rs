@@ -95,45 +95,13 @@ fn process_commands(
             Command::Message {
                 prepared,
                 message_id,
-                persistence_ack,
-            } => {
-                match accept_runtime_user_message(
-                    session,
-                    stream_tx,
-                    message_id,
-                    prepared,
-                    persistence_ack,
-                ) {
-                    Ok(text) => current_agent_input = Some(text),
-                    Err(err) => tracing::warn!(
-                        error = %err,
-                        "排空队列时追加用户消息持久化失败"
-                    ),
-                }
-            }
-            Command::UpdateCwd { cwd } => {
-                session.cwd = cwd;
-                crate::core::apply_session_cwd(session);
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
-                });
-                return PendingCommandEffect::Terminate;
-            }
-            Command::UpdateSessionMetadata {
-                update,
-                persistence_ack,
-            } => {
-                let trust_mode = engine.permission_gate().trust_mode_handle();
-                if let Err(error) = crate::core::apply_session_metadata_update(
-                    session,
-                    &trust_mode,
-                    update,
-                    persistence_ack,
-                ) {
-                    tracing::warn!(%error, "执行中更新会话元数据失败");
-                }
-            }
-            Command::ReloadConfig => {}
+            } => match accept_runtime_user_message(session, stream_tx, message_id, prepared) {
+                Ok(text) => current_agent_input = Some(text),
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    "排空队列时追加用户消息持久化失败"
+                ),
+            },
             Command::Approval { .. } => {}
             Command::InjectTool { tool_name, payload } => {
                 crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);

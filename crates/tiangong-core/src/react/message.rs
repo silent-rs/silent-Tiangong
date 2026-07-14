@@ -100,13 +100,9 @@ pub(crate) fn accept_prepared_user_message_with_options(
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
     if let Err(err) = validate_ready_content_blocks(&prepared) {
-        if let Some(ack) = persistence_ack {
-            let _ = ack.send(Err(err.clone()));
-        }
         return Err(err);
     }
     let before = session.clone();
@@ -132,9 +128,6 @@ pub(crate) fn accept_prepared_user_message_with_options(
         Ok(message_id) => message_id,
         Err(err) => {
             *session = before;
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Err(err.clone()));
-            }
             return Err(err);
         }
     };
@@ -143,22 +136,12 @@ pub(crate) fn accept_prepared_user_message_with_options(
         None => {
             let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
             *session = before;
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Err(err.clone()));
-            }
             return Err(err);
         }
     };
     if let Err(err) = session.try_persist_to_disk() {
         *session = before;
-        if let Some(ack) = persistence_ack {
-            let _ = ack.send(Err(err.clone()));
-        }
         return Err(err);
-    }
-
-    if let Some(ack) = persistence_ack {
-        let _ = ack.send(Ok(()));
     }
     for (tool_call_id, tool_name, output) in interrupted_tool_calls {
         let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -264,7 +247,6 @@ pub(crate) fn accept_user_message(
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
     accept_prepared_user_message_with_options(
@@ -272,7 +254,6 @@ pub(crate) fn accept_user_message(
         stream_tx,
         message_id,
         prepared,
-        persistence_ack,
         close_pending_tools,
     )
 }
@@ -283,16 +264,8 @@ pub(crate) fn accept_runtime_user_message(
     stream_tx: &StdSender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 ) -> Result<String, String> {
-    let accepted = accept_user_message(
-        session,
-        stream_tx,
-        message_id,
-        prepared,
-        persistence_ack,
-        true,
-    )?;
+    let accepted = accept_user_message(session, stream_tx, message_id, prepared, true)?;
     Ok(content_blocks_text(&accepted.prepared))
 }
 

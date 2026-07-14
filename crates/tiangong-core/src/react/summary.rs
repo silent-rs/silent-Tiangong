@@ -120,7 +120,6 @@ impl ReactEngine {
                         Some(Command::Message {
                             prepared,
                             message_id,
-                            persistence_ack,
                         }) => {
                             sink.flush();
                             let message_count_before_interruption = session.messages.len();
@@ -140,7 +139,6 @@ impl ReactEngine {
                                 stream_tx,
                                 message_id,
                                 prepared,
-                                persistence_ack,
                             ) {
                                 Ok(input) => {
                                     summary_interruption = Some(input);
@@ -160,32 +158,6 @@ impl ReactEngine {
                                 }
                             }
                         }
-                        Some(Command::UpdateCwd { cwd }) => {
-                            session.cwd = cwd;
-                            crate::core::apply_session_cwd(session);
-                            if let Some(handle) = llm_fut.take() {
-                                abort_and_join(handle).await;
-                            }
-                            let _ = stream_tx.send(StreamEvent::Error {
-                                message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
-                            });
-                            break Err(anyhow::Error::new(CancelSignal::Abort));
-                        }
-                        Some(Command::UpdateSessionMetadata {
-                            update,
-                            persistence_ack,
-                        }) => {
-                            let trust_mode = self.engine.permission_gate().trust_mode_handle();
-                            if let Err(error) = crate::core::apply_session_metadata_update(
-                                session,
-                                &trust_mode,
-                                update,
-                                persistence_ack,
-                            ) {
-                                tracing::warn!(%error, "总结阶段更新会话元数据失败");
-                            }
-                        }
-                        Some(Command::ReloadConfig) => {}
                         Some(Command::Approval { .. }) => {}
                         Some(Command::InjectTool { tool_name, payload }) => {
                             crate::react::message::inject_tool_to_session(
