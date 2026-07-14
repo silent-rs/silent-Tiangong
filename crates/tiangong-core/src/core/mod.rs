@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -265,8 +265,10 @@ fn worker_loop(
     // 在专用的 tokio runtime 上运行 async 工作循环，
     // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
     //
-    // 注意：execute_turn_inner_async 内部使用了 tokio::task::block_in_place，
-    // 该 API 仅在 multi-thread runtime 可用，因此这里使用 1 worker 的 multi-thread runtime。
+    // 注意：LLM crate 的 provider_client 内部仍使用 tokio::task::block_in_place
+    //（检测 current runtime flavor 后调 block_in_place 等 forward stream），该 API
+    // 仅在 multi-thread runtime 可用，因此这里使用 1 worker 的 multi-thread runtime。
+    // core 自身的转发屏障已改用 tokio::sync::Notify，不再依赖 block_in_place。
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -316,7 +318,14 @@ async fn worker_loop_async(
     // ReactEngine 内部仍可用 Done/Error 表达执行结果，但外部终态必须由 worker 在
     // 完成清理、插件钩子与持久化后统一发出。转发线程先捕获内部终态，通过屏障
     // 确认已消费完本轮事件；worker 最后只放行一个规范化终态。
-    let turn_capture = Arc::new((Mutex::new(TurnCapture::default()), Condvar::new()));
+    //
+    // 屏障使用 tokio::sync::Notify：转发线程（std::thread）调 notify_waiters，
+    // worker（async task）调 notified().await，无需 block_in_place。
+    // 共享状态用 std::sync::Mutex（双方都短时持锁，不跨 await）。
+    let turn_capture = Arc::new(TurnCaptureState {
+        capture: Mutex::new(TurnCapture::default()),
+        notify: tokio::sync::Notify::new(),
+    });
     let fwd_capture = turn_capture.clone();
     let forward_terminal = Arc::new(AtomicBool::new(false));
     let fwd_terminal = forward_terminal.clone();
@@ -330,24 +339,21 @@ async fn worker_loop_async(
                 ..
             } = &event
             {
-                let (lock, _) = &*fwd_capture;
-                if let Ok(mut capture) = lock.lock() {
+                if let Ok(mut capture) = fwd_capture.capture.lock() {
                     capture.usage.record(usage, agent_id.as_deref(), source);
                 }
             }
             match event {
                 StreamEvent::TurnBoundary { boundary_id } => {
-                    let (lock, ready) = &*fwd_capture;
-                    if let Ok(mut capture) = lock.lock() {
+                    if let Ok(mut capture) = fwd_capture.capture.lock() {
                         capture.processed_boundary = capture.processed_boundary.max(boundary_id);
-                        ready.notify_all();
                     }
+                    fwd_capture.notify.notify_waiters();
                     continue;
                 }
                 terminal @ (StreamEvent::Done { .. } | StreamEvent::Error { .. }) => {
                     if !fwd_terminal.swap(false, Ordering::AcqRel) {
-                        let (lock, _) = &*fwd_capture;
-                        if let Ok(mut capture) = lock.lock() {
+                        if let Ok(mut capture) = fwd_capture.capture.lock() {
                             // 可恢复错误之后可能继续成功；以本轮最后一个内部终态为准。
                             capture.terminal = Some(terminal);
                         }
@@ -522,7 +528,7 @@ async fn worker_loop_async(
                 let turn_start_cwd = session.cwd.clone();
                 // 新轮次内部终态一律先捕获，直到最终会话状态提交完毕。
                 forward_terminal.store(false, Ordering::Release);
-                if let Ok(mut capture) = turn_capture.0.lock() {
+                if let Ok(mut capture) = turn_capture.capture.lock() {
                     capture.terminal = None;
                     capture.usage = TurnUsageCapture::default();
                 }
@@ -547,7 +553,8 @@ async fn worker_loop_async(
                             StreamEvent::Error {
                                 message: format!("用户消息持久化失败：{err}"),
                             },
-                        );
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -576,16 +583,20 @@ async fn worker_loop_async(
                 turn_boundary_id = turn_boundary_id.wrapping_add(1);
                 let boundary_id = turn_boundary_id;
                 let _ = stream_tx.send(StreamEvent::TurnBoundary { boundary_id });
-                let mut terminal = tokio::task::block_in_place(|| {
-                    let (lock, ready) = &*turn_capture;
-                    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
-                    while capture.processed_boundary < boundary_id {
-                        capture = ready
-                            .wait(capture)
+                // 等转发线程消费完 execute_turn_async 在返回前产生的所有事件，取得
+                // 本轮最后一个内部终态。屏障不对外可见。
+                let mut terminal = loop {
+                    {
+                        let mut capture = turn_capture
+                            .capture
+                            .lock()
                             .unwrap_or_else(|poison| poison.into_inner());
+                        if capture.processed_boundary >= boundary_id {
+                            break capture.terminal.take();
+                        }
                     }
-                    capture.terminal.take()
-                })
+                    turn_capture.notify.notified().await;
+                }
                 .unwrap_or(StreamEvent::Done { usage: None });
 
                 if session.cwd != turn_start_cwd {
@@ -629,12 +640,12 @@ async fn worker_loop_async(
 
                 // 插件终态钩子也可能同步上报用量。再次设置屏障，确保转发线程已捕获
                 // 本轮全部 TokenUsage，再由 Core 统一写入权威 Session。
-                tokio::task::block_in_place(|| {
-                    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id);
-                });
+                wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
                 let turn_usage = {
-                    let (lock, _) = &*turn_capture;
-                    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let mut capture = turn_capture
+                        .capture
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
                     std::mem::take(&mut capture.usage)
                 };
                 // 本轮结束后后台子执行仍可能继续发送累计取消事件；继承本轮已经观测
@@ -698,7 +709,8 @@ async fn worker_loop_async(
                     &turn_capture,
                     &mut turn_boundary_id,
                     terminal,
-                );
+                )
+                .await;
 
                 // shutdown 由 Command::Shutdown 在下一轮 cmd_rx.recv() 时处理。
                 // 置位（mod.rs:300），turn 会通过 cancel 信号尽快终止；终止后回到 recv
@@ -733,7 +745,8 @@ async fn worker_loop_async(
                         &turn_capture,
                         &mut turn_boundary_id,
                         StreamEvent::Done { usage: None },
-                    );
+                    )
+                    .await;
                 }
             }
             Command::Shutdown => {
@@ -754,7 +767,8 @@ async fn worker_loop_async(
                     &turn_capture,
                     &mut turn_boundary_id,
                     StreamEvent::Done { usage: None },
-                );
+                )
+                .await;
             }
             Command::EmitStreamEvent(ev) => {
                 let ev = *ev;
@@ -781,7 +795,8 @@ async fn worker_loop_async(
                         &turn_capture,
                         &mut turn_boundary_id,
                         ev,
-                    );
+                    )
+                    .await;
                     background_usage_capture = TurnUsageCapture::default();
                 } else {
                     let _ = stream_tx.send(ev);
@@ -821,8 +836,8 @@ async fn worker_loop_async(
     drop(engine);
     // 关闭内部通道，等待转发线程结束
     drop(stream_tx);
-    tokio::task::spawn_blocking(|| ()).await.ok(); // yield，让 forward_handle 有机会 drain
-    let _ = forward_handle.join();
+    // 在 blocking pool 上 join 转发线程，避免阻塞 runtime worker 线程。
+    let _ = tokio::task::spawn_blocking(move || forward_handle.join()).await;
 
     // 会话结束：回调插件生命周期钩子（index 插件在此 finalize Session 索引）。
     // 注意：stream 通道已关闭，钩子内不应再投递流事件。
@@ -981,6 +996,16 @@ struct TurnCapture {
     terminal: Option<StreamEvent>,
     usage: TurnUsageCapture,
     processed_boundary: u64,
+}
+
+/// 转发线程与 worker 共享的屏障状态。
+///
+/// `capture` 用 std::sync::Mutex 保护（双方都短时持锁，不跨 await）；
+/// `notify` 让 worker（async task）在不使用 block_in_place 的情况下等待
+/// 转发线程处理完 TurnBoundary。
+struct TurnCaptureState {
+    capture: Mutex<TurnCapture>,
+    notify: tokio::sync::Notify,
 }
 
 /// 转发线程捕获的单轮精确用量。
@@ -1259,10 +1284,10 @@ mod turn_usage_capture_tests {
     }
 }
 
-fn send_final_stream_event(
+async fn send_final_stream_event(
     stream_tx: &StdSender<StreamEvent>,
     forward_terminal: &AtomicBool,
-    turn_capture: &Arc<(Mutex<TurnCapture>, Condvar)>,
+    turn_capture: &Arc<TurnCaptureState>,
     turn_boundary_id: &mut u64,
     event: StreamEvent,
 ) {
@@ -1274,14 +1299,14 @@ fn send_final_stream_event(
     if stream_tx.send(event).is_ok() {
         // 必须确认转发线程已经处理完这个终态，才能接收/重置下一轮。否则新轮次
         // 清除放行标志时，上一轮尚在队列里的终态可能被误当作内部事件吞掉。
-        wait_for_stream_boundary(stream_tx, turn_capture, turn_boundary_id);
+        wait_for_stream_boundary(stream_tx, turn_capture, turn_boundary_id).await;
     }
     forward_terminal.store(false, Ordering::Release);
 }
 
-fn wait_for_stream_boundary(
+async fn wait_for_stream_boundary(
     stream_tx: &StdSender<StreamEvent>,
-    turn_capture: &Arc<(Mutex<TurnCapture>, Condvar)>,
+    turn_capture: &Arc<TurnCaptureState>,
     turn_boundary_id: &mut u64,
 ) {
     *turn_boundary_id = turn_boundary_id.wrapping_add(1);
@@ -1292,12 +1317,17 @@ fn wait_for_stream_boundary(
     {
         return;
     }
-    let (lock, ready) = &**turn_capture;
-    let mut capture = lock.lock().unwrap_or_else(|poison| poison.into_inner());
-    while capture.processed_boundary < boundary_id {
-        capture = ready
-            .wait(capture)
-            .unwrap_or_else(|poison| poison.into_inner());
+    loop {
+        {
+            let capture = turn_capture
+                .capture
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if capture.processed_boundary >= boundary_id {
+                return;
+            }
+        }
+        turn_capture.notify.notified().await;
     }
 }
 
