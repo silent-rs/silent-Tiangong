@@ -582,19 +582,6 @@ async fn worker_loop_async(
                 }
                 e.set_runtime_env(exec_env);
             }
-            // 汇总插件贡献的允许文件根目录，
-            // 写入 process-level 允许表供 tool/common.rs 写权限校验，避免 core 硬编码。
-            {
-                let mut extra_roots: Vec<std::path::PathBuf> = Vec::new();
-                for plugin in &plugins {
-                    for root in plugin.allowed_file_roots() {
-                        if !extra_roots.contains(&root) {
-                            extra_roots.push(root);
-                        }
-                    }
-                }
-                tiangong_toolkit::set_extra_allowed_roots(extra_roots);
-            }
             // 汇总插件贡献的工具权限覆盖，
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
             {

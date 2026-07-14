@@ -976,8 +976,6 @@ fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessag
         SYSTEM_IDENTITY.to_string(),
         SYSTEM_RULES.to_string(),
         format!("当前会话：{}", req.session_title),
-        format!("当前工作目录：{}", current_working_directory_text()),
-        format!("允许文件操作目录：{}", allowed_file_roots_text()),
     ];
     let mut has_context_system = false;
     for msg in &req.context {
@@ -1681,18 +1679,6 @@ fn block_on_provider_stream(
 
 fn map_llm_error(error: crate::error::LlmError) -> anyhow::Error {
     anyhow!(error.to_string())
-}
-
-fn current_working_directory_text() -> String {
-    std::env::current_dir()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| ".".to_string())
-}
-
-fn allowed_file_roots_text() -> String {
-    let workspace = current_working_directory_text();
-    let temp = std::env::temp_dir().display().to_string();
-    format!("{workspace}；{temp}")
 }
 
 // ── 重试相关 ──────────────────────────────────────────────

@@ -99,12 +99,6 @@ impl Plugin for SkillPlugin {
         env
     }
 
-    fn allowed_file_roots(&self) -> Vec<std::path::PathBuf> {
-        // 贡献 skills 存储目录（~/.tiangong/skills），供 fs 工具写权限校验，
-        // 让 Agent 能创建/编辑 skill 文件。core 不再硬编码此路径。
-        vec![crate::paths::default_skills_storage_dir_path()]
-    }
-
     fn tool_permission_overrides(
         &self,
     ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {

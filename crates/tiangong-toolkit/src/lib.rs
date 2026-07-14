@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -52,40 +52,50 @@ pub fn session_workspace_root() -> Option<PathBuf> {
     SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
 }
 
-/// 插件贡献的额外允许文件根目录（process-level，由 core/mod.rs 汇总各插件的
-/// `Plugin::allowed_file_roots` 写入）。
-static EXTRA_ALLOWED_ROOTS: OnceLock<RwLock<Vec<PathBuf>>> = OnceLock::new();
-
-fn extra_allowed_roots() -> &'static RwLock<Vec<PathBuf>> {
-    EXTRA_ALLOWED_ROOTS.get_or_init(|| RwLock::new(Vec::new()))
-}
-
-/// 写入插件贡献的额外允许文件根目录（供 core/mod.rs 在汇总插件能力时调用）。
-pub fn set_extra_allowed_roots(roots: Vec<PathBuf>) {
-    if let Ok(mut guard) = extra_allowed_roots().write() {
-        *guard = roots;
+/// 应用自管存储根目录：`~/.tiangong/`。
+///
+/// 该目录承载 skills / MCP 锁等插件自管数据，天然属于应用可信存储区，
+/// 始终允许 fs 工具写入（如 Agent 创建/编辑 skill 文件），无需经插件 hook 声明。
+pub fn app_storage_root() -> PathBuf {
+    fn user_home_dir() -> Option<PathBuf> {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(home));
+        }
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(profile));
+        }
+        let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
+        let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
+        match (drive, path) {
+            (Some(drive), Some(path)) => {
+                let mut buf = PathBuf::from(drive);
+                buf.push(path);
+                Some(buf)
+            }
+            _ => None,
+        }
     }
+    user_home_dir()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .join(".tiangong")
 }
 
-/// 计算允许写入的根目录列表（工作空间 + 插件贡献的额外根目录）。
+/// 计算允许写入的根目录列表（工作空间 + 应用存储根）。
 ///
 /// 显式传入 `workspace`，供无 thread-local CWD 的插件 handler 调用，
-/// 避免隐式依赖 `SESSION_CWD`。额外根目录由各插件经
-/// `Plugin::allowed_file_roots` 贡献，由 core 汇总后通过 `set_extra_allowed_roots` 注入。
+/// 避免隐式依赖 `SESSION_CWD`。应用存储根（`~/.tiangong/`）天然可信，
+/// 始终追加，无需插件经 hook 声明。
 fn write_allowed_roots_with(workspace: &Path) -> Result<Vec<PathBuf>> {
     let workspace_canonical = workspace
         .canonicalize()
         .with_context(|| format!("解析工作目录失败：{}", workspace.display()))?;
 
     let mut roots = vec![workspace_canonical];
-    // 插件贡献的额外允许目录（如 skill plugin 的 ~/.tiangong/skills）。
-    if let Ok(extra) = extra_allowed_roots().read() {
-        for root in extra.iter() {
-            let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
-            if !roots.iter().any(|r| r == &canonical) {
-                roots.push(canonical);
-            }
-        }
+    // 应用自管存储根（~/.tiangong/），始终允许。
+    let storage = app_storage_root();
+    let storage_canonical = storage.canonicalize().unwrap_or(storage);
+    if !roots.iter().any(|r| r == &storage_canonical) {
+        roots.push(storage_canonical);
     }
     Ok(roots)
 }

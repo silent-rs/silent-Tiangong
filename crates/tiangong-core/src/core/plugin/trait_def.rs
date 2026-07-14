@@ -91,19 +91,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
         std::collections::BTreeMap::new()
     }
 
-    /// 贡献插件允许文件操作的额外根目录（供 fs 工具写权限校验）。
-    ///
-    /// core 在「所有插件注册完成时」以及「配置变化导致 engine rebuild 时」统一
-    /// 遍历所有插件调用此方法，合并结果写入 process-level 的允许根目录表，
-    /// 供 tool/common.rs 的 `write_allowed_roots_with` 读取——避免 core 硬编码
-    /// 任何领域目录（如插件自管的存储目录）。
-    ///
-    /// 默认返回空——不贡献额外文件根的插件无需覆写。需要贡献的插件
-    /// 覆写此方法返回自己的领域存储目录。
-    fn allowed_file_roots(&self) -> Vec<std::path::PathBuf> {
-        Vec::new()
-    }
-
     /// 贡献插件工具的权限等级覆盖（供 core 权限门统一汇总）。
     ///
     /// core 在「所有插件注册完成时」统一遍历所有插件调用此方法，合并到
