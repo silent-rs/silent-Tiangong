@@ -4,8 +4,8 @@
 //! 注入的会话上下文；[`IndexManager`] 在 [`IndexPlugin::new`] 时自建并私有持有。
 //!
 //! 生命周期钩子接管原 core 对 `IndexManager` 的全部写入与维护：
+//! - [`Plugin::set_workspace`]：工作区变更后重扫索引（原 `on_cwd_changed` 的职责）。
 //! - [`Plugin::on_session_ready`]：首次全量扫描工作区索引（原 core/mod.rs 初始扫描）。
-//! - [`Plugin::on_cwd_changed`]：CWD 变更后重扫工作区索引。
 //! - [`Plugin::on_turn_finished`]：批量写入本轮对话索引（原 `index_turn_messages`）。
 //! - [`Plugin::on_session_ended`]：finalize Session 索引。
 
@@ -26,6 +26,8 @@ use tiangong_core::tool_override::PromptSectionProvider;
 pub struct IndexPlugin {
     /// 当前会话工作目录（可变，由 core 注入）。
     workspace: RwLock<Option<PathBuf>>,
+    /// 上次已扫描的工作目录（避免同一目录重复扫描）。
+    last_scanned: RwLock<Option<PathBuf>>,
     /// 信任模式解析句柄（FullTrust 时放宽 search_code 路径校验）。
     trust_mode: RwLock<Option<TrustModeHandle>>,
     /// 自建并私有持有的 IndexManager（core 不感知）。
@@ -44,6 +46,7 @@ impl IndexPlugin {
             .ok();
         Self {
             workspace: RwLock::new(None),
+            last_scanned: RwLock::new(None),
             trust_mode: RwLock::new(None),
             index_manager: RwLock::new(im),
         }
@@ -77,15 +80,20 @@ impl IndexPlugin {
         Some(f(im))
     }
 
-    /// 对工作区做全量扫描（用于 on_session_ready / on_cwd_changed）。
+    /// 对工作区做全量扫描（用于 on_session_ready）。
     ///
     /// - 索引不存在：同步全量扫描（首次使用，阻塞直到完成）。
     /// - 索引过期（>1 小时）：后台重建，不阻塞当前搜索。
     /// - 索引新鲜：跳过。
+    ///
+    /// 无论走哪个分支都会置位 `last_scanned`，使后续 `set_workspace` 对同一目录不再重复扫描。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
             return;
+        }
+        if let Ok(mut scanned) = self.last_scanned.write() {
+            scanned.clone_from(&Some(root.clone()));
         }
         if !crate::index::workspace_index_exists(&root) {
             // 首次：同步全量扫描
@@ -126,8 +134,29 @@ impl Plugin for IndexPlugin {
     }
 
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        let new_path = workspace.map(|p| p.to_path_buf());
         if let Ok(mut guard) = self.workspace.write() {
-            *guard = workspace.map(|p| p.to_path_buf());
+            *guard = new_path.clone();
+        }
+        // 工作区变更后重扫索引（原 on_cwd_changed 的职责）。
+        // 仅当新路径与上次已扫描路径不同且是有效目录时才扫描，避免重复。
+        if let Some(ref root) = new_path
+            && root.is_dir()
+        {
+            let need_scan = self
+                .last_scanned
+                .read()
+                .map(|g| g.as_ref() != Some(root))
+                .unwrap_or(true);
+            if need_scan && let Ok(mut scanned) = self.last_scanned.write() {
+                scanned.clone_from(&Some(root.clone()));
+            }
+            if need_scan {
+                self.with_index_manager(|im| match im.full_scan(root) {
+                    Ok(count) => tracing::info!(count, "Workspace 索引扫描完成"),
+                    Err(e) => tracing::warn!("Workspace 索引扫描失败: {e}"),
+                });
+            }
         }
     }
 
@@ -141,18 +170,20 @@ impl Plugin for IndexPlugin {
     // 由 core 通过 supertrait 自动收集。
 
     fn on_session_ready(&self, session: &mut Session) {
-        self.full_scan_workspace(&session.cwd);
-    }
-
-    fn on_cwd_changed(&self, session: &mut Session) {
+        // set_workspace 可能已在 engine 初始化时对当前 cwd 触发过扫描（last_scanned
+        // 已置位）。若已扫描过同一目录则跳过，否则做首次全量扫描。
         let root = PathBuf::from(&session.cwd);
-        if !root.is_dir() {
-            return;
+        if root.is_dir() {
+            let already_scanned = self
+                .last_scanned
+                .read()
+                .map(|g| g.as_ref() == Some(&root))
+                .unwrap_or(false);
+            if already_scanned {
+                return;
+            }
         }
-        self.with_index_manager(|im| match im.full_scan(&root) {
-            Ok(count) => tracing::info!(count, "Workspace 索引扫描完成"),
-            Err(e) => tracing::warn!("Workspace 索引扫描失败: {e}"),
-        });
+        self.full_scan_workspace(&session.cwd);
     }
 
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {

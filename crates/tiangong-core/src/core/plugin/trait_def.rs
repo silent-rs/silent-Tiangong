@@ -146,12 +146,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 目录做首次全量扫描）。仅触发一次；后续 engine 重建只回调 [`Plugin::on_engine_rebuilt`]。
     fn on_session_ready(&self, _session: &mut crate::session::Session) {}
 
-    /// engine 创建或重建（配置变更）完成后调用。
-    fn on_engine_rebuilt(&self, _session: &mut crate::session::Session) {}
-
-    /// 会话工作目录变更后调用（core 已更新 `session.cwd` 并重注入 `set_workspace`）。
-    fn on_cwd_changed(&self, _session: &mut crate::session::Session) {}
-
     /// 一个对话轮次开始前调用：用户消息已写入 session，`execute_turn` 调用前。
     ///
     /// `turn_start_idx` 为本轮用户消息在 `session.messages` 中的起始索引，

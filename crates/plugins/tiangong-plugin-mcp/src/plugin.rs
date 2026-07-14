@@ -220,8 +220,9 @@ impl Plugin for McpPlugin {
         self.collect_runtime_env()
     }
 
-    fn on_engine_rebuilt(&self, _session: &mut tiangong_core::session::Session) {
+    fn on_config_updated(&self, _config: &tiangong_core::core_config::CoreConfig) {
         // engine 重建（配置变更）后，capability scheduler 重配 + targets 重建。
+        // 原 on_engine_rebuilt 的职责由配置变更钩子统一承载。
         self.reconfigure();
     }
 }

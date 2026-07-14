@@ -606,26 +606,23 @@ async fn worker_loop_async(
             last_cfg_gen = cfg_gen;
 
             // 首次 engine build + 插件注册完成后触发一次 on_session_ready
-            //（此时 workspace / trust_mode / feedback 已注入）；后续重建只调 on_engine_rebuilt。
+            //（此时 workspace / trust_mode / feedback 已注入）；engine 重建后的再配置
+            // 由各插件在 on_config_updated 中统一承载。
             if !session_ready_fired {
                 session_ready_fired = true;
                 for plugin in &plugins {
                     plugin.on_session_ready(&mut session);
                 }
             }
-            // engine 创建/重建完成：回调插件生命周期钩子
-            for plugin in &plugins {
-                plugin.on_engine_rebuilt(&mut session);
-            }
         }
 
         match cmd {
             Command::UpdateCwd { cwd } => {
-                let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
                 // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）。
                 // cwd 无效时传 None，让插件清空缓存的旧 workspace，避免在旧目录上继续操作。
+                // index 插件在 set_workspace 内对变更目录触发重扫，无需单独的 cwd 钩子。
                 let workspace = std::path::Path::new(&session.cwd);
                 let workspace = if workspace.is_dir() {
                     Some(workspace)
@@ -634,12 +631,6 @@ async fn worker_loop_async(
                 };
                 for plugin in &plugins {
                     plugin.set_workspace(workspace);
-                }
-                // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
-                if cwd_changed {
-                    for plugin in &plugins {
-                        plugin.on_cwd_changed(&mut session);
-                    }
                 }
 
                 continue;
@@ -744,7 +735,6 @@ async fn worker_loop_async(
                     let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
                     for plugin in &plugins {
                         plugin.set_workspace(workspace);
-                        plugin.on_cwd_changed(&mut session);
                     }
                 }
 
