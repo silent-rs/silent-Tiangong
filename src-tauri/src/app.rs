@@ -58,8 +58,6 @@ pub struct TiangongApp {
     scheduled_message_rx: Mutex<
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::ScheduledMessageRequest>>,
     >,
-    /// 插件集合变化（能力新增/删除）时标记的 session，下次 ensure_core 移除旧 core 重建。
-    plugin_dirty_sessions: Mutex<HashSet<String>>,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -111,47 +109,6 @@ struct CoreCreationLocks {
 pub(crate) struct EnsuredCore {
     pub(crate) session_id: String,
     pub(crate) is_new: bool,
-}
-
-/// `ensure_core` 对已存在 Core 的处置决策。
-///
-/// 提纯为纯函数便于覆盖全部 (dirty, session_pending, 存活) 组合。重建只发生在
-/// turn 完成或未开始的安全点：dirty 且 turn 未在执行时立即重建；dirty 且 turn 在
-/// 执行时延迟重建（热更新配置、保留 dirty 标记），等下一个安全点再重建。
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(crate) enum CoreReuseDecision {
-    /// 复用存活 Core：热更新配置/cwd/trust，不打断当前状态。
-    Reuse,
-    /// 插件集合变化但 turn 在执行，延迟重建：热更新配置，dirty 标记保留待下次 ensure。
-    DeferDirtyRebuild,
-    /// 移除旧 Core（已停止或需要插件重建）并 drop。
-    /// 重建是 app 层策略：直接 drop 旧 Core（其 Drop 发 Shutdown），用调用方传入的
-    /// session 重新构造全新 Core，不继承旧 Core 的内存状态。
-    RetireForRebuild,
-}
-
-/// 依据 dirty 标记、是否有活跃 turn、是否存在存活 Core，决定 ensure_core 的处置路径。
-///
-/// - `dirty && session_pending && has_live_core`：延迟重建（不打断执行中的 turn）
-/// - `dirty && 其他`：立即重建（turn 未在执行，或 Core 已停止）
-/// - `!dirty && has_live_core`：复用
-/// - `!dirty && !has_live_core`：无存活 Core，走新建路径（若有已停止 Core 则先移除）
-pub(crate) fn decide_core_reuse(
-    dirty: bool,
-    session_pending: bool,
-    has_live_core: bool,
-) -> CoreReuseDecision {
-    if dirty {
-        if session_pending && has_live_core {
-            CoreReuseDecision::DeferDirtyRebuild
-        } else {
-            CoreReuseDecision::RetireForRebuild
-        }
-    } else if has_live_core {
-        CoreReuseDecision::Reuse
-    } else {
-        CoreReuseDecision::RetireForRebuild
-    }
 }
 
 fn merge_agent_output_messages(
@@ -264,7 +221,6 @@ impl TiangongApp {
             config,
             scheduler_context,
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
-            plugin_dirty_sessions: Mutex::new(HashSet::new()),
             skill_plugin: std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
             ),
@@ -1004,19 +960,11 @@ impl TiangongApp {
         // 这份 provider 只作全局模板和新 Core 构造辅助，不承载任一会话的
         // trust/reasoning 覆盖。已存在 Core 使用各自独立的 provider。
         self.config.replace(template);
-        let cores = self.lock_cores();
-        if plugin_set_changed {
-            // 能力集合变化（新增/删除）：plugin 列表构造时固定，无法热更新。
-            // 标记 dirty，下次 ensure_core 时移除旧 core 重建（不打断当前 turn）。
-            for session_id in cores.keys().cloned().collect::<Vec<_>>() {
-                self.plugin_dirty_sessions
-                    .lock()
-                    .map(|mut g| g.insert(session_id))
-                    .ok();
-            }
-        } else {
-            // 仅 endpoint 或会话配置变化：按 session 替换独立 provider，
-            // 避免并行会话互相覆盖 trust/reasoning。
+        // 能力集合变化时，存活 Core 的插件列表无法热更（构造时固定）。
+        // 存活 Core 继续用旧插件直到自然停止；下次 ensure_core 新建时用最新插件。
+        // 仅 endpoint/trust/reasoning 变化时，按 session 热更存活 Core 的配置。
+        if !plugin_set_changed {
+            let cores = self.lock_cores();
             for (session_id, core) in cores.iter() {
                 if let Some(config) = session_configs.get(session_id) {
                     let _ = core.replace_config(config.clone());
@@ -1043,10 +991,11 @@ impl TiangongApp {
         f(&guard).map_err(|e| e.to_string())
     }
 
-    /// 获取或创建会话对应的 TiangongCore
+    /// 获取或创建会话对应的 TiangongCore。
     ///
-    /// 如果 core 已存在（多轮对话），直接复用。
-    /// stream_tx 只在创建新 core 时使用。
+    /// 存活 Core 直接复用（热更配置/cwd/trust）；无存活 Core（不存在或已停止）
+    /// 则清理 stopped 残留后调用 `create_core` 新建。本方法不主动关闭存活 Core ——
+    /// 关闭是删除会话/失败回滚的职责。
     pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
@@ -1056,85 +1005,57 @@ impl TiangongApp {
         let creation_lock = self.core_creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
 
-        // Invariant: 无效 CWD 的会话不会加载到 Core 生命周期。调用方在加载会话前
-        // 已过滤掉 cwd 为无效目录的会话，因此插件可以假设 session.cwd 要么为空
-        //（普通聊天会话）要么是有效工作区目录。
-        //
-        // 同一 session 的所有入口在本函数内串行化。该边界必须覆盖异步初始化、
-        // builder 启动 worker 和最终插入，不能只依赖调用方各自的业务锁。
-
         let base = self.config.snapshot();
-        let (session_config, session_pending) = {
+        let session_config = {
             let core_state = self.state.lock().await;
-            (
-                core_state.build_core_config_for_session_from_base(&base, session_id),
-                core_state.has_active_turn_for(session_id),
-            )
+            core_state.build_core_config_for_session_from_base(&base, session_id)
         };
 
-        // 1. 先检查是否已有 core（持有锁期间不做 async 操作）。
-        // 重建是 app 层策略：drop 旧 Core（让其 Drop 发 Shutdown）+ 用调用方传入的
-        // session 重建，不继承旧 Core 的内存状态。
         {
             let mut cores = self.lock_cores();
-            // 插件集合变化（能力新增/删除）时移除旧 core，用最新 models 重建。
-            let dirty = self
-                .plugin_dirty_sessions
-                .lock()
-                .map(|mut g| g.remove(session_id))
-                .unwrap_or(false);
-            let has_live_core = cores.get(session_id).is_some_and(|core| !core.is_stopped());
-            match decide_core_reuse(dirty, session_pending, has_live_core) {
-                CoreReuseDecision::DeferDirtyRebuild => {
-                    // dirty 但 turn 在执行：热更新配置，把 dirty 标记保留到下一个安全点。
-                    // 上面 remove 消费了 dirty 标记，这里重新插回集合。
-                    if let Some(core) = cores.get(session_id) {
-                        self.plugin_dirty_sessions
-                            .lock()
-                            .map(|mut dirty| dirty.insert(session_id.to_string()))
-                            .ok();
-                        let _ = core.replace_config(session_config.clone());
-                        core.set_trust_mode(session.trust_mode);
-                        return EnsuredCore {
-                            session_id: session_id.to_string(),
-                            is_new: false,
-                        };
-                    }
-                    // dirty + pending 但 Core 已不存在（罕见）：落到下方重建。
-                }
-                CoreReuseDecision::Reuse => {
-                    let core = cores.get(session_id).expect("Reuse 预期存在存活 Core");
-                    let _ = core.replace_config(session_config.clone());
-                    let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
-                    core.set_trust_mode(session.trust_mode);
-                    return EnsuredCore {
-                        session_id: session_id.to_string(),
-                        is_new: false,
-                    };
-                }
-                CoreReuseDecision::RetireForRebuild => {
-                    // dirty 重建（turn 未执行）或 Core 已停止：drop 旧 Core。
-                    // Drop 会发 Shutdown，worker 在后台收尾；重建用传入的 session。
-                    if cores.remove(session_id).is_some() {
-                        if dirty {
-                            tracing::info!(session_id, "插件集合变化，移除旧 core 待重建");
-                        } else {
-                            warn!(session_id, "移除已停止的 TiangongCore");
-                        }
-                    }
-                }
+            if cores.get(session_id).is_some_and(|core| !core.is_stopped()) {
+                // 复用存活 Core：热更配置/cwd/trust。
+                let core = cores.get(session_id).expect("上文已确认存活");
+                let _ = core.replace_config(session_config.clone());
+                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
+                core.set_trust_mode(session.trust_mode);
+                return EnsuredCore {
+                    session_id: session_id.to_string(),
+                    is_new: false,
+                };
             }
-        };
+            // 清理已停止 Core（worker 已结束，安全）。core_creation_lock 保证
+            // 同会话无并发写入者。
+            if cores.remove(session_id).is_some() {
+                warn!(session_id, "移除已停止的 TiangongCore");
+            }
+        }
 
-        // 2. 初始化 Memory Handle（async，不持有 cores 锁）。
+        let core = self.create_core(session, session_config, stream_tx).await;
+        let id = core.session_id().to_string();
+        self.lock_cores().insert(id.clone(), core);
+        EnsuredCore {
+            session_id: id,
+            is_new: true,
+        }
+    }
+
+    /// 构造全新的 TiangongCore（memory handle + 全部插件 + builder.build）。
+    ///
+    /// 纯构建流程，不操作 cores map。每次新建 Core（首次创建 / stopped 后重建）
+    /// 都复用本方法。
+    async fn create_core(
+        &self,
+        session: tiangong_core::session::Session,
+        session_config: tiangong_core::core_config::CoreConfig,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+    ) -> TiangongCore {
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
             self.config.generation(),
             tiangong_memory::ProcessType::Gui,
         )
         .await;
 
-        // 3. 现场构造全部插件实例（per-Core 独立，隔离 per-session 状态）。重建时
-        // 直接 drop 旧 Core、用传入 session 起一个全新的 Core。
         let storage_root = tiangong_app_state::app_state::storage_root();
         let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
         // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
@@ -1161,7 +1082,6 @@ impl TiangongApp {
         plugins.push(tiangong_plugin_fs::build_plugin());
         plugins.push(tiangong_plugin_index::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-        // models 从 config 内存单例读取（sync_core_config_from_state 时已同步）。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
         let models = tiangong_config::registry::models();
         let resolve_ep = |cap: ModelCapability| {
@@ -1197,15 +1117,11 @@ impl TiangongApp {
         if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
         }
-        // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具（get_skill_detail），
-        // app 侧经 self.skill_plugin 做管理（remove/set_enabled/refresh/gc/doctor）。
+        // Skill / MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具，
+        // app 侧经 self.skill_plugin / self.mcp_plugin 做管理。
         plugins.push(self.skill_plugin.clone());
-        // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
-        // app 侧经 self.mcp_plugin 做管理（register/update/remove/set_enabled/probe）。
         plugins.push(self.mcp_plugin.clone());
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-        // 工厂只保存当前主 Core 的能力快照；每次创建子 Core 都重新构造一套
-        // 会话级插件外壳，Agent Team 自身由插件内部追加受限客户端。
         let child_plugin_factory: std::sync::Arc<
             dyn tiangong_plugin_agent_team::ChildPluginFactory,
         > = std::sync::Arc::new({
@@ -1214,7 +1130,6 @@ impl TiangongApp {
             move || {
                 let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
                     Vec::new();
-                // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
                 child_plugins.extend(tiangong_plugin_prompt::default_plugins());
                 if browser_available {
                     if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
@@ -1262,34 +1177,14 @@ impl TiangongApp {
             child_plugin_factory,
         ));
 
-        // 4. builder 会立即启动 worker；最后一次防御检查必须发生在 builder 之前，
-        // 绝不能先启动一个落选实例再 Drop，否则它仍可能执行插件恢复钩子。
-        if self
-            .lock_cores()
-            .get(session_id)
-            .is_some_and(|existing| !existing.is_stopped())
-        {
-            return EnsuredCore {
-                session_id: session_id.to_string(),
-                is_new: false,
-            };
-        }
-
-        // 创建 Core 并插入。`core_creation_lock` 保证同会话没有第二个 ensure 写入者。
-        let core = TiangongCore::builder()
+        TiangongCore::builder()
             .config(CoreConfigProvider::new(session_config))
             .session(session)
             .event_sender(stream_tx)
             .plugins(plugins)
             .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
             .build()
-            .expect("Builder 必填字段已齐");
-        let id = core.session_id().to_string();
-        self.lock_cores().insert(id.clone(), core);
-        EnsuredCore {
-            session_id: id,
-            is_new: true,
-        }
+            .expect("Builder 必填字段已齐")
     }
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
@@ -1498,37 +1393,6 @@ mod tests {
             .expect("同会话后继创建应在前一创建离开后继续")
             .expect("创建锁等待任务不应失败");
         assert!(entered.load(Ordering::Acquire));
-    }
-
-    /// `decide_core_reuse` 覆盖 (dirty, session_pending, has_live_core) 全部组合。
-    /// 重建只发生在安全点：dirty 且 turn 未执行时立即重建；dirty 且 turn 在执行时
-    /// 延迟到下一个安全点；无存活 Core 一律重建（或新建）。
-    #[test]
-    fn decide_core_reuse_truth_table() {
-        use CoreReuseDecision::*;
-        // (dirty, session_pending, has_live_core) -> 期望决策
-        let cases = [
-            // 无存活 Core：无论 dirty/pending 都需要（重新）创建。
-            (false, false, false, RetireForRebuild),
-            (false, true, false, RetireForRebuild),
-            (true, false, false, RetireForRebuild),
-            (true, true, false, RetireForRebuild),
-            // 存活 Core 且无 dirty：复用（即便有活跃 turn 也只热更新配置）。
-            (false, false, true, Reuse),
-            (false, true, true, Reuse),
-            // 存活 Core 且 dirty：
-            //   - turn 在执行 -> 延迟重建（不打断）
-            //   - turn 未执行 -> 立即重建（安全点）
-            (true, true, true, DeferDirtyRebuild),
-            (true, false, true, RetireForRebuild),
-        ];
-        for (dirty, pending, live, expected) in cases {
-            assert_eq!(
-                decide_core_reuse(dirty, pending, live),
-                expected,
-                "decide_core_reuse({dirty}, {pending}, {live})",
-            );
-        }
     }
 
     /// 构造真实 Core 验证 has_live_core / remove_stopped_core 的生命周期语义。
