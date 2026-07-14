@@ -68,7 +68,7 @@ impl TiangongCoreBuilder {
     /// 构造 core 实例。
     ///
     /// 缺少任一必填字段返回 [`CoreError::MissingBuilderField`]。
-    /// worker 线程由内部 `thread::spawn` 创建，构造期不会失败。
+    /// worker task 由共享 runtime 的 `spawn` 创建，构造期不会失败。
     pub fn build(self) -> Result<TiangongCore, CoreError> {
         let config = self
             .config

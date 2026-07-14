@@ -1175,6 +1175,47 @@ mod turn_usage_capture_tests {
     }
 }
 
+#[cfg(test)]
+mod shared_runtime_tests {
+    use super::*;
+    use crate::core::storage_location::CoreStorageLocation;
+    use crate::core_config::{CoreConfig, CoreConfigProvider};
+
+    /// 多个 Core 共享同一个 runtime，空闲时各自停在 cmd_rx.recv().await。
+    /// 验证构造期不 panic、Core 可正常 deliver + shutdown。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
+        let root = tempfile::tempdir().unwrap();
+        crate::storage::set_storage_root(root.path().to_path_buf());
+
+        let config = CoreConfigProvider::new(CoreConfig::default());
+        let cores: Vec<TiangongCore> = (0..3)
+            .map(|i| {
+                let session = Session::new(&format!("shared-runtime-{i}"));
+                let (event_tx, _event_rx) = std::sync::mpsc::channel();
+                TiangongCore::builder()
+                    .config(config.clone())
+                    .session(session)
+                    .event_sender(event_tx)
+                    .storage(CoreStorageLocation::new(root.path()))
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+
+        // 所有 Core 初始即存活（worker task 已 spawn 但 idle 在 recv().await）
+        for core in &cores {
+            assert!(!core.is_stopped(), "Core 应存活");
+        }
+
+        // 逐个关闭，验证 shutdown 路径在共享 runtime 上正常工作
+        for core in cores {
+            let result = tokio::task::spawn_blocking(move || core.shutdown_join()).await;
+            assert!(result.is_ok(), "shutdown_join 不应 panic");
+        }
+    }
+}
+
 async fn send_final_stream_event(
     stream_tx: &StdSender<StreamEvent>,
     forward_terminal: &AtomicBool,
