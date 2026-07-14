@@ -184,28 +184,64 @@ impl LineBuildHandler {
     fn first_param(params: &vte::Params) -> usize {
         params.iter().next().map(|p| p[0]).unwrap_or(0) as usize
     }
+}
 
-    fn handle_csi(&mut self, params: &vte::Params, final_byte: char) {
-        // DEC private 序列（如 ESC[?25l 隐藏光标）的参数带 ? 前缀，
-        // vte 已剥离前缀，直接取数值。
-        match final_byte {
-            // ESC[K — 清行
-            'K' => {
-                let n = Self::first_param(params);
-                match n {
-                    0 => self.line.truncate(self.cursor),
-                    1 => {
-                        let after: Vec<char> = self.line.drain(self.cursor..).collect();
-                        self.line = after;
-                        self.cursor = 0;
-                    }
-                    2 => {
-                        self.line.clear();
-                        self.cursor = 0;
-                    }
-                    _ => {}
+impl vte::Perform for LineBuildHandler {
+    fn print(&mut self, c: char) {
+        if self.cursor >= self.line.len() {
+            self.line.push(c);
+        } else {
+            self.line[self.cursor] = c;
+        }
+        self.cursor += 1;
+    }
+
+    fn execute(&mut self, byte: u8) {
+        // C0 控制字符
+        match byte {
+            b'\n' => {
+                // LF：提交当前行
+                let line: String = self.line.iter().collect();
+                if !line.trim().is_empty() {
+                    self.complete_lines.push(line);
                 }
+                self.line.clear();
+                self.cursor = 0;
             }
+            b'\r' => {
+                // CR：光标回行首
+                self.cursor = 0;
+            }
+            // 其他控制字符（BS/HT 等）忽略
+            _ => {}
+        }
+    }
+
+    /// CSI 序列分帧已由 vte 状态机完成，这里只对影响单行内容的光标序列
+    /// 模拟行为。SGR（颜色 m）、DEC private（?25l 光标显隐）等不影响行
+    /// 内容收集的序列落入 `_ => {}` 忽略。
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        c: char,
+    ) {
+        match c {
+            // ESC[K — 清行
+            'K' => match Self::first_param(params) {
+                0 => self.line.truncate(self.cursor),
+                1 => {
+                    let after: Vec<char> = self.line.drain(self.cursor..).collect();
+                    self.line = after;
+                    self.cursor = 0;
+                }
+                2 => {
+                    self.line.clear();
+                    self.cursor = 0;
+                }
+                _ => {}
+            },
             // ESC[G — 光标水平绝对定位
             'G' => {
                 let col = Self::first_param(params).max(1);
@@ -216,8 +252,7 @@ impl LineBuildHandler {
             }
             // ESC[J — 清屏（单行模型只处理 2=全清）
             'J' => {
-                let n = Self::first_param(params);
-                if n >= 2 {
+                if Self::first_param(params) >= 2 {
                     self.line.clear();
                     self.cursor = 0;
                 }
@@ -258,48 +293,6 @@ impl LineBuildHandler {
             // SGR（颜色/样式）等其他序列不影响行内容收集，忽略
             _ => {}
         }
-    }
-}
-
-impl vte::Perform for LineBuildHandler {
-    fn print(&mut self, c: char) {
-        if self.cursor >= self.line.len() {
-            self.line.push(c);
-        } else {
-            self.line[self.cursor] = c;
-        }
-        self.cursor += 1;
-    }
-
-    fn execute(&mut self, byte: u8) {
-        // C0 控制字符
-        match byte {
-            b'\n' => {
-                // LF：提交当前行
-                let line: String = self.line.iter().collect();
-                if !line.trim().is_empty() {
-                    self.complete_lines.push(line);
-                }
-                self.line.clear();
-                self.cursor = 0;
-            }
-            b'\r' => {
-                // CR：光标回行首
-                self.cursor = 0;
-            }
-            // 其他控制字符（BS/HT 等）忽略
-            _ => {}
-        }
-    }
-
-    fn csi_dispatch(
-        &mut self,
-        params: &vte::Params,
-        _intermediates: &[u8],
-        _ignore: bool,
-        c: char,
-    ) {
-        self.handle_csi(params, c);
     }
 }
 

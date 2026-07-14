@@ -1149,4 +1149,87 @@ mod tests {
             "取消栅栏放行后，忽略 SIGINT 的命令不得继续写文件"
         );
     }
+
+    /// #237 完整复现链路验证（不依赖网络/GitHub 登录）。
+    ///
+    /// 模拟一个 TTY-aware 命令（类似 gh）在 PTY 下的完整输出流：
+    /// 1. spinner 动画（隐藏/显示光标 + CR/清行）
+    /// 2. 彩色输出（SGR 序列 + 真彩色冒号参数）
+    /// 3. shell 回显 wrapper 命令文本（contains 所有 marker）
+    /// 4. 实际的 marker 输出（start/cwd/rc/end）
+    ///
+    /// 验证：marker 检测只命中实际 marker 行（不命中回显），
+    /// 命令输出完整收集，退出码正确解析。
+    #[test]
+    fn end_to_end_tty_aware_command_marker_detection() {
+        use crate::output_processor::TerminalLineProcessor;
+
+        let marker_id = "test_e2e_001";
+        let start = format!("__TIANGONG_START_{marker_id}__");
+        let end = format!("__TIANGONG_END_{marker_id}__");
+        let cwd = format!("__TIANGONG_CWD_{marker_id}__");
+        let rc = format!("__TIANGONG_RC_{marker_id}__");
+
+        // 构造 wrapper 命令文本（会被 shell 回显，contains 所有 marker）
+        let wrapper_echo =
+            format!("__TIANGONG_= __rc=$?; printf '\\n{cwd}'; pwd; echo '{rc}'$__rc; echo '{end}'");
+
+        // 模拟 PTY 完整输出流（shell 回显 + spinner + 彩色命令输出 + marker）
+        let start_echo = format!("__TIANGONG_= echo '{start}'; export PAGER=cat; fake_gh_cmd\r\n");
+        let wrapper_echo_line = format!("{wrapper_echo}\r\n");
+        let spinner = "\x1b[?25l\r\x1b[K\r⣾\r\x1b[K\r⣽\r\x1b[K\x1b[?25h\r\x1b[K";
+        let color_error = "\x1b[38:2::255:0:0mError:\x1b[0m something failed\r\n";
+        let color_ok = "\x1b[32mOK\x1b[0m done\r\n";
+        let cwd_line = format!("{cwd}/tmp\r\n");
+        let rc_line = format!("{rc}1\r\n");
+        let end_line = format!("{end}\r\n");
+        let pty_output = format!(
+            "{start_echo}{wrapper_echo_line}{spinner}{color_error}{color_ok}{cwd_line}{rc_line}{end_line}"
+        );
+
+        // 用 TerminalLineProcessor 处理（模拟 output_reader 线程）
+        let mut processor = TerminalLineProcessor::new();
+        let lines = processor.process(&pty_output);
+
+        // 收集到的行里必须包含命令输出
+        let has_error = lines.iter().any(|l| l.contains("Error:"));
+        let has_ok = lines.iter().any(|l| l == "OK done");
+        assert!(has_error, "命令彩色输出丢失！lines: {:?}", lines);
+        assert!(has_ok, "命令输出丢失！lines: {:?}", lines);
+
+        // 回显的 wrapper 文本不应等于任何 marker（精确匹配不会误判）
+        let echo_line = lines.iter().find(|l| l.contains("__rc=$?"));
+        if let Some(echo) = echo_line {
+            assert!(
+                !line_matches_marker(echo, &end),
+                "回显行被误判为 end marker！echo: {echo}"
+            );
+            assert!(
+                !line_matches_marker(echo, &rc),
+                "回显行被误判为 rc marker！echo: {echo}"
+            );
+        }
+
+        // 实际 marker 行必须能被精确匹配
+        let rc_line = lines
+            .iter()
+            .find(|l| extract_marker_value(l, rc.as_str()).is_some())
+            .expect("rc marker 行未找到");
+        let rc_value = extract_marker_value(rc_line, rc.as_str()).unwrap();
+        assert_eq!(rc_value, "1", "退出码解析错误：{rc_value}");
+
+        let cwd_line = lines
+            .iter()
+            .find(|l| extract_marker_value(l, cwd.as_str()).is_some())
+            .expect("cwd marker 行未找到");
+        let cwd_value = extract_marker_value(cwd_line, cwd.as_str()).unwrap();
+        assert_eq!(cwd_value, "/tmp", "cwd 解析错误：{cwd_value}");
+
+        // end marker 必须能精确匹配
+        assert!(
+            lines.iter().any(|l| line_matches_marker(l, &end)),
+            "end marker 行未找到！lines: {:?}",
+            lines
+        );
+    }
 }

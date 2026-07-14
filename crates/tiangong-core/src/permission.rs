@@ -386,12 +386,20 @@ pub(crate) fn format_call_args_summary(call: &crate::model::ToolCall) -> String 
     }
 
     if call.name == "run_command" || call.name == "run_shell" {
-        if let Some(cmd) = args.get("command").and_then(Value::as_str) {
+        // run_command: cmd + args[] → "cmd arg1 arg2"
+        if let Some(cmd) = args.get("cmd").and_then(Value::as_str) {
+            if let Some(arr) = args.get("args").and_then(Value::as_array) {
+                let parts: Vec<&str> = arr.iter().filter_map(Value::as_str).collect();
+                if parts.is_empty() {
+                    return cmd.to_string();
+                }
+                return format!("{cmd} {}", parts.join(" "));
+            }
             return cmd.to_string();
         }
+        // run_shell: script → 直接显示脚本内容
         if let Some(script) = args.get("script").and_then(Value::as_str) {
-            let shell = args.get("shell").and_then(Value::as_str).unwrap_or("auto");
-            return format!("[{shell}] {script}");
+            return script.to_string();
         }
     }
 
