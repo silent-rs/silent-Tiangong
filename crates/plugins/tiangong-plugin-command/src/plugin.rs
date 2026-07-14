@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::RwLock;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::permission::{TrustMode, TrustModeHandle};
@@ -11,11 +11,11 @@ use tiangong_core::permission::{TrustMode, TrustModeHandle};
 pub struct CommandPlugin {
     workspace: RwLock<Option<PathBuf>>,
     trust_mode: RwLock<Option<TrustModeHandle>>,
-    /// 各插件贡献的环境变量共享句柄（register 时从 engine 获取）。
+    /// 各插件贡献的汇总环境变量（由 core 经 set_exec_env 回注）。
     ///
-    /// core 在「所有插件注册完成后」汇总各插件的 `collect_exec_env` 写入同一句柄，
+    /// core 在「所有插件注册完成后」汇总各插件的 `exec_env` 回注，
     /// command 执行子进程时读取即为最新值，无需 snapshot 刷新。
-    runtime_env: RwLock<Arc<Mutex<BTreeMap<String, String>>>>,
+    runtime_env: RwLock<BTreeMap<String, String>>,
     /// 用户自定义的允许命令列表（扩展内置白名单）。
     ///
     /// 由 core 在 engine rebuild 时通过 `on_config_updated` 从 `CoreConfig` 注入。
@@ -28,7 +28,7 @@ impl Default for CommandPlugin {
         Self {
             workspace: RwLock::new(None),
             trust_mode: RwLock::new(None),
-            runtime_env: RwLock::new(Arc::new(Mutex::new(BTreeMap::new()))),
+            runtime_env: RwLock::new(BTreeMap::new()),
             allowed_commands: RwLock::new(Vec::new()),
         }
     }
@@ -43,14 +43,12 @@ impl CommandPlugin {
         self.workspace.read().ok()?.clone()
     }
 
-    /// 读取当前环境变量快照（从共享句柄取最新值）。
+    /// 读取当前环境变量快照（从回注的汇总值取最新值）。
     pub(crate) fn runtime_env(&self) -> BTreeMap<String, String> {
-        let handle = self
-            .runtime_env
+        self.runtime_env
             .read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| Arc::new(Mutex::new(BTreeMap::new())));
-        handle.lock().map(|g| g.clone()).unwrap_or_default()
+            .unwrap_or_default()
     }
 
     pub(crate) fn is_full_trust(&self) -> bool {
@@ -99,11 +97,10 @@ impl Plugin for CommandPlugin {
         }
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        // 持有 engine 的 runtime_env 共享句柄——core 在所有插件注册完成后会汇总
-        // 各插件的 collect_exec_env 写入同一句柄，此处读取即为最新值。
+    fn set_exec_env(&self, env: BTreeMap<String, String>) {
+        // 接收 core 汇总后的全部插件环境变量，run_command/run_shell 执行子进程时注入。
         if let Ok(mut guard) = self.runtime_env.write() {
-            *guard = engine.runtime_env_handle();
+            *guard = env;
         }
     }
 }

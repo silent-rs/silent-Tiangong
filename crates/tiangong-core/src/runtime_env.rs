@@ -1,8 +1,8 @@
 //! 子进程环境变量加载工具。
 //!
-//! 插件通过 [`crate::core::Plugin::collect_exec_env`] 贡献子进程环境变量，core 在
-//! 所有插件注册完成后统一汇总写入 RuntimeEngine。本模块仅保留 `.env` / `.env.local`
-//! 文件解析工具，供插件复用。
+//! 插件通过 [`crate::core::Plugin::exec_env`] 贡献子进程环境变量，core 在
+//! 所有插件注册完成后统一汇总并经 [`crate::core::Plugin::set_exec_env`] 回注给
+//! 消费方插件。本模块仅保留 `.env` / `.env.local` 文件解析工具，供插件复用。
 
 use std::path::Path;
 

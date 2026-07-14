@@ -13,7 +13,6 @@ use crate::paths::default_skills_storage_dir_path;
 use crate::skill_registry::SkillRegistry;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::runtime::RuntimeEngine;
 
 /// Skill 插件。
 ///
@@ -38,8 +37,11 @@ impl SkillPlugin {
 
     /// 用指定存储根目录构造（主要供测试或自定义路径使用）。
     pub fn with_storage_root(root: PathBuf) -> Self {
+        let skill_registry = Arc::new(SkillRegistry::new(root));
+        // 构造时刷新 registry 缓存，确保读到最新磁盘状态（原 register 逻辑迁入）。
+        skill_registry.refresh();
         Self {
-            skill_registry: Arc::new(SkillRegistry::new(root)),
+            skill_registry,
             workspace: RwLock::new(None),
             feedback_tx: RwLock::new(None),
         }
@@ -74,12 +76,7 @@ impl Plugin for SkillPlugin {
         }
     }
 
-    fn register(&self, _engine: &RuntimeEngine) {
-        // 刷新 registry 缓存，确保读到最新磁盘状态。
-        self.skill_registry.refresh();
-    }
-
-    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+    fn exec_env(&self) -> std::collections::BTreeMap<String, String> {
         // 贡献 enabled skill 目录的 .env.local 环境变量，供 run_command 子进程注入。
         let registry = self.registry();
         let view = registry.view();

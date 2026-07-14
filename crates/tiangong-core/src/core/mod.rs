@@ -528,11 +528,11 @@ async fn worker_loop_async(
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
             //
-            // register_plugin 内部先注入上下文（workspace/trust_mode/feedback_tx），
-            // 再调 Plugin::register 初始化插件内部状态或注入 engine 依赖（如克隆
-            // models_config），最后才收集 tool_specs 并注册 override handler——保证
-            // handler 注册到正确的工具名上。返回的 specs 累积到 plugin_specs，供后续
-            // 同名工具冲突避让与 tools 合并使用。
+            // on_config_updated 已在上文统一触发（插件内部状态已就绪）。
+            // register_plugin 内部注入上下文（workspace/trust_mode/feedback_tx）后，
+            // 收集 tool_specs 并注册 override handler——保证 handler 注册到正确的
+            // 工具名上。返回的 specs 累积到 plugin_specs，供后续同名工具冲突避让
+            // 与 tools 合并使用。
             let e = engine.as_ref().unwrap();
             let workspace = std::path::Path::new(&session.cwd);
             let workspace = if workspace.is_dir() {
@@ -571,16 +571,19 @@ async fn worker_loop_async(
                 }
             }
             // 汇总所有插件贡献的子进程环境变量，
-            // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。
+            // 回注给需要消费合并 env 的插件（command / task 执行子进程时注入）。
             // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
             {
                 let mut exec_env = std::collections::BTreeMap::new();
                 for plugin in &plugins {
-                    for (key, value) in plugin.collect_exec_env() {
+                    for (key, value) in plugin.exec_env() {
                         exec_env.insert(key, value);
                     }
                 }
-                e.set_runtime_env(exec_env);
+                e.set_runtime_env(exec_env.clone());
+                for plugin in &plugins {
+                    plugin.set_exec_env(exec_env.clone());
+                }
             }
             // 汇总插件贡献的工具权限覆盖，
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。

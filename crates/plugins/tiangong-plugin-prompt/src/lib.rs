@@ -19,7 +19,7 @@ use tiangong_core::tool_override::PromptSectionProvider;
 ///
 /// 注入 identity（产品身份）、通用 rules（回复风格 / 格式规范）与用户自定义指令外围包装。
 ///
-/// `custom_prompt` 在 `register` 时从 `AgentConfig.custom_system_prompt` 读取并缓存，
+/// `custom_prompt` 在 `on_config_updated` 时从 `CoreConfig.custom_system_prompt` 读取并缓存，
 /// 覆盖两种场景：
 /// - 主 Agent：值为宿主全局用户自定义指令（经 `to_core_config` 从 registry 落入 CoreConfig）；
 /// - 子 Agent：值为「用户自定义指令 + 角色 prompt」组合（经 agent-team 插件的 `child_config` 写入）。
@@ -54,10 +54,10 @@ impl Plugin for PromptPlugin {
         "prompt"
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
+    fn on_config_updated(&self, config: &tiangong_core::core_config::CoreConfig) {
         // 缓存当前 Core 的自定义指令：主 Agent 取宿主全局值，子 Agent 取角色 prompt。
-        // engine 每次 build / rebuild 都会重新调 register，故配置变更后缓存自动刷新。
-        let custom = engine.agent_config().custom_system_prompt.clone();
+        // engine 每次 build / rebuild 都会重新调 on_config_updated，故配置变更后缓存自动刷新。
+        let custom = config.custom_system_prompt.clone();
         if let Ok(mut guard) = self.custom_prompt.write() {
             *guard = custom;
         }

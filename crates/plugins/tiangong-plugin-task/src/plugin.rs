@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::RwLock;
 
 use serde_json::json;
 use tiangong_core::core::Plugin;
@@ -18,15 +18,15 @@ use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, T
 use crate::handler::{TaskStatus, task_registry, wait_tasks};
 
 pub struct TaskPlugin {
-    /// 各插件贡献的环境变量共享句柄（register 时从 engine 获取）。
-    runtime_env: RwLock<Arc<Mutex<BTreeMap<String, String>>>>,
+    /// 各插件贡献的汇总环境变量（由 core 经 set_exec_env 回注）。
+    runtime_env: RwLock<BTreeMap<String, String>>,
     workspace: RwLock<Option<PathBuf>>,
 }
 
 impl Default for TaskPlugin {
     fn default() -> Self {
         Self {
-            runtime_env: RwLock::new(Arc::new(Mutex::new(BTreeMap::new()))),
+            runtime_env: RwLock::new(BTreeMap::new()),
             workspace: RwLock::new(None),
         }
     }
@@ -39,13 +39,8 @@ impl TaskPlugin {
 
     /// 读取当前环境变量快照（spawn_task 时注入子进程）。
     fn env_snapshot(&self) -> Vec<(String, String)> {
-        let handle = self
-            .runtime_env
+        self.runtime_env
             .read()
-            .map(|g| g.clone())
-            .unwrap_or_else(|_| Arc::new(Mutex::new(BTreeMap::new())));
-        handle
-            .lock()
             .map(|g| g.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default()
     }
@@ -329,11 +324,10 @@ impl Plugin for TaskPlugin {
         }
     }
 
-    fn register(&self, engine: &tiangong_core::runtime::RuntimeEngine) {
-        // 持有 engine 的 runtime_env 共享句柄——core 在所有插件注册完成后会汇总
-        // 各插件的 collect_exec_env 写入同一句柄，spawn_task 时读取即为最新值。
+    fn set_exec_env(&self, env: BTreeMap<String, String>) {
+        // 接收 core 汇总后的全部插件环境变量，spawn_task 执行子进程时注入。
         if let Ok(mut guard) = self.runtime_env.write() {
-            *guard = engine.runtime_env_handle();
+            *guard = env;
         }
     }
 
