@@ -102,9 +102,7 @@ pub(crate) fn accept_prepared_user_message_with_options(
     prepared: Vec<ContentBlock>,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
-    if let Err(err) = validate_ready_content_blocks(&prepared) {
-        return Err(err);
-    }
+    validate_ready_content_blocks(&prepared)?;
     let before = session.clone();
     // Desktop/Server 会先把稳定 User 乐观写入宿主快照。执行中追加时必须先取出
     // 这条预写消息，闭合未完成 tool calls 后再把 User 放回末尾，保持协议顺序。

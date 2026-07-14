@@ -17,6 +17,7 @@ pub mod react;
 pub mod runtime;
 pub mod runtime_env;
 pub mod session;
+pub mod shared_runtime;
 pub mod storage;
 mod stream_throttle;
 pub mod tool;

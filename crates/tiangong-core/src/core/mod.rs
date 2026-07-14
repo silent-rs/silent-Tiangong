@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread::{self};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
@@ -42,8 +42,8 @@ pub use storage_location::CoreStorageLocation;
 pub struct TiangongCore {
     /// 用户命令发送端（tokio unbounded，send 不需要 await）
     cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
-    /// 工作线程
-    worker: Option<JoinHandle<Session>>,
+    /// worker task（共享 runtime 上的长驻 task；idle 时被 park 不占线程）
+    worker_task: Option<tokio::task::JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
     /// 当前 Core 独立的配置提供者。
@@ -59,8 +59,9 @@ pub struct TiangongCore {
 impl TiangongCore {
     /// Builder 的实际装配实现（私有）。
     ///
-    /// 所有入口最终汇聚到这里。worker 线程由 `thread::spawn` 创建，
-    /// 构造期不会失败；`build()` 的 `Result` 仅承载必填字段缺失的检查。
+    /// worker task 由共享 runtime 的 `spawn` 创建（非 OS 线程），构造期不会失败；
+    /// `build()` 的 `Result` 仅承载必填字段缺失的检查。空闲时 worker task 停在
+    /// `cmd_rx.recv().await`，future 被 park、线程归还 runtime 池。
     fn assemble(
         config: CoreConfigProvider,
         session: Session,
@@ -87,22 +88,20 @@ impl TiangongCore {
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
         let worker_cmd_tx = cmd_tx.clone();
-        let worker = thread::spawn(move || {
-            worker_loop(
-                worker_config,
-                session,
-                stream_tx,
-                cmd_rx,
-                worker_trust_mode,
-                plugins,
-                worker_cmd_tx,
-                storage_root,
-            )
-        });
+        let worker_task = crate::shared_runtime::shared_runtime().spawn(worker_loop_async(
+            worker_config,
+            session,
+            stream_tx,
+            cmd_rx,
+            worker_trust_mode,
+            plugins,
+            worker_cmd_tx,
+            storage_root,
+        ));
 
         Self {
             cmd_tx: Some(cmd_tx),
-            worker: Some(worker),
+            worker_task: Some(worker_task),
             session_id,
             config,
             trust_mode,
@@ -141,16 +140,16 @@ impl TiangongCore {
         Ok(())
     }
 
-    /// 是否已停止（worker 已结束或命令通道已关闭）。
+    /// 是否已停止（worker task 已结束或命令通道已关闭）。
     ///
     /// 已停止的 core 无法再接收命令，调用方应移除并按需重建。
     pub fn is_stopped(&self) -> bool {
         if self.cmd_tx.is_none() {
             return true;
         }
-        self.worker
+        self.worker_task
             .as_ref()
-            .map(|worker| worker.is_finished())
+            .map(|task| task.is_finished())
             .unwrap_or(true)
     }
 
@@ -186,10 +185,19 @@ impl TiangongCore {
     fn shutdown_and_take_session(mut self) -> Result<Session, CoreError> {
         let _ = self.send_cmd(Command::Shutdown);
         self.cmd_tx = None;
-        if let Some(w) = self.worker.take() {
-            match w.join() {
+        if let Some(task) = self.worker_task.take() {
+            // worker task 跑在共享 runtime 上；用 Handle::block_on 等待它结束。
+            // 调用方通常已在 runtime 之外（spawn_blocking 包裹），可安全 block_on。
+            let handle = crate::shared_runtime::shared_runtime().handle().clone();
+            match handle.block_on(task) {
                 Ok(session) => return Ok(session),
-                Err(_) => tracing::warn!("TiangongCore worker panic"),
+                Err(join_error) => {
+                    if join_error.is_panic() {
+                        tracing::warn!("TiangongCore worker task panic");
+                    } else {
+                        tracing::warn!(%join_error, "TiangongCore worker task 被取消");
+                    }
+                }
             }
         }
         Err(CoreError::WorkerPanicked)
@@ -250,42 +258,6 @@ impl Drop for TiangongCore {
 
 // ==================== 工作线程 ====================
 
-/// 工作线程：接收用户命令，执行 LLM + 工具，推送 StreamEvent
-#[allow(clippy::too_many_arguments)]
-fn worker_loop(
-    config: CoreConfigProvider,
-    session: Session,
-    external_tx: StdSender<SessionStreamEvent>,
-    cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    trust_mode: crate::permission::TrustModeHandle,
-    plugins: Vec<Arc<dyn Plugin>>,
-    cmd_tx: tokio_mpsc::UnboundedSender<Command>,
-    storage_root: std::path::PathBuf,
-) -> Session {
-    // 在专用的 tokio runtime 上运行 async 工作循环，
-    // 使 execute_turn_inner 可以用 select! + stream_function_calls 实现真正取消。
-    //
-    // 注意：LLM crate 的 provider_client 内部仍使用 tokio::task::block_in_place
-    //（检测 current runtime flavor 后调 block_in_place 等 forward stream），该 API
-    // 仅在 multi-thread runtime 可用，因此这里使用 1 worker 的 multi-thread runtime。
-    // core 自身的转发屏障已改用 tokio::sync::Notify，不再依赖 block_in_place。
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .expect("创建 TiangongCore tokio runtime 失败");
-    rt.block_on(worker_loop_async(
-        config,
-        session,
-        external_tx,
-        cmd_rx,
-        trust_mode,
-        plugins,
-        cmd_tx,
-        storage_root,
-    ))
-}
-
 /// 真正的 async 工作循环
 #[allow(clippy::too_many_arguments)]
 async fn worker_loop_async(
@@ -334,6 +306,7 @@ async fn worker_loop_async(
                 ..
             } = &event
             {
+                #[allow(clippy::collapsible_if)]
                 if let Ok(mut capture) = fwd_capture.capture.lock() {
                     capture.usage.record(usage, agent_id.as_deref(), source);
                 }
