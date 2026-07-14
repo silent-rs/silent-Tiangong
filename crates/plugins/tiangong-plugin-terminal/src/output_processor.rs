@@ -131,147 +131,67 @@ pub(crate) fn backfill_line(state: &mut crate::manager::TerminalState, line: Str
 }
 
 /// 终端行处理器，模拟光标行为以正确处理 zsh 行编辑器的重绘。
-/// 维护 pending 缓冲区处理跨 chunk 的不完整 ESC 序列。
+///
+/// 序列分帧委托给 [`vte::Parser`]（Paul Williams 状态机实现），保证所有合法的
+/// CSI/OSC/ESC 序列都能被正确分帧——包括真彩色冒号参数（`ESC[38:2::r:g:bm`）、
+/// DEC private 模式（`ESC[?25l`）等。光标行为模拟在 [`LineBuildHandler`] 的
+/// `csi_dispatch` / `execute` 回调中实现。
 pub(crate) struct TerminalLineProcessor {
-    line: Vec<char>,
-    cursor: usize,
-    pending: String,
+    parser: vte::Parser,
+    handler: LineBuildHandler,
 }
 
 impl TerminalLineProcessor {
     pub fn new() -> Self {
         Self {
-            line: Vec::new(),
-            cursor: 0,
-            pending: String::new(),
+            parser: vte::Parser::new(),
+            handler: LineBuildHandler::new(),
         }
     }
 
     pub fn process(&mut self, raw: &str) -> Vec<String> {
-        if !self.pending.is_empty() {
-            self.pending.push_str(raw);
-        }
-        let input = if self.pending.is_empty() {
-            raw.to_string()
-        } else {
-            std::mem::take(&mut self.pending)
-        };
-
-        let mut complete_lines = Vec::new();
-        let chars: Vec<char> = input.chars().collect();
-        let len = chars.len();
-        let mut i = 0;
-
-        while i < len {
-            let c = chars[i];
-            match c {
-                '\n' => {
-                    let line: String = self.line.iter().collect();
-                    if !line.trim().is_empty() {
-                        complete_lines.push(line);
-                    }
-                    self.line.clear();
-                    self.cursor = 0;
-                    i += 1;
-                }
-                '\r' => {
-                    self.cursor = 0;
-                    i += 1;
-                }
-                '\x1b' => {
-                    let seq_start = i;
-                    i += 1;
-                    if i >= len {
-                        self.pending = chars[seq_start..].iter().collect();
-                        break;
-                    }
-                    match chars[i] {
-                        '[' => {
-                            i += 1;
-                            let mut params = String::new();
-                            let mut found_final = false;
-                            while i < len {
-                                let next = chars[i];
-                                if next.is_ascii()
-                                    && ((next as u8).is_ascii_digit() || next == ';' || next == '?')
-                                {
-                                    params.push(next);
-                                    i += 1;
-                                } else if next.is_ascii() && (b'@'..=b'~').contains(&(next as u8)) {
-                                    self.handle_csi(&params, next);
-                                    i += 1;
-                                    found_final = true;
-                                    break;
-                                } else {
-                                    break;
-                                }
-                            }
-                            if !found_final {
-                                self.pending = chars[seq_start..].iter().collect();
-                                break;
-                            }
-                        }
-                        ']' | 'P' => {
-                            i += 1;
-                            let mut found_end = false;
-                            while i < len {
-                                let next = chars[i];
-                                if next == '\x07' {
-                                    i += 1;
-                                    found_end = true;
-                                    break;
-                                }
-                                if next == '\x1b' && i + 1 < len && chars[i + 1] == '\\' {
-                                    i += 2;
-                                    found_end = true;
-                                    break;
-                                }
-                                i += 1;
-                            }
-                            if !found_end {
-                                self.pending = chars[seq_start..].iter().collect();
-                                break;
-                            }
-                        }
-                        '(' | ')' => {
-                            i += 1;
-                            if i >= len {
-                                self.pending = chars[seq_start..].iter().collect();
-                                break;
-                            }
-                            i += 1;
-                        }
-                        _ => {
-                            i += 1;
-                        }
-                    }
-                }
-                c if c.is_control() => {
-                    i += 1;
-                }
-                c => {
-                    if self.cursor >= self.line.len() {
-                        self.line.push(c);
-                    } else {
-                        self.line[self.cursor] = c;
-                    }
-                    self.cursor += 1;
-                    i += 1;
-                }
-            }
-        }
-
-        complete_lines
+        // vte::Parser 内部维护状态机，跨 chunk 的不完整序列自动暂存在 parser 里，
+        // 无需手写 pending 缓冲区。
+        self.parser.advance(&mut self.handler, raw.as_bytes());
+        std::mem::take(&mut self.handler.complete_lines)
     }
 
     pub fn current_line(&self) -> String {
-        self.line.iter().collect()
+        self.handler.line.iter().collect()
+    }
+}
+
+/// [`vte::Perform`] 实现：维护单行字符缓冲 + 光标位置，收集完整行。
+///
+/// 只模拟影响单行内容的光标行为（K/G/J/C/D/P/@），SGR（颜色）等序列在
+/// `csi_dispatch` 的 `_ => {}` 分支被忽略——颜色不影响行内容收集。
+struct LineBuildHandler {
+    line: Vec<char>,
+    cursor: usize,
+    complete_lines: Vec<String>,
+}
+
+impl LineBuildHandler {
+    fn new() -> Self {
+        Self {
+            line: Vec::new(),
+            cursor: 0,
+            complete_lines: Vec::new(),
+        }
     }
 
-    fn handle_csi(&mut self, params: &str, final_byte: char) {
+    /// 从 vte Params 提取第一个参数值（默认 0）。
+    fn first_param(params: &vte::Params) -> usize {
+        params.iter().next().map(|p| p[0]).unwrap_or(0) as usize
+    }
+
+    fn handle_csi(&mut self, params: &vte::Params, final_byte: char) {
+        // DEC private 序列（如 ESC[?25l 隐藏光标）的参数带 ? 前缀，
+        // vte 已剥离前缀，直接取数值。
         match final_byte {
+            // ESC[K — 清行
             'K' => {
-                let n: usize = params.trim_start_matches('?').parse().unwrap_or(0);
+                let n = Self::first_param(params);
                 match n {
                     0 => self.line.truncate(self.cursor),
                     1 => {
@@ -286,22 +206,25 @@ impl TerminalLineProcessor {
                     _ => {}
                 }
             }
+            // ESC[G — 光标水平绝对定位
             'G' => {
-                let col: usize = params.parse().unwrap_or(1).max(1);
+                let col = Self::first_param(params).max(1);
                 self.cursor = col - 1;
                 while self.line.len() < self.cursor {
                     self.line.push(' ');
                 }
             }
+            // ESC[J — 清屏（单行模型只处理 2=全清）
             'J' => {
-                let n: usize = params.parse().unwrap_or(0);
+                let n = Self::first_param(params);
                 if n >= 2 {
                     self.line.clear();
                     self.cursor = 0;
                 }
             }
+            // ESC[C — 光标右移
             'C' => {
-                let n: usize = params.parse().unwrap_or(1);
+                let n = Self::first_param(params).max(1);
                 for _ in 0..n {
                     if self.cursor < self.line.len() {
                         self.cursor += 1;
@@ -311,26 +234,72 @@ impl TerminalLineProcessor {
                     }
                 }
             }
+            // ESC[D — 光标左移
             'D' => {
-                let n: usize = params.parse().unwrap_or(1);
+                let n = Self::first_param(params).max(1);
                 self.cursor = self.cursor.saturating_sub(n);
             }
+            // ESC[P — 删除字符
             'P' => {
-                let n: usize = params.parse().unwrap_or(1);
+                let n = Self::first_param(params).max(1);
                 for _ in 0..n {
                     if self.cursor < self.line.len() {
                         self.line.remove(self.cursor);
                     }
                 }
             }
+            // ESC[@ — 插入空白
             '@' => {
-                let n: usize = params.parse().unwrap_or(1);
+                let n = Self::first_param(params).max(1);
                 for _ in 0..n {
                     self.line.insert(self.cursor, ' ');
                 }
             }
+            // SGR（颜色/样式）等其他序列不影响行内容收集，忽略
             _ => {}
         }
+    }
+}
+
+impl vte::Perform for LineBuildHandler {
+    fn print(&mut self, c: char) {
+        if self.cursor >= self.line.len() {
+            self.line.push(c);
+        } else {
+            self.line[self.cursor] = c;
+        }
+        self.cursor += 1;
+    }
+
+    fn execute(&mut self, byte: u8) {
+        // C0 控制字符
+        match byte {
+            b'\n' => {
+                // LF：提交当前行
+                let line: String = self.line.iter().collect();
+                if !line.trim().is_empty() {
+                    self.complete_lines.push(line);
+                }
+                self.line.clear();
+                self.cursor = 0;
+            }
+            b'\r' => {
+                // CR：光标回行首
+                self.cursor = 0;
+            }
+            // 其他控制字符（BS/HT 等）忽略
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        c: char,
+    ) {
+        self.handle_csi(params, c);
     }
 }
 
@@ -671,5 +640,16 @@ mod tests {
         let has_end = lines.iter().any(|l| l.contains("__TIANGONG_END_abc__"));
         assert!(has_rc, "RC marker 行丢失！lines: {:?}", lines);
         assert!(has_end, "END marker 行丢失！lines: {:?}", lines);
+    }
+
+    #[test]
+    fn test_line_processor_truecolor_colon_params() {
+        // 真彩色序列使用冒号分隔参数（ITU-T T.416）：ESC[38:2::255:0:0m
+        // 旧版只接受数字+;+?，遇到冒号会卡住处理器，后续 marker 无法进入缓冲区。
+        let mut p = TerminalLineProcessor::new();
+        let input = "\x1b[38:2::255:0:0mred text\x1b[0m\n__TIANGONG_END_x__\n";
+        let lines = p.process(input);
+        // 冒号序列被正确消费，不卡死；red text 和 marker 行正常 push
+        assert_eq!(lines, vec!["red text", "__TIANGONG_END_x__"]);
     }
 }

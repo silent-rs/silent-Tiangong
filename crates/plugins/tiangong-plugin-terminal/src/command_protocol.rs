@@ -5,7 +5,7 @@ use tauri::Emitter;
 use tokio::sync::oneshot;
 
 use crate::manager::TerminalManager;
-use crate::types::{contains_marker, PtyState, TerminalExecResponse, TerminalOutputEvent};
+use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 
@@ -120,7 +120,11 @@ fn collect_command_output(
         // wrapper 命令文本（它 contains 但不 == marker）。
         let is_cwd = extract_marker_value(line, cwd_marker).is_some();
         let is_rc = extract_marker_value(line, rc_marker).is_some();
-        if in_range && !is_cwd && !is_rc && !contains_marker(line) {
+        // 只过滤本次命令的实际 marker（含唯一 ID），不用固定前缀——
+        // 避免用户输出恰好包含 __TIANGONG_START_ 前缀被静默删除。
+        let is_start = line_matches_marker(line, start_marker);
+        let is_end = line_matches_marker(line, end_marker);
+        if in_range && !is_cwd && !is_rc && !is_start && !is_end {
             lines.push(line.clone());
         }
     }
@@ -132,7 +136,9 @@ fn collect_command_output(
         for line in state.output_buffer.iter().skip(start) {
             let is_cwd = extract_marker_value(line, cwd_marker).is_some();
             let is_rc = extract_marker_value(line, rc_marker).is_some();
-            if !contains_marker(line) && !is_cwd && !is_rc {
+            let is_start = line_matches_marker(line, start_marker);
+            let is_end = line_matches_marker(line, end_marker);
+            if !is_cwd && !is_rc && !is_start && !is_end {
                 lines.push(line.clone());
             }
         }
@@ -141,10 +147,13 @@ fn collect_command_output(
         let current_line = state.current_line.trim_end();
         let is_cwd = extract_marker_value(current_line, cwd_marker).is_some();
         let is_rc = extract_marker_value(current_line, rc_marker).is_some();
+        let is_start = line_matches_marker(current_line, start_marker);
+        let is_end = line_matches_marker(current_line, end_marker);
         if !current_line.trim().is_empty()
-            && !contains_marker(current_line)
             && !is_cwd
             && !is_rc
+            && !is_start
+            && !is_end
             && lines.last().is_none_or(|line| line != current_line)
         {
             lines.push(current_line.to_string());
@@ -195,7 +204,7 @@ fn wrap_non_interactive_command(
     end_marker: &str,
 ) -> String {
     format!(
-        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
         start_marker, command, cwd_marker, rc_marker, end_marker
     )
 }
@@ -1087,9 +1096,11 @@ mod tests {
         );
         assert!(combined.contains("PAGER="));
         assert!(combined.contains("GIT_PAGER="));
+        assert!(combined.contains("GH_PAGER="));
         assert!(!combined.contains("GIT_CONFIG_PARAMETERS"));
-        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat LESS=FRX"));
+        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX"));
         assert!(combined.contains("unset PAGER"));
+        assert!(combined.contains("unset GH_PAGER"));
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));

@@ -20,6 +20,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 descape = "3"
 strip-ansi-escapes = "0.2"
+vte = "0.14"
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
