@@ -299,13 +299,8 @@ async fn worker_loop_async(
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
-    let mut last_cfg_gen = 0u64;
-
-    let mut engine: Option<RuntimeEngine> = None;
-    let mut tools: Vec<ToolSpec> = Vec::new();
-    // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次
+    // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次（跨 turn）
     let mut session_ready_fired = false;
-    // turn 计数器：每 10 个 turn 触发一次 Meta 反刍（归档低活跃节点）
 
     // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
     // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
@@ -413,115 +408,26 @@ async fn worker_loop_async(
     // 确保插件在钩子内能读到已注入的 workspace / trust_mode / feedback。
 
     while let Some(cmd) = cmd_rx.recv().await {
-        // 配置变更检测：仅在 generation 变化时重建 engine 和工具列表
-        let cfg_gen = config.generation();
-        if engine.is_none() || cfg_gen != last_cfg_gen {
-            let cfg = config.snapshot();
-            engine = Some(build_engine_from_config(
-                &cfg,
-                &stream_tx,
-                trust_mode.clone(),
-                storage_root.clone(),
-            ));
-            // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
-            // 根治「注册竞态窗口」。
-            //
-            // on_config_updated 已在上文统一触发（插件内部状态已就绪）。
-            // register_plugin 内部注入上下文（workspace/trust_mode/feedback_tx）后，
-            // 收集 tool_specs 并注册 override handler——保证 handler 注册到正确的
-            // 工具名上。返回的 specs 累积到 plugin_specs，供后续同名工具冲突避让
-            // 与 tools 合并使用。
-            let e = engine.as_ref().unwrap();
-            let workspace = std::path::Path::new(&session.cwd);
-            let workspace = if workspace.is_dir() {
-                Some(workspace)
-            } else {
-                None
-            };
-            let mut plugin_specs: Vec<ToolSpec> = Vec::new();
-            // 配置快照更新通知：在 register 之前调 on_config_updated，使插件先刷新
-            // 内部 endpoint/client，再收集 tool_specs / register——保证 specs 基于最新配置。
-            for plugin in &plugins {
-                plugin.on_config_updated(&cfg);
-            }
-            // 追踪已注册的工具名，用于跨插件工具名冲突消解：
-            // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
-            // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
-            let mut seen_tool_names: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            for plugin in &plugins {
-                let specs = crate::core::plugin::register_plugin(
-                    e,
-                    plugin.clone(),
-                    workspace,
-                    cmd_tx.clone(),
-                );
-                for spec in specs {
-                    if seen_tool_names.insert(spec.name.clone()) {
-                        plugin_specs.push(spec);
-                    } else {
-                        tracing::debug!(
-                            tool = %spec.name,
-                            plugin = %plugin.id(),
-                            "跳过与其他插件重名的工具规格（保留先注册者）"
-                        );
-                    }
-                }
-            }
-            // 汇总所有插件贡献的子进程环境变量，
-            // 回注给需要消费合并 env 的插件（command / task 执行子进程时注入）。
-            // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
-            {
-                let mut exec_env = std::collections::BTreeMap::new();
-                for plugin in &plugins {
-                    for (key, value) in plugin.exec_env() {
-                        exec_env.insert(key, value);
-                    }
-                }
-                e.set_runtime_env(exec_env.clone());
-                for plugin in &plugins {
-                    plugin.set_exec_env(exec_env.clone());
-                }
-            }
-            // 汇总插件贡献的工具权限覆盖，
-            // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
-            {
-                let mut overrides = std::collections::BTreeMap::new();
-                for plugin in &plugins {
-                    for (name, level) in plugin.tool_permission_overrides() {
-                        overrides.insert(name, level);
-                    }
-                }
-                e.permission_gate().set_plugin_overrides(overrides);
-            }
-            // 各插件（含动态工具插件）的工具规格经 tool_specs() 声明，
-            // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
-            let injection_spec = crate::core::plugin::injection_tool_spec();
-            let mut new_tools: Vec<ToolSpec> = Vec::new();
-            // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
-            new_tools.push(injection_spec);
-            // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
-            new_tools.extend(plugin_specs);
-            tools = new_tools;
-            // Agent 团队从会话历史恢复的逻辑已迁移至 team 插件的 on_session_ready。
-            last_cfg_gen = cfg_gen;
-
-            // 首次 engine build + 插件注册完成后触发一次 on_session_ready
-            //（此时 workspace / trust_mode / feedback 已注入）；engine 重建后的再配置
-            // 由各插件在 on_config_updated 中统一承载。
-            if !session_ready_fired {
-                session_ready_fired = true;
-                for plugin in &plugins {
-                    plugin.on_session_ready(&mut session);
-                }
-            }
-        }
-
+        // 每 turn 现建 engine：engine/client 不跨 turn，配置变更靠下次 turn 新建
+        // client 天然生效。engine 在 turn 结束时 drop，释放 LLM 连接资源。
         match cmd {
             Command::Message {
                 prepared,
                 message_id,
             } => {
+                // 每 turn 现建 engine + 注册插件 + 触发 on_session_ready（仅首次）。
+                // engine/client 在 turn 结束时 drop，不跨 turn 复用。
+                let (engine, tools) = build_turn_engine(
+                    &config,
+                    &stream_tx,
+                    &trust_mode,
+                    &storage_root,
+                    &plugins,
+                    cmd_tx.clone(),
+                    &mut session,
+                    &mut session_ready_fired,
+                );
+
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
                 // 使历史会话同样展示执行总时长与状态）。
                 let turn_started = std::time::Instant::now();
@@ -570,7 +476,7 @@ async fn worker_loop_async(
                     &mut session,
                     &accepted.message_id,
                     &accepted.prepared,
-                    engine.as_ref().unwrap(),
+                    &engine,
                     &tools,
                     &stream_tx,
                     &mut cmd_rx,
@@ -803,17 +709,31 @@ async fn worker_loop_async(
                 }
             }
             Command::CompressContext => {
-                compress_context_for_session(
-                    &mut session,
-                    engine.as_ref().unwrap(),
+                let (engine, _tools) = build_turn_engine(
+                    &config,
                     &stream_tx,
-                    &mut cmd_rx,
-                )
-                .await;
+                    &trust_mode,
+                    &storage_root,
+                    &plugins,
+                    cmd_tx.clone(),
+                    &mut session,
+                    &mut session_ready_fired,
+                );
+                compress_context_for_session(&mut session, &engine, &stream_tx, &mut cmd_rx).await;
                 continue;
             }
             Command::ResetContext => {
-                reset_context_for_session(&mut session, &stream_tx, engine.as_ref().unwrap());
+                let (engine, _tools) = build_turn_engine(
+                    &config,
+                    &stream_tx,
+                    &trust_mode,
+                    &storage_root,
+                    &plugins,
+                    cmd_tx.clone(),
+                    &mut session,
+                    &mut session_ready_fired,
+                );
+                reset_context_for_session(&mut session, &stream_tx, &engine);
                 continue;
             }
         }
@@ -831,10 +751,8 @@ async fn worker_loop_async(
     }
     session.persist_to_disk();
 
-    // RuntimeEngine 的重试回调持有 stream_tx clone；先释放 engine，确保内部通道
-    // 能在 drop(stream_tx) 后真正关闭，避免 Shutdown/join 永久等待转发线程。
-    drop(engine);
-    // 关闭内部通道，等待转发线程结束
+    // engine 已在最后一个 turn 分支结束时 drop，其重试回调持有的 stream_tx clone
+    // 随之释放。关闭内部通道，等待转发线程结束。
     drop(stream_tx);
     // 在 blocking pool 上 join 转发线程，避免阻塞 runtime worker 线程。
     let _ = tokio::task::spawn_blocking(move || forward_handle.join()).await;
@@ -1385,6 +1303,116 @@ async fn execute_turn_async(
     react
         .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
+}
+
+/// 每 turn 现建 engine：从最新 config 快照构建 RuntimeEngine，注册所有插件，
+/// 汇总 exec_env / permission_overrides，并触发 on_session_ready（仅首次）。
+///
+/// engine/client 不跨 turn，配置变更靠下次 turn 新建 client 天然生效。
+#[allow(clippy::too_many_arguments)]
+fn build_turn_engine(
+    config: &CoreConfigProvider,
+    stream_tx: &StdSender<StreamEvent>,
+    trust_mode: &crate::permission::TrustModeHandle,
+    storage_root: &std::path::Path,
+    plugins: &[Arc<dyn Plugin>],
+    cmd_tx: tokio_mpsc::UnboundedSender<Command>,
+    session: &mut Session,
+    session_ready_fired: &mut bool,
+) -> (RuntimeEngine, Vec<ToolSpec>) {
+    let cfg = config.snapshot();
+    let engine = build_engine_from_config(
+        &cfg,
+        stream_tx,
+        trust_mode.clone(),
+        storage_root.to_path_buf(),
+    );
+
+    // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
+    // 根治「注册竞态窗口」。
+    //
+    // on_config_updated 已在上文统一触发（插件内部状态已就绪）。
+    // register_plugin 内部注入上下文（workspace/trust_mode/feedback_tx）后，
+    // 收集 tool_specs 并注册 override handler——保证 handler 注册到正确的
+    // 工具名上。返回的 specs 累积到 plugin_specs，供后续同名工具冲突避让
+    // 与 tools 合并使用。
+    let workspace = std::path::Path::new(&session.cwd);
+    let workspace = workspace.is_dir().then_some(workspace);
+    let mut plugin_specs: Vec<ToolSpec> = Vec::new();
+    // 配置快照更新通知：在 register 之前调 on_config_updated，使插件先刷新
+    // 内部 endpoint/client，再收集 tool_specs / register——保证 specs 基于最新配置。
+    for plugin in plugins {
+        plugin.on_config_updated(&cfg);
+    }
+    // 追踪已注册的工具名，用于跨插件工具名冲突消解：
+    // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
+    // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
+    let mut seen_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for plugin in plugins {
+        let specs = crate::core::plugin::register_plugin(
+            &engine,
+            plugin.clone(),
+            workspace,
+            cmd_tx.clone(),
+        );
+        for spec in specs {
+            if seen_tool_names.insert(spec.name.clone()) {
+                plugin_specs.push(spec);
+            } else {
+                tracing::debug!(
+                    tool = %spec.name,
+                    plugin = %plugin.id(),
+                    "跳过与其他插件重名的工具规格（保留先注册者）"
+                );
+            }
+        }
+    }
+    // 汇总所有插件贡献的子进程环境变量，
+    // 回注给需要消费合并 env 的插件（command / task 执行子进程时注入）。
+    // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
+    {
+        let mut exec_env = std::collections::BTreeMap::new();
+        for plugin in plugins {
+            for (key, value) in plugin.exec_env() {
+                exec_env.insert(key, value);
+            }
+        }
+        engine.set_runtime_env(exec_env.clone());
+        for plugin in plugins {
+            plugin.set_exec_env(exec_env.clone());
+        }
+    }
+    // 汇总插件贡献的工具权限覆盖，
+    // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
+    {
+        let mut overrides = std::collections::BTreeMap::new();
+        for plugin in plugins {
+            for (name, level) in plugin.tool_permission_overrides() {
+                overrides.insert(name, level);
+            }
+        }
+        engine.permission_gate().set_plugin_overrides(overrides);
+    }
+    // 各插件（含动态工具插件）的工具规格经 tool_specs() 声明，
+    // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
+    let injection_spec = crate::core::plugin::injection_tool_spec();
+    let mut tools: Vec<ToolSpec> = Vec::new();
+    // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
+    tools.push(injection_spec);
+    // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
+    tools.extend(plugin_specs);
+
+    // 首次 engine build + 插件注册完成后触发一次 on_session_ready
+    //（此时 workspace / trust_mode / feedback 已注入）；engine 重建后的再配置
+    // 由各插件在 on_config_updated 中统一承载。
+    if !*session_ready_fired {
+        *session_ready_fired = true;
+        for plugin in plugins {
+            plugin.on_session_ready(session);
+        }
+    }
+
+    (engine, tools)
 }
 
 /// 从 CoreConfig 快照构建 RuntimeEngine
