@@ -519,11 +519,11 @@ async fn worker_loop_async(
             // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
             // 根治「注册竞态窗口」。
             //
-            // register_plugin 内部先注入上下文（workspace/trust_mode/feedback_tx），
-            // 再调 Plugin::register 初始化插件内部状态或注入 engine 依赖（如克隆
-            // models_config），最后才收集 tool_specs 并注册 override handler——保证
-            // handler 注册到正确的工具名上。返回的 specs 累积到 plugin_specs，供后续
-            // 同名工具冲突避让与 tools 合并使用。
+            // on_config_updated 已在上文统一触发（插件内部状态已就绪）。
+            // register_plugin 内部注入上下文（workspace/trust_mode/feedback_tx）后，
+            // 收集 tool_specs 并注册 override handler——保证 handler 注册到正确的
+            // 工具名上。返回的 specs 累积到 plugin_specs，供后续同名工具冲突避让
+            // 与 tools 合并使用。
             let e = engine.as_ref().unwrap();
             let workspace = std::path::Path::new(&session.cwd);
             let workspace = if workspace.is_dir() {
@@ -562,29 +562,19 @@ async fn worker_loop_async(
                 }
             }
             // 汇总所有插件贡献的子进程环境变量，
-            // 写入 engine 供 command 插件在 on_engine_rebuilt 时读取注入子进程。
+            // 回注给需要消费合并 env 的插件（command / task 执行子进程时注入）。
             // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
             {
                 let mut exec_env = std::collections::BTreeMap::new();
                 for plugin in &plugins {
-                    for (key, value) in plugin.collect_exec_env() {
+                    for (key, value) in plugin.exec_env() {
                         exec_env.insert(key, value);
                     }
                 }
-                e.set_runtime_env(exec_env);
-            }
-            // 汇总插件贡献的允许文件根目录，
-            // 写入 process-level 允许表供 tool/common.rs 写权限校验，避免 core 硬编码。
-            {
-                let mut extra_roots: Vec<std::path::PathBuf> = Vec::new();
+                e.set_runtime_env(exec_env.clone());
                 for plugin in &plugins {
-                    for root in plugin.allowed_file_roots() {
-                        if !extra_roots.contains(&root) {
-                            extra_roots.push(root);
-                        }
-                    }
+                    plugin.set_exec_env(exec_env.clone());
                 }
-                tiangong_toolkit::set_extra_allowed_roots(extra_roots);
             }
             // 汇总插件贡献的工具权限覆盖，
             // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
@@ -610,26 +600,23 @@ async fn worker_loop_async(
             last_cfg_gen = cfg_gen;
 
             // 首次 engine build + 插件注册完成后触发一次 on_session_ready
-            //（此时 workspace / trust_mode / feedback 已注入）；后续重建只调 on_engine_rebuilt。
+            //（此时 workspace / trust_mode / feedback 已注入）；engine 重建后的再配置
+            // 由各插件在 on_config_updated 中统一承载。
             if !session_ready_fired {
                 session_ready_fired = true;
                 for plugin in &plugins {
                     plugin.on_session_ready(&mut session);
                 }
             }
-            // engine 创建/重建完成：回调插件生命周期钩子
-            for plugin in &plugins {
-                plugin.on_engine_rebuilt(&mut session);
-            }
         }
 
         match cmd {
             Command::UpdateCwd { cwd } => {
-                let cwd_changed = cwd != session.cwd;
                 session.cwd = cwd;
                 apply_session_cwd(&session);
                 // 同步把新的工作目录注入到所有插件（文件类插件据此感知会话 workspace）。
                 // cwd 无效时传 None，让插件清空缓存的旧 workspace，避免在旧目录上继续操作。
+                // index 插件在 set_workspace 内对变更目录触发重扫，无需单独的 cwd 钩子。
                 let workspace = std::path::Path::new(&session.cwd);
                 let workspace = if workspace.is_dir() {
                     Some(workspace)
@@ -638,12 +625,6 @@ async fn worker_loop_async(
                 };
                 for plugin in &plugins {
                     plugin.set_workspace(workspace);
-                }
-                // CWD 变更：回调插件生命周期钩子（index 插件在此重扫工作区索引）
-                if cwd_changed {
-                    for plugin in &plugins {
-                        plugin.on_cwd_changed(&mut session);
-                    }
                 }
 
                 continue;
@@ -748,7 +729,6 @@ async fn worker_loop_async(
                     let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
                     for plugin in &plugins {
                         plugin.set_workspace(workspace);
-                        plugin.on_cwd_changed(&mut session);
                     }
                 }
 

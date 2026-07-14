@@ -55,8 +55,12 @@ fn collect_environment_parts(session: &Session) -> Vec<String> {
     let workspace = session_working_directory(session);
     parts.push(format!("当前会话：{}", session.title));
     parts.push(format!("当前工作目录：{}", workspace));
-    // 允许文件操作目录：仅工作空间。插件贡献的额外根目录由各插件自行注入。
-    parts.push(format!("允许文件操作目录：{}", workspace));
+    // 允许文件操作目录：工作空间 + 应用存储根（由 toolkit 硬编码为始终允许）。
+    parts.push(format!(
+        "允许文件操作目录：{}；{}",
+        workspace,
+        tiangong_toolkit::app_storage_root().display()
+    ));
     parts
 }
 

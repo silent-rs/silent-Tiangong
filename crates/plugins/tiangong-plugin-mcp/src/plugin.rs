@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::permission::TrustModeHandle;
-use tiangong_core::runtime::RuntimeEngine;
 
 use crate::capability::McpCapabilityIndex;
 use crate::config::McpConfig;
@@ -66,10 +65,13 @@ impl McpPlugin {
     /// 用显式路径构造（主要供测试使用，capability 状态实例隔离）。
     pub fn with_paths(mcp_config_path: PathBuf, capability_cache_path: PathBuf) -> Self {
         let mcp_config = load_mcp_config_from_path(&mcp_config_path);
+        let capability = McpCapabilityIndex::new();
+        // 加载 capability 缓存（原 register 逻辑，迁入构造期完成）。
+        let _ = capability.load_cache(&capability_cache_path);
         Self {
             mcp_config: RwLock::new(mcp_config),
             mcp_targets: RwLock::new(HashMap::new()),
-            capability: McpCapabilityIndex::new(),
+            capability,
             capability_cache_path,
             mcp_config_path,
             workspace: RwLock::new(None),
@@ -193,12 +195,6 @@ impl Plugin for McpPlugin {
         "mcp"
     }
 
-    fn register(&self, _engine: &RuntimeEngine) {
-        // 加载 capability 缓存 + 启动后台调度器 + 异步预热 + 重建 targets。
-        let _ = self.capability.load_cache(&self.capability_cache_path);
-        self.reconfigure();
-    }
-
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         if let Ok(mut guard) = self.workspace.write() {
             *guard = workspace.map(|p| p.to_path_buf());
@@ -215,13 +211,14 @@ impl Plugin for McpPlugin {
         }
     }
 
-    fn collect_exec_env(&self) -> std::collections::BTreeMap<String, String> {
+    fn exec_env(&self) -> std::collections::BTreeMap<String, String> {
         // 贡献启用 MCP server 的环境变量（API keys 等），供 run_command 子进程注入。
         self.collect_runtime_env()
     }
 
-    fn on_engine_rebuilt(&self, _session: &mut tiangong_core::session::Session) {
+    fn on_config_updated(&self, _config: &tiangong_core::core_config::CoreConfig) {
         // engine 重建（配置变更）后，capability scheduler 重配 + targets 重建。
+        // 原 on_engine_rebuilt 的职责由配置变更钩子统一承载。
         self.reconfigure();
     }
 }

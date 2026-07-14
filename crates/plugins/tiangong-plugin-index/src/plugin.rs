@@ -4,8 +4,8 @@
 //! 注入的会话上下文；[`IndexManager`] 在 [`IndexPlugin::new`] 时自建并私有持有。
 //!
 //! 生命周期钩子接管原 core 对 `IndexManager` 的全部写入与维护：
+//! - [`Plugin::set_workspace`]：工作区变更后重扫索引（原 `on_cwd_changed` 的职责）。
 //! - [`Plugin::on_session_ready`]：首次全量扫描工作区索引（原 core/mod.rs 初始扫描）。
-//! - [`Plugin::on_cwd_changed`]：CWD 变更后重扫工作区索引。
 //! - [`Plugin::on_turn_finished`]：批量写入本轮对话索引（原 `index_turn_messages`）。
 //! - [`Plugin::on_session_ended`]：finalize Session 索引。
 
@@ -26,6 +26,8 @@ use tiangong_core::tool_override::PromptSectionProvider;
 pub struct IndexPlugin {
     /// 当前会话工作目录（可变，由 core 注入）。
     workspace: RwLock<Option<PathBuf>>,
+    /// 上次已扫描的工作目录（避免同一目录重复扫描）。
+    last_scanned: RwLock<Option<PathBuf>>,
     /// 信任模式解析句柄（FullTrust 时放宽 search_code 路径校验）。
     trust_mode: RwLock<Option<TrustModeHandle>>,
     /// 自建并私有持有的 IndexManager（core 不感知）。
@@ -44,6 +46,7 @@ impl IndexPlugin {
             .ok();
         Self {
             workspace: RwLock::new(None),
+            last_scanned: RwLock::new(None),
             trust_mode: RwLock::new(None),
             index_manager: RwLock::new(im),
         }
@@ -77,23 +80,41 @@ impl IndexPlugin {
         Some(f(im))
     }
 
-    /// 对工作区做全量扫描（用于 on_session_ready / on_cwd_changed）。
+    /// 对工作区做全量扫描（供 set_workspace / on_session_ready 共用）。
     ///
     /// - 索引不存在：同步全量扫描（首次使用，阻塞直到完成）。
     /// - 索引过期（>1 小时）：后台重建，不阻塞当前搜索。
     /// - 索引新鲜：跳过。
+    ///
+    /// 仅在索引已存在（复用或后台重建）或同步首次扫描成功时置位 `last_scanned`，
+    /// 使后续 `set_workspace` 对同一目录不再重复扫描；扫描失败时不置位，允许下次重试。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
             return;
         }
         if !crate::index::workspace_index_exists(&root) {
-            // 首次：同步全量扫描
-            self.with_index_manager(|im| match im.full_scan(&root) {
-                Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
-                Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
+            // 首次：同步全量扫描。仅在成功后置位 last_scanned，失败则允许下次重试。
+            let scanned = self.with_index_manager(|im| match im.full_scan(&root) {
+                Ok(count) => {
+                    tracing::info!(count, "Workspace 初始索引扫描完成");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("Workspace 初始索引扫描失败: {e}");
+                    false
+                }
             });
+            if scanned.unwrap_or(false)
+                && let Ok(mut guard) = self.last_scanned.write()
+            {
+                guard.clone_from(&Some(root));
+            }
             return;
+        }
+        // 索引已存在——复用，置位 last_scanned。
+        if let Ok(mut guard) = self.last_scanned.write() {
+            guard.clone_from(&Some(root.clone()));
         }
         // 检查索引年龄，过期则后台重建（不阻塞搜索）
         const STALE_THRESHOLD_SECS: u64 = 3600; // 1 小时
@@ -126,8 +147,24 @@ impl Plugin for IndexPlugin {
     }
 
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        let new_path = workspace.map(|p| p.to_path_buf());
         if let Ok(mut guard) = self.workspace.write() {
-            *guard = workspace.map(|p| p.to_path_buf());
+            *guard = new_path.clone();
+        }
+        // 工作区变更后重扫索引（原 on_cwd_changed 的职责）。
+        // 仅当新路径与上次已扫描路径不同时才触发，避免重复扫描。
+        // 复用 full_scan_workspace 的检查策略：索引已存在则复用，不存在才同步全量扫描。
+        if let Some(ref root) = new_path
+            && root.is_dir()
+        {
+            let already_scanned = self
+                .last_scanned
+                .read()
+                .map(|g| g.as_ref() == Some(root))
+                .unwrap_or(false);
+            if !already_scanned {
+                self.full_scan_workspace(&root.display().to_string());
+            }
         }
     }
 
@@ -141,18 +178,19 @@ impl Plugin for IndexPlugin {
     // 由 core 通过 supertrait 自动收集。
 
     fn on_session_ready(&self, session: &mut Session) {
-        self.full_scan_workspace(&session.cwd);
-    }
-
-    fn on_cwd_changed(&self, session: &mut Session) {
+        // set_workspace 已在 engine 初始化时对当前 cwd 触发过扫描（last_scanned 已置位）。
+        // 若 set_workspace 因扫描失败未置位，此处兜底重试一次。
         let root = PathBuf::from(&session.cwd);
-        if !root.is_dir() {
-            return;
+        if root.is_dir() {
+            let already_scanned = self
+                .last_scanned
+                .read()
+                .map(|g| g.as_ref() == Some(&root))
+                .unwrap_or(false);
+            if !already_scanned {
+                self.full_scan_workspace(&session.cwd);
+            }
         }
-        self.with_index_manager(|im| match im.full_scan(&root) {
-            Ok(count) => tracing::info!(count, "Workspace 索引扫描完成"),
-            Err(e) => tracing::warn!("Workspace 索引扫描失败: {e}"),
-        });
     }
 
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
