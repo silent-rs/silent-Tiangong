@@ -80,28 +80,41 @@ impl IndexPlugin {
         Some(f(im))
     }
 
-    /// 对工作区做全量扫描（用于 on_session_ready）。
+    /// 对工作区做全量扫描（供 set_workspace / on_session_ready 共用）。
     ///
     /// - 索引不存在：同步全量扫描（首次使用，阻塞直到完成）。
     /// - 索引过期（>1 小时）：后台重建，不阻塞当前搜索。
     /// - 索引新鲜：跳过。
     ///
-    /// 无论走哪个分支都会置位 `last_scanned`，使后续 `set_workspace` 对同一目录不再重复扫描。
+    /// 仅在索引已存在（复用或后台重建）或同步首次扫描成功时置位 `last_scanned`，
+    /// 使后续 `set_workspace` 对同一目录不再重复扫描；扫描失败时不置位，允许下次重试。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
             return;
         }
-        if let Ok(mut scanned) = self.last_scanned.write() {
-            scanned.clone_from(&Some(root.clone()));
-        }
         if !crate::index::workspace_index_exists(&root) {
-            // 首次：同步全量扫描
-            self.with_index_manager(|im| match im.full_scan(&root) {
-                Ok(count) => tracing::info!(count, "Workspace 初始索引扫描完成"),
-                Err(e) => tracing::warn!("Workspace 初始索引扫描失败: {e}"),
+            // 首次：同步全量扫描。仅在成功后置位 last_scanned，失败则允许下次重试。
+            let scanned = self.with_index_manager(|im| match im.full_scan(&root) {
+                Ok(count) => {
+                    tracing::info!(count, "Workspace 初始索引扫描完成");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("Workspace 初始索引扫描失败: {e}");
+                    false
+                }
             });
+            if scanned.unwrap_or(false)
+                && let Ok(mut guard) = self.last_scanned.write()
+            {
+                guard.clone_from(&Some(root));
+            }
             return;
+        }
+        // 索引已存在——复用，置位 last_scanned。
+        if let Ok(mut guard) = self.last_scanned.write() {
+            guard.clone_from(&Some(root.clone()));
         }
         // 检查索引年龄，过期则后台重建（不阻塞搜索）
         const STALE_THRESHOLD_SECS: u64 = 3600; // 1 小时
@@ -139,23 +152,18 @@ impl Plugin for IndexPlugin {
             *guard = new_path.clone();
         }
         // 工作区变更后重扫索引（原 on_cwd_changed 的职责）。
-        // 仅当新路径与上次已扫描路径不同且是有效目录时才扫描，避免重复。
+        // 仅当新路径与上次已扫描路径不同时才触发，避免重复扫描。
+        // 复用 full_scan_workspace 的检查策略：索引已存在则复用，不存在才同步全量扫描。
         if let Some(ref root) = new_path
             && root.is_dir()
         {
-            let need_scan = self
+            let already_scanned = self
                 .last_scanned
                 .read()
-                .map(|g| g.as_ref() != Some(root))
-                .unwrap_or(true);
-            if need_scan && let Ok(mut scanned) = self.last_scanned.write() {
-                scanned.clone_from(&Some(root.clone()));
-            }
-            if need_scan {
-                self.with_index_manager(|im| match im.full_scan(root) {
-                    Ok(count) => tracing::info!(count, "Workspace 索引扫描完成"),
-                    Err(e) => tracing::warn!("Workspace 索引扫描失败: {e}"),
-                });
+                .map(|g| g.as_ref() == Some(root))
+                .unwrap_or(false);
+            if !already_scanned {
+                self.full_scan_workspace(&root.display().to_string());
             }
         }
     }
@@ -170,8 +178,8 @@ impl Plugin for IndexPlugin {
     // 由 core 通过 supertrait 自动收集。
 
     fn on_session_ready(&self, session: &mut Session) {
-        // set_workspace 可能已在 engine 初始化时对当前 cwd 触发过扫描（last_scanned
-        // 已置位）。若已扫描过同一目录则跳过，否则做首次全量扫描。
+        // set_workspace 已在 engine 初始化时对当前 cwd 触发过扫描（last_scanned 已置位）。
+        // 若 set_workspace 因扫描失败未置位，此处兜底重试一次。
         let root = PathBuf::from(&session.cwd);
         if root.is_dir() {
             let already_scanned = self
@@ -179,11 +187,10 @@ impl Plugin for IndexPlugin {
                 .read()
                 .map(|g| g.as_ref() == Some(&root))
                 .unwrap_or(false);
-            if already_scanned {
-                return;
+            if !already_scanned {
+                self.full_scan_workspace(&session.cwd);
             }
         }
-        self.full_scan_workspace(&session.cwd);
     }
 
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
