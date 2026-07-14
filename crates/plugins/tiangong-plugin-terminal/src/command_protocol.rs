@@ -5,7 +5,7 @@ use tauri::Emitter;
 use tokio::sync::oneshot;
 
 use crate::manager::TerminalManager;
-use crate::types::{contains_marker, PtyState, TerminalExecResponse, TerminalOutputEvent};
+use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
 const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
 
@@ -62,8 +62,13 @@ fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> 
     let session_id = manager.session_id();
     let cwd = manager.cwd();
     let shell = manager.shell();
+    let pty_env = manager
+        .pty_env
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
     tracing::info!(session_id = %session_id, "系统 PTY 不可用，尝试重新启动");
-    match crate::manager::start_pty(&session_id, &cwd, &shell) {
+    match crate::manager::start_pty(&session_id, &cwd, &shell, &pty_env) {
         Ok(new_ps) => {
             manager.set_alive(true);
             {
@@ -104,18 +109,22 @@ fn collect_command_output(
     let mut in_range = false;
     let mut lines = Vec::new();
     for line in &state.output_buffer {
-        if line.contains(start_marker) {
+        if line_matches_marker(line, start_marker) {
             in_range = true;
             continue;
         }
-        if line.contains(end_marker) {
+        if line_matches_marker(line, end_marker) {
             break;
         }
-        if in_range
-            && !line.contains(cwd_marker)
-            && !line.contains(rc_marker)
-            && !contains_marker(line)
-        {
+        // 用精确匹配过滤 marker 行（cwd/rc marker 行），排除 shell 回显的
+        // wrapper 命令文本（它 contains 但不 == marker）。
+        let is_cwd = extract_marker_value(line, cwd_marker).is_some();
+        let is_rc = extract_marker_value(line, rc_marker).is_some();
+        // 只过滤本次命令的实际 marker（含唯一 ID），不用固定前缀——
+        // 避免用户输出恰好包含 __TIANGONG_START_ 前缀被静默删除。
+        let is_start = line_matches_marker(line, start_marker);
+        let is_end = line_matches_marker(line, end_marker);
+        if in_range && !is_cwd && !is_rc && !is_start && !is_end {
             lines.push(line.clone());
         }
     }
@@ -125,17 +134,26 @@ fn collect_command_output(
         lines.clear();
         let start = fallback_start_idx.unwrap_or(0);
         for line in state.output_buffer.iter().skip(start) {
-            if !contains_marker(line) && !line.contains(cwd_marker) && !line.contains(rc_marker) {
+            let is_cwd = extract_marker_value(line, cwd_marker).is_some();
+            let is_rc = extract_marker_value(line, rc_marker).is_some();
+            let is_start = line_matches_marker(line, start_marker);
+            let is_end = line_matches_marker(line, end_marker);
+            if !is_cwd && !is_rc && !is_start && !is_end {
                 lines.push(line.clone());
             }
         }
     }
     if include_current_line {
         let current_line = state.current_line.trim_end();
+        let is_cwd = extract_marker_value(current_line, cwd_marker).is_some();
+        let is_rc = extract_marker_value(current_line, rc_marker).is_some();
+        let is_start = line_matches_marker(current_line, start_marker);
+        let is_end = line_matches_marker(current_line, end_marker);
         if !current_line.trim().is_empty()
-            && !contains_marker(current_line)
-            && !current_line.contains(cwd_marker)
-            && !current_line.contains(rc_marker)
+            && !is_cwd
+            && !is_rc
+            && !is_start
+            && !is_end
             && lines.last().is_none_or(|line| line != current_line)
         {
             lines.push(current_line.to_string());
@@ -147,6 +165,37 @@ fn collect_command_output(
     (lines.join("\n"), interrupted)
 }
 
+/// 剥离 CSI/OSC 等 ANSI 转义序列，返回纯文本。
+///
+/// marker 匹配前先 strip ANSI，这样即使 TTY-aware 命令在 marker 行前后残留
+/// 转义片断（如 `\x1b[0m`），也能用精确 `==` 判定——避免 `contains` 误匹配
+/// shell 回显的 wrapper 命令文本（回显行包含所有 marker 字符串）。
+fn strip_ansi(input: &str) -> String {
+    strip_ansi_escapes::strip_str(input)
+}
+
+/// 判定一行是否匹配某个 marker（先 strip ANSI 再精确比较 trim 后的行）。
+///
+/// 不用 `contains`：shell 会回显 wrapper 命令文本，该行包含所有 marker 字符串，
+/// `contains` 会误匹配回显导致命令尚未执行就判定完成。
+fn line_matches_marker(line: &str, marker: &str) -> bool {
+    strip_ansi(line).trim() == marker
+}
+
+/// 从 marker 行提取 marker 之后的值（先 strip ANSI）。
+/// 用于 cwd_marker / rc_marker 后面跟着的路径 / 退出码。
+fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
+    let clean = strip_ansi(line);
+    let trimmed = clean.trim();
+    let rest = trimmed.strip_prefix(marker)?;
+    let value = rest.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
 fn wrap_non_interactive_command(
     start_marker: &str,
     command: &str,
@@ -155,7 +204,7 @@ fn wrap_non_interactive_command(
     end_marker: &str,
 ) -> String {
     format!(
-        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
         start_marker, command, cwd_marker, rc_marker, end_marker
     )
 }
@@ -197,10 +246,10 @@ fn command_boundary_seen(manager: &TerminalManager, start_marker: &str, end_mark
         .unwrap_or_else(|poison| poison.into_inner());
     let mut start_seen = false;
     for line in &state.output_buffer {
-        if line.trim() == start_marker {
+        if line_matches_marker(line, start_marker) {
             start_seen = true;
         }
-        if start_seen && line.trim() == end_marker {
+        if start_seen && line_matches_marker(line, end_marker) {
             return true;
         }
     }
@@ -400,22 +449,34 @@ pub(crate) async fn handle_exec(
                 let mut found_end = false;
                 for i in start_idx..buf_len {
                     if let Some(line) = state.output_buffer.get(i) {
-                        if line.trim() == start_marker {
+                        // 精确匹配（strip ANSI 后 == marker），不用 contains：
+                        // shell 会回显 wrapper 命令文本，该行包含所有 marker 字符串，
+                        // contains 会误匹配回显导致命令尚未执行就判定完成。
+                        if line_matches_marker(line, start_marker.as_str()) {
                             start_seen = true;
                         }
-                        if line.trim() == end_marker {
+                        if line_matches_marker(line, end_marker.as_str()) {
                             found_end = true;
                         }
-                        if line.starts_with(&cwd_marker) {
-                            cwd_value = line[cwd_marker.len()..].trim().to_string();
+                        if let Some(value) = extract_marker_value(line, cwd_marker.as_str()) {
+                            cwd_value = value;
                         }
-                        if let Some(rest) = line.trim().strip_prefix(&rc_marker) {
-                            rc_value = rest.trim().parse().ok();
+                        if let Some(value) = extract_marker_value(line, rc_marker.as_str()) {
+                            if let Ok(rc) = value.parse::<i32>() {
+                                rc_value = Some(rc);
+                            }
                         }
                     }
                 }
                 last_seen_pushed = pushed;
-                if found_end && start_seen {
+                // 完成判定（按可靠性递减）：
+                // 1. end + start marker 都命中 → 正常完成
+                // 2. rc_marker 已收到（退出码已知）→ 命令一定已结束，
+                //    end_marker 只是紧随其后的收尾 echo，可能被 ANSI 污染漏判。
+                //    此时不应再等满超时——这正是 #237 的核心：命令成功执行、数据
+                //    已采集，却因边界检测失败被误判超时，触发 recovery 封禁工具。
+                let completed = (found_end && start_seen) || rc_value.is_some();
+                if completed {
                     Some(crate::types::CollectResult {
                         cwd: cwd_value.clone(),
                         exit_code: rc_value.unwrap_or(0),
@@ -881,6 +942,118 @@ mod tests {
     }
 
     #[test]
+    fn collect_matches_marker_with_ansi_residual() {
+        // TTY-aware 命令（如 gh）可能在 marker 行前后残留 ANSI 转义片断。
+        // strip_ansi + 精确匹配应能命中，而非漏判。
+        let manager = make_manager_with_lines(&[
+            "\x1b[0m__TIANGONG_START_abc__\x1b[0m",
+            "hello",
+            "__TIANGONG_CWD_abc__/tmp",
+            "__TIANGONG_RC_abc__0",
+            "\x1b[0m__TIANGONG_END_abc__",
+        ]);
+        let (out, interrupted) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+            "__TIANGONG_CWD_abc__",
+            "__TIANGONG_RC_abc__",
+            false,
+            None,
+        );
+        assert_eq!(out, "hello");
+        assert!(!interrupted);
+    }
+
+    #[test]
+    fn collect_does_not_match_shell_echo_of_wrapper() {
+        // shell 回显 wrapper 命令文本时，该行 contains 所有 marker 字符串但
+        // strip_ansi + trim 后不等于任何 marker。精确匹配不应误命中回显行，
+        // 否则命令尚未执行就判定完成（#237 回归 bug 的根因）。
+        let echo_line = "__TIANGONG_= __rc=$?; printf '\\n__TIANGONG_CWD_abc__'; pwd; echo '__TIANGONG_RC_abc__'$__rc; echo '__TIANGONG_END_abc__'";
+        let manager = make_manager_with_lines(&[
+            "__TIANGONG_START_abc__",
+            echo_line, // shell 回显的 wrapper 第二行（contains 所有 marker）
+            "actual output",
+            "__TIANGONG_CWD_abc__/tmp",
+            "__TIANGONG_RC_abc__0",
+            "__TIANGONG_END_abc__",
+        ]);
+        let (out, interrupted) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+            "__TIANGONG_CWD_abc__",
+            "__TIANGONG_RC_abc__",
+            false,
+            None,
+        );
+        // 回显行不应被当作 end_marker 提前截断，actual output 必须出现
+        assert!(
+            out.contains("actual output"),
+            "回显行误匹配导致输出截断: {out}"
+        );
+        assert!(!interrupted);
+    }
+
+    #[test]
+    fn line_match_ignores_shell_echo() {
+        // 直接验证 line_matches_marker 对回显行返回 false
+        let echo_line = "__TIANGONG_= echo '__TIANGONG_START_abc__'; export PAGER=cat; cmd";
+        assert!(!line_matches_marker(echo_line, "__TIANGONG_START_abc__"));
+        // 而真正的 marker 行返回 true
+        assert!(line_matches_marker(
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_START_abc__"
+        ));
+        // 带 ANSI 残片的 marker 行也返回 true
+        assert!(line_matches_marker(
+            "\x1b[0m__TIANGONG_START_abc__\x1b[0m",
+            "__TIANGONG_START_abc__"
+        ));
+    }
+
+    #[test]
+    fn command_boundary_matches_with_ansi_residual() {
+        // command_boundary_seen 用 strip_ansi + 精确匹配，验证带 ANSI 残片的 marker 仍能识别边界。
+        let manager = make_manager_with_lines(&[
+            "\x1b[0m__TIANGONG_START_abc__",
+            "running",
+            "__TIANGONG_END_abc__\x1b[0m",
+        ]);
+        assert!(command_boundary_seen(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+        ));
+    }
+
+    #[test]
+    fn collect_rc_marker_with_ansi_residual_excluded() {
+        // rc_marker 行带 ANSI 残片时，应被正确过滤（不混入命令输出），
+        // 且轮询循环能从中解析出退出码（完成判定安全网）。
+        let manager = make_manager_with_lines(&[
+            "__TIANGONG_START_abc__",
+            "command output line",
+            "\x1b[0m__TIANGONG_CWD_abc__/tmp\x1b[0m",
+            "\x1b[0m__TIANGONG_RC_abc__0",
+            // end_marker 缺失（模拟被 ANSI 污染漏判的场景）
+        ]);
+        let (out, interrupted) = collect_command_output(
+            &manager,
+            "__TIANGONG_START_abc__",
+            "__TIANGONG_END_abc__",
+            "__TIANGONG_CWD_abc__",
+            "__TIANGONG_RC_abc__",
+            false,
+            None,
+        );
+        // 命令输出应只包含实际内容，cwd/rc marker 行被过滤
+        assert_eq!(out, "command output line");
+        assert!(!interrupted);
+    }
+
+    #[test]
     fn collect_fallback_respects_start_idx() {
         // 缓冲区：[旧行, 新行1, 新行2]，start marker 缺失。
         // fallback_start_idx=1 时只应返回"新行1/新行2"，不含旧行。
@@ -923,9 +1096,11 @@ mod tests {
         );
         assert!(combined.contains("PAGER="));
         assert!(combined.contains("GIT_PAGER="));
+        assert!(combined.contains("GH_PAGER="));
         assert!(!combined.contains("GIT_CONFIG_PARAMETERS"));
-        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat LESS=FRX"));
+        assert!(combined.contains("export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX"));
         assert!(combined.contains("unset PAGER"));
+        assert!(combined.contains("unset GH_PAGER"));
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
@@ -972,6 +1147,89 @@ mod tests {
         assert!(
             !late_write_path.exists(),
             "取消栅栏放行后，忽略 SIGINT 的命令不得继续写文件"
+        );
+    }
+
+    /// #237 完整复现链路验证（不依赖网络/GitHub 登录）。
+    ///
+    /// 模拟一个 TTY-aware 命令（类似 gh）在 PTY 下的完整输出流：
+    /// 1. spinner 动画（隐藏/显示光标 + CR/清行）
+    /// 2. 彩色输出（SGR 序列 + 真彩色冒号参数）
+    /// 3. shell 回显 wrapper 命令文本（contains 所有 marker）
+    /// 4. 实际的 marker 输出（start/cwd/rc/end）
+    ///
+    /// 验证：marker 检测只命中实际 marker 行（不命中回显），
+    /// 命令输出完整收集，退出码正确解析。
+    #[test]
+    fn end_to_end_tty_aware_command_marker_detection() {
+        use crate::output_processor::TerminalLineProcessor;
+
+        let marker_id = "test_e2e_001";
+        let start = format!("__TIANGONG_START_{marker_id}__");
+        let end = format!("__TIANGONG_END_{marker_id}__");
+        let cwd = format!("__TIANGONG_CWD_{marker_id}__");
+        let rc = format!("__TIANGONG_RC_{marker_id}__");
+
+        // 构造 wrapper 命令文本（会被 shell 回显，contains 所有 marker）
+        let wrapper_echo =
+            format!("__TIANGONG_= __rc=$?; printf '\\n{cwd}'; pwd; echo '{rc}'$__rc; echo '{end}'");
+
+        // 模拟 PTY 完整输出流（shell 回显 + spinner + 彩色命令输出 + marker）
+        let start_echo = format!("__TIANGONG_= echo '{start}'; export PAGER=cat; fake_gh_cmd\r\n");
+        let wrapper_echo_line = format!("{wrapper_echo}\r\n");
+        let spinner = "\x1b[?25l\r\x1b[K\r⣾\r\x1b[K\r⣽\r\x1b[K\x1b[?25h\r\x1b[K";
+        let color_error = "\x1b[38:2::255:0:0mError:\x1b[0m something failed\r\n";
+        let color_ok = "\x1b[32mOK\x1b[0m done\r\n";
+        let cwd_line = format!("{cwd}/tmp\r\n");
+        let rc_line = format!("{rc}1\r\n");
+        let end_line = format!("{end}\r\n");
+        let pty_output = format!(
+            "{start_echo}{wrapper_echo_line}{spinner}{color_error}{color_ok}{cwd_line}{rc_line}{end_line}"
+        );
+
+        // 用 TerminalLineProcessor 处理（模拟 output_reader 线程）
+        let mut processor = TerminalLineProcessor::new();
+        let lines = processor.process(&pty_output);
+
+        // 收集到的行里必须包含命令输出
+        let has_error = lines.iter().any(|l| l.contains("Error:"));
+        let has_ok = lines.iter().any(|l| l == "OK done");
+        assert!(has_error, "命令彩色输出丢失！lines: {:?}", lines);
+        assert!(has_ok, "命令输出丢失！lines: {:?}", lines);
+
+        // 回显的 wrapper 文本不应等于任何 marker（精确匹配不会误判）
+        let echo_line = lines.iter().find(|l| l.contains("__rc=$?"));
+        if let Some(echo) = echo_line {
+            assert!(
+                !line_matches_marker(echo, &end),
+                "回显行被误判为 end marker！echo: {echo}"
+            );
+            assert!(
+                !line_matches_marker(echo, &rc),
+                "回显行被误判为 rc marker！echo: {echo}"
+            );
+        }
+
+        // 实际 marker 行必须能被精确匹配
+        let rc_line = lines
+            .iter()
+            .find(|l| extract_marker_value(l, rc.as_str()).is_some())
+            .expect("rc marker 行未找到");
+        let rc_value = extract_marker_value(rc_line, rc.as_str()).unwrap();
+        assert_eq!(rc_value, "1", "退出码解析错误：{rc_value}");
+
+        let cwd_line = lines
+            .iter()
+            .find(|l| extract_marker_value(l, cwd.as_str()).is_some())
+            .expect("cwd marker 行未找到");
+        let cwd_value = extract_marker_value(cwd_line, cwd.as_str()).unwrap();
+        assert_eq!(cwd_value, "/tmp", "cwd 解析错误：{cwd_value}");
+
+        // end marker 必须能精确匹配
+        assert!(
+            lines.iter().any(|l| line_matches_marker(l, &end)),
+            "end marker 行未找到！lines: {:?}",
+            lines
         );
     }
 }

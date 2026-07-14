@@ -17,6 +17,13 @@ pub struct TerminalManager {
     pub(crate) state: Arc<Mutex<TerminalState>>,
     /// 系统 PTY 输出日志器（仅系统 PTY 有；面板 PTY 为 None）。用于持久化历史与重置时清空。
     pub(crate) logger: Option<Arc<crate::output_processor::OutputLogger>>,
+    /// 创建 PTY 时快照的插件贡献环境变量（由 core 经 `set_exec_env` 汇总回注）。
+    ///
+    /// PTY 是长期复用的交互式 shell，env 在创建时快照注入（不 clear、不 allowlist，
+    /// 只在继承的主进程环境之上追加）。Reset / PTY 恢复时复用同一份快照重建 shell，
+    /// 保持会话内环境一致。配置变更后新建的 PTY 才会用最新 env（快照语义，
+    /// 与 `default_cwd` 一致）。
+    pub(crate) pty_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 pub(crate) struct TerminalState {
@@ -46,6 +53,15 @@ pub(crate) struct TerminalState {
 
 impl TerminalManager {
     pub fn new(session_id: String, cwd: String) -> Self {
+        Self::with_pty_env(session_id, cwd, std::collections::BTreeMap::new())
+    }
+
+    /// 用指定的插件贡献 env 快照构造 manager（PTY 创建时注入）。
+    pub(crate) fn with_pty_env(
+        session_id: String,
+        cwd: String,
+        pty_env: std::collections::BTreeMap<String, String>,
+    ) -> Self {
         let shell = default_shell();
         Self {
             state: Arc::new(Mutex::new(TerminalState {
@@ -62,6 +78,7 @@ impl TerminalManager {
                 screen_updates: 0,
             })),
             logger: None,
+            pty_env: Arc::new(Mutex::new(pty_env)),
         }
     }
 
@@ -145,7 +162,8 @@ impl TerminalManager {
         app: tauri::AppHandle,
     ) -> Option<PtyState> {
         let shell = self.shell();
-        let ps = start_pty(session_id, cwd, &shell)
+        let pty_env = self.pty_env.lock().map(|g| g.clone()).unwrap_or_default();
+        let ps = start_pty(session_id, cwd, &shell, &pty_env)
             .inspect_err(|e| {
                 error!(session_id, error = %e, "PTY 进程启动失败");
             })
@@ -392,7 +410,12 @@ pub(crate) async fn spawn_command_loop(
                 }
                 // 用户主动重置视为刷新，清空持久化日志
                 manager.clear_log();
-                match start_pty(&session_id, &cwd, &shell) {
+                let pty_env = manager
+                    .pty_env
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                match start_pty(&session_id, &cwd, &shell, &pty_env) {
                     Ok(new_ps) => {
                         {
                             let mut state = manager.state.lock().unwrap();
@@ -448,7 +471,12 @@ fn default_shell() -> String {
     }
 }
 
-pub(crate) fn start_pty(session_id: &str, cwd: &str, shell: &str) -> anyhow::Result<PtyState> {
+pub(crate) fn start_pty(
+    session_id: &str,
+    cwd: &str,
+    shell: &str,
+    extra_env: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<PtyState> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -462,6 +490,11 @@ pub(crate) fn start_pty(session_id: &str, cwd: &str, shell: &str) -> anyhow::Res
     let mut cmd = CommandBuilder::new(shell);
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
+    // 追加各插件贡献的环境变量（MCP/skill 等注入的 token、.env.local 等）。
+    // PTY 是交互式 shell，继承主进程完整环境，此处只追加、不 clear、不 allowlist。
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
 
     tracing::debug!(session_id, cwd, shell, "正在启动 PTY 子进程");
 

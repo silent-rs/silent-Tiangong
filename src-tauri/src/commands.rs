@@ -1882,7 +1882,14 @@ pub(crate) fn start_stream_consumer(
                     | StreamEvent::SummaryText { .. } => {
                         core_state.store.runtime.run.summary = "正在回复...".to_string();
                     }
-                    StreamEvent::PhaseChanged { .. } => {}
+                    StreamEvent::PhaseChanged { phase, .. } => {
+                        // 工具执行完毕后 core 发出 PhaseChanged(analyzing)，
+                        // 标志进入下一轮 LLM 推理。及时更新 summary 避免前端
+                        // 状态卡在刚完成的工具名上（如 "✓ run_shell"）。
+                        if phase == "analyzing" {
+                            core_state.store.runtime.run.summary = "正在思考...".to_string();
+                        }
+                    }
                     StreamEvent::MemoryRecallStart { .. } => {
                         core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
                     }
