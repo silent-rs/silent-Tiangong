@@ -21,9 +21,9 @@ use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 /// 30 轮：review 类多步骤任务（连续读取多个文件做审查）在 15 轮时容易触顶，
 /// 过早进入总结阶段。30 轮给复杂任务更多空间；触顶后仍走与正常完成相同的总结
 /// 路径（由模型自行判断完成度），无需特殊触顶逻辑。
-const MAX_TOOL_ROUNDS: usize = 30;
+
 /// 总结阶段后重新进入工具执行阶段的最大次数。
-const MAX_OUTER_ITERATIONS: u32 = 3;
+
 
 pub mod command;
 pub(crate) use command::Command;
@@ -154,34 +154,71 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 prepared,
                 message_id,
             }) => {
-                // clone Core 的会话级字段,spawn turn task
                 let session_id = self.session_id.clone();
-                let config = self.config.clone();
-                let trust_mode = self
-                    .trust_mode
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                let storage_root = self.storage_root.clone();
-                let external_tx = self.external_tx.clone();
-                let plugins = self.plugins.clone();
-                let session_ready = Arc::clone(&self.session_ready_fired);
 
-                crate::shared_runtime::spawn_turn(session_id.clone(), move |cmd_rx| async move {
+                // 1. 从磁盘加载 session
+                let mut session = Session::load_from_storage(&self.storage_root, &session_id)
+                    .map_err(|e| CoreError::WorkerStopped)?;
+
+                // 2. 内部 stream 通道(per-turn forwarder)
+                let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+
+                // 3. 将用户消息注入 session 并落盘
+                let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+                let accepted = accept_user_message(
+                    &mut session,
+                    &stream_tx,
+                    Some(message_id),
+                    prepared,
+                    true,
+                ).map_err(|e| CoreError::WorkerStopped)?;
+                let turn_start_idx = accepted.turn_start_idx;
+                let user_msg_id = accepted.message_id.clone();
+                let accepted_prepared = accepted.prepared.clone();
+
+                // 4. 构建 TurnContext(session 在其中)
+                let trust_mode = self.trust_mode.lock()
+                    .unwrap_or_else(|p| p.into_inner()).clone();
+                let mut session_ready_flag = self.session_ready_fired
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let (turn_cmd_tx, turn_cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
+                let mut session_ready_flag = self.session_ready_fired
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let (mut ctx, _tools) = build_turn_context(
+                    &self.config,
+                    &stream_tx,
+                    trust_mode,
+                    &self.storage_root,
+                    &self.plugins,
+                    turn_cmd_tx.clone(),
+                    &mut session,
+                    &mut session_ready_flag,
+                );
+                self.session_ready_fired.store(
+                    session_ready_flag,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+
+                // session 现在在 ctx 内,TurnContext 持有它
+                let external_tx = self.external_tx.clone();
+
+                // 5. spawn turn task(传入 ctx + 执行参数)
+                let (turn_cmd_tx, turn_cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
+                let sid = session_id.clone();
+                crate::shared_runtime::spawn_turn(session_id, move |_ignored_rx| async move {
                     run_turn(
-                        session_id,
-                        config,
-                        trust_mode,
-                        storage_root,
+                        sid,
+                        ctx,
+                        stream_tx,
+                        stream_rx,
                         external_tx,
-                        plugins,
-                        cmd_rx,
-                        session_ready,
-                        prepared,
-                        message_id,
-                    )
-                    .await;
+                        turn_cmd_rx,
+                        turn_start_idx,
+                        user_msg_id,
+                    ).await;
                 });
+                // turn_cmd_tx 被 drop 后通道关闭;Cancel 等命令通过 send_command 投递
+                std::mem::forget(turn_cmd_tx); // TODO: turn_cmd_tx 应该存到 TURN_TASKS
                 Ok(())
             }
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
@@ -211,42 +248,160 @@ impl Drop for TiangongCore {
     }
 }
 
-/// turn task:加载 session → 构建 TurnContext → 执行 turn → 落盘。
+/// turn task:执行 TurnContext 中的 turn。
 ///
-/// 替代原 worker_loop_async 的 Message 分支。每次 deliver(Message) spawn 一个 turn task,
-/// turn 结束后自动退出。
+/// TurnContext(session + 用户消息已注入)在 deliver 中构建,传入此处执行。
+/// turn 结束后 session 落盘,task 退出。
 #[allow(clippy::too_many_arguments)]
 async fn run_turn(
     session_id: String,
-    config: CoreConfigProvider,
-    trust_mode: crate::permission::TrustMode,
-    storage_root: std::path::PathBuf,
+    mut ctx: crate::turn_context::TurnContext,
+    stream_tx: StdSender<StreamEvent>,
+    stream_rx: std::sync::mpsc::Receiver<StreamEvent>,
     external_tx: Sender<SessionStreamEvent>,
-    plugins: Vec<Arc<dyn Plugin>>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    session_ready_fired: Arc<std::sync::atomic::AtomicBool>,
-    prepared: Vec<ContentBlock>,
-    message_id: Option<String>,
+    turn_start_idx: usize,
+    user_msg_id: String,
 ) {
-    // TODO: 从 worker_loop_async 的 Message 分支迁移完整逻辑
-    let _ = (
-        config,
-        trust_mode,
-        storage_root,
-        plugins,
-        cmd_rx,
-        session_ready_fired,
-        prepared,
-        message_id,
-    );
-    tracing::warn!(session_id = %session_id, "run_turn: 待实现");
-
-    let _ = external_tx.send(SessionStreamEvent {
-        session_id,
-        event: StreamEvent::Error {
-            message: "run_turn 尚未实现".to_string(),
-        },
+    // ===== per-turn forwarder + 屏障 =====
+    let fwd_session_id = session_id.clone();
+    let fwd_tx = external_tx.clone();
+    let turn_capture = Arc::new(TurnCaptureState {
+        capture: Mutex::new(TurnCapture::default()),
+        notify: tokio::sync::Notify::new(),
     });
+    let fwd_capture = turn_capture.clone();
+    let forward_terminal = Arc::new(AtomicBool::new(false));
+    let fwd_terminal = forward_terminal.clone();
+    let mut turn_boundary_id = 0u64;
+
+    let forward_handle = thread::spawn(move || {
+        let mut external_open = true;
+        while let Ok(event) = stream_rx.recv() {
+            if let StreamEvent::TokenUsage { usage, agent_id, source, .. } = &event {
+                if let Ok(mut capture) = fwd_capture.capture.lock() {
+                    capture.usage.record(usage, agent_id.as_deref(), source);
+                }
+            }
+            match event {
+                StreamEvent::TurnBoundary { boundary_id } => {
+                    if let Ok(mut capture) = fwd_capture.capture.lock() {
+                        capture.processed_boundary = capture.processed_boundary.max(boundary_id);
+                    }
+                    fwd_capture.notify.notify_waiters();
+                    continue;
+                }
+                terminal @ (StreamEvent::Done { .. } | StreamEvent::Error { .. }) => {
+                    if !fwd_terminal.swap(false, Ordering::AcqRel) {
+                        if let Ok(mut capture) = fwd_capture.capture.lock() {
+                            capture.terminal = Some(terminal);
+                        }
+                        continue;
+                    }
+                    if external_open && fwd_tx.send(SessionStreamEvent {
+                        session_id: fwd_session_id.clone(), event: terminal,
+                    }).is_err() { external_open = false; }
+                    continue;
+                }
+                _ => {}
+            }
+            if external_open && fwd_tx.send(SessionStreamEvent {
+                session_id: fwd_session_id.clone(), event,
+            }).is_err() { external_open = false; }
+        }
+    });
+
+    // ===== execute turn =====
+    let turn_started = std::time::Instant::now();
+    let turn_start_cwd = ctx.session.cwd.clone();
+    forward_terminal.store(false, Ordering::Release);
+    if let Ok(mut capture) = turn_capture.capture.lock() {
+        capture.terminal = None;
+        capture.usage = TurnUsageCapture::default();
+    }
+
+    // on_turn_started(session 在 ctx 内)
+    let plugins = ctx.tools.clone(); // TODO: plugins 需要单独传入或从 ctx 获取
+    // 插件钩子需要 &mut session — 从 ctx 借用
+    let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
+
+    execute_turn_async(
+        &mut session, &user_msg_id, &[],mut session, &user_msg_id,
+        &ctx, &stream_tx, &mut cmd_rx, &session_id,
+    ).await;
+
+    // ===== 等终态 =====
+    turn_boundary_id = turn_boundary_id.wrapping_add(1);
+    let boundary_id = turn_boundary_id;
+    let _ = stream_tx.send(StreamEvent::TurnBoundary { boundary_id });
+    let mut terminal = loop {
+        {
+            let mut capture = turn_capture.capture.lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if capture.processed_boundary >= boundary_id {
+                break capture.terminal.take();
+            }
+        }
+        turn_capture.notify.notified().await;
+    }.unwrap_or(StreamEvent::Done { usage: None });
+
+    if session.cwd != turn_start_cwd {
+        let workspace_path = std::path::PathBuf::from(&session.cwd);
+        let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
+        // TODO: plugin.set_workspace
+    }
+
+    let interrupted_tools = crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
+    if !interrupted_tools.is_empty() {
+        for (tool_call_id, tool_name, output) in interrupted_tools {
+            let _ = stream_tx.send(StreamEvent::ToolResult {
+                name: tool_name, tool_call_id: Some(tool_call_id), ok: false,
+                output, full_output: None, duration_ms: None,
+            });
+        }
+        if matches!(terminal, StreamEvent::Done { .. }) {
+            terminal = StreamEvent::Error { message: "本轮仍有未完成的工具调用，已安全中断".to_string() };
+        }
+    }
+
+    crate::react::message::flush_deferred_tool_injections(&mut session, &stream_tx);
+
+    // on_turn_finished — TODO: 需要 plugins 引用
+
+    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
+    let turn_usage = {
+        let mut capture = turn_capture.capture.lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut capture.usage)
+    };
+    turn_usage.apply_to_session(&mut session);
+    session.clear_transient_content();
+
+    let elapsed_ms = turn_started.elapsed().as_millis() as u64;
+    let mut status = TurnOutcome::from_terminal(&terminal).status;
+
+    if status == tiangong_types::TurnStatus::Cancelled {
+        // TODO: plugin.on_cancel
+    }
+
+    if let Some(msg) = session.messages.iter_mut()
+        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
+    {
+        msg.set_turn_result(elapsed_ms, status);
+    }
+    let _ = session.try_persist_to_disk();
+
+    send_final_stream_event(
+        &stream_tx, &forward_terminal, &turn_capture,
+        &mut turn_boundary_id, terminal,
+    ).await;
+
+    // session 放回 ctx(drop 时不需要额外操作)
+    ctx.session = session;
+
+    // ===== 清理 forwarder =====
+    drop(stream_tx);
+    let _ = tokio::task::spawn_blocking(move || forward_handle.join()).await;
 }
 
 // ==================== 工作线程 ====================
@@ -393,8 +548,6 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
-                    &shared_tool_overrides,
-                    &shared_prompt_section_providers,
                 );
 
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -665,8 +818,6 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
-                    &shared_tool_overrides,
-                    &shared_prompt_section_providers,
                 );
                 compress_context_for_session(&mut session, &ctx, &stream_tx, &mut cmd_rx).await;
                 continue;
@@ -681,8 +832,6 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
-                    &shared_tool_overrides,
-                    &shared_prompt_section_providers,
                 );
                 reset_context_for_session(&mut session, &stream_tx, &ctx);
                 continue;
@@ -1305,21 +1454,10 @@ fn build_turn_context(
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     session: &mut Session,
     session_ready_fired: &mut bool,
-    shared_tool_overrides: &Arc<
-        Mutex<HashMap<String, Arc<dyn crate::tool_override::ToolOverrideHandler>>>,
-    >,
-    shared_prompt_section_providers: &Arc<
-        Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
-    >,
 ) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
     let cfg = config.snapshot();
     let mut ctx =
-        build_context_from_config(&cfg, stream_tx, trust_mode, storage_root.to_path_buf())
-            // 注入会话级共享的插件注册表（Arc clone，跨 turn 复用同一份）。
-            .with_shared_plugin_state(
-                Arc::clone(shared_tool_overrides),
-                Arc::clone(shared_prompt_section_providers),
-            );
+        build_context_from_config(&cfg, stream_tx, trust_mode, storage_root.to_path_buf());
 
     let workspace = std::path::Path::new(&session.cwd);
     let workspace = workspace.is_dir().then_some(workspace);
@@ -1445,8 +1583,8 @@ fn build_context_from_config(
         trust_mode,
         crate::observe::Observer::new(storage_root),
         Vec::new(),
-        MAX_TOOL_ROUNDS,
-        MAX_OUTER_ITERATIONS,
+        crate::MAX_TOOL_ROUNDS,
+        crate::MAX_OUTER_ITERATIONS,
         Arc::new(crate::core::plugin::TurnUsageSink::new()),
     );
     ctx

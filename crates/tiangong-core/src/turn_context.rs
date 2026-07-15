@@ -201,3 +201,169 @@ impl TurnContext {
         })
     }
 }
+
+// ===== TurnContextBuilder =====
+
+use std::path::Path;
+
+use crate::core::plugin::PluginFeedbackTx;
+use crate::core::plugin::Plugin;
+use crate::core_config::{CoreConfig, CoreConfigProvider};
+use crate::model::OnRetryCallback;
+use crate::observe::Observer;
+use crate::permission::TrustMode;
+use tiangong_types::StreamEvent;
+
+/// TurnContext 构造器。
+///
+/// 在 deliver(Message) 中使用:从 CoreConfig 构建 client/权限,
+/// 注册插件,注入 session,产出完整 TurnContext。
+pub struct TurnContextBuilder {
+    config: CoreConfig,
+    trust_mode: TrustMode,
+    storage_root: std::path::PathBuf,
+    session: Option<Session>,
+    plugins: Vec<Arc<dyn Plugin>>,
+    stream_tx: Option<std::sync::mpsc::Sender<StreamEvent>>,
+    cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::core::command::Command>>,
+}
+
+impl TurnContextBuilder {
+    pub fn new(config: CoreConfig, trust_mode: TrustMode, storage_root: std::path::PathBuf) -> Self {
+        Self {
+            config,
+            trust_mode,
+            storage_root,
+            session: None,
+            plugins: Vec::new(),
+            stream_tx: None,
+            cmd_tx: None,
+        }
+    }
+
+    /// 注入 session(用户消息已注入并落盘)。
+    pub fn session(mut self, session: Session) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// 进程内插件。
+    pub fn plugins(mut self, plugins: Vec<Arc<dyn Plugin>>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    /// 内部 stream 通道(forwarder 用)。
+    pub fn stream_tx(mut self, tx: std::sync::mpsc::Sender<StreamEvent>) -> Self {
+        self.stream_tx = Some(tx);
+        self
+    }
+
+    /// 命令通道(给插件 feedback)。
+    pub fn cmd_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::core::command::Command>) -> Self {
+        self.cmd_tx = Some(tx);
+        self
+    }
+
+    /// 构建 TurnContext。
+    ///
+    /// 完成插件注册(on_config_updated / set_workspace / set_trust_mode / set_feedback_tx /
+    /// tool_specs / tool_overrides / prompt_sections / exec_env / on_session_ready)。
+    pub fn build(self) -> Result<TurnContext, String> {
+        let session = self.session.ok_or("session 未设置")?;
+        let stream_tx = self.stream_tx.ok_or("stream_tx 未设置")?;
+        let cmd_tx = self.cmd_tx.ok_or("cmd_tx 未设置")?;
+
+        // 构建 client + observer
+        let agent_config = crate::agent_config::AgentConfig {
+            trust_mode: self.config.trust_mode,
+            default_trust_mode: self.config.default_trust_mode,
+            custom_system_prompt: self.config.custom_system_prompt.clone(),
+            reasoning_effort: self.config.reasoning_effort.clone(),
+        };
+
+        let retry_tx = stream_tx.clone();
+        let on_retry: OnRetryCallback = Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+            let _ = retry_tx.send(StreamEvent::Retry {
+                message: error_text.to_string(),
+                attempt,
+                max_attempts,
+            });
+        });
+
+        let context_limit = self.config.context_limit;
+        let client = SingleProviderClient::new(self.config.llm.chat.clone())
+            .with_on_retry(on_retry);
+
+        let observer = Observer::new(self.storage_root.clone());
+        let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
+
+        let mut ctx = TurnContext::new(
+            session,
+            client,
+            context_limit,
+            agent_config,
+            self.trust_mode,
+            observer,
+            Vec::new(),
+            crate::MAX_TOOL_ROUNDS,
+            crate::MAX_OUTER_ITERATIONS,
+            usage_sink,
+        );
+
+        // 插件注册
+        let workspace = std::path::Path::new(&ctx.session.cwd);
+        let workspace = workspace.is_dir().then_some(workspace);
+
+        for plugin in &self.plugins {
+            plugin.on_config_updated(&self.config);
+        }
+
+        let mut plugin_specs: Vec<ToolSpec> = Vec::new();
+        let mut seen_tool_names = std::collections::HashSet::new();
+
+        for plugin in &self.plugins {
+            plugin.set_workspace(workspace);
+            plugin.set_trust_mode(self.trust_mode);
+            plugin.set_feedback_tx(PluginFeedbackTx::new(
+                cmd_tx.clone(),
+                ctx.turn_usage_sink().clone(),
+            ));
+
+            let specs = plugin.tool_specs();
+            for spec in &specs {
+                ctx.register_tool_override(&spec.name, plugin.clone());
+            }
+            ctx.register_prompt_section_provider(plugin.clone());
+
+            for spec in specs {
+                if seen_tool_names.insert(spec.name.clone()) {
+                    plugin_specs.push(spec);
+                }
+            }
+        }
+
+        // exec_env
+        let mut exec_env = std::collections::BTreeMap::new();
+        for plugin in &self.plugins {
+            for (key, value) in plugin.exec_env() {
+                exec_env.insert(key, value);
+            }
+        }
+        for plugin in &self.plugins {
+            plugin.set_exec_env(exec_env.clone());
+        }
+
+        // tools
+        let injection_spec = crate::core::plugin::injection_tool_spec();
+        ctx.tools.push(injection_spec);
+        ctx.tools.extend(plugin_specs);
+
+        // on_session_ready(每次 turn task 都触发——turn task 模型下不存在跨 turn 状态)
+        for plugin in &self.plugins {
+            plugin.on_session_ready(&mut ctx.session);
+        }
+
+        Ok(ctx)
+    }
+}
