@@ -19,9 +19,19 @@ pub(crate) fn test_runtime(base_url: String) -> TurnContext {
     });
     let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
     let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+    test_turn_ctx("test", stream_tx, client, usage_sink)
+}
+
+/// 构造一个仅用于测试的 TurnContext，允许调用方自带 stream 通道和 session_id。
+pub(crate) fn test_turn_ctx(
+    session_id: &str,
+    stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+    client: SingleProviderClient,
+    usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
+) -> TurnContext {
     TurnContext::builder()
         .client(client)
-        .session(crate::session::Session::new("test"))
+        .session(crate::session::Session::new(session_id))
         .stream_tx(stream_tx)
         .plugins(Vec::new())
         .context_limit(100_000)

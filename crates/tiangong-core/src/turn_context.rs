@@ -19,7 +19,7 @@ use crate::model::{SingleProviderClient, ToolCall, ToolSpec};
 use crate::session::Session;
 use crate::tool::ToolResult;
 use crate::tool_override::ToolOverrideHandler;
-use tiangong_types::StreamEvent;
+
 use typed_builder::TypedBuilder;
 
 /// 一轮对话的执行上下文（替代原 ReactEngine + RuntimeEngine）。

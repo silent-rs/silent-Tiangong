@@ -35,7 +35,6 @@ pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
 }
 
 pub(crate) fn emit_token_usage(
-    stream_tx: &StdSender<StreamEvent>,
     usage: &TokenUsage,
     current_tokens: Option<usize>,
     context_limit: usize,
@@ -69,7 +68,7 @@ pub(crate) fn emit_token_usage(
             "kv cache 命中统计",
         );
     }
-    let _ = stream_tx.send(StreamEvent::TokenUsage {
+    let _ = ctx.stream_tx.send(StreamEvent::TokenUsage {
         usage: usage.clone(),
         current_tokens,
         compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
@@ -83,7 +82,6 @@ pub(crate) async fn maybe_update_context_summary(
     session: &mut Session,
     ctx: &TurnContext,
     observed_usage: &TokenUsage,
-    stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> bool {
     let organizer = ContextOrganizer::new(ctx.context_limit)
@@ -94,7 +92,7 @@ pub(crate) async fn maybe_update_context_summary(
         return false;
     }
     let total_messages = session.messages.len();
-    let _ = stream_tx.send(StreamEvent::ContextCompressing {
+    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
         summary_up_to: session.summary_up_to,
         total_messages,
     });
@@ -125,14 +123,14 @@ pub(crate) async fn maybe_update_context_summary(
             // 压缩后重建 system prompt（摘要已更新）
             rebuild_system_prompt(session, ctx);
             emit_token_usage(
-                stream_tx,
+                ctx.stream_tx,
                 &update.usage,
                 Some(estimated_tokens),
                 ctx.context_limit,
                 "context_summary",
                 None,
             );
-            let _ = stream_tx.send(StreamEvent::ContextCompressed {
+            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
                 action: tiangong_types::stream::ContextCompressAction::Auto,
                 summary_up_to: session.summary_up_to,
                 remaining_messages: remaining,

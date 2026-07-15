@@ -1,10 +1,8 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
-use std::sync::mpsc::Sender as StdSender;
-
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{
-    ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
+    ContentBlock, SessionStreamEvent, StreamEvent, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
 };
 
@@ -44,15 +42,15 @@ pub(crate) struct AcceptedUserMessage {
 
 pub(crate) fn emit_session_message_upsert(
     session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: &str,
 ) {
-    emit_session_message_upsert_with_state(session, stream_tx, message_id, false);
+    emit_session_message_upsert_with_state(session, ctx, message_id, false);
 }
 
 pub(crate) fn emit_session_message_upsert_with_state(
     session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: &str,
     include_deferred_tool_injections: bool,
 ) {
@@ -65,7 +63,7 @@ pub(crate) fn emit_session_message_upsert_with_state(
         return;
     };
     message.clear_transient_data();
-    let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+    let _ = ctx.stream_tx.send(StreamEvent::SessionMessageUpsert {
         message,
         deferred_tool_injections: include_deferred_tool_injections
             .then(|| session.deferred_tool_injections.clone()),
@@ -74,22 +72,24 @@ pub(crate) fn emit_session_message_upsert_with_state(
 
 pub(crate) fn emit_deferred_tool_injections_changed(
     session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
 ) {
-    let _ = stream_tx.send(StreamEvent::DeferredToolInjectionsChanged {
-        injections: session.deferred_tool_injections.clone(),
-    });
+    let _ = ctx
+        .stream_tx
+        .send(StreamEvent::DeferredToolInjectionsChanged {
+            injections: session.deferred_tool_injections.clone(),
+        });
 }
 
 pub(crate) fn defer_tool_injection(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     tool_name: String,
     payload: serde_json::Value,
 ) {
     session.defer_tool_injection(tool_name, payload);
     session.persist_to_disk();
-    emit_deferred_tool_injections_changed(session, stream_tx);
+    emit_deferred_tool_injections_changed(session, ctx);
 }
 
 /// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
@@ -97,7 +97,7 @@ pub(crate) fn defer_tool_injection(
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
 pub(crate) fn accept_prepared_user_message_with_options(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     close_pending_tools: bool,
@@ -142,7 +142,7 @@ pub(crate) fn accept_prepared_user_message_with_options(
         return Err(err);
     }
     for (tool_call_id, tool_name, output) in interrupted_tool_calls {
-        let _ = stream_tx.send(StreamEvent::ToolResult {
+        let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
             name: tool_name,
             tool_call_id: Some(tool_call_id),
             ok: false,
@@ -157,7 +157,7 @@ pub(crate) fn accept_prepared_user_message_with_options(
         .find(|message| message.id == message_id)
         .map(|message| message.extract_media_assets())
         .unwrap_or_default();
-    let _ = stream_tx.send(StreamEvent::UserMessage {
+    let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
         message_id: message_id.clone(),
         content: text.clone(),
         content_blocks: stable_content,
@@ -205,16 +205,16 @@ pub(crate) fn has_unfinished_tool_calls(session: &Session) -> bool {
 
 pub(crate) fn flush_deferred_tool_injections(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
 ) {
     if has_unfinished_tool_calls(session) {
         return;
     }
     for injection in std::mem::take(&mut session.deferred_tool_injections) {
-        inject_tool_to_session(session, stream_tx, &injection.tool_name, &injection.payload);
+        inject_tool_to_session(session, ctx, &injection.tool_name, &injection.payload);
     }
     session.persist_to_disk();
-    emit_deferred_tool_injections_changed(session, stream_tx);
+    emit_deferred_tool_injections_changed(session, ctx);
 }
 
 fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
@@ -242,14 +242,14 @@ fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
 /// 持久化用户消息，并直接交给当前 Agent 处理。
 pub(crate) fn accept_user_message(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
     accept_prepared_user_message_with_options(
         session,
-        stream_tx,
+        ctx,
         message_id,
         prepared,
         close_pending_tools,
@@ -259,11 +259,11 @@ pub(crate) fn accept_user_message(
 /// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
 pub(crate) fn accept_runtime_user_message(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
 ) -> Result<String, String> {
-    let accepted = accept_user_message(session, stream_tx, message_id, prepared, true)?;
+    let accepted = accept_user_message(session, ctx, message_id, prepared, true)?;
     Ok(content_blocks_text(&accepted.prepared))
 }
 
@@ -635,7 +635,7 @@ pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
 
 pub(crate) fn append_duplicate_tool_result(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     tool_call_id: &str,
     tool_name: &str,
 ) {
@@ -643,7 +643,7 @@ pub(crate) fn append_duplicate_tool_result(
         "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。\
         请查看上方历史消息中的工具执行结果，直接基于已有结果继续后续任务，不要再次发起相同调用。"
     );
-    let _ = stream_tx.send(StreamEvent::ToolResult {
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.to_string()),
         ok: true,
@@ -661,7 +661,7 @@ pub(crate) fn append_duplicate_tool_result(
 
 pub(crate) fn append_repeated_failed_tool_result(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     tool_call_id: &str,
     tool_name: &str,
     original_error: &str,
@@ -674,7 +674,7 @@ pub(crate) fn append_repeated_failed_tool_result(
     let message = format!(
         "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；如果失败原因包含 __parse_error，请重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数；也可以切换到其他可行方式。"
     );
-    let _ = stream_tx.send(StreamEvent::ToolResult {
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.to_string()),
         ok: false,
@@ -796,7 +796,7 @@ pub fn inject_tool_to_messages(
 /// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
 pub fn inject_tool_to_session(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     tool_name: &str,
     payload: &serde_json::Value,
 ) {
@@ -811,16 +811,16 @@ pub fn inject_tool_to_session(
     {
         let assistant_id = assistant_msg.id.clone();
         let tool_result_id = session.messages.last().map(|message| message.id.clone());
-        emit_session_message_upsert(session, stream_tx, &assistant_id);
+        emit_session_message_upsert(session, ctx, &assistant_id);
         if let Some(tool_result_id) = tool_result_id {
-            emit_session_message_upsert(session, stream_tx, &tool_result_id);
+            emit_session_message_upsert(session, ctx, &tool_result_id);
         }
         let output = session
             .messages
             .last()
             .map(|m| m.text_content())
             .unwrap_or_default();
-        let _ = stream_tx.send(StreamEvent::ToolResult {
+        let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
             name: INJECTION_TOOL_NAME.to_string(),
             tool_call_id: Some(tc.id.clone()),
             ok: true,

@@ -14,7 +14,7 @@ use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
 use crate::react::message::{AcceptedUserMessage, accept_user_message};
 use crate::session::{MessageRole, Session};
-use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
+use tiangong_types::{ContentBlock, StreamEvent};
 
 pub mod command;
 pub(crate) use command::Command;
@@ -39,7 +39,7 @@ pub struct TiangongCore {
     /// 存储根目录(turn task 从此加载/保存 session)。
     storage_root: std::path::PathBuf,
     /// 事件输出通道(会话级,跨 turn;clone 给每个 turn task 的 forwarder)。
-    external_tx: Sender<SessionStreamEvent>,
+    stream_tx: Sender<StreamEvent>,
     /// 进程内插件(会话级,跨 turn)。
     plugins: Vec<Arc<dyn Plugin>>,
     /// on_session_ready 是否已触发(跨 turn)。
@@ -57,7 +57,7 @@ impl TiangongCore {
         config: CoreConfigProvider,
         trust_mode: crate::permission::TrustMode,
         storage_root: std::path::PathBuf,
-        external_tx: Sender<SessionStreamEvent>,
+        stream_tx: Sender<StreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         Self {
@@ -65,7 +65,7 @@ impl TiangongCore {
             config,
             trust_mode: std::sync::Mutex::new(trust_mode),
             storage_root,
-            external_tx,
+            stream_tx,
             plugins,
             session_ready_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -174,9 +174,8 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 let storage_root = self.storage_root.clone();
                 let plugins = self.plugins.clone();
                 let session_ready_fired = self.session_ready_fired.clone();
-                // 内部 stream 通道:core 发 StreamEvent → forwarder 包装 session_id → external_tx
-                let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-                let external_tx = self.external_tx.clone();
+                // stream_tx 直接用 core 的通道(发 StreamEvent 到 app 层)
+                let stream_tx = self.stream_tx.clone();
 
                 let agent_config = crate::agent_config::AgentConfig {
                     trust_mode: config.trust_mode,
@@ -244,7 +243,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         tracing::warn!(%error, "持久化本轮系统提示失败");
                         CoreError::WorkerStopped
                     })?;
-                    Ok(run_turn(ctx, cmd_rx, stream_rx, external_tx, accepted))
+                    Ok(run_turn(ctx, cmd_rx, stream_tx, accepted))
                 })
             }
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
@@ -281,73 +280,18 @@ impl Drop for TiangongCore {
 async fn run_turn(
     mut ctx: crate::turn_context::TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    stream_rx: std::sync::mpsc::Receiver<StreamEvent>,
-    external_tx: Sender<SessionStreamEvent>,
+    stream_tx: Sender<StreamEvent>,
     accepted: AcceptedUserMessage,
 ) {
     let stream_tx = ctx.stream_tx.clone();
     let session_id = ctx.session.id.clone();
 
-    let fwd_session_id = session_id.clone();
     let turn_capture = Arc::new(TurnCaptureState {
         capture: Mutex::new(TurnCapture::default()),
         notify: tokio::sync::Notify::new(),
     });
-    let fwd_capture = turn_capture.clone();
     let forward_terminal = Arc::new(AtomicBool::new(false));
-    let fwd_terminal = forward_terminal.clone();
     let mut turn_boundary_id = 0u64;
-    let forward_handle = thread::spawn(move || {
-        let mut external_open = true;
-        while let Ok(event) = stream_rx.recv() {
-            if let StreamEvent::TokenUsage {
-                usage,
-                agent_id,
-                source,
-                ..
-            } = &event
-                && let Ok(mut capture) = fwd_capture.capture.lock()
-            {
-                capture.usage.record(usage, agent_id.as_deref(), source);
-            }
-            match event {
-                StreamEvent::TurnBoundary { boundary_id } => {
-                    if let Ok(mut capture) = fwd_capture.capture.lock() {
-                        capture.processed_boundary = capture.processed_boundary.max(boundary_id);
-                    }
-                    fwd_capture.notify.notify_one();
-                }
-                terminal @ (StreamEvent::Done { .. } | StreamEvent::Error { .. }) => {
-                    if !fwd_terminal.swap(false, Ordering::AcqRel) {
-                        if let Ok(mut capture) = fwd_capture.capture.lock() {
-                            capture.terminal = Some(terminal);
-                        }
-                    } else if external_open
-                        && external_tx
-                            .send(SessionStreamEvent {
-                                session_id: fwd_session_id.clone(),
-                                event: terminal,
-                            })
-                            .is_err()
-                    {
-                        external_open = false;
-                    }
-                }
-                event => {
-                    if external_open
-                        && external_tx
-                            .send(SessionStreamEvent {
-                                session_id: fwd_session_id.clone(),
-                                event,
-                            })
-                            .is_err()
-                    {
-                        external_open = false;
-                    }
-                }
-            }
-        }
-    });
 
     let turn_start_idx = accepted.turn_start_idx;
     let user_msg_id = accepted.message_id;
@@ -477,13 +421,10 @@ async fn run_turn(
     .await;
 
     drop(ctx);
-    drop(stream_tx);
-    let _ = tokio::task::spawn_blocking(move || forward_handle.join()).await;
 }
 
 pub(crate) fn reset_context_for_session(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
     ctx: &crate::turn_context::TurnContext,
 ) {
     let total = session.messages.len();
@@ -495,7 +436,7 @@ pub(crate) fn reset_context_for_session(
     session.agent_current_tokens.clear();
     // 清空后重建 system prompt
     crate::react::context::rebuild_system_prompt(session, ctx);
-    let _ = stream_tx.send(StreamEvent::ContextCompressed {
+    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
         action: tiangong_types::stream::ContextCompressAction::Clear,
         summary_up_to: total,
         remaining_messages: 0,
