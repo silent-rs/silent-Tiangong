@@ -784,6 +784,6 @@ async fn execute_turn_async(
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) {
-    ctx.execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
+    ctx.execute_turn(session, Some((message_id, prepared)), cmd_rx)
         .await;
 }

@@ -35,6 +35,7 @@ pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
 }
 
 pub(crate) fn emit_token_usage(
+    stream_tx: &StdSender<StreamEvent>,
     usage: &TokenUsage,
     current_tokens: Option<usize>,
     context_limit: usize,
@@ -68,7 +69,7 @@ pub(crate) fn emit_token_usage(
             "kv cache 命中统计",
         );
     }
-    let _ = ctx.stream_tx.send(StreamEvent::TokenUsage {
+    let _ = stream_tx.send(StreamEvent::TokenUsage {
         usage: usage.clone(),
         current_tokens,
         compression_threshold_tokens: Some(compression_threshold_tokens(context_limit)),
@@ -123,7 +124,7 @@ pub(crate) async fn maybe_update_context_summary(
             // 压缩后重建 system prompt（摘要已更新）
             rebuild_system_prompt(session, ctx);
             emit_token_usage(
-                ctx.stream_tx,
+                &ctx.stream_tx,
                 &update.usage,
                 Some(estimated_tokens),
                 ctx.context_limit,

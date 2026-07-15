@@ -52,20 +52,20 @@ impl TurnContext {
     pub(super) fn defer_tool_injections(
         &mut self,
         session: &mut Session,
-        stream_tx: &StdSender<StreamEvent>,
         injections: impl IntoIterator<Item = (String, serde_json::Value)>,
     ) {
         for (tool_name, payload) in injections {
-            crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
+            crate::react::message::defer_tool_injection(
+                session,
+                &self.stream_tx,
+                tool_name,
+                payload,
+            );
         }
     }
 
-    pub(super) fn flush_deferred_tool_injections(
-        &mut self,
-        session: &mut Session,
-        stream_tx: &StdSender<StreamEvent>,
-    ) {
-        crate::react::message::flush_deferred_tool_injections(session, stream_tx);
+    pub(super) fn flush_deferred_tool_injections(&mut self, session: &mut Session) {
+        crate::react::message::flush_deferred_tool_injections(session, &self.stream_tx);
     }
 
     fn build_thinking_config(
@@ -124,9 +124,9 @@ impl TurnContext {
         &mut self,
         session: &mut Session,
         initial_user_message: Option<(&str, &[ContentBlock])>,
-        stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> TokenUsage {
+        let stream_tx = &self.stream_tx;
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
@@ -168,7 +168,7 @@ impl TurnContext {
                         "TurnContext 构建前应已注入 system prompt"
                     );
                 }
-                match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(session, self, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
@@ -194,7 +194,7 @@ impl TurnContext {
                     }
                     PendingCommandEffect::None => {}
                 }
-                self.flush_deferred_tool_injections(session, stream_tx);
+                self.flush_deferred_tool_injections(session);
 
                 // 工具执行完进入下一轮模型请求前，通知前端"正在分析工具结果"，
                 // 避免前端把模型等待时间算到最后一个工具上。
@@ -284,7 +284,7 @@ impl TurnContext {
                                     }
                                     match accept_runtime_user_message(
                                         session,
-                                        stream_tx,
+                                        self,
                                         message_id,
                                         prepared,
                                     ) {
@@ -312,7 +312,7 @@ impl TurnContext {
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     crate::react::message::inject_tool_to_session(
                                         session,
-                                        stream_tx,
+                                        self,
                                         &tool_name,
                                         &payload,
                                     );
@@ -359,8 +359,7 @@ impl TurnContext {
                                         Err(e) if e.is_cancelled() => {
                                             sink.finish();
                                             accumulated_usage.accumulate(&streaming_usage);
-                                            emit_cancel_usage(
-                                                stream_tx,
+                                            emit_cancel_usage(&self.stream_tx,
                                                 &streaming_usage,
                                                 self.context_limit,
                                             );
@@ -387,7 +386,7 @@ impl TurnContext {
                     );
                     crate::react::message::emit_session_message_upsert(
                         session,
-                        stream_tx,
+                        self,
                         &pending_msg_id,
                     );
                 }
@@ -396,7 +395,7 @@ impl TurnContext {
                     accumulated_usage.accumulate(&streaming_usage);
                     if streaming_usage.total_tokens > 0 {
                         emit_token_usage(
-                            stream_tx,
+                            &self.stream_tx,
                             &streaming_usage,
                             None,
                             self.context_limit,
@@ -423,7 +422,11 @@ impl TurnContext {
                                 abort_and_join(handle).await;
                             }
                             accumulated_usage.accumulate(&streaming_usage);
-                            emit_cancel_usage(stream_tx, &streaming_usage, self.context_limit);
+                            emit_cancel_usage(
+                                &self.stream_tx,
+                                &streaming_usage,
+                                self.context_limit,
+                            );
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -474,7 +477,7 @@ impl TurnContext {
 
                 accumulated_usage.accumulate(&response.usage);
                 emit_token_usage(
-                    stream_tx,
+                    &self.stream_tx,
                     &response.usage,
                     Some(response.usage.prompt_tokens.max(session.current_tokens)),
                     self.context_limit,
@@ -508,7 +511,7 @@ impl TurnContext {
                     }
                     crate::react::message::emit_session_message_upsert(
                         session,
-                        stream_tx,
+                        self,
                         &pending_msg_id,
                     );
                     let output = LlmOutputRecord {
@@ -525,14 +528,8 @@ impl TurnContext {
                         response.reasoning_content.clone(),
                     );
                     session.persist_to_disk();
-                    let compression_cancelled = maybe_update_context_summary(
-                        session,
-                        self,
-                        &response.usage,
-                        stream_tx,
-                        cmd_rx,
-                    )
-                    .await;
+                    let compression_cancelled =
+                        maybe_update_context_summary(session, self, &response.usage, cmd_rx).await;
                     if compression_cancelled {
                         emit_cancelled(stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
@@ -655,7 +652,7 @@ impl TurnContext {
                     // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
-                    match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(session, self, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -810,7 +807,7 @@ impl TurnContext {
                                     message_id,
                                 }) => {
                                     match accept_runtime_user_message(
-                                        session, stream_tx, message_id, prepared,
+                                        session, self, message_id, prepared,
                                     ) {
                                         Ok(input) => {
                                             break ApprovalWaitOutcome::CurrentInput(input);
@@ -894,7 +891,7 @@ impl TurnContext {
                                 )),
                                 true,
                             );
-                            self.flush_deferred_tool_injections(session, stream_tx);
+                            self.flush_deferred_tool_injections(session);
                             session.persist_to_disk();
                             let _ = stream_tx.send(StreamEvent::ToolResult {
                                 name: call.name.clone(),
@@ -992,7 +989,7 @@ impl TurnContext {
                     let usage_source = "";
                     accumulated_usage.accumulate(&tool_llm_usage);
                     emit_token_usage(
-                        stream_tx,
+                        &self.stream_tx,
                         &tool_llm_usage,
                         None,
                         self.context_limit,
@@ -1089,21 +1086,15 @@ impl TurnContext {
 
                     // 记忆候选评估已下沉到 memory 插件 on_turn_finished（从 session 重建候选，
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
-                    let compression_cancelled = maybe_update_context_summary(
-                        session,
-                        self,
-                        &response.usage,
-                        stream_tx,
-                        cmd_rx,
-                    )
-                    .await;
+                    let compression_cancelled =
+                        maybe_update_context_summary(session, self, &response.usage, cmd_rx).await;
                     if compression_cancelled {
                         emit_cancelled(stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
 
-                    match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(session, self, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1130,7 +1121,7 @@ impl TurnContext {
                         }
                         PendingCommandEffect::None => {}
                     }
-                    self.flush_deferred_tool_injections(session, stream_tx);
+                    self.flush_deferred_tool_injections(session);
                 }
 
                 if need_failure_recovery_prompt {
