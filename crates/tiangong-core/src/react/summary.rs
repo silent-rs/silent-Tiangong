@@ -59,6 +59,7 @@ impl TurnContext {
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         iteration: u32,
     ) -> SummaryPhaseResult {
+        let stream_tx = &self.stream_tx;
         let _phase = TurnPhase::Summary;
         let _ = stream_tx.send(StreamEvent::PhaseChanged {
             phase: "summary".to_string(),
@@ -928,6 +929,7 @@ impl TurnContext {
         pending_msg_id: &str,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> Option<crate::model::ModelFunctionResponse> {
+        let stream_tx = &self.stream_tx;
         let final_tools = tools_for_current_turn(&self.tools, session, "");
         let sink = ThrottledStreamSink::with_text_kind(
             pending_msg_id.to_string(),

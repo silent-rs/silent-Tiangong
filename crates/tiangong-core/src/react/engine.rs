@@ -57,7 +57,7 @@ impl TurnContext {
         for (tool_name, payload) in injections {
             crate::react::message::defer_tool_injection(
                 session,
-                &self.stream_tx,
+                self,
                 tool_name,
                 payload,
             );
