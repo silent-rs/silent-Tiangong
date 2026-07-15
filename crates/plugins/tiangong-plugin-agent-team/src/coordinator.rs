@@ -1149,7 +1149,6 @@ mod tests {
     async fn create_agent_uses_session_id_as_agent_id_and_persists_under_teams() {
         let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let coordinator = Coordinator::new(storage.path().to_path_buf(), empty_factory());
         let mut parent = Session::new("parent");
         parent.cwd = storage.path().to_string_lossy().into_owned();

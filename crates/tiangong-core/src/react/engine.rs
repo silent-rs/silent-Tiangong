@@ -769,15 +769,6 @@ impl TurnContext {
                             &trust_mode,
                             (!args_summary.is_empty()).then_some(args_summary.as_str()),
                         );
-                        crate::approval_store::add_pending(
-                            &session.id,
-                            crate::session::PendingApproval {
-                                request_id: request_id.clone(),
-                                tool_name: call.name.clone(),
-                                tool_args_summary: args_summary.clone(),
-                                created_at: now_text(),
-                            },
-                        );
                         let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
                             request_id: request_id.clone(),
                             tool_name: call.name.clone(),
@@ -798,7 +789,6 @@ impl TurnContext {
                                     break ApprovalWaitOutcome::Decision(approved);
                                 }
                                 Some(Command::Shutdown) => {
-                                    crate::approval_store::remove_pending(&session.id, &request_id);
                                     let _ = stream_tx.send(StreamEvent::Error {
                                         message: "已取消".into(),
                                     });
@@ -806,7 +796,6 @@ impl TurnContext {
                                     return accumulated_usage;
                                 }
                                 Some(Command::Cancel) | None => {
-                                    crate::approval_store::remove_pending(&session.id, &request_id);
                                     let _ = stream_tx.send(StreamEvent::Error {
                                         message: "已取消".into(),
                                     });
@@ -860,8 +849,6 @@ impl TurnContext {
                                 }
                             }
                         };
-
-                        crate::approval_store::remove_pending(&session.id, &request_id);
 
                         if let ApprovalWaitOutcome::CurrentInput(input) = &approval_outcome {
                             successful_tool_call_keys.clear();

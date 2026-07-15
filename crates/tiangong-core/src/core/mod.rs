@@ -270,6 +270,11 @@ async fn worker_loop_async(
     storage_root: std::path::PathBuf,
 ) -> Session {
     let session_id = session.id.clone();
+    // session 的 storage_root 由调用方在构造时绑定（bind_storage_root）。
+    // 若未绑定则用 Core 的 storage_root 作为回退。
+    if session.bound_storage_root().is_none() {
+        session.bind_storage_root(storage_root.clone());
+    }
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次（跨 turn）
     let mut session_ready_fired = false;
 
@@ -371,19 +376,6 @@ async fn worker_loop_async(
     apply_session_cwd(&session);
 
     // 初始索引扫描已由 index 插件的 on_session_ready 钩子接管（见下方钩子调用）。
-
-    // 恢复未完成的审批请求（崩溃恢复场景）
-    let pending = crate::approval_store::get_pending(&session_id);
-    if !pending.is_empty() {
-        tracing::info!(count = pending.len(), "恢复未完成的审批请求");
-        for approval in &pending {
-            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                request_id: approval.request_id.clone(),
-                tool_name: approval.tool_name.clone(),
-                args_summary: approval.tool_args_summary.clone(),
-            });
-        }
-    }
 
     // on_session_ready 已移至「首次 engine build + 插件注册完成」之后触发，
     // 确保插件在钩子内能读到已注入的 workspace / trust_mode / feedback。
@@ -610,32 +602,8 @@ async fn worker_loop_async(
                 // 活跃执行会在 select!/drain 中消费 Cancel 并终止 turn；
                 // 空闲时到达此处说明 turn 已结束，无需处理。
             }
-            Command::Approval {
-                request_id,
-                approved,
-            } => {
-                // 恢复场景的审批响应：清除 pending 状态
-                let pending = crate::approval_store::get_pending(&session_id);
-                let had_pending = pending.iter().any(|a| a.request_id == request_id);
-                crate::approval_store::remove_pending(&session_id, &request_id);
-
-                if had_pending {
-                    let action = if approved { "已允许" } else { "已拒绝" };
-                    append_runtime_tool_message(
-                        &mut session,
-                        "approval_response",
-                        format!("审批响应：{action}（会话已恢复，请重新发送消息继续）"),
-                    );
-                    session.persist_to_disk();
-                    send_final_stream_event(
-                        &stream_tx,
-                        &forward_terminal,
-                        &turn_capture,
-                        &mut turn_boundary_id,
-                        StreamEvent::Done { usage: None },
-                    )
-                    .await;
-                }
+            Command::Approval { .. } => {
+                // 空闲时收到审批响应说明用户点了过期的审批,忽略。
             }
             Command::Shutdown => {
                 break;
@@ -1199,7 +1167,6 @@ mod shared_runtime_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
         let root = tempfile::tempdir().unwrap();
-        crate::storage::set_storage_root(root.path().to_path_buf());
 
         let config = CoreConfigProvider::new(CoreConfig::default());
         let cores: Vec<TiangongCore> = (0..3)
@@ -1471,8 +1438,6 @@ fn build_context_from_config(
                 max_attempts,
             });
         });
-
-    crate::storage::set_storage_root(storage_root.clone());
 
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;

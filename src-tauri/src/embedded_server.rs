@@ -300,7 +300,8 @@ async fn resolve_connector_session(
             {
                 return Ok((session.id.clone(), false));
             }
-            let mut session = Session::new_isolated(title);
+            let mut session =
+                Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
             session.trust_mode = TrustMode::FullTrust;
             let session_id = session.id.clone();
             core_state.sessions_mut().push(session);

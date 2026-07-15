@@ -129,7 +129,6 @@ impl RuntimeEngine {
         agent_config: AgentConfig,
         storage_root: std::path::PathBuf,
     ) -> Self {
-        crate::storage::set_storage_root(storage_root);
         Self {
             client,
             lite_client: None,
@@ -154,7 +153,6 @@ impl RuntimeEngine {
         storage_root: std::path::PathBuf,
     ) -> Self {
         let _ = trust_mode;
-        crate::storage::set_storage_root(storage_root);
         Self {
             client,
             lite_client: None,

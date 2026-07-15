@@ -995,7 +995,6 @@ mod tests {
             scru128::new()
         ));
         std::fs::create_dir_all(&storage_root).unwrap();
-        crate::storage::set_storage_root(storage_root);
         let mut session = Session::new("terminal-deferred-injection");
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![MessageToolCall {

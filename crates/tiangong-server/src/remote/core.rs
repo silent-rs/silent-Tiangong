@@ -603,7 +603,8 @@ impl ServerCoreManager {
             {
                 session.id.clone()
             } else {
-                let mut session = Session::new_isolated(title);
+                let mut session =
+                    Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
                 session.trust_mode = TrustMode::FullTrust;
                 let session_id = session.id.clone();
                 state.sessions_mut().push(session);
@@ -2015,7 +2016,6 @@ mod tests {
     async fn fire_and_forget_message_persists_stable_content() {
         let _guard = STORAGE_TEST_LOCK.lock().await;
         let root = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(root.path().to_path_buf());
         let session = Session::new("fire-and-forget");
         let session_id = session.id.clone();
         let (event_tx, event_rx) = std::sync::mpsc::channel();

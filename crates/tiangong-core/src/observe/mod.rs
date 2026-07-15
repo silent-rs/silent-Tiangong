@@ -120,7 +120,7 @@ impl AuditRecord {
 /// audit.jsonl 路径由 storage_root 决定,不依赖全局 STORAGE_ROOT。
 #[derive(Clone)]
 pub struct Observer {
-    storage_root: PathBuf,
+    pub storage_root: PathBuf,
 }
 
 impl Observer {
@@ -225,11 +225,22 @@ fn insert_metadata(metadata: &mut Map<String, Value>, key: &str, value: Option<&
     }
 }
 
+/// 计算默认存储根目录（`~/.tiangong`），供非 turn 级审计使用。
+fn default_storage_root() -> PathBuf {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".tiangong"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".tiangong")
+        })
+}
+
 // 供插件管理操作（非 turn 级）使用的底层审计 API。
-// turn 级审计经 Observer 实例写入；这些函数保留全局 storage_root 依赖，
-// 待 storage_root 全局变量清理后迁移。
+// turn 级审计经 Observer 实例写入；这些函数从 HOME 计算 storage_root。
 pub fn append_audit_log(entry: &AuditEntry) {
-    let path = crate::storage::storage_root().join("audit.jsonl");
+    let path = default_storage_root().join("audit.jsonl");
     if let Ok(json) = serde_json::to_string(entry)
         && let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)

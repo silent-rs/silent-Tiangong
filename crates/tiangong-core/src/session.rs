@@ -289,11 +289,11 @@ impl Session {
     }
 
     /// 创建隔离模式的会话（用于 Connector 接入）
-    pub fn new_isolated(title: impl Into<String>) -> Self {
+    pub fn new_isolated(title: impl Into<String>, storage_root: &std::path::Path) -> Self {
         let id = new_id();
         let now = now_text();
-        // 在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
-        let workspace_dir = crate::storage::storage_root().join("workspaces").join(&id);
+        // 在 {storage_root}/workspaces/{session_id}/ 下创建独立目录
+        let workspace_dir = storage_root.join("workspaces").join(&id);
         let _ = std::fs::create_dir_all(&workspace_dir);
         Self {
             id,
@@ -378,10 +378,9 @@ impl Session {
     /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
-        let storage_root = self
-            .storage_root
-            .clone()
-            .unwrap_or_else(crate::storage::storage_root);
+        let storage_root = self.storage_root.as_ref().ok_or_else(|| {
+            "session 未绑定 storage_root（worker_loop_async 应在入口处 bind）".to_string()
+        })?;
         let path = storage_root
             .join("sessions")
             .join(format!("{}.json", self.id));

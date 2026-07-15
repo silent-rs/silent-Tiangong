@@ -1416,7 +1416,6 @@ mod tests {
     async fn independent_core_waits_for_external_terminal_and_persists_child_session() {
         let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let server = OneShotSseServer::start();
 
         // 真实 Core 注册一个最小插件，取得合法的父反馈通道供子事件桥转发。

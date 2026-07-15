@@ -37,7 +37,10 @@ impl SchedulerContext for ServerSchedulerContext {
 
         let mut state = self.state.lock().await;
         let title = format!("定时任务：{}", trigger_name);
-        let session = tiangong_core::session::Session::new_isolated(title);
+        let session = tiangong_core::session::Session::new_isolated(
+            title,
+            &tiangong_app_state::app_state::storage_root(),
+        );
         let session_id = session.id.clone();
         state.sessions_mut().push(session);
         state.persist_session(&session_id)?;

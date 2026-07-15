@@ -383,7 +383,6 @@ mod tests {
     fn parent_continues_after_synchronous_child_turn_and_emits_one_final_done() {
         let _guard = storage_test_guard();
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let server = ParentChildSseServer::start();
         let mut config = CoreConfig::default();
         config.llm.chat = ModelEndpoint {
