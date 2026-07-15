@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::index::{IndexManager, TurnData};
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::{TrustMode, TrustModeHandle};
+use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_core::tool_override::PromptSectionProvider;
 
@@ -29,7 +29,7 @@ pub struct IndexPlugin {
     /// 上次已扫描的工作目录（避免同一目录重复扫描）。
     last_scanned: RwLock<Option<PathBuf>>,
     /// 信任模式解析句柄（FullTrust 时放宽 search_code 路径校验）。
-    trust_mode: RwLock<Option<TrustModeHandle>>,
+    trust_mode: RwLock<Option<TrustMode>>,
     /// 自建并私有持有的 IndexManager（core 不感知）。
     index_manager: RwLock<Option<Arc<IndexManager>>>,
 }
@@ -70,7 +70,7 @@ impl IndexPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.current() == TrustMode::FullTrust
+        *tm == TrustMode::FullTrust
     }
 
     /// 取 IndexManager 引用执行闭包；若未初始化则跳过（用于钩子内的写入操作）。
@@ -168,7 +168,7 @@ impl Plugin for IndexPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: TrustModeHandle) {
+    fn set_trust_mode(&self, trust: TrustMode) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

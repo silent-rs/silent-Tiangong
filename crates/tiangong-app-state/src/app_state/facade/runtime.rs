@@ -41,7 +41,14 @@ impl TiangongState {
             .unwrap_or_default();
         self.store.provider.model_endpoint = endpoint.clone();
         // 保留旧 RuntimeEngine 的任务隔离信任模式解析句柄和 tool_overrides
-        let trust_mode = self.services.runtime.permission_gate().trust_mode_handle();
+        let trust_mode = self
+            .store
+            .session
+            .sessions
+            .iter()
+            .find(|s| s.id == self.store.session.active_session_id)
+            .map(|s| s.trust_mode)
+            .unwrap_or_default();
         let tool_overrides = self.services.runtime.tool_overrides();
         let tool_spec_providers = self.services.runtime.tool_spec_providers();
         let prompt_section_providers = self.services.runtime.prompt_section_providers();

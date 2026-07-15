@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::agent_config::AgentConfig;
 use crate::core_config::ModelEndpoint;
 use crate::model::SingleProviderClient;
-use crate::permission::PermissionGate;
+use crate::permission::TrustMode;
 use crate::turn_context::TurnContext;
 
 pub(crate) fn test_runtime(base_url: String) -> TurnContext {
@@ -17,16 +17,15 @@ pub(crate) fn test_runtime(base_url: String) -> TurnContext {
         timeout_ms: 5_000,
         ..Default::default()
     });
-    let permission_gate = PermissionGate::new(crate::permission::PermissionPolicy::default());
     let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
     TurnContext::new(
         client,
         100_000,
         AgentConfig::default(),
+        TrustMode::FullTrust,
         Vec::new(),
         2,
         1,
-        permission_gate,
         usage_sink,
     )
 }

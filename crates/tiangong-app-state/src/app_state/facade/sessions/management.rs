@@ -37,10 +37,6 @@ impl TiangongState {
         session.trust_mode = self.store.agent.agent_config.default_trust_mode;
         Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.agent.agent_config.trust_mode = session.trust_mode;
-        self.services
-            .runtime
-            .permission_gate()
-            .set_trust_mode(session.trust_mode);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
         self.store
@@ -100,10 +96,6 @@ impl TiangongState {
             self.store.session.active_session_id = session_id.to_string();
             self.store.session.session_title_draft = session.title.clone();
             self.store.agent.agent_config.trust_mode = session.trust_mode;
-            self.services
-                .runtime
-                .permission_gate()
-                .set_trust_mode(session.trust_mode);
             let _ = self.persist_app_only();
             let _ = self.try_auto_resume_unfinished_plan_for_active_session();
         }
@@ -190,10 +182,6 @@ impl TiangongState {
         }
         if let Some(trust_mode) = self.active_session().map(|session| session.trust_mode) {
             self.store.agent.agent_config.trust_mode = trust_mode;
-            self.services
-                .runtime
-                .permission_gate()
-                .set_trust_mode(trust_mode);
         }
 
         self.remove_session_file(session_id)?;
@@ -260,10 +248,6 @@ impl TiangongState {
         // 同步活跃会话的 trust_mode 到运行时
         if let Some(trust_mode) = self.active_session().map(|session| session.trust_mode) {
             self.store.agent.agent_config.trust_mode = trust_mode;
-            self.services
-                .runtime
-                .permission_gate()
-                .set_trust_mode(trust_mode);
         }
 
         self.persist_app_only()?;

@@ -13,10 +13,7 @@ use crate::core::command::{Command, PendingCommandEffect};
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{ModelRequest, TokenUsage, ToolSpec};
 use crate::observe::{audit_permission_with_context, audit_tool_execution};
-use crate::permission::{
-    PermissionDecision, evaluate_tool_permission, format_call_args_summary, infer_audit_target,
-    normalize_permission_target,
-};
+use crate::permission::TrustMode;
 use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
 };
@@ -695,7 +692,7 @@ impl TurnContext {
                         let failure = ToolFailureRecord::new(
                             &call.name,
                             &call.id,
-                            format_call_args_summary(call),
+                            format_tool_args_summary(call),
                             ToolFailureKind::Argument,
                             message.clone(),
                         );
@@ -727,13 +724,7 @@ impl TurnContext {
                         continue;
                     }
 
-                    let args_summary = format_call_args_summary(call);
-                    let (target_scope, target_summary) = infer_audit_target(call);
-                    let normalized_target = normalize_permission_target(
-                        session,
-                        target_scope.as_deref(),
-                        target_summary.as_deref(),
-                    );
+                    let args_summary = format_tool_args_summary(call);
                     let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
                     if successful_tool_call_keys.contains(&tool_call_key) {
                         append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
@@ -759,43 +750,147 @@ impl TurnContext {
                         continue;
                     }
 
-                    let decision = evaluate_tool_permission(
-                        self,
-                        &call.name,
-                        target_scope.as_deref(),
-                        normalized_target.as_deref(),
-                    );
-                    let trust_mode = format!("{:?}", self.permission_gate().trust_mode());
-                    match decision {
-                        PermissionDecision::Approved => {
-                            audit_permission_with_context(
-                                &session.id,
-                                &call.name,
-                                "approved",
-                                &trust_mode,
-                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                                target_scope.as_deref(),
-                                normalized_target.as_deref().or(target_summary.as_deref()),
-                            );
+                    let trust_mode = format!("{:?}", self.trust_mode);
+                    if self.trust_mode == TrustMode::FullTrust {
+                        // FullTrust 放行一切：记录审批通过的审计后直接执行工具。
+                        audit_permission_with_context(
+                            &session.id,
+                            &call.name,
+                            "approved",
+                            &trust_mode,
+                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        );
+                    } else {
+                        // 非 FullTrust：统一走审批流程（发 ApprovalNeeded 事件 + 阻塞等待用户决策）。
+                        let request_id = scru128::new().to_string();
+                        audit_permission_with_context(
+                            &session.id,
+                            &call.name,
+                            "needs_approval",
+                            &trust_mode,
+                            (!args_summary.is_empty()).then_some(args_summary.as_str()),
+                        );
+                        crate::approval_store::add_pending(
+                            &session.id,
+                            crate::session::PendingApproval {
+                                request_id: request_id.clone(),
+                                tool_name: call.name.clone(),
+                                tool_args_summary: args_summary.clone(),
+                                created_at: now_text(),
+                            },
+                        );
+                        let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                            request_id: request_id.clone(),
+                            tool_name: call.name.clone(),
+                            args_summary: args_summary.clone(),
+                        });
+
+                        enum ApprovalWaitOutcome {
+                            Decision(bool),
+                            CurrentInput(String),
                         }
-                        PermissionDecision::Denied { reason } => {
-                            audit_permission_with_context(
+
+                        let approval_outcome = loop {
+                            match cmd_rx.recv().await {
+                                Some(Command::Approval {
+                                    request_id: rid,
+                                    approved,
+                                }) if rid == request_id => {
+                                    break ApprovalWaitOutcome::Decision(approved);
+                                }
+                                Some(Command::Shutdown) => {
+                                    crate::approval_store::remove_pending(&session.id, &request_id);
+                                    let _ = stream_tx.send(StreamEvent::Error {
+                                        message: "已取消".into(),
+                                    });
+                                    merge_plugin_usage(&mut accumulated_usage);
+                                    return accumulated_usage;
+                                }
+                                Some(Command::Cancel) | None => {
+                                    crate::approval_store::remove_pending(&session.id, &request_id);
+                                    let _ = stream_tx.send(StreamEvent::Error {
+                                        message: "已取消".into(),
+                                    });
+                                    {
+                                        merge_plugin_usage(&mut accumulated_usage);
+                                        return accumulated_usage;
+                                    }
+                                }
+                                Some(Command::Message {
+                                    prepared,
+                                    message_id,
+                                }) => {
+                                    match accept_runtime_user_message(
+                                        session, stream_tx, message_id, prepared,
+                                    ) {
+                                        Ok(input) => {
+                                            break ApprovalWaitOutcome::CurrentInput(input);
+                                        }
+                                        Err(err) => tracing::warn!(
+                                            error = %err,
+                                            "审批等待阶段追加用户消息持久化失败"
+                                        ),
+                                    }
+                                }
+                                Some(Command::Approval { .. }) => {}
+                                Some(Command::InjectTool { tool_name, payload }) => {
+                                    self.defer_tool_injections(
+                                        session,
+                                        stream_tx,
+                                        std::iter::once((tool_name, payload)),
+                                    );
+                                }
+                                Some(Command::CompressContext) => {
+                                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                        agent_id: "system".to_string(),
+                                        agent_label: "系统".to_string(),
+                                        content:
+                                            "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试"
+                                                .to_string(),
+                                        level: "warning".to_string(),
+                                    });
+                                }
+                                Some(Command::ResetContext) => {
+                                    crate::core::reset_context_for_session(
+                                        session, stream_tx, self,
+                                    );
+                                }
+                                Some(Command::EmitStreamEvent(ev)) => {
+                                    let ev = *ev;
+                                    let _ = stream_tx.send(ev);
+                                }
+                            }
+                        };
+
+                        crate::approval_store::remove_pending(&session.id, &request_id);
+
+                        if let ApprovalWaitOutcome::CurrentInput(input) = &approval_outcome {
+                            successful_tool_call_keys.clear();
+                            failed_tool_call_keys.clear();
+                            failed_tool_names.clear();
+                            user_input = input.clone();
+                            round = 0;
+                            outer_iteration = 0;
+                            session.persist_to_disk();
+                            continue 'outer;
+                        }
+                        let ApprovalWaitOutcome::Decision(approved) = approval_outcome else {
+                            unreachable!("current input handled above")
+                        };
+
+                        if !approved {
+                            audit_tool_execution(
                                 &session.id,
                                 &call.name,
-                                "denied",
-                                &trust_mode,
+                                false,
                                 (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                                target_scope.as_deref(),
-                                normalized_target.as_deref().or(target_summary.as_deref()),
+                                "用户拒绝执行",
                             );
-                            let _ = stream_tx.send(StreamEvent::ToolResult {
-                                name: call.name.clone(),
-                                tool_call_id: Some(call.id.clone()),
-                                ok: false,
-                                output: format!("权限拒绝：{reason}"),
-                                full_output: None,
-                                duration_ms: None,
-                            });
+                            append_runtime_tool_message(
+                                session,
+                                &call.name,
+                                format!("工具 {} 被用户拒绝执行", call.name),
+                            );
                             append_tool_result_message(
                                 session,
                                 &call.id,
@@ -804,193 +899,26 @@ impl TurnContext {
                                     &call.name,
                                     &call.id,
                                     args_summary.clone(),
-                                    ToolFailureKind::PermissionDenied,
-                                    format!("权限拒绝：{reason}"),
+                                    ToolFailureKind::UserRejected,
+                                    "用户拒绝执行",
                                 )),
                                 true,
                             );
-                            failed_tool_call_keys.insert(
-                                tool_call_key,
-                                structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                    &call.name,
-                                    &call.id,
-                                    args_summary.clone(),
-                                    ToolFailureKind::PermissionDenied,
-                                    format!("权限拒绝：{reason}"),
-                                )),
-                            );
-                            failed_tool_names.insert(call.name.clone());
-                            need_failure_recovery_prompt = true;
-                            continue;
-                        }
-                        PermissionDecision::NeedsApproval { request_id } => {
-                            audit_permission_with_context(
-                                &session.id,
-                                &call.name,
-                                "needs_approval",
-                                &trust_mode,
-                                (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                                target_scope.as_deref(),
-                                normalized_target.as_deref().or(target_summary.as_deref()),
-                            );
-                            crate::approval_store::add_pending(
-                                &session.id,
-                                crate::session::PendingApproval {
-                                    request_id: request_id.clone(),
-                                    tool_name: call.name.clone(),
-                                    tool_args_summary: args_summary.clone(),
-                                    created_at: now_text(),
-                                },
-                            );
-                            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                                request_id: request_id.clone(),
-                                tool_name: call.name.clone(),
-                                args_summary: args_summary.clone(),
+                            self.flush_deferred_tool_injections(session, stream_tx);
+                            session.persist_to_disk();
+                            let _ = stream_tx.send(StreamEvent::ToolResult {
+                                name: call.name.clone(),
+                                tool_call_id: Some(call.id.clone()),
+                                ok: false,
+                                output: "用户拒绝执行".to_string(),
+                                full_output: None,
+                                duration_ms: None,
                             });
-
-                            enum ApprovalWaitOutcome {
-                                Decision(bool),
-                                CurrentInput(String),
-                            }
-
-                            let approval_outcome = loop {
-                                match cmd_rx.recv().await {
-                                    Some(Command::Approval {
-                                        request_id: rid,
-                                        approved,
-                                    }) if rid == request_id => {
-                                        break ApprovalWaitOutcome::Decision(approved);
-                                    }
-                                    Some(Command::Shutdown) => {
-                                        crate::approval_store::remove_pending(
-                                            &session.id,
-                                            &request_id,
-                                        );
-                                        let _ = stream_tx.send(StreamEvent::Error {
-                                            message: "已取消".into(),
-                                        });
-                                        merge_plugin_usage(&mut accumulated_usage);
-                                        return accumulated_usage;
-                                    }
-                                    Some(Command::Cancel) | None => {
-                                        crate::approval_store::remove_pending(
-                                            &session.id,
-                                            &request_id,
-                                        );
-                                        let _ = stream_tx.send(StreamEvent::Error {
-                                            message: "已取消".into(),
-                                        });
-                                        {
-                                            merge_plugin_usage(&mut accumulated_usage);
-                                            return accumulated_usage;
-                                        }
-                                    }
-                                    Some(Command::Message {
-                                        prepared,
-                                        message_id,
-                                    }) => {
-                                        match accept_runtime_user_message(
-                                            session, stream_tx, message_id, prepared,
-                                        ) {
-                                            Ok(input) => {
-                                                break ApprovalWaitOutcome::CurrentInput(input);
-                                            }
-                                            Err(err) => tracing::warn!(
-                                                error = %err,
-                                                "审批等待阶段追加用户消息持久化失败"
-                                            ),
-                                        }
-                                    }
-                                    Some(Command::Approval { .. }) => {}
-                                    Some(Command::InjectTool { tool_name, payload }) => {
-                                        self.defer_tool_injections(
-                                            session,
-                                            stream_tx,
-                                            std::iter::once((tool_name, payload)),
-                                        );
-                                    }
-                                    Some(Command::CompressContext) => {
-                                        let _ = stream_tx.send(StreamEvent::AgentNotification {
-                                            agent_id: "system".to_string(),
-                                            agent_label: "系统".to_string(),
-                                            content:
-                                                "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试"
-                                                    .to_string(),
-                                            level: "warning".to_string(),
-                                        });
-                                    }
-                                    Some(Command::ResetContext) => {
-                                        crate::core::reset_context_for_session(
-                                            session, stream_tx, self,
-                                        );
-                                    }
-                                    Some(Command::EmitStreamEvent(ev)) => {
-                                        let ev = *ev;
-                                        let _ = stream_tx.send(ev);
-                                    }
-                                }
-                            };
-
-                            crate::approval_store::remove_pending(&session.id, &request_id);
-
-                            if let ApprovalWaitOutcome::CurrentInput(input) = &approval_outcome {
-                                successful_tool_call_keys.clear();
-                                failed_tool_call_keys.clear();
-                                failed_tool_names.clear();
-                                user_input = input.clone();
-                                round = 0;
-                                outer_iteration = 0;
-                                session.persist_to_disk();
-                                continue 'outer;
-                            }
-                            let ApprovalWaitOutcome::Decision(approved) = approval_outcome else {
-                                unreachable!("current input handled above")
-                            };
-
-                            if !approved {
-                                audit_tool_execution(
-                                    &session.id,
-                                    &call.name,
-                                    false,
-                                    (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                                    target_scope.as_deref(),
-                                    normalized_target.as_deref().or(target_summary.as_deref()),
-                                    "用户拒绝执行",
-                                );
-                                append_runtime_tool_message(
-                                    session,
-                                    &call.name,
-                                    format!("工具 {} 被用户拒绝执行", call.name),
-                                );
-                                append_tool_result_message(
-                                    session,
-                                    &call.id,
-                                    &call.name,
-                                    structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                                        &call.name,
-                                        &call.id,
-                                        args_summary.clone(),
-                                        ToolFailureKind::UserRejected,
-                                        "用户拒绝执行",
-                                    )),
-                                    true,
-                                );
-                                self.flush_deferred_tool_injections(session, stream_tx);
-                                session.persist_to_disk();
-                                let _ = stream_tx.send(StreamEvent::ToolResult {
-                                    name: call.name.clone(),
-                                    tool_call_id: Some(call.id.clone()),
-                                    ok: false,
-                                    output: "用户拒绝执行".to_string(),
-                                    full_output: None,
-                                    duration_ms: None,
-                                });
-                                merge_plugin_usage(&mut accumulated_usage);
-                                let _ = stream_tx.send(StreamEvent::Done {
-                                    usage: Some(accumulated_usage.clone()),
-                                });
-                                return accumulated_usage;
-                            }
+                            merge_plugin_usage(&mut accumulated_usage);
+                            let _ = stream_tx.send(StreamEvent::Done {
+                                usage: Some(accumulated_usage.clone()),
+                            });
+                            return accumulated_usage;
                         }
                     }
 
@@ -1083,8 +1011,6 @@ impl TurnContext {
                         &call.name,
                         result.ok,
                         (!args_summary.is_empty()).then_some(args_summary.as_str()),
-                        target_scope.as_deref(),
-                        normalized_target.as_deref().or(target_summary.as_deref()),
                         &result.summary,
                     );
                     let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -1356,6 +1282,36 @@ pub(super) fn tools_for_current_turn(
         user_input.to_string()
     };
     filter_background_task_tools(tools.to_vec(), &intent_text)
+}
+
+/// 通用工具参数摘要:把 JSON arguments 的 key=value 拼成简短字符串。
+fn format_tool_args_summary(call: &crate::model::ToolCall) -> String {
+    let Some(obj) = call.arguments.as_object() else {
+        return String::new();
+    };
+    if obj.is_empty() {
+        return String::new();
+    }
+    obj.iter()
+        .map(|(k, v)| {
+            let val = match v {
+                serde_json::Value::String(s) if s.chars().count() > 80 => {
+                    format!("{}...", s.chars().take(77).collect::<String>())
+                }
+                serde_json::Value::String(s) => s.clone(),
+                other => {
+                    let s = other.to_string();
+                    if s.chars().count() > 80 {
+                        format!("{}...", s.chars().take(77).collect::<String>())
+                    } else {
+                        s
+                    }
+                }
+            };
+            format!("{k}={val}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

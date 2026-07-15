@@ -7,7 +7,7 @@
 //!
 //! 编排顺序（由 worker_loop 在 TurnContext 创建时逐个插件调用）：
 //! 1. `set_workspace` — 注入会话工作目录；
-//! 2. `set_trust_mode` — 注入会话信任模式解析句柄；
+//! 2. `set_trust_mode` — 注入会话信任模式；
 //! 3. `set_feedback_tx` — 注入状态反馈通道（复用 worker 命令通道）；
 //! 4. 收集 `tool_specs` 并注册为 `ToolSpecProvider`；
 //! 5. 按 spec.name 逐个注册 `ToolOverrideHandler`；
@@ -50,9 +50,8 @@ pub(crate) fn register_plugin(
     // 1) 注入当前会话工作目录（None 表示无有效 cwd，插件应清空缓存的旧值）
     plugin.set_workspace(workspace);
 
-    // 2) 注入信任模式解析句柄（在收集 tool_specs 前注入，让插件 handler 可读）
-    let trust_mode = ctx.permission_gate().trust_mode_handle();
-    plugin.set_trust_mode(trust_mode);
+    // 2) 注入当前会话信任模式（在收集 tool_specs 前注入，让插件 handler 可读）
+    plugin.set_trust_mode(ctx.trust_mode);
 
     // 3) 注入状态反馈通道（复用 worker 命令通道，clone 给插件持有）
     plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx, ctx.turn_usage_sink().clone()));

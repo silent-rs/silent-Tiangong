@@ -5,17 +5,17 @@
 //!
 //! core 通过 trait 默认方法统一注入运行时上下文（均在收集 tool_specs 前调用）：
 //! - [`Plugin::set_workspace`]：会话工作目录（文件类工具据此感知 cwd）。
-//! - [`Plugin::set_trust_mode`]：会话信任模式解析句柄（插件可据此放宽校验）。
+//! - [`Plugin::set_trust_mode`]：会话信任模式（插件可据此放宽校验）。
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
 //! 三者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
 //! 各插件自定义的 `is_full_trust` 固有方法）是插件内部工具，不作为 trait 能力暴露，
-//! 插件按需读取注入的解析句柄即可。
+//! 插件按需读取注入的信任模式即可。
 
 use std::path::Path;
 
 use crate::core::plugin::feedback::PluginFeedbackTx;
-use crate::permission::TrustModeHandle;
+use crate::permission::TrustMode;
 use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
 /// 进程内插件：封装自己的全部能力，在 engine 创建/重建时自行注册。
@@ -25,7 +25,7 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 ///
 /// core 在 engine 创建时遍历插件，依次：
 /// 1. [`set_workspace`](Plugin::set_workspace) 注入会话工作目录；
-/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式解析句柄；
+/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式；
 /// 3. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入状态反馈通道；
 /// 4. 收集 `tool_specs` / 注册 override handler / 注册 prompt section。
 ///
@@ -51,18 +51,18 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 在此方法内触发，避免职责分散到多个钩子。
     fn set_workspace(&self, _workspace: Option<&Path>) {}
 
-    /// 注入信任模式解析句柄（与 [`crate::permission::PermissionGate`] 共享同一解析器）。
+    /// 注入当前会话的信任模式（[`crate::permission::TrustMode`]）。
     ///
     /// core 在 engine 创建时、收集 tool_specs 之前调用一次。需要感知信任模式的
     /// 插件（如 `fs` / `command` / `fetch`）应覆写此方法，把入参存入内部字段，
     /// 之后在其自身的固有方法里读取（例如 `is_full_trust`）。
     ///
     /// 默认实现为空操作——不关心信任模式的插件（`scheduler` / `terminal` / `browser`）
-    /// 无需覆写；这些插件的工具执行仍受 engine 层 [`PermissionGate::check`] 统一兜底。
+    /// 无需覆写；这些插件的工具执行仍受 engine 层信任模式审批统一兜底
+    ///（`FullTrust` 放行一切，否则走 turn 层审批流程）。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
-    /// 插件调用句柄的 `current()` 读取当前会话的有效模式。
-    fn set_trust_mode(&self, _trust: TrustModeHandle) {}
+    fn set_trust_mode(&self, _trust: TrustMode) {}
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
     ///
@@ -92,19 +92,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 传入合并后的完整 env。需要读取合并 env 的插件（如 `command` / `task`，在
     /// 执行子进程时注入）应覆写此方法存储。默认空操作——不消费 env 的插件无需覆写。
     fn set_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
-
-    /// 贡献插件工具的权限等级覆盖（供 core 权限门统一汇总）。
-    ///
-    /// core 在「所有插件注册完成时」统一遍历所有插件调用此方法，合并到
-    /// `PermissionGate` 的覆盖表——避免 core 的 `classify_tool` 硬编码任何插件
-    /// 工具名。插件工具名未命中覆盖表时走 core 的默认分类（按工具名前缀/特征推断）。
-    ///
-    /// 默认返回空——不贡献权限覆盖的插件无需覆写。
-    fn tool_permission_overrides(
-        &self,
-    ) -> std::collections::BTreeMap<String, crate::permission::PermissionLevel> {
-        std::collections::BTreeMap::new()
-    }
 
     /// 用户取消当前 turn 时通知插件响应取消意图。
     ///

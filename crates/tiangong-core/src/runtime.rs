@@ -1,15 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::agent_config::AgentConfig;
-use crate::model::{ModelClient, SingleProviderClient, TokenUsage, ToolCall};
+use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
 use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
 use crate::session::Session;
-use crate::tool::{ToolExecutionRecord, ToolResult};
+use crate::tool::ToolExecutionRecord;
 use crate::tool_override::ToolOverrideHandler;
 
 pub use tiangong_types::RunStatus;
@@ -83,7 +81,6 @@ pub struct RuntimeEngine {
     agent_config: AgentConfig,
     models_config: ModelsConfig,
     core_config: Option<crate::core_config::CoreConfig>,
-    permission_gate: crate::permission::PermissionGate,
     /// 工具覆盖处理器（替代硬编码的工具名拦截）
     tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的工具规格提供者
@@ -112,11 +109,6 @@ impl RuntimeEngine {
     #[cfg(test)]
     pub(crate) fn for_react_test(client: SingleProviderClient) -> Self {
         let agent_config = AgentConfig::default();
-        let permission_gate =
-            crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
-                trust_mode: agent_config.trust_mode,
-                ..Default::default()
-            });
         Self {
             client,
             lite_client: None,
@@ -125,7 +117,6 @@ impl RuntimeEngine {
             agent_config,
             models_config: ModelsConfig::default(),
             core_config: None,
-            permission_gate,
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
@@ -139,14 +130,7 @@ impl RuntimeEngine {
         agent_config: AgentConfig,
         storage_root: std::path::PathBuf,
     ) -> Self {
-        // 收敛 storage_root 注入：RuntimeEngine 是 core 的硬入口，任何正确使用
-        // core 的代码都必然先构造 runtime，从而必然先注入 root。详见 storage 模块文档。
         crate::storage::set_storage_root(storage_root);
-        let permission_gate =
-            crate::permission::PermissionGate::new(crate::permission::PermissionPolicy {
-                trust_mode: agent_config.trust_mode,
-                ..Default::default()
-            });
         Self {
             client,
             lite_client: None,
@@ -155,7 +139,6 @@ impl RuntimeEngine {
             agent_config,
             models_config: ModelsConfig::default(),
             core_config: None,
-            permission_gate,
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
@@ -168,17 +151,11 @@ impl RuntimeEngine {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
-        trust_mode: crate::permission::TrustModeHandle,
+        trust_mode: crate::permission::TrustMode,
         storage_root: std::path::PathBuf,
     ) -> Self {
+        let _ = trust_mode;
         crate::storage::set_storage_root(storage_root);
-        let permission_gate = crate::permission::PermissionGate::with_shared_trust_mode(
-            crate::permission::PermissionPolicy {
-                trust_mode: agent_config.trust_mode,
-                ..Default::default()
-            },
-            trust_mode,
-        );
         Self {
             client,
             lite_client: None,
@@ -187,7 +164,6 @@ impl RuntimeEngine {
             agent_config,
             models_config: ModelsConfig::default(),
             core_config: None,
-            permission_gate,
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
@@ -235,10 +211,6 @@ impl RuntimeEngine {
     /// 获取 ModelsConfig 引用
     pub fn models_config(&self) -> &ModelsConfig {
         &self.models_config
-    }
-    /// 获取权限网关引用
-    pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
-        &self.permission_gate
     }
 
     /// 取 turn-scoped 插件 usage 收集器的共享引用（供 ReactEngine 在 turn
@@ -337,88 +309,6 @@ impl RuntimeEngine {
             self.client.api_base_url(),
             self.client.api_timeout_ms()
         )
-    }
-
-    /// 对工具进行权限检查（暴露给 core 层在执行前调用）
-    pub(crate) fn check_tool_permission(
-        &self,
-        tool_name: &str,
-    ) -> crate::permission::PermissionDecision {
-        self.permission_gate.check(tool_name)
-    }
-
-    /// 执行单个工具调用（本地工具或后台任务）
-    ///
-    /// 注意：权限检查已由调用方（core/mod.rs）在执行前完成，
-    /// 此方法内部的权限检查改为仅 Denied 拦截，NeedsApproval 由调用方处理。
-    ///
-    /// 所有工具均由各插件经 tool_overrides 统一分发，此方法不再持有具体领域参数。
-    pub(crate) fn start_tool_call(
-        &self,
-        call: &ToolCall,
-        session: &mut Session,
-        actor_id: &str,
-    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
-        // 权限检查
-        use crate::permission::PermissionDecision;
-        match self.permission_gate.check(&call.name) {
-            PermissionDecision::Approved => {}
-            PermissionDecision::Denied { reason } => {
-                return Box::pin(async move {
-                    ToolResult {
-                        ok: false,
-                        summary: format!("权限拒绝：{reason}"),
-                        stdout: String::new(),
-                        stderr: reason,
-                        exit_code: 1,
-                        execution: None,
-                    }
-                });
-            }
-            PermissionDecision::NeedsApproval { .. } => {
-                // 审批已由调用方（core/mod.rs execute_turn_inner）完成，此处放行
-            }
-        }
-
-        // 后台任务、多媒体、扩展能力查询等均由各插件经 tool_overrides 统一分发。
-
-        // 工具覆盖（Plugin 注入的能力：fs / fetch / command / browser / terminal 等）
-        if let Some(handler) = self
-            .tool_overrides
-            .lock()
-            .ok()
-            .and_then(|g| g.get(&call.name).cloned())
-        {
-            let handler_future = handler.handle(call, session, actor_id);
-            let tool_name = call.name.clone();
-            return Box::pin(async move {
-                if let Some(result) = handler_future.await {
-                    return result;
-                }
-
-                ToolResult {
-                    ok: false,
-                    summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
-                    stdout: String::new(),
-                    stderr: format!("tool {tool_name} not handled by any plugin"),
-                    exit_code: 1,
-                    execution: None,
-                }
-            });
-        }
-
-        // 无任何处理器命中的工具：LocalToolExecutor 已删除，所有工具均由插件提供。
-        let tool_name = call.name.clone();
-        Box::pin(async move {
-            ToolResult {
-                ok: false,
-                summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
-                stdout: String::new(),
-                stderr: format!("tool {tool_name} not handled by any plugin"),
-                exit_code: 1,
-                execution: None,
-            }
-        })
     }
 
     pub fn fallback_error_message(err: &anyhow::Error) -> String {

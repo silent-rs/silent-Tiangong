@@ -50,7 +50,7 @@ pub struct TiangongCore {
     /// 宿主可以按会话原子替换配置，不会影响同进程中的其他 Core。
     config: CoreConfigProvider,
     /// 会话信任模式基线。
-    trust_mode: crate::permission::TrustModeHandle,
+    trust_mode: std::sync::Mutex<crate::permission::TrustMode>,
     /// 保证"设置取消信号 + 入队取消命令"与并发消息入队具有单一顺序。
     command_delivery_lock: Mutex<()>,
 }
@@ -78,11 +78,11 @@ impl TiangongCore {
         }
         let storage_root = storage.into_root();
         let initial_trust_mode = session.trust_mode;
-        let trust_mode = crate::permission::TrustModeHandle::new(initial_trust_mode);
+        let trust_mode = std::sync::Mutex::new(initial_trust_mode);
         let session_id = session.id.clone();
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
 
-        let worker_trust_mode = trust_mode.clone();
+        let worker_trust_mode = initial_trust_mode;
         let worker_config = config.clone();
         // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
         // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
@@ -165,7 +165,7 @@ impl TiangongCore {
     ///
     /// 更新后对当前会话的权限门与插件实时生效。
     pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
-        self.trust_mode.set_base(mode);
+        *self.trust_mode.lock().unwrap() = mode;
     }
 
     /// 关闭并获取最终 session。
@@ -264,7 +264,7 @@ async fn worker_loop_async(
     mut session: Session,
     external_tx: StdSender<SessionStreamEvent>,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    trust_mode: crate::permission::TrustModeHandle,
+    trust_mode: crate::permission::TrustMode,
     plugins: Vec<Arc<dyn Plugin>>,
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     storage_root: std::path::PathBuf,
@@ -401,7 +401,7 @@ async fn worker_loop_async(
                 let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
-                    &trust_mode,
+                    trust_mode,
                     &storage_root,
                     &plugins,
                     cmd_tx.clone(),
@@ -694,7 +694,7 @@ async fn worker_loop_async(
                 let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
-                    &trust_mode,
+                    trust_mode,
                     &storage_root,
                     &plugins,
                     cmd_tx.clone(),
@@ -710,7 +710,7 @@ async fn worker_loop_async(
                 let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
-                    &trust_mode,
+                    trust_mode,
                     &storage_root,
                     &plugins,
                     cmd_tx.clone(),
@@ -732,7 +732,7 @@ async fn worker_loop_async(
             &stream_tx,
             command,
             &mut background_usage_capture,
-            &trust_mode,
+            trust_mode,
         );
     }
     session.persist_to_disk();
@@ -757,7 +757,7 @@ fn process_shutdown_feedback_command(
     stream_tx: &StdSender<StreamEvent>,
     command: Command,
     usage_capture: &mut TurnUsageCapture,
-    trust_mode: &crate::permission::TrustModeHandle,
+    trust_mode: crate::permission::TrustMode,
 ) {
     let _ = trust_mode;
     match command {
@@ -1153,7 +1153,7 @@ mod turn_usage_capture_tests {
         let mut session = Session::new("shutdown-feedback-usage");
         let mut capture = TurnUsageCapture::default();
         let (stream_tx, stream_rx) = std::sync::mpsc::channel();
-        let trust_mode = crate::permission::TrustModeHandle::new(session.trust_mode);
+        let trust_mode = session.trust_mode;
 
         for (usage, source) in [
             (usage(20, 10, 30), "react-round-1"),
@@ -1171,7 +1171,7 @@ mod turn_usage_capture_tests {
                     agent_id: Some("child-agent".to_string()),
                 })),
                 &mut capture,
-                &trust_mode,
+                trust_mode,
             );
         }
 
@@ -1336,7 +1336,7 @@ async fn execute_turn_async(
 fn build_turn_context(
     config: &CoreConfigProvider,
     stream_tx: &StdSender<StreamEvent>,
-    trust_mode: &crate::permission::TrustModeHandle,
+    trust_mode: crate::permission::TrustMode,
     storage_root: &std::path::Path,
     plugins: &[Arc<dyn Plugin>],
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
@@ -1350,17 +1350,13 @@ fn build_turn_context(
     >,
 ) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
     let cfg = config.snapshot();
-    let mut ctx = build_context_from_config(
-        &cfg,
-        stream_tx,
-        trust_mode.clone(),
-        storage_root.to_path_buf(),
-    )
-    // 注入会话级共享的插件注册表（Arc clone，跨 turn 复用同一份）。
-    .with_shared_plugin_state(
-        Arc::clone(shared_tool_overrides),
-        Arc::clone(shared_prompt_section_providers),
-    );
+    let mut ctx =
+        build_context_from_config(&cfg, stream_tx, trust_mode, storage_root.to_path_buf())
+            // 注入会话级共享的插件注册表（Arc clone，跨 turn 复用同一份）。
+            .with_shared_plugin_state(
+                Arc::clone(shared_tool_overrides),
+                Arc::clone(shared_prompt_section_providers),
+            );
 
     let workspace = std::path::Path::new(&session.cwd);
     let workspace = workspace.is_dir().then_some(workspace);
@@ -1380,7 +1376,7 @@ fn build_turn_context(
     for plugin in plugins {
         // 注入 turn 级状态（每 turn 都需要：feedback 绑定新 TurnUsageSink）
         plugin.set_workspace(workspace);
-        plugin.set_trust_mode(ctx.permission_gate().trust_mode_handle());
+        plugin.set_trust_mode(trust_mode);
         plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(
             cmd_tx.clone(),
             ctx.turn_usage_sink().clone(),
@@ -1424,16 +1420,6 @@ fn build_turn_context(
             plugin.set_exec_env(exec_env.clone());
         }
     }
-    // 汇总 permission_overrides（每 turn 刷新到本轮 PermissionGate）
-    {
-        let mut overrides = std::collections::BTreeMap::new();
-        for plugin in plugins {
-            for (name, level) in plugin.tool_permission_overrides() {
-                overrides.insert(name, level);
-            }
-        }
-        ctx.permission_gate().set_plugin_overrides(overrides);
-    }
 
     let injection_spec = crate::core::plugin::injection_tool_spec();
     let mut tools: Vec<ToolSpec> = Vec::new();
@@ -1461,7 +1447,7 @@ fn build_turn_context(
 fn build_context_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
-    trust_mode: crate::permission::TrustModeHandle,
+    trust_mode: crate::permission::TrustMode,
     storage_root: std::path::PathBuf,
 ) -> crate::turn_context::TurnContext {
     use crate::agent_config::AgentConfig;
@@ -1543,13 +1529,6 @@ fn build_context_from_config(
         });
 
     crate::storage::set_storage_root(storage_root);
-    let permission_gate = crate::permission::PermissionGate::with_shared_trust_mode(
-        crate::permission::PermissionPolicy {
-            trust_mode: agent_config.trust_mode,
-            ..Default::default()
-        },
-        trust_mode,
-    );
 
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
@@ -1557,10 +1536,10 @@ fn build_context_from_config(
         SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
+        trust_mode,
         Vec::new(),
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,
-        permission_gate,
         Arc::new(crate::core::plugin::TurnUsageSink::new()),
     );
     ctx

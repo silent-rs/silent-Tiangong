@@ -30,8 +30,8 @@ pub struct TurnContext {
     pub context_limit: usize,
     /// Agent 配置（reasoning_effort 等）
     pub agent_config: AgentConfig,
-    /// 权限判断器
-    pub permission_gate: crate::permission::PermissionGate,
+    /// 会话信任模式（FullTrust 放行一切,否则需审批;审批在 turn 层统一完成）
+    pub trust_mode: crate::permission::TrustMode,
     /// 工具覆盖处理器（会话级共享 Arc）
     pub tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的 Prompt 段落提供者（会话级共享 Arc,供 rebuild_system_prompt 收集）
@@ -58,17 +58,17 @@ impl TurnContext {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
+        trust_mode: crate::permission::TrustMode,
         tools: Vec<ToolSpec>,
         max_tool_rounds: usize,
         max_outer_iterations: u32,
-        permission_gate: crate::permission::PermissionGate,
         turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
     ) -> Self {
         Self {
             client,
             context_limit,
             agent_config,
-            permission_gate,
+            trust_mode,
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink,
@@ -113,10 +113,6 @@ impl TurnContext {
         &self.agent_config
     }
 
-    pub fn permission_gate(&self) -> &crate::permission::PermissionGate {
-        &self.permission_gate
-    }
-
     pub fn turn_usage_sink(&self) -> &Arc<crate::core::plugin::TurnUsageSink> {
         &self.turn_usage_sink
     }
@@ -148,43 +144,18 @@ impl TurnContext {
             .unwrap_or_default()
     }
 
-    // ===== 权限与工具执行 =====
+    // ===== 工具执行 =====
 
-    /// 对工具进行权限检查
-    pub(crate) fn check_tool_permission(
-        &self,
-        tool_name: &str,
-    ) -> crate::permission::PermissionDecision {
-        self.permission_gate.check(tool_name)
-    }
-
-    /// 执行单个工具调用（本地工具或后台任务）
+    /// 执行单个工具调用。
+    ///
+    /// 权限审批在 turn 层统一完成（engine.rs 的工具执行循环）;
+    /// 到达此方法时审批已通过,handler 直接执行。
     pub(crate) fn start_tool_call(
         &self,
         call: &ToolCall,
         session: &mut Session,
         actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
-        use crate::permission::PermissionDecision;
-        match self.permission_gate.check(&call.name) {
-            PermissionDecision::Approved => {}
-            PermissionDecision::Denied { reason } => {
-                return Box::pin(async move {
-                    ToolResult {
-                        ok: false,
-                        summary: format!("权限拒绝：{reason}"),
-                        stdout: String::new(),
-                        stderr: reason,
-                        exit_code: 1,
-                        execution: None,
-                    }
-                });
-            }
-            PermissionDecision::NeedsApproval { .. } => {
-                // 审批已由调用方完成,此处放行
-            }
-        }
-
         if let Some(handler) = self
             .tool_overrides
             .lock()

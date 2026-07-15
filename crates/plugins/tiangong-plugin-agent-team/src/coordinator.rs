@@ -10,7 +10,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::{PermissionLevel, TrustMode};
+use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{now_text, Message, MessageRole, Session};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -949,13 +949,6 @@ impl Plugin for ChildTeamClientPlugin {
         if let Ok(mut current) = self.feedback.write() {
             *current = Some(feedback);
         }
-    }
-
-    fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
-        child_tool_specs()
-            .into_iter()
-            .map(|spec| (spec.name, PermissionLevel::Safe))
-            .collect()
     }
 }
 

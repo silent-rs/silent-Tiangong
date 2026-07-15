@@ -190,8 +190,6 @@ pub fn audit_permission_with_context(
     decision: &str,
     trust_mode: &str,
     args_summary: Option<&str>,
-    target_scope: Option<&str>,
-    target_summary: Option<&str>,
 ) {
     let mut record = AuditRecord::new(
         AuditEventType::PermissionDecision,
@@ -206,12 +204,6 @@ pub fn audit_permission_with_context(
     if let Some(args_summary) = args_summary {
         record = record.with_args_summary(args_summary);
     }
-    if let Some(target_scope) = target_scope {
-        record = record.with_target_scope(target_scope);
-    }
-    if let Some(target_summary) = target_summary {
-        record = record.with_target_summary(target_summary);
-    }
     record.write();
 }
 
@@ -220,8 +212,6 @@ pub fn audit_tool_execution(
     tool_name: &str,
     success: bool,
     args_summary: Option<&str>,
-    target_scope: Option<&str>,
-    target_summary: Option<&str>,
     result_summary: &str,
 ) {
     let mut record = AuditRecord::new(AuditEventType::ToolExecution, result_summary, success)
@@ -232,12 +222,6 @@ pub fn audit_tool_execution(
 
     if let Some(args_summary) = args_summary {
         record = record.with_args_summary(args_summary);
-    }
-    if let Some(target_scope) = target_scope {
-        record = record.with_target_scope(target_scope);
-    }
-    if let Some(target_summary) = target_summary {
-        record = record.with_target_summary(target_summary);
     }
     record.write();
 }

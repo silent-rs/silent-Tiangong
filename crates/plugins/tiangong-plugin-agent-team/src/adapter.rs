@@ -6,7 +6,6 @@ use std::sync::{Arc, RwLock};
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::PermissionLevel;
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -136,13 +135,6 @@ impl Plugin for AgentTeamPlugin {
             tracing::info!(session_id, "后台销毁 Agent Team 团队");
             coordinator.shutdown().await;
         });
-    }
-
-    fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
-        root_tool_specs()
-            .into_iter()
-            .map(|spec| (spec.name, PermissionLevel::Safe))
-            .collect()
     }
 }
 
