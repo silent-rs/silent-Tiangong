@@ -356,7 +356,7 @@ async fn run_turn(
         }
     }
 
-    crate::react::message::flush_deferred_tool_injections(&mut ctx.session, &stream_tx);
+    crate::react::message::flush_deferred_tool_injections(&mut ctx.session, &ctx);
 
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let mut status = TurnOutcome::from_terminal(&terminal).status;
@@ -408,7 +408,7 @@ async fn run_turn(
         let _ = ctx.session.try_persist_to_disk();
     }
     if user_msg_updated {
-        crate::react::message::emit_session_message_upsert(&ctx.session, &stream_tx, &user_msg_id);
+        crate::react::message::emit_session_message_upsert(&ctx.session, &ctx, &user_msg_id);
     }
 
     send_final_stream_event(

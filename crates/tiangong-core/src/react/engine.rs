@@ -65,7 +65,7 @@ impl TurnContext {
     }
 
     pub(super) fn flush_deferred_tool_injections(&mut self, session: &mut Session) {
-        crate::react::message::flush_deferred_tool_injections(session, &self.stream_tx);
+        crate::react::message::flush_deferred_tool_injections(session, &self.self);
     }
 
     fn build_thinking_config(
@@ -555,7 +555,7 @@ impl TurnContext {
                         }
                         crate::react::message::emit_session_message_upsert(
                             session,
-                            stream_tx,
+                            self,
                             &pending_msg_id,
                         );
                         session.persist_to_disk();
@@ -582,7 +582,7 @@ impl TurnContext {
                         }
                         crate::react::message::emit_session_message_upsert(
                             session,
-                            stream_tx,
+                            self,
                             &pending_msg_id,
                         );
                         session.persist_to_disk();
@@ -642,7 +642,7 @@ impl TurnContext {
                 );
                 crate::react::message::emit_session_message_upsert(
                     session,
-                    stream_tx,
+                    self,
                     &pending_msg_id,
                 );
 
