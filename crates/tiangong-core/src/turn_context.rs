@@ -106,6 +106,25 @@ impl TurnContext {
         self
     }
 
+    /// 注入会话级共享的插件注册表（跨 turn 复用，避免每 turn 重复注册）。
+    ///
+    /// `runtime_env` 同样是跨 turn 共享的（插件贡献的子进程环境变量）。
+    pub fn with_shared_plugin_state(
+        mut self,
+        tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
+        tool_spec_providers: Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
+        prompt_section_providers: Arc<
+            Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
+        >,
+        runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    ) -> Self {
+        self.tool_overrides = tool_overrides;
+        self.tool_spec_providers = tool_spec_providers;
+        self.prompt_section_providers = prompt_section_providers;
+        self.runtime_env = runtime_env;
+        self
+    }
+
     // ===== 能力 accessor =====
 
     pub fn client(&self) -> &SingleProviderClient {

@@ -273,6 +273,20 @@ async fn worker_loop_async(
     // on_session_ready 仅在首次 engine build + 插件注册完成后触发一次（跨 turn）
     let mut session_ready_fired = false;
 
+    // 会话级共享的插件注册表（跨 turn 复用，避免每 turn 重复注册）。
+    // 每 turn 的 TurnContext 通过 Arc clone 共享同一份注册表。
+    let shared_tool_overrides: Arc<
+        Mutex<HashMap<String, Arc<dyn crate::tool_override::ToolOverrideHandler>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let shared_tool_spec_providers: Arc<
+        Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>,
+    > = Arc::new(Mutex::new(Vec::new()));
+    let shared_prompt_section_providers: Arc<
+        Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
+    > = Arc::new(Mutex::new(Vec::new()));
+    let shared_runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>> =
+        Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+
     // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
     // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
 
@@ -398,6 +412,10 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
+                    &shared_tool_overrides,
+                    &shared_tool_spec_providers,
+                    &shared_prompt_section_providers,
+                    &shared_runtime_env,
                 );
 
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -689,6 +707,10 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
+                    &shared_tool_overrides,
+                    &shared_tool_spec_providers,
+                    &shared_prompt_section_providers,
+                    &shared_runtime_env,
                 );
                 compress_context_for_session(&mut session, &ctx, &stream_tx, &mut cmd_rx).await;
                 continue;
@@ -703,6 +725,10 @@ async fn worker_loop_async(
                     cmd_tx.clone(),
                     &mut session,
                     &mut session_ready_fired,
+                    &shared_tool_overrides,
+                    &shared_tool_spec_providers,
+                    &shared_prompt_section_providers,
+                    &shared_runtime_env,
                 );
                 reset_context_for_session(&mut session, &stream_tx, &ctx);
                 continue;
@@ -1310,10 +1336,13 @@ async fn execute_turn_async(
         .await;
 }
 
-/// 每 turn 现建 TurnContext：从最新 config 快照构建，注册所有插件，
-/// 汇总 exec_env / permission_overrides，并触发 on_session_ready（仅首次）。
+/// 每 turn 现建 TurnContext：从最新 config 快照构建 client/权限/用量，
+/// 共享会话级插件注册表，注入 turn 级 feedback，收集 tool_specs。
 ///
-/// client 不跨 turn，配置变更靠下次 turn 新建 client 天然生效。
+/// - 插件注册表（tool_overrides / tool_spec_providers / prompt_section_providers）
+///   是会话级共享的 Arc<Mutex>，只在首次 turn 注册，后续 turn 通过 Arc clone 复用。
+/// - 每 turn 必须刷新的是：feedback_tx（绑定新的 TurnUsageSink）、exec_env、
+///   permission_overrides、tool_specs（可能因配置变更而不同）。
 #[allow(clippy::too_many_arguments)]
 fn build_turn_context(
     config: &CoreConfigProvider,
@@ -1324,6 +1353,14 @@ fn build_turn_context(
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     session: &mut Session,
     session_ready_fired: &mut bool,
+    shared_tool_overrides: &Arc<
+        Mutex<HashMap<String, Arc<dyn crate::tool_override::ToolOverrideHandler>>>,
+    >,
+    shared_tool_spec_providers: &Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
+    shared_prompt_section_providers: &Arc<
+        Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
+    >,
+    shared_runtime_env: &Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 ) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
     let cfg = config.snapshot();
     let mut ctx = build_context_from_config(
@@ -1331,31 +1368,54 @@ fn build_turn_context(
         stream_tx,
         trust_mode.clone(),
         storage_root.to_path_buf(),
+    )
+    // 注入会话级共享的插件注册表（Arc clone，跨 turn 复用同一份）。
+    .with_shared_plugin_state(
+        Arc::clone(shared_tool_overrides),
+        Arc::clone(shared_tool_spec_providers),
+        Arc::clone(shared_prompt_section_providers),
+        Arc::clone(shared_runtime_env),
     );
 
-    // 遍历插件自注册（issue #156）：在 worker 接收任何用户消息前完成，
-    // 根治「注册竞态窗口」。
-    //
-    // on_config_updated 已在上文统一触发（插件内部状态已就绪）。
-    // register_plugin 内部注入上下文（workspace/trust_mode/feedback_tx）后，
-    // 收集 tool_specs 并注册 override handler——保证 handler 注册到正确的
-    // 工具名上。返回的 specs 累积到 plugin_specs，供后续同名工具冲突避让
-    // 与 tools 合并使用。
     let workspace = std::path::Path::new(&session.cwd);
     let workspace = workspace.is_dir().then_some(workspace);
-    let mut plugin_specs: Vec<ToolSpec> = Vec::new();
-    // 配置快照更新通知：在 register 之前调 on_config_updated，使插件先刷新
-    // 内部 endpoint/client，再收集 tool_specs / register——保证 specs 基于最新配置。
+
+    // 配置快照更新通知：在收集 specs 前调 on_config_updated，使插件先刷新
+    // 内部 endpoint/client，再收集 tool_specs——保证 specs 基于最新配置。
     for plugin in plugins {
         plugin.on_config_updated(&cfg);
     }
-    // 追踪已注册的工具名，用于跨插件工具名冲突消解：
-    // 若多个插件声明同名工具，保留先注册者，跳过后注册者。
-    // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
+
+    let is_first_turn = !*session_ready_fired;
+
+    // 收集 tool_specs + 注入 turn 级状态（workspace/trust_mode/feedback_tx）。
+    // 首次 turn 额外注册 provider/override/prompt 到共享注册表。
+    let mut plugin_specs: Vec<ToolSpec> = Vec::new();
     let mut seen_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for plugin in plugins {
-        let specs =
-            crate::core::plugin::register_plugin(&ctx, plugin.clone(), workspace, cmd_tx.clone());
+        // 注入 turn 级状态（每 turn 都需要：feedback 绑定新 TurnUsageSink）
+        plugin.set_workspace(workspace);
+        plugin.set_trust_mode(ctx.permission_gate().trust_mode_handle());
+        plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(
+            cmd_tx.clone(),
+            ctx.turn_usage_sink().clone(),
+        ));
+
+        let specs = plugin.tool_specs();
+        // 首次 turn：注册到共享注册表（后续 turn 通过 Arc 复用，不重复注册）
+        if is_first_turn {
+            let plugin_as_spec: Arc<dyn crate::tool_override::ToolSpecProvider> = plugin.clone();
+            ctx.register_tool_spec_provider(plugin_as_spec);
+            let plugin_as_handler: Arc<dyn crate::tool_override::ToolOverrideHandler> =
+                plugin.clone();
+            for spec in &specs {
+                ctx.register_tool_override(&spec.name, plugin_as_handler.clone());
+            }
+            let plugin_as_prompt: Arc<dyn crate::tool_override::PromptSectionProvider> =
+                plugin.clone();
+            ctx.register_prompt_section_provider(plugin_as_prompt);
+        }
+
         for spec in specs {
             if seen_tool_names.insert(spec.name.clone()) {
                 plugin_specs.push(spec);
@@ -1368,9 +1428,8 @@ fn build_turn_context(
             }
         }
     }
-    // 汇总所有插件贡献的子进程环境变量，
-    // 回注给需要消费合并 env 的插件（command / task 执行子进程时注入）。
-    // 每次 engine rebuild 都重走此段，保证配置变化后 env 刷新。
+
+    // 汇总 exec_env（配置可能变更，每 turn 刷新）
     {
         let mut exec_env = std::collections::BTreeMap::new();
         for plugin in plugins {
@@ -1383,8 +1442,7 @@ fn build_turn_context(
             plugin.set_exec_env(exec_env.clone());
         }
     }
-    // 汇总插件贡献的工具权限覆盖，
-    // 写入 PermissionGate 覆盖表，避免 core classify_tool 硬编码插件工具名。
+    // 汇总 permission_overrides（每 turn 刷新到本轮 PermissionGate）
     {
         let mut overrides = std::collections::BTreeMap::new();
         for plugin in plugins {
@@ -1394,13 +1452,10 @@ fn build_turn_context(
         }
         ctx.permission_gate().set_plugin_overrides(overrides);
     }
-    // 各插件（含动态工具插件）的工具规格经 tool_specs() 声明，
-    // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
+
     let injection_spec = crate::core::plugin::injection_tool_spec();
     let mut tools: Vec<ToolSpec> = Vec::new();
-    // 插件事件注入通道（synthetic tool，声明给模型但不主动调用）
     tools.push(injection_spec);
-    // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
     tools.extend(plugin_specs);
     ctx.tools = tools.clone();
 
