@@ -12,7 +12,10 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
+
+use crate::core::command::Command;
 
 /// 共享 runtime 的 worker 线程数。
 const WORKER_THREADS: usize = 2;
@@ -22,9 +25,15 @@ const GC_INTERVAL: Duration = Duration::from_millis(500);
 
 static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-static TURN_TASKS: OnceLock<Mutex<HashMap<String, JoinHandle<()>>>> = OnceLock::new();
+/// turn task 注册表:session_id → (cmd_tx, JoinHandle)
+///
+/// cmd_tx 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx,
+/// deliver(Cancel/Approval) 通过 send_command 投递到活跃 turn task。
+type TurnTaskMap = HashMap<String, (UnboundedSender<Command>, JoinHandle<()>)>;
 
-fn turn_tasks() -> &'static Mutex<HashMap<String, JoinHandle<()>>> {
+static TURN_TASKS: OnceLock<Mutex<TurnTaskMap>> = OnceLock::new();
+
+fn turn_tasks() -> &'static Mutex<TurnTaskMap> {
     TURN_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -42,7 +51,7 @@ pub fn shared_runtime() -> &'static Runtime {
             loop {
                 tokio::time::sleep(GC_INTERVAL).await;
                 if let Ok(mut tasks) = turn_tasks().lock() {
-                    tasks.retain(|_id, handle| !handle.is_finished());
+                    tasks.retain(|_id, (_, handle)| !handle.is_finished());
                 }
             }
         });
@@ -51,20 +60,41 @@ pub fn shared_runtime() -> &'static Runtime {
     })
 }
 
-/// Spawn 一个 turn task,自动注册到 turn_tasks HashMap。
+/// Spawn 一个 turn task,创建专属的命令通道并注册到 turn_tasks。
+///
+/// `fut_fn` 接收 cmd_rx(用于在 turn 内消费 Cancel/Approval/InjectTool)。
 ///
 /// turn task 正常结束或被 abort 后,wrapper 会立即调 `remove_turn` 清理。
 /// panic 的 task 由 GC task 定期清理。
-pub fn spawn_turn(session_id: String, fut: impl Future<Output = ()> + Send + 'static) {
+pub fn spawn_turn<F, Fut>(session_id: String, fut_fn: F)
+where
+    F: FnOnce(UnboundedReceiver<Command>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     let sid = session_id.clone();
     let handle = shared_runtime().spawn(async move {
-        fut.await;
+        fut_fn(cmd_rx).await;
         // 正常结束或 abort → 立即清理
         remove_turn(&sid);
     });
     if let Ok(mut tasks) = turn_tasks().lock() {
-        tasks.insert(session_id, handle);
+        tasks.insert(session_id, (cmd_tx, handle));
     }
+}
+
+/// 向活跃 turn task 发送命令(Cancel/Approval/InjectTool)。
+///
+/// 无活跃 turn task 时返回 false(命令被忽略)。
+pub fn send_command(session_id: &str, cmd: Command) -> bool {
+    if let Ok(tasks) = turn_tasks().lock() {
+        if let Some((tx, handle)) = tasks.get(session_id) {
+            if !handle.is_finished() {
+                return tx.send(cmd).is_ok();
+            }
+        }
+    }
+    false
 }
 
 /// 从 turn_tasks 移除指定 session。
@@ -79,7 +109,7 @@ pub fn is_running(session_id: &str) -> bool {
     if let Ok(tasks) = turn_tasks().lock() {
         tasks
             .get(session_id)
-            .is_some_and(|handle| !handle.is_finished())
+            .is_some_and(|(_, handle)| !handle.is_finished())
     } else {
         false
     }
