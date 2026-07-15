@@ -39,20 +39,20 @@ pub use storage_location::CoreStorageLocation;
 
 /// 天工智能体核心
 pub struct TiangongCore {
-    /// 用户命令发送端（tokio unbounded，send 不需要 await）
-    cmd_tx: Option<tokio_mpsc::UnboundedSender<Command>>,
-    /// worker task（共享 runtime 上的长驻 task；idle 时被 park 不占线程）
-    worker_task: Option<tokio::task::JoinHandle<Session>>,
     /// 会话 ID
     session_id: String,
     /// 当前 Core 独立的配置提供者。
-    ///
-    /// 宿主可以按会话原子替换配置，不会影响同进程中的其他 Core。
     config: CoreConfigProvider,
-    /// 会话信任模式基线。
+    /// 会话信任模式。
     trust_mode: std::sync::Mutex<crate::permission::TrustMode>,
-    /// 保证"设置取消信号 + 入队取消命令"与并发消息入队具有单一顺序。
-    command_delivery_lock: Mutex<()>,
+    /// 存储根目录(turn task 从此加载/保存 session)。
+    storage_root: std::path::PathBuf,
+    /// 事件输出通道(会话级,跨 turn;clone 给每个 turn task 的 forwarder)。
+    external_tx: Sender<SessionStreamEvent>,
+    /// 进程内插件(会话级,跨 turn)。
+    plugins: Vec<Arc<dyn Plugin>>,
+    /// on_session_ready 是否已触发(跨 turn)。
+    session_ready_fired: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TiangongCore {
@@ -62,49 +62,21 @@ impl TiangongCore {
     /// `build()` 的 `Result` 仅承载必填字段缺失的检查。空闲时 worker task 停在
     /// `cmd_rx.recv().await`，future 被 park、线程归还 runtime 池。
     fn assemble(
+        session_id: String,
         config: CoreConfigProvider,
-        session: Session,
-        stream_tx: Sender<SessionStreamEvent>,
+        trust_mode: crate::permission::TrustMode,
+        storage_root: std::path::PathBuf,
+        external_tx: Sender<SessionStreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
-        storage: CoreStorageLocation,
     ) -> Self {
-        // Invariant: 无效 CWD 的会话应在 Core 创建前由调用方过滤。
-        // 此处仅做防御性检查：若 session.cwd 非空且不是有效目录，记录告警。
-        if !session.cwd.is_empty() && !std::path::Path::new(&session.cwd).is_dir() {
-            tracing::warn!(
-                cwd = %session.cwd,
-                "invalid cwd: 会话应在 Core 创建前被过滤，插件可能行为异常"
-            );
-        }
-        let storage_root = storage.into_root();
-        let initial_trust_mode = session.trust_mode;
-        let trust_mode = std::sync::Mutex::new(initial_trust_mode);
-        let session_id = session.id.clone();
-        let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-
-        let worker_trust_mode = initial_trust_mode;
-        let worker_config = config.clone();
-        // clone 一份 cmd_tx 给 worker，用于在 register_plugin 时注入给插件
-        // （作为状态反馈通道，复用同一命令通道，避免新增 channel）。
-        let worker_cmd_tx = cmd_tx.clone();
-        let worker_task = crate::shared_runtime::shared_runtime().spawn(worker_loop_async(
-            worker_config,
-            session,
-            stream_tx,
-            cmd_rx,
-            worker_trust_mode,
-            plugins,
-            worker_cmd_tx,
-            storage_root,
-        ));
-
         Self {
-            cmd_tx: Some(cmd_tx),
-            worker_task: Some(worker_task),
             session_id,
             config,
-            trust_mode,
-            command_delivery_lock: Mutex::new(()),
+            trust_mode: std::sync::Mutex::new(trust_mode),
+            storage_root,
+            external_tx,
+            plugins,
+            session_ready_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -115,15 +87,10 @@ impl TiangongCore {
         TiangongCoreBuilder::default()
     }
 
+    /// 向活跃 turn task 发送命令(无活跃 task 则忽略)。
     fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
-        let Some(ref tx) = self.cmd_tx else {
-            return Err(CoreError::WorkerStopped);
-        };
-        if tx.send(cmd).is_ok() {
-            Ok(())
-        } else {
-            Err(CoreError::WorkerStopped)
-        }
+        crate::shared_runtime::send_command(&self.session_id, cmd);
+        Ok(())
     }
 
     pub fn session_id(&self) -> &str {
@@ -142,23 +109,14 @@ impl TiangongCore {
     /// 是否已停止（worker task 已结束或命令通道已关闭）。
     ///
     /// 已停止的 core 无法再接收命令，调用方应移除并按需重建。
+    /// 是否有活跃的 turn task。
     pub fn is_stopped(&self) -> bool {
-        if self.cmd_tx.is_none() {
-            return true;
-        }
-        self.worker_task
-            .as_ref()
-            .map(|task| task.is_finished())
-            .unwrap_or(true)
+        !crate::shared_runtime::is_running(&self.session_id)
     }
 
-    /// 是否可接收命令（worker 存活且通道未关闭）。
-    ///
-    /// 注意：当前实现无法准确反映"是否正在执行 Agent Turn"（执行状态在 worker
-    /// 线程内部，无共享标志），此处仅表达"可投递命令"，即 `!is_stopped()`。
-    /// 真正的 busy 语义需后续 worker 状态上报完善。
+    /// 是否正在执行 turn(有活跃 turn task)。
     pub fn is_busy(&self) -> bool {
-        !self.is_stopped()
+        crate::shared_runtime::is_running(&self.session_id)
     }
 
     /// 设置会话信任模式。
@@ -172,34 +130,18 @@ impl TiangongCore {
     ///
     /// worker panic 时返回 [`CoreError::WorkerPanicked`]，不再静默兜底为
     /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
+    /// 从磁盘加载最终 session。
     pub fn into_session(self) -> Result<Session, CoreError> {
-        self.shutdown_and_take_session()
+        // 发 Cancel 终止活跃 turn(如有)
+        let _ = self.send_cmd(Command::Cancel);
+        Session::load_from_storage(&self.storage_root, &self.session_id)
+            .map_err(|_| CoreError::WorkerPanicked)
     }
 
-    /// 关闭 Core 并等待 worker 与插件结束钩子全部完成，不取回最终 session。
+    /// 关闭 Core,不取回 session(session 已在磁盘上)。
     pub fn shutdown_join(self) -> Result<(), CoreError> {
-        self.shutdown_and_take_session().map(drop)
-    }
-
-    fn shutdown_and_take_session(mut self) -> Result<Session, CoreError> {
-        let _ = self.send_cmd(Command::Shutdown);
-        self.cmd_tx = None;
-        if let Some(task) = self.worker_task.take() {
-            // worker task 跑在共享 runtime 上；用 Handle::block_on 等待它结束。
-            // 调用方通常已在 runtime 之外（spawn_blocking 包裹），可安全 block_on。
-            let handle = crate::shared_runtime::shared_runtime().handle().clone();
-            match handle.block_on(task) {
-                Ok(session) => return Ok(session),
-                Err(join_error) => {
-                    if join_error.is_panic() {
-                        tracing::warn!("TiangongCore worker task panic");
-                    } else {
-                        tracing::warn!(%join_error, "TiangongCore worker task 被取消");
-                    }
-                }
-            }
-        }
-        Err(CoreError::WorkerPanicked)
+        let _ = self.send_cmd(Command::Cancel);
+        Ok(())
     }
 }
 
@@ -207,25 +149,41 @@ impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
         use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
-        let _delivery_guard = self
-            .command_delivery_lock
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-
-        // 取消完全由 Command::Cancel 队列承载：select! 的 cmd_rx 分支和 drain
-        // 会消费它并终止 turn。
-        if matches!(&input, AgentInputKind::Command(CommandInput::Cancel)) {
-            return self.send_cmd(Command::Cancel);
-        }
-
         match input {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
-            }) => self.send_cmd(Command::Message {
-                prepared,
-                message_id,
-            }),
+            }) => {
+                // clone Core 的会话级字段,spawn turn task
+                let session_id = self.session_id.clone();
+                let config = self.config.clone();
+                let trust_mode = self
+                    .trust_mode
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone();
+                let storage_root = self.storage_root.clone();
+                let external_tx = self.external_tx.clone();
+                let plugins = self.plugins.clone();
+                let session_ready = Arc::clone(&self.session_ready_fired);
+
+                crate::shared_runtime::spawn_turn(session_id.clone(), move |cmd_rx| async move {
+                    run_turn(
+                        session_id,
+                        config,
+                        trust_mode,
+                        storage_root,
+                        external_tx,
+                        plugins,
+                        cmd_rx,
+                        session_ready,
+                        prepared,
+                        message_id,
+                    )
+                    .await;
+                });
+                Ok(())
+            }
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
                 tool_name: tool.tool_name().to_string(),
                 payload: tool.render(),
@@ -248,11 +206,47 @@ impl crate::agent_input::AgentInput for TiangongCore {
 
 impl Drop for TiangongCore {
     fn drop(&mut self) {
-        if let Some(ref tx) = self.cmd_tx {
-            let _ = tx.send(Command::Shutdown);
-        }
-        self.cmd_tx = None;
+        // 发 Cancel 终止活跃 turn(如有)
+        crate::shared_runtime::send_command(&self.session_id, Command::Cancel);
     }
+}
+
+/// turn task:加载 session → 构建 TurnContext → 执行 turn → 落盘。
+///
+/// 替代原 worker_loop_async 的 Message 分支。每次 deliver(Message) spawn 一个 turn task,
+/// turn 结束后自动退出。
+#[allow(clippy::too_many_arguments)]
+async fn run_turn(
+    session_id: String,
+    config: CoreConfigProvider,
+    trust_mode: crate::permission::TrustMode,
+    storage_root: std::path::PathBuf,
+    external_tx: Sender<SessionStreamEvent>,
+    plugins: Vec<Arc<dyn Plugin>>,
+    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
+    session_ready_fired: Arc<std::sync::atomic::AtomicBool>,
+    prepared: Vec<ContentBlock>,
+    message_id: Option<String>,
+) {
+    // TODO: 从 worker_loop_async 的 Message 分支迁移完整逻辑
+    let _ = (
+        config,
+        trust_mode,
+        storage_root,
+        plugins,
+        cmd_rx,
+        session_ready_fired,
+        prepared,
+        message_id,
+    );
+    tracing::warn!(session_id = %session_id, "run_turn: 待实现");
+
+    let _ = external_tx.send(SessionStreamEvent {
+        session_id,
+        event: StreamEvent::Error {
+            message: "run_turn 尚未实现".to_string(),
+        },
+    });
 }
 
 // ==================== 工作线程 ====================
