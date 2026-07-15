@@ -65,7 +65,7 @@ impl TurnContext {
     }
 
     pub(super) fn flush_deferred_tool_injections(&mut self, session: &mut Session) {
-        crate::react::message::flush_deferred_tool_injections(session, &self.self);
+        crate::react::message::flush_deferred_tool_injections(session, &self);
     }
 
     fn build_thinking_config(
@@ -126,7 +126,6 @@ impl TurnContext {
         initial_user_message: Option<(&str, &[ContentBlock])>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> TokenUsage {
-        let stream_tx = &self.stream_tx;
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
@@ -135,7 +134,7 @@ impl TurnContext {
         // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
         // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
         let usage_sink = self.turn_usage_sink().clone();
-        let _usage_guard = usage_sink.bind(stream_tx.clone(), self.context_limit);
+        let _usage_guard = usage_sink.bind(self.stream_tx.clone(), self.context_limit);
         // 把本轮插件累计的 usage 折算进 accumulated_usage（在每个返回点调用）。
         // 注意：捕获 usage_sink 的 clone，而非 self，避免与循环内 &mut self 借用冲突。
         let merge_plugin_usage = |acc: &mut TokenUsage| {
@@ -199,7 +198,7 @@ impl TurnContext {
                 // 工具执行完进入下一轮模型请求前，通知前端"正在分析工具结果"，
                 // 避免前端把模型等待时间算到最后一个工具上。
                 if round > 0 {
-                    let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                    let _ = self.stream_tx.send(StreamEvent::PhaseChanged {
                         phase: "analyzing".to_string(),
                         iteration: (round + 1) as u32,
                     });
@@ -230,7 +229,7 @@ impl TurnContext {
                 // 工具执行阶段的流式文本作为过程性输出（ReactText），前端紧凑展示。
                 let sink = ThrottledStreamSink::with_text_kind(
                     pending_msg_id.clone(),
-                    stream_tx.clone(),
+                    self.stream_tx.clone(),
                     crate::stream_throttle::StreamTextKind::React,
                 );
 
@@ -296,7 +295,7 @@ impl TurnContext {
                                             break Err(anyhow::anyhow!(
                                                 "模型响应已被新的用户消息中断"
                                             ));
-                                        }
+                                        },
                                         Err(err) => {
                                             session
                                                 .messages
@@ -305,7 +304,7 @@ impl TurnContext {
                                                 error = %err,
                                                 "流式阶段追加用户消息持久化失败"
                                             );
-                                        }
+                                        },
                                     }
                                 }
                                 Some(Command::Approval { .. }) => {}
@@ -318,7 +317,7 @@ impl TurnContext {
                                     );
                                 }
                                 Some(Command::CompressContext) => {
-                                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                    let _ = self.stream_tx.send(StreamEvent::AgentNotification {
                                         agent_id: "system".to_string(),
                                         agent_label: "系统".to_string(),
                                         content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
@@ -328,13 +327,12 @@ impl TurnContext {
                                 Some(Command::ResetContext) => {
                                     crate::core::reset_context_for_session(
                                         session,
-                                        stream_tx,
                                         self,
                                     );
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let ev = *ev;
-                                    let _ = stream_tx.send(ev);
+                                    let _ = self.stream_tx.send(ev);
                                 }
                                 Some(Command::SetTrustMode(mode)) => {
                                     self.trust_mode = mode;
@@ -365,7 +363,7 @@ impl TurnContext {
                                             );
                                             merge_plugin_usage(&mut accumulated_usage);
                                             return accumulated_usage;
-                                        }
+                                        },
                                         Err(e) => Err(anyhow::anyhow!(e.to_string())),
                                     };
                                     break response_result;
@@ -450,12 +448,11 @@ impl TurnContext {
                                         prompt_cache_hit_tokens: None,
                                         prompt_cache_miss_tokens: None,
                                     },
-                                    stream_tx,
                                     cmd_rx,
                                 )
                                 .await;
                             if compression_cancelled {
-                                emit_cancelled(stream_tx);
+                                emit_cancelled(&self.stream_tx);
                                 merge_plugin_usage(&mut accumulated_usage);
                                 return accumulated_usage;
                             }
@@ -463,7 +460,7 @@ impl TurnContext {
                                 continue 'react_loop;
                             }
                         }
-                        let _ = stream_tx.send(StreamEvent::Error {
+                        let _ = self.stream_tx.send(StreamEvent::Error {
                             message: err_msg.clone(),
                         });
                         // 持久化错误到 session，避免前端 Error 事件时序丢失导致中断无痕迹。
@@ -531,7 +528,7 @@ impl TurnContext {
                     let compression_cancelled =
                         maybe_update_context_summary(session, self, &response.usage, cmd_rx).await;
                     if compression_cancelled {
-                        emit_cancelled(stream_tx);
+                        emit_cancelled(&self.stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
@@ -560,7 +557,7 @@ impl TurnContext {
                         );
                         session.persist_to_disk();
                         merge_plugin_usage(&mut accumulated_usage);
-                        let _ = stream_tx.send(StreamEvent::Done {
+                        let _ = self.stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
                         return accumulated_usage;
@@ -587,7 +584,7 @@ impl TurnContext {
                         );
                         session.persist_to_disk();
                         merge_plugin_usage(&mut accumulated_usage);
-                        let _ = stream_tx.send(StreamEvent::Done {
+                        let _ = self.stream_tx.send(StreamEvent::Done {
                             usage: Some(accumulated_usage.clone()),
                         });
                         return accumulated_usage;
@@ -619,7 +616,7 @@ impl TurnContext {
                     format_llm_output_message(&output),
                     response.reasoning_content.clone(),
                 );
-                let _ = stream_tx.send(StreamEvent::ToolCalls {
+                let _ = self.stream_tx.send(StreamEvent::ToolCalls {
                     message_id: pending_msg_id.clone(),
                     names: tool_names.clone(),
                     calls: executable_calls
@@ -694,7 +691,7 @@ impl TurnContext {
                             message.clone(),
                         );
                         let provider_text = structured_tool_failure_provider_text(&failure);
-                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                        let _ = self.stream_tx.send(StreamEvent::ToolResult {
                             name: call.name.clone(),
                             tool_call_id: Some(call.id.clone()),
                             ok: false,
@@ -724,7 +721,7 @@ impl TurnContext {
                     let args_summary = format_tool_args_summary(call);
                     let tool_call_key = tool_call_dedupe_key(&call.name, &call.arguments);
                     if successful_tool_call_keys.contains(&tool_call_key) {
-                        append_duplicate_tool_result(session, stream_tx, &call.id, &call.name);
+                        append_duplicate_tool_result(session, self, &call.id, &call.name);
                         continue;
                     }
                     if let Some(original_error) = failed_tool_call_keys.get(&tool_call_key).cloned()
@@ -737,7 +734,7 @@ impl TurnContext {
                         );
                         append_repeated_failed_tool_result(
                             session,
-                            stream_tx,
+                            self,
                             &call.id,
                             &call.name,
                             &structured_tool_failure_provider_text(&repeated_failure),
@@ -767,7 +764,7 @@ impl TurnContext {
                             &trust_mode,
                             (!args_summary.is_empty()).then_some(args_summary.as_str()),
                         );
-                        let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                        let _ = self.stream_tx.send(StreamEvent::ApprovalNeeded {
                             request_id: request_id.clone(),
                             tool_name: call.name.clone(),
                             args_summary: args_summary.clone(),
@@ -787,14 +784,14 @@ impl TurnContext {
                                     break ApprovalWaitOutcome::Decision(approved);
                                 }
                                 Some(Command::Shutdown) => {
-                                    let _ = stream_tx.send(StreamEvent::Error {
+                                    let _ = self.stream_tx.send(StreamEvent::Error {
                                         message: "已取消".into(),
                                     });
                                     merge_plugin_usage(&mut accumulated_usage);
                                     return accumulated_usage;
                                 }
                                 Some(Command::Cancel) | None => {
-                                    let _ = stream_tx.send(StreamEvent::Error {
+                                    let _ = self.stream_tx.send(StreamEvent::Error {
                                         message: "已取消".into(),
                                     });
                                     {
@@ -811,7 +808,7 @@ impl TurnContext {
                                     ) {
                                         Ok(input) => {
                                             break ApprovalWaitOutcome::CurrentInput(input);
-                                        }
+                                        },
                                         Err(err) => tracing::warn!(
                                             error = %err,
                                             "审批等待阶段追加用户消息持久化失败"
@@ -825,12 +822,11 @@ impl TurnContext {
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     self.defer_tool_injections(
                                         session,
-                                        stream_tx,
                                         std::iter::once((tool_name, payload)),
                                     );
                                 }
                                 Some(Command::CompressContext) => {
-                                    let _ = stream_tx.send(StreamEvent::AgentNotification {
+                                    let _ = self.stream_tx.send(StreamEvent::AgentNotification {
                                         agent_id: "system".to_string(),
                                         agent_label: "系统".to_string(),
                                         content:
@@ -841,12 +837,12 @@ impl TurnContext {
                                 }
                                 Some(Command::ResetContext) => {
                                     crate::core::reset_context_for_session(
-                                        session, stream_tx, self,
+                                        session, self,
                                     );
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let ev = *ev;
-                                    let _ = stream_tx.send(ev);
+                                    let _ = self.stream_tx.send(ev);
                                 }
                             }
                         };
@@ -893,7 +889,7 @@ impl TurnContext {
                             );
                             self.flush_deferred_tool_injections(session);
                             session.persist_to_disk();
-                            let _ = stream_tx.send(StreamEvent::ToolResult {
+                            let _ = self.stream_tx.send(StreamEvent::ToolResult {
                                 name: call.name.clone(),
                                 tool_call_id: Some(call.id.clone()),
                                 ok: false,
@@ -902,14 +898,14 @@ impl TurnContext {
                                 duration_ms: None,
                             });
                             merge_plugin_usage(&mut accumulated_usage);
-                            let _ = stream_tx.send(StreamEvent::Done {
+                            let _ = self.stream_tx.send(StreamEvent::Done {
                                 usage: Some(accumulated_usage.clone()),
                             });
                             return accumulated_usage;
                         }
                     }
 
-                    let _ = stream_tx.send(StreamEvent::ToolStart {
+                    let _ = self.stream_tx.send(StreamEvent::ToolStart {
                         name: call.name.clone(),
                         args_summary: args_summary.clone(),
                     });
@@ -927,21 +923,21 @@ impl TurnContext {
                                 match command {
                                     Some(Command::Approval { .. }) => {}
                                     Some(Command::EmitStreamEvent(event)) => {
-                                        let _ = stream_tx.send(*event);
-                                    }
+                                        let _ = self.stream_tx.send(*event);
+                                    },
                                     Some(Command::SetTrustMode(mode)) => {
                                         self.trust_mode = mode;
-                                    }
+                                    },
                                     Some(Command::Cancel) => {
                                         break None;
-                                    }
+                                    },
                                     Some(Command::Shutdown) => {
                                         break None;
-                                    }
+                                    },
                                     Some(command) => buffered_tool_commands.push(command),
                                     None => {
                                         break None;
-                                    }
+                                    },
                                 }
                             }
                         }
@@ -949,7 +945,7 @@ impl TurnContext {
                     drop(tool_future);
                     let Some(result) = result else {
                         let output = "工具调用因执行取消或会话关闭而中断。".to_string();
-                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                        let _ = self.stream_tx.send(StreamEvent::ToolResult {
                             name: call.name.clone(),
                             tool_call_id: Some(call.id.clone()),
                             ok: false,
@@ -961,7 +957,6 @@ impl TurnContext {
                         let buffered_effect = process_buffered_commands(
                             session,
                             self,
-                            stream_tx,
                             buffered_tool_commands,
                         );
                         if let PendingCommandEffect::MessagesInjected {
@@ -979,7 +974,7 @@ impl TurnContext {
                             continue 'outer;
                         }
                         merge_plugin_usage(&mut accumulated_usage);
-                        let _ = stream_tx.send(StreamEvent::Error {
+                        let _ = self.stream_tx.send(StreamEvent::Error {
                             message: "已取消".into(),
                         });
                         return accumulated_usage;
@@ -1004,7 +999,7 @@ impl TurnContext {
                         (!args_summary.is_empty()).then_some(args_summary.as_str()),
                         &result.summary,
                     );
-                    let _ = stream_tx.send(StreamEvent::ToolResult {
+                    let _ = self.stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         tool_call_id: Some(call.id.clone()),
                         ok: result.ok,
@@ -1039,7 +1034,6 @@ impl TurnContext {
                     match process_buffered_commands(
                         session,
                         self,
-                        stream_tx,
                         buffered_tool_commands,
                     ) {
                         PendingCommandEffect::Terminate => {
@@ -1089,7 +1083,7 @@ impl TurnContext {
                     let compression_cancelled =
                         maybe_update_context_summary(session, self, &response.usage, cmd_rx).await;
                     if compression_cancelled {
-                        emit_cancelled(stream_tx);
+                        emit_cancelled(&self.stream_tx);
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
                     }
@@ -1157,13 +1151,13 @@ impl TurnContext {
             // ── 总结阶段 ──
             // 内层工具执行阶段结束后，由主模型独立判断任务完成度并输出最终回复。
             let summary_result = self
-                .run_summary_phase(session, stream_tx, cmd_rx, outer_iteration + 1)
+                .run_summary_phase(session, cmd_rx, outer_iteration + 1)
                 .await;
             match summary_result {
                 SummaryPhaseResult::Completed(usage) => {
                     accumulated_usage.accumulate(&usage);
                     merge_plugin_usage(&mut accumulated_usage);
-                    let _ = stream_tx.send(StreamEvent::Done {
+                    let _ = self.stream_tx.send(StreamEvent::Done {
                         usage: Some(accumulated_usage.clone()),
                     });
                     return accumulated_usage;
@@ -1175,7 +1169,6 @@ impl TurnContext {
                         // 重入次数已达上限，强制输出最终回复。
                         self.force_final_response(
                             session,
-                            stream_tx,
                             cmd_rx,
                             ForceFinalReason::OuterLimit,
                         )
@@ -1218,7 +1211,6 @@ impl TurnContext {
                     persist_error(session, format!("总结阶段失败：{message}"));
                     self.force_final_response(
                         session,
-                        stream_tx,
                         cmd_rx,
                         ForceFinalReason::SummaryError,
                     )

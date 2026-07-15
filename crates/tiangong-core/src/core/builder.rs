@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use tiangong_types::SessionStreamEvent;
+
 
 use crate::core::TiangongCore;
 use crate::core::error::CoreError;
@@ -13,6 +13,7 @@ use crate::core::plugin::Plugin;
 use crate::core_config::CoreConfigProvider;
 use crate::permission::TrustMode;
 use crate::session::Session;
+use tiangong_types::StreamEvent;
 
 /// [`TiangongCore`] 的构造器。
 #[derive(Default)]
@@ -21,7 +22,7 @@ pub struct TiangongCoreBuilder {
     config: Option<CoreConfigProvider>,
     trust_mode: Option<TrustMode>,
     storage_root: Option<std::path::PathBuf>,
-    event_sender: Option<Sender<SessionStreamEvent>>,
+    event_sender: Option<Sender<StreamEvent>>,
     plugins: Vec<Arc<dyn Plugin>>,
 }
 
@@ -51,7 +52,7 @@ impl TiangongCoreBuilder {
     }
 
     /// 流式事件发送端（必填）。会话级,跨 turn,clone 给每个 turn task。
-    pub fn event_sender(mut self, sender: Sender<SessionStreamEvent>) -> Self {
+    pub fn event_sender(mut self, sender: Sender<StreamEvent>) -> Self {
         self.event_sender = Some(sender);
         self
     }

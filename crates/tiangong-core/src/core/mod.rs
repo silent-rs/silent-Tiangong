@@ -176,6 +176,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 let session_ready_fired = self.session_ready_fired.clone();
                 // stream_tx 直接用 core 的通道(发 StreamEvent 到 app 层)
                 let stream_tx = self.stream_tx.clone();
+                let run_stream_tx = stream_tx.clone();
 
                 let agent_config = crate::agent_config::AgentConfig {
                     trust_mode: config.trust_mode,
@@ -200,7 +201,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 let mut ctx = crate::turn_context::TurnContext::builder()
                     .client(client)
                     .session(session)
-                    .stream_tx(stream_tx)
+                    .stream_tx(stream_tx.clone())
                     .plugins(plugins)
                     .context_limit(config.context_limit)
                     .agent_config(agent_config)
@@ -212,10 +213,10 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     .build();
 
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-                let turn_stream_tx = ctx.stream_tx.clone();
+                let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
                 let accepted = accept_user_message(
-                    &mut ctx.session,
-                    &turn_stream_tx,
+                    &mut session,
+                    &ctx,
                     Some(message_id),
                     prepared,
                     true,
@@ -224,6 +225,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     tracing::warn!(%error, "持久化本轮用户消息失败");
                     CoreError::WorkerStopped
                 })?;
+                ctx.session = session;
 
                 crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
                     if !session_ready_fired.swap(true, Ordering::AcqRel) {
@@ -337,7 +339,12 @@ async fn run_turn(
     }
 
     let interrupted_tools =
-        crate::react::message::close_unfinished_tool_calls_for_turn(&mut ctx.session);
+        {
+        let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
+        let result = crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
+        ctx.session = session;
+        result
+    };
     if !interrupted_tools.is_empty() {
         for (tool_call_id, tool_name, output) in interrupted_tools {
             let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -356,7 +363,11 @@ async fn run_turn(
         }
     }
 
-    crate::react::message::flush_deferred_tool_injections(&mut ctx.session, &ctx);
+    {
+        let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
+        crate::react::message::flush_deferred_tool_injections(&mut session, &ctx);
+        ctx.session = session;
+    }
 
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let mut status = TurnOutcome::from_terminal(&terminal).status;

@@ -175,7 +175,6 @@ impl TurnContext {
                         Some(Command::ResetContext) => {
                             crate::core::reset_context_for_session(
                                 session,
-                                stream_tx,
                                 self,
                             );
                         }
@@ -205,8 +204,8 @@ impl TurnContext {
                                 Err(e) if e.is_cancelled() => {
                                     sink.finish();
                                     persist_partial_summary(
+                                        self,
                                         session,
-                                        stream_tx,
                                         &pending_msg_id,
                                         &streamed_text,
                                         &streamed_reasoning,
@@ -229,8 +228,8 @@ impl TurnContext {
 
         if let Some(current_agent_input) = summary_interruption {
             persist_partial_summary(
+                self,
                 session,
-                stream_tx,
                 &pending_msg_id,
                 &streamed_text,
                 &streamed_reasoning,
@@ -254,8 +253,8 @@ impl TurnContext {
             Ok(response) => response,
             Err(err) => {
                 persist_partial_summary(
+                    self,
                     session,
-                    stream_tx,
                     &pending_msg_id,
                     &streamed_text,
                     &streamed_reasoning,
@@ -442,6 +441,7 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
 }
 
 fn persist_partial_summary(
+    ctx: &crate::turn_context::TurnContext,
     session: &mut Session,
     message_id: &str,
     text: &str,
@@ -460,7 +460,7 @@ fn persist_partial_summary(
     if let Err(error) = session.try_persist_to_disk() {
         tracing::warn!(%error, "持久化部分总结响应失败");
     }
-    crate::react::message::emit_session_message_upsert(session, self, message_id);
+    crate::react::message::emit_session_message_upsert(session, ctx, message_id);
 }
 
 #[cfg(test)]
@@ -850,6 +850,7 @@ impl TurnContext {
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         reason: ForceFinalReason,
     ) -> bool {
+        let stream_tx = &self.stream_tx;
         // 确保 system prompt 已构建
         if session.system_prompt_message.is_none() {
             rebuild_system_prompt(session, self);
@@ -887,7 +888,7 @@ impl TurnContext {
         let pending_msg_id = scru128::new().to_string();
 
         let resp = match self
-            .run_text_finalization_llm(session, &req, &pending_msg_id, stream_tx, cmd_rx)
+            .run_text_finalization_llm(session, &req, &pending_msg_id, cmd_rx)
             .await
         {
             Some(r) => r,
@@ -902,7 +903,6 @@ impl TurnContext {
 
         if !self.commit_summary_message(
             session,
-            stream_tx,
             &pending_msg_id,
             &resp,
             "force_final_response",
@@ -999,6 +999,7 @@ impl TurnContext {
         resp: &crate::model::ModelFunctionResponse,
         usage_source: &str,
     ) -> bool {
+        let stream_tx = &self.stream_tx;
         session.append_message_with_id(
             pending_msg_id.to_string(),
             MessageRole::Assistant,
