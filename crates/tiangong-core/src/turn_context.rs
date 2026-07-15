@@ -32,6 +32,8 @@ pub struct TurnContext {
     pub agent_config: AgentConfig,
     /// 会话信任模式（FullTrust 放行一切,否则需审批;审批在 turn 层统一完成）
     pub trust_mode: crate::permission::TrustMode,
+    /// 观测器（审计日志写入,持有 storage_root）
+    pub observer: crate::observe::Observer,
     /// 工具覆盖处理器（会话级共享 Arc）
     pub tool_overrides: Arc<Mutex<HashMap<String, Arc<dyn ToolOverrideHandler>>>>,
     /// Plugin 注册的 Prompt 段落提供者（会话级共享 Arc,供 rebuild_system_prompt 收集）
@@ -59,6 +61,7 @@ impl TurnContext {
         context_limit: usize,
         agent_config: AgentConfig,
         trust_mode: crate::permission::TrustMode,
+        observer: crate::observe::Observer,
         tools: Vec<ToolSpec>,
         max_tool_rounds: usize,
         max_outer_iterations: u32,
@@ -69,6 +72,7 @@ impl TurnContext {
             context_limit,
             agent_config,
             trust_mode,
+            observer,
             tool_overrides: Arc::new(Mutex::new(HashMap::new())),
             prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
             turn_usage_sink,

@@ -1452,7 +1452,7 @@ fn build_context_from_config(
 ) -> crate::turn_context::TurnContext {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
-    use crate::react::engine::TurnContext;
+    use crate::turn_context::TurnContext;
 
     let agent_config = AgentConfig {
         trust_mode: config.trust_mode,
@@ -1472,7 +1472,7 @@ fn build_context_from_config(
             });
         });
 
-    crate::storage::set_storage_root(storage_root);
+    crate::storage::set_storage_root(storage_root.clone());
 
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
@@ -1481,6 +1481,7 @@ fn build_context_from_config(
         context_limit,
         agent_config,
         trust_mode,
+        crate::observe::Observer::new(storage_root),
         Vec::new(),
         MAX_TOOL_ROUNDS,
         MAX_OUTER_ITERATIONS,

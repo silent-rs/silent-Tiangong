@@ -23,6 +23,7 @@ pub(crate) fn test_runtime(base_url: String) -> TurnContext {
         100_000,
         AgentConfig::default(),
         TrustMode::FullTrust,
+        crate::observe::Observer::new(std::path::PathBuf::from("/tmp/tiangong-test")),
         Vec::new(),
         2,
         1,

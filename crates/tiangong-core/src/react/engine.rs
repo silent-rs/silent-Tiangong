@@ -12,7 +12,6 @@ use crate::context::assembler::filter_background_task_tools;
 use crate::core::command::{Command, PendingCommandEffect};
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{ModelRequest, TokenUsage, ToolSpec};
-use crate::observe::{audit_permission_with_context, audit_tool_execution};
 use crate::permission::TrustMode;
 use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
@@ -753,7 +752,7 @@ impl TurnContext {
                     let trust_mode = format!("{:?}", self.trust_mode);
                     if self.trust_mode == TrustMode::FullTrust {
                         // FullTrust 放行一切：记录审批通过的审计后直接执行工具。
-                        audit_permission_with_context(
+                        self.observer.audit_permission(
                             &session.id,
                             &call.name,
                             "approved",
@@ -763,7 +762,7 @@ impl TurnContext {
                     } else {
                         // 非 FullTrust：统一走审批流程（发 ApprovalNeeded 事件 + 阻塞等待用户决策）。
                         let request_id = scru128::new().to_string();
-                        audit_permission_with_context(
+                        self.observer.audit_permission(
                             &session.id,
                             &call.name,
                             "needs_approval",
@@ -879,7 +878,7 @@ impl TurnContext {
                         };
 
                         if !approved {
-                            audit_tool_execution(
+                            self.observer.audit_tool_execution(
                                 &session.id,
                                 &call.name,
                                 false,
@@ -1006,7 +1005,7 @@ impl TurnContext {
                         None,
                     );
 
-                    audit_tool_execution(
+                    self.observer.audit_tool_execution(
                         &session.id,
                         &call.name,
                         result.ok,
