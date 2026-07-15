@@ -6,7 +6,6 @@ use crate::agent_config::AgentConfig;
 use crate::model::{ModelClient, SingleProviderClient, TokenUsage};
 use crate::models_config::ModelsConfig;
 use crate::planner::TaskPlan;
-use crate::session::Session;
 use crate::tool::ToolExecutionRecord;
 use crate::tool_override::ToolOverrideHandler;
 

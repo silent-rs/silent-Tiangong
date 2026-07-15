@@ -33,4 +33,3 @@ pub use feedback::{PluginFeedback, PluginFeedbackTx, TurnUsageGuard, TurnUsageSi
 pub use trait_def::Plugin;
 
 pub(crate) use injection::injection_tool_spec;
-pub(crate) use registry::register_plugin;

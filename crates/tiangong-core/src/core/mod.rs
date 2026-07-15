@@ -1452,63 +1452,7 @@ fn build_context_from_config(
 ) -> crate::turn_context::TurnContext {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
-    use crate::models_config::{
-        ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
-    };
-    use crate::turn_context::TurnContext;
-
-    // CoreConfig.llm 只含 chat + lite 扁平端点；此处重建一个最小 ModelsConfig
-    // 供 ctx.models_config() / chat_is_multimodal() 使用。
-    // 注意：LlmConfig 不携带 capability 信息，因此重建结果只声明 Chat 能力
-    //（与原 from_llm_config 行为一致）——chat_is_multimodal 在此路径恒为 false。
-    // GUI/Server 入口不经此函数，它们直接用完整 ModelsConfig 构造 TurnContext。
-    let mut providers = std::collections::HashMap::new();
-    let mut routing = std::collections::HashMap::new();
-    providers.insert(
-        "chat-provider".to_string(),
-        ProviderConfig {
-            base_url: config.llm.chat.base_url.clone(),
-            api_key: config.llm.chat.api_key.clone(),
-            timeout_ms: config.llm.chat.timeout_ms,
-            protocol: config.llm.chat.protocol,
-        },
-    );
-    routing.insert(
-        RoutingSlot::Chat,
-        ModelEntry {
-            provider: "chat-provider".to_string(),
-            model: config.llm.chat.model.clone(),
-            capabilities: vec![ModelCapability::Chat],
-            options: config.llm.chat.options.clone(),
-            context_window: None,
-        },
-    );
-    if let Some(ref lite) = config.llm.lite {
-        providers.insert(
-            "lite-provider".to_string(),
-            ProviderConfig {
-                base_url: lite.base_url.clone(),
-                api_key: lite.api_key.clone(),
-                timeout_ms: lite.timeout_ms,
-                protocol: lite.protocol,
-            },
-        );
-        routing.insert(
-            RoutingSlot::Lite,
-            ModelEntry {
-                provider: "lite-provider".to_string(),
-                model: lite.model.clone(),
-                capabilities: vec![ModelCapability::Chat],
-                options: lite.options.clone(),
-                context_window: None,
-            },
-        );
-    }
-    let models_config = ModelsConfig {
-        providers,
-        models: std::collections::HashMap::new(),
-        routing,
-    };
+    use crate::react::engine::TurnContext;
 
     let agent_config = AgentConfig {
         trust_mode: config.trust_mode,

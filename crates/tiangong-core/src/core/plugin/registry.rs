@@ -26,7 +26,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::core::command::Command;
 use crate::core::plugin::feedback::PluginFeedbackTx;
 use crate::model::ToolSpec;
-use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
+use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler};
 use crate::turn_context::TurnContext;
 
 use super::trait_def::Plugin;
