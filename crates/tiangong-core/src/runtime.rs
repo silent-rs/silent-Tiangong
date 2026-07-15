@@ -127,7 +127,7 @@ impl RuntimeEngine {
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
-        storage_root: std::path::PathBuf,
+        _storage_root: std::path::PathBuf,
     ) -> Self {
         Self {
             client,
@@ -150,7 +150,7 @@ impl RuntimeEngine {
         context_limit: usize,
         agent_config: AgentConfig,
         trust_mode: crate::permission::TrustMode,
-        storage_root: std::path::PathBuf,
+        _storage_root: std::path::PathBuf,
     ) -> Self {
         let _ = trust_mode;
         Self {

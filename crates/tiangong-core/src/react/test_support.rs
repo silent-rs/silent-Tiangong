@@ -19,6 +19,7 @@ pub(crate) fn test_runtime(base_url: String) -> TurnContext {
     });
     let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
     TurnContext::new(
+        crate::session::Session::new("test"),
         client,
         100_000,
         AgentConfig::default(),

@@ -12,7 +12,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::{accept_user_message, append_runtime_tool_message};
+use crate::react::message::accept_user_message;
 use crate::session::{MessageRole, Session};
 use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 
@@ -390,7 +390,7 @@ async fn worker_loop_async(
             } => {
                 // 每 turn 现建 TurnContext + 注册插件 + 触发 on_session_ready（仅首次）。
                 // client 在 turn 结束时 drop，不跨 turn 复用。
-                let (ctx, _tools) = build_turn_context(
+                let (mut ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     trust_mode,
@@ -597,6 +597,9 @@ async fn worker_loop_async(
                 // 取到 Command::Shutdown 即 break。
 
                 // 反刍（Micro/Meta）已下沉到 memory 插件 on_turn_finished 钩子。
+
+                // session 从 TurnContext 取回,后续 idle 命令(InjectTool 等)继续使用。
+                session = session;
             }
             Command::Cancel => {
                 // 活跃执行会在 select!/drain 中消费 Cancel 并终止 turn；
@@ -659,7 +662,7 @@ async fn worker_loop_async(
                 }
             }
             Command::CompressContext => {
-                let (ctx, _tools) = build_turn_context(
+                let (mut ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     trust_mode,
@@ -675,7 +678,7 @@ async fn worker_loop_async(
                 continue;
             }
             Command::ResetContext => {
-                let (ctx, _tools) = build_turn_context(
+                let (mut ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     trust_mode,
@@ -1284,7 +1287,6 @@ async fn execute_turn_async(
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     session_id: &str,
 ) {
-    // 复用已构建的 TurnContext,只覆盖 agent_id（Core 的执行身份 = Session ID）。
     let mut turn_ctx = ctx.clone();
     turn_ctx.agent_id = session_id.to_string();
     turn_ctx
@@ -1442,6 +1444,7 @@ fn build_context_from_config(
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
     let ctx = TurnContext::new(
+        Session::new("placeholder"),
         SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,

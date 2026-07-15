@@ -26,6 +26,8 @@ use crate::tool_override::ToolOverrideHandler;
 pub struct TurnContext {
     /// 模型请求客户端
     pub client: SingleProviderClient,
+    /// 本轮会话（turn 期间独占,turn 结束时取回落盘）
+    pub session: Session,
     /// 上下文 token 上限
     pub context_limit: usize,
     /// Agent 配置（reasoning_effort 等）
@@ -57,6 +59,7 @@ pub struct TurnContext {
 impl TurnContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        session: Session,
         client: SingleProviderClient,
         context_limit: usize,
         agent_config: AgentConfig,
@@ -69,6 +72,7 @@ impl TurnContext {
     ) -> Self {
         Self {
             client,
+            session,
             context_limit,
             agent_config,
             trust_mode,

@@ -18,7 +18,7 @@ use crate::react::context::{
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::{Message, MessageRole, Session, now_text};
+use crate::session::{Message, MessageRole, Session};
 use crate::stream_throttle::ThrottledStreamSink;
 use crate::turn_context::TurnContext;
 use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
