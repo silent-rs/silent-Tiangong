@@ -13,9 +13,12 @@ use std::time::Duration;
 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::core::command::Command;
+use crate::core::plugin::PluginFeedbackTx;
+use crate::turn_context::TurnContext;
 
 /// 共享 runtime 的 worker 线程数。
 const WORKER_THREADS: usize = 2;
@@ -60,39 +63,56 @@ pub fn shared_runtime() -> &'static Runtime {
     })
 }
 
-/// Spawn 一个 turn task,创建专属的命令通道并注册到 turn_tasks。
+/// 为已经构建完成的 [`TurnContext`] 创建命令通道并 Spawn turn task。
 ///
-/// `fut_fn` 接收 cmd_rx(用于在 turn 内消费 Cancel/Approval/InjectTool)。
+/// 本函数先把本轮 feedback 通道注入 Context 中的插件，再调用 `future_factory`
+/// 同步完成任务启动前的准备并生成 Future。只有上述步骤全部成功后才注册并启动任务，
+/// 避免留下半初始化运行态。
 ///
 /// turn task 正常结束或被 abort 后,wrapper 会立即调 `remove_turn` 清理。
 /// panic 的 task 由 GC task 定期清理。
-pub fn spawn_turn<F, Fut>(session_id: String, fut_fn: F)
+pub fn spawn_turn<F, Fut>(
+    context: TurnContext,
+    future_factory: F,
+) -> Result<(), crate::core::CoreError>
 where
-    F: FnOnce(UnboundedReceiver<Command>) -> Fut + Send + 'static,
+    F: FnOnce(TurnContext, UnboundedReceiver<Command>) -> Result<Fut, crate::core::CoreError>,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    let session_id = context.session.id.clone();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let usage_sink = context.turn_usage_sink().clone();
+    for plugin in &context.plugins {
+        plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx.clone(), usage_sink.clone()));
+    }
+    let future = future_factory(context, cmd_rx)?;
+
+    let (start_tx, start_rx) = oneshot::channel();
     let sid = session_id.clone();
     let handle = shared_runtime().spawn(async move {
-        fut_fn(cmd_rx).await;
-        // 正常结束或 abort → 立即清理
+        if start_rx.await.is_ok() {
+            future.await;
+        }
         remove_turn(&sid);
     });
-    if let Ok(mut tasks) = turn_tasks().lock() {
-        tasks.insert(session_id, (cmd_tx, handle));
-    }
+    turn_tasks()
+        .lock()
+        .map_err(|_| crate::core::CoreError::WorkerStopped)?
+        .insert(session_id, (cmd_tx, handle));
+    start_tx
+        .send(())
+        .map_err(|_| crate::core::CoreError::WorkerStopped)
 }
 
 /// 向活跃 turn task 发送命令(Cancel/Approval/InjectTool)。
 ///
 /// 无活跃 turn task 时返回 false(命令被忽略)。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
-    if let Ok(tasks) = turn_tasks().lock() {
-        if let Some((tx, handle)) = tasks.get(session_id) {
-            if !handle.is_finished() {
-                return tx.send(cmd).is_ok();
-            }
-        }
+    if let Ok(tasks) = turn_tasks().lock()
+        && let Some((tx, handle)) = tasks.get(session_id)
+        && !handle.is_finished()
+    {
+        return tx.send(cmd).is_ok();
     }
     false
 }

@@ -44,6 +44,7 @@ futures-util = { workspace = true }
 http = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+typed-builder = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
 tiangong-media = { workspace = true }
 tempfile = { workspace = true }

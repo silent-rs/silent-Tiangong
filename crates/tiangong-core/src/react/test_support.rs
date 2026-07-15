@@ -18,18 +18,24 @@ pub(crate) fn test_runtime(base_url: String) -> TurnContext {
         ..Default::default()
     });
     let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
-    TurnContext::new(
-        crate::session::Session::new("test"),
-        client,
-        100_000,
-        AgentConfig::default(),
-        TrustMode::FullTrust,
-        crate::observe::Observer::new(std::path::PathBuf::from("/tmp/tiangong-test")),
-        Vec::new(),
-        2,
-        1,
-        usage_sink,
-    )
+    let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+    TurnContext::builder()
+        .client(client)
+        .session(crate::session::Session::new("test"))
+        .stream_tx(stream_tx)
+        .plugins(Vec::new())
+        .context_limit(100_000)
+        .agent_config(AgentConfig::default())
+        .trust_mode(TrustMode::FullTrust)
+        .observer(crate::observe::Observer::new(std::path::PathBuf::from(
+            "/tmp/tiangong-test",
+        )))
+        .tool_overrides(std::collections::HashMap::new())
+        .turn_usage_sink(usage_sink)
+        .tools(Vec::new())
+        .max_tool_rounds(2)
+        .max_outer_iterations(1)
+        .build()
 }
 
 pub(crate) enum MockResponse {

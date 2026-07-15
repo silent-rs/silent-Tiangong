@@ -190,11 +190,6 @@ impl TurnContext {
                         Some(Command::SetTrustMode(mode)) => {
                             self.trust_mode = mode;
                         }
-                        Some(Command::Message { .. })
-                        | Some(Command::Shutdown)
-                        | Some(Command::InjectTool { .. })
-                        | Some(Command::CompressContext)
-                        | Some(Command::ResetContext) => {}
                     }
                 }
                 chunk_opt = chunk_rx.recv() => {

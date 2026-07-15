@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::{CoreStorageLocation, TiangongCore};
+use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::Session;
 use tiangong_types::{SessionStreamEvent, StreamEvent};
@@ -14,13 +14,19 @@ fn main() {
     let storage_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".tiangong");
-    // session 由调用方创建后传入，core 不再持有产品文案。
+    let mut session = Session::new("测试");
+    session.bind_storage_root(storage_root.clone());
+    session
+        .try_persist_to_disk()
+        .expect("初始 Session 应保存成功");
+    // Core 只持有会话 ID，实际 Session 在每轮开始时从存储中加载。
     let core = TiangongCore::builder()
+        .session_id(session.id.clone())
         .config(config)
-        .session(Session::new("测试"))
+        .trust_mode(session.trust_mode)
+        .storage_root(storage_root)
         .event_sender(tx)
         .plugins(Vec::new())
-        .storage(CoreStorageLocation::new(storage_root))
         .build()
         .expect("Builder 必填字段已齐");
 

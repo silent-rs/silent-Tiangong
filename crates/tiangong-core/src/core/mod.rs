@@ -11,18 +11,11 @@ use std::thread::{self};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
-use crate::model::{SingleProviderClient, ToolSpec};
-use crate::react::message::accept_user_message;
+use crate::model::SingleProviderClient;
+use crate::react::message::{AcceptedUserMessage, accept_user_message};
 use crate::session::{MessageRole, Session};
 use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 
-/// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
-///
-/// 30 轮：review 类多步骤任务（连续读取多个文件做审查）在 15 轮时容易触顶，
-/// 过早进入总结阶段。30 轮给复杂任务更多空间；触顶后仍走与正常完成相同的总结
-/// 路径（由模型自行判断完成度），无需特殊触顶逻辑。
-
-/// 总结阶段后重新进入工具执行阶段的最大次数。
 pub mod command;
 pub(crate) use command::Command;
 pub mod plugin;
@@ -87,8 +80,9 @@ impl TiangongCore {
 
     /// 向活跃 turn task 发送命令(无活跃 task 则忽略)。
     fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
-        crate::shared_runtime::send_command(&self.session_id, cmd);
-        Ok(())
+        crate::shared_runtime::send_command(&self.session_id, cmd)
+            .then_some(())
+            .ok_or(CoreError::WorkerStopped)
     }
 
     pub fn session_id(&self) -> &str {
@@ -154,72 +148,104 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 prepared,
                 message_id,
             }) => {
+                // 如果有活跃 turn task,先取消并等待结束
+                if crate::shared_runtime::is_running(&self.session_id) {
+                    crate::shared_runtime::send_command(&self.session_id, Command::Cancel);
+                    // 等待 task 结束(轮询,最多 5 秒)
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while crate::shared_runtime::is_running(&self.session_id) {
+                        if std::time::Instant::now() > deadline {
+                            tracing::warn!(session_id = %self.session_id, "等待上一轮 turn 结束超时");
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+
                 let session_id = self.session_id.clone();
-
-                // 1. 从磁盘加载 session
-                let mut session = Session::load_from_storage(&self.storage_root, &session_id)
-                    .map_err(|e| CoreError::WorkerStopped)?;
-
-                // 2. 内部 stream 通道(per-turn forwarder)
+                let session = Session::load_from_storage(&self.storage_root, &session_id).map_err(
+                    |error| {
+                        tracing::warn!(%error, %session_id, "加载本轮 Session 失败");
+                        CoreError::WorkerStopped
+                    },
+                )?;
+                let trust_mode = *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner());
+                let config = (*self.config.snapshot()).clone();
+                let storage_root = self.storage_root.clone();
+                let plugins = self.plugins.clone();
+                let session_ready_fired = self.session_ready_fired.clone();
+                // 内部 stream 通道:core 发 StreamEvent → forwarder 包装 session_id → external_tx
                 let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-
-                // 3. 将用户消息注入 session 并落盘
-                let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
-                let accepted =
-                    accept_user_message(&mut session, &stream_tx, Some(message_id), prepared, true)
-                        .map_err(|e| CoreError::WorkerStopped)?;
-                let turn_start_idx = accepted.turn_start_idx;
-                let user_msg_id = accepted.message_id.clone();
-                let accepted_prepared = accepted.prepared.clone();
-
-                // 4. 构建 TurnContext(session 在其中)
-                let trust_mode = self
-                    .trust_mode
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .clone();
-                let mut session_ready_flag = self
-                    .session_ready_fired
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let (turn_cmd_tx, turn_cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-                let mut session_ready_flag = self
-                    .session_ready_fired
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let (mut ctx, _tools) = build_turn_context(
-                    &self.config,
-                    &stream_tx,
-                    trust_mode,
-                    &self.storage_root,
-                    &self.plugins,
-                    turn_cmd_tx.clone(),
-                    &mut session,
-                    &mut session_ready_flag,
-                );
-                self.session_ready_fired
-                    .store(session_ready_flag, std::sync::atomic::Ordering::Relaxed);
-
-                // session 现在在 ctx 内,TurnContext 持有它
                 let external_tx = self.external_tx.clone();
 
-                // 5. spawn turn task(传入 ctx + 执行参数)
-                let (turn_cmd_tx, turn_cmd_rx) = tokio_mpsc::unbounded_channel::<Command>();
-                let sid = session_id.clone();
-                crate::shared_runtime::spawn_turn(session_id, move |_ignored_rx| async move {
-                    run_turn(
-                        sid,
-                        ctx,
-                        stream_tx,
-                        stream_rx,
-                        external_tx,
-                        turn_cmd_rx,
-                        turn_start_idx,
-                        user_msg_id,
-                    )
-                    .await;
-                });
-                // turn_cmd_tx 被 drop 后通道关闭;Cancel 等命令通过 send_command 投递
-                std::mem::forget(turn_cmd_tx); // TODO: turn_cmd_tx 应该存到 TURN_TASKS
-                Ok(())
+                let agent_config = crate::agent_config::AgentConfig {
+                    trust_mode: config.trust_mode,
+                    default_trust_mode: config.default_trust_mode,
+                    custom_system_prompt: config.custom_system_prompt.clone(),
+                    reasoning_effort: config.reasoning_effort.clone(),
+                };
+                let retry_tx = stream_tx.clone();
+                let on_retry: crate::model::OnRetryCallback =
+                    Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+                        let _ = retry_tx.send(StreamEvent::Retry {
+                            message: error_text.to_string(),
+                            attempt,
+                            max_attempts,
+                        });
+                    });
+                let client =
+                    SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
+                let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
+                let prepared_plugins =
+                    crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
+                let mut ctx = crate::turn_context::TurnContext::builder()
+                    .client(client)
+                    .session(session)
+                    .stream_tx(stream_tx)
+                    .plugins(plugins)
+                    .context_limit(config.context_limit)
+                    .agent_config(agent_config)
+                    .trust_mode(trust_mode)
+                    .observer(crate::observe::Observer::new(storage_root))
+                    .tool_overrides(prepared_plugins.tool_overrides)
+                    .turn_usage_sink(usage_sink)
+                    .tools(prepared_plugins.tools)
+                    .build();
+
+                let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
+                let turn_stream_tx = ctx.stream_tx.clone();
+                let accepted = accept_user_message(
+                    &mut ctx.session,
+                    &turn_stream_tx,
+                    Some(message_id),
+                    prepared,
+                    true,
+                )
+                .map_err(|error| {
+                    tracing::warn!(%error, "持久化本轮用户消息失败");
+                    CoreError::WorkerStopped
+                })?;
+
+                crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
+                    if !session_ready_fired.swap(true, Ordering::AcqRel) {
+                        for plugin in &ctx.plugins {
+                            plugin.on_session_ready(&mut ctx.session);
+                        }
+                    }
+                    let prompt_sections = ctx
+                        .plugins
+                        .iter()
+                        .flat_map(|plugin| plugin.prompt_sections())
+                        .collect();
+                    ctx.session.rebuild_system_prompt(
+                        &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
+                    );
+                    ctx.session.try_persist_to_disk().map_err(|error| {
+                        tracing::warn!(%error, "持久化本轮系统提示失败");
+                        CoreError::WorkerStopped
+                    })?;
+                    Ok(run_turn(ctx, cmd_rx, stream_rx, external_tx, accepted))
+                })
             }
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
                 tool_name: tool.tool_name().to_string(),
@@ -252,20 +278,17 @@ impl Drop for TiangongCore {
 ///
 /// TurnContext(session + 用户消息已注入)在 deliver 中构建,传入此处执行。
 /// turn 结束后 session 落盘,task 退出。
-#[allow(clippy::too_many_arguments)]
 async fn run_turn(
-    session_id: String,
     mut ctx: crate::turn_context::TurnContext,
-    stream_tx: StdSender<StreamEvent>,
+    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
     stream_rx: std::sync::mpsc::Receiver<StreamEvent>,
     external_tx: Sender<SessionStreamEvent>,
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    turn_start_idx: usize,
-    user_msg_id: String,
+    accepted: AcceptedUserMessage,
 ) {
-    // ===== per-turn forwarder + 屏障 =====
+    let stream_tx = ctx.stream_tx.clone();
+    let session_id = ctx.session.id.clone();
+
     let fwd_session_id = session_id.clone();
-    let fwd_tx = external_tx.clone();
     let turn_capture = Arc::new(TurnCaptureState {
         capture: Mutex::new(TurnCapture::default()),
         notify: tokio::sync::Notify::new(),
@@ -274,7 +297,6 @@ async fn run_turn(
     let forward_terminal = Arc::new(AtomicBool::new(false));
     let fwd_terminal = forward_terminal.clone();
     let mut turn_boundary_id = 0u64;
-
     let forward_handle = thread::spawn(move || {
         let mut external_open = true;
         while let Ok(event) = stream_rx.recv() {
@@ -284,28 +306,24 @@ async fn run_turn(
                 source,
                 ..
             } = &event
+                && let Ok(mut capture) = fwd_capture.capture.lock()
             {
-                if let Ok(mut capture) = fwd_capture.capture.lock() {
-                    capture.usage.record(usage, agent_id.as_deref(), source);
-                }
+                capture.usage.record(usage, agent_id.as_deref(), source);
             }
             match event {
                 StreamEvent::TurnBoundary { boundary_id } => {
                     if let Ok(mut capture) = fwd_capture.capture.lock() {
                         capture.processed_boundary = capture.processed_boundary.max(boundary_id);
                     }
-                    fwd_capture.notify.notify_waiters();
-                    continue;
+                    fwd_capture.notify.notify_one();
                 }
                 terminal @ (StreamEvent::Done { .. } | StreamEvent::Error { .. }) => {
                     if !fwd_terminal.swap(false, Ordering::AcqRel) {
                         if let Ok(mut capture) = fwd_capture.capture.lock() {
                             capture.terminal = Some(terminal);
                         }
-                        continue;
-                    }
-                    if external_open
-                        && fwd_tx
+                    } else if external_open
+                        && external_tx
                             .send(SessionStreamEvent {
                                 session_id: fwd_session_id.clone(),
                                 event: terminal,
@@ -314,24 +332,26 @@ async fn run_turn(
                     {
                         external_open = false;
                     }
-                    continue;
                 }
-                _ => {}
-            }
-            if external_open
-                && fwd_tx
-                    .send(SessionStreamEvent {
-                        session_id: fwd_session_id.clone(),
-                        event,
-                    })
-                    .is_err()
-            {
-                external_open = false;
+                event => {
+                    if external_open
+                        && external_tx
+                            .send(SessionStreamEvent {
+                                session_id: fwd_session_id.clone(),
+                                event,
+                            })
+                            .is_err()
+                    {
+                        external_open = false;
+                    }
+                }
             }
         }
     });
 
-    // ===== execute turn =====
+    let turn_start_idx = accepted.turn_start_idx;
+    let user_msg_id = accepted.message_id;
+    let prepared = accepted.prepared;
     let turn_started = std::time::Instant::now();
     let turn_start_cwd = ctx.session.cwd.clone();
     forward_terminal.store(false, Ordering::Release);
@@ -339,49 +359,41 @@ async fn run_turn(
         capture.terminal = None;
         capture.usage = TurnUsageCapture::default();
     }
+    for plugin in &ctx.plugins {
+        plugin.on_turn_started(&mut ctx.session, turn_start_idx);
+    }
 
-    // on_turn_started(session 在 ctx 内)
-    let plugins = ctx.tools.clone(); // TODO: plugins 需要单独传入或从 ctx 获取
-    // 插件钩子需要 &mut session — 从 ctx 借用
     let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-
     execute_turn_async(
         &mut session,
         &user_msg_id,
-        &[],
-        &ctx,
+        &prepared,
+        &mut ctx,
         &stream_tx,
         &mut cmd_rx,
-        &session_id,
     )
     .await;
+    ctx.session = session;
 
-    // ===== 等终态 =====
-    turn_boundary_id = turn_boundary_id.wrapping_add(1);
-    let boundary_id = turn_boundary_id;
-    let _ = stream_tx.send(StreamEvent::TurnBoundary { boundary_id });
-    let mut terminal = loop {
-        {
-            let mut capture = turn_capture
-                .capture
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if capture.processed_boundary >= boundary_id {
-                break capture.terminal.take();
-            }
-        }
-        turn_capture.notify.notified().await;
-    }
-    .unwrap_or(StreamEvent::Done { usage: None });
+    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
+    let mut terminal = turn_capture
+        .capture
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .terminal
+        .take()
+        .unwrap_or(StreamEvent::Done { usage: None });
 
-    if session.cwd != turn_start_cwd {
-        let workspace_path = std::path::PathBuf::from(&session.cwd);
+    if ctx.session.cwd != turn_start_cwd {
+        let workspace_path = std::path::PathBuf::from(&ctx.session.cwd);
         let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
-        // TODO: plugin.set_workspace
+        for plugin in &ctx.plugins {
+            plugin.set_workspace(workspace);
+        }
     }
 
     let interrupted_tools =
-        crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
+        crate::react::message::close_unfinished_tool_calls_for_turn(&mut ctx.session);
     if !interrupted_tools.is_empty() {
         for (tool_call_id, tool_name, output) in interrupted_tools {
             let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -400,9 +412,30 @@ async fn run_turn(
         }
     }
 
-    crate::react::message::flush_deferred_tool_injections(&mut session, &stream_tx);
+    crate::react::message::flush_deferred_tool_injections(&mut ctx.session, &stream_tx);
 
-    // on_turn_finished — TODO: 需要 plugins 引用
+    let elapsed_ms = turn_started.elapsed().as_millis() as u64;
+    let mut status = TurnOutcome::from_terminal(&terminal).status;
+
+    if status == tiangong_types::TurnStatus::Cancelled {
+        for plugin in &ctx.plugins {
+            plugin.on_cancel(&mut ctx.session).await;
+        }
+    }
+
+    let mut user_msg_updated = false;
+    if let Some(msg) = ctx
+        .session
+        .messages
+        .iter_mut()
+        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
+    {
+        msg.set_turn_result(elapsed_ms, status);
+        user_msg_updated = true;
+    }
+    for plugin in &ctx.plugins {
+        plugin.on_turn_finished(&mut ctx.session, turn_start_idx);
+    }
 
     wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
     let turn_usage = {
@@ -412,24 +445,27 @@ async fn run_turn(
             .unwrap_or_else(|poison| poison.into_inner());
         std::mem::take(&mut capture.usage)
     };
-    turn_usage.apply_to_session(&mut session);
-    session.clear_transient_content();
+    turn_usage.apply_to_session(&mut ctx.session);
+    ctx.session.clear_transient_content();
 
-    let elapsed_ms = turn_started.elapsed().as_millis() as u64;
-    let mut status = TurnOutcome::from_terminal(&terminal).status;
-
-    if status == tiangong_types::TurnStatus::Cancelled {
-        // TODO: plugin.on_cancel
+    if let Err(error) = ctx.session.try_persist_to_disk() {
+        terminal = StreamEvent::Error {
+            message: format!("最终会话持久化失败：{error}"),
+        };
+        status = tiangong_types::TurnStatus::Failed;
+        if let Some(msg) = ctx
+            .session
+            .messages
+            .iter_mut()
+            .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
+        {
+            msg.set_turn_result(elapsed_ms, status);
+        }
+        let _ = ctx.session.try_persist_to_disk();
     }
-
-    if let Some(msg) = session
-        .messages
-        .iter_mut()
-        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
-    {
-        msg.set_turn_result(elapsed_ms, status);
+    if user_msg_updated {
+        crate::react::message::emit_session_message_upsert(&ctx.session, &stream_tx, &user_msg_id);
     }
-    let _ = session.try_persist_to_disk();
 
     send_final_stream_event(
         &stream_tx,
@@ -440,132 +476,9 @@ async fn run_turn(
     )
     .await;
 
-    // session 放回 ctx(drop 时不需要额外操作)
-    ctx.session = session;
-
-    // ===== 清理 forwarder =====
+    drop(ctx);
     drop(stream_tx);
     let _ = tokio::task::spawn_blocking(move || forward_handle.join()).await;
-}
-
-fn process_shutdown_feedback_command(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    command: Command,
-    usage_capture: &mut TurnUsageCapture,
-    trust_mode: crate::permission::TrustMode,
-) {
-    let _ = trust_mode;
-    match command {
-        Command::InjectTool { tool_name, payload } => {
-            crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
-            crate::react::message::flush_deferred_tool_injections(session, stream_tx);
-        }
-        Command::EmitStreamEvent(event)
-            if !matches!(*event, StreamEvent::Done { .. } | StreamEvent::Error { .. }) =>
-        {
-            let event = *event;
-            if let StreamEvent::TokenUsage {
-                usage,
-                agent_id,
-                source,
-                ..
-            } = &event
-            {
-                let delta = usage_capture.record(usage, agent_id.as_deref(), source);
-                apply_usage_delta_to_session(session, &delta, agent_id.as_deref());
-                session.updated_at = crate::session::now_text();
-            }
-            let _ = stream_tx.send(event);
-        }
-        Command::EmitStreamEvent(_) => {}
-        _ => {}
-    }
-}
-
-pub(crate) fn apply_session_cwd(session: &Session) {
-    let cwd = session.cwd.trim();
-    if cwd.is_empty() {
-        tiangong_toolkit::set_session_cwd(None);
-        return;
-    }
-
-    let path = std::path::PathBuf::from(cwd);
-    if path.is_dir() {
-        tiangong_toolkit::set_session_cwd(Some(path));
-    }
-}
-
-pub(crate) async fn compress_context_for_session(
-    session: &mut Session,
-    ctx: &crate::turn_context::TurnContext,
-    stream_tx: &StdSender<StreamEvent>,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) {
-    let _ = stream_tx.send(StreamEvent::ContextCompressing {
-        summary_up_to: session.summary_up_to,
-        total_messages: session.messages.len(),
-    });
-    let organizer = crate::context::organizer::ContextOrganizer::new(ctx.context_limit)
-        .with_keep_recent_turns(6);
-    let update = tokio::select! {
-        update = organizer.force_update_summary_with_usage_async(session, ctx.client()) => update,
-        cmd = cmd_rx.recv() => {
-            let _ = cmd;
-            let _ = stream_tx.send(StreamEvent::AgentNotification {
-                agent_id: "system".to_string(),
-                agent_label: "系统".to_string(),
-                content: "上下文压缩已取消".to_string(),
-                level: "warning".to_string(),
-            });
-            let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: tiangong_types::stream::ContextCompressAction::Cancelled,
-                summary_up_to: session.summary_up_to,
-                remaining_messages: session.messages.len().saturating_sub(session.summary_up_to),
-            });
-            return;
-        }
-    };
-    match update {
-        Ok(update) => {
-            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
-            session.current_tokens = 0;
-            session.active_agent_current_tokens = 0;
-            session.agent_current_tokens.clear();
-            crate::react::context::rebuild_system_prompt(session, ctx);
-            crate::react::context::emit_token_usage(
-                stream_tx,
-                &update.usage,
-                Some(0),
-                ctx.context_limit,
-                "manual_context_compress",
-                None,
-            );
-            let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: if update.compressed {
-                    tiangong_types::stream::ContextCompressAction::Compress
-                } else {
-                    tiangong_types::stream::ContextCompressAction::Noop
-                },
-                summary_up_to: session.summary_up_to,
-                remaining_messages: remaining,
-            });
-            session.persist_to_disk();
-        }
-        Err(err) => {
-            let _ = stream_tx.send(StreamEvent::AgentNotification {
-                agent_id: "system".to_string(),
-                agent_label: "系统".to_string(),
-                content: format!("上下文压缩失败：{err}"),
-                level: "error".to_string(),
-            });
-            let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                action: tiangong_types::stream::ContextCompressAction::Failed,
-                summary_up_to: session.summary_up_to,
-                remaining_messages: session.messages.len().saturating_sub(session.summary_up_to),
-            });
-        }
-    }
 }
 
 pub(crate) fn reset_context_for_session(
@@ -728,24 +641,6 @@ fn max_optional_usage(current: Option<usize>, cumulative: Option<usize>) -> Opti
     }
 }
 
-fn apply_usage_delta_to_session(
-    session: &mut Session,
-    usage: &tiangong_types::TokenUsage,
-    agent_id: Option<&str>,
-) {
-    if usage.total_tokens == 0 {
-        return;
-    }
-    session.token_usage.accumulate(usage);
-    if let Some(agent_id) = agent_id {
-        session
-            .agent_token_usage
-            .entry(agent_id.to_string())
-            .or_default()
-            .accumulate(usage);
-    }
-}
-
 #[cfg(test)]
 mod turn_usage_capture_tests {
     use super::*;
@@ -806,31 +701,6 @@ mod turn_usage_capture_tests {
     }
 
     #[test]
-    fn shutdown_background_usage_delta_can_be_applied_immediately() {
-        let mut capture = TurnUsageCapture::default();
-        let first = capture.record(&usage(20, 10, 30), Some("child-agent"), "react-round-1");
-        let cancelled = capture.record(
-            &usage(25, 12, 37),
-            Some("child-agent"),
-            "cancelled-cumulative",
-        );
-        let mut session = Session::new("shutdown-usage-capture");
-
-        apply_usage_delta_to_session(&mut session, &first, Some("child-agent"));
-        apply_usage_delta_to_session(&mut session, &cancelled, Some("child-agent"));
-
-        assert_eq!(session.token_usage.total_tokens, 37);
-        assert_eq!(
-            session
-                .agent_token_usage
-                .get("child-agent")
-                .unwrap()
-                .total_tokens,
-            37
-        );
-    }
-
-    #[test]
     fn summary_cancelled_increment_is_added_after_react_usage() {
         let mut capture = TurnUsageCapture::default();
         capture.record(&usage(70, 30, 100), None, "react-round-1");
@@ -843,55 +713,14 @@ mod turn_usage_capture_tests {
         assert_eq!(session.token_usage.completion_tokens, 35);
         assert_eq!(session.token_usage.total_tokens, 120);
     }
-
-    #[test]
-    fn shutdown_feedback_persists_incremental_and_cancelled_usage_once() {
-        let mut session = Session::new("shutdown-feedback-usage");
-        let mut capture = TurnUsageCapture::default();
-        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
-        let trust_mode = session.trust_mode;
-
-        for (usage, source) in [
-            (usage(20, 10, 30), "react-round-1"),
-            (usage(25, 12, 37), "cancelled-cumulative"),
-        ] {
-            process_shutdown_feedback_command(
-                &mut session,
-                &stream_tx,
-                Command::EmitStreamEvent(Box::new(StreamEvent::TokenUsage {
-                    usage,
-                    current_tokens: None,
-                    compression_threshold_tokens: None,
-                    context_limit_tokens: None,
-                    source: source.to_string(),
-                    agent_id: Some("child-agent".to_string()),
-                })),
-                &mut capture,
-                trust_mode,
-            );
-        }
-
-        assert_eq!(session.token_usage.total_tokens, 37);
-        assert_eq!(
-            session
-                .agent_token_usage
-                .get("child-agent")
-                .unwrap()
-                .total_tokens,
-            37
-        );
-        assert_eq!(stream_rx.try_iter().count(), 2);
-    }
 }
 
 #[cfg(test)]
 mod shared_runtime_tests {
     use super::*;
-    use crate::core::storage_location::CoreStorageLocation;
     use crate::core_config::{CoreConfig, CoreConfigProvider};
 
-    /// 多个 Core 共享同一个 runtime，空闲时各自停在 cmd_rx.recv().await。
-    /// 验证构造期不 panic、Core 可正常 deliver + shutdown。
+    /// 多个空闲 Core 不创建 turn task，且可正常关闭。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
         let root = tempfile::tempdir().unwrap();
@@ -899,21 +728,24 @@ mod shared_runtime_tests {
         let config = CoreConfigProvider::new(CoreConfig::default());
         let cores: Vec<TiangongCore> = (0..3)
             .map(|i| {
-                let session = Session::new(&format!("shared-runtime-{i}"));
+                let mut session = Session::new(format!("shared-runtime-{i}"));
+                session.bind_storage_root(root.path());
+                session.try_persist_to_disk().unwrap();
                 let (event_tx, _event_rx) = std::sync::mpsc::channel();
                 TiangongCore::builder()
+                    .session_id(session.id.clone())
                     .config(config.clone())
-                    .session(session)
+                    .trust_mode(session.trust_mode)
+                    .storage_root(root.path())
                     .event_sender(event_tx)
-                    .storage(CoreStorageLocation::new(root.path()))
                     .build()
                     .unwrap()
             })
             .collect();
 
-        // 所有 Core 初始即存活（worker task 已 spawn 但 idle 在 recv().await）
+        // 空闲 Core 没有活跃 turn task。
         for core in &cores {
-            assert!(!core.is_stopped(), "Core 应存活");
+            assert!(core.is_stopped(), "空闲 Core 不应存在 turn task");
         }
 
         // 逐个关闭，验证 shutdown 路径在共享 runtime 上正常工作
@@ -974,7 +806,7 @@ async fn wait_for_stream_boundary(
 /// 转发线程捕获的单个对话轮次终态。
 ///
 /// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
-/// 时为 Cancelled，否则为 Failed。worker_loop_async 据此把 `status` 与执行时长
+/// 时为 Cancelled，否则为 Failed。run_turn 据此把 `status` 与执行时长
 /// 写入用户消息，供前端（含历史会话）展示。
 struct TurnOutcome {
     status: tiangong_types::TurnStatus,
@@ -1007,167 +839,10 @@ async fn execute_turn_async(
     session: &mut Session,
     message_id: &str,
     prepared: &[ContentBlock],
-    ctx: &crate::turn_context::TurnContext,
+    ctx: &mut crate::turn_context::TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    session_id: &str,
 ) {
-    let mut turn_ctx = ctx.clone();
-    turn_ctx.agent_id = session_id.to_string();
-    turn_ctx
-        .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
+    ctx.execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
-}
-
-/// 每 turn 现建 TurnContext：从最新 config 快照构建 client/权限/用量，
-/// 共享会话级插件注册表，注入 turn 级 feedback，收集 tool_specs。
-///
-/// - 插件注册表（tool_overrides / prompt_section_providers）是会话级共享的
-///   Arc<Mutex>，只在首次 turn 注册，后续 turn 通过 Arc clone 复用。
-/// - 每 turn 必须刷新的是：feedback_tx（绑定新的 TurnUsageSink）、exec_env、
-///   permission_overrides、tool_specs（可能因配置变更而不同）。
-#[allow(clippy::too_many_arguments)]
-fn build_turn_context(
-    config: &CoreConfigProvider,
-    stream_tx: &StdSender<StreamEvent>,
-    mut trust_mode: crate::permission::TrustMode,
-    storage_root: &std::path::Path,
-    plugins: &[Arc<dyn Plugin>],
-    cmd_tx: tokio_mpsc::UnboundedSender<Command>,
-    session: &mut Session,
-    session_ready_fired: &mut bool,
-) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
-    let cfg = config.snapshot();
-    let mut ctx =
-        build_context_from_config(&cfg, stream_tx, trust_mode, storage_root.to_path_buf());
-
-    let workspace = std::path::Path::new(&session.cwd);
-    let workspace = workspace.is_dir().then_some(workspace);
-
-    // 配置快照更新通知：在收集 specs 前调 on_config_updated，使插件先刷新
-    // 内部 endpoint/client，再收集 tool_specs——保证 specs 基于最新配置。
-    for plugin in plugins {
-        plugin.on_config_updated(&cfg);
-    }
-
-    let is_first_turn = !*session_ready_fired;
-
-    // 收集 tool_specs + 注入 turn 级状态（workspace/trust_mode/feedback_tx）。
-    // 首次 turn 额外注册 provider/override/prompt 到共享注册表。
-    let mut plugin_specs: Vec<ToolSpec> = Vec::new();
-    let mut seen_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for plugin in plugins {
-        // 注入 turn 级状态（每 turn 都需要：feedback 绑定新 TurnUsageSink）
-        plugin.set_workspace(workspace);
-        plugin.set_trust_mode(trust_mode);
-        plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(
-            cmd_tx.clone(),
-            ctx.turn_usage_sink().clone(),
-        ));
-
-        let specs = plugin.tool_specs();
-        // 首次 turn：注册到共享注册表（后续 turn 通过 Arc 复用，不重复注册）
-        if is_first_turn {
-            let plugin_as_handler: Arc<dyn crate::tool_override::ToolOverrideHandler> =
-                plugin.clone();
-            for spec in &specs {
-                ctx.register_tool_override(&spec.name, plugin_as_handler.clone());
-            }
-            let plugin_as_prompt: Arc<dyn crate::tool_override::PromptSectionProvider> =
-                plugin.clone();
-            ctx.register_prompt_section_provider(plugin_as_prompt);
-        }
-
-        for spec in specs {
-            if seen_tool_names.insert(spec.name.clone()) {
-                plugin_specs.push(spec);
-            } else {
-                tracing::debug!(
-                    tool = %spec.name,
-                    plugin = %plugin.id(),
-                    "跳过与其他插件重名的工具规格（保留先注册者）"
-                );
-            }
-        }
-    }
-
-    // 汇总 exec_env 注入给插件（配置可能变更，每 turn 刷新）
-    {
-        let mut exec_env = std::collections::BTreeMap::new();
-        for plugin in plugins {
-            for (key, value) in plugin.exec_env() {
-                exec_env.insert(key, value);
-            }
-        }
-        for plugin in plugins {
-            plugin.set_exec_env(exec_env.clone());
-        }
-    }
-
-    let injection_spec = crate::core::plugin::injection_tool_spec();
-    let mut tools: Vec<ToolSpec> = Vec::new();
-    tools.push(injection_spec);
-    tools.extend(plugin_specs);
-    ctx.tools = tools.clone();
-
-    // 首次 context 构建 + 插件注册完成后触发一次 on_session_ready
-    //（此时 workspace / trust_mode / feedback 已注入）；后续 turn 的再配置
-    // 由各插件在 on_config_updated 中统一承载。
-    if !*session_ready_fired {
-        *session_ready_fired = true;
-        for plugin in plugins {
-            plugin.on_session_ready(session);
-        }
-    }
-
-    (ctx, tools)
-}
-
-/// 从 CoreConfig 快照构建 TurnContext（每 turn 现建）
-///
-/// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
-/// `trust_mode` 是 TiangongCore 持有的会话信任解析句柄，TurnContext 共享它。
-fn build_context_from_config(
-    config: &crate::core_config::CoreConfig,
-    stream_tx: &StdSender<StreamEvent>,
-    mut trust_mode: crate::permission::TrustMode,
-    storage_root: std::path::PathBuf,
-) -> crate::turn_context::TurnContext {
-    use crate::agent_config::AgentConfig;
-    use crate::model::OnRetryCallback;
-    use crate::turn_context::TurnContext;
-
-    let agent_config = AgentConfig {
-        trust_mode: config.trust_mode,
-        default_trust_mode: config.default_trust_mode,
-        custom_system_prompt: config.custom_system_prompt.clone(),
-        reasoning_effort: config.reasoning_effort.clone(),
-    };
-
-    // 构造重试回调：发送 StreamEvent::Retry 通知前端
-    let retry_tx = stream_tx.clone();
-    let on_retry: OnRetryCallback =
-        Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
-            let _ = retry_tx.send(StreamEvent::Retry {
-                message: error_text.to_string(),
-                attempt,
-                max_attempts,
-            });
-        });
-
-    // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
-    let context_limit = config.context_limit;
-    let ctx = TurnContext::new(
-        Session::new("placeholder"),
-        SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
-        context_limit,
-        agent_config,
-        trust_mode,
-        crate::observe::Observer::new(storage_root),
-        Vec::new(),
-        crate::MAX_TOOL_ROUNDS,
-        crate::MAX_OUTER_ITERATIONS,
-        Arc::new(crate::core::plugin::TurnUsageSink::new()),
-    );
-    ctx
 }

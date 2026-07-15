@@ -3,14 +3,15 @@
 //! [`Plugin`] 是能力的声明式聚合：通过 supertrait 约束同时要求实现工具规格、
 //! 工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //!
-//! core 通过 trait 默认方法统一注入运行时上下文（均在收集 tool_specs 前调用）：
+//! core 通过 trait 默认方法统一注入运行时上下文：
 //! - [`Plugin::set_workspace`]：会话工作目录（文件类工具据此感知 cwd）。
 //! - [`Plugin::set_trust_mode`]：会话信任模式（插件可据此放宽校验）。
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
-//! 三者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
-//! 各插件自定义的 `is_full_trust` 固有方法）是插件内部工具，不作为 trait 能力暴露，
-//! 插件按需读取注入的信任模式即可。
+//! workspace 与 trust mode 在收集 tool_specs 前注入；feedback 在 TurnContext 构建后、
+//! `on_session_ready` 与 turn task 启动前注入。三者都带默认实现，不需要的插件无需
+//! 任何改动。其中信任模式的**查询**（如各插件自定义的 `is_full_trust` 固有方法）
+//! 是插件内部工具，不作为 trait 能力暴露，插件按需读取注入的信任模式即可。
 
 use std::path::Path;
 
@@ -23,11 +24,12 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 /// 通过 supertrait 约束声明三种能力（`ToolSpecProvider` / `ToolOverrideHandler` /
 /// `PromptSectionProvider`），三者均提供默认空实现——插件只需覆写自己关心的部分。
 ///
-/// core 在 engine 创建时遍历插件，依次：
+/// core 在每轮 Context 准备与启动时遍历插件，依次：
 /// 1. [`set_workspace`](Plugin::set_workspace) 注入会话工作目录；
 /// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式；
-/// 3. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入状态反馈通道；
-/// 4. 收集 `tool_specs` / 注册 override handler / 注册 prompt section。
+/// 3. 收集 `tool_specs` / 注册 override handler 并构建 TurnContext；
+/// 4. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入本轮状态反馈通道；
+/// 5. 首轮调用 `on_session_ready`，然后收集 Prompt 段落写入 Session。
 ///
 /// 插件初始化自身状态（如读取配置、启动后台调度器）在 [`Plugin::on_config_updated`]
 /// 中完成（core 在收集 specs 前调用）。
@@ -66,9 +68,9 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
     ///
-    /// core 在 engine 创建时、收集 tool_specs 之前调用一次。需要向 session 主动
+    /// core 在 TurnContext 构建后、turn task 启动前调用一次。需要向 session 主动
     /// 投递外部事件（如浏览器页面变化、终端用户操作）的插件应覆写此方法，把入参
-    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx::send`] 投递
+    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx::inject_tool`] 投递
     /// [`PluginFeedback`]，core 会统一注入到 session（以 tool result 形式）。
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
@@ -125,13 +127,12 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
     //（如维护索引、归档记忆等）。全部默认空实现，插件按需覆写。
 
-    /// worker 首次处理命令前会按需 build engine；首次 build + 插件注册完成后调用一次。
+    /// 首轮 TurnContext 构建且 feedback 注入完成后、turn task 启动前调用一次。
     ///
-    /// 注意：此钩子在「收到首条命令后、处理该命令前」触发（worker 收到命令才会按需
-    /// build engine），并非在接收命令前。此时 [`set_workspace`](Plugin::set_workspace) /
+    /// 此时 [`set_workspace`](Plugin::set_workspace) /
     /// [`set_trust_mode`](Plugin::set_trust_mode) / [`set_feedback_tx`](Plugin::set_feedback_tx)
     /// 均已注入，插件可安全读取已存储的上下文。适合做一次性的会话级初始化（如对工作
-    /// 目录做首次全量扫描）。仅触发一次；后续 engine 重建由 [`Plugin::on_config_updated`]
+    /// 目录做首次全量扫描）。仅触发一次；后续 Context 重建由 [`Plugin::on_config_updated`]
     /// 承载再配置语义。
     fn on_session_ready(&self, _session: &mut crate::session::Session) {}
 

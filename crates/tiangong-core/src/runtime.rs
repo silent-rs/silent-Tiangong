@@ -105,24 +105,6 @@ impl std::fmt::Debug for RuntimeEngine {
 }
 
 impl RuntimeEngine {
-    #[cfg(test)]
-    pub(crate) fn for_react_test(client: SingleProviderClient) -> Self {
-        let agent_config = AgentConfig::default();
-        Self {
-            client,
-            lite_client: None,
-            runtime_env: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            context_limit: 8_192,
-            agent_config,
-            models_config: ModelsConfig::default(),
-            core_config: None,
-            tool_overrides: Arc::new(Mutex::new(HashMap::new())),
-            tool_spec_providers: Arc::new(Mutex::new(Vec::new())),
-            prompt_section_providers: Arc::new(Mutex::new(Vec::new())),
-            turn_usage_sink: Arc::new(crate::core::plugin::TurnUsageSink::new()),
-        }
-    }
-
     pub fn new(
         client: SingleProviderClient,
         context_limit: usize,

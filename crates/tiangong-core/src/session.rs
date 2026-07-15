@@ -379,7 +379,7 @@ impl Session {
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
         let storage_root = self.storage_root.as_ref().ok_or_else(|| {
-            "session 未绑定 storage_root（worker_loop_async 应在入口处 bind）".to_string()
+            "session 未绑定 storage_root（创建或加载 Session 时必须绑定）".to_string()
         })?;
         let path = storage_root
             .join("sessions")

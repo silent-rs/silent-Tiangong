@@ -50,14 +50,17 @@
 ## 待完成
 
 ### Turn task 模型收尾
-- [ ] 删除 `worker_loop_async`(及其依赖的 forwarder / turn_capture / send_final_stream_event 等,逻辑已迁移到 `run_turn`)
-- [ ] 删除 `build_turn_context` 函数(已被 `TurnContextBuilder` 替代)
-- [ ] 删除 `build_context_from_config` 函数(已被 `TurnContextBuilder` 替代)
-- [ ] `deliver(Message)` 改为用 `TurnContextBuilder`(当前仍调 `build_turn_context`)
-- [ ] `run_turn` 完善:`plugins` 引用正确传入(当前从 `ctx.tools` 取,不准确)
-- [ ] `run_turn` 完善:插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)需要 `&mut session`
-- [ ] `run_turn` 的 `turn_cmd_tx` 正确存入 `TURN_TASKS`(当前用 `std::mem::forget` 占位)
-- [ ] `std::mem::forget(turn_cmd_tx)` 移除 — 应改为 `spawn_turn` 返回的 cmd_tx 存入 TURN_TASKS
+- [x] 删除 `worker_loop_async` 及不再使用的旧 worker 辅助逻辑，保留的轮次转发逻辑统一由 `run_turn` 持有
+- [x] 删除 `build_turn_context` 函数，`TurnContext` 直接使用 `TypedBuilder`
+- [x] 删除 `build_context_from_config` 函数
+- [x] `deliver(Message)` 在 `spawn_turn` 前完成 `TurnContext` 构建和用户消息落盘
+- [x] `run_turn` 从 `ctx.plugins` 调用插件生命周期钩子
+- [x] `run_turn` 的插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)使用 `&mut session`
+- [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
+- [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
+- [x] 插件一次性 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前
+- [x] `deliver(Message)` 删除本轮命令通道创建与 `cmd_tx` 传参
+- [x] 删除 `std::mem::forget(turn_cmd_tx)` 占位逻辑
 
 ### execute_turn 内部简化
 - [ ] `execute_turn` 从 `self.session` 读取(当前仍接收 `session: &mut Session` 参数)

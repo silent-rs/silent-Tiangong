@@ -14,12 +14,16 @@ use crate::session::Session;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
-/// 从 TurnContext 收集插件段落并重建 session 的 system prompt
+/// 从本轮插件快照收集段落并重建 session 的 system prompt。
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
 /// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
 pub(crate) fn rebuild_system_prompt(session: &mut Session, ctx: &TurnContext) {
-    let plugin_sections = ctx.collect_plugin_prompt_sections();
+    let plugin_sections = ctx
+        .plugins
+        .iter()
+        .flat_map(|plugin| plugin.prompt_sections())
+        .collect();
     let config = SystemPromptConfig::from_plugin_sections(plugin_sections);
     session.rebuild_system_prompt(&config);
 }

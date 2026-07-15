@@ -162,14 +162,11 @@ impl TurnContext {
             let mut executed_tool_in_iteration = false;
 
             'react_loop: loop {
-                // 首轮始终重建 system prompt，确保规则段与当前代码版本一致。
-                // 旧 session 持久化的 system_prompt_message 可能缺少新增规则。
                 if round == 0 {
-                    if let Some(system_prompt) = &self.system_prompt_override {
-                        session.system_prompt_message = Some(system_prompt.clone());
-                    } else {
-                        crate::react::context::rebuild_system_prompt(session, self);
-                    }
+                    debug_assert!(
+                        session.system_prompt_message.is_some(),
+                        "TurnContext 构建前应已注入 system prompt"
+                    );
                 }
                 match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => {
@@ -342,7 +339,6 @@ impl TurnContext {
                                 Some(Command::SetTrustMode(mode)) => {
                                     self.trust_mode = mode;
                                 }
-                                Some(Command::Message { .. }) | Some(Command::Shutdown) => {}
                             }
                         }
                         chunk_opt = chunk_rx.recv() => {
@@ -924,7 +920,8 @@ impl TurnContext {
 
                     let mut buffered_tool_commands = Vec::new();
                     // 工具处理器只在启动瞬间借用 Session；执行 Future 不再持有借用。
-                    let mut tool_future = self.start_tool_call(call, session, &self.agent_id);
+                    let actor_id = session.id.clone();
+                    let mut tool_future = self.start_tool_call(call, session, &actor_id);
                     let result = loop {
                         tokio::select! {
                             biased;
