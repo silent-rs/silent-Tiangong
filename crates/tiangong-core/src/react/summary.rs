@@ -56,7 +56,6 @@ impl TurnContext {
     pub(super) async fn run_summary_phase(
         &mut self,
         session: &mut Session,
-        stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         iteration: u32,
     ) -> SummaryPhaseResult {
@@ -135,9 +134,7 @@ impl TurnContext {
                                     crate::session::MessagePhase::Summary,
                                 );
                             }
-                            match accept_runtime_user_message(
-                                session,
-                                stream_tx,
+                            match accept_runtime_user_message(session, self,
                                 message_id,
                                 prepared,
                             ) {
@@ -161,9 +158,7 @@ impl TurnContext {
                         }
                         Some(Command::Approval { .. }) => {}
                         Some(Command::InjectTool { tool_name, payload }) => {
-                            crate::react::message::inject_tool_to_session(
-                                session,
-                                stream_tx,
+                            crate::react::message::inject_tool_to_session(session, self,
                                 &tool_name,
                                 &payload,
                             );
@@ -215,8 +210,7 @@ impl TurnContext {
                                         &streamed_text,
                                         &streamed_reasoning,
                                     );
-                                    emit_cancel_usage(
-                                        stream_tx,
+                                    emit_cancel_usage(&self.stream_tx,
                                         &streaming_usage,
                                         self.context_limit,
                                     );
@@ -241,8 +235,7 @@ impl TurnContext {
                 &streamed_reasoning,
             );
             if streaming_usage.total_tokens > 0 {
-                emit_token_usage(
-                    stream_tx,
+                emit_token_usage(&self.stream_tx,
                     &streaming_usage,
                     None,
                     self.context_limit,
@@ -271,7 +264,7 @@ impl TurnContext {
                     if let Some(handle) = llm_fut.take() {
                         abort_and_join(handle).await;
                     }
-                    emit_cancel_usage(stream_tx, &streaming_usage, self.context_limit);
+                    emit_cancel_usage(&self.stream_tx, &streaming_usage, self.context_limit);
                     return SummaryPhaseResult::Cancelled(streaming_usage);
                 }
                 return SummaryPhaseResult::Failed {
@@ -281,8 +274,7 @@ impl TurnContext {
             }
         };
 
-        emit_token_usage(
-            stream_tx,
+        emit_token_usage(&self.stream_tx,
             &response.usage,
             Some(response.usage.prompt_tokens.max(session.current_tokens)),
             self.context_limit,
@@ -322,10 +314,10 @@ impl TurnContext {
         // 改为不落盘新消息，直接把上一轮 ReAct 的过程回复（phase=React）提升为最终回复。
         if !needs_more_work && summary_content.trim().is_empty() {
             if let Some(message_id) = promote_last_react_message_to_summary(session) {
-                crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
+                crate::react::message::emit_session_message_upsert(session, self, &message_id);
             }
             let compression_cancelled =
-                maybe_update_context_summary(session, self, &usage, stream_tx, cmd_rx).await;
+                maybe_update_context_summary(session, self, &usage, cmd_rx).await;
             if compression_cancelled {
                 emit_cancelled(stream_tx);
                 return SummaryPhaseResult::Cancelled(usage);
@@ -354,9 +346,9 @@ impl TurnContext {
                 crate::session::MessagePhase::Summary
             };
         }
-        crate::react::message::emit_session_message_upsert(session, stream_tx, &pending_msg_id);
+        crate::react::message::emit_session_message_upsert(session, self, &pending_msg_id);
         let compression_cancelled =
-            maybe_update_context_summary(session, self, &usage, stream_tx, cmd_rx).await;
+            maybe_update_context_summary(session, self, &usage, cmd_rx).await;
         if compression_cancelled {
             emit_cancelled(stream_tx);
             return SummaryPhaseResult::Cancelled(usage);
@@ -450,7 +442,6 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
 
 fn persist_partial_summary(
     session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
     message_id: &str,
     text: &str,
     reasoning: &str,
@@ -468,7 +459,7 @@ fn persist_partial_summary(
     if let Err(error) = session.try_persist_to_disk() {
         tracing::warn!(%error, "持久化部分总结响应失败");
     }
-    crate::react::message::emit_session_message_upsert(session, stream_tx, message_id);
+    crate::react::message::emit_session_message_upsert(session, self, message_id);
 }
 
 #[cfg(test)]
@@ -855,7 +846,6 @@ impl TurnContext {
     pub(super) async fn force_final_response(
         &self,
         session: &mut Session,
-        stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         reason: ForceFinalReason,
     ) -> bool {
@@ -936,7 +926,6 @@ impl TurnContext {
         session: &Session,
         req: &ModelRequest,
         pending_msg_id: &str,
-        stream_tx: &StdSender<StreamEvent>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> Option<crate::model::ModelFunctionResponse> {
         let final_tools = tools_for_current_turn(&self.tools, session, "");
@@ -1004,7 +993,6 @@ impl TurnContext {
     fn commit_summary_message(
         &self,
         session: &mut Session,
-        stream_tx: &StdSender<StreamEvent>,
         pending_msg_id: &str,
         resp: &crate::model::ModelFunctionResponse,
         usage_source: &str,
@@ -1019,8 +1007,7 @@ impl TurnContext {
             message.phase = MessagePhase::Summary;
             message.reasoning_signature = resp.reasoning_signature.clone();
         }
-        emit_token_usage(
-            stream_tx,
+        emit_token_usage(&self.stream_tx,
             &resp.usage,
             Some(resp.usage.prompt_tokens.max(session.current_tokens)),
             self.context_limit,
@@ -1033,7 +1020,7 @@ impl TurnContext {
             });
             return false;
         }
-        crate::react::message::emit_session_message_upsert(session, stream_tx, pending_msg_id);
+        crate::react::message::emit_session_message_upsert(session, self, pending_msg_id);
         true
     }
 }
