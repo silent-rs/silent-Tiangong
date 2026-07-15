@@ -2,7 +2,7 @@
 
 /// 用户命令
 pub enum Command {
-    /// 发送消息
+    /// 发送消息(spawn turn task)
     Message {
         prepared: Vec<tiangong_types::ContentBlock>,
         message_id: Option<String>,
@@ -12,6 +12,8 @@ pub enum Command {
     /// 审批响应
     #[allow(dead_code)]
     Approval { request_id: String, approved: bool },
+    /// 运行时切换信任模式(即时生效到活跃 turn task)
+    SetTrustMode(crate::permission::TrustMode),
     /// 手动触发上下文压缩
     #[allow(dead_code)]
     CompressContext,
@@ -19,18 +21,11 @@ pub enum Command {
     #[allow(dead_code)]
     ResetContext,
     /// 工具类内容自动注入（浏览器页面、终端用户操作等，不触发 turn）。
-    ///
-    /// 统一入口：tool_name + JSON payload 由 ToolInput trait 的 render 产出，
-    /// worker 侧统一调用 inject_tool_to_session 处理。
     InjectTool {
         tool_name: String,
         payload: serde_json::Value,
     },
-    /// 插件投递的流事件（如 MemoryRecallStart/Progress/Done）。
-    ///
-    /// 插件通过 [`crate::core::plugin::feedback::PluginFeedbackTx::send_stream_event`]
-    /// 投递，worker 收到后直接转发到 `stream_tx`，与 worker 自身发出的流事件
-    /// 走同一出口。用于让插件复用 UI 实时事件通道，无需各自持有 stream_tx。
+    /// 插件投递的流事件。
     EmitStreamEvent(Box<tiangong_types::StreamEvent>),
     /// 关闭
     Shutdown,

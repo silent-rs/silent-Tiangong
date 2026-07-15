@@ -121,6 +121,9 @@ fn process_commands(
                 let ev = *ev;
                 let _ = stream_tx.send(ev);
             }
+            Command::SetTrustMode(_) => {
+                // trust_mode 更新由 engine.rs 的 select! 分支处理(拥有 &mut self)
+            }
         }
     }
 

@@ -206,8 +206,8 @@ impl TurnContext {
 
 use std::path::Path;
 
-use crate::core::plugin::PluginFeedbackTx;
 use crate::core::plugin::Plugin;
+use crate::core::plugin::PluginFeedbackTx;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::OnRetryCallback;
 use crate::observe::Observer;
@@ -229,7 +229,11 @@ pub struct TurnContextBuilder {
 }
 
 impl TurnContextBuilder {
-    pub fn new(config: CoreConfig, trust_mode: TrustMode, storage_root: std::path::PathBuf) -> Self {
+    pub fn new(
+        config: CoreConfig,
+        trust_mode: TrustMode,
+        storage_root: std::path::PathBuf,
+    ) -> Self {
         Self {
             config,
             trust_mode,
@@ -260,7 +264,10 @@ impl TurnContextBuilder {
     }
 
     /// 命令通道(给插件 feedback)。
-    pub fn cmd_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<crate::core::command::Command>) -> Self {
+    pub fn cmd_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::core::command::Command>,
+    ) -> Self {
         self.cmd_tx = Some(tx);
         self
     }
@@ -283,17 +290,18 @@ impl TurnContextBuilder {
         };
 
         let retry_tx = stream_tx.clone();
-        let on_retry: OnRetryCallback = Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
-            let _ = retry_tx.send(StreamEvent::Retry {
-                message: error_text.to_string(),
-                attempt,
-                max_attempts,
+        let on_retry: OnRetryCallback =
+            Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+                let _ = retry_tx.send(StreamEvent::Retry {
+                    message: error_text.to_string(),
+                    attempt,
+                    max_attempts,
+                });
             });
-        });
 
         let context_limit = self.config.context_limit;
-        let client = SingleProviderClient::new(self.config.llm.chat.clone())
-            .with_on_retry(on_retry);
+        let client =
+            SingleProviderClient::new(self.config.llm.chat.clone()).with_on_retry(on_retry);
 
         let observer = Observer::new(self.storage_root.clone());
         let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());

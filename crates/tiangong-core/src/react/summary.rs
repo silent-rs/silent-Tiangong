@@ -187,6 +187,14 @@ impl TurnContext {
                             let ev = *ev;
                             let _ = stream_tx.send(ev);
                         }
+                        Some(Command::SetTrustMode(mode)) => {
+                            self.trust_mode = mode;
+                        }
+                        Some(Command::Message { .. })
+                        | Some(Command::Shutdown)
+                        | Some(Command::InjectTool { .. })
+                        | Some(Command::CompressContext)
+                        | Some(Command::ResetContext) => {}
                     }
                 }
                 chunk_opt = chunk_rx.recv() => {

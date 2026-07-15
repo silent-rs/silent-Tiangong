@@ -338,7 +338,12 @@ impl TurnContext {
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let ev = *ev;
                                     let _ = stream_tx.send(ev);
-                                }                            }
+                                }
+                                Some(Command::SetTrustMode(mode)) => {
+                                    self.trust_mode = mode;
+                                }
+                                Some(Command::Message { .. }) | Some(Command::Shutdown) => {}
+                            }
                         }
                         chunk_opt = chunk_rx.recv() => {
                             match chunk_opt {
@@ -821,6 +826,9 @@ impl TurnContext {
                                     }
                                 }
                                 Some(Command::Approval { .. }) => {}
+                                Some(Command::SetTrustMode(mode)) => {
+                                    self.trust_mode = mode;
+                                }
                                 Some(Command::InjectTool { tool_name, payload }) => {
                                     self.defer_tool_injections(
                                         session,
@@ -926,6 +934,9 @@ impl TurnContext {
                                     Some(Command::Approval { .. }) => {}
                                     Some(Command::EmitStreamEvent(event)) => {
                                         let _ = stream_tx.send(*event);
+                                    }
+                                    Some(Command::SetTrustMode(mode)) => {
+                                        self.trust_mode = mode;
                                     }
                                     Some(Command::Cancel) => {
                                         break None;
