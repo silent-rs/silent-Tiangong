@@ -278,14 +278,9 @@ async fn worker_loop_async(
     let shared_tool_overrides: Arc<
         Mutex<HashMap<String, Arc<dyn crate::tool_override::ToolOverrideHandler>>>,
     > = Arc::new(Mutex::new(HashMap::new()));
-    let shared_tool_spec_providers: Arc<
-        Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>,
-    > = Arc::new(Mutex::new(Vec::new()));
     let shared_prompt_section_providers: Arc<
         Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
     > = Arc::new(Mutex::new(Vec::new()));
-    let shared_runtime_env: Arc<Mutex<std::collections::BTreeMap<String, String>>> =
-        Arc::new(Mutex::new(std::collections::BTreeMap::new()));
 
     // IndexManager 已下沉到 index 插件私有持有，core 不再创建/感知它。
     // 索引的初始扫描、增量写入、finalize 全部由 index 插件的生命周期钩子接管。
@@ -413,9 +408,7 @@ async fn worker_loop_async(
                     &mut session,
                     &mut session_ready_fired,
                     &shared_tool_overrides,
-                    &shared_tool_spec_providers,
                     &shared_prompt_section_providers,
-                    &shared_runtime_env,
                 );
 
                 // 记录本轮起点；执行结束后用于计算 elapsed_ms 并写入用户消息（持久化，
@@ -708,9 +701,7 @@ async fn worker_loop_async(
                     &mut session,
                     &mut session_ready_fired,
                     &shared_tool_overrides,
-                    &shared_tool_spec_providers,
                     &shared_prompt_section_providers,
-                    &shared_runtime_env,
                 );
                 compress_context_for_session(&mut session, &ctx, &stream_tx, &mut cmd_rx).await;
                 continue;
@@ -726,9 +717,7 @@ async fn worker_loop_async(
                     &mut session,
                     &mut session_ready_fired,
                     &shared_tool_overrides,
-                    &shared_tool_spec_providers,
                     &shared_prompt_section_providers,
-                    &shared_runtime_env,
                 );
                 reset_context_for_session(&mut session, &stream_tx, &ctx);
                 continue;
@@ -1339,8 +1328,8 @@ async fn execute_turn_async(
 /// 每 turn 现建 TurnContext：从最新 config 快照构建 client/权限/用量，
 /// 共享会话级插件注册表，注入 turn 级 feedback，收集 tool_specs。
 ///
-/// - 插件注册表（tool_overrides / tool_spec_providers / prompt_section_providers）
-///   是会话级共享的 Arc<Mutex>，只在首次 turn 注册，后续 turn 通过 Arc clone 复用。
+/// - 插件注册表（tool_overrides / prompt_section_providers）是会话级共享的
+///   Arc<Mutex>，只在首次 turn 注册，后续 turn 通过 Arc clone 复用。
 /// - 每 turn 必须刷新的是：feedback_tx（绑定新的 TurnUsageSink）、exec_env、
 ///   permission_overrides、tool_specs（可能因配置变更而不同）。
 #[allow(clippy::too_many_arguments)]
@@ -1356,11 +1345,9 @@ fn build_turn_context(
     shared_tool_overrides: &Arc<
         Mutex<HashMap<String, Arc<dyn crate::tool_override::ToolOverrideHandler>>>,
     >,
-    shared_tool_spec_providers: &Arc<Mutex<Vec<Arc<dyn crate::tool_override::ToolSpecProvider>>>>,
     shared_prompt_section_providers: &Arc<
         Mutex<Vec<Arc<dyn crate::tool_override::PromptSectionProvider>>>,
     >,
-    shared_runtime_env: &Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 ) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
     let cfg = config.snapshot();
     let mut ctx = build_context_from_config(
@@ -1372,9 +1359,7 @@ fn build_turn_context(
     // 注入会话级共享的插件注册表（Arc clone，跨 turn 复用同一份）。
     .with_shared_plugin_state(
         Arc::clone(shared_tool_overrides),
-        Arc::clone(shared_tool_spec_providers),
         Arc::clone(shared_prompt_section_providers),
-        Arc::clone(shared_runtime_env),
     );
 
     let workspace = std::path::Path::new(&session.cwd);
@@ -1404,8 +1389,6 @@ fn build_turn_context(
         let specs = plugin.tool_specs();
         // 首次 turn：注册到共享注册表（后续 turn 通过 Arc 复用，不重复注册）
         if is_first_turn {
-            let plugin_as_spec: Arc<dyn crate::tool_override::ToolSpecProvider> = plugin.clone();
-            ctx.register_tool_spec_provider(plugin_as_spec);
             let plugin_as_handler: Arc<dyn crate::tool_override::ToolOverrideHandler> =
                 plugin.clone();
             for spec in &specs {
@@ -1429,7 +1412,7 @@ fn build_turn_context(
         }
     }
 
-    // 汇总 exec_env（配置可能变更，每 turn 刷新）
+    // 汇总 exec_env 注入给插件（配置可能变更，每 turn 刷新）
     {
         let mut exec_env = std::collections::BTreeMap::new();
         for plugin in plugins {
@@ -1437,7 +1420,6 @@ fn build_turn_context(
                 exec_env.insert(key, value);
             }
         }
-        ctx.set_runtime_env(exec_env.clone());
         for plugin in plugins {
             plugin.set_exec_env(exec_env.clone());
         }
@@ -1571,7 +1553,7 @@ fn build_context_from_config(
 
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
-    let mut ctx = TurnContext::new(
+    let ctx = TurnContext::new(
         SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
@@ -1581,13 +1563,5 @@ fn build_context_from_config(
         permission_gate,
         Arc::new(crate::core::plugin::TurnUsageSink::new()),
     );
-    ctx.models_config = models_config;
-    ctx.core_config = Some(config.clone());
-
-    // 如果配置了独立的 lite 端点，构建 lite client（直接吃 lite ModelEndpoint）
-    if let Some(ref lite_endpoint) = config.llm.lite {
-        ctx.lite_client =
-            Some(SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()));
-    }
     ctx
 }

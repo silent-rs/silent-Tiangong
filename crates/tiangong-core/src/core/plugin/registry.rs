@@ -60,8 +60,6 @@ pub(crate) fn register_plugin(
     // 4) 工具规格：on_config_updated 已由 worker_loop 在调用本函数前统一触发，
     //    插件内部状态已就绪，直接收集 specs。
     let specs = plugin.tool_specs();
-    let plugin_as_spec: Arc<dyn ToolSpecProvider> = plugin.clone();
-    ctx.register_tool_spec_provider(plugin_as_spec);
 
     // 5) 工具覆盖：按 spec 中的工具名逐个注册，路由到同一 plugin 的 handle。
     let plugin_as_handler: Arc<dyn ToolOverrideHandler> = plugin.clone();
