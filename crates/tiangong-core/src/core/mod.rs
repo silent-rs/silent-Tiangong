@@ -13,7 +13,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::{SingleProviderClient, ToolSpec};
 use crate::react::message::{accept_user_message, append_runtime_tool_message};
-use crate::runtime::RuntimeEngine;
 use crate::session::{MessageRole, Session};
 use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent};
 
@@ -388,9 +387,9 @@ async fn worker_loop_async(
                 prepared,
                 message_id,
             } => {
-                // 每 turn 现建 engine + 注册插件 + 触发 on_session_ready（仅首次）。
-                // engine/client 在 turn 结束时 drop，不跨 turn 复用。
-                let (engine, tools) = build_turn_engine(
+                // 每 turn 现建 TurnContext + 注册插件 + 触发 on_session_ready（仅首次）。
+                // client 在 turn 结束时 drop，不跨 turn 复用。
+                let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     &trust_mode,
@@ -449,8 +448,7 @@ async fn worker_loop_async(
                     &mut session,
                     &accepted.message_id,
                     &accepted.prepared,
-                    &engine,
-                    &tools,
+                    &ctx,
                     &stream_tx,
                     &mut cmd_rx,
                     &session_id,
@@ -682,7 +680,7 @@ async fn worker_loop_async(
                 }
             }
             Command::CompressContext => {
-                let (engine, _tools) = build_turn_engine(
+                let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     &trust_mode,
@@ -692,11 +690,11 @@ async fn worker_loop_async(
                     &mut session,
                     &mut session_ready_fired,
                 );
-                compress_context_for_session(&mut session, &engine, &stream_tx, &mut cmd_rx).await;
+                compress_context_for_session(&mut session, &ctx, &stream_tx, &mut cmd_rx).await;
                 continue;
             }
             Command::ResetContext => {
-                let (engine, _tools) = build_turn_engine(
+                let (ctx, _tools) = build_turn_context(
                     &config,
                     &stream_tx,
                     &trust_mode,
@@ -706,7 +704,7 @@ async fn worker_loop_async(
                     &mut session,
                     &mut session_ready_fired,
                 );
-                reset_context_for_session(&mut session, &stream_tx, &engine);
+                reset_context_for_session(&mut session, &stream_tx, &ctx);
                 continue;
             }
         }
@@ -789,7 +787,7 @@ pub(crate) fn apply_session_cwd(session: &Session) {
 
 pub(crate) async fn compress_context_for_session(
     session: &mut Session,
-    engine: &RuntimeEngine,
+    ctx: &crate::turn_context::TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) {
@@ -797,10 +795,10 @@ pub(crate) async fn compress_context_for_session(
         summary_up_to: session.summary_up_to,
         total_messages: session.messages.len(),
     });
-    let organizer = crate::context::organizer::ContextOrganizer::new(engine.context_limit)
+    let organizer = crate::context::organizer::ContextOrganizer::new(ctx.context_limit)
         .with_keep_recent_turns(6);
     let update = tokio::select! {
-        update = organizer.force_update_summary_with_usage_async(session, engine.client()) => update,
+        update = organizer.force_update_summary_with_usage_async(session, ctx.client()) => update,
         cmd = cmd_rx.recv() => {
             let _ = cmd;
             let _ = stream_tx.send(StreamEvent::AgentNotification {
@@ -823,12 +821,12 @@ pub(crate) async fn compress_context_for_session(
             session.current_tokens = 0;
             session.active_agent_current_tokens = 0;
             session.agent_current_tokens.clear();
-            crate::react::context::rebuild_system_prompt(session, engine);
+            crate::react::context::rebuild_system_prompt(session, ctx);
             crate::react::context::emit_token_usage(
                 stream_tx,
                 &update.usage,
                 Some(0),
-                engine.context_limit,
+                ctx.context_limit,
                 "manual_context_compress",
                 None,
             );
@@ -862,7 +860,7 @@ pub(crate) async fn compress_context_for_session(
 pub(crate) fn reset_context_for_session(
     session: &mut Session,
     stream_tx: &StdSender<StreamEvent>,
-    engine: &RuntimeEngine,
+    ctx: &crate::turn_context::TurnContext,
 ) {
     let total = session.messages.len();
     session.summary_up_to = total;
@@ -872,7 +870,7 @@ pub(crate) fn reset_context_for_session(
     session.active_agent_current_tokens = 0;
     session.agent_current_tokens.clear();
     // 清空后重建 system prompt
-    crate::react::context::rebuild_system_prompt(session, engine);
+    crate::react::context::rebuild_system_prompt(session, ctx);
     let _ = stream_tx.send(StreamEvent::ContextCompressed {
         action: tiangong_types::stream::ContextCompressAction::Clear,
         summary_up_to: total,
@@ -1295,36 +1293,29 @@ impl TurnOutcome {
 }
 
 /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
-#[allow(clippy::too_many_arguments)]
 async fn execute_turn_async(
     session: &mut Session,
     message_id: &str,
     prepared: &[ContentBlock],
-    engine: &RuntimeEngine,
-    tools: &[ToolSpec],
+    ctx: &crate::turn_context::TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     session_id: &str,
 ) {
-    let mut react = crate::react::engine::ReactEngine::new(
-        engine.clone(),
-        tools.to_vec(),
-        MAX_TOOL_ROUNDS,
-        MAX_OUTER_ITERATIONS,
-    )
-    // Core 的执行身份只有一个来源：当前 Session ID。
-    .with_agent_id(session_id.to_string());
-    react
+    // 复用已构建的 TurnContext,只覆盖 agent_id（Core 的执行身份 = Session ID）。
+    let mut turn_ctx = ctx.clone();
+    turn_ctx.agent_id = session_id.to_string();
+    turn_ctx
         .execute_turn(session, Some((message_id, prepared)), stream_tx, cmd_rx)
         .await;
 }
 
-/// 每 turn 现建 engine：从最新 config 快照构建 RuntimeEngine，注册所有插件，
+/// 每 turn 现建 TurnContext：从最新 config 快照构建，注册所有插件，
 /// 汇总 exec_env / permission_overrides，并触发 on_session_ready（仅首次）。
 ///
-/// engine/client 不跨 turn，配置变更靠下次 turn 新建 client 天然生效。
+/// client 不跨 turn，配置变更靠下次 turn 新建 client 天然生效。
 #[allow(clippy::too_many_arguments)]
-fn build_turn_engine(
+fn build_turn_context(
     config: &CoreConfigProvider,
     stream_tx: &StdSender<StreamEvent>,
     trust_mode: &crate::permission::TrustModeHandle,
@@ -1333,9 +1324,9 @@ fn build_turn_engine(
     cmd_tx: tokio_mpsc::UnboundedSender<Command>,
     session: &mut Session,
     session_ready_fired: &mut bool,
-) -> (RuntimeEngine, Vec<ToolSpec>) {
+) -> (crate::turn_context::TurnContext, Vec<ToolSpec>) {
     let cfg = config.snapshot();
-    let engine = build_engine_from_config(
+    let mut ctx = build_context_from_config(
         &cfg,
         stream_tx,
         trust_mode.clone(),
@@ -1363,12 +1354,8 @@ fn build_turn_engine(
     // runtime override 注册层同样 first-writer-wins；这里仅过滤最终暴露给 LLM 的 tool specs。
     let mut seen_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for plugin in plugins {
-        let specs = crate::core::plugin::register_plugin(
-            &engine,
-            plugin.clone(),
-            workspace,
-            cmd_tx.clone(),
-        );
+        let specs =
+            crate::core::plugin::register_plugin(&ctx, plugin.clone(), workspace, cmd_tx.clone());
         for spec in specs {
             if seen_tool_names.insert(spec.name.clone()) {
                 plugin_specs.push(spec);
@@ -1391,7 +1378,7 @@ fn build_turn_engine(
                 exec_env.insert(key, value);
             }
         }
-        engine.set_runtime_env(exec_env.clone());
+        ctx.set_runtime_env(exec_env.clone());
         for plugin in plugins {
             plugin.set_exec_env(exec_env.clone());
         }
@@ -1405,7 +1392,7 @@ fn build_turn_engine(
                 overrides.insert(name, level);
             }
         }
-        engine.permission_gate().set_plugin_overrides(overrides);
+        ctx.permission_gate().set_plugin_overrides(overrides);
     }
     // 各插件（含动态工具插件）的工具规格经 tool_specs() 声明，
     // 随 plugin_specs 自动汇入。工具名冲突由上面的 seen_tool_names 机制消解。
@@ -1415,9 +1402,10 @@ fn build_turn_engine(
     tools.push(injection_spec);
     // 合并 plugin 注册的工具规格（含动态工具插件收集的工具）
     tools.extend(plugin_specs);
+    ctx.tools = tools.clone();
 
-    // 首次 engine build + 插件注册完成后触发一次 on_session_ready
-    //（此时 workspace / trust_mode / feedback 已注入）；engine 重建后的再配置
+    // 首次 context 构建 + 插件注册完成后触发一次 on_session_ready
+    //（此时 workspace / trust_mode / feedback 已注入）；后续 turn 的再配置
     // 由各插件在 on_config_updated 中统一承载。
     if !*session_ready_fired {
         *session_ready_fired = true;
@@ -1426,30 +1414,31 @@ fn build_turn_engine(
         }
     }
 
-    (engine, tools)
+    (ctx, tools)
 }
 
-/// 从 CoreConfig 快照构建 RuntimeEngine
+/// 从 CoreConfig 快照构建 TurnContext（每 turn 现建）
 ///
 /// `stream_tx` 用于在 LLM 请求重试时发送 `StreamEvent::Retry` 通知。
-/// `trust_mode` 是 TiangongCore 持有的会话信任解析句柄，RuntimeEngine 共享它。
-fn build_engine_from_config(
+/// `trust_mode` 是 TiangongCore 持有的会话信任解析句柄，TurnContext 共享它。
+fn build_context_from_config(
     config: &crate::core_config::CoreConfig,
     stream_tx: &StdSender<StreamEvent>,
     trust_mode: crate::permission::TrustModeHandle,
     storage_root: std::path::PathBuf,
-) -> RuntimeEngine {
+) -> crate::turn_context::TurnContext {
     use crate::agent_config::AgentConfig;
     use crate::model::OnRetryCallback;
     use crate::models_config::{
         ModelCapability, ModelEntry, ModelsConfig, ProviderConfig, RoutingSlot,
     };
+    use crate::turn_context::TurnContext;
 
     // CoreConfig.llm 只含 chat + lite 扁平端点；此处重建一个最小 ModelsConfig
-    // 供 engine.models_config() / chat_is_multimodal() 使用。
+    // 供 ctx.models_config() / chat_is_multimodal() 使用。
     // 注意：LlmConfig 不携带 capability 信息，因此重建结果只声明 Chat 能力
     //（与原 from_llm_config 行为一致）——chat_is_multimodal 在此路径恒为 false。
-    // GUI/Server 入口不经此函数，它们直接用完整 ModelsConfig 构造 RuntimeEngine。
+    // GUI/Server 入口不经此函数，它们直接用完整 ModelsConfig 构造 TurnContext。
     let mut providers = std::collections::HashMap::new();
     let mut routing = std::collections::HashMap::new();
     providers.insert(
@@ -1516,23 +1505,34 @@ fn build_engine_from_config(
             });
         });
 
+    crate::storage::set_storage_root(storage_root);
+    let permission_gate = crate::permission::PermissionGate::with_shared_trust_mode(
+        crate::permission::PermissionPolicy {
+            trust_mode: agent_config.trust_mode,
+            ..Default::default()
+        },
+        trust_mode,
+    );
+
     // context_limit 由 to_core_config 在加载时解析注入（core 不做配置磁盘 IO）。
     let context_limit = config.context_limit;
-    let mut engine = RuntimeEngine::with_shared_trust_mode(
+    let mut ctx = TurnContext::new(
         SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
         context_limit,
         agent_config,
-        trust_mode,
-        storage_root,
-    )
-    .with_models_config(models_config)
-    .with_core_config(config.clone());
+        Vec::new(),
+        MAX_TOOL_ROUNDS,
+        MAX_OUTER_ITERATIONS,
+        permission_gate,
+        Arc::new(crate::core::plugin::TurnUsageSink::new()),
+    );
+    ctx.models_config = models_config;
+    ctx.core_config = Some(config.clone());
 
     // 如果配置了独立的 lite 端点，构建 lite client（直接吃 lite ModelEndpoint）
     if let Some(ref lite_endpoint) = config.llm.lite {
-        engine = engine.with_lite_client(
-            SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()),
-        );
+        ctx.lite_client =
+            Some(SingleProviderClient::new(lite_endpoint.clone()).with_on_retry(on_retry.clone()));
     }
-    engine
+    ctx
 }

@@ -3,11 +3,13 @@ use std::net::TcpListener;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::agent_config::AgentConfig;
 use crate::core_config::ModelEndpoint;
 use crate::model::SingleProviderClient;
-use crate::runtime::RuntimeEngine;
+use crate::permission::PermissionGate;
+use crate::turn_context::TurnContext;
 
-pub(crate) fn test_runtime(base_url: String) -> RuntimeEngine {
+pub(crate) fn test_runtime(base_url: String) -> TurnContext {
     let client = SingleProviderClient::new(ModelEndpoint {
         base_url,
         api_key: "test-key".to_string(),
@@ -15,7 +17,18 @@ pub(crate) fn test_runtime(base_url: String) -> RuntimeEngine {
         timeout_ms: 5_000,
         ..Default::default()
     });
-    RuntimeEngine::for_react_test(client)
+    let permission_gate = PermissionGate::new(crate::permission::PermissionPolicy::default());
+    let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
+    TurnContext::new(
+        client,
+        100_000,
+        AgentConfig::default(),
+        Vec::new(),
+        2,
+        1,
+        permission_gate,
+        usage_sink,
+    )
 }
 
 pub(crate) enum MockResponse {

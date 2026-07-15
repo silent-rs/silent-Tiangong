@@ -24,7 +24,8 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
-use super::engine::{ReactEngine, TurnPhase, tools_for_current_turn};
+use super::engine::{TurnPhase, tools_for_current_turn};
+use crate::turn_context::TurnContext;
 
 /// 总结阶段的执行结果。
 pub(super) enum SummaryPhaseResult {
@@ -43,7 +44,7 @@ pub(super) enum SummaryPhaseResult {
     },
 }
 
-impl ReactEngine {
+impl TurnContext {
     /// 执行总结阶段。
     ///
     /// 由主模型（非 lite 模型）基于工具执行阶段的全部结果，判断任务完成度：
@@ -66,7 +67,7 @@ impl ReactEngine {
         });
 
         if session.system_prompt_message.is_none() {
-            crate::react::context::rebuild_system_prompt(session, &self.engine);
+            crate::react::context::rebuild_system_prompt(session, self);
         }
 
         let req = request_for_summary_phase(session);
@@ -79,7 +80,7 @@ impl ReactEngine {
 
         let (chunk_tx, mut chunk_rx) =
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
-        let client = select_client_for_request(&self.engine, &req).clone();
+        let client = select_client_for_request(self, &req).clone();
         let req_clone = req.clone();
         // 总结阶段传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤）以保持
         // KV cache 前缀一致，但通过 Some(ToolChoice::None) 显式禁止模型调用工具。
@@ -179,7 +180,7 @@ impl ReactEngine {
                             crate::core::reset_context_for_session(
                                 session,
                                 stream_tx,
-                                &self.engine,
+                                self,
                             );
                         }
                         Some(Command::EmitStreamEvent(ev)) => {
@@ -214,7 +215,7 @@ impl ReactEngine {
                                     emit_cancel_usage(
                                         stream_tx,
                                         &streaming_usage,
-                                        self.engine.context_limit,
+                                        self.context_limit,
                                     );
                                     return SummaryPhaseResult::Cancelled(streaming_usage);
                                 }
@@ -241,7 +242,7 @@ impl ReactEngine {
                     stream_tx,
                     &streaming_usage,
                     None,
-                    self.engine.context_limit,
+                    self.context_limit,
                     "summary-interrupted",
                     None,
                 );
@@ -267,7 +268,7 @@ impl ReactEngine {
                     if let Some(handle) = llm_fut.take() {
                         abort_and_join(handle).await;
                     }
-                    emit_cancel_usage(stream_tx, &streaming_usage, self.engine.context_limit);
+                    emit_cancel_usage(stream_tx, &streaming_usage, self.context_limit);
                     return SummaryPhaseResult::Cancelled(streaming_usage);
                 }
                 return SummaryPhaseResult::Failed {
@@ -281,7 +282,7 @@ impl ReactEngine {
             stream_tx,
             &response.usage,
             Some(response.usage.prompt_tokens.max(session.current_tokens)),
-            self.engine.context_limit,
+            self.context_limit,
             format!("summary-iteration-{iteration}"),
             None,
         );
@@ -297,7 +298,7 @@ impl ReactEngine {
         if !response.tool_calls.is_empty() {
             tracing::warn!(
                 count = response.tool_calls.len(),
-                protocol = ?self.engine.client().protocol(),
+                protocol = ?self.client().protocol(),
                 "summary phase returned tool calls despite ToolChoice::None"
             );
             if response.text.trim().is_empty() {
@@ -321,8 +322,7 @@ impl ReactEngine {
                 crate::react::message::emit_session_message_upsert(session, stream_tx, &message_id);
             }
             let compression_cancelled =
-                maybe_update_context_summary(session, &self.engine, &usage, stream_tx, cmd_rx)
-                    .await;
+                maybe_update_context_summary(session, self, &usage, stream_tx, cmd_rx).await;
             if compression_cancelled {
                 emit_cancelled(stream_tx);
                 return SummaryPhaseResult::Cancelled(usage);
@@ -353,7 +353,7 @@ impl ReactEngine {
         }
         crate::react::message::emit_session_message_upsert(session, stream_tx, &pending_msg_id);
         let compression_cancelled =
-            maybe_update_context_summary(session, &self.engine, &usage, stream_tx, cmd_rx).await;
+            maybe_update_context_summary(session, self, &usage, stream_tx, cmd_rx).await;
         if compression_cancelled {
             emit_cancelled(stream_tx);
             return SummaryPhaseResult::Cancelled(usage);
@@ -479,8 +479,8 @@ mod tests {
             content: "[DONE]".to_string(),
             complete: true,
         });
-        let engine = test_runtime(server.base_url());
-        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1);
+        let mut engine = test_runtime(server.base_url());
+
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("summary-done-marker").with_storage_root(storage.path());
         session.append_message(MessageRole::User, "完成任务");
@@ -497,7 +497,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            react.run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1),
+            engine.run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1),
         )
         .await
         .expect("总结阶段未及时完成");
@@ -532,8 +532,8 @@ mod tests {
             content: "部分总结".to_string(),
             complete: false,
         });
-        let engine = test_runtime(server.base_url());
-        let mut react = ReactEngine::new(engine, Vec::new(), 2, 1);
+        let mut engine = test_runtime(server.base_url());
+
         let storage = tempfile::tempdir().unwrap();
         let mut session = Session::new("summary-interrupted").with_storage_root(storage.path());
         session.append_message(MessageRole::User, "完成任务");
@@ -542,7 +542,7 @@ mod tests {
         let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
 
         let execution = tokio::spawn(async move {
-            let result = react
+            let result = engine
                 .run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1)
                 .await;
             (result, session)
@@ -833,7 +833,7 @@ impl ForceFinalReason {
     }
 }
 
-impl ReactEngine {
+impl TurnContext {
     /// 超限时强制最终回复（兜底路径）。
     ///
     /// 触发场景：
@@ -858,7 +858,7 @@ impl ReactEngine {
     ) -> bool {
         // 确保 system prompt 已构建
         if session.system_prompt_message.is_none() {
-            rebuild_system_prompt(session, &self.engine);
+            rebuild_system_prompt(session, self);
         }
         // 将强制终结提示作为 Tool 消息持久化进 session（区别于 run_summary_phase 把
         // 提示放在请求 context 而不入 session）：兜底原因需在会话恢复后可见，便于诊断。
@@ -943,7 +943,7 @@ impl ReactEngine {
             StreamTextKind::Summary,
         );
         let (chunk_tx, mut chunk_rx) = tokio_mpsc::unbounded_channel();
-        let client = select_client_for_request(&self.engine, req).clone();
+        let client = select_client_for_request(self, req).clone();
         let request = req.clone();
         let llm_fut = tokio::spawn(async move {
             client
@@ -1020,7 +1020,7 @@ impl ReactEngine {
             stream_tx,
             &resp.usage,
             Some(resp.usage.prompt_tokens.max(session.current_tokens)),
-            self.engine.context_limit,
+            self.context_limit,
             usage_source,
             None,
         );

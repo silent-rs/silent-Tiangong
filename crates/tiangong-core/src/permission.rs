@@ -555,15 +555,15 @@ fn infer_tool_name_scope(
 
 /// 综合基础工具权限和路径/网络规则，给出最终权限判定
 pub(crate) fn evaluate_tool_permission(
-    engine: &crate::runtime::RuntimeEngine,
+    ctx: &crate::turn_context::TurnContext,
     tool_name: &str,
     target_scope: Option<&str>,
     target_summary: Option<&str>,
 ) -> PermissionDecision {
-    let base_decision = engine.check_tool_permission(tool_name);
+    let base_decision = ctx.check_tool_permission(tool_name);
     let scoped_decision = match (target_scope, target_summary) {
-        (Some("path"), Some(path)) => Some(engine.permission_gate().check_path(path)),
-        (Some("network"), Some(target)) => Some(engine.permission_gate().check_network(target)),
+        (Some("path"), Some(path)) => Some(ctx.permission_gate().check_path(path)),
+        (Some("network"), Some(target)) => Some(ctx.permission_gate().check_network(target)),
         _ => None,
     };
 

@@ -1,6 +1,7 @@
-//! ReactEngine: 单个 agent 的 async ReAct 循环
+//! TurnContext 的 ReAct 执行流程。
 //!
-//! 所有执行路径统一经过 `ReactEngine::execute_turn`，消除 sync/async 双版本。
+//! [`TurnContext`] 定义在 `crate::turn_context`,是 turn 级能力容器。本文件在其上
+//! 定义 ReAct 循环方法（`execute_turn` / `run_summary_phase` / `force_final_response`）。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender as StdSender;
@@ -23,6 +24,7 @@ use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
 use crate::session::{Message, MessageRole, Session, now_text};
 use crate::stream_throttle::ThrottledStreamSink;
+use crate::turn_context::TurnContext;
 use tiangong_types::{ContentBlock, StreamEvent, StreamToolCall, content_blocks_text};
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
@@ -44,38 +46,12 @@ pub(super) enum TurnPhase {
     Summary,
 }
 
-/// 单个 agent 的 async ReAct 执行引擎
-pub struct ReactEngine {
-    /// 共享的 RuntimeEngine（嵌套执行经 clone 继承父引擎的 tool_overrides）。
-    pub engine: crate::runtime::RuntimeEngine,
-    /// 当前执行单元可用的工具集。
-    pub tools: Vec<ToolSpec>,
-    /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次。
-    pub max_tool_rounds: usize,
-    /// 总结阶段后重新进入工具执行阶段的最大次数。
-    pub max_outer_iterations: u32,
-    /// 当前执行单元身份。
-    pub agent_id: String,
-    /// 调用方提供的完整 system prompt；用于插件启动的嵌套 Agent。
-    system_prompt_override: Option<Message>,
-}
+// TurnContext 定义与能力方法（new/with_*/accessor/start_tool_permission 等）位于
+// `crate::turn_context`。本文件仅保留 ReAct 执行流程相关方法（impl TurnContext 的
+// execute_turn / run_summary_phase / force_final_response / 辅助方法）。
 
-impl ReactEngine {
-    pub fn new(
-        engine: crate::runtime::RuntimeEngine,
-        tools: Vec<ToolSpec>,
-        max_tool_rounds: usize,
-        max_outer_iterations: u32,
-    ) -> Self {
-        Self {
-            engine,
-            tools,
-            max_tool_rounds,
-            max_outer_iterations,
-            agent_id: "main".to_string(),
-            system_prompt_override: None,
-        }
-    }
+impl TurnContext {
+    // ===== turn 执行辅助 =====
 
     pub(super) fn defer_tool_injections(
         &mut self,
@@ -103,12 +79,7 @@ impl ReactEngine {
         Option<crate::model::ReasoningEffort>,
         bool,
     ) {
-        let effort_str = self
-            .engine
-            .agent_config()
-            .reasoning_effort
-            .trim()
-            .to_lowercase();
+        let effort_str = self.agent_config.reasoning_effort.trim().to_lowercase();
         match effort_str.as_str() {
             "none" | "" => (None, None, true),
             "low" => (
@@ -149,18 +120,6 @@ impl ReactEngine {
         }
     }
 
-    /// 设置当前执行单元身份，供插件策略与工具处理器识别调用方。
-    pub fn with_agent_id(mut self, agent_id: String) -> Self {
-        self.agent_id = agent_id;
-        self
-    }
-
-    /// 为嵌套 Agent 固定专属 system prompt，避免首轮按主 Agent 配置重建覆盖。
-    pub fn with_system_prompt(mut self, system_prompt: Message) -> Self {
-        self.system_prompt_override = Some(system_prompt);
-        self
-    }
-
     /// 执行一个完整的对话轮次（可能多轮工具调用），async 版
     ///
     /// 每轮之间检查 cmd_rx：新消息注入上下文，cancel 立即生效。
@@ -179,8 +138,8 @@ impl ReactEngine {
         // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
         // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
         // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
-        let usage_sink = self.engine.turn_usage_sink().clone();
-        let _usage_guard = usage_sink.bind(stream_tx.clone(), self.engine.context_limit);
+        let usage_sink = self.turn_usage_sink().clone();
+        let _usage_guard = usage_sink.bind(stream_tx.clone(), self.context_limit);
         // 把本轮插件累计的 usage 折算进 accumulated_usage（在每个返回点调用）。
         // 注意：捕获 usage_sink 的 clone，而非 self，避免与循环内 &mut self 借用冲突。
         let merge_plugin_usage = |acc: &mut TokenUsage| {
@@ -213,10 +172,10 @@ impl ReactEngine {
                     if let Some(system_prompt) = &self.system_prompt_override {
                         session.system_prompt_message = Some(system_prompt.clone());
                     } else {
-                        crate::react::context::rebuild_system_prompt(session, &self.engine);
+                        crate::react::context::rebuild_system_prompt(session, self);
                     }
                 }
-                match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;
@@ -285,7 +244,7 @@ impl ReactEngine {
                 // async 流式调用 + select! 取消
                 let (chunk_tx, mut chunk_rx) =
                     tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
-                let client = select_client_for_request(&self.engine, &req).clone();
+                let client = select_client_for_request(self, &req).clone();
                 let req_clone = req.clone();
                 let tools_clone = request_tools.clone();
                 let mut llm_fut = Some(tokio::task::spawn(async move {
@@ -377,7 +336,7 @@ impl ReactEngine {
                                     crate::core::reset_context_for_session(
                                         session,
                                         stream_tx,
-                                        &self.engine,
+                                        self,
                                     );
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
@@ -406,7 +365,7 @@ impl ReactEngine {
                                             emit_cancel_usage(
                                                 stream_tx,
                                                 &streaming_usage,
-                                                self.engine.context_limit,
+                                                self.context_limit,
                                             );
                                             merge_plugin_usage(&mut accumulated_usage);
                                             return accumulated_usage;
@@ -443,7 +402,7 @@ impl ReactEngine {
                             stream_tx,
                             &streaming_usage,
                             None,
-                            self.engine.context_limit,
+                            self.context_limit,
                             "react-interrupted",
                             None,
                         );
@@ -467,11 +426,7 @@ impl ReactEngine {
                                 abort_and_join(handle).await;
                             }
                             accumulated_usage.accumulate(&streaming_usage);
-                            emit_cancel_usage(
-                                stream_tx,
-                                &streaming_usage,
-                                self.engine.context_limit,
-                            );
+                            emit_cancel_usage(stream_tx, &streaming_usage, self.context_limit);
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
                         }
@@ -487,11 +442,11 @@ impl ReactEngine {
                             let compression_cancelled =
                                 crate::react::context::maybe_update_context_summary(
                                     session,
-                                    &self.engine,
+                                    self,
                                     &tiangong_types::TokenUsage {
-                                        prompt_tokens: self.engine.context_limit,
+                                        prompt_tokens: self.context_limit,
                                         completion_tokens: 0,
-                                        total_tokens: self.engine.context_limit,
+                                        total_tokens: self.context_limit,
                                         prompt_cache_hit_tokens: None,
                                         prompt_cache_miss_tokens: None,
                                     },
@@ -525,7 +480,7 @@ impl ReactEngine {
                     stream_tx,
                     &response.usage,
                     Some(response.usage.prompt_tokens.max(session.current_tokens)),
-                    self.engine.context_limit,
+                    self.context_limit,
                     format!("react-round-{round}", round = round + 1),
                     None,
                 );
@@ -575,7 +530,7 @@ impl ReactEngine {
                     session.persist_to_disk();
                     let compression_cancelled = maybe_update_context_summary(
                         session,
-                        &self.engine,
+                        self,
                         &response.usage,
                         stream_tx,
                         cmd_rx,
@@ -703,7 +658,7 @@ impl ReactEngine {
                     // 本轮已尝试执行工具调用（无论成功/失败/跳过），标记以阻止
                     // 简单问答快速路径把后续无 tool_calls 的回复误判为直接回复。
                     executed_tool_in_iteration = true;
-                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -805,12 +760,12 @@ impl ReactEngine {
                     }
 
                     let decision = evaluate_tool_permission(
-                        &self.engine,
+                        self,
                         &call.name,
                         target_scope.as_deref(),
                         normalized_target.as_deref(),
                     );
-                    let trust_mode = format!("{:?}", self.engine.permission_gate().trust_mode());
+                    let trust_mode = format!("{:?}", self.permission_gate().trust_mode());
                     match decision {
                         PermissionDecision::Approved => {
                             audit_permission_with_context(
@@ -966,9 +921,7 @@ impl ReactEngine {
                                     }
                                     Some(Command::ResetContext) => {
                                         crate::core::reset_context_for_session(
-                                            session,
-                                            stream_tx,
-                                            &self.engine,
+                                            session, stream_tx, self,
                                         );
                                     }
                                     Some(Command::EmitStreamEvent(ev)) => {
@@ -1049,8 +1002,7 @@ impl ReactEngine {
 
                     let mut buffered_tool_commands = Vec::new();
                     // 工具处理器只在启动瞬间借用 Session；执行 Future 不再持有借用。
-                    let mut tool_future =
-                        self.engine.start_tool_call(call, session, &self.agent_id);
+                    let mut tool_future = self.start_tool_call(call, session, &self.agent_id);
                     let result = loop {
                         tokio::select! {
                             biased;
@@ -1089,7 +1041,7 @@ impl ReactEngine {
                         append_tool_result_message(session, &call.id, &call.name, output, true);
                         let buffered_effect = process_buffered_commands(
                             session,
-                            &self.engine,
+                            self,
                             stream_tx,
                             buffered_tool_commands,
                         );
@@ -1121,7 +1073,7 @@ impl ReactEngine {
                         stream_tx,
                         &tool_llm_usage,
                         None,
-                        self.engine.context_limit,
+                        self.context_limit,
                         usage_source,
                         None,
                     );
@@ -1169,7 +1121,7 @@ impl ReactEngine {
                     );
                     match process_buffered_commands(
                         session,
-                        &self.engine,
+                        self,
                         stream_tx,
                         buffered_tool_commands,
                     ) {
@@ -1219,7 +1171,7 @@ impl ReactEngine {
                     // 统一提交给 actor 的 pending list，反刍时自动合并）。
                     let compression_cancelled = maybe_update_context_summary(
                         session,
-                        &self.engine,
+                        self,
                         &response.usage,
                         stream_tx,
                         cmd_rx,
@@ -1231,7 +1183,7 @@ impl ReactEngine {
                         return accumulated_usage;
                     }
 
-                    match drain_pending_commands_async(session, &self.engine, stream_tx, cmd_rx) {
+                    match drain_pending_commands_async(session, self, stream_tx, cmd_rx) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;

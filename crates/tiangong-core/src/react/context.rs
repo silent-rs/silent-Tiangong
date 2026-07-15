@@ -10,16 +10,16 @@ use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
-use crate::runtime::RuntimeEngine;
 use crate::session::Session;
+use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
-/// 从 RuntimeEngine 收集插件段落并重建 session 的 system prompt
+/// 从 TurnContext 收集插件段落并重建 session 的 system prompt
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
 /// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
-pub(crate) fn rebuild_system_prompt(session: &mut Session, engine: &RuntimeEngine) {
-    let plugin_sections = engine.collect_plugin_prompt_sections();
+pub(crate) fn rebuild_system_prompt(session: &mut Session, ctx: &TurnContext) {
+    let plugin_sections = ctx.collect_plugin_prompt_sections();
     let config = SystemPromptConfig::from_plugin_sections(plugin_sections);
     session.rebuild_system_prompt(&config);
 }
@@ -77,12 +77,12 @@ pub(crate) fn emit_token_usage(
 
 pub(crate) async fn maybe_update_context_summary(
     session: &mut Session,
-    engine: &RuntimeEngine,
+    ctx: &TurnContext,
     observed_usage: &TokenUsage,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> bool {
-    let organizer = ContextOrganizer::new(engine.context_limit)
+    let organizer = ContextOrganizer::new(ctx.context_limit)
         .with_threshold(0.95)
         .with_keep_recent_turns(6);
     let observed_tokens = observed_total_tokens(observed_usage);
@@ -97,7 +97,7 @@ pub(crate) async fn maybe_update_context_summary(
     let update = tokio::select! {
         update = organizer.maybe_update_summary_with_usage_async(
             session,
-            engine.client(),
+            ctx.client(),
             observed_tokens,
         ) => update,
         _cmd = cmd_rx.recv() => {
@@ -119,12 +119,12 @@ pub(crate) async fn maybe_update_context_summary(
                 as usize;
             session.current_tokens = estimated_tokens;
             // 压缩后重建 system prompt（摘要已更新）
-            rebuild_system_prompt(session, engine);
+            rebuild_system_prompt(session, ctx);
             emit_token_usage(
                 stream_tx,
                 &update.usage,
                 Some(estimated_tokens),
-                engine.context_limit,
+                ctx.context_limit,
                 "context_summary",
                 None,
             );
@@ -165,10 +165,10 @@ pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
 }
 
 pub(crate) fn select_client_for_request<'a>(
-    engine: &'a RuntimeEngine,
+    ctx: &'a TurnContext,
     _req: &ModelRequest,
 ) -> &'a SingleProviderClient {
-    engine.client()
+    ctx.client()
 }
 
 /// 将错误持久化到 session，作为 LLM 请求失败时的诊断痕迹。

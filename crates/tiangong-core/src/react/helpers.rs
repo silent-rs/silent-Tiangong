@@ -1,7 +1,7 @@
 //! ReAct 主循环的通用辅助函数。
 //!
-//! 这些函数不依赖 `ReactEngine` 自身状态（无 `&self`），而是操作传入的
-//! `Session` / `RuntimeEngine` / 命令通道，属于与主状态机解耦的纯过程性逻辑：
+//! 这些函数不依赖 `TurnContext` 自身状态（无 `&self`），而是操作传入的
+//! `Session` / `TurnContext` / 命令通道，属于与主状态机解耦的纯过程性逻辑：
 //! - 命令排空（`drain_pending_commands_async`）
 //! - 非阻塞取消检查（`check_cancel`）
 //! - 最终回答启发式判断（`looks_like_final_answer`）
@@ -15,8 +15,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::{Command, PendingCommandEffect};
 use crate::react::message::accept_runtime_user_message;
-use crate::runtime::RuntimeEngine;
 use crate::session::Session;
+use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
 /// 判断 ReAct 阶段的文本回复是否「看起来像一个完整回答」（而非向用户提问）。
@@ -57,27 +57,27 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 /// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
 pub(super) fn drain_pending_commands_async(
     session: &mut Session,
-    engine: &RuntimeEngine,
+    ctx: &TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> PendingCommandEffect {
     let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(session, engine, stream_tx, commands)
+    process_commands(session, ctx, stream_tx, commands)
 }
 
 /// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
 pub(super) fn process_buffered_commands(
     session: &mut Session,
-    engine: &RuntimeEngine,
+    ctx: &TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     commands: Vec<Command>,
 ) -> PendingCommandEffect {
-    process_commands(session, engine, stream_tx, commands)
+    process_commands(session, ctx, stream_tx, commands)
 }
 
 fn process_commands(
     session: &mut Session,
-    engine: &RuntimeEngine,
+    ctx: &TurnContext,
     stream_tx: &StdSender<StreamEvent>,
     commands: impl IntoIterator<Item = Command>,
 ) -> PendingCommandEffect {
@@ -115,7 +115,7 @@ fn process_commands(
                 });
             }
             Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx, engine);
+                crate::core::reset_context_for_session(session, stream_tx, ctx);
             }
             Command::EmitStreamEvent(ev) => {
                 let ev = *ev;
