@@ -67,7 +67,7 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         let coordinator = Arc::clone(&self.coordinator);
         let call = call.clone();
         let actor_id = actor_id.to_string();
-        let feedback = self.feedback().map(PluginFeedbackTx::for_current_turn);
+        let feedback = self.feedback();
         Box::pin(async move {
             let Some(feedback) = feedback else {
                 return Some(error_result(&call.name, "Agent Team 反馈通道不可用"));
@@ -397,6 +397,7 @@ mod tests {
         parent_session.cwd = storage.path().to_string_lossy().into_owned();
         parent_session.trust_mode = TrustMode::FullTrust;
         parent_session.bind_storage_root(storage.path());
+        parent_session.try_persist_to_disk().unwrap();
         let child_factory: Arc<dyn ChildPluginFactory> = Arc::new(Vec::<Arc<dyn Plugin>>::new);
         let plugin = build_plugin(storage.path().to_path_buf(), child_factory);
         let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();

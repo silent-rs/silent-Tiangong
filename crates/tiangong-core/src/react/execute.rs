@@ -26,6 +26,7 @@ use tiangong_types::{StreamEvent, StreamToolCall};
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
 use super::helpers::{
     drain_pending_commands_async, looks_like_final_answer, process_buffered_commands,
+    record_plugin_usage,
 };
 use super::outcome::TurnExecutionResult;
 use super::summary::{ForceFinalReason, ForceFinalResult, SummaryPhaseResult};
@@ -139,6 +140,7 @@ enum ReactRequestOutcome {
 async fn request_react_response(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
     request_tools: Vec<ToolSpec>,
 ) -> ReactRequestOutcome {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
@@ -236,6 +238,18 @@ async fn request_react_response(
                     Some(Command::EmitStreamEvent(event)) => {
                         let _ = ctx.stream_tx.send(*event);
                     }
+                    Some(Command::ReportUsage {
+                        usage,
+                        source,
+                        emit_event,
+                    }) => record_plugin_usage(
+                        &ctx.stream_tx,
+                        ctx.context_limit,
+                        accumulated_usage,
+                        usage,
+                        source,
+                        emit_event,
+                    ),
                     Some(Command::SetTrustMode(mode)) => {
                         ctx.trust_mode = mode;
                     }
@@ -341,6 +355,7 @@ struct TextResponseState {
 async fn handle_text_response(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
     pending_msg_id: &str,
     response: &crate::model::ModelFunctionResponse,
     state: TextResponseState,
@@ -380,7 +395,7 @@ async fn handle_text_response(
     );
     ctx.session.persist_to_disk();
 
-    if maybe_update_context_summary(ctx, &response.usage, cmd_rx).await {
+    if maybe_update_context_summary(ctx, &response.usage, cmd_rx, accumulated_usage).await {
         return TextResponseOutcome::Cancelled;
     }
 
@@ -558,6 +573,7 @@ enum ToolApprovalOutcome {
 async fn request_tool_approval(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
     call: &ToolCall,
     args_summary: &str,
 ) -> ToolApprovalOutcome {
@@ -631,6 +647,18 @@ async fn request_tool_approval(
             Some(Command::EmitStreamEvent(event)) => {
                 let _ = ctx.stream_tx.send(*event);
             }
+            Some(Command::ReportUsage {
+                usage,
+                source,
+                emit_event,
+            }) => record_plugin_usage(
+                &ctx.stream_tx,
+                ctx.context_limit,
+                accumulated_usage,
+                usage,
+                source,
+                emit_event,
+            ),
         }
     }
 }
@@ -689,6 +717,7 @@ enum RunningToolOutcome {
 async fn run_tool_call(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
     call: &ToolCall,
     args_summary: &str,
 ) -> RunningToolOutcome {
@@ -710,6 +739,18 @@ async fn run_tool_call(
                     Some(Command::EmitStreamEvent(event)) => {
                         let _ = ctx.stream_tx.send(*event);
                     }
+                    Some(Command::ReportUsage {
+                        usage,
+                        source,
+                        emit_event,
+                    }) => record_plugin_usage(
+                        &ctx.stream_tx,
+                        ctx.context_limit,
+                        accumulated_usage,
+                        usage,
+                        source,
+                        emit_event,
+                    ),
                     Some(Command::SetTrustMode(mode)) => ctx.trust_mode = mode,
                     Some(Command::Cancel) | Some(Command::Shutdown) | None => break None,
                     Some(command) => buffered_commands.push(command),
@@ -857,7 +898,7 @@ async fn execute_tool_batch(
     let mut needs_failure_recovery = false;
 
     for call in calls {
-        match drain_pending_commands_async(ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx, accumulated_usage) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -886,7 +927,7 @@ async fn execute_tool_batch(
             }
         };
 
-        match request_tool_approval(ctx, cmd_rx, call, &args_summary).await {
+        match request_tool_approval(ctx, cmd_rx, accumulated_usage, call, &args_summary).await {
             ToolApprovalOutcome::Approved => {}
             ToolApprovalOutcome::Rejected => {
                 record_rejected_tool_call(ctx, call, &args_summary);
@@ -901,7 +942,7 @@ async fn execute_tool_batch(
         }
 
         let (result, buffered_commands, duration_ms) =
-            match run_tool_call(ctx, cmd_rx, call, &args_summary).await {
+            match run_tool_call(ctx, cmd_rx, accumulated_usage, call, &args_summary).await {
                 RunningToolOutcome::Completed {
                     result,
                     buffered_commands,
@@ -930,7 +971,7 @@ async fn execute_tool_batch(
                     if let PendingCommandEffect::MessagesInjected {
                         current_agent_input: Some(input),
                         ..
-                    } = process_buffered_commands(ctx, buffered_commands)
+                    } = process_buffered_commands(ctx, buffered_commands, accumulated_usage)
                     {
                         tool_history.clear();
                         ctx.session.persist_to_disk();
@@ -939,18 +980,6 @@ async fn execute_tool_batch(
                     return ToolBatchOutcome::Cancelled;
                 }
             };
-
-        // 工具自身不产生模型用量；保留统一的用量事件入口。
-        let tool_usage = TokenUsage::default();
-        accumulated_usage.accumulate(&tool_usage);
-        emit_token_usage(
-            &ctx.stream_tx,
-            &tool_usage,
-            None,
-            ctx.context_limit,
-            "",
-            None,
-        );
 
         needs_failure_recovery |= record_completed_tool_call(
             ctx,
@@ -964,7 +993,7 @@ async fn execute_tool_batch(
             tool_history,
         );
 
-        match process_buffered_commands(ctx, buffered_commands) {
+        match process_buffered_commands(ctx, buffered_commands, accumulated_usage) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -979,11 +1008,11 @@ async fn execute_tool_batch(
             PendingCommandEffect::MessagesInjected { .. } | PendingCommandEffect::None => {}
         }
 
-        if maybe_update_context_summary(ctx, &response.usage, cmd_rx).await {
+        if maybe_update_context_summary(ctx, &response.usage, cmd_rx, accumulated_usage).await {
             return ToolBatchOutcome::Cancelled;
         }
 
-        match drain_pending_commands_async(ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx, accumulated_usage) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -1046,7 +1075,7 @@ async fn execute_react_phase(
                 "TurnContext 构建前应已注入 system prompt"
             );
         }
-        match drain_pending_commands_async(ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx, accumulated_usage) {
             PendingCommandEffect::Terminate => {
                 return ReactPhaseOutcome::Cancelled;
             }
@@ -1085,7 +1114,9 @@ async fn execute_react_phase(
         let request_tools = tools_for_current_turn(ctx, user_input);
 
         let (pending_msg_id, response) =
-            match request_react_response(ctx, cmd_rx, request_tools.clone()).await {
+            match request_react_response(ctx, cmd_rx, accumulated_usage, request_tools.clone())
+                .await
+            {
                 ReactRequestOutcome::Completed {
                     pending_msg_id: response_message_id,
                     response_result,
@@ -1112,6 +1143,7 @@ async fn execute_react_phase(
                                         prompt_cache_miss_tokens: None,
                                     },
                                     cmd_rx,
+                                    accumulated_usage,
                                 )
                                 .await;
                                 if compression_cancelled {
@@ -1158,6 +1190,7 @@ async fn execute_react_phase(
             match handle_text_response(
                 ctx,
                 cmd_rx,
+                accumulated_usage,
                 &pending_msg_id,
                 &response,
                 TextResponseState {
@@ -1222,7 +1255,10 @@ async fn execute_summary_step(
     outer_iteration: &mut u32,
     accumulated_usage: &mut TokenUsage,
 ) -> SummaryStepOutcome {
-    match ctx.run_summary_phase(cmd_rx, *outer_iteration + 1).await {
+    match ctx
+        .run_summary_phase(cmd_rx, accumulated_usage, *outer_iteration + 1)
+        .await
+    {
         SummaryPhaseResult::Completed(usage) => {
             accumulated_usage.accumulate(&usage);
             SummaryStepOutcome::Completed
@@ -1232,7 +1268,7 @@ async fn execute_summary_step(
             *outer_iteration += 1;
             if *outer_iteration >= ctx.max_outer_iterations {
                 return match ctx
-                    .force_final_response(cmd_rx, ForceFinalReason::OuterLimit)
+                    .force_final_response(cmd_rx, accumulated_usage, ForceFinalReason::OuterLimit)
                     .await
                 {
                     ForceFinalResult::Completed(usage) => {
@@ -1265,7 +1301,7 @@ async fn execute_summary_step(
             accumulated_usage.accumulate(&usage);
             persist_error(ctx, format!("总结阶段失败：{message}"));
             match ctx
-                .force_final_response(cmd_rx, ForceFinalReason::SummaryError)
+                .force_final_response(cmd_rx, accumulated_usage, ForceFinalReason::SummaryError)
                 .await
             {
                 ForceFinalResult::Completed(usage) => {
@@ -1296,15 +1332,9 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    let usage_sink = ctx.turn_usage_sink().clone();
-    let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
-    let merge_plugin_usage = |acc: &mut TokenUsage| {
-        acc.accumulate(&usage_sink.take_usage());
-    };
     let mut round = 0usize;
     let mut outer_iteration = 0u32;
     let mut accumulated_usage = TokenUsage::default();
-    // 插件用量在本轮内即时累加；guard 离开 execute_turn 时自动解绑。
     let mut tool_history = ToolCallHistory::default();
     let mut user_input = ctx
         .session
@@ -1338,15 +1368,12 @@ pub(super) async fn execute_turn(
                 continue 'outer;
             }
             ReactPhaseOutcome::Completed => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::success(accumulated_usage);
             }
             ReactPhaseOutcome::Cancelled => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::cancelled(accumulated_usage);
             }
             ReactPhaseOutcome::Failed(message) => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::failed(accumulated_usage, message);
             }
         }
@@ -1354,7 +1381,6 @@ pub(super) async fn execute_turn(
         match execute_summary_step(ctx, cmd_rx, &mut outer_iteration, &mut accumulated_usage).await
         {
             SummaryStepOutcome::Completed => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::success(accumulated_usage);
             }
             SummaryStepOutcome::Continue => {
@@ -1369,11 +1395,9 @@ pub(super) async fn execute_turn(
                 continue 'outer;
             }
             SummaryStepOutcome::Cancelled => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::cancelled(accumulated_usage);
             }
             SummaryStepOutcome::Failed(message) => {
-                merge_plugin_usage(&mut accumulated_usage);
                 break 'outer TurnExecutionResult::failed(accumulated_usage, message);
             }
         }

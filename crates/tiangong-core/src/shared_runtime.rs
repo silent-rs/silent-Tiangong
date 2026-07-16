@@ -81,9 +81,8 @@ where
 {
     let session_id = context.session.id.clone();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let usage_sink = context.turn_usage_sink().clone();
     for plugin in &context.plugins {
-        plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx.clone(), usage_sink.clone()));
+        plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx.clone()));
     }
     let future = future_factory(context, cmd_rx)?;
 

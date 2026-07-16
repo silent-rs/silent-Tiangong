@@ -29,7 +29,7 @@ mod registry;
 mod tool_spec;
 mod trait_def;
 
-pub use feedback::{PluginFeedback, PluginFeedbackTx, TurnUsageGuard, TurnUsageSink};
+pub use feedback::{PluginFeedback, PluginFeedbackTx};
 pub use trait_def::Plugin;
 
 pub(crate) use injection::injection_tool_spec;

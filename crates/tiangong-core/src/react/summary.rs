@@ -23,6 +23,7 @@ use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
 use super::execute::{TurnPhase, tools_for_current_turn};
+use super::helpers::record_plugin_usage;
 use crate::turn_context::TurnContext;
 
 /// 总结阶段的执行结果。
@@ -66,6 +67,7 @@ impl TurnContext {
     pub(super) async fn run_summary_phase(
         &mut self,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        accumulated_usage: &mut TokenUsage,
         iteration: u32,
     ) -> SummaryPhaseResult {
         let stream_tx = self.stream_tx.clone();
@@ -186,6 +188,18 @@ impl TurnContext {
                             let ev = *ev;
                             let _ = stream_tx.send(ev);
                         }
+                        Some(Command::ReportUsage {
+                            usage,
+                            source,
+                            emit_event,
+                        }) => record_plugin_usage(
+                            &self.stream_tx,
+                            self.context_limit,
+                            accumulated_usage,
+                            usage,
+                            source,
+                            emit_event,
+                        ),
                         Some(Command::SetTrustMode(mode)) => {
                             self.trust_mode = mode;
                         }
@@ -314,7 +328,8 @@ impl TurnContext {
             if let Some(message_id) = promote_last_react_message_to_summary(&mut self.session) {
                 crate::react::message::emit_session_message_upsert(self, &message_id);
             }
-            let compression_cancelled = maybe_update_context_summary(self, &usage, cmd_rx).await;
+            let compression_cancelled =
+                maybe_update_context_summary(self, &usage, cmd_rx, accumulated_usage).await;
             if compression_cancelled {
                 return SummaryPhaseResult::Cancelled(usage);
             }
@@ -344,7 +359,8 @@ impl TurnContext {
             };
         }
         crate::react::message::emit_session_message_upsert(self, &pending_msg_id);
-        let compression_cancelled = maybe_update_context_summary(self, &usage, cmd_rx).await;
+        let compression_cancelled =
+            maybe_update_context_summary(self, &usage, cmd_rx, accumulated_usage).await;
         if compression_cancelled {
             return SummaryPhaseResult::Cancelled(usage);
         }
@@ -732,6 +748,7 @@ impl TurnContext {
     pub(super) async fn force_final_response(
         &mut self,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        accumulated_usage: &mut TokenUsage,
         reason: ForceFinalReason,
     ) -> ForceFinalResult {
         // 确保 system prompt 已构建
@@ -771,7 +788,7 @@ impl TurnContext {
         let pending_msg_id = scru128::new().to_string();
 
         let resp = match self
-            .run_text_finalization_llm(&req, &pending_msg_id, cmd_rx)
+            .run_text_finalization_llm(&req, &pending_msg_id, cmd_rx, accumulated_usage)
             .await
         {
             Ok(response) => response,
@@ -805,6 +822,7 @@ impl TurnContext {
         req: &ModelRequest,
         pending_msg_id: &str,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        accumulated_usage: &mut TokenUsage,
     ) -> Result<crate::model::ModelFunctionResponse, TextFinalizationError> {
         let stream_tx = &self.stream_tx;
         let final_tools = tools_for_current_turn(self, "");
@@ -830,13 +848,32 @@ impl TurnContext {
         let response_result = loop {
             tokio::select! {
                 biased;
-                _cmd = cmd_rx.recv() => {
-                    // 收到任意命令时中止（Cancel/Shutdown 表示用户要停）。
-                    if let Some(handle) = llm_fut.take() {
-                        crate::react::cancel::abort_and_join(handle).await;
+                command = cmd_rx.recv() => {
+                    match command {
+                        Some(Command::ReportUsage {
+                            usage,
+                            source,
+                            emit_event,
+                        }) => record_plugin_usage(
+                            &self.stream_tx,
+                            self.context_limit,
+                            accumulated_usage,
+                            usage,
+                            source,
+                            emit_event,
+                        ),
+                        Some(Command::EmitStreamEvent(event)) => {
+                            let _ = self.stream_tx.send(*event);
+                        }
+                        _ => {
+                            // 强制终结阶段收到控制命令时中止。
+                            if let Some(handle) = llm_fut.take() {
+                                crate::react::cancel::abort_and_join(handle).await;
+                            }
+                            sink.finish();
+                            return Err(TextFinalizationError::Cancelled);
+                        }
                     }
-                    sink.finish();
-                    return Err(TextFinalizationError::Cancelled);
                 }
                 chunk = chunk_rx.recv() => {
                     if let Some(chunk) = chunk {

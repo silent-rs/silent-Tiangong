@@ -70,8 +70,8 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// core 在 TurnContext 构建后、turn task 启动前调用一次。需要向 session 主动
     /// 投递外部事件（如浏览器页面变化、终端用户操作）的插件应覆写此方法，把入参
-    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx::inject_tool`] 投递
-    /// [`PluginFeedback`]，core 会统一注入到 session（以 tool result 形式）。
+    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx`] 投递会话内容、用量或
+    /// 流事件，Core 会按本轮命令顺序统一处理。
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}

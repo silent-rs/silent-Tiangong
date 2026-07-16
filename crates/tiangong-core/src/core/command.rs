@@ -27,6 +27,12 @@ pub enum Command {
     },
     /// 插件投递的流事件。
     EmitStreamEvent(Box<tiangong_types::StreamEvent>),
+    /// 插件内部模型调用产生的 token 用量。
+    ReportUsage {
+        usage: tiangong_types::TokenUsage,
+        source: String,
+        emit_event: bool,
+    },
     /// 关闭
     Shutdown,
 }

@@ -82,6 +82,7 @@ pub(crate) async fn maybe_update_context_summary(
     ctx: &mut TurnContext,
     observed_usage: &TokenUsage,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
 ) -> bool {
     let organizer = ContextOrganizer::new(ctx.context_limit)
         .with_threshold(0.95)
@@ -95,19 +96,37 @@ pub(crate) async fn maybe_update_context_summary(
         summary_up_to: ctx.session.summary_up_to,
         total_messages,
     });
-    let client = &ctx.client;
-    let update = tokio::select! {
-        update = organizer.maybe_update_summary_with_usage_async(
+    let stream_tx = ctx.stream_tx.clone();
+    let context_limit = ctx.context_limit;
+    let update = {
+        let update_future = organizer.maybe_update_summary_with_usage_async(
             &mut ctx.session,
-            client,
+            &ctx.client,
             observed_tokens,
-        ) => update,
-        _cmd = cmd_rx.recv() => {
-            // 收到任意命令时中止压缩（Cancel/Shutdown 表示用户要停，其他命令
-            // 排在压缩期间到达的概率极低——turn 内排空后才压缩）。
-            // 被中断的命令无法放回 unbounded channel，但 turn 会立即终止，
-            // 后续 drain 不会再执行。此处 return true 让调用方发"已取消"。
-            return true;
+        );
+        tokio::pin!(update_future);
+        loop {
+            tokio::select! {
+                update = &mut update_future => break update,
+                command = cmd_rx.recv() => match command {
+                    Some(Command::ReportUsage {
+                        usage,
+                        source,
+                        emit_event,
+                    }) => crate::react::helpers::record_plugin_usage(
+                        &stream_tx,
+                        context_limit,
+                        accumulated_usage,
+                        usage,
+                        source,
+                        emit_event,
+                    ),
+                    Some(Command::EmitStreamEvent(event)) => {
+                        let _ = stream_tx.send(*event);
+                    }
+                    _ => return true,
+                }
+            }
         }
     };
     match update {

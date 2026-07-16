@@ -54,13 +54,11 @@ pub(crate) struct ChildRuntime {
 }
 
 impl ChildRuntime {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         descriptor: AgentDescriptor,
         mut session: Session,
         config: CoreConfig,
         child_storage_root: PathBuf,
-        core_storage_root: PathBuf,
         mut plugins: Vec<Arc<dyn Plugin>>,
         team_client: Arc<dyn Plugin>,
         base_feedback: SharedFeedback,
@@ -95,7 +93,7 @@ impl ChildRuntime {
             .session_id(session_id)
             .config(CoreConfigProvider::new(config))
             .trust_mode(trust_mode)
-            .storage_root(core_storage_root)
+            .storage_root(child_storage_root.clone())
             .stream_tx(event_tx)
             .plugins(plugins)
             .build();
@@ -1023,9 +1021,7 @@ fn namespaced_message_id(
 }
 
 fn forward_event(feedback: &PluginFeedbackTx, event: StreamEvent) {
-    if !feedback.send_turn_stream_event(event.clone()) {
-        feedback.send_stream_event(event);
-    }
+    feedback.send_stream_event(event);
 }
 
 fn forward_status(feedback: &PluginFeedbackTx, descriptor: &AgentDescriptor, status: &str) {
@@ -1420,6 +1416,7 @@ mod tests {
         let mut parent_session = Session::new("parent");
         parent_session.cwd = storage.path().to_string_lossy().into_owned();
         parent_session.bind_storage_root(storage.path());
+        parent_session.try_persist_to_disk().unwrap();
         let (parent_events_tx, _parent_events_rx) = std::sync::mpsc::channel();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
@@ -1567,7 +1564,6 @@ mod tests {
             child_session,
             config,
             child_storage.clone(),
-            storage.path().to_path_buf(),
             Vec::new(),
             Arc::new(EmptyPlugin),
             base_feedback,

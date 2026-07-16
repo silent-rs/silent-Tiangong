@@ -48,8 +48,6 @@ pub struct TurnContext {
     pub observer: crate::observe::Observer,
     /// 构建前收集完成的工具覆盖处理器。
     pub(crate) tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
-    /// Turn-scoped 插件 usage 收集器
-    pub turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
     // ===== turn 级配置 =====
     /// 当前执行单元可用的工具集
     pub tools: Vec<ToolSpec>,
@@ -70,9 +68,5 @@ impl TurnContext {
 
     pub fn agent_config(&self) -> &AgentConfig {
         &self.agent_config
-    }
-
-    pub fn turn_usage_sink(&self) -> &Arc<crate::core::plugin::TurnUsageSink> {
-        &self.turn_usage_sink
     }
 }

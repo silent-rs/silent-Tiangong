@@ -12,6 +12,7 @@
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::{Command, PendingCommandEffect};
+use crate::model::TokenUsage;
 use crate::react::message::accept_runtime_user_message;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
@@ -55,22 +56,46 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 pub(super) fn drain_pending_commands_async(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    accumulated_usage: &mut TokenUsage,
 ) -> PendingCommandEffect {
     let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(ctx, commands)
+    process_commands(ctx, commands, accumulated_usage)
 }
 
 /// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
 pub(super) fn process_buffered_commands(
     ctx: &mut TurnContext,
     commands: Vec<Command>,
+    accumulated_usage: &mut TokenUsage,
 ) -> PendingCommandEffect {
-    process_commands(ctx, commands)
+    process_commands(ctx, commands, accumulated_usage)
+}
+
+pub(super) fn record_plugin_usage(
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+    accumulated_usage: &mut TokenUsage,
+    usage: TokenUsage,
+    source: String,
+    emit_event: bool,
+) {
+    accumulated_usage.accumulate(&usage);
+    if emit_event {
+        crate::react::context::emit_token_usage(
+            stream_tx,
+            &usage,
+            None,
+            context_limit,
+            source,
+            None,
+        );
+    }
 }
 
 fn process_commands(
     ctx: &mut TurnContext,
     commands: impl IntoIterator<Item = Command>,
+    accumulated_usage: &mut TokenUsage,
 ) -> PendingCommandEffect {
     let mut current_agent_input = None;
 
@@ -109,6 +134,18 @@ fn process_commands(
                 let ev = *ev;
                 let _ = ctx.stream_tx.send(ev);
             }
+            Command::ReportUsage {
+                usage,
+                source,
+                emit_event,
+            } => record_plugin_usage(
+                &ctx.stream_tx,
+                ctx.context_limit,
+                accumulated_usage,
+                usage,
+                source,
+                emit_event,
+            ),
             Command::SetTrustMode(_) => {
                 // trust_mode 更新由 turn.rs 的 select! 分支处理(拥有 &mut self)
             }
@@ -127,6 +164,34 @@ fn process_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_usage_is_accumulated_and_optionally_emitted() {
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let usage = TokenUsage {
+            prompt_tokens: 7,
+            completion_tokens: 5,
+            total_tokens: 12,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        };
+        let mut accumulated = TokenUsage::default();
+
+        record_plugin_usage(
+            &stream_tx,
+            1_000,
+            &mut accumulated,
+            usage,
+            "plugin".to_string(),
+            true,
+        );
+
+        assert_eq!(accumulated.total_tokens, 12);
+        let StreamEvent::TokenUsage { source, .. } = stream_rx.try_recv().unwrap() else {
+            panic!("expected token usage event");
+        };
+        assert_eq!(source, "plugin");
+    }
 
     #[test]
     fn looks_like_final_answer_empty_is_not_final() {

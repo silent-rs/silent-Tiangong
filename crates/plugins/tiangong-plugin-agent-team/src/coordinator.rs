@@ -698,7 +698,6 @@ impl Coordinator {
             session,
             config,
             child_root(&self.storage_root, &parent.id, &record.descriptor.agent_id),
-            self.storage_root.clone(),
             self.fresh_child_plugins(),
             Arc::new(ChildTeamClientPlugin::new(Arc::downgrade(self))),
             Arc::clone(&self.feedback),
@@ -839,9 +838,7 @@ impl Coordinator {
 
     fn emit(&self, event: StreamEvent) {
         if let Some(feedback) = self.feedback() {
-            if !feedback.send_turn_stream_event(event.clone()) {
-                feedback.send_stream_event(event);
-            }
+            feedback.send_stream_event(event);
         }
     }
 
@@ -915,8 +912,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
             .feedback
             .read()
             .ok()
-            .and_then(|feedback| feedback.clone())
-            .map(PluginFeedbackTx::for_current_turn);
+            .and_then(|feedback| feedback.clone());
         let call = call.clone();
         let actor_id = actor_id.to_string();
         Box::pin(async move {

@@ -182,7 +182,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     });
                 let client =
                     SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
-                let usage_sink = Arc::new(crate::core::plugin::TurnUsageSink::new());
                 let prepared_plugins =
                     crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
                 let ctx = crate::turn_context::TurnContext::builder()
@@ -195,7 +194,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     .trust_mode(trust_mode)
                     .observer(crate::observe::Observer::new(storage_root))
                     .tool_overrides(prepared_plugins.tool_overrides)
-                    .turn_usage_sink(usage_sink)
                     .tools(prepared_plugins.tools)
                     .build();
 
