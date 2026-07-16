@@ -1,12 +1,7 @@
-//! Agent 命令与执行效果类型
+//! Agent 命令类型
 
 /// 用户命令
 pub enum Command {
-    /// 发送消息(spawn turn task)
-    Message {
-        prepared: Vec<tiangong_types::ContentBlock>,
-        message_id: Option<String>,
-    },
     /// 取消当前执行
     Cancel,
     /// 审批响应
@@ -34,13 +29,5 @@ pub enum Command {
         emit_event: bool,
     },
     /// 关闭
-    Shutdown,
-}
-
-/// 命令排空后的副作用
-pub enum PendingCommandEffect {
-    None,
-    MessagesInjected,
-    Terminate,
     Shutdown,
 }

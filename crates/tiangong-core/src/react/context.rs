@@ -4,10 +4,9 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::oneshot;
 
 use crate::context::organizer::ContextOrganizer;
-use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::turn_context::TurnContext;
@@ -81,8 +80,7 @@ pub(crate) fn emit_token_usage(
 pub(crate) async fn maybe_update_context_summary(
     ctx: &mut TurnContext,
     observed_usage: &TokenUsage,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    accumulated_usage: &mut TokenUsage,
+    mut cancel_rx: oneshot::Receiver<()>,
 ) -> bool {
     let organizer = ContextOrganizer::new(ctx.context_limit)
         .with_threshold(0.95)
@@ -96,8 +94,6 @@ pub(crate) async fn maybe_update_context_summary(
         summary_up_to: ctx.session.summary_up_to,
         total_messages,
     });
-    let stream_tx = ctx.stream_tx.clone();
-    let context_limit = ctx.context_limit;
     let update = {
         let update_future = organizer.maybe_update_summary_with_usage_async(
             &mut ctx.session,
@@ -105,30 +101,13 @@ pub(crate) async fn maybe_update_context_summary(
             observed_tokens,
         );
         tokio::pin!(update_future);
-        loop {
-            tokio::select! {
-                update = &mut update_future => break update,
-                command = cmd_rx.recv() => match command {
-                    Some(Command::ReportUsage {
-                        usage,
-                        source,
-                        emit_event,
-                    }) => crate::react::helpers::record_plugin_usage(
-                        &stream_tx,
-                        context_limit,
-                        accumulated_usage,
-                        usage,
-                        source,
-                        emit_event,
-                    ),
-                    Some(Command::EmitStreamEvent(event)) => {
-                        let _ = stream_tx.send(*event);
-                    }
-                    _ => return true,
-                }
-            }
+        tokio::select! {
+            biased;
+            _ = &mut cancel_rx => return true,
+            update = &mut update_future => update,
         }
     };
+
     match update {
         Ok(update) if update.compressed => {
             // 重置 current_tokens，压缩后上下文已大幅缩减
@@ -178,6 +157,7 @@ pub(crate) async fn maybe_update_context_summary(
             );
         }
     }
+
     false
 }
 

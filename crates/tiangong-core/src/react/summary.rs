@@ -8,21 +8,19 @@
 //! 二者此前散落在 engine.rs 与 context.rs，现统一收敛于此，使「最终回复只有一个出口」。
 //! 上下文管理（压缩、token usage、system prompt 重建）仍留在 context.rs。
 
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
-use crate::core::command::Command;
 use crate::model::{ModelRequest, TokenUsage};
 use crate::react::context::{
     emit_token_usage, maybe_update_context_summary, rebuild_system_prompt,
     select_client_for_request,
 };
-use crate::react::message::{accept_runtime_user_message, upsert_assistant_text_message};
+use crate::react::message::upsert_assistant_text_message;
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
-use super::helpers::record_plugin_usage;
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, run_cancelable_child};
 use crate::turn_context::TurnContext;
 
 /// 总结阶段的执行结果。
@@ -35,8 +33,6 @@ pub(super) enum SummaryPhaseResult {
     Cancelled(TokenUsage),
     /// 总结阶段 LLM 请求失败。
     Failed { message: String, usage: TokenUsage },
-    /// 执行中收到新的用户消息，当前总结已停止。
-    Interrupted(TokenUsage),
 }
 
 /// 强制最终回复的执行结果。
@@ -62,8 +58,7 @@ impl TurnContext {
     /// - LLM 错误 → 返回 `Failed`
     pub(super) async fn run_summary_phase(
         &mut self,
-        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        accumulated_usage: &mut TokenUsage,
+        mut cancel_rx: oneshot::Receiver<()>,
         iteration: u32,
     ) -> SummaryPhaseResult {
         let stream_tx = self.stream_tx.clone();
@@ -109,97 +104,13 @@ impl TurnContext {
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
-        let mut summary_interrupted = false;
         let mut streamed_text = String::new();
         let mut streamed_reasoning = String::new();
 
         let response_result: anyhow::Result<crate::model::ModelFunctionResponse> = loop {
             tokio::select! {
                 biased;
-                cmd_opt = cmd_rx.recv() => {
-                    match cmd_opt {
-                        Some(Command::Shutdown) => {
-                            break Err(anyhow::Error::new(CancelSignal::Abort));
-                        }
-                        Some(Command::Cancel) | None => {
-                            break Err(anyhow::Error::new(CancelSignal::Abort));
-                        }
-                        Some(Command::Message {
-                            prepared,
-                            message_id,
-                        }) => {
-                            sink.flush();
-                            let message_count_before_interruption = self.session.messages.len();
-                            if !streamed_text.trim().is_empty()
-                                || !streamed_reasoning.trim().is_empty()
-                            {
-                                upsert_assistant_text_message(
-                                    &mut self.session,
-                                    &pending_msg_id,
-                                    &streamed_text,
-                                    &streamed_reasoning,
-                                    crate::session::MessagePhase::Summary,
-                                );
-                            }
-                            match accept_runtime_user_message(self, message_id, prepared) {
-                                Ok(_) => {
-                                    summary_interrupted = true;
-                                    if let Some(handle) = llm_fut.take() {
-                                        abort_and_join(handle).await;
-                                    }
-                                    break Err(anyhow::anyhow!(
-                                        "总结响应已被新的用户消息中断"
-                                    ));
-                                }
-                                Err(err) => {
-                                    self.session.messages.truncate(message_count_before_interruption);
-                                    tracing::warn!(
-                                        error = %err,
-                                        "总结阶段追加用户消息持久化失败"
-                                    );
-                                }
-                            }
-                        }
-                        Some(Command::Approval { .. }) => {}
-                        Some(Command::InjectTool { tool_name, payload }) => {
-                            crate::react::message::inject_tool_to_session(
-                                self,
-                                &tool_name,
-                                &payload,
-                            );
-                        }
-                        Some(Command::CompressContext) => {
-                            let _ = stream_tx.send(StreamEvent::AgentNotification {
-                                agent_id: "system".to_string(),
-                                agent_label: "系统".to_string(),
-                                content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
-                                level: "warning".to_string(),
-                            });
-                        }
-                        Some(Command::ResetContext) => {
-                            crate::core::reset_context(self);
-                        }
-                        Some(Command::EmitStreamEvent(ev)) => {
-                            let ev = *ev;
-                            let _ = stream_tx.send(ev);
-                        }
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &self.stream_tx,
-                            self.context_limit,
-                            accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                        Some(Command::SetTrustMode(mode)) => {
-                            self.trust_mode = mode;
-                        }
-                    }
-                }
+                _ = &mut cancel_rx => break Err(anyhow::Error::new(CancelSignal::Abort)),
                 chunk_opt = chunk_rx.recv() => {
                     match chunk_opt {
                         Some(chunk) => {
@@ -237,21 +148,6 @@ impl TurnContext {
             }
         };
         sink.finish();
-
-        if summary_interrupted {
-            persist_partial_summary(self, &pending_msg_id, &streamed_text, &streamed_reasoning);
-            if streaming_usage.total_tokens > 0 {
-                emit_token_usage(
-                    &self.stream_tx,
-                    &streaming_usage,
-                    None,
-                    self.context_limit,
-                    "summary-interrupted",
-                    None,
-                );
-            }
-            return SummaryPhaseResult::Interrupted(streaming_usage);
-        }
 
         let response = match response_result {
             Ok(response) => response,
@@ -320,8 +216,10 @@ impl TurnContext {
             if let Some(message_id) = promote_last_react_message_to_summary(&mut self.session) {
                 crate::react::message::emit_session_message_upsert(self, &message_id);
             }
-            let compression_cancelled =
-                maybe_update_context_summary(self, &usage, cmd_rx, accumulated_usage).await;
+            let compression_cancelled = run_cancelable_child(&mut cancel_rx, |child_cancel| {
+                maybe_update_context_summary(self, &usage, child_cancel)
+            })
+            .await;
             if compression_cancelled {
                 return SummaryPhaseResult::Cancelled(usage);
             }
@@ -351,8 +249,10 @@ impl TurnContext {
             };
         }
         crate::react::message::emit_session_message_upsert(self, &pending_msg_id);
-        let compression_cancelled =
-            maybe_update_context_summary(self, &usage, cmd_rx, accumulated_usage).await;
+        let compression_cancelled = run_cancelable_child(&mut cancel_rx, |child_cancel| {
+            maybe_update_context_summary(self, &usage, child_cancel)
+        })
+        .await;
         if compression_cancelled {
             return SummaryPhaseResult::Cancelled(usage);
         }
@@ -739,8 +639,7 @@ impl TurnContext {
     /// 否则 OuterLimit / SummaryError 会再次触发重入，造成无限循环。
     pub(super) async fn force_final_response(
         &mut self,
-        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        accumulated_usage: &mut TokenUsage,
+        mut cancel_rx: oneshot::Receiver<()>,
         reason: ForceFinalReason,
     ) -> ForceFinalResult {
         // 确保 system prompt 已构建
@@ -779,10 +678,11 @@ impl TurnContext {
 
         let pending_msg_id = scru128::new().to_string();
 
-        let resp = match self
-            .run_text_finalization_llm(&req, &pending_msg_id, cmd_rx, accumulated_usage)
-            .await
-        {
+        let response = run_cancelable_child(&mut cancel_rx, |child_cancel| {
+            self.run_text_finalization_llm(&req, &pending_msg_id, child_cancel)
+        })
+        .await;
+        let resp = match response {
             Ok(response) => response,
             Err(TextFinalizationError::Cancelled) => return ForceFinalResult::Cancelled,
             Err(TextFinalizationError::Failed(message)) => {
@@ -813,14 +713,13 @@ impl TurnContext {
         &self,
         req: &ModelRequest,
         pending_msg_id: &str,
-        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-        accumulated_usage: &mut TokenUsage,
+        mut cancel_rx: oneshot::Receiver<()>,
     ) -> Result<crate::model::ModelFunctionResponse, TextFinalizationError> {
-        let stream_tx = &self.stream_tx;
+        let stream_tx = self.stream_tx.clone();
         let final_tools = self.tools.clone();
         let sink = ThrottledStreamSink::with_text_kind(
             pending_msg_id.to_string(),
-            stream_tx.clone(),
+            stream_tx,
             StreamTextKind::Summary,
         );
         let (chunk_tx, mut chunk_rx) = tokio_mpsc::unbounded_channel();
@@ -840,32 +739,12 @@ impl TurnContext {
         let response_result = loop {
             tokio::select! {
                 biased;
-                command = cmd_rx.recv() => {
-                    match command {
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &self.stream_tx,
-                            self.context_limit,
-                            accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                        Some(Command::EmitStreamEvent(event)) => {
-                            let _ = self.stream_tx.send(*event);
-                        }
-                        _ => {
-                            // 强制终结阶段收到控制命令时中止。
-                            if let Some(handle) = llm_fut.take() {
-                                crate::react::cancel::abort_and_join(handle).await;
-                            }
-                            sink.finish();
-                            return Err(TextFinalizationError::Cancelled);
-                        }
+                _ = &mut cancel_rx => {
+                    if let Some(handle) = llm_fut.take() {
+                        crate::react::cancel::abort_and_join(handle).await;
                     }
+                    sink.finish();
+                    return Err(TextFinalizationError::Cancelled);
                 }
                 chunk = chunk_rx.recv() => {
                     if let Some(chunk) = chunk {

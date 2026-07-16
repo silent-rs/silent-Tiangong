@@ -2,9 +2,11 @@
 //!
 //! `select!` 循环 break 时使用可被 anyhow downcast 的取消信号类型，替代裸字符串。
 
+use std::future::Future;
 use std::sync::mpsc::Sender as StdSender;
 
 use tiangong_types::StreamEvent;
+use tokio::sync::oneshot;
 
 use crate::react::context::emit_token_usage;
 
@@ -63,4 +65,30 @@ pub(super) fn emit_cancel_usage(
 pub(super) async fn abort_and_join<T>(handle: tokio::task::JoinHandle<T>) {
     handle.abort();
     let _ = handle.await;
+}
+
+/// 为子循环创建独立取消通道；父层取消时先通知子层，再等待子层自行收尾退出。
+///
+/// 用于 `execute_turn` 中 ctx 已被子循环 future 独占借用、父层 select 无法直接
+/// await 子循环的场景：父层持有 `parent_cancel`，子循环拿到新分配的 `cancel_rx`。
+/// 父层取消信号到来时，先向子循环发送取消，再 await 子循环返回其（部分）结果，
+/// 保证 ctx 的可变借用被有序释放、迟到事件不会越过轮次屏障。
+pub(super) async fn run_cancelable_child<T, F, Fut>(
+    parent_cancel: &mut oneshot::Receiver<()>,
+    child: F,
+) -> T
+where
+    F: FnOnce(oneshot::Receiver<()>) -> Fut,
+    Fut: Future<Output = T>,
+{
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let mut child = Box::pin(child(cancel_rx));
+    tokio::select! {
+        biased;
+        _ = &mut *parent_cancel => {
+            let _ = cancel_tx.send(());
+            child.await
+        }
+        result = &mut child => result,
+    }
 }

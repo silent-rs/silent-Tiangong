@@ -84,10 +84,12 @@
 - [x] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `ctx.session` 读取
 - [x] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
 - [x] 合并 `execute_agent_loop` 与 `execute_turn`，由 `execute_turn` 直接编排并返回本轮结果
+- [x] 将 `execute_react_phase` 平铺进 `execute_turn`，固定为外层 `execute_loop` 与内层 `react_loop`；循环编排直接保留在 `execute_turn` 中，不再抽离阶段编排方法或增加阶段结果转换
 - [x] 执行链统一只传 `TurnContext`，通过 `ctx.session` 访问会话，删除占位 Session 与 `ctx + session` 双参数
 - [x] 删除 `TurnUsageSink` 与 turn 绑定旁路；插件用量统一通过 `PluginFeedbackTx` 命令上报，并直接累计到 `execute_turn` 本轮用量
 - [x] 删除基于关键词的后台工具意图过滤和 `user_input` 局部状态，所有工具统一交由主模型结合 Session 上下文选择
 - [x] 删除未参与控制流的 `TurnPhase` 枚举和无效阶段赋值，阶段变化只通过 `StreamEvent::PhaseChanged` 发布
+- [x] 删除 `PendingCommandEffect`、运行中消息追加链路及通用命令处理封装；主 `cmd_rx` 只在 `execute_turn` 内监听，收到 `Cancel` / `Shutdown` 后立即关闭接收端，并通过逐层新建的 `oneshot` 通知当前子循环由内向外收尾退出
 
 ### 调用方适配
 - [ ] `app.rs ensure_core`:先 persist session 文件再创建 Core(不再传 session 给 builder)

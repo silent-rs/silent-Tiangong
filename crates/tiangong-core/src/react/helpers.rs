@@ -1,20 +1,13 @@
 //! ReAct 主循环的通用辅助函数。
 //!
-//! 这些函数不依赖 `TurnContext` 自身状态（无 `&self`），而是操作传入的
-//! `Session` / `TurnContext` / 命令通道，属于与主状态机解耦的纯过程性逻辑：
-//! - 命令排空（`drain_pending_commands_async`）
-//! - 非阻塞取消检查（`check_cancel`）
+//! 这里只保留不参与命令路由的独立逻辑：
 //! - 最终回答启发式判断（`looks_like_final_answer`）
+//! - 插件模型用量累计与事件发布（`record_plugin_usage`）
 //!
 //! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
 //! core 不再感知浏览器快照注入。
 
-use tokio::sync::mpsc as tokio_mpsc;
-
-use crate::core::command::{Command, PendingCommandEffect};
 use crate::model::TokenUsage;
-use crate::react::message::accept_runtime_user_message;
-use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
 /// 判断 ReAct 阶段的文本回复是否「看起来像一个完整回答」（而非向用户提问）。
@@ -52,25 +45,6 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
     true
 }
 
-/// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
-pub(super) fn drain_pending_commands_async(
-    ctx: &mut TurnContext,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    accumulated_usage: &mut TokenUsage,
-) -> PendingCommandEffect {
-    let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(ctx, commands, accumulated_usage)
-}
-
-/// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
-pub(super) fn process_buffered_commands(
-    ctx: &mut TurnContext,
-    commands: Vec<Command>,
-    accumulated_usage: &mut TokenUsage,
-) -> PendingCommandEffect {
-    process_commands(ctx, commands, accumulated_usage)
-}
-
 pub(super) fn record_plugin_usage(
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     context_limit: usize,
@@ -89,73 +63,6 @@ pub(super) fn record_plugin_usage(
             source,
             None,
         );
-    }
-}
-
-fn process_commands(
-    ctx: &mut TurnContext,
-    commands: impl IntoIterator<Item = Command>,
-    accumulated_usage: &mut TokenUsage,
-) -> PendingCommandEffect {
-    let mut message_injected = false;
-
-    for cmd in commands {
-        match cmd {
-            Command::Cancel => {
-                return PendingCommandEffect::Terminate;
-            }
-            Command::Shutdown => return PendingCommandEffect::Shutdown,
-            Command::Message {
-                prepared,
-                message_id,
-            } => match accept_runtime_user_message(ctx, message_id, prepared) {
-                Ok(_) => message_injected = true,
-                Err(err) => tracing::warn!(
-                    error = %err,
-                    "排空队列时追加用户消息持久化失败"
-                ),
-            },
-            Command::Approval { .. } => {}
-            Command::InjectTool { tool_name, payload } => {
-                crate::react::message::defer_tool_injection(ctx, tool_name, payload);
-            }
-            Command::CompressContext => {
-                let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
-                    agent_id: "system".to_string(),
-                    agent_label: "系统".to_string(),
-                    content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
-                    level: "warning".to_string(),
-                });
-            }
-            Command::ResetContext => {
-                crate::core::reset_context(ctx);
-            }
-            Command::EmitStreamEvent(ev) => {
-                let ev = *ev;
-                let _ = ctx.stream_tx.send(ev);
-            }
-            Command::ReportUsage {
-                usage,
-                source,
-                emit_event,
-            } => record_plugin_usage(
-                &ctx.stream_tx,
-                ctx.context_limit,
-                accumulated_usage,
-                usage,
-                source,
-                emit_event,
-            ),
-            Command::SetTrustMode(_) => {
-                // trust_mode 更新由 turn.rs 的 select! 分支处理(拥有 &mut self)
-            }
-        }
-    }
-
-    if message_injected {
-        PendingCommandEffect::MessagesInjected
-    } else {
-        PendingCommandEffect::None
     }
 }
 

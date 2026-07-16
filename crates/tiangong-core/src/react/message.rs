@@ -1,7 +1,9 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks};
+#[cfg(test)]
+use tiangong_types::ContentBlock;
+use tiangong_types::StreamEvent;
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
@@ -61,27 +63,6 @@ pub(crate) fn flush_deferred_tool_injections(ctx: &mut crate::turn_context::Turn
     }
     ctx.session.persist_to_disk();
     emit_deferred_tool_injections_changed(ctx);
-}
-
-/// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
-pub(crate) fn accept_runtime_user_message(
-    ctx: &mut crate::turn_context::TurnContext,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-) -> Result<String, String> {
-    let text = content_blocks_text(&prepared);
-    let content_blocks = stable_content_blocks(&prepared);
-    let message_id = message_id.unwrap_or_else(scru128::new_string);
-    ctx.session
-        .try_append_prepared_user_message_with_id(message_id.clone(), prepared)?;
-    let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
-        message_id,
-        content: text.clone(),
-        content_blocks,
-        media: Vec::new(),
-        model_excluded: false,
-    });
-    Ok(text)
 }
 
 pub(crate) fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
