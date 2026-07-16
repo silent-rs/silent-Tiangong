@@ -22,7 +22,6 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
-use super::execute::TurnPhase;
 use super::helpers::record_plugin_usage;
 use crate::turn_context::TurnContext;
 
@@ -68,7 +67,6 @@ impl TurnContext {
         iteration: u32,
     ) -> SummaryPhaseResult {
         let stream_tx = self.stream_tx.clone();
-        let _phase = TurnPhase::Summary;
         let _ = stream_tx.send(StreamEvent::PhaseChanged {
             phase: "summary".to_string(),
             iteration,

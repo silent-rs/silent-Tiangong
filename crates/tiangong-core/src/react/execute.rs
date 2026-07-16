@@ -31,19 +31,6 @@ use super::outcome::TurnExecutionResult;
 use super::summary::{ForceFinalReason, ForceFinalResult, SummaryPhaseResult};
 use super::tool_call::start_tool_call;
 
-/// 单个 turn 内的执行阶段。
-///
-/// ReAct Loop 与总结阶段分离后的阶段状态机：
-/// - `Initial`：外层循环第一次迭代，主模型决定是否需要工具。
-/// - `ToolExecution`：工具执行阶段，LLM 只负责调用工具。
-/// - `Summary`：总结阶段，主模型判断任务完成度并输出最终回复。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TurnPhase {
-    Initial,
-    ToolExecution,
-    Summary,
-}
-
 #[derive(Default)]
 struct ToolCallHistory {
     successful_keys: HashSet<String>,
@@ -1038,11 +1025,6 @@ async fn execute_react_phase(
     tool_history: &mut ToolCallHistory,
 ) -> ReactPhaseOutcome {
     let mut round = start_round;
-    let _phase = if outer_iteration == 0 {
-        TurnPhase::Initial
-    } else {
-        TurnPhase::ToolExecution
-    };
     let iteration_start_round = round;
     let mut executed_tool_in_iteration = false;
 
