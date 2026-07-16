@@ -1182,10 +1182,9 @@ impl TiangongApp {
             .config(CoreConfigProvider::new(session_config))
             .trust_mode(session.trust_mode)
             .storage_root(storage_root)
-            .event_sender(stream_tx)
+            .stream_tx(stream_tx)
             .plugins(plugins)
             .build()
-            .expect("Builder 必填字段已齐")
     }
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
@@ -1414,7 +1413,7 @@ mod tests {
         let core = tiangong_core::core::TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
             .session(session)
-            .event_sender(event_tx)
+            .stream_tx(event_tx)
             .plugins(Vec::new())
             .storage(CoreStorageLocation::new(storage_root.path()))
             .build()

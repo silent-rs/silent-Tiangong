@@ -58,9 +58,11 @@
 - [x] `run_turn` 的插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)使用 `&mut session`
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
 - [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
-- [x] 插件一次性 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前
+- [x] 插件 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前
 - [x] `deliver(Message)` 删除本轮命令通道创建与 `cmd_tx` 传参
 - [x] 删除 `std::mem::forget(turn_cmd_tx)` 占位逻辑
+- [ ] 删除 `TiangongCore.session_ready_fired`，每轮 Session 加载完成并绑定 feedback 后、收集提示段落与执行 Agent Loop 前调用 `on_session_ready`
+- [ ] `on_session_ready` 只负责基于本轮 Session 刷新插件状态；插件自行保证一次性后台初始化不重复，重点处理 Agent Team `Coordinator::initialize` 的幂等性
 
 ### execute_turn 内部简化
 - [ ] `execute_turn` 从 `self.session` 读取(当前仍接收 `session: &mut Session` 参数)

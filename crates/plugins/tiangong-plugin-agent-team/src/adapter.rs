@@ -152,9 +152,7 @@ mod tests {
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider, ModelEndpoint};
     use tiangong_core::permission::TrustMode;
     use tiangong_core::session::Session;
-    use tiangong_types::{
-        ContentBlock, MessagePhase, MessageRole, SessionEvent, StreamEvent,
-    };
+    use tiangong_types::{ContentBlock, MessagePhase, MessageRole, SessionEvent, StreamEvent};
 
     use crate::test_support::storage_test_guard;
     use crate::{build_plugin, ChildPluginFactory};
@@ -402,11 +400,11 @@ mod tests {
         let parent_session_id = parent_session.id.clone();
         let child_factory: Arc<dyn ChildPluginFactory> = Arc::new(Vec::<Arc<dyn Plugin>>::new);
         let plugin = build_plugin(storage.path().to_path_buf(), child_factory);
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<SessionEvent>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(config))
-            .session(parent_session)
-            .event_sender(event_tx)
+            .session_id(parent_session)
+            .stream_tx(event_tx)
             .plugins(vec![plugin])
             .storage(CoreStorageLocation::new(storage.path()))
             .build()

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::plugin::{Plugin, PluginFeedbackTx};
-use tiangong_core::core::{CoreStorageLocation, TiangongCore};
+use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::{Message, MessagePhase, MessageRole, Session};
 use tiangong_types::{ContentBlock, StreamEvent, TokenUsage, TurnStatus};
@@ -91,21 +91,14 @@ impl ChildRuntime {
         );
         let session_id = session.id.clone();
         let trust_mode = session.trust_mode;
-        let core = match TiangongCore::builder()
+        let core = TiangongCore::builder()
             .session_id(session_id)
             .config(CoreConfigProvider::new(config))
             .trust_mode(trust_mode)
             .storage_root(core_storage_root)
-            .event_sender(event_tx)
+            .stream_tx(event_tx)
             .plugins(plugins)
-            .build()
-        {
-            Ok(core) => core,
-            Err(error) => {
-                let _ = event_thread.join();
-                return Err(format!("构造子 Agent Core 失败：{error}"));
-            }
-        };
+            .build();
 
         Ok(Arc::new(Self {
             descriptor,
@@ -1431,7 +1424,7 @@ mod tests {
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
             .session(parent_session)
-            .event_sender(parent_events_tx)
+            .stream_tx(parent_events_tx)
             .plugins(vec![capture.clone()])
             .storage(CoreStorageLocation::new(storage.path()))
             .build()

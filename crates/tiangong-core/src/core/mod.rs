@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use tokio::sync::mpsc as tokio_mpsc;
+use typed_builder::TypedBuilder;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
@@ -18,64 +19,41 @@ pub mod command;
 pub(crate) use command::Command;
 pub mod plugin;
 pub use plugin::Plugin;
-pub mod builder;
 pub mod error;
 pub mod storage_location;
 
-pub use builder::TiangongCoreBuilder;
 pub use error::CoreError;
 pub use storage_location::CoreStorageLocation;
 
 /// 天工智能体核心
+#[derive(TypedBuilder)]
+#[builder(
+    builder_method(vis = "pub"),
+    builder_type(vis = "pub"),
+    build_method(vis = "pub")
+)]
 pub struct TiangongCore {
     /// 会话 ID
+    #[builder(setter(into))]
     session_id: String,
     /// 当前 Core 独立的配置提供者。
     config: CoreConfigProvider,
     /// 会话信任模式。
+    #[builder(setter(transform = |mode: crate::permission::TrustMode| std::sync::Mutex::new(mode)))]
     trust_mode: std::sync::Mutex<crate::permission::TrustMode>,
     /// 存储根目录(turn task 从此加载/保存 session)。
+    #[builder(setter(into))]
     storage_root: std::path::PathBuf,
     /// 事件输出通道(会话级,跨 turn;clone 给每个 turn task 的 forwarder)。
     stream_tx: Sender<StreamEvent>,
     /// 进程内插件(会话级,跨 turn)。
     plugins: Vec<Arc<dyn Plugin>>,
     /// on_session_ready 是否已触发(跨 turn)。
+    #[builder(default = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))]
     session_ready_fired: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TiangongCore {
-    /// Builder 的实际装配实现（私有）。
-    ///
-    /// worker task 由共享 runtime 的 `spawn` 创建（非 OS 线程），构造期不会失败；
-    /// `build()` 的 `Result` 仅承载必填字段缺失的检查。空闲时 worker task 停在
-    /// `cmd_rx.recv().await`，future 被 park、线程归还 runtime 池。
-    fn assemble(
-        session_id: String,
-        config: CoreConfigProvider,
-        trust_mode: crate::permission::TrustMode,
-        storage_root: std::path::PathBuf,
-        stream_tx: Sender<StreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-    ) -> Self {
-        Self {
-            session_id,
-            config,
-            trust_mode: std::sync::Mutex::new(trust_mode),
-            storage_root,
-            stream_tx,
-            plugins,
-            session_ready_fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
-    }
-
-    /// Builder 入口：与宿主入口（GUI/CLI/Server）解耦的构造方式。
-    ///
-    /// session 为必填字段，新会话由调用方创建后传入。
-    pub fn builder() -> TiangongCoreBuilder {
-        TiangongCoreBuilder::default()
-    }
-
     /// 向活跃 turn task 发送命令(无活跃 task 则忽略)。
     fn send_cmd(&self, cmd: Command) -> Result<(), CoreError> {
         crate::shared_runtime::send_command(&self.session_id, cmd)
@@ -254,6 +232,10 @@ impl crate::agent_input::AgentInput for TiangongCore {
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
                 CommandInput::SetTrustMode(truest_mod) => {
+                    self.trust_mode
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone_from(&truest_mod);
                     self.send_cmd(Command::SetTrustMode(truest_mod))
                 }
                 CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
@@ -408,47 +390,6 @@ pub(crate) fn reset_context_for_session(
     session.persist_to_disk();
 }
 
-#[cfg(test)]
-mod shared_runtime_tests {
-    use super::*;
-    use crate::core_config::{CoreConfig, CoreConfigProvider};
-
-    /// 多个空闲 Core 不创建 turn task，且可正常关闭。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
-        let root = tempfile::tempdir().unwrap();
-
-        let config = CoreConfigProvider::new(CoreConfig::default());
-        let cores: Vec<TiangongCore> = (0..3)
-            .map(|i| {
-                let mut session = Session::new(format!("shared-runtime-{i}"));
-                session.bind_storage_root(root.path());
-                session.try_persist_to_disk().unwrap();
-                let (event_tx, _event_rx) = std::sync::mpsc::channel();
-                TiangongCore::builder()
-                    .session_id(session.id.clone())
-                    .config(config.clone())
-                    .trust_mode(session.trust_mode)
-                    .storage_root(root.path())
-                    .event_sender(event_tx)
-                    .build()
-                    .unwrap()
-            })
-            .collect();
-
-        // 空闲 Core 没有活跃 turn task。
-        for core in &cores {
-            assert!(core.is_stopped(), "空闲 Core 不应存在 turn task");
-        }
-
-        // 逐个关闭，验证 shutdown 路径在共享 runtime 上正常工作
-        for core in cores {
-            let result = tokio::task::spawn_blocking(move || core.shutdown_join()).await;
-            assert!(result.is_ok(), "shutdown_join 不应 panic");
-        }
-    }
-}
-
 /// 转发线程捕获的单个对话轮次终态。
 ///
 /// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
@@ -477,5 +418,46 @@ impl TurnOutcome {
             _ => tiangong_types::TurnStatus::Failed,
         };
         Self { status }
+    }
+}
+
+#[cfg(test)]
+mod shared_runtime_tests {
+    use super::*;
+    use crate::core_config::{CoreConfig, CoreConfigProvider};
+
+    /// 多个空闲 Core 不创建 turn task，且可正常关闭。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
+        let root = tempfile::tempdir().unwrap();
+
+        let config = CoreConfigProvider::new(CoreConfig::default());
+        let cores: Vec<TiangongCore> = (0..3)
+            .map(|i| {
+                let mut session = Session::new(format!("shared-runtime-{i}"));
+                session.bind_storage_root(root.path());
+                session.try_persist_to_disk().unwrap();
+                let (event_tx, _event_rx) = std::sync::mpsc::channel();
+                TiangongCore::builder()
+                    .session_id(session.id.clone())
+                    .config(config.clone())
+                    .trust_mode(session.trust_mode)
+                    .storage_root(root.path())
+                    .stream_tx(event_tx)
+                    .plugins(vec![])
+                    .build()
+            })
+            .collect();
+
+        // 空闲 Core 没有活跃 turn task。
+        for core in &cores {
+            assert!(core.is_stopped(), "空闲 Core 不应存在 turn task");
+        }
+
+        // 逐个关闭，验证 shutdown 路径在共享 runtime 上正常工作
+        for core in cores {
+            let result = tokio::task::spawn_blocking(move || core.shutdown_join()).await;
+            assert!(result.is_ok(), "shutdown_join 不应 panic");
+        }
     }
 }

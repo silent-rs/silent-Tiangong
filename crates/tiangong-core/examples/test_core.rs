@@ -3,12 +3,12 @@ use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::Session;
-use tiangong_types::{SessionEvent, StreamEvent};
+use tiangong_types::StreamEvent;
 
 fn main() {
     // 示例：使用默认配置（第三方开发者可直接构造 CoreConfig）
     let config = CoreConfigProvider::new(CoreConfig::default());
-    let (tx, rx) = mpsc::channel::<SessionEvent>();
+    let (tx, rx) = mpsc::channel::<StreamEvent>();
     // storage_root 必须由调用方提供（core 不自行计算路径）。
     // 这里用 home 目录下的 .tiangong 作为示例；生产入口由 tiangong-app-state 注入。
     let storage_root = dirs::home_dir()
@@ -25,10 +25,9 @@ fn main() {
         .config(config)
         .trust_mode(session.trust_mode)
         .storage_root(storage_root)
-        .event_sender(tx)
+        .stream_tx(tx)
         .plugins(Vec::new())
-        .build()
-        .expect("Builder 必填字段已齐");
+        .build();
 
     println!("=== 发送: 你好 ===");
     let _ = core.deliver(AgentInputKind::message("你好"));
@@ -36,7 +35,7 @@ fn main() {
     let mut got_done = false;
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(se) => match &se.event {
+            Ok(se) => match &se {
                 StreamEvent::UserMessage { content, .. } => println!("[用户] {content}"),
                 StreamEvent::Delta { content: text, .. } => print!("{text}"),
                 StreamEvent::Reasoning { .. } => print!("[R]"),
@@ -69,7 +68,7 @@ fn main() {
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(se) => match &se.event {
+                Ok(se) => match &se {
                     StreamEvent::Delta { content: text, .. } => print!("{text}"),
                     StreamEvent::Reasoning { .. } => print!("[R]"),
                     StreamEvent::Done { .. } => {

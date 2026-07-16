@@ -64,7 +64,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         .config(config.clone())
         .trust_mode(tiangong_core::permission::TrustMode::FullTrust)
         .storage_root(tiangong_config::io::storage_root())
-        .event_sender(stream_tx)
+        .stream_tx(stream_tx)
         .plugins({
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
@@ -169,8 +169,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             ));
             plugins
         })
-        .storage_root(storage_root.clone())
-        .build()?;
+        .build();
 
     // CLI --trust-mode 参数覆盖
     if let Some(mode) = trust_mode {

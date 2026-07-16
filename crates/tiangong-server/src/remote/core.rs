@@ -418,7 +418,7 @@ impl ServerCoreManager {
             .config(isolated_core_config_provider(&session_config))
             .trust_mode(session.trust_mode)
             .storage_root(storage_root.clone())
-            .event_sender(stream_tx)
+            .stream_tx(stream_tx)
             .plugins({
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
                 // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
@@ -526,8 +526,7 @@ impl ServerCoreManager {
                 ));
                 plugins
             })
-            .storage_root(storage_root.clone())
-            .build()?;
+            .build();
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let installed =
@@ -1480,12 +1479,12 @@ mod tests {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
-            .event_sender(event_tx)
+            .session_id(session.id)
+            .stream_tx(event_tx)
             .plugins(plugins)
             .storage_root(storage_root.clone())
+            .trust_mode(session.trust_mode)
             .build()
-            .unwrap()
     }
 
     fn image_asset() -> StoredAsset {
@@ -2023,10 +2022,9 @@ mod tests {
         let core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
             .session(session)
-            .event_sender(event_tx)
+            .stream_tx(event_tx)
             .storage_root(root.path().to_path_buf())
-            .build()
-            .unwrap();
+            .build();
 
         // fire-and-forget：deliver 后不等持久化确认，靠终态事件确认 turn 完成。
         core.deliver(
