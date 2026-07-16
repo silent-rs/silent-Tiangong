@@ -551,13 +551,38 @@ impl Session {
 
     /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
     ///
-    /// 落盘失败时保留内存中的补齐结果，供 turn 最终持久化再次尝试。
+    /// 补齐结果落盘失败时，删除新增结果和对应的悬空调用后再次落盘，避免后续
+    /// 请求读取到不完整的工具调用协议。二次落盘仍失败时保留清理后的内存状态，
+    /// 供 turn 最终持久化继续重试。
     pub(crate) fn close_unfinished_tool_calls_with_reason(
         &mut self,
         reason: &str,
-    ) -> Result<Vec<(String, String, String)>, String> {
-        let interrupted = self
-            .unfinished_tool_calls()
+    ) -> Vec<(String, String, String)> {
+        let Some((assistant_index, assistant)) = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| !message.tool_calls.is_empty())
+        else {
+            return Vec::new();
+        };
+        let completed = self.messages[assistant_index + 1..]
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        let unfinished = assistant
+            .tool_calls
+            .iter()
+            .filter(|call| !completed.contains(call.id.as_str()))
+            .map(|call| (call.id.clone(), call.name.clone()))
+            .collect::<Vec<_>>();
+        if unfinished.is_empty() {
+            return Vec::new();
+        }
+
+        let message_count_before_close = self.messages.len();
+        let interrupted = unfinished
             .into_iter()
             .map(|(tool_call_id, tool_name)| {
                 let output = reason.to_string();
@@ -568,12 +593,37 @@ impl Session {
                 (tool_call_id, tool_name, output)
             })
             .collect::<Vec<_>>();
-        if interrupted.is_empty() {
-            return Ok(interrupted);
-        }
         self.updated_at = now_text();
-        self.try_persist_to_disk()?;
-        Ok(interrupted)
+        if let Err(close_error) = self.try_persist_to_disk() {
+            self.messages.truncate(message_count_before_close);
+            let interrupted_ids = interrupted
+                .iter()
+                .map(|(tool_call_id, _, _)| tool_call_id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.messages[assistant_index]
+                .tool_calls
+                .retain(|call| !interrupted_ids.contains(call.id.as_str()));
+            self.updated_at = now_text();
+
+            if let Err(remove_error) = self.try_persist_to_disk() {
+                tracing::error!(
+                    close_error = %close_error,
+                    remove_error = %remove_error,
+                    count = interrupted.len(),
+                    "补齐未完成工具调用及删除悬空调用均持久化失败"
+                );
+                return Vec::new();
+            }
+
+            tracing::warn!(
+                error = %close_error,
+                count = interrupted.len(),
+                "补齐未完成工具调用持久化失败，已删除悬空调用并重新落盘"
+            );
+            return Vec::new();
+        }
+
+        interrupted
     }
 
     pub(crate) fn has_unfinished_tool_calls(&self) -> bool {
@@ -1133,6 +1183,45 @@ mod persistence_tests {
         assert_eq!(entries.len(), 1, "成功替换后不应遗留临时文件");
         assert_eq!(entries[0].path(), target);
         Ok(())
+    }
+
+    #[test]
+    fn close_fallback_removes_only_unfinished_tool_calls() {
+        let mut session = Session::new("tool-call-fallback");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![
+            MessageToolCall {
+                id: "completed-call".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            MessageToolCall {
+                id: "unfinished-call".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ];
+        session.messages.push(assistant);
+        session.messages.push(Message::tool_result(
+            "completed-call",
+            "read_file",
+            "done",
+            false,
+        ));
+
+        let interrupted = session.close_unfinished_tool_calls_with_reason("interrupted");
+
+        let remaining_calls = &session.messages[0].tool_calls;
+        assert!(interrupted.is_empty());
+        assert_eq!(remaining_calls.len(), 1);
+        assert_eq!(remaining_calls[0].id, "completed-call");
+        assert!(!session.has_unfinished_tool_calls());
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|message| message.tool_call_id.as_deref() != Some("unfinished-call"))
+        );
     }
 
     #[test]

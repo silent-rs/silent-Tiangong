@@ -732,9 +732,8 @@ mod tests {
             false,
         );
 
-        let interrupted = session
-            .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。")
-            .unwrap();
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-2");
         assert!(!session.has_unfinished_tool_calls());
@@ -802,9 +801,8 @@ mod tests {
         }
 
         assert!(session.has_unfinished_tool_calls());
-        let interrupted = session
-            .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。")
-            .unwrap();
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
         assert!(!session.has_unfinished_tool_calls());
