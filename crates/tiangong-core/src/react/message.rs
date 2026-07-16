@@ -5,31 +5,6 @@ use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_cont
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub fn append_or_reuse_user_message(
-    session: &mut Session,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-) -> Result<String, String> {
-    if let Some(message_id) = message_id {
-        if session
-            .messages
-            .iter()
-            .any(|message| message.id == message_id)
-        {
-            if !session.update_prepared_user_message(&message_id, prepared) {
-                return Err(format!("消息 ID {message_id} 已被非用户消息占用"));
-            }
-        } else {
-            session.append_prepared_user_message_with_id(message_id.clone(), prepared);
-        }
-        return Ok(message_id);
-    }
-
-    let message_id = scru128::new().to_string();
-    session.append_prepared_user_message_with_id(message_id.clone(), prepared);
-    Ok(message_id)
-}
-
 pub(crate) fn emit_session_message_upsert(
     session: &Session,
     ctx: &crate::turn_context::TurnContext,
@@ -82,29 +57,11 @@ pub(crate) fn defer_tool_injection(
     emit_deferred_tool_injections_changed(session, ctx);
 }
 
-/// 在轮次终态提交前闭合所有未完成的工具调用，保持 Provider 历史协议完整。
-pub(crate) fn close_unfinished_tool_calls_for_turn(
-    session: &mut Session,
-) -> Vec<(String, String, String)> {
-    close_unfinished_tool_calls_with_reason(session, "工具调用因本轮结束而中断，未执行。")
-}
-
-fn close_unfinished_tool_calls_with_reason(
-    session: &mut Session,
-    reason: &str,
-) -> Vec<(String, String, String)> {
-    session.close_unfinished_tool_calls_with_reason(reason)
-}
-
-pub(crate) fn has_unfinished_tool_calls(session: &Session) -> bool {
-    session.has_unfinished_tool_calls()
-}
-
 pub(crate) fn flush_deferred_tool_injections(
     session: &mut Session,
     ctx: &crate::turn_context::TurnContext,
 ) {
-    if has_unfinished_tool_calls(session) {
+    if session.has_unfinished_tool_calls() {
         return;
     }
     for injection in std::mem::take(&mut session.deferred_tool_injections) {
@@ -133,14 +90,6 @@ pub(crate) fn accept_runtime_user_message(
         model_excluded: false,
     });
     Ok(text)
-}
-
-#[cfg(test)]
-fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
-    session
-        .messages
-        .iter()
-        .position(|message| message.id == message_id && message.role == MessageRole::User)
 }
 
 pub(crate) fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
@@ -387,10 +336,6 @@ pub(crate) fn classify_tool_result_failure(result: &crate::tool::ToolResult) -> 
     } else {
         ToolFailureKind::ToolInternal
     }
-}
-
-pub(crate) fn structured_tool_failure_provider_text(record: &ToolFailureRecord) -> String {
-    record.render_for_model()
 }
 
 fn classify_failure_message(message: &str) -> ToolFailureKind {
@@ -762,33 +707,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preloaded_same_id_message_uses_its_actual_index_as_turn_start() {
-        let mut session = Session::new("preloaded-turn");
-        session.append_message(MessageRole::Assistant, "before");
-        session.append_prepared_user_message_with_id(
-            "preloaded-user".to_string(),
-            vec![ContentBlock::text("old content")],
-        );
-        session.append_message(MessageRole::Assistant, "after");
-        let accept_before_len = session.messages.len();
-
-        let message_id = append_or_reuse_user_message(
-            &mut session,
-            Some("preloaded-user".to_string()),
-            vec![ContentBlock::text("new content")],
-        )
-        .unwrap();
-        let turn_start_idx = user_message_turn_start_idx(&session, &message_id).unwrap();
-
-        assert_eq!(turn_start_idx, 1);
-        assert_ne!(turn_start_idx, accept_before_len);
-        assert_eq!(
-            session.messages[turn_start_idx].text_content(),
-            "new content"
-        );
-    }
-
-    #[test]
     fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
         let mut session = Session::new("tool-interruption");
         let mut assistant = Message::new(MessageRole::Assistant, "");
@@ -813,10 +731,11 @@ mod tests {
             false,
         );
 
-        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-2");
-        assert!(!has_unfinished_tool_calls(&session));
+        assert!(!session.has_unfinished_tool_calls());
 
         session.append_prepared_user_message_with_id(
             "next-user".to_string(),
@@ -846,7 +765,7 @@ mod tests {
         }];
         session.messages.push(assistant);
 
-        assert!(has_unfinished_tool_calls(&session));
+        assert!(session.has_unfinished_tool_calls());
         append_tool_result_message(
             &mut session,
             "call-pending",
@@ -854,7 +773,7 @@ mod tests {
             "done".to_string(),
             false,
         );
-        assert!(!has_unfinished_tool_calls(&session));
+        assert!(!session.has_unfinished_tool_calls());
     }
 
     #[test]
@@ -879,11 +798,12 @@ mod tests {
             }
         }
 
-        assert!(has_unfinished_tool_calls(&session));
-        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
+        assert!(session.has_unfinished_tool_calls());
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
-        assert!(!has_unfinished_tool_calls(&session));
+        assert!(!session.has_unfinished_tool_calls());
     }
 
     #[test]
@@ -896,7 +816,7 @@ mod tests {
             "工具参数 JSON 无效：__parse_error",
         );
 
-        let text = structured_tool_failure_provider_text(&record);
+        let text = record.render_for_model();
 
         assert!(text.contains("[tool_failure]"));
         assert!(text.contains("tool_name: read_file"));

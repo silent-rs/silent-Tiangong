@@ -41,7 +41,6 @@ pub(crate) async fn run_turn(
     // 同一消息索引和 ID，避免执行过程中追加的消息改变本轮归属。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
-    let turn_start_cwd = ctx.session.cwd.clone();
     let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
         let _ = stream_tx.send(StreamEvent::Error {
             message: "本轮 Session 缺少用户消息".to_string(),
@@ -65,25 +64,12 @@ pub(crate) async fn run_turn(
     // 已作为独立任务记录在 TODO.md，避免在本次结构整理中改变既有行为。
     let mut terminal = StreamEvent::Done { usage: None };
 
-    // ── 对齐插件工作区 ──
-    // 工具可能在执行期间修改 Session.cwd，turn 结束时再把最终工作区同步给插件。
-    if ctx.session.cwd != turn_start_cwd {
-        let workspace_path = std::path::PathBuf::from(&ctx.session.cwd);
-        let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
-        for plugin in &ctx.plugins {
-            plugin.set_workspace(workspace);
-        }
-    }
-
     // ── 修复消息协议并处理延迟注入 ──
     // 先为悬空的 tool_call 补齐失败结果，保证 Provider 历史满足
     // Assistant(tool_call) -> Tool(result) 的配对要求。
-    let interrupted_tools = {
-        let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-        let result = crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
-        ctx.session = session;
-        result
-    };
+    let interrupted_tools = ctx
+        .session
+        .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
     if !interrupted_tools.is_empty() {
         for (tool_call_id, tool_name, output) in interrupted_tools {
             let _ = stream_tx.send(StreamEvent::ToolResult {
@@ -837,7 +823,7 @@ async fn execute_turn_with_session(
                         ToolFailureKind::Argument,
                         message.clone(),
                     );
-                    let provider_text = structured_tool_failure_provider_text(&failure);
+                    let provider_text = failure.render_for_model();
                     let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
                         name: call.name.clone(),
                         tool_call_id: Some(call.id.clone()),
@@ -883,7 +869,7 @@ async fn execute_turn_with_session(
                         ctx,
                         &call.id,
                         &call.name,
-                        &structured_tool_failure_provider_text(&repeated_failure),
+                        &repeated_failure.render_for_model(),
                     );
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;
@@ -1025,13 +1011,14 @@ async fn execute_turn_with_session(
                             session,
                             &call.id,
                             &call.name,
-                            structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                            ToolFailureRecord::new(
                                 &call.name,
                                 &call.id,
                                 args_summary.clone(),
                                 ToolFailureKind::UserRejected,
                                 "用户拒绝执行",
-                            )),
+                            )
+                            .render_for_model(),
                             true,
                         );
                         crate::react::message::flush_deferred_tool_injections(session, ctx);
@@ -1160,13 +1147,14 @@ async fn execute_turn_with_session(
                     if result.ok {
                         tool_result_provider_text(&call.name, &result, allow_memory_context)
                     } else {
-                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
+                        ToolFailureRecord::new(
                             &call.name,
                             &call.id,
                             args_summary.clone(),
                             classify_tool_result_failure(&result),
                             tool_result_full_output(&result),
-                        ))
+                        )
+                        .render_for_model()
                     },
                     !result.ok,
                 );
@@ -1204,14 +1192,14 @@ async fn execute_turn_with_session(
                     failed_tool_names.remove(&call.name);
                     successful_tool_call_keys.insert(tool_call_key);
                 } else {
-                    let error_summary =
-                        structured_tool_failure_provider_text(&ToolFailureRecord::new(
-                            &call.name,
-                            &call.id,
-                            args_summary.clone(),
-                            classify_tool_result_failure(&result),
-                            tool_result_full_output(&result),
-                        ));
+                    let error_summary = ToolFailureRecord::new(
+                        &call.name,
+                        &call.id,
+                        args_summary.clone(),
+                        classify_tool_result_failure(&result),
+                        tool_result_full_output(&result),
+                    )
+                    .render_for_model();
                     failed_tool_call_keys.insert(tool_call_key, error_summary);
                     failed_tool_names.insert(call.name.clone());
                     need_failure_recovery_prompt = true;

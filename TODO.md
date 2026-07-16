@@ -57,7 +57,10 @@
 - [x] Session 用户消息写入覆盖内容校验、同 ID 处理、失败回滚与完整落盘，删除 `accept_prepared_user_message_with_options`；遗留工具调用统一由上一轮取消收尾闭合
 - [x] `run_turn` 从 `ctx.plugins` 调用插件生命周期钩子
 - [x] `run_turn` 的插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)使用 `&mut session`
+- [x] 删除 `run_turn` 结束时的插件工作区二次同步，插件工作区只在 turn 启动前设置
+- [x] 删除 `run_turn` 的无效 `Session` 占位替换，以及 `react/message` 中仅转发底层方法的包装
 - [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
+- [ ] App 对已有对话或执行记录的会话禁止修改工作区
 - [ ] 收敛单一终态合同：`execute_turn` 返回明确执行结果，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
 - [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
