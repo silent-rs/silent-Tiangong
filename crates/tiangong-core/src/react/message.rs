@@ -708,7 +708,8 @@ mod tests {
 
     #[test]
     fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
-        let mut session = Session::new("tool-interruption");
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("tool-interruption").with_storage_root(storage.path());
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![
             MessageToolCall {
@@ -731,8 +732,9 @@ mod tests {
             false,
         );
 
-        let interrupted =
-            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
+        let interrupted = session
+            .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。")
+            .unwrap();
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-2");
         assert!(!session.has_unfinished_tool_calls());
@@ -778,7 +780,8 @@ mod tests {
 
     #[test]
     fn reused_tool_call_id_does_not_reuse_an_old_result() {
-        let mut session = Session::new("reused-tool-id");
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("reused-tool-id").with_storage_root(storage.path());
         for completed in [true, false] {
             let mut assistant = Message::new(MessageRole::Assistant, "");
             assistant.tool_calls = vec![MessageToolCall {
@@ -799,8 +802,9 @@ mod tests {
         }
 
         assert!(session.has_unfinished_tool_calls());
-        let interrupted =
-            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
+        let interrupted = session
+            .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。")
+            .unwrap();
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
         assert!(!session.has_unfinished_tool_calls());

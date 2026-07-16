@@ -549,11 +549,15 @@ impl Session {
         Ok(())
     }
 
+    /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
+    ///
+    /// 落盘失败时保留内存中的补齐结果，供 turn 最终持久化再次尝试。
     pub(crate) fn close_unfinished_tool_calls_with_reason(
         &mut self,
         reason: &str,
-    ) -> Vec<(String, String, String)> {
-        self.unfinished_tool_calls()
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let interrupted = self
+            .unfinished_tool_calls()
             .into_iter()
             .map(|(tool_call_id, tool_name)| {
                 let output = reason.to_string();
@@ -563,7 +567,13 @@ impl Session {
                 );
                 (tool_call_id, tool_name, output)
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if interrupted.is_empty() {
+            return Ok(interrupted);
+        }
+        self.updated_at = now_text();
+        self.try_persist_to_disk()?;
+        Ok(interrupted)
     }
 
     pub(crate) fn has_unfinished_tool_calls(&self) -> bool {

@@ -59,6 +59,8 @@
 - [x] `run_turn` 的插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)使用 `&mut session`
 - [x] 删除 `run_turn` 结束时的插件工作区二次同步，插件工作区只在 turn 启动前设置
 - [x] 删除 `run_turn` 的无效 `Session` 占位替换，以及 `react/message` 中仅转发底层方法的包装
+- [x] `Session::close_unfinished_tool_calls_with_reason` 在补齐悬空工具消息后立即落盘，成功后再由调用方发布失败的 `ToolResult`
+- [x] 取消后不在 `run_turn` 收尾阶段刷新延迟工具注入，暂存数据保留到下一 turn 安全点
 - [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
 - [ ] App 对已有对话或执行记录的会话禁止修改工作区
 - [ ] 收敛单一终态合同：`execute_turn` 返回明确执行结果，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`

@@ -67,30 +67,31 @@ pub(crate) async fn run_turn(
     // ── 修复消息协议并处理延迟注入 ──
     // 先为悬空的 tool_call 补齐失败结果，保证 Provider 历史满足
     // Assistant(tool_call) -> Tool(result) 的配对要求。
-    let interrupted_tools = ctx
+    match ctx
         .session
-        .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
-    if !interrupted_tools.is_empty() {
-        for (tool_call_id, tool_name, output) in interrupted_tools {
-            let _ = stream_tx.send(StreamEvent::ToolResult {
-                name: tool_name,
-                tool_call_id: Some(tool_call_id),
-                ok: false,
-                output,
-                full_output: None,
-                duration_ms: None,
-            });
-        }
-        terminal = StreamEvent::Error {
-            message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
-        };
-    }
-
-    // 悬空调用闭合后再刷新延迟注入，避免新的 Tool 消息破坏既有调用顺序。
+        .close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。")
     {
-        let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-        crate::react::message::flush_deferred_tool_injections(&mut session, &ctx);
-        ctx.session = session;
+        Ok(interrupted_tools) if !interrupted_tools.is_empty() => {
+            for (tool_call_id, tool_name, output) in interrupted_tools {
+                let _ = stream_tx.send(StreamEvent::ToolResult {
+                    name: tool_name,
+                    tool_call_id: Some(tool_call_id),
+                    ok: false,
+                    output,
+                    full_output: None,
+                    duration_ms: None,
+                });
+            }
+            terminal = StreamEvent::Error {
+                message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
+            };
+        }
+        Ok(_) => {}
+        Err(error) => {
+            terminal = StreamEvent::Error {
+                message: format!("补齐未完成工具调用后持久化失败：{error}"),
+            };
+        }
     }
 
     // ── 提交轮次状态与插件收尾 ──
