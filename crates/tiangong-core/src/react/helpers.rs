@@ -54,25 +54,22 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 
 /// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
 pub(super) fn drain_pending_commands_async(
-    session: &mut Session,
     ctx: &TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> PendingCommandEffect {
     let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(session, ctx, commands)
+    process_commands(ctx, commands)
 }
 
 /// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
 pub(super) fn process_buffered_commands(
-    session: &mut Session,
     ctx: &TurnContext,
     commands: Vec<Command>,
 ) -> PendingCommandEffect {
-    process_commands(session, ctx, commands)
+    process_commands(ctx, commands)
 }
 
 fn process_commands(
-    session: &mut Session,
     ctx: &TurnContext,
     commands: impl IntoIterator<Item = Command>,
 ) -> PendingCommandEffect {

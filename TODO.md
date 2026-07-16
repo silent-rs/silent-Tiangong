@@ -66,6 +66,9 @@
 
 ### execute_turn 内部简化
 - [ ] `execute_turn` 从 `self.session` 读取(当前仍接收 `session: &mut Session` 参数)
+- [ ] 明确职责边界：`deliver(Message)` 完整构建本轮 Session，`run_turn` 只负责执行、收尾与持久化
+- [ ] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点
+- [ ] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `self.session` 读取
 - [ ] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
 - [ ] `execute_turn_async` wrapper 函数简化或内联
 

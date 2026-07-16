@@ -993,6 +993,16 @@ impl Session {
         self.messages.truncate(idx + 1);
         remove_count
     }
+
+    /// 获取最新用户消息的index
+    pub fn latest_user_message_index(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, m)| m.role == MessageRole::User)
+            .map(|(idx, _)| idx)
+    }
 }
 
 fn new_id() -> String {

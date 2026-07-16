@@ -112,10 +112,21 @@ impl TurnContext {
     #[allow(clippy::too_many_arguments, unreachable_code)]
     pub async fn execute_turn(
         &mut self,
-        session: &mut Session,
-        initial_user_message: Option<(&str, &[ContentBlock])>,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> TokenUsage {
+        // 借用冲突解决方案:把所有需要的 self 字段先提取为局部变量
+        let context_limit = self.context_limit;
+        let stream_tx = &self.stream_tx;
+        let tools = &self.tools;
+        let max_tool_rounds = self.max_tool_rounds;
+        let max_outer_iterations = self.max_outer_iterations;
+        let trust_mode = self.trust_mode;
+        let usage_sink = self.turn_usage_sink().clone();
+        let _usage_guard = usage_sink.bind(stream_tx.clone(), context_limit);
+        let merge_plugin_usage = |acc: &mut TokenUsage| {
+            acc.accumulate(&usage_sink.take_usage());
+        };
+        let session = &mut self.session;
         let mut round = 0usize;
         let mut outer_iteration = 0u32;
         let mut accumulated_usage = TokenUsage::default();
@@ -123,19 +134,10 @@ impl TurnContext {
         // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
         // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
         // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
-        let usage_sink = self.turn_usage_sink().clone();
-        let _usage_guard = usage_sink.bind(self.stream_tx.clone(), self.context_limit);
-        // 把本轮插件累计的 usage 折算进 accumulated_usage（在每个返回点调用）。
-        // 注意：捕获 usage_sink 的 clone，而非 self，避免与循环内 &mut self 借用冲突。
-        let merge_plugin_usage = |acc: &mut TokenUsage| {
-            acc.accumulate(&usage_sink.take_usage());
-        };
+
         let mut successful_tool_call_keys = HashSet::new();
         let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
         let mut failed_tool_names = HashSet::new();
-        let mut user_input = initial_user_message
-            .map(|(_, prepared)| content_blocks_text(prepared))
-            .unwrap_or_default();
 
         // 外层循环：ReAct Loop（工具执行）与总结阶段分离。
         // - 每次迭代先走内层 'react_loop（工具执行阶段），break 后进入总结阶段。
@@ -157,7 +159,7 @@ impl TurnContext {
                         "TurnContext 构建前应已注入 system prompt"
                     );
                 }
-                match drain_pending_commands_async(session, self, cmd_rx) {
+                match drain_pending_commands_async(self, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;

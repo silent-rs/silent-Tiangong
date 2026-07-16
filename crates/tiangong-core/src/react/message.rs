@@ -96,7 +96,6 @@ pub(crate) fn defer_tool_injection(
 ///
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
 pub(crate) fn accept_prepared_user_message_with_options(
-    session: &mut Session,
     ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
@@ -241,29 +240,21 @@ fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
 
 /// 持久化用户消息，并直接交给当前 Agent 处理。
 pub(crate) fn accept_user_message(
-    session: &mut Session,
     ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     close_pending_tools: bool,
 ) -> Result<AcceptedUserMessage, String> {
-    accept_prepared_user_message_with_options(
-        session,
-        ctx,
-        message_id,
-        prepared,
-        close_pending_tools,
-    )
+    accept_prepared_user_message_with_options(ctx, message_id, prepared, close_pending_tools)
 }
 
 /// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
 pub(crate) fn accept_runtime_user_message(
-    session: &mut Session,
     ctx: &crate::turn_context::TurnContext,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
 ) -> Result<String, String> {
-    let accepted = accept_user_message(session, ctx, message_id, prepared, true)?;
+    let accepted = accept_user_message(ctx, message_id, prepared, true)?;
     Ok(content_blocks_text(&accepted.prepared))
 }
 
