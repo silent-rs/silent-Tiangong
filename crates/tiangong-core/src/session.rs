@@ -516,6 +516,82 @@ impl Session {
         });
         self.updated_at = now_text();
     }
+
+    /// 校验并事务性写入 Core 已接收的用户消息。
+    ///
+    /// 同 ID 的宿主镜像消息会先移除；只有完整 Session 成功落盘后才返回。失败时
+    /// 恢复调用前的 Session。上一轮遗留工具调用由该轮取消收尾负责闭合。
+    pub(crate) fn try_append_prepared_user_message_with_id(
+        &mut self,
+        id: String,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), String> {
+        tiangong_types::validate_ready_content_blocks(&content)?;
+
+        if self
+            .messages
+            .iter()
+            .any(|message| message.id == id && message.role != MessageRole::User)
+        {
+            return Err(format!("消息 ID {id} 已被非用户消息占用"));
+        }
+
+        let before = self.clone();
+        self.messages
+            .retain(|message| message.id != id || message.role != MessageRole::User);
+        self.append_prepared_user_message_with_id(id, content);
+
+        if let Err(error) = self.try_persist_to_disk() {
+            *self = before;
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn close_unfinished_tool_calls_with_reason(
+        &mut self,
+        reason: &str,
+    ) -> Vec<(String, String, String)> {
+        self.unfinished_tool_calls()
+            .into_iter()
+            .map(|(tool_call_id, tool_name)| {
+                let output = reason.to_string();
+                self.messages.push(
+                    Message::tool_result(&tool_call_id, &tool_name, &output, true)
+                        .with_phase(MessagePhase::React),
+                );
+                (tool_call_id, tool_name, output)
+            })
+            .collect()
+    }
+
+    pub(crate) fn has_unfinished_tool_calls(&self) -> bool {
+        !self.unfinished_tool_calls().is_empty()
+    }
+
+    fn unfinished_tool_calls(&self) -> Vec<(String, String)> {
+        let Some((assistant_index, assistant)) = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| !message.tool_calls.is_empty())
+        else {
+            return Vec::new();
+        };
+        let completed = self.messages[assistant_index + 1..]
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        assistant
+            .tool_calls
+            .iter()
+            .filter(|call| !completed.contains(call.id.as_str()))
+            .map(|call| (call.id.clone(), call.name.clone()))
+            .collect()
+    }
+
     /// 用宿主准备好的内容原样替换已有用户消息。
     pub fn update_prepared_user_message(
         &mut self,

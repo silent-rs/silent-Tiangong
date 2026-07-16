@@ -1,10 +1,7 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use tiangong_types::{
-    ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
-    validate_ready_content_blocks,
-};
+use tiangong_types::{ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks};
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
@@ -85,82 +82,6 @@ pub(crate) fn defer_tool_injection(
     emit_deferred_tool_injections_changed(session, ctx);
 }
 
-/// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
-///
-/// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
-pub(crate) fn accept_prepared_user_message_with_options(
-    session: &mut Session,
-    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-    close_pending_tools: bool,
-) -> Result<String, String> {
-    validate_ready_content_blocks(&prepared)?;
-    let before = session.clone();
-    // Desktop/Server 会先把稳定 User 乐观写入宿主快照。执行中追加时必须先取出
-    // 这条预写消息，闭合未完成 tool calls 后再把 User 放回末尾，保持协议顺序。
-    if let Some(message_id) = message_id.as_deref()
-        && let Some(index) = session
-            .messages
-            .iter()
-            .position(|message| message.id == message_id && message.role == MessageRole::User)
-    {
-        session.messages.remove(index);
-    }
-    let interrupted_tool_calls = if close_pending_tools {
-        close_unfinished_tool_calls(session)
-    } else {
-        Vec::new()
-    };
-    let text = content_blocks_text(&prepared);
-    let stable_content = stable_content_blocks(&prepared);
-    let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
-        Ok(message_id) => message_id,
-        Err(err) => {
-            *session = before;
-            return Err(err);
-        }
-    };
-    if user_message_turn_start_idx(session, &message_id).is_none() {
-        let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
-        *session = before;
-        return Err(err);
-    }
-    if let Err(err) = session.try_persist_to_disk() {
-        *session = before;
-        return Err(err);
-    }
-    for (tool_call_id, tool_name, output) in interrupted_tool_calls {
-        let _ = stream_tx.send(StreamEvent::ToolResult {
-            name: tool_name,
-            tool_call_id: Some(tool_call_id),
-            ok: false,
-            output,
-            full_output: None,
-            duration_ms: None,
-        });
-    }
-    let media = session
-        .messages
-        .iter()
-        .find(|message| message.id == message_id)
-        .map(|message| message.extract_media_assets())
-        .unwrap_or_default();
-    let _ = stream_tx.send(StreamEvent::UserMessage {
-        message_id: message_id.clone(),
-        content: text.clone(),
-        content_blocks: stable_content,
-        media: media.clone(),
-        model_excluded: false,
-    });
-    Ok(message_id)
-}
-
-/// 在追加新的 User 消息前闭合所有尚未返回结果的工具调用，保持 Provider 协议顺序。
-fn close_unfinished_tool_calls(session: &mut Session) -> Vec<(String, String, String)> {
-    close_unfinished_tool_calls_with_reason(session, "工具调用因新的用户消息而中断，未执行。")
-}
-
 /// 在轮次终态提交前闭合所有未完成的工具调用，保持 Provider 历史协议完整。
 pub(crate) fn close_unfinished_tool_calls_for_turn(
     session: &mut Session,
@@ -172,20 +93,11 @@ fn close_unfinished_tool_calls_with_reason(
     session: &mut Session,
     reason: &str,
 ) -> Vec<(String, String, String)> {
-    let pending = unfinished_tool_calls(session);
-
-    pending
-        .into_iter()
-        .map(|(tool_call_id, tool_name)| {
-            let output = reason.to_string();
-            append_tool_result_message(session, &tool_call_id, &tool_name, output.clone(), true);
-            (tool_call_id, tool_name, output)
-        })
-        .collect()
+    session.close_unfinished_tool_calls_with_reason(reason)
 }
 
 pub(crate) fn has_unfinished_tool_calls(session: &Session) -> bool {
-    !unfinished_tool_calls(session).is_empty()
+    session.has_unfinished_tool_calls()
 }
 
 pub(crate) fn flush_deferred_tool_injections(
@@ -202,28 +114,6 @@ pub(crate) fn flush_deferred_tool_injections(
     emit_deferred_tool_injections_changed(session, ctx);
 }
 
-fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
-    let Some((assistant_index, assistant)) = session
-        .messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, message)| !message.tool_calls.is_empty())
-    else {
-        return Vec::new();
-    };
-    let completed = session.messages[assistant_index + 1..]
-        .iter()
-        .filter_map(|message| message.tool_call_id.as_deref())
-        .collect::<std::collections::HashSet<_>>();
-    assistant
-        .tool_calls
-        .iter()
-        .filter(|call| !completed.contains(call.id.as_str()))
-        .map(|call| (call.id.clone(), call.name.clone()))
-        .collect()
-}
-
 /// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
 pub(crate) fn accept_runtime_user_message(
     session: &mut Session,
@@ -232,10 +122,20 @@ pub(crate) fn accept_runtime_user_message(
     prepared: Vec<ContentBlock>,
 ) -> Result<String, String> {
     let text = content_blocks_text(&prepared);
-    accept_prepared_user_message_with_options(session, stream_tx, message_id, prepared, true)?;
+    let content_blocks = stable_content_blocks(&prepared);
+    let message_id = message_id.unwrap_or_else(scru128::new_string);
+    session.try_append_prepared_user_message_with_id(message_id.clone(), prepared)?;
+    let _ = stream_tx.send(StreamEvent::UserMessage {
+        message_id,
+        content: text.clone(),
+        content_blocks,
+        media: Vec::new(),
+        model_excluded: false,
+    });
     Ok(text)
 }
 
+#[cfg(test)]
 fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
     session
         .messages
@@ -889,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn new_user_message_closes_every_unfinished_tool_call_first() {
+    fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
         let mut session = Session::new("tool-interruption");
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![
@@ -913,7 +813,7 @@ mod tests {
             false,
         );
 
-        let interrupted = close_unfinished_tool_calls(&mut session);
+        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-2");
         assert!(!has_unfinished_tool_calls(&session));
@@ -980,7 +880,7 @@ mod tests {
         }
 
         assert!(has_unfinished_tool_calls(&session));
-        let interrupted = close_unfinished_tool_calls(&mut session);
+        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
         assert!(!has_unfinished_tool_calls(&session));

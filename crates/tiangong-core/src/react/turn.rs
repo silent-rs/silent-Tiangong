@@ -28,14 +28,17 @@ use super::helpers::{
 };
 use super::summary::{ForceFinalReason, SummaryPhaseResult};
 
-/// turn task:执行 TurnContext 中的 turn。
+/// 执行并收尾一个完整的 turn task。
 ///
-/// TurnContext(session + 用户消息已注入)在 deliver 中构建,传入此处执行。
-/// turn 结束后 session 落盘,task 退出。
+/// `deliver` 已完成用户消息接收并构建 [`TurnContext`]；本函数依次负责插件生命周期、
+/// Agent Loop、消息协议收尾、轮次状态提交和最终持久化。
 pub(crate) async fn run_turn(
-    mut ctx: crate::turn_context::TurnContext,
+    mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
 ) {
+    // ── 固定轮次锚点 ──
+    // 当前用户消息已在 deliver 阶段写入 Session。后续插件回调、耗时与状态都使用
+    // 同一消息索引和 ID，避免执行过程中追加的消息改变本轮归属。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let turn_start_cwd = ctx.session.cwd.clone();
@@ -47,17 +50,23 @@ pub(crate) async fn run_turn(
     };
     let user_msg_id = ctx.session.messages[turn_start_idx].id.clone();
 
+    // ── 启动插件生命周期 ──
+    // 插件看到的是已包含本轮用户消息的完整 Session。
     for plugin in &ctx.plugins {
         plugin.on_turn_started(&mut ctx.session, turn_start_idx);
     }
 
+    // ── 执行 Agent Loop ──
+    // execute_turn 负责模型请求、工具调用和运行时命令；返回值只包含本轮累计用量。
     let usage = execute_turn(&mut ctx, &mut cmd_rx).await;
-
-    // execute_turn 返回的 usage 直接应用到 session
     ctx.session.token_usage.accumulate(&usage);
 
+    // 当前执行函数尚未返回明确终态，因此收尾层先按成功处理；单一终态合同的收敛
+    // 已作为独立任务记录在 TODO.md，避免在本次结构整理中改变既有行为。
     let mut terminal = StreamEvent::Done { usage: None };
 
+    // ── 对齐插件工作区 ──
+    // 工具可能在执行期间修改 Session.cwd，turn 结束时再把最终工作区同步给插件。
     if ctx.session.cwd != turn_start_cwd {
         let workspace_path = std::path::PathBuf::from(&ctx.session.cwd);
         let workspace = workspace_path.is_dir().then_some(workspace_path.as_path());
@@ -66,6 +75,9 @@ pub(crate) async fn run_turn(
         }
     }
 
+    // ── 修复消息协议并处理延迟注入 ──
+    // 先为悬空的 tool_call 补齐失败结果，保证 Provider 历史满足
+    // Assistant(tool_call) -> Tool(result) 的配对要求。
     let interrupted_tools = {
         let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
         let result = crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
@@ -88,12 +100,15 @@ pub(crate) async fn run_turn(
         };
     }
 
+    // 悬空调用闭合后再刷新延迟注入，避免新的 Tool 消息破坏既有调用顺序。
     {
         let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
         crate::react::message::flush_deferred_tool_injections(&mut session, &ctx);
         ctx.session = session;
     }
 
+    // ── 提交轮次状态与插件收尾 ──
+    // 先形成内存中的轮次状态，让取消钩子和结束钩子看到一致的执行结果。
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let mut status = TurnOutcome::from_terminal(&terminal).status;
 
@@ -113,13 +128,18 @@ pub(crate) async fn run_turn(
         msg.set_turn_result(elapsed_ms, status);
         user_msg_updated = true;
     }
+    // on_turn_finished 使用与 on_turn_started 相同的起点，并可在最终落盘前处理
+    // 本轮新增消息（例如建立索引或提交记忆任务）。
     for plugin in &ctx.plugins {
         plugin.on_turn_finished(&mut ctx.session, turn_start_idx);
     }
 
+    // ── 清理运行态并最终持久化 ──
+    // base64 等瞬态内容只用于本轮模型请求，不能进入磁盘会话合同。
     ctx.session.clear_transient_content();
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
+        // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
         terminal = StreamEvent::Error {
             message: format!("最终会话持久化失败：{error}"),
         };
@@ -134,17 +154,18 @@ pub(crate) async fn run_turn(
         }
         let _ = ctx.session.try_persist_to_disk();
     }
+
+    // ── 发布权威快照和收尾终态 ──
+    // 宿主依赖“用户消息终态快照在前、Done/Error 在后”关联远程请求，因此顺序不可交换。
     if user_msg_updated {
         crate::react::message::emit_session_message_upsert(&ctx.session, &ctx, &user_msg_id);
     }
 
-    // 直接发送终态事件(无 forwarder 屏障)
+    // run_turn 层的收尾终态在最终持久化之后直接发送，不再经过 forwarder 屏障。
     let _ = stream_tx.send(terminal);
-
-    drop(ctx);
 }
 
-/// 转发线程捕获的单个对话轮次终态。
+/// `run_turn` 收尾阶段使用的单个对话轮次状态。
 ///
 /// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
 /// 时为 Cancelled，否则为 Failed。run_turn 据此把 `status` 与执行时长
@@ -363,7 +384,7 @@ async fn execute_turn_with_session(
             let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
             let req = ModelRequest {
                 session_title: session.title.clone(),
-                // 当前用户消息已在 Command::Message 入口写入 session.messages。
+                // 当前用户消息已在 deliver 阶段写入 session.messages。
                 // ReAct 多轮继续请求时不能再次追加 user_input，否则模型会把同一请求
                 // 误认为新的用户消息，反复从第一步重新开始。
                 user_input: String::new(),

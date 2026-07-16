@@ -139,18 +139,26 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         tracing::warn!(%error, %session_id, "加载本轮 Session 失败");
                         CoreError::WorkerStopped
                     })?;
+                let message_id = message_id.unwrap_or_else(scru128::new_string);
+                let content = tiangong_types::content_blocks_text(&prepared);
+                let content_blocks = tiangong_types::stable_content_blocks(&prepared);
+                session
+                    .try_append_prepared_user_message_with_id(message_id.clone(), prepared)
+                    .map_err(|error| {
+                        tracing::warn!(%error, "持久化本轮用户消息失败");
+                        CoreError::WorkerStopped
+                    })?;
                 let stream_tx = self.stream_tx.clone();
-                crate::react::message::accept_prepared_user_message_with_options(
-                    &mut session,
-                    &stream_tx,
-                    message_id,
-                    prepared,
-                    true,
-                )
-                .map_err(|error| {
-                    tracing::warn!(%error, "持久化本轮用户消息失败");
-                    CoreError::WorkerStopped
-                })?;
+                // 返回前先发出 StreamEvent::UserMessage,让调用方确认本轮消息已被 core 接收。
+                stream_tx
+                    .send(StreamEvent::UserMessage {
+                        message_id,
+                        content,
+                        content_blocks,
+                        media: Vec::new(),
+                        model_excluded: false,
+                    })
+                    .map_err(|_| CoreError::WorkerStopped)?;
                 let trust_mode = *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner());
                 let config = (*self.config.snapshot()).clone();
                 let storage_root = self.storage_root.clone();

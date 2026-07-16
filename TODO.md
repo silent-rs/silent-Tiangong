@@ -53,9 +53,12 @@
 - [x] 删除 `worker_loop_async` 及不再使用的旧 worker 辅助逻辑，保留的轮次转发逻辑统一由 `run_turn` 持有
 - [x] 删除 `build_turn_context` 函数，`TurnContext` 直接使用 `TypedBuilder`
 - [x] 删除 `build_context_from_config` 函数
-- [x] `deliver(Message)` 在 `spawn_turn` 前完成 `TurnContext` 构建和用户消息落盘
+- [x] `deliver(Message)` 在 `spawn_turn` 前完成用户消息落盘并立即发布 `UserMessage`，再构建 `TurnContext`
+- [x] Session 用户消息写入覆盖内容校验、同 ID 处理、失败回滚与完整落盘，删除 `accept_prepared_user_message_with_options`；遗留工具调用统一由上一轮取消收尾闭合
 - [x] `run_turn` 从 `ctx.plugins` 调用插件生命周期钩子
 - [x] `run_turn` 的插件钩子(`on_turn_started` / `on_turn_finished` / `on_cancel`)使用 `&mut session`
+- [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
+- [ ] 收敛单一终态合同：`execute_turn` 返回明确执行结果，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
 - [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
 - [x] 插件 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前
