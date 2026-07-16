@@ -4,7 +4,7 @@ use anyhow::Result;
 use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
-use tiangong_types::{SessionStreamEvent, StreamEvent};
+use tiangong_types::StreamEvent;
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> = std::sync::Arc::new(
         tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
     );
-    let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     // CLI 入口是同步函数，用临时 tokio runtime block_on。
     let memory_handle = tokio::runtime::Runtime::new()
@@ -60,8 +60,10 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         });
 
     let core = TiangongCore::builder()
+        .session_id("cli-session")
         .config(config.clone())
-        .session(tiangong_core::session::Session::new("新对话"))
+        .trust_mode(tiangong_core::permission::TrustMode::FullTrust)
+        .storage_root(tiangong_config::io::storage_root())
         .event_sender(stream_tx)
         .plugins({
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
@@ -167,7 +169,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             ));
             plugins
         })
-        .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
+        .storage_root(storage_root.clone())
         .build()?;
 
     // CLI --trust-mode 参数覆盖
@@ -260,7 +262,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 }
 
 /// 处理完整的响应流
-fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>, core: &TiangongCore) {
+fn handle_response(rx: &mpsc::Receiver<StreamEvent>, core: &TiangongCore) {
     let mut state = ResponseState::new();
     let mut last_event_at = Instant::now();
     let timeout = Duration::from_secs(300);
@@ -274,7 +276,7 @@ fn handle_response(rx: &mpsc::Receiver<SessionStreamEvent>, core: &TiangongCore)
                 Ok(session_event) => {
                     had_event = true;
                     last_event_at = Instant::now();
-                    if state.process(&session_event.event, core) {
+                    if state.process(&session_event, core) {
                         return;
                     }
                 }

@@ -9,7 +9,7 @@ use tiangong_core::core::plugin::{Plugin, PluginFeedbackTx};
 use tiangong_core::core::{CoreStorageLocation, TiangongCore};
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::{Message, MessagePhase, MessageRole, Session};
-use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent, TokenUsage, TurnStatus};
+use tiangong_types::{ContentBlock, StreamEvent, TokenUsage, TurnStatus};
 
 use crate::constants::{CHILD_PLUGIN_ID, PLUGIN_ID};
 use crate::state::AgentDescriptor;
@@ -78,7 +78,7 @@ impl ChildRuntime {
         plugins.retain(|plugin| plugin.id() != PLUGIN_ID && plugin.id() != CHILD_PLUGIN_ID);
         plugins.push(team_client);
 
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<SessionStreamEvent>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let active_turn = Arc::new(Mutex::new(None));
         let state = Arc::new(Mutex::new(RuntimeState::Idle));
         let event_thread = spawn_event_bridge(
@@ -89,12 +89,15 @@ impl ChildRuntime {
             base_feedback,
             event_rx,
         );
+        let session_id = session.id.clone();
+        let trust_mode = session.trust_mode;
         let core = match TiangongCore::builder()
+            .session_id(session_id)
             .config(CoreConfigProvider::new(config))
-            .session(session)
+            .trust_mode(trust_mode)
+            .storage_root(core_storage_root)
             .event_sender(event_tx)
             .plugins(plugins)
-            .storage(CoreStorageLocation::new(core_storage_root))
             .build()
         {
             Ok(core) => core,
@@ -623,7 +626,7 @@ fn spawn_event_bridge(
     state: Arc<Mutex<RuntimeState>>,
     completed_messages: Arc<Mutex<HashMap<String, ChildTurnResult>>>,
     base_feedback: SharedFeedback,
-    event_rx: std::sync::mpsc::Receiver<SessionStreamEvent>,
+    event_rx: std::sync::mpsc::Receiver<StreamEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(event) = event_rx.recv() {
@@ -633,7 +636,7 @@ fn spawn_event_bridge(
                 &state,
                 &completed_messages,
                 &base_feedback,
-                event.event,
+                event,
             );
         }
         // 锁顺序固定为 active_turn → state。通道关闭后即使 waiter 已被调用方

@@ -361,7 +361,7 @@ impl ServerCoreManager {
             return Ok((session_id, capabilities));
         }
 
-        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
 
         // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
@@ -414,8 +414,10 @@ impl ServerCoreManager {
         let attachment_capabilities = attachment_capability_snapshot(&models);
         let storage_root = tiangong_app_state::app_state::storage_root();
         let core = tiangong_core::core::TiangongCore::builder()
+            .session_id(session.id.clone())
             .config(isolated_core_config_provider(&session_config))
-            .session(session.clone())
+            .trust_mode(session.trust_mode)
+            .storage_root(storage_root.clone())
             .event_sender(stream_tx)
             .plugins({
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
@@ -524,7 +526,7 @@ impl ServerCoreManager {
                 ));
                 plugins
             })
-            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
+            .storage_root(storage_root.clone())
             .build()?;
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
@@ -625,14 +627,13 @@ impl ServerCoreManager {
     fn spawn_stream_forwarder(
         &self,
         session_id: String,
-        stream_rx: mpsc::Receiver<SessionStreamEvent>,
+        stream_rx: mpsc::Receiver<StreamEvent>,
         tracker: Arc<ExecutionTracker>,
     ) {
         let state = self.state.clone();
         let event_bus = self.event_bus.clone();
         thread::spawn(move || {
-            for session_event in stream_rx {
-                let event = session_event.event;
+            for event in stream_rx {
                 sync_stream_event_to_state(&state, &event_bus, &session_id, &event);
                 // 终态先完成 Core 权威会话重载，再唤醒等待者；否则等待线程可能读到
                 // 尚未提交的流式镜像。
@@ -1482,7 +1483,7 @@ mod tests {
             .session(session)
             .event_sender(event_tx)
             .plugins(plugins)
-            .storage(CoreStorageLocation::new(storage_root))
+            .storage_root(storage_root.clone())
             .build()
             .unwrap()
     }
@@ -2023,7 +2024,7 @@ mod tests {
             .config(CoreConfigProvider::new(CoreConfig::default()))
             .session(session)
             .event_sender(event_tx)
-            .storage(CoreStorageLocation::new(root.path()))
+            .storage_root(root.path().to_path_buf())
             .build()
             .unwrap();
 

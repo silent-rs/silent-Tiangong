@@ -438,8 +438,8 @@ impl TiangongApp {
                     continue;
                 };
                 use std::sync::mpsc;
-                use tiangong_types::SessionStreamEvent;
-                let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+                use tiangong_types::StreamEvent;
+                let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
                     .ensure_core(&session_id, session_snapshot, stream_tx)
                     .await;
@@ -559,7 +559,7 @@ impl TiangongApp {
             })
             .await?;
 
-        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = self
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
@@ -1000,7 +1000,7 @@ impl TiangongApp {
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
         let creation_lock = self.core_creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
@@ -1048,7 +1048,7 @@ impl TiangongApp {
         &self,
         session: tiangong_core::session::Session,
         session_config: tiangong_core::core_config::CoreConfig,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> TiangongCore {
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
             self.config.generation(),
@@ -1178,11 +1178,12 @@ impl TiangongApp {
         ));
 
         TiangongCore::builder()
+            .session_id(session.id.clone())
             .config(CoreConfigProvider::new(session_config))
-            .session(session)
+            .trust_mode(session.trust_mode)
+            .storage_root(storage_root)
             .event_sender(stream_tx)
             .plugins(plugins)
-            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
             .build()
             .expect("Builder 必填字段已齐")
     }

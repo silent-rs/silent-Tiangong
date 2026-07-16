@@ -1174,7 +1174,7 @@ async fn send_message_inner(
     state: &TiangongApp,
 ) -> Result<(), String> {
     use std::sync::mpsc;
-    use tiangong_types::SessionStreamEvent;
+    use tiangong_types::StreamEvent;
 
     let UserMessageDeliveryRequest {
         session_id,
@@ -1323,7 +1323,7 @@ async fn send_message_inner(
     transaction.commit();
 
     // 获取或创建 TiangongCore
-    let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
@@ -1448,11 +1448,11 @@ pub(crate) async fn attachment_capability_snapshot(
         .await
 }
 
-/// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
+/// 消费 StreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
-    stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
+    stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
 ) {
     use tiangong_types::StreamEvent;
 
@@ -1471,7 +1471,7 @@ pub(crate) fn start_stream_consumer(
             }
 
             let terminal_event = matches!(
-                &session_event.event,
+                &session_event,
                 StreamEvent::Done { .. } | StreamEvent::Error { .. }
             );
             // 普通流事件立即转发；终态必须等 Core 权威会话重载完成后再对外发布。
@@ -1479,8 +1479,8 @@ pub(crate) fn start_stream_consumer(
                 let _ = app.emit("stream_event", &session_event);
             }
 
-            let sid = session_event.session_id;
-            let event = session_event.event;
+            let sid = session_id.clone();
+            let event = session_event;
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
             let completed_remote_message_id = remote_turn_correlation.observe(&event);
@@ -2082,10 +2082,7 @@ pub(crate) fn start_stream_consumer(
 
                 let _ = app.emit(
                     "stream_event",
-                    &tiangong_types::SessionStreamEvent {
-                        session_id: final_sid.clone(),
-                        event: event.clone(),
-                    },
+                    &event,
                 );
 
                 // 异步生成标题（不阻塞消费线程）
@@ -2172,11 +2169,8 @@ pub(crate) fn start_stream_consumer(
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
             let _ = app.emit(
                 "stream_event",
-                &tiangong_types::SessionStreamEvent {
-                    session_id,
-                    event: tiangong_types::StreamEvent::Error {
-                        message: "Core 事件流已关闭".to_string(),
-                    },
+                &tiangong_types::StreamEvent::Error {
+                    message: "Core 事件流已关闭".to_string(),
                 },
             );
         }
@@ -2329,7 +2323,7 @@ pub async fn edit_and_resend(
         .with_state(|core_state| core_state.persist_session_and_app(&session_id))
         .await?;
 
-    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
@@ -2493,7 +2487,7 @@ async fn run_context_slash_command(
             continue;
         };
 
-        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
