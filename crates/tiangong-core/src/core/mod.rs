@@ -278,41 +278,25 @@ async fn run_turn(
     accepted: AcceptedUserMessage,
 ) {
     let stream_tx = ctx.stream_tx.clone();
-
-    let turn_capture = Arc::new(TurnCaptureState {
-        capture: Mutex::new(TurnCapture::default()),
-        notify: tokio::sync::Notify::new(),
-    });
-    let forward_terminal = Arc::new(AtomicBool::new(false));
-    let mut turn_boundary_id = 0u64;
-
     let turn_start_idx = accepted.turn_start_idx;
     let user_msg_id = accepted.message_id;
     let prepared = accepted.prepared;
     let turn_started = std::time::Instant::now();
     let turn_start_cwd = ctx.session.cwd.clone();
-    forward_terminal.store(false, Ordering::Release);
-    if let Ok(mut capture) = turn_capture.capture.lock() {
-        capture.terminal = None;
-        capture.usage = TurnUsageCapture::default();
-    }
+
     for plugin in &ctx.plugins {
         plugin.on_turn_started(&mut ctx.session, turn_start_idx);
     }
 
     let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    ctx.execute_turn(&mut session, Some((&user_msg_id, &prepared)), &mut cmd_rx)
+    let usage = ctx.execute_turn(&mut session, Some((&user_msg_id, &prepared)), &mut cmd_rx)
         .await;
     ctx.session = session;
 
-    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
-    let mut terminal = turn_capture
-        .capture
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .terminal
-        .take()
-        .unwrap_or(StreamEvent::Done { usage: None });
+    // execute_turn 返回的 usage 直接应用到 session
+    ctx.session.token_usage.accumulate(&usage);
+
+    let mut terminal = StreamEvent::Done { usage: None };
 
     if ctx.session.cwd != turn_start_cwd {
         let workspace_path = std::path::PathBuf::from(&ctx.session.cwd);
@@ -339,11 +323,9 @@ async fn run_turn(
                 duration_ms: None,
             });
         }
-        if matches!(terminal, StreamEvent::Done { .. }) {
-            terminal = StreamEvent::Error {
-                message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
-            };
-        }
+        terminal = StreamEvent::Error {
+            message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
+        };
     }
 
     {
@@ -375,15 +357,6 @@ async fn run_turn(
         plugin.on_turn_finished(&mut ctx.session, turn_start_idx);
     }
 
-    wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
-    let turn_usage = {
-        let mut capture = turn_capture
-            .capture
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        std::mem::take(&mut capture.usage)
-    };
-    turn_usage.apply_to_session(&mut ctx.session);
     ctx.session.clear_transient_content();
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
@@ -405,14 +378,8 @@ async fn run_turn(
         crate::react::message::emit_session_message_upsert(&ctx.session, &ctx, &user_msg_id);
     }
 
-    send_final_stream_event(
-        &stream_tx,
-        &forward_terminal,
-        &turn_capture,
-        &mut turn_boundary_id,
-        terminal,
-    )
-    .await;
+    // 直接发送终态事件(无 forwarder 屏障)
+    let _ = stream_tx.send(terminal);
 
     drop(ctx);
 }
@@ -436,24 +403,6 @@ pub(crate) fn reset_context_for_session(
         remaining_messages: 0,
     });
     session.persist_to_disk();
-}
-
-/// 转发线程与 worker 之间的轮次终态/屏障状态。
-#[derive(Default)]
-struct TurnCapture {
-    terminal: Option<StreamEvent>,
-    usage: TurnUsageCapture,
-    processed_boundary: u64,
-}
-
-/// 转发线程与 worker 共享的屏障状态。
-///
-/// `capture` 用 std::sync::Mutex 保护（双方都短时持锁，不跨 await）；
-/// `notify` 让 worker（async task）在不使用 block_in_place 的情况下等待
-/// 转发线程处理完 TurnBoundary。
-struct TurnCaptureState {
-    capture: Mutex<TurnCapture>,
-    notify: tokio::sync::Notify,
 }
 
 /// 转发线程捕获的单轮精确用量。
@@ -691,52 +640,6 @@ mod shared_runtime_tests {
     }
 }
 
-async fn send_final_stream_event(
-    stream_tx: &StdSender<StreamEvent>,
-    forward_terminal: &AtomicBool,
-    turn_capture: &Arc<TurnCaptureState>,
-    turn_boundary_id: &mut u64,
-    event: StreamEvent,
-) {
-    debug_assert!(matches!(
-        event,
-        StreamEvent::Done { .. } | StreamEvent::Error { .. }
-    ));
-    forward_terminal.store(true, Ordering::Release);
-    if stream_tx.send(event).is_ok() {
-        // 必须确认转发线程已经处理完这个终态，才能接收/重置下一轮。否则新轮次
-        // 清除放行标志时，上一轮尚在队列里的终态可能被误当作内部事件吞掉。
-        wait_for_stream_boundary(stream_tx, turn_capture, turn_boundary_id).await;
-    }
-    forward_terminal.store(false, Ordering::Release);
-}
-
-async fn wait_for_stream_boundary(
-    stream_tx: &StdSender<StreamEvent>,
-    turn_capture: &Arc<TurnCaptureState>,
-    turn_boundary_id: &mut u64,
-) {
-    *turn_boundary_id = turn_boundary_id.wrapping_add(1);
-    let boundary_id = *turn_boundary_id;
-    if stream_tx
-        .send(StreamEvent::TurnBoundary { boundary_id })
-        .is_err()
-    {
-        return;
-    }
-    loop {
-        {
-            let capture = turn_capture
-                .capture
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if capture.processed_boundary >= boundary_id {
-                return;
-            }
-        }
-        turn_capture.notify.notified().await;
-    }
-}
 
 /// 转发线程捕获的单个对话轮次终态。
 ///
