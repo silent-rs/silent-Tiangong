@@ -81,9 +81,6 @@ fn process_commands(
     for cmd in commands {
         match cmd {
             Command::Cancel => {
-                let _ = ctx.stream_tx.send(StreamEvent::Error {
-                    message: "已取消".into(),
-                });
                 return PendingCommandEffect::Terminate;
             }
             Command::Shutdown => return PendingCommandEffect::Shutdown,

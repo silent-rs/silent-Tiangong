@@ -63,7 +63,7 @@
 - [x] 取消后不在 `run_turn` 收尾阶段刷新延迟工具注入，暂存数据保留到下一 turn 安全点
 - [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
 - [ ] App 对已有对话或执行记录的会话禁止修改工作区
-- [ ] 收敛单一终态合同：`execute_turn` 返回明确执行结果，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
+- [x] 收敛单一终态合同：`execute_turn` 返回明确执行结果，执行终态与结果独立定义，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
 - [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
 - [x] 插件 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前

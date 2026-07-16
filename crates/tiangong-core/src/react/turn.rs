@@ -22,11 +22,12 @@ use crate::stream_throttle::ThrottledStreamSink;
 use crate::turn_context::TurnContext;
 use tiangong_types::{StreamEvent, StreamToolCall};
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
 use super::helpers::{
     drain_pending_commands_async, looks_like_final_answer, process_buffered_commands,
 };
-use super::summary::{ForceFinalReason, SummaryPhaseResult};
+use super::outcome::{TurnExecutionOutcome, TurnExecutionResult};
+use super::summary::{ForceFinalReason, ForceFinalResult, SummaryPhaseResult};
 
 /// 执行并收尾一个完整的 turn task。
 ///
@@ -56,13 +57,11 @@ pub(crate) async fn run_turn(
     }
 
     // ── 执行 Agent Loop ──
-    // execute_turn 负责模型请求、工具调用和运行时命令；返回值只包含本轮累计用量。
-    let usage = execute_turn(&mut ctx, &mut cmd_rx).await;
+    // execute_turn 返回明确的执行结果和累计用量，不在内部发送终态事件。
+    let execution = execute_turn(&mut ctx, &mut cmd_rx).await;
+    let usage = execution.usage;
+    let mut outcome = execution.outcome;
     ctx.session.token_usage.accumulate(&usage);
-
-    // 当前执行函数尚未返回明确终态，因此收尾层先按成功处理；单一终态合同的收敛
-    // 已作为独立任务记录在 TODO.md，避免在本次结构整理中改变既有行为。
-    let mut terminal = StreamEvent::Done { usage: None };
 
     // ── 修复消息协议并处理延迟注入 ──
     // 先为悬空的 tool_call 补齐失败结果，保证 Provider 历史满足
@@ -82,29 +81,23 @@ pub(crate) async fn run_turn(
                     duration_ms: None,
                 });
             }
-            terminal = StreamEvent::Error {
-                message: "本轮仍有未完成的工具调用，已安全中断".to_string(),
-            };
+            if matches!(outcome, TurnExecutionOutcome::Success) {
+                outcome = TurnExecutionOutcome::Failed(
+                    "本轮仍有未完成的工具调用，已安全中断".to_string(),
+                );
+            }
         }
         Ok(_) => {}
         Err(error) => {
-            terminal = StreamEvent::Error {
-                message: format!("补齐未完成工具调用后持久化失败：{error}"),
-            };
+            outcome =
+                TurnExecutionOutcome::Failed(format!("补齐未完成工具调用后持久化失败：{error}"));
         }
     }
 
     // ── 提交轮次状态与插件收尾 ──
-    // 先形成内存中的轮次状态，让取消钩子和结束钩子看到一致的执行结果。
+    // 先把明确结果写入本轮用户消息，让取消钩子和结束钩子看到一致状态。
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
-    let mut status = TurnOutcome::from_terminal(&terminal).status;
-
-    if status == tiangong_types::TurnStatus::Cancelled {
-        for plugin in &ctx.plugins {
-            plugin.on_cancel(&mut ctx.session).await;
-        }
-    }
-
+    let status = outcome.status();
     let mut user_msg_updated = false;
     if let Some(msg) = ctx
         .session
@@ -114,6 +107,11 @@ pub(crate) async fn run_turn(
     {
         msg.set_turn_result(elapsed_ms, status);
         user_msg_updated = true;
+    }
+    if status == tiangong_types::TurnStatus::Cancelled {
+        for plugin in &ctx.plugins {
+            plugin.on_cancel(&mut ctx.session).await;
+        }
     }
     // on_turn_finished 使用与 on_turn_started 相同的起点，并可在最终落盘前处理
     // 本轮新增消息（例如建立索引或提交记忆任务）。
@@ -127,17 +125,14 @@ pub(crate) async fn run_turn(
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
-        terminal = StreamEvent::Error {
-            message: format!("最终会话持久化失败：{error}"),
-        };
-        status = tiangong_types::TurnStatus::Failed;
+        outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
         if let Some(msg) = ctx
             .session
             .messages
             .iter_mut()
             .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
         {
-            msg.set_turn_result(elapsed_ms, status);
+            msg.set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
         }
         let _ = ctx.session.try_persist_to_disk();
     }
@@ -148,39 +143,8 @@ pub(crate) async fn run_turn(
         crate::react::message::emit_session_message_upsert(&ctx.session, &ctx, &user_msg_id);
     }
 
-    // run_turn 层的收尾终态在最终持久化之后直接发送，不再经过 forwarder 屏障。
-    let _ = stream_tx.send(terminal);
-}
-
-/// `run_turn` 收尾阶段使用的单个对话轮次状态。
-///
-/// `status` 由终态事件推导：`Done` → Success；`Error` 文案含「取消/cancel/abort」
-/// 时为 Cancelled，否则为 Failed。run_turn 据此把 `status` 与执行时长
-/// 写入用户消息，供前端（含历史会话）展示。
-struct TurnOutcome {
-    status: tiangong_types::TurnStatus,
-}
-
-impl TurnOutcome {
-    fn from_terminal(event: &StreamEvent) -> Self {
-        let status = match event {
-            StreamEvent::Done { .. } => tiangong_types::TurnStatus::Success,
-            StreamEvent::Error { message } => {
-                let lower = message.to_lowercase();
-                if lower.contains("取消")
-                    || lower.contains("cancel")
-                    || lower.contains("abort")
-                    || lower.contains("中断")
-                {
-                    tiangong_types::TurnStatus::Cancelled
-                } else {
-                    tiangong_types::TurnStatus::Failed
-                }
-            }
-            _ => tiangong_types::TurnStatus::Failed,
-        };
-        Self { status }
-    }
+    // 最终持久化完成后，由 run_turn 发布唯一终态事件。
+    let _ = stream_tx.send(outcome.terminal_event(usage));
 }
 
 /// 单个 turn 内的执行阶段。
@@ -265,11 +229,11 @@ fn build_thinking_config(
 async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) -> TokenUsage {
+) -> TurnExecutionResult {
     let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    let usage = execute_turn_with_session(ctx, &mut session, cmd_rx).await;
+    let result = execute_turn_with_session(ctx, &mut session, cmd_rx).await;
     ctx.session = session;
-    usage
+    result
 }
 
 #[allow(clippy::too_many_arguments, unreachable_code)]
@@ -277,7 +241,7 @@ async fn execute_turn_with_session(
     ctx: &mut TurnContext,
     session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) -> TokenUsage {
+) -> TurnExecutionResult {
     let usage_sink = ctx.turn_usage_sink().clone();
     let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
     let merge_plugin_usage = |acc: &mut TokenUsage| {
@@ -289,7 +253,7 @@ async fn execute_turn_with_session(
     // 绑定本轮 turn-scoped 插件 usage sink：插件经 PluginFeedbackTx.report_token_usage
     // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
     // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
-    // 计入下一轮。每个 return accumulated_usage 前先 merge_plugin_usage 折算插件用量。
+    // 计入下一轮。每个返回点先 merge_plugin_usage 折算插件用量。
 
     let mut successful_tool_call_keys = HashSet::new();
     let mut failed_tool_call_keys: HashMap<String, String> = HashMap::new();
@@ -326,11 +290,11 @@ async fn execute_turn_with_session(
             match drain_pending_commands_async(session, ctx, cmd_rx) {
                 PendingCommandEffect::Terminate => {
                     merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
+                    return TurnExecutionResult::cancelled(accumulated_usage);
                 }
                 PendingCommandEffect::Shutdown => {
                     merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
+                    return TurnExecutionResult::cancelled(accumulated_usage);
                 }
                 PendingCommandEffect::MessagesInjected {
                     current_agent_input,
@@ -513,7 +477,7 @@ async fn execute_turn_with_session(
                                             ctx.context_limit,
                                         );
                                         merge_plugin_usage(&mut accumulated_usage);
-                                        return accumulated_usage;
+                                        return TurnExecutionResult::cancelled(accumulated_usage);
                                     },
                                     Err(e) => Err(anyhow::anyhow!(e.to_string())),
                                 };
@@ -569,7 +533,7 @@ async fn execute_turn_with_session(
                         accumulated_usage.accumulate(&streaming_usage);
                         emit_cancel_usage(&ctx.stream_tx, &streaming_usage, ctx.context_limit);
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     let err_msg = err.to_string();
                     // 上下文超限或空响应时强制压缩后重试
@@ -595,23 +559,17 @@ async fn execute_turn_with_session(
                             )
                             .await;
                         if compression_cancelled {
-                            emit_cancelled(&ctx.stream_tx);
                             merge_plugin_usage(&mut accumulated_usage);
-                            return accumulated_usage;
+                            return TurnExecutionResult::cancelled(accumulated_usage);
                         }
                         if session.summary_up_to > before_summary_up_to {
                             continue 'react_loop;
                         }
                     }
-                    let _ = ctx.stream_tx.send(StreamEvent::Error {
-                        message: err_msg.clone(),
-                    });
-                    // 持久化错误到 session，避免前端 Error 事件时序丢失导致中断无痕迹。
+                    // 持久化错误到 session，供会话恢复后诊断。
                     persist_error(session, format!("ReAct 循环请求失败：{err_msg}"));
-                    {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
-                    }
+                    merge_plugin_usage(&mut accumulated_usage);
+                    return TurnExecutionResult::failed(accumulated_usage, err_msg);
                 }
             };
 
@@ -667,9 +625,8 @@ async fn execute_turn_with_session(
                 let compression_cancelled =
                     maybe_update_context_summary(session, ctx, &response.usage, cmd_rx).await;
                 if compression_cancelled {
-                    emit_cancelled(&ctx.stream_tx);
                     merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
+                    return TurnExecutionResult::cancelled(accumulated_usage);
                 }
 
                 // 简单问答快速路径：首轮、本轮未执行工具、未注入新消息且 LLM 已给出
@@ -696,10 +653,7 @@ async fn execute_turn_with_session(
                     );
                     session.persist_to_disk();
                     merge_plugin_usage(&mut accumulated_usage);
-                    let _ = ctx.stream_tx.send(StreamEvent::Done {
-                        usage: Some(accumulated_usage.clone()),
-                    });
-                    return accumulated_usage;
+                    return TurnExecutionResult::success(accumulated_usage);
                 }
 
                 // 智能提升（工具场景）：本轮执行过工具、且 LLM 已给出一段「看起来像
@@ -723,10 +677,7 @@ async fn execute_turn_with_session(
                     );
                     session.persist_to_disk();
                     merge_plugin_usage(&mut accumulated_usage);
-                    let _ = ctx.stream_tx.send(StreamEvent::Done {
-                        usage: Some(accumulated_usage.clone()),
-                    });
-                    return accumulated_usage;
+                    return TurnExecutionResult::success(accumulated_usage);
                 }
 
                 break 'react_loop;
@@ -786,11 +737,11 @@ async fn execute_turn_with_session(
                 match drain_pending_commands_async(session, ctx, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::Shutdown => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::MessagesInjected {
                         current_agent_input,
@@ -917,20 +868,12 @@ async fn execute_turn_with_session(
                                 break ApprovalWaitOutcome::Decision(approved);
                             }
                             Some(Command::Shutdown) => {
-                                let _ = ctx.stream_tx.send(StreamEvent::Error {
-                                    message: "已取消".into(),
-                                });
                                 merge_plugin_usage(&mut accumulated_usage);
-                                return accumulated_usage;
+                                return TurnExecutionResult::cancelled(accumulated_usage);
                             }
                             Some(Command::Cancel) | None => {
-                                let _ = ctx.stream_tx.send(StreamEvent::Error {
-                                    message: "已取消".into(),
-                                });
-                                {
-                                    merge_plugin_usage(&mut accumulated_usage);
-                                    return accumulated_usage;
-                                }
+                                merge_plugin_usage(&mut accumulated_usage);
+                                return TurnExecutionResult::cancelled(accumulated_usage);
                             }
                             Some(Command::Message {
                                 prepared,
@@ -1033,10 +976,7 @@ async fn execute_turn_with_session(
                             duration_ms: None,
                         });
                         merge_plugin_usage(&mut accumulated_usage);
-                        let _ = ctx.stream_tx.send(StreamEvent::Done {
-                            usage: Some(accumulated_usage.clone()),
-                        });
-                        return accumulated_usage;
+                        return TurnExecutionResult::success(accumulated_usage);
                     }
                 }
 
@@ -1106,10 +1046,7 @@ async fn execute_turn_with_session(
                         continue 'outer;
                     }
                     merge_plugin_usage(&mut accumulated_usage);
-                    let _ = ctx.stream_tx.send(StreamEvent::Error {
-                        message: "已取消".into(),
-                    });
-                    return accumulated_usage;
+                    return TurnExecutionResult::cancelled(accumulated_usage);
                 };
                 let tool_llm_usage = tiangong_types::TokenUsage::default();
                 let allow_memory_context = false;
@@ -1167,11 +1104,11 @@ async fn execute_turn_with_session(
                 match process_buffered_commands(session, ctx, buffered_tool_commands) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::Shutdown => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::MessagesInjected {
                         current_agent_input: Some(input),
@@ -1211,19 +1148,18 @@ async fn execute_turn_with_session(
                 let compression_cancelled =
                     maybe_update_context_summary(session, ctx, &response.usage, cmd_rx).await;
                 if compression_cancelled {
-                    emit_cancelled(&ctx.stream_tx);
                     merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
+                    return TurnExecutionResult::cancelled(accumulated_usage);
                 }
 
                 match drain_pending_commands_async(session, ctx, cmd_rx) {
                     PendingCommandEffect::Terminate => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::Shutdown => {
                         merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        return TurnExecutionResult::cancelled(accumulated_usage);
                     }
                     PendingCommandEffect::MessagesInjected {
                         current_agent_input,
@@ -1285,21 +1221,30 @@ async fn execute_turn_with_session(
             SummaryPhaseResult::Completed(usage) => {
                 accumulated_usage.accumulate(&usage);
                 merge_plugin_usage(&mut accumulated_usage);
-                let _ = ctx.stream_tx.send(StreamEvent::Done {
-                    usage: Some(accumulated_usage.clone()),
-                });
-                return accumulated_usage;
+                return TurnExecutionResult::success(accumulated_usage);
             }
             SummaryPhaseResult::NeedMoreWork { reason, usage } => {
                 accumulated_usage.accumulate(&usage);
                 outer_iteration += 1;
                 if outer_iteration >= ctx.max_outer_iterations {
                     // 重入次数已达上限，强制输出最终回复。
-                    ctx.force_final_response(session, cmd_rx, ForceFinalReason::OuterLimit)
-                        .await;
+                    match ctx
+                        .force_final_response(session, cmd_rx, ForceFinalReason::OuterLimit)
+                        .await
                     {
-                        merge_plugin_usage(&mut accumulated_usage);
-                        return accumulated_usage;
+                        ForceFinalResult::Completed(usage) => {
+                            accumulated_usage.accumulate(&usage);
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return TurnExecutionResult::success(accumulated_usage);
+                        }
+                        ForceFinalResult::Cancelled => {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return TurnExecutionResult::cancelled(accumulated_usage);
+                        }
+                        ForceFinalResult::Failed(message) => {
+                            merge_plugin_usage(&mut accumulated_usage);
+                            return TurnExecutionResult::failed(accumulated_usage, message);
+                        }
                     }
                 }
                 // 注入"上轮总结判定未完成"的上下文，重新进入工具执行阶段。
@@ -1323,21 +1268,34 @@ async fn execute_turn_with_session(
             SummaryPhaseResult::Cancelled(usage) => {
                 accumulated_usage.accumulate(&usage);
                 session.persist_to_disk();
-                {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
-                }
+                merge_plugin_usage(&mut accumulated_usage);
+                return TurnExecutionResult::cancelled(accumulated_usage);
             }
             SummaryPhaseResult::Failed { message, usage } => {
                 accumulated_usage.accumulate(&usage);
                 // 初次总结失败只是可恢复的中间状态；只有强制终结也失败时，
-                // run_text_finalization_llm 才发送唯一终态 Error。
+                // 才将本轮明确标记为失败。
                 persist_error(session, format!("总结阶段失败：{message}"));
-                ctx.force_final_response(session, cmd_rx, ForceFinalReason::SummaryError)
-                    .await;
+                match ctx
+                    .force_final_response(session, cmd_rx, ForceFinalReason::SummaryError)
+                    .await
                 {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    return accumulated_usage;
+                    ForceFinalResult::Completed(usage) => {
+                        accumulated_usage.accumulate(&usage);
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return TurnExecutionResult::success(accumulated_usage);
+                    }
+                    ForceFinalResult::Cancelled => {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return TurnExecutionResult::cancelled(accumulated_usage);
+                    }
+                    ForceFinalResult::Failed(force_message) => {
+                        merge_plugin_usage(&mut accumulated_usage);
+                        return TurnExecutionResult::failed(
+                            accumulated_usage,
+                            format!("总结阶段失败：{message}；强制最终回复失败：{force_message}"),
+                        );
+                    }
                 }
             }
             SummaryPhaseResult::Interrupted {
@@ -1358,7 +1316,7 @@ async fn execute_turn_with_session(
     }
 
     merge_plugin_usage(&mut accumulated_usage);
-    accumulated_usage
+    TurnExecutionResult::success(accumulated_usage)
 }
 
 pub(super) fn tools_for_current_turn(

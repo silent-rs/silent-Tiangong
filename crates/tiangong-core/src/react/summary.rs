@@ -21,7 +21,7 @@ use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
+use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
 use super::turn::{TurnPhase, tools_for_current_turn};
 use crate::turn_context::TurnContext;
 
@@ -40,6 +40,18 @@ pub(super) enum SummaryPhaseResult {
         current_agent_input: String,
         usage: TokenUsage,
     },
+}
+
+/// 强制最终回复的执行结果。
+pub(super) enum ForceFinalResult {
+    Completed(TokenUsage),
+    Cancelled,
+    Failed(String),
+}
+
+enum TextFinalizationError {
+    Cancelled,
+    Failed(String),
 }
 
 impl TurnContext {
@@ -319,7 +331,6 @@ impl TurnContext {
             let compression_cancelled =
                 maybe_update_context_summary(session, self, &usage, cmd_rx).await;
             if compression_cancelled {
-                emit_cancelled(stream_tx);
                 return SummaryPhaseResult::Cancelled(usage);
             }
             session.persist_to_disk();
@@ -350,7 +361,6 @@ impl TurnContext {
         let compression_cancelled =
             maybe_update_context_summary(session, self, &usage, cmd_rx).await;
         if compression_cancelled {
-            emit_cancelled(stream_tx);
             return SummaryPhaseResult::Cancelled(usage);
         }
         session.persist_to_disk();
@@ -740,8 +750,7 @@ impl TurnContext {
         session: &mut Session,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         reason: ForceFinalReason,
-    ) -> bool {
-        let stream_tx = &self.stream_tx;
+    ) -> ForceFinalResult {
         // 确保 system prompt 已构建
         if session.system_prompt_message.is_none() {
             rebuild_system_prompt(session, self);
@@ -782,23 +791,23 @@ impl TurnContext {
             .run_text_finalization_llm(session, &req, &pending_msg_id, cmd_rx)
             .await
         {
-            Some(r) => r,
-            None => {
+            Ok(response) => response,
+            Err(TextFinalizationError::Cancelled) => return ForceFinalResult::Cancelled,
+            Err(TextFinalizationError::Failed(message)) => {
                 crate::react::context::persist_error(
                     session,
-                    "force_final_response 失败".to_string(),
+                    format!("force_final_response 失败：{message}"),
                 );
-                return false;
+                return ForceFinalResult::Failed(message);
             }
         };
 
-        if !self.commit_summary_message(session, &pending_msg_id, &resp, "force_final_response") {
-            return false;
+        if let Err(message) =
+            self.commit_summary_message(session, &pending_msg_id, &resp, "force_final_response")
+        {
+            return ForceFinalResult::Failed(message);
         }
-        let _ = stream_tx.send(StreamEvent::Done {
-            usage: Some(resp.usage.clone()),
-        });
-        true
+        ForceFinalResult::Completed(resp.usage)
     }
 
     /// 执行一次「只产出文本最终回复」的 LLM 调用（tools + `ToolChoice::None`，流式）。
@@ -807,14 +816,14 @@ impl TurnContext {
     /// 通过 `ToolChoice::None` 禁止工具调用。`complete_with_functions_stream_with_tool_choice`
     /// 内部按 `use_stream_mode()` 自动选择流式/非流式实现，并在流式失败时回退非流式。
     ///
-    /// 成功返回响应；失败则上报错误、持久化错误痕迹并返回 `None`（调用方据此终止）。
+    /// 成功返回响应；取消与失败由返回值明确区分，不在本层发送终态事件。
     async fn run_text_finalization_llm(
         &self,
         session: &Session,
         req: &ModelRequest,
         pending_msg_id: &str,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-    ) -> Option<crate::model::ModelFunctionResponse> {
+    ) -> Result<crate::model::ModelFunctionResponse, TextFinalizationError> {
         let stream_tx = &self.stream_tx;
         let final_tools = tools_for_current_turn(&self.tools, session, "");
         let sink = ThrottledStreamSink::with_text_kind(
@@ -845,10 +854,7 @@ impl TurnContext {
                         crate::react::cancel::abort_and_join(handle).await;
                     }
                     sink.finish();
-                    let _ = stream_tx.send(StreamEvent::Error {
-                        message: "已取消".to_string(),
-                    });
-                    return None;
+                    return Err(TextFinalizationError::Cancelled);
                 }
                 chunk = chunk_rx.recv() => {
                     if let Some(chunk) = chunk {
@@ -864,13 +870,8 @@ impl TurnContext {
         };
         sink.finish();
         match response_result {
-            Ok(r) => Some(r),
-            Err(err) => {
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: err.to_string(),
-                });
-                None
-            }
+            Ok(response) => Ok(response),
+            Err(error) => Err(TextFinalizationError::Failed(error.to_string())),
         }
     }
 
@@ -884,8 +885,7 @@ impl TurnContext {
         pending_msg_id: &str,
         resp: &crate::model::ModelFunctionResponse,
         usage_source: &str,
-    ) -> bool {
-        let stream_tx = &self.stream_tx;
+    ) -> Result<(), String> {
         session.append_message_with_id(
             pending_msg_id.to_string(),
             MessageRole::Assistant,
@@ -904,13 +904,10 @@ impl TurnContext {
             usage_source,
             None,
         );
-        if let Err(error) = session.try_persist_to_disk() {
-            let _ = stream_tx.send(StreamEvent::Error {
-                message: format!("持久化最终回复失败：{error}"),
-            });
-            return false;
-        }
+        session
+            .try_persist_to_disk()
+            .map_err(|error| format!("持久化最终回复失败：{error}"))?;
         crate::react::message::emit_session_message_upsert(session, self, pending_msg_id);
-        true
+        Ok(())
     }
 }
