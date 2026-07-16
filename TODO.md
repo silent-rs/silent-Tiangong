@@ -83,7 +83,7 @@
 - [x] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点
 - [x] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `ctx.session` 读取
 - [ ] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
-- [ ] `execute_turn_async` wrapper 函数简化或内联
+- [x] 合并 `execute_agent_loop` 与 `execute_turn`，由 `execute_turn` 直接编排并返回本轮结果
 
 ### 调用方适配
 - [ ] `app.rs ensure_core`:先 persist session 文件再创建 Core(不再传 session 给 builder)

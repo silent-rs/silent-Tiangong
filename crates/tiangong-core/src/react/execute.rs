@@ -1307,111 +1307,101 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    let result = execute_agent_loop(ctx, &mut session, cmd_rx).await;
-    ctx.session = session;
-    result
-}
+    let mut owned_session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
+    let result = {
+        let session = &mut owned_session;
+        let usage_sink = ctx.turn_usage_sink().clone();
+        let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
+        let merge_plugin_usage = |acc: &mut TokenUsage| {
+            acc.accumulate(&usage_sink.take_usage());
+        };
+        let mut round = 0usize;
+        let mut outer_iteration = 0u32;
+        let mut accumulated_usage = TokenUsage::default();
+        // 插件用量在本轮内即时累加；guard 离开此作用域后自动解绑。
+        let mut tool_history = ToolCallHistory::default();
+        let mut user_input = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .map(|message| message.text_content())
+            .unwrap_or_default();
 
-async fn execute_agent_loop(
-    ctx: &mut TurnContext,
-    session: &mut Session,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) -> TurnExecutionResult {
-    let usage_sink = ctx.turn_usage_sink().clone();
-    let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
-    let merge_plugin_usage = |acc: &mut TokenUsage| {
-        acc.accumulate(&usage_sink.take_usage());
+        // 外层只编排 ReAct 与总结两个独立阶段；具体过程由各阶段函数负责。
+        'outer: loop {
+            match execute_react_phase(
+                ctx,
+                session,
+                cmd_rx,
+                round,
+                outer_iteration,
+                &user_input,
+                &mut accumulated_usage,
+                &mut tool_history,
+            )
+            .await
+            {
+                ReactPhaseOutcome::EnterSummary { round: next_round } => {
+                    round = next_round;
+                }
+                ReactPhaseOutcome::Restart(input) => {
+                    user_input = input;
+                    round = 0;
+                    outer_iteration = 0;
+                    continue 'outer;
+                }
+                ReactPhaseOutcome::Completed => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::success(accumulated_usage);
+                }
+                ReactPhaseOutcome::Cancelled => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::cancelled(accumulated_usage);
+                }
+                ReactPhaseOutcome::Failed(message) => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::failed(accumulated_usage, message);
+                }
+            }
+
+            match execute_summary_step(
+                ctx,
+                session,
+                cmd_rx,
+                &mut outer_iteration,
+                &mut accumulated_usage,
+            )
+            .await
+            {
+                SummaryStepOutcome::Completed => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::success(accumulated_usage);
+                }
+                SummaryStepOutcome::Continue => {
+                    tool_history.clear();
+                    continue 'outer;
+                }
+                SummaryStepOutcome::Interrupted(input) => {
+                    tool_history.clear();
+                    user_input = input;
+                    round = 0;
+                    outer_iteration = 0;
+                    continue 'outer;
+                }
+                SummaryStepOutcome::Cancelled => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::cancelled(accumulated_usage);
+                }
+                SummaryStepOutcome::Failed(message) => {
+                    merge_plugin_usage(&mut accumulated_usage);
+                    break 'outer TurnExecutionResult::failed(accumulated_usage, message);
+                }
+            }
+        }
     };
-    let mut round = 0usize;
-    let mut outer_iteration = 0u32;
-    let mut accumulated_usage = TokenUsage::default();
-    // 绑定本轮 turn-scoped 插件 usage sink：插件经 PluginFeedbackTx.report_token_usage
-    // 即时累加到本轮并立即发送 StreamEvent::TokenUsage（不走命令队列，避免被
-    // drain_pending_commands_async 等 drain 吞掉）。_usage_guard drop 时自动解绑，迟到的 usage 不会
-    // 计入下一轮。每个返回点先 merge_plugin_usage 折算插件用量。
-
-    let mut tool_history = ToolCallHistory::default();
-    // 从 session 最后一条用户消息提取初始 user_input
-    let mut user_input = session
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == MessageRole::User)
-        .map(|m| m.text_content())
-        .unwrap_or_default();
-
-    // 外层只编排 ReAct 与总结两个独立阶段；具体过程由各阶段函数负责。
-    'outer: loop {
-        match execute_react_phase(
-            ctx,
-            session,
-            cmd_rx,
-            round,
-            outer_iteration,
-            &user_input,
-            &mut accumulated_usage,
-            &mut tool_history,
-        )
-        .await
-        {
-            ReactPhaseOutcome::EnterSummary { round: next_round } => {
-                round = next_round;
-            }
-            ReactPhaseOutcome::Restart(input) => {
-                user_input = input;
-                round = 0;
-                outer_iteration = 0;
-                continue 'outer;
-            }
-            ReactPhaseOutcome::Completed => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::success(accumulated_usage);
-            }
-            ReactPhaseOutcome::Cancelled => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::cancelled(accumulated_usage);
-            }
-            ReactPhaseOutcome::Failed(message) => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::failed(accumulated_usage, message);
-            }
-        }
-
-        match execute_summary_step(
-            ctx,
-            session,
-            cmd_rx,
-            &mut outer_iteration,
-            &mut accumulated_usage,
-        )
-        .await
-        {
-            SummaryStepOutcome::Completed => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::success(accumulated_usage);
-            }
-            SummaryStepOutcome::Continue => {
-                tool_history.clear();
-                continue 'outer;
-            }
-            SummaryStepOutcome::Interrupted(input) => {
-                tool_history.clear();
-                user_input = input;
-                round = 0;
-                outer_iteration = 0;
-                continue 'outer;
-            }
-            SummaryStepOutcome::Cancelled => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::cancelled(accumulated_usage);
-            }
-            SummaryStepOutcome::Failed(message) => {
-                merge_plugin_usage(&mut accumulated_usage);
-                return TurnExecutionResult::failed(accumulated_usage, message);
-            }
-        }
-    }
+    ctx.session = owned_session;
+    result
 }
 
 pub(super) fn tools_for_current_turn(
