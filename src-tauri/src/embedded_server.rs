@@ -15,11 +15,6 @@ use crate::app::TiangongApp;
 type HostResult<T> = std::result::Result<T, String>;
 type MessageReply = HostResult<(String, OutgoingMessage)>;
 
-#[derive(Default)]
-pub(crate) struct RemoteTurnCorrelation {
-    finalized_user_message_id: Option<String>,
-}
-
 struct RemoteTurnLease<'a> {
     state: &'a TiangongApp,
     session_id: String,
@@ -30,26 +25,6 @@ impl Drop for RemoteTurnLease<'_> {
     fn drop(&mut self) {
         self.state
             .finish_remote_turn(&self.session_id, &self.message_id);
-    }
-}
-
-impl RemoteTurnCorrelation {
-    /// Core 保证用户终态快照先于该轮 Done/Error。这里把两者组合成稳定消息 ID，
-    /// 后续轮次即使已经排队，也不会按“最后一条消息”误取回复。
-    pub(crate) fn observe(&mut self, event: &tiangong_types::StreamEvent) -> Option<String> {
-        if let tiangong_types::StreamEvent::SessionMessageUpsert { message, .. } = event {
-            if message.role == tiangong_types::MessageRole::User && message.turn_status.is_some() {
-                self.finalized_user_message_id = Some(message.id.clone());
-                return None;
-            }
-        }
-        if matches!(
-            event,
-            tiangong_types::StreamEvent::Done { .. } | tiangong_types::StreamEvent::Error { .. }
-        ) {
-            return self.finalized_user_message_id.take();
-        }
-        None
     }
 }
 
@@ -645,35 +620,15 @@ mod tests {
     }
 
     #[test]
-    fn terminal_events_follow_each_finalized_user_message_id() {
-        let mut correlation = RemoteTurnCorrelation::default();
-        let final_user = |id: &str| {
-            let mut message =
-                tiangong_types::Message::new(tiangong_types::MessageRole::User, "request");
-            message.id = id.to_string();
-            message.turn_status = Some(TurnStatus::Success);
-            tiangong_types::StreamEvent::SessionMessageUpsert {
-                message,
-                deferred_tool_injections: None,
-            }
-        };
-
-        assert_eq!(correlation.observe(&final_user("message-1")), None);
+    fn remote_turn_owner_identifies_terminal_waiter() {
+        let state = TiangongApp::new();
+        state.begin_remote_turn("session", "message-1").unwrap();
         assert_eq!(
-            correlation.observe(&tiangong_types::StreamEvent::Done { usage: None }),
-            Some("message-1".to_string())
+            state.remote_turn_owner("session").as_deref(),
+            Some("message-1")
         );
-        assert_eq!(correlation.observe(&final_user("message-2")), None);
-        assert_eq!(
-            correlation.observe(&tiangong_types::StreamEvent::Error {
-                message: "failed".to_string(),
-            }),
-            Some("message-2".to_string())
-        );
-        assert_eq!(
-            correlation.observe(&tiangong_types::StreamEvent::Done { usage: None }),
-            None
-        );
+        state.finish_remote_turn("session", "message-1");
+        assert!(state.remote_turn_owner("session").is_none());
     }
 
     #[test]

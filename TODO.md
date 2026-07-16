@@ -42,6 +42,7 @@
 - [x] `deliver(Message)` → `spawn_turn`(构建 TurnContext + 注入用户消息 + 落盘)
 - [x] `deliver(Cancel/Approval/SetTrustMode)` → `send_command`
 - [x] `is_stopped` / `is_busy` → 查 `shared_runtime::is_running`
+- [x] Desktop 将 Core 实例存在与 turn 运行状态分离，空闲 Core 仍可接收下一条用户消息
 - [x] `into_session` → 从磁盘 load
 - [x] `builder.rs` 重写:删除 `.session()`,新增 `.session_id()` / `.trust_mode()` / `.storage_root()`
 - [x] `run_turn` 函数实现(替代 `worker_loop_async` 的 Message 分支)
@@ -64,7 +65,7 @@
 - [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
 - [x] `run_turn` 启动旁路计时器，每秒通过 `stream_tx` 发布当前运行秒数，并在提交最终耗时前停止
 - [ ] App 对已有对话或执行记录的会话禁止修改工作区
-- [x] 收敛单一终态合同：`execute_turn` 返回明确执行结果，执行终态与结果独立定义，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
+- [x] 收敛单一终态合同：`execute_turn` 返回明确执行结果，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`，宿主按终态重载 Session，不再等待额外消息事件
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`
 - [x] `spawn_turn` 在创建 Future 前遍历 `ctx.plugins` 调用 `set_feedback_tx`，并将 `cmd_tx` 存入 `TURN_TASKS`
 - [x] 插件 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前

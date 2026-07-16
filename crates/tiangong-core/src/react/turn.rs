@@ -91,7 +91,6 @@ pub(crate) async fn run_turn(
     elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
-    let mut user_msg_updated = false;
     if let Some(msg) = ctx
         .session
         .messages
@@ -99,7 +98,6 @@ pub(crate) async fn run_turn(
         .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
     {
         msg.set_turn_result(elapsed_ms, status);
-        user_msg_updated = true;
     }
     if status == tiangong_types::TurnStatus::Cancelled {
         for plugin in &ctx.plugins {
@@ -130,13 +128,8 @@ pub(crate) async fn run_turn(
         let _ = ctx.session.try_persist_to_disk();
     }
 
-    // ── 发布权威快照和收尾终态 ──
-    // 宿主依赖“用户消息终态快照在前、Done/Error 在后”关联远程请求，因此顺序不可交换。
-    if user_msg_updated {
-        crate::react::message::emit_session_message_upsert(&ctx.session, &ctx, &user_msg_id);
-    }
-
-    // 最终持久化完成后，由 run_turn 发布唯一终态事件。
+    // ── 发布唯一终态 ──
+    // 宿主在收到终态后从磁盘重载权威 Session，不再需要额外的最终消息快照。
     let _ = stream_tx.send(outcome.terminal_event(usage));
 }
 

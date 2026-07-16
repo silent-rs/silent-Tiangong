@@ -1460,7 +1460,6 @@ pub(crate) fn start_stream_consumer(
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
-        let mut remote_turn_correlation = crate::embedded_server::RemoteTurnCorrelation::default();
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
@@ -1490,7 +1489,6 @@ pub(crate) fn start_stream_consumer(
             let event = session_event;
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
-            let completed_remote_message_id = remote_turn_correlation.observe(&event);
             if let StreamEvent::AgentOutput {
                 agent_id,
                 agent_role,
@@ -1513,12 +1511,6 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
                     _ => None,
                 };
-                let final_user_snapshot = matches!(
-                    &event,
-                    StreamEvent::SessionMessageUpsert { message, .. }
-                        if message.role == tiangong_core::session::MessageRole::User
-                            && message.turn_status.is_some()
-                );
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
                         StreamEvent::UserMessage {
@@ -1785,7 +1777,7 @@ pub(crate) fn start_stream_consumer(
                 if let Some(message_id) = accepted_message_id {
                     core_state.accept_pending_message_for(&sid, &message_id);
                 }
-                if final_user_snapshot {
+                if is_done || is_error {
                     core_state.complete_accepted_turn_for(&sid);
                 }
                 // RunStatus/usage 更新
@@ -2019,8 +2011,8 @@ pub(crate) fn start_stream_consumer(
             }
 
             if is_done || is_error {
-                // Done：先持久化，再异步生成标题（不阻塞消费线程）
                 let final_sid = sid.clone();
+                let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
                 let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
@@ -2087,10 +2079,7 @@ pub(crate) fn start_stream_consumer(
                     ));
                 }
 
-                let _ = app.emit(
-                    "stream_event",
-                    &event,
-                );
+                let _ = app.emit("stream_event", &event);
 
                 // 异步生成标题（不阻塞消费线程）
                 if let Ok(Some((input, provider_config))) = title_task {
@@ -2156,7 +2145,9 @@ pub(crate) fn start_stream_consumer(
         let app_state = app.state::<TiangongApp>();
         let eof_lock = app_state.session_send_lock(&session_id);
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
-        if app_state.remove_stopped_core(&session_id) {
+        // 通道关闭说明持有该发送端的 Core 已被显式移除。若同会话已经创建了新 Core，
+        // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
+        if !app_state.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 if let Err(error) = core_state.reload_session_from_disk(&session_id) {
                     tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
