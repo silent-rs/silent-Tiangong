@@ -38,6 +38,8 @@ pub enum StreamEvent {
         /// 第几次外层循环（从 1 开始）
         iteration: u32,
     },
+    /// 当前 turn 已运行的整秒数，仅用于实时展示，不进入 Session。
+    TurnElapsed { seconds: u64 },
     /// 思考过程增量
     Reasoning {
         /// 所属消息 ID

@@ -1463,6 +1463,13 @@ pub(crate) fn start_stream_consumer(
         let mut remote_turn_correlation = crate::embedded_server::RemoteTurnCorrelation::default();
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
+            if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
+                if app_state.has_live_core(&session_id) {
+                    let _ = app.emit("stream_event", &session_event);
+                }
+                continue;
+            }
+
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
             if !app_state.has_live_core(&session_id) {

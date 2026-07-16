@@ -28,6 +28,7 @@ use super::helpers::{
 };
 use super::outcome::{TurnExecutionOutcome, TurnExecutionResult};
 use super::summary::{ForceFinalReason, ForceFinalResult, SummaryPhaseResult};
+use super::timer::TurnElapsedTimer;
 
 /// 执行并收尾一个完整的 turn task。
 ///
@@ -49,6 +50,7 @@ pub(crate) async fn run_turn(
         return;
     };
     let user_msg_id = ctx.session.messages[turn_start_idx].id.clone();
+    let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
     // ── 启动插件生命周期 ──
     // 插件看到的是已包含本轮用户消息的完整 Session。
@@ -86,6 +88,7 @@ pub(crate) async fn run_turn(
 
     // ── 提交轮次状态与插件收尾 ──
     // 先把明确结果写入本轮用户消息，让取消钩子和结束钩子看到一致状态。
+    elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
     let mut user_msg_updated = false;

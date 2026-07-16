@@ -62,6 +62,7 @@
 - [x] `Session::close_unfinished_tool_calls_with_reason` 在补齐悬空工具消息后立即落盘；补齐落盘失败时删除悬空调用并重新落盘，成功后再由调用方发布实际存在的失败 `ToolResult`
 - [x] 取消后不在 `run_turn` 收尾阶段刷新延迟工具注入，暂存数据保留到下一 turn 安全点
 - [x] 整理 `run_turn` 收尾流程，在轮次锚点、插件生命周期、执行、消息修复、持久化与终态发布节点补充说明
+- [x] `run_turn` 启动旁路计时器，每秒通过 `stream_tx` 发布当前运行秒数，并在提交最终耗时前停止
 - [ ] App 对已有对话或执行记录的会话禁止修改工作区
 - [x] 收敛单一终态合同：`execute_turn` 返回明确执行结果，执行终态与结果独立定义，最终持久化后只由 `run_turn` 发送一次 `Done` / `Error`
 - [x] `spawn_turn` 接收已构建的 `TurnContext` 与 Future 构建闭包，内部创建本轮 `cmd_tx / cmd_rx`

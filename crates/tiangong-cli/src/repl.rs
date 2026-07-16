@@ -358,6 +358,7 @@ impl ResponseState {
             }
 
             StreamEvent::PhaseChanged { .. } => {}
+            StreamEvent::TurnElapsed { .. } => {}
 
             StreamEvent::ToolCalls { names, .. } => {
                 self.end_active_stream();
