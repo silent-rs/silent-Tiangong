@@ -86,6 +86,93 @@ fn apply_deferred_turn_commands(
     crate::react::message::flush_deferred_tool_injections(ctx);
 }
 
+/// 命令分发目标：execute_turn 内部转发运行时命令所需的全部通道。
+///
+/// 这些通道由 `execute_turn` 顶部创建一次,在各子循环驱动期间共享。
+/// `forward_approval` 区分两类调用点：工具相关阶段(request / tool_batch)转发
+/// Approval,其余阶段(compression / text / summary)无活跃审批,丢弃即可。
+struct CommandDispatch<'a> {
+    cmd_rx: &'a mut tokio_mpsc::UnboundedReceiver<Command>,
+    cancel_tx: &'a mut Option<oneshot::Sender<()>>,
+    approval_tx: &'a tokio_mpsc::UnboundedSender<ApprovalResponse>,
+    trust_tx: &'a watch::Sender<TrustMode>,
+    deferred_tx: &'a tokio_mpsc::UnboundedSender<DeferredTurnCommand>,
+    stream_tx: &'a std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+    accumulated_usage: &'a mut TokenUsage,
+    /// 工具相关阶段为 true(转发 Approval),其余阶段为 false(丢弃)。
+    forward_approval: bool,
+}
+
+/// 驱动子循环 future 的同时分发运行时命令。
+///
+/// 这是 request / compression / text / tool_batch / summary 五处 `select!` 循环
+/// 的统一实现。收到 `Cancel` / `Shutdown` 或 `cmd_rx` 关闭时,关闭接收端、通知
+/// 子循环收尾,返回 `(outcome, true)`;子循环自然结束返回 `(outcome, false)`。
+/// 其余命令转发到 `CommandDispatch` 持有的专用通道。
+///
+/// `parent_cancelled=true` 时 `outcome` 是子循环被中断后的部分结果,调用方据此
+/// 决定如何提取 usage 并返回 `TurnExecutionResult::cancelled`。
+async fn drive_with_command_dispatch<F>(
+    dispatch: &mut CommandDispatch<'_>,
+    child: &mut std::pin::Pin<&mut F>,
+) -> (F::Output, bool)
+where
+    F: std::future::Future,
+{
+    let mut parent_cancelled = false;
+    let outcome = loop {
+        let CommandDispatch {
+            cmd_rx,
+            cancel_tx,
+            approval_tx,
+            trust_tx,
+            deferred_tx,
+            stream_tx,
+            context_limit,
+            accumulated_usage,
+            forward_approval,
+        } = dispatch;
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv() => match command {
+                Some(Command::Cancel | Command::Shutdown) | None => {
+                    cmd_rx.close();
+                    if let Some(cancel_tx) = cancel_tx.take() {
+                        let _ = cancel_tx.send(());
+                    }
+                    parent_cancelled = true;
+                    break child.as_mut().await;
+                }
+                Some(Command::Approval { request_id, approved }) if *forward_approval => {
+                    let _ = approval_tx.send(ApprovalResponse { request_id, approved });
+                }
+                Some(Command::Approval { .. }) => {}
+                Some(Command::SetTrustMode(mode)) => {
+                    let _ = trust_tx.send(mode);
+                }
+                Some(Command::CompressContext) => {
+                    let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                }
+                Some(Command::ResetContext) => {
+                    let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                }
+                Some(Command::InjectTool { tool_name, payload }) => {
+                    let _ = deferred_tx.send(DeferredTurnCommand::InjectTool { tool_name, payload });
+                }
+                Some(Command::EmitStreamEvent(event)) => {
+                    let _ = stream_tx.send(*event);
+                }
+                Some(Command::ReportUsage { usage, source, emit_event }) => {
+                    record_plugin_usage(stream_tx, *context_limit, accumulated_usage, usage, source, emit_event);
+                }
+            },
+            outcome = child.as_mut() => break outcome,
+        }
+    };
+    (outcome, parent_cancelled)
+}
+
 // TurnContext 定义与基础能力方法位于 `crate::turn_context`。本文件只实现单轮
 // Agent Loop 的阶段编排与具体执行步骤。
 
@@ -912,64 +999,20 @@ pub(super) async fn execute_turn(
                 cancel_rx,
                 request_tools.clone(),
             ));
-            let mut parent_cancelled = false;
-            // 命令分发 + 子循环驱动的统一模板（request / compression / text / tool /
-            // summary 五处复用同一结构）。Cancel/Shutdown/通道关闭 → 通知子循环
-            // 收尾并标记 parent_cancelled；其余命令转发到专用通道。子循环通过
-            // cancel_rx 感知取消后自行 break 并返回部分结果，父层 await 拿回。
-            // NOTE: 当前存在命令分发的样板重复，后续可抽公共 helper 收敛。
-            let request_outcome = loop {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => match command {
-                        Some(Command::Cancel | Command::Shutdown) | None => {
-                            cmd_rx.close();
-                            if let Some(cancel_tx) = cancel_tx.take() {
-                                let _ = cancel_tx.send(());
-                            }
-                            parent_cancelled = true;
-                            break (&mut request_future).await;
-                        }
-                        Some(Command::Approval { request_id, approved }) => {
-                            let _ = approval_tx.send(ApprovalResponse {
-                                request_id,
-                                approved,
-                            });
-                        }
-                        Some(Command::SetTrustMode(mode)) => {
-                            let _ = trust_tx.send(mode);
-                        }
-                        Some(Command::CompressContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                        }
-                        Some(Command::ResetContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                        }
-                        Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                tool_name,
-                                payload,
-                            });
-                        }
-                        Some(Command::EmitStreamEvent(event)) => {
-                            let _ = stream_tx.send(*event);
-                        }
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &stream_tx,
-                            context_limit,
-                            &mut accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                    },
-                    outcome = &mut request_future => break outcome,
-                }
+            // request 阶段会发起工具调用,需要转发 Approval。
+            let mut dispatch = CommandDispatch {
+                cmd_rx,
+                cancel_tx: &mut cancel_tx,
+                approval_tx: &approval_tx,
+                trust_tx: &trust_tx,
+                deferred_tx: &deferred_tx,
+                stream_tx: &stream_tx,
+                context_limit,
+                accumulated_usage: &mut accumulated_usage,
+                forward_approval: true,
             };
+            let (request_outcome, parent_cancelled) =
+                drive_with_command_dispatch(&mut dispatch, &mut request_future.as_mut()).await;
             drop(request_future);
             if parent_cancelled {
                 match request_outcome {
@@ -1017,54 +1060,23 @@ pub(super) async fn execute_turn(
                         let mut cancel_tx = Some(cancel_tx);
                         let mut compression_future =
                             Box::pin(maybe_update_context_summary(ctx, &forced_usage, cancel_rx));
-                        let mut parent_cancelled = false;
-                        let compression_cancelled = loop {
-                            tokio::select! {
-                                biased;
-                                command = cmd_rx.recv() => match command {
-                                    Some(Command::Cancel | Command::Shutdown) | None => {
-                                        cmd_rx.close();
-                                        if let Some(cancel_tx) = cancel_tx.take() {
-                                            let _ = cancel_tx.send(());
-                                        }
-                                        parent_cancelled = true;
-                                        break (&mut compression_future).await;
-                                    }
-                                    Some(Command::Approval { .. }) => {}
-                                    Some(Command::SetTrustMode(mode)) => {
-                                        let _ = trust_tx.send(mode);
-                                    }
-                                    Some(Command::CompressContext) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                                    }
-                                    Some(Command::ResetContext) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                                    }
-                                    Some(Command::InjectTool { tool_name, payload }) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                            tool_name,
-                                            payload,
-                                        });
-                                    }
-                                    Some(Command::EmitStreamEvent(event)) => {
-                                        let _ = stream_tx.send(*event);
-                                    }
-                                    Some(Command::ReportUsage {
-                                        usage,
-                                        source,
-                                        emit_event,
-                                    }) => record_plugin_usage(
-                                        &stream_tx,
-                                        context_limit,
-                                        &mut accumulated_usage,
-                                        usage,
-                                        source,
-                                        emit_event,
-                                    ),
-                                },
-                                result = &mut compression_future => break result,
-                            }
+                        let mut dispatch = CommandDispatch {
+                            cmd_rx,
+                            cancel_tx: &mut cancel_tx,
+                            approval_tx: &approval_tx,
+                            trust_tx: &trust_tx,
+                            deferred_tx: &deferred_tx,
+                            stream_tx: &stream_tx,
+                            context_limit,
+                            accumulated_usage: &mut accumulated_usage,
+                            forward_approval: false,
                         };
+                        let (compression_cancelled, parent_cancelled) =
+                            drive_with_command_dispatch(
+                                &mut dispatch,
+                                &mut compression_future.as_mut(),
+                            )
+                            .await;
                         drop(compression_future);
                         if parent_cancelled || compression_cancelled {
                             return TurnExecutionResult::cancelled(accumulated_usage);
@@ -1107,54 +1119,19 @@ pub(super) async fn execute_turn(
                         executed_tool: executed_tool_in_iteration,
                     },
                 ));
-                let mut parent_cancelled = false;
-                let text_outcome = loop {
-                    tokio::select! {
-                        biased;
-                        command = cmd_rx.recv() => match command {
-                            Some(Command::Cancel | Command::Shutdown) | None => {
-                                cmd_rx.close();
-                                if let Some(cancel_tx) = cancel_tx.take() {
-                                    let _ = cancel_tx.send(());
-                                }
-                                parent_cancelled = true;
-                                break (&mut text_future).await;
-                            }
-                            Some(Command::Approval { .. }) => {}
-                            Some(Command::SetTrustMode(mode)) => {
-                                let _ = trust_tx.send(mode);
-                            }
-                            Some(Command::CompressContext) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                            }
-                            Some(Command::ResetContext) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                            }
-                            Some(Command::InjectTool { tool_name, payload }) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                    tool_name,
-                                    payload,
-                                });
-                            }
-                            Some(Command::EmitStreamEvent(event)) => {
-                                let _ = stream_tx.send(*event);
-                            }
-                            Some(Command::ReportUsage {
-                                usage,
-                                source,
-                                emit_event,
-                            }) => record_plugin_usage(
-                                &stream_tx,
-                                context_limit,
-                                &mut accumulated_usage,
-                                usage,
-                                source,
-                                emit_event,
-                            ),
-                        },
-                        outcome = &mut text_future => break outcome,
-                    }
+                let mut dispatch = CommandDispatch {
+                    cmd_rx,
+                    cancel_tx: &mut cancel_tx,
+                    approval_tx: &approval_tx,
+                    trust_tx: &trust_tx,
+                    deferred_tx: &deferred_tx,
+                    stream_tx: &stream_tx,
+                    context_limit,
+                    accumulated_usage: &mut accumulated_usage,
+                    forward_approval: false,
                 };
+                let (text_outcome, parent_cancelled) =
+                    drive_with_command_dispatch(&mut dispatch, &mut text_future.as_mut()).await;
                 drop(text_future);
                 if parent_cancelled {
                     return TurnExecutionResult::cancelled(accumulated_usage);
@@ -1186,59 +1163,20 @@ pub(super) async fn execute_turn(
                 &request_tools,
                 &mut tool_history,
             ));
-            let mut parent_cancelled = false;
-            let tool_outcome = loop {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => match command {
-                        Some(Command::Cancel | Command::Shutdown) | None => {
-                            cmd_rx.close();
-                            if let Some(cancel_tx) = cancel_tx.take() {
-                                let _ = cancel_tx.send(());
-                            }
-                            parent_cancelled = true;
-                            break (&mut tool_future).await;
-                        }
-                        Some(Command::Approval { request_id, approved }) => {
-                            let _ = approval_tx.send(ApprovalResponse {
-                                request_id,
-                                approved,
-                            });
-                        }
-                        Some(Command::SetTrustMode(mode)) => {
-                            let _ = trust_tx.send(mode);
-                        }
-                        Some(Command::CompressContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                        }
-                        Some(Command::ResetContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                        }
-                        Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                tool_name,
-                                payload,
-                            });
-                        }
-                        Some(Command::EmitStreamEvent(event)) => {
-                            let _ = stream_tx.send(*event);
-                        }
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &stream_tx,
-                            context_limit,
-                            &mut accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                    },
-                    outcome = &mut tool_future => break outcome,
-                }
+            // tool_batch 内会发起审批请求,需要转发 Approval。
+            let mut dispatch = CommandDispatch {
+                cmd_rx,
+                cancel_tx: &mut cancel_tx,
+                approval_tx: &approval_tx,
+                trust_tx: &trust_tx,
+                deferred_tx: &deferred_tx,
+                stream_tx: &stream_tx,
+                context_limit,
+                accumulated_usage: &mut accumulated_usage,
+                forward_approval: true,
             };
+            let (tool_outcome, parent_cancelled) =
+                drive_with_command_dispatch(&mut dispatch, &mut tool_future.as_mut()).await;
             drop(tool_future);
             if parent_cancelled {
                 return TurnExecutionResult::cancelled(accumulated_usage);
@@ -1328,54 +1266,19 @@ pub(super) async fn execute_turn(
                 }
             }
         });
-        let mut parent_cancelled = false;
-        let summary_result = loop {
-            tokio::select! {
-                biased;
-                command = cmd_rx.recv() => match command {
-                    Some(Command::Cancel | Command::Shutdown) | None => {
-                        cmd_rx.close();
-                        if let Some(cancel_tx) = cancel_tx.take() {
-                            let _ = cancel_tx.send(());
-                        }
-                        parent_cancelled = true;
-                        break (&mut summary_future).await;
-                    }
-                    Some(Command::Approval { .. }) => {}
-                    Some(Command::SetTrustMode(mode)) => {
-                        let _ = trust_tx.send(mode);
-                    }
-                    Some(Command::CompressContext) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                    }
-                    Some(Command::ResetContext) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                    }
-                    Some(Command::InjectTool { tool_name, payload }) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                            tool_name,
-                            payload,
-                        });
-                    }
-                    Some(Command::EmitStreamEvent(event)) => {
-                        let _ = stream_tx.send(*event);
-                    }
-                    Some(Command::ReportUsage {
-                        usage,
-                        source,
-                        emit_event,
-                    }) => record_plugin_usage(
-                        &stream_tx,
-                        context_limit,
-                        &mut accumulated_usage,
-                        usage,
-                        source,
-                        emit_event,
-                    ),
-                },
-                result = &mut summary_future => break result,
-            }
+        let mut dispatch = CommandDispatch {
+            cmd_rx,
+            cancel_tx: &mut cancel_tx,
+            approval_tx: &approval_tx,
+            trust_tx: &trust_tx,
+            deferred_tx: &deferred_tx,
+            stream_tx: &stream_tx,
+            context_limit,
+            accumulated_usage: &mut accumulated_usage,
+            forward_approval: false,
         };
+        let (summary_result, parent_cancelled) =
+            drive_with_command_dispatch(&mut dispatch, &mut summary_future.as_mut()).await;
         drop(summary_future);
         let summary_usage = match &summary_result {
             SummaryPhaseResult::Completed(usage) | SummaryPhaseResult::Cancelled(usage) => usage,
