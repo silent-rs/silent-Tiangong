@@ -134,6 +134,8 @@ pub enum ApprovalInput {
 pub enum CommandInput {
     /// 取消当前执行。
     Cancel,
+    /// 运行时更新信任模式(即时生效到活跃 turn task)。
+    SetTrustMode(crate::permission::TrustMode),
     /// 手动触发上下文压缩。
     CompressContext,
     /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）。

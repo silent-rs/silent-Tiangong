@@ -3,10 +3,9 @@
 //! 单一线程完成所有工作：接收消息 → LLM 调用 → 工具执行 → session 更新 → 推送 StreamEvent
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Sender, Sender as StdSender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::Sender;
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
@@ -254,6 +253,9 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
+                CommandInput::SetTrustMode(truest_mod) => {
+                    self.send_cmd(Command::SetTrustMode(truest_mod))
+                }
                 CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
                 CommandInput::ResetContext => self.send_cmd(Command::ResetContext),
             },
@@ -289,7 +291,8 @@ async fn run_turn(
     }
 
     let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    let usage = ctx.execute_turn(&mut session, Some((&user_msg_id, &prepared)), &mut cmd_rx)
+    let usage = ctx
+        .execute_turn(&mut session, Some((&user_msg_id, &prepared)), &mut cmd_rx)
         .await;
     ctx.session = session;
 
@@ -405,200 +408,6 @@ pub(crate) fn reset_context_for_session(
     session.persist_to_disk();
 }
 
-/// 转发线程捕获的单轮精确用量。
-///
-/// `total` 同时包含主 Agent 与所有子 Agent；`by_agent` 额外保留子 Agent 维度，
-/// 供会话切换到 Agent Tab 时恢复各自累计值。
-#[derive(Default, Clone)]
-struct TurnUsageCapture {
-    total: tiangong_types::TokenUsage,
-    by_agent: HashMap<String, tiangong_types::TokenUsage>,
-    /// 每个执行单元已经观测到的用量，用于把显式标记为
-    /// `source=cancelled-cumulative` 的累计快照换算成尚未落账的增量。
-    /// `None` 表示主执行单元。普通 `cancelled-incremental` 事件始终按增量记账。
-    observed_by_actor: HashMap<Option<String>, tiangong_types::TokenUsage>,
-}
-
-impl TurnUsageCapture {
-    fn record(
-        &mut self,
-        usage: &tiangong_types::TokenUsage,
-        agent_id: Option<&str>,
-        source: &str,
-    ) -> tiangong_types::TokenUsage {
-        let mut normalized = usage.clone();
-        if normalized.total_tokens == 0 {
-            normalized.total_tokens = normalized.prompt_tokens + normalized.completion_tokens;
-        }
-        if normalized.total_tokens == 0 {
-            return tiangong_types::TokenUsage::default();
-        }
-
-        let actor = agent_id.map(str::to_string);
-        let observed = self.observed_by_actor.entry(actor).or_default();
-        let delta = if source == "cancelled-cumulative" {
-            let delta = cumulative_usage_delta(&normalized, observed);
-            merge_cumulative_usage(observed, &normalized);
-            delta
-        } else {
-            observed.accumulate(&normalized);
-            normalized
-        };
-
-        self.total.accumulate(&delta);
-        if let Some(agent_id) = agent_id {
-            self.by_agent
-                .entry(agent_id.to_string())
-                .or_default()
-                .accumulate(&delta);
-        }
-        delta
-    }
-
-    fn apply_to_session(self, session: &mut Session) {
-        if self.total.total_tokens > 0 {
-            session.token_usage.accumulate(&self.total);
-        }
-        for (agent_id, usage) in self.by_agent {
-            session
-                .agent_token_usage
-                .entry(agent_id)
-                .or_default()
-                .accumulate(&usage);
-        }
-    }
-}
-
-fn cumulative_usage_delta(
-    cumulative: &tiangong_types::TokenUsage,
-    observed: &tiangong_types::TokenUsage,
-) -> tiangong_types::TokenUsage {
-    tiangong_types::TokenUsage {
-        prompt_tokens: cumulative
-            .prompt_tokens
-            .saturating_sub(observed.prompt_tokens),
-        completion_tokens: cumulative
-            .completion_tokens
-            .saturating_sub(observed.completion_tokens),
-        total_tokens: cumulative
-            .total_tokens
-            .saturating_sub(observed.total_tokens),
-        prompt_cache_hit_tokens: optional_usage_delta(
-            cumulative.prompt_cache_hit_tokens,
-            observed.prompt_cache_hit_tokens,
-        ),
-        prompt_cache_miss_tokens: optional_usage_delta(
-            cumulative.prompt_cache_miss_tokens,
-            observed.prompt_cache_miss_tokens,
-        ),
-    }
-}
-
-fn optional_usage_delta(cumulative: Option<usize>, observed: Option<usize>) -> Option<usize> {
-    cumulative.map(|value| value.saturating_sub(observed.unwrap_or_default()))
-}
-
-fn merge_cumulative_usage(
-    observed: &mut tiangong_types::TokenUsage,
-    cumulative: &tiangong_types::TokenUsage,
-) {
-    observed.prompt_tokens = observed.prompt_tokens.max(cumulative.prompt_tokens);
-    observed.completion_tokens = observed.completion_tokens.max(cumulative.completion_tokens);
-    observed.total_tokens = observed
-        .total_tokens
-        .max(cumulative.total_tokens)
-        .max(observed.prompt_tokens + observed.completion_tokens);
-    observed.prompt_cache_hit_tokens = max_optional_usage(
-        observed.prompt_cache_hit_tokens,
-        cumulative.prompt_cache_hit_tokens,
-    );
-    observed.prompt_cache_miss_tokens = max_optional_usage(
-        observed.prompt_cache_miss_tokens,
-        cumulative.prompt_cache_miss_tokens,
-    );
-}
-
-fn max_optional_usage(current: Option<usize>, cumulative: Option<usize>) -> Option<usize> {
-    match (current, cumulative) {
-        (Some(current), Some(cumulative)) => Some(current.max(cumulative)),
-        (current, cumulative) => current.or(cumulative),
-    }
-}
-
-#[cfg(test)]
-mod turn_usage_capture_tests {
-    use super::*;
-
-    fn usage(
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        total_tokens: usize,
-    ) -> tiangong_types::TokenUsage {
-        tiangong_types::TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            prompt_cache_hit_tokens: None,
-            prompt_cache_miss_tokens: None,
-        }
-    }
-
-    #[test]
-    fn normalizes_and_persists_main_and_agent_usage_once() {
-        let mut capture = TurnUsageCapture::default();
-        capture.record(&usage(10, 5, 0), None, "react-round-1");
-        capture.record(&usage(20, 8, 28), Some("researcher"), "react-round-1");
-        capture.record(&usage(7, 3, 10), Some("researcher"), "react-round-2");
-
-        let mut session = Session::new("usage-capture");
-        session.token_usage = usage(1, 1, 2);
-        session
-            .agent_token_usage
-            .insert("researcher".to_string(), usage(2, 1, 3));
-        capture.apply_to_session(&mut session);
-
-        assert_eq!(session.token_usage.prompt_tokens, 38);
-        assert_eq!(session.token_usage.completion_tokens, 17);
-        assert_eq!(session.token_usage.total_tokens, 55);
-
-        let agent_usage = session.agent_token_usage.get("researcher").unwrap();
-        assert_eq!(agent_usage.prompt_tokens, 29);
-        assert_eq!(agent_usage.completion_tokens, 12);
-        assert_eq!(agent_usage.total_tokens, 41);
-    }
-
-    #[test]
-    fn cancelled_cumulative_usage_only_records_unseen_delta() {
-        let mut capture = TurnUsageCapture::default();
-        capture.record(&usage(10, 5, 15), None, "react-round-1");
-        let delta = capture.record(&usage(14, 8, 22), None, "cancelled-cumulative");
-
-        assert_eq!(delta.prompt_tokens, 4);
-        assert_eq!(delta.completion_tokens, 3);
-        assert_eq!(delta.total_tokens, 7);
-
-        let mut session = Session::new("cancelled-usage-capture");
-        capture.apply_to_session(&mut session);
-        assert_eq!(session.token_usage.prompt_tokens, 14);
-        assert_eq!(session.token_usage.completion_tokens, 8);
-        assert_eq!(session.token_usage.total_tokens, 22);
-    }
-
-    #[test]
-    fn summary_cancelled_increment_is_added_after_react_usage() {
-        let mut capture = TurnUsageCapture::default();
-        capture.record(&usage(70, 30, 100), None, "react-round-1");
-        capture.record(&usage(15, 5, 20), None, "cancelled-incremental");
-
-        let mut session = Session::new("summary-cancelled-increment");
-        capture.apply_to_session(&mut session);
-
-        assert_eq!(session.token_usage.prompt_tokens, 85);
-        assert_eq!(session.token_usage.completion_tokens, 35);
-        assert_eq!(session.token_usage.total_tokens, 120);
-    }
-}
-
 #[cfg(test)]
 mod shared_runtime_tests {
     use super::*;
@@ -639,7 +448,6 @@ mod shared_runtime_tests {
         }
     }
 }
-
 
 /// 转发线程捕获的单个对话轮次终态。
 ///
