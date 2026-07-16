@@ -438,7 +438,6 @@ impl TiangongApp {
                     continue;
                 };
                 use std::sync::mpsc;
-                use tiangong_types::StreamEvent;
                 let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
                     .ensure_core(&session_id, session_snapshot, stream_tx)
@@ -509,7 +508,7 @@ impl TiangongApp {
         content: String,
     ) -> Result<(), String> {
         use std::sync::mpsc;
-        use tiangong_types::{ContentBlock, SessionEvent};
+        use tiangong_types::ContentBlock;
 
         if session_id.trim().is_empty() {
             return Err("定时消息目标会话 ID 不能为空".to_string());
@@ -1399,7 +1398,6 @@ mod tests {
     #[tokio::test]
     async fn has_live_core_and_remove_stopped_core_track_real_core_state() {
         use std::sync::mpsc;
-        use tiangong_core::core::CoreStorageLocation;
         use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 
         let app = TiangongApp::new();
@@ -1412,12 +1410,12 @@ mod tests {
         let storage_root = tempfile::tempdir().unwrap();
         let core = tiangong_core::core::TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
+            .session_id(session.id)
             .stream_tx(event_tx)
             .plugins(Vec::new())
-            .storage(CoreStorageLocation::new(storage_root.path()))
-            .build()
-            .unwrap();
+            .storage_root(storage_root.path())
+            .trust_mode(session.trust_mode)
+            .build();
         app.lock_cores().insert(session_id.to_string(), core);
 
         assert!(app.has_live_core(session_id), "插入存活 Core 后应判活");

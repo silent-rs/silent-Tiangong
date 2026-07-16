@@ -16,8 +16,8 @@ use tiangong_media_archive::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
 };
 use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionEvent,
-    StreamEvent, stable_content_blocks,
+    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
+    stable_content_blocks,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -1412,7 +1412,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    use tiangong_core::core::{CoreStorageLocation, Plugin, TiangongCore};
+    use tiangong_core::core::{Plugin, TiangongCore};
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
     use tiangong_core::tool_override::{
         PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
@@ -1482,7 +1482,7 @@ mod tests {
             .session_id(session.id)
             .stream_tx(event_tx)
             .plugins(plugins)
-            .storage_root(storage_root.clone())
+            .storage_root(storage_root)
             .trust_mode(session.trust_mode)
             .build()
     }
@@ -2021,9 +2021,11 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
+            .session_id(session.id)
             .stream_tx(event_tx)
             .storage_root(root.path().to_path_buf())
+            .trust_mode(session.trust_mode)
+            .plugins(vec![])
             .build();
 
         // fire-and-forget：deliver 后不等持久化确认，靠终态事件确认 turn 完成。
@@ -2050,7 +2052,7 @@ mod tests {
             match event_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(event) => {
                     if matches!(
-                        event.event,
+                        event,
                         tiangong_types::StreamEvent::Done { .. }
                             | tiangong_types::StreamEvent::Error { .. }
                     ) {

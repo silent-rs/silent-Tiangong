@@ -7,7 +7,7 @@ use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{MessageRole, Session};
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
 use tiangong_server::remote::event::{EventBus, TiangongEvent};
-use tiangong_types::{StreamEvent, MediaAsset, OutgoingMessage, TurnStatus};
+use tiangong_types::{MediaAsset, OutgoingMessage, TurnStatus};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::TiangongApp;

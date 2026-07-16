@@ -1423,12 +1423,12 @@ mod tests {
         let (parent_events_tx, _parent_events_rx) = std::sync::mpsc::channel();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(parent_session)
+            .session_id(parent_session.id)
             .stream_tx(parent_events_tx)
             .plugins(vec![capture.clone()])
-            .storage(CoreStorageLocation::new(storage.path()))
-            .build()
-            .unwrap();
+            .storage_root(storage.path())
+            .trust_mode(parent_session.trust_mode)
+            .build();
         parent_core
             .deliver(AgentInputKind::message("trigger plugin registration"))
             .unwrap();
