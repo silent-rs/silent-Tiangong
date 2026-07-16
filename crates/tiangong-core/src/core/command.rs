@@ -40,7 +40,7 @@ pub enum Command {
 /// 命令排空后的副作用
 pub enum PendingCommandEffect {
     None,
-    MessagesInjected { current_agent_input: Option<String> },
+    MessagesInjected,
     Terminate,
     Shutdown,
 }

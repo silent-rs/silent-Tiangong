@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::context::assembler::filter_background_task_tools;
 use crate::core::command::{Command, PendingCommandEffect};
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{ModelFunctionResponse, ModelRequest, TokenUsage, ToolCall, ToolSpec};
@@ -17,7 +16,7 @@ use crate::react::context::{
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::{Message, MessageRole, Session};
+use crate::session::{Message, MessageRole};
 use crate::stream_throttle::ThrottledStreamSink;
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
@@ -128,7 +127,6 @@ enum ReactRequestOutcome {
         response_result: anyhow::Result<crate::model::ModelFunctionResponse>,
     },
     Interrupted {
-        current_agent_input: String,
         usage: TokenUsage,
     },
     Cancelled {
@@ -168,7 +166,7 @@ async fn request_react_response(
             .stream_function_calls_with_tool_choice(request, request_tools, None, chunk_tx)
             .await
     }));
-    let mut interrupted_input = None;
+    let mut interrupted = false;
     let mut streamed_text = String::new();
     let mut streamed_reasoning = String::new();
     let mut streaming_usage = TokenUsage::default();
@@ -199,8 +197,8 @@ async fn request_react_response(
                             );
                         }
                         match accept_runtime_user_message(ctx, message_id, prepared) {
-                            Ok(input) => {
-                                interrupted_input = Some(input);
+                            Ok(_) => {
+                                interrupted = true;
                                 if let Some(handle) = llm_task.take() {
                                     abort_and_join(handle).await;
                                 }
@@ -301,7 +299,7 @@ async fn request_react_response(
         emit_session_message_upsert(ctx, &pending_msg_id);
     }
 
-    if let Some(current_agent_input) = interrupted_input {
+    if interrupted {
         if streaming_usage.total_tokens > 0 {
             emit_token_usage(
                 &ctx.stream_tx,
@@ -313,7 +311,6 @@ async fn request_react_response(
             );
         }
         return ReactRequestOutcome::Interrupted {
-            current_agent_input,
             usage: streaming_usage,
         };
     }
@@ -421,7 +418,7 @@ async fn handle_text_response(
 
 enum ToolBatchOutcome {
     Continue,
-    Restart(String),
+    Restart,
     Completed,
     Cancelled,
 }
@@ -566,7 +563,7 @@ fn prepare_tool_call(
 enum ToolApprovalOutcome {
     Approved,
     Rejected,
-    Restart(String),
+    Restart,
     Cancelled,
 }
 
@@ -622,7 +619,7 @@ async fn request_tool_approval(
                 prepared,
                 message_id,
             }) => match accept_runtime_user_message(ctx, message_id, prepared) {
-                Ok(input) => return ToolApprovalOutcome::Restart(input),
+                Ok(_) => return ToolApprovalOutcome::Restart,
                 Err(error) => tracing::warn!(
                     %error,
                     "审批等待阶段追加用户消息持久化失败"
@@ -902,16 +899,10 @@ async fn execute_tool_batch(
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
-            PendingCommandEffect::MessagesInjected {
-                current_agent_input,
-                ..
-            } => {
+            PendingCommandEffect::MessagesInjected => {
                 tool_history.clear();
-                if let Some(input) = current_agent_input {
-                    ctx.session.persist_to_disk();
-                    return ToolBatchOutcome::Restart(input);
-                }
                 ctx.session.persist_to_disk();
+                return ToolBatchOutcome::Restart;
             }
             PendingCommandEffect::None => {}
         }
@@ -933,10 +924,10 @@ async fn execute_tool_batch(
                 record_rejected_tool_call(ctx, call, &args_summary);
                 return ToolBatchOutcome::Completed;
             }
-            ToolApprovalOutcome::Restart(input) => {
+            ToolApprovalOutcome::Restart => {
                 tool_history.clear();
                 ctx.session.persist_to_disk();
-                return ToolBatchOutcome::Restart(input);
+                return ToolBatchOutcome::Restart;
             }
             ToolApprovalOutcome::Cancelled => return ToolBatchOutcome::Cancelled,
         }
@@ -968,14 +959,12 @@ async fn execute_tool_batch(
                         output,
                         true,
                     );
-                    if let PendingCommandEffect::MessagesInjected {
-                        current_agent_input: Some(input),
-                        ..
-                    } = process_buffered_commands(ctx, buffered_commands, accumulated_usage)
+                    if let PendingCommandEffect::MessagesInjected =
+                        process_buffered_commands(ctx, buffered_commands, accumulated_usage)
                     {
                         tool_history.clear();
                         ctx.session.persist_to_disk();
-                        return ToolBatchOutcome::Restart(input);
+                        return ToolBatchOutcome::Restart;
                     }
                     return ToolBatchOutcome::Cancelled;
                 }
@@ -997,15 +986,12 @@ async fn execute_tool_batch(
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
-            PendingCommandEffect::MessagesInjected {
-                current_agent_input: Some(input),
-                ..
-            } => {
+            PendingCommandEffect::MessagesInjected => {
                 tool_history.clear();
                 ctx.session.persist_to_disk();
-                return ToolBatchOutcome::Restart(input);
+                return ToolBatchOutcome::Restart;
             }
-            PendingCommandEffect::MessagesInjected { .. } | PendingCommandEffect::None => {}
+            PendingCommandEffect::None => {}
         }
 
         if maybe_update_context_summary(ctx, &response.usage, cmd_rx, accumulated_usage).await {
@@ -1016,16 +1002,10 @@ async fn execute_tool_batch(
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
-            PendingCommandEffect::MessagesInjected {
-                current_agent_input,
-                ..
-            } => {
+            PendingCommandEffect::MessagesInjected => {
                 tool_history.clear();
-                if let Some(input) = current_agent_input {
-                    ctx.session.persist_to_disk();
-                    return ToolBatchOutcome::Restart(input);
-                }
                 ctx.session.persist_to_disk();
+                return ToolBatchOutcome::Restart;
             }
             PendingCommandEffect::None => {}
         }
@@ -1042,20 +1022,18 @@ async fn execute_tool_batch(
 
 enum ReactPhaseOutcome {
     EnterSummary { round: usize },
-    Restart(String),
+    Restart,
     Completed,
     Cancelled,
     Failed(String),
 }
 
 /// 执行一次完整的 ReAct 工具阶段，直到需要进入总结或本轮状态发生转向。
-#[allow(clippy::too_many_arguments)]
 async fn execute_react_phase(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     start_round: usize,
     outer_iteration: u32,
-    user_input: &str,
     accumulated_usage: &mut TokenUsage,
     tool_history: &mut ToolCallHistory,
 ) -> ReactPhaseOutcome {
@@ -1082,15 +1060,10 @@ async fn execute_react_phase(
             PendingCommandEffect::Shutdown => {
                 return ReactPhaseOutcome::Cancelled;
             }
-            PendingCommandEffect::MessagesInjected {
-                current_agent_input,
-                ..
-            } => {
+            PendingCommandEffect::MessagesInjected => {
                 tool_history.clear();
-                if let Some(input) = current_agent_input {
-                    ctx.session.persist_to_disk();
-                    return ReactPhaseOutcome::Restart(input);
-                }
+                ctx.session.persist_to_disk();
+                return ReactPhaseOutcome::Restart;
             }
             PendingCommandEffect::None => {}
         }
@@ -1111,7 +1084,8 @@ async fn execute_react_phase(
             return ReactPhaseOutcome::EnterSummary { round };
         }
 
-        let request_tools = tools_for_current_turn(ctx, user_input);
+        // 将完整工具集合交给主模型，由模型根据 Session 上下文自行选择。
+        let request_tools = ctx.tools.clone();
 
         let (pending_msg_id, response) =
             match request_react_response(ctx, cmd_rx, accumulated_usage, request_tools.clone())
@@ -1159,14 +1133,11 @@ async fn execute_react_phase(
                     };
                     (response_message_id, response)
                 }
-                ReactRequestOutcome::Interrupted {
-                    current_agent_input,
-                    usage,
-                } => {
+                ReactRequestOutcome::Interrupted { usage } => {
                     accumulated_usage.accumulate(&usage);
                     tool_history.clear();
                     ctx.session.persist_to_disk();
-                    return ReactPhaseOutcome::Restart(current_agent_input);
+                    return ReactPhaseOutcome::Restart;
                 }
                 ReactRequestOutcome::Cancelled { usage } => {
                     accumulated_usage.accumulate(&usage);
@@ -1227,8 +1198,8 @@ async fn execute_react_phase(
         .await
         {
             ToolBatchOutcome::Continue => continue 'react_loop,
-            ToolBatchOutcome::Restart(input) => {
-                return ReactPhaseOutcome::Restart(input);
+            ToolBatchOutcome::Restart => {
+                return ReactPhaseOutcome::Restart;
             }
             ToolBatchOutcome::Completed => {
                 return ReactPhaseOutcome::Completed;
@@ -1243,7 +1214,7 @@ async fn execute_react_phase(
 enum SummaryStepOutcome {
     Completed,
     Continue,
-    Interrupted(String),
+    Interrupted,
     Cancelled,
     Failed(String),
 }
@@ -1314,13 +1285,10 @@ async fn execute_summary_step(
                 )),
             }
         }
-        SummaryPhaseResult::Interrupted {
-            current_agent_input,
-            usage,
-        } => {
+        SummaryPhaseResult::Interrupted(usage) => {
             accumulated_usage.accumulate(&usage);
             ctx.session.persist_to_disk();
-            SummaryStepOutcome::Interrupted(current_agent_input)
+            SummaryStepOutcome::Interrupted
         }
     }
 }
@@ -1336,15 +1304,6 @@ pub(super) async fn execute_turn(
     let mut outer_iteration = 0u32;
     let mut accumulated_usage = TokenUsage::default();
     let mut tool_history = ToolCallHistory::default();
-    let mut user_input = ctx
-        .session
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == MessageRole::User)
-        .map(|message| message.text_content())
-        .unwrap_or_default();
-
     // 外层只编排 ReAct 与总结两个独立阶段；具体过程由各阶段函数负责。
     'outer: loop {
         match execute_react_phase(
@@ -1352,7 +1311,6 @@ pub(super) async fn execute_turn(
             cmd_rx,
             round,
             outer_iteration,
-            &user_input,
             &mut accumulated_usage,
             &mut tool_history,
         )
@@ -1361,8 +1319,7 @@ pub(super) async fn execute_turn(
             ReactPhaseOutcome::EnterSummary { round: next_round } => {
                 round = next_round;
             }
-            ReactPhaseOutcome::Restart(input) => {
-                user_input = input;
+            ReactPhaseOutcome::Restart => {
                 round = 0;
                 outer_iteration = 0;
                 continue 'outer;
@@ -1387,9 +1344,8 @@ pub(super) async fn execute_turn(
                 tool_history.clear();
                 continue 'outer;
             }
-            SummaryStepOutcome::Interrupted(input) => {
+            SummaryStepOutcome::Interrupted => {
                 tool_history.clear();
-                user_input = input;
                 round = 0;
                 outer_iteration = 0;
                 continue 'outer;
@@ -1402,29 +1358,6 @@ pub(super) async fn execute_turn(
             }
         }
     }
-}
-
-pub(super) fn tools_for_current_turn(ctx: &TurnContext, user_input: &str) -> Vec<ToolSpec> {
-    filter_tools_for_current_turn(&ctx.tools, &ctx.session, user_input)
-}
-
-fn filter_tools_for_current_turn(
-    tools: &[ToolSpec],
-    session: &Session,
-    user_input: &str,
-) -> Vec<ToolSpec> {
-    let intent_text = if user_input.trim().is_empty() {
-        session
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::User && !message.model_excluded)
-            .map(|message| message.text_content())
-            .unwrap_or_default()
-    } else {
-        user_input.to_string()
-    };
-    filter_background_task_tools(tools.to_vec(), &intent_text)
 }
 
 /// 通用工具参数摘要:把 JSON arguments 的 key=value 拼成简短字符串。
@@ -1455,62 +1388,4 @@ fn format_tool_args_summary(call: &crate::model::ToolCall) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tool(name: &str) -> ToolSpec {
-        ToolSpec {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: serde_json::json!({"type": "object"}),
-        }
-    }
-
-    fn tool_names(tools: Vec<ToolSpec>) -> Vec<String> {
-        tools.into_iter().map(|tool| tool.name).collect()
-    }
-
-    #[test]
-    fn current_turn_hides_background_task_tools_for_normal_commands() {
-        let session = Session::new("test");
-        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
-
-        let names = tool_names(filter_tools_for_current_turn(
-            &tools,
-            &session,
-            "执行 git diff 看一下改动",
-        ));
-
-        assert_eq!(names, vec!["run_shell"]);
-    }
-
-    #[test]
-    fn current_turn_uses_latest_user_message_when_input_is_empty() {
-        let mut session = Session::new("test");
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "执行 git diff 看一下改动"));
-        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
-
-        let names = tool_names(filter_tools_for_current_turn(&tools, &session, ""));
-
-        assert_eq!(names, vec!["run_shell"]);
-    }
-
-    #[test]
-    fn current_turn_keeps_background_task_tools_for_background_intent() {
-        let mut session = Session::new("test");
-        session.messages.push(Message::new(
-            MessageRole::User,
-            "后台启动 dev server，不要阻塞",
-        ));
-        let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
-
-        let names = tool_names(filter_tools_for_current_turn(&tools, &session, ""));
-
-        assert_eq!(names, vec!["run_shell", "spawn_task", "wait_tasks"]);
-    }
 }

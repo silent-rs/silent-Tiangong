@@ -97,7 +97,7 @@ fn process_commands(
     commands: impl IntoIterator<Item = Command>,
     accumulated_usage: &mut TokenUsage,
 ) -> PendingCommandEffect {
-    let mut current_agent_input = None;
+    let mut message_injected = false;
 
     for cmd in commands {
         match cmd {
@@ -109,7 +109,7 @@ fn process_commands(
                 prepared,
                 message_id,
             } => match accept_runtime_user_message(ctx, message_id, prepared) {
-                Ok(text) => current_agent_input = Some(text),
+                Ok(_) => message_injected = true,
                 Err(err) => tracing::warn!(
                     error = %err,
                     "排空队列时追加用户消息持久化失败"
@@ -152,10 +152,8 @@ fn process_commands(
         }
     }
 
-    if current_agent_input.is_some() {
-        PendingCommandEffect::MessagesInjected {
-            current_agent_input,
-        }
+    if message_injected {
+        PendingCommandEffect::MessagesInjected
     } else {
         PendingCommandEffect::None
     }

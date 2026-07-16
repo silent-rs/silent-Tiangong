@@ -22,7 +22,7 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage};
-use super::execute::{TurnPhase, tools_for_current_turn};
+use super::execute::TurnPhase;
 use super::helpers::record_plugin_usage;
 use crate::turn_context::TurnContext;
 
@@ -37,10 +37,7 @@ pub(super) enum SummaryPhaseResult {
     /// 总结阶段 LLM 请求失败。
     Failed { message: String, usage: TokenUsage },
     /// 执行中收到新的用户消息，当前总结已停止。
-    Interrupted {
-        current_agent_input: String,
-        usage: TokenUsage,
-    },
+    Interrupted(TokenUsage),
 }
 
 /// 强制最终回复的执行结果。
@@ -93,8 +90,8 @@ impl TurnContext {
             tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
         let client = select_client_for_request(self, &req).clone();
         let req_clone = req.clone();
-        // 总结阶段传与 ReAct 阶段相同的 tools schema（按相同 intent 过滤）以保持
-        // KV cache 前缀一致，但通过 Some(ToolChoice::None) 显式禁止模型调用工具。
+        // 总结阶段传与 ReAct 阶段相同的完整 tools schema，以保持 KV cache 前缀
+        // 一致，但通过 Some(ToolChoice::None) 显式禁止模型调用工具。
         //
         // 此前曾用 tool_choice 缺省（None），但 build_provider_request 在有 tools 时
         // 会把缺省回落到 ToolChoice::Auto（model.rs::build_provider_request），模型可
@@ -102,7 +99,7 @@ impl TurnContext {
         // 误调用会出现空文本被当作最终回复。ToolChoice 现已新增 None 变体（各 provider
         // 映射为 OpenAI/DeepSeek "none"、Anthropic {"type":"none"}），显式禁用工具调用，
         // 既保留 cache 前缀又从源头杜绝误调用。
-        let summary_tools = tools_for_current_turn(self, "");
+        let summary_tools = self.tools.clone();
         let mut llm_fut = Some(tokio::task::spawn(async move {
             client
                 .stream_function_calls_with_tool_choice(
@@ -114,7 +111,7 @@ impl TurnContext {
                 .await
         }));
         let mut streaming_usage = tiangong_types::TokenUsage::default();
-        let mut summary_interruption = None;
+        let mut summary_interrupted = false;
         let mut streamed_text = String::new();
         let mut streamed_reasoning = String::new();
 
@@ -147,8 +144,8 @@ impl TurnContext {
                                 );
                             }
                             match accept_runtime_user_message(self, message_id, prepared) {
-                                Ok(input) => {
-                                    summary_interruption = Some(input);
+                                Ok(_) => {
+                                    summary_interrupted = true;
                                     if let Some(handle) = llm_fut.take() {
                                         abort_and_join(handle).await;
                                     }
@@ -243,7 +240,7 @@ impl TurnContext {
         };
         sink.finish();
 
-        if let Some(current_agent_input) = summary_interruption {
+        if summary_interrupted {
             persist_partial_summary(self, &pending_msg_id, &streamed_text, &streamed_reasoning);
             if streaming_usage.total_tokens > 0 {
                 emit_token_usage(
@@ -255,10 +252,7 @@ impl TurnContext {
                     None,
                 );
             }
-            return SummaryPhaseResult::Interrupted {
-                current_agent_input,
-                usage: streaming_usage,
-            };
+            return SummaryPhaseResult::Interrupted(streaming_usage);
         }
 
         let response = match response_result {
@@ -812,7 +806,7 @@ impl TurnContext {
 
     /// 执行一次「只产出文本最终回复」的 LLM 调用（tools + `ToolChoice::None`，流式）。
     ///
-    /// 总结阶段与强制终结共用：传相同 intent 过滤后的 tools schema 保持 KV cache 前缀，
+    /// 总结阶段与强制终结共用：传入与 ReAct 阶段相同的完整 tools schema 保持 KV cache 前缀，
     /// 通过 `ToolChoice::None` 禁止工具调用。`complete_with_functions_stream_with_tool_choice`
     /// 内部按 `use_stream_mode()` 自动选择流式/非流式实现，并在流式失败时回退非流式。
     ///
@@ -825,7 +819,7 @@ impl TurnContext {
         accumulated_usage: &mut TokenUsage,
     ) -> Result<crate::model::ModelFunctionResponse, TextFinalizationError> {
         let stream_tx = &self.stream_tx;
-        let final_tools = tools_for_current_turn(self, "");
+        let final_tools = self.tools.clone();
         let sink = ThrottledStreamSink::with_text_kind(
             pending_msg_id.to_string(),
             stream_tx.clone(),
