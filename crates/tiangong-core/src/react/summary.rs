@@ -65,22 +65,21 @@ impl TurnContext {
     /// - LLM 错误 → 返回 `Failed`
     pub(super) async fn run_summary_phase(
         &mut self,
-        session: &mut Session,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         iteration: u32,
     ) -> SummaryPhaseResult {
-        let stream_tx = &self.stream_tx;
+        let stream_tx = self.stream_tx.clone();
         let _phase = TurnPhase::Summary;
         let _ = stream_tx.send(StreamEvent::PhaseChanged {
             phase: "summary".to_string(),
             iteration,
         });
 
-        if session.system_prompt_message.is_none() {
-            crate::react::context::rebuild_system_prompt(session, self);
+        if self.session.system_prompt_message.is_none() {
+            crate::react::context::rebuild_system_prompt(self);
         }
 
-        let req = request_for_summary_phase(session);
+        let req = request_for_summary_phase(&self.session);
         let pending_msg_id = scru128::new().to_string();
         let sink = ThrottledStreamSink::with_text_kind(
             pending_msg_id.clone(),
@@ -101,7 +100,7 @@ impl TurnContext {
         // 误调用会出现空文本被当作最终回复。ToolChoice 现已新增 None 变体（各 provider
         // 映射为 OpenAI/DeepSeek "none"、Anthropic {"type":"none"}），显式禁用工具调用，
         // 既保留 cache 前缀又从源头杜绝误调用。
-        let summary_tools = tools_for_current_turn(&self.tools, session, "");
+        let summary_tools = tools_for_current_turn(self, "");
         let mut llm_fut = Some(tokio::task::spawn(async move {
             client
                 .stream_function_calls_with_tool_choice(
@@ -133,22 +132,19 @@ impl TurnContext {
                             message_id,
                         }) => {
                             sink.flush();
-                            let message_count_before_interruption = session.messages.len();
+                            let message_count_before_interruption = self.session.messages.len();
                             if !streamed_text.trim().is_empty()
                                 || !streamed_reasoning.trim().is_empty()
                             {
                                 upsert_assistant_text_message(
-                                    session,
+                                    &mut self.session,
                                     &pending_msg_id,
                                     &streamed_text,
                                     &streamed_reasoning,
                                     crate::session::MessagePhase::Summary,
                                 );
                             }
-                            match accept_runtime_user_message(session, &self.stream_tx,
-                                message_id,
-                                prepared,
-                            ) {
+                            match accept_runtime_user_message(self, message_id, prepared) {
                                 Ok(input) => {
                                     summary_interruption = Some(input);
                                     if let Some(handle) = llm_fut.take() {
@@ -159,7 +155,7 @@ impl TurnContext {
                                     ));
                                 }
                                 Err(err) => {
-                                    session.messages.truncate(message_count_before_interruption);
+                                    self.session.messages.truncate(message_count_before_interruption);
                                     tracing::warn!(
                                         error = %err,
                                         "总结阶段追加用户消息持久化失败"
@@ -169,7 +165,8 @@ impl TurnContext {
                         }
                         Some(Command::Approval { .. }) => {}
                         Some(Command::InjectTool { tool_name, payload }) => {
-                            crate::react::message::inject_tool_to_session(session, self,
+                            crate::react::message::inject_tool_to_session(
+                                self,
                                 &tool_name,
                                 &payload,
                             );
@@ -183,10 +180,7 @@ impl TurnContext {
                             });
                         }
                         Some(Command::ResetContext) => {
-                            crate::core::reset_context_for_session(
-                                session,
-                                self,
-                            );
+                            crate::core::reset_context(self);
                         }
                         Some(Command::EmitStreamEvent(ev)) => {
                             let ev = *ev;
@@ -215,7 +209,6 @@ impl TurnContext {
                                     sink.finish();
                                     persist_partial_summary(
                                         self,
-                                        session,
                                         &pending_msg_id,
                                         &streamed_text,
                                         &streamed_reasoning,
@@ -237,13 +230,7 @@ impl TurnContext {
         sink.finish();
 
         if let Some(current_agent_input) = summary_interruption {
-            persist_partial_summary(
-                self,
-                session,
-                &pending_msg_id,
-                &streamed_text,
-                &streamed_reasoning,
-            );
+            persist_partial_summary(self, &pending_msg_id, &streamed_text, &streamed_reasoning);
             if streaming_usage.total_tokens > 0 {
                 emit_token_usage(
                     &self.stream_tx,
@@ -263,13 +250,7 @@ impl TurnContext {
         let response = match response_result {
             Ok(response) => response,
             Err(err) => {
-                persist_partial_summary(
-                    self,
-                    session,
-                    &pending_msg_id,
-                    &streamed_text,
-                    &streamed_reasoning,
-                );
+                persist_partial_summary(self, &pending_msg_id, &streamed_text, &streamed_reasoning);
                 if let Some(signal) = CancelSignal::from_error(&err) {
                     let CancelSignal::Abort = signal;
                     if let Some(handle) = llm_fut.take() {
@@ -288,7 +269,12 @@ impl TurnContext {
         emit_token_usage(
             &self.stream_tx,
             &response.usage,
-            Some(response.usage.prompt_tokens.max(session.current_tokens)),
+            Some(
+                response
+                    .usage
+                    .prompt_tokens
+                    .max(self.session.current_tokens),
+            ),
             self.context_limit,
             format!("summary-iteration-{iteration}"),
             None,
@@ -325,26 +311,26 @@ impl TurnContext {
         // 此时落盘一条空 Summary 消息只会与上一轮回复重复展示（双重总结）。
         // 改为不落盘新消息，直接把上一轮 ReAct 的过程回复（phase=React）提升为最终回复。
         if !needs_more_work && summary_content.trim().is_empty() {
-            if let Some(message_id) = promote_last_react_message_to_summary(session) {
-                crate::react::message::emit_session_message_upsert(session, self, &message_id);
+            if let Some(message_id) = promote_last_react_message_to_summary(&mut self.session) {
+                crate::react::message::emit_session_message_upsert(self, &message_id);
             }
-            let compression_cancelled =
-                maybe_update_context_summary(session, self, &usage, cmd_rx).await;
+            let compression_cancelled = maybe_update_context_summary(self, &usage, cmd_rx).await;
             if compression_cancelled {
                 return SummaryPhaseResult::Cancelled(usage);
             }
-            session.persist_to_disk();
+            self.session.persist_to_disk();
             return SummaryPhaseResult::Completed(usage);
         }
 
         upsert_assistant_text_message(
-            session,
+            &mut self.session,
             &pending_msg_id,
             &summary_content,
             &response.reasoning_content,
             crate::session::MessagePhase::Normal,
         );
-        if let Some(message) = session
+        if let Some(message) = self
+            .session
             .messages
             .iter_mut()
             .find(|message| message.id == pending_msg_id)
@@ -357,13 +343,12 @@ impl TurnContext {
                 crate::session::MessagePhase::Summary
             };
         }
-        crate::react::message::emit_session_message_upsert(session, self, &pending_msg_id);
-        let compression_cancelled =
-            maybe_update_context_summary(session, self, &usage, cmd_rx).await;
+        crate::react::message::emit_session_message_upsert(self, &pending_msg_id);
+        let compression_cancelled = maybe_update_context_summary(self, &usage, cmd_rx).await;
         if compression_cancelled {
             return SummaryPhaseResult::Cancelled(usage);
         }
-        session.persist_to_disk();
+        self.session.persist_to_disk();
 
         if needs_more_work {
             SummaryPhaseResult::NeedMoreWork {
@@ -451,8 +436,7 @@ fn strip_summary_marker<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
 }
 
 fn persist_partial_summary(
-    ctx: &crate::turn_context::TurnContext,
-    session: &mut Session,
+    ctx: &mut crate::turn_context::TurnContext,
     message_id: &str,
     text: &str,
     reasoning: &str,
@@ -461,16 +445,16 @@ fn persist_partial_summary(
         return;
     }
     upsert_assistant_text_message(
-        session,
+        &mut ctx.session,
         message_id,
         text,
         reasoning,
         crate::session::MessagePhase::Summary,
     );
-    if let Err(error) = session.try_persist_to_disk() {
+    if let Err(error) = ctx.session.try_persist_to_disk() {
         tracing::warn!(%error, "持久化部分总结响应失败");
     }
-    crate::react::message::emit_session_message_upsert(session, ctx, message_id);
+    crate::react::message::emit_session_message_upsert(ctx, message_id);
 }
 
 #[cfg(test)]
@@ -746,18 +730,17 @@ impl TurnContext {
     /// 与 `run_summary_phase` 的「完成度判断器」语义相反——这是二者不能合并的根本原因：
     /// 否则 OuterLimit / SummaryError 会再次触发重入，造成无限循环。
     pub(super) async fn force_final_response(
-        &self,
-        session: &mut Session,
+        &mut self,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
         reason: ForceFinalReason,
     ) -> ForceFinalResult {
         // 确保 system prompt 已构建
-        if session.system_prompt_message.is_none() {
-            rebuild_system_prompt(session, self);
+        if self.session.system_prompt_message.is_none() {
+            rebuild_system_prompt(self);
         }
         // 将强制终结提示作为 Tool 消息持久化进 session（区别于 run_summary_phase 把
         // 提示放在请求 context 而不入 session）：兜底原因需在会话恢复后可见，便于诊断。
-        session.messages.push(Message {
+        self.session.messages.push(Message {
             id: scru128::new().to_string(),
             role: MessageRole::Tool,
             content: vec![crate::session::ContentBlock::text(format!(
@@ -783,19 +766,19 @@ impl TurnContext {
         // 请求构造复用 build_text_finalization_request 的统一请求体（thinking 预算等），
         // 这里无需再向请求 context 追加 prompt——传空串时 build_text_finalization_request
         // 会跳过 push，避免空 system 消息污染上下文。
-        let req = build_text_finalization_request(session, "");
+        let req = build_text_finalization_request(&self.session, "");
 
         let pending_msg_id = scru128::new().to_string();
 
         let resp = match self
-            .run_text_finalization_llm(session, &req, &pending_msg_id, cmd_rx)
+            .run_text_finalization_llm(&req, &pending_msg_id, cmd_rx)
             .await
         {
             Ok(response) => response,
             Err(TextFinalizationError::Cancelled) => return ForceFinalResult::Cancelled,
             Err(TextFinalizationError::Failed(message)) => {
                 crate::react::context::persist_error(
-                    session,
+                    self,
                     format!("force_final_response 失败：{message}"),
                 );
                 return ForceFinalResult::Failed(message);
@@ -803,7 +786,7 @@ impl TurnContext {
         };
 
         if let Err(message) =
-            self.commit_summary_message(session, &pending_msg_id, &resp, "force_final_response")
+            self.commit_summary_message(&pending_msg_id, &resp, "force_final_response")
         {
             return ForceFinalResult::Failed(message);
         }
@@ -819,13 +802,12 @@ impl TurnContext {
     /// 成功返回响应；取消与失败由返回值明确区分，不在本层发送终态事件。
     async fn run_text_finalization_llm(
         &self,
-        session: &Session,
         req: &ModelRequest,
         pending_msg_id: &str,
         cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     ) -> Result<crate::model::ModelFunctionResponse, TextFinalizationError> {
         let stream_tx = &self.stream_tx;
-        let final_tools = tools_for_current_turn(&self.tools, session, "");
+        let final_tools = tools_for_current_turn(self, "");
         let sink = ThrottledStreamSink::with_text_kind(
             pending_msg_id.to_string(),
             stream_tx.clone(),
@@ -880,34 +862,33 @@ impl TurnContext {
     /// 共用于总结阶段的 Done/AskUser 分支与强制终结：append assistant 消息、
     /// 设置 phase=Summary 与 reasoning_signature、上报 token usage、持久化。
     fn commit_summary_message(
-        &self,
-        session: &mut Session,
+        &mut self,
         pending_msg_id: &str,
         resp: &crate::model::ModelFunctionResponse,
         usage_source: &str,
     ) -> Result<(), String> {
-        session.append_message_with_id(
+        self.session.append_message_with_id(
             pending_msg_id.to_string(),
             MessageRole::Assistant,
             resp.text.clone(),
             resp.reasoning_content.clone(),
         );
-        if let Some(message) = session.messages.last_mut() {
+        if let Some(message) = self.session.messages.last_mut() {
             message.phase = MessagePhase::Summary;
             message.reasoning_signature = resp.reasoning_signature.clone();
         }
         emit_token_usage(
             &self.stream_tx,
             &resp.usage,
-            Some(resp.usage.prompt_tokens.max(session.current_tokens)),
+            Some(resp.usage.prompt_tokens.max(self.session.current_tokens)),
             self.context_limit,
             usage_source,
             None,
         );
-        session
+        self.session
             .try_persist_to_disk()
             .map_err(|error| format!("持久化最终回复失败：{error}"))?;
-        crate::react::message::emit_session_message_upsert(session, self, pending_msg_id);
+        crate::react::message::emit_session_message_upsert(self, pending_msg_id);
         Ok(())
     }
 }

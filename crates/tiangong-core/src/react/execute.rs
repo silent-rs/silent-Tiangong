@@ -65,12 +65,11 @@ impl ToolCallHistory {
 // ===== turn 执行辅助 =====
 
 fn defer_tool_injections(
-    ctx: &TurnContext,
-    session: &mut Session,
+    ctx: &mut TurnContext,
     injections: impl IntoIterator<Item = (String, serde_json::Value)>,
 ) {
     for (tool_name, payload) in injections {
-        crate::react::message::defer_tool_injection(session, ctx, tool_name, payload);
+        crate::react::message::defer_tool_injection(ctx, tool_name, payload);
     }
 }
 
@@ -139,16 +138,15 @@ enum ReactRequestOutcome {
 /// 发起一轮流式模型请求，并在等待期间处理可即时响应的运行时命令。
 async fn request_react_response(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     request_tools: Vec<ToolSpec>,
 ) -> ReactRequestOutcome {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     let request = ModelRequest {
-        session_title: session.title.clone(),
+        session_title: ctx.session.title.clone(),
         // 当前用户消息已经在 deliver 阶段写入 Session，多轮请求不得重复追加。
         user_input: String::new(),
-        context: session.context(),
+        context: ctx.session.context(),
         thinking,
         reasoning_effort,
         thinking_disabled,
@@ -186,24 +184,19 @@ async fn request_react_response(
                         message_id,
                     }) => {
                         sink.flush();
-                        let message_count_before_interruption = session.messages.len();
+                        let message_count_before_interruption = ctx.session.messages.len();
                         if !streamed_text.trim().is_empty()
                             || !streamed_reasoning.trim().is_empty()
                         {
                             upsert_assistant_text_message(
-                                session,
+                                &mut ctx.session,
                                 &pending_msg_id,
                                 &streamed_text,
                                 &streamed_reasoning,
                                 crate::session::MessagePhase::React,
                             );
                         }
-                        match accept_runtime_user_message(
-                            session,
-                            &ctx.stream_tx,
-                            message_id,
-                            prepared,
-                        ) {
+                        match accept_runtime_user_message(ctx, message_id, prepared) {
                             Ok(input) => {
                                 interrupted_input = Some(input);
                                 if let Some(handle) = llm_task.take() {
@@ -214,7 +207,9 @@ async fn request_react_response(
                                 ));
                             }
                             Err(error) => {
-                                session.messages.truncate(message_count_before_interruption);
+                                ctx.session
+                                    .messages
+                                    .truncate(message_count_before_interruption);
                                 tracing::warn!(
                                     %error,
                                     "流式阶段追加用户消息持久化失败"
@@ -224,7 +219,7 @@ async fn request_react_response(
                     }
                     Some(Command::Approval { .. }) => {}
                     Some(Command::InjectTool { tool_name, payload }) => {
-                        inject_tool_to_session(session, ctx, &tool_name, &payload);
+                        inject_tool_to_session(ctx, &tool_name, &payload);
                     }
                     Some(Command::CompressContext) => {
                         let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
@@ -236,7 +231,7 @@ async fn request_react_response(
                         });
                     }
                     Some(Command::ResetContext) => {
-                        crate::core::reset_context_for_session(session, ctx);
+                        crate::core::reset_context(ctx);
                     }
                     Some(Command::EmitStreamEvent(event)) => {
                         let _ = ctx.stream_tx.send(*event);
@@ -283,13 +278,13 @@ async fn request_react_response(
 
     if !streamed_text.trim().is_empty() || !streamed_reasoning.trim().is_empty() {
         upsert_assistant_text_message(
-            session,
+            &mut ctx.session,
             &pending_msg_id,
             &streamed_text,
             &streamed_reasoning,
             crate::session::MessagePhase::React,
         );
-        emit_session_message_upsert(session, ctx, &pending_msg_id);
+        emit_session_message_upsert(ctx, &pending_msg_id);
     }
 
     if let Some(current_agent_input) = interrupted_input {
@@ -345,7 +340,6 @@ struct TextResponseState {
 /// 保存无工具调用的模型响应，并判断是否可直接作为本轮最终回复。
 async fn handle_text_response(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending_msg_id: &str,
     response: &crate::model::ModelFunctionResponse,
@@ -356,20 +350,21 @@ async fn handle_text_response(
     }
 
     upsert_assistant_text_message(
-        session,
+        &mut ctx.session,
         pending_msg_id,
         &response.text,
         &response.reasoning_content,
         crate::session::MessagePhase::React,
     );
-    if let Some(message) = session
+    if let Some(message) = ctx
+        .session
         .messages
         .iter_mut()
         .find(|message| message.id == pending_msg_id)
     {
         message.reasoning_signature = response.reasoning_signature.clone();
     }
-    emit_session_message_upsert(session, ctx, pending_msg_id);
+    emit_session_message_upsert(ctx, pending_msg_id);
     let output = LlmOutputRecord {
         stage: format!("react-round-{}", state.round),
         content: response.text.clone(),
@@ -378,14 +373,14 @@ async fn handle_text_response(
         usage: response.usage.clone(),
     };
     append_runtime_tool_message_with_reasoning(
-        session,
+        &mut ctx.session,
         "llm_output",
         format_llm_output_message(&output),
         response.reasoning_content.clone(),
     );
-    session.persist_to_disk();
+    ctx.session.persist_to_disk();
 
-    if maybe_update_context_summary(session, ctx, &response.usage, cmd_rx).await {
+    if maybe_update_context_summary(ctx, &response.usage, cmd_rx).await {
         return TextResponseOutcome::Cancelled;
     }
 
@@ -396,15 +391,16 @@ async fn handle_text_response(
         return TextResponseOutcome::EnterSummary;
     }
 
-    if let Some(message) = session
+    if let Some(message) = ctx
+        .session
         .messages
         .iter_mut()
         .find(|message| message.id == pending_msg_id)
     {
         message.phase = crate::session::MessagePhase::Summary;
     }
-    emit_session_message_upsert(session, ctx, pending_msg_id);
-    session.persist_to_disk();
+    emit_session_message_upsert(ctx, pending_msg_id);
+    ctx.session.persist_to_disk();
     TextResponseOutcome::Completed
 }
 
@@ -416,8 +412,7 @@ enum ToolBatchOutcome {
 }
 
 fn record_tool_calls<'a>(
-    ctx: &TurnContext,
-    session: &mut Session,
+    ctx: &mut TurnContext,
     pending_msg_id: &str,
     response: &'a ModelFunctionResponse,
     round: usize,
@@ -437,7 +432,7 @@ fn record_tool_calls<'a>(
         usage: response.usage.clone(),
     };
     append_runtime_tool_message_with_reasoning(
-        session,
+        &mut ctx.session,
         "llm_output",
         format_llm_output_message(&output),
         response.reasoning_content.clone(),
@@ -456,14 +451,14 @@ fn record_tool_calls<'a>(
         usage: Some(response.usage.clone()),
     });
     append_assistant_tool_call_message(
-        session,
+        &mut ctx.session,
         pending_msg_id.to_string(),
         &response.text,
         &response.reasoning_content,
         response.reasoning_signature.clone(),
         &calls,
     );
-    emit_session_message_upsert(session, ctx, pending_msg_id);
+    emit_session_message_upsert(ctx, pending_msg_id);
     calls
 }
 
@@ -478,8 +473,7 @@ enum ToolPreflightOutcome {
 }
 
 fn prepare_tool_call(
-    ctx: &TurnContext,
-    session: &mut Session,
+    ctx: &mut TurnContext,
     call: &ToolCall,
     history: &mut ToolCallHistory,
 ) -> ToolPreflightOutcome {
@@ -505,9 +499,15 @@ fn prepare_tool_call(
             full_output: Some(message),
             duration_ms: None,
         });
-        append_tool_result_message(session, &call.id, &call.name, provider_text.clone(), true);
+        append_tool_result_message(
+            &mut ctx.session,
+            &call.id,
+            &call.name,
+            provider_text.clone(),
+            true,
+        );
         append_runtime_tool_message(
-            session,
+            &mut ctx.session,
             &call.name,
             format!("工具参数无效 [{}]\n{provider_text}", call.name),
         );
@@ -522,7 +522,7 @@ fn prepare_tool_call(
     let args_summary = format_tool_args_summary(call);
     let dedupe_key = tool_call_dedupe_key(&call.name, &call.arguments);
     if history.successful_keys.contains(&dedupe_key) {
-        append_duplicate_tool_result(session, ctx, &call.id, &call.name);
+        append_duplicate_tool_result(ctx, &call.id, &call.name);
         return ToolPreflightOutcome::Skip {
             needs_recovery: false,
         };
@@ -531,7 +531,6 @@ fn prepare_tool_call(
         let repeated_failure =
             ToolFailureRecord::repeated(&call.name, &call.id, args_summary, original_error);
         append_repeated_failed_tool_result(
-            session,
             ctx,
             &call.id,
             &call.name,
@@ -558,7 +557,6 @@ enum ToolApprovalOutcome {
 
 async fn request_tool_approval(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     call: &ToolCall,
     args_summary: &str,
@@ -566,7 +564,7 @@ async fn request_tool_approval(
     let trust_mode = format!("{:?}", ctx.trust_mode);
     if ctx.trust_mode == TrustMode::FullTrust {
         ctx.observer.audit_permission(
-            &session.id,
+            &ctx.session.id,
             &call.name,
             "approved",
             &trust_mode,
@@ -577,7 +575,7 @@ async fn request_tool_approval(
 
     let request_id = scru128::new().to_string();
     ctx.observer.audit_permission(
-        &session.id,
+        &ctx.session.id,
         &call.name,
         "needs_approval",
         &trust_mode,
@@ -607,19 +605,17 @@ async fn request_tool_approval(
             Some(Command::Message {
                 prepared,
                 message_id,
-            }) => {
-                match accept_runtime_user_message(session, &ctx.stream_tx, message_id, prepared) {
-                    Ok(input) => return ToolApprovalOutcome::Restart(input),
-                    Err(error) => tracing::warn!(
-                        %error,
-                        "审批等待阶段追加用户消息持久化失败"
-                    ),
-                }
-            }
+            }) => match accept_runtime_user_message(ctx, message_id, prepared) {
+                Ok(input) => return ToolApprovalOutcome::Restart(input),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "审批等待阶段追加用户消息持久化失败"
+                ),
+            },
             Some(Command::Approval { .. }) => {}
             Some(Command::SetTrustMode(mode)) => ctx.trust_mode = mode,
             Some(Command::InjectTool { tool_name, payload }) => {
-                defer_tool_injections(ctx, session, std::iter::once((tool_name, payload)));
+                defer_tool_injections(ctx, std::iter::once((tool_name, payload)));
             }
             Some(Command::CompressContext) => {
                 let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
@@ -630,7 +626,7 @@ async fn request_tool_approval(
                 });
             }
             Some(Command::ResetContext) => {
-                crate::core::reset_context_for_session(session, ctx);
+                crate::core::reset_context(ctx);
             }
             Some(Command::EmitStreamEvent(event)) => {
                 let _ = ctx.stream_tx.send(*event);
@@ -639,26 +635,21 @@ async fn request_tool_approval(
     }
 }
 
-fn record_rejected_tool_call(
-    ctx: &TurnContext,
-    session: &mut Session,
-    call: &ToolCall,
-    args_summary: &str,
-) {
+fn record_rejected_tool_call(ctx: &mut TurnContext, call: &ToolCall, args_summary: &str) {
     ctx.observer.audit_tool_execution(
-        &session.id,
+        &ctx.session.id,
         &call.name,
         false,
         (!args_summary.is_empty()).then_some(args_summary),
         "用户拒绝执行",
     );
     append_runtime_tool_message(
-        session,
+        &mut ctx.session,
         &call.name,
         format!("工具 {} 被用户拒绝执行", call.name),
     );
     append_tool_result_message(
-        session,
+        &mut ctx.session,
         &call.id,
         &call.name,
         ToolFailureRecord::new(
@@ -671,8 +662,8 @@ fn record_rejected_tool_call(
         .render_for_model(),
         true,
     );
-    flush_deferred_tool_injections(session, ctx);
-    session.persist_to_disk();
+    flush_deferred_tool_injections(ctx);
+    ctx.session.persist_to_disk();
     let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: call.name.clone(),
         tool_call_id: Some(call.id.clone()),
@@ -697,7 +688,6 @@ enum RunningToolOutcome {
 
 async fn run_tool_call(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     call: &ToolCall,
     args_summary: &str,
@@ -708,8 +698,8 @@ async fn run_tool_call(
     });
     let started_at = std::time::Instant::now();
     let mut buffered_commands = Vec::new();
-    let actor_id = session.id.clone();
-    let mut tool_future = start_tool_call(ctx, call, session, &actor_id);
+    let actor_id = ctx.session.id.clone();
+    let mut tool_future = start_tool_call(ctx, call, &actor_id);
     let result = loop {
         tokio::select! {
             biased;
@@ -751,8 +741,7 @@ struct CompletedToolCall<'a> {
 }
 
 fn record_completed_tool_call(
-    ctx: &TurnContext,
-    session: &mut Session,
+    ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
     history: &mut ToolCallHistory,
 ) -> bool {
@@ -764,7 +753,7 @@ fn record_completed_tool_call(
         duration_ms,
     } = completion;
     ctx.observer.audit_tool_execution(
-        &session.id,
+        &ctx.session.id,
         &call.name,
         result.ok,
         (!args_summary.is_empty()).then_some(args_summary),
@@ -779,7 +768,7 @@ fn record_completed_tool_call(
         duration_ms: Some(duration_ms),
     });
     append_tool_result_message(
-        session,
+        &mut ctx.session,
         &call.id,
         &call.name,
         if result.ok {
@@ -796,7 +785,11 @@ fn record_completed_tool_call(
         },
         !result.ok,
     );
-    append_runtime_tool_message(session, &call.name, format_tool_trace_message(result));
+    append_runtime_tool_message(
+        &mut ctx.session,
+        &call.name,
+        format_tool_trace_message(result),
+    );
 
     if result.ok {
         history.failed_calls.remove(&dedupe_key);
@@ -819,7 +812,7 @@ fn record_completed_tool_call(
 }
 
 fn append_failure_recovery_prompt(
-    session: &mut Session,
+    ctx: &mut TurnContext,
     history: &ToolCallHistory,
     request_tools: &[ToolSpec],
 ) {
@@ -844,15 +837,14 @@ fn append_failure_recovery_prompt(
         ),
     );
     reminder.tool_name = Some("react_failed_tool_recovery".to_string());
-    session.messages.push(reminder);
-    session.persist_to_disk();
+    ctx.session.messages.push(reminder);
+    ctx.session.persist_to_disk();
 }
 
 /// 记录并执行一批工具调用，所有跨循环转向都通过明确结果返回。
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_batch(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
@@ -861,11 +853,11 @@ async fn execute_tool_batch(
     accumulated_usage: &mut TokenUsage,
     tool_history: &mut ToolCallHistory,
 ) -> ToolBatchOutcome {
-    let calls = record_tool_calls(ctx, session, pending_msg_id, response, round);
+    let calls = record_tool_calls(ctx, pending_msg_id, response, round);
     let mut needs_failure_recovery = false;
 
     for call in calls {
-        match drain_pending_commands_async(session, ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -875,15 +867,15 @@ async fn execute_tool_batch(
             } => {
                 tool_history.clear();
                 if let Some(input) = current_agent_input {
-                    session.persist_to_disk();
+                    ctx.session.persist_to_disk();
                     return ToolBatchOutcome::Restart(input);
                 }
-                session.persist_to_disk();
+                ctx.session.persist_to_disk();
             }
             PendingCommandEffect::None => {}
         }
 
-        let (args_summary, dedupe_key) = match prepare_tool_call(ctx, session, call, tool_history) {
+        let (args_summary, dedupe_key) = match prepare_tool_call(ctx, call, tool_history) {
             ToolPreflightOutcome::Execute {
                 args_summary,
                 dedupe_key,
@@ -894,22 +886,22 @@ async fn execute_tool_batch(
             }
         };
 
-        match request_tool_approval(ctx, session, cmd_rx, call, &args_summary).await {
+        match request_tool_approval(ctx, cmd_rx, call, &args_summary).await {
             ToolApprovalOutcome::Approved => {}
             ToolApprovalOutcome::Rejected => {
-                record_rejected_tool_call(ctx, session, call, &args_summary);
+                record_rejected_tool_call(ctx, call, &args_summary);
                 return ToolBatchOutcome::Completed;
             }
             ToolApprovalOutcome::Restart(input) => {
                 tool_history.clear();
-                session.persist_to_disk();
+                ctx.session.persist_to_disk();
                 return ToolBatchOutcome::Restart(input);
             }
             ToolApprovalOutcome::Cancelled => return ToolBatchOutcome::Cancelled,
         }
 
         let (result, buffered_commands, duration_ms) =
-            match run_tool_call(ctx, session, cmd_rx, call, &args_summary).await {
+            match run_tool_call(ctx, cmd_rx, call, &args_summary).await {
                 RunningToolOutcome::Completed {
                     result,
                     buffered_commands,
@@ -928,14 +920,20 @@ async fn execute_tool_batch(
                         full_output: None,
                         duration_ms: Some(duration_ms),
                     });
-                    append_tool_result_message(session, &call.id, &call.name, output, true);
+                    append_tool_result_message(
+                        &mut ctx.session,
+                        &call.id,
+                        &call.name,
+                        output,
+                        true,
+                    );
                     if let PendingCommandEffect::MessagesInjected {
                         current_agent_input: Some(input),
                         ..
-                    } = process_buffered_commands(session, ctx, buffered_commands)
+                    } = process_buffered_commands(ctx, buffered_commands)
                     {
                         tool_history.clear();
-                        session.persist_to_disk();
+                        ctx.session.persist_to_disk();
                         return ToolBatchOutcome::Restart(input);
                     }
                     return ToolBatchOutcome::Cancelled;
@@ -956,7 +954,6 @@ async fn execute_tool_batch(
 
         needs_failure_recovery |= record_completed_tool_call(
             ctx,
-            session,
             CompletedToolCall {
                 call,
                 args_summary: &args_summary,
@@ -967,7 +964,7 @@ async fn execute_tool_batch(
             tool_history,
         );
 
-        match process_buffered_commands(session, ctx, buffered_commands) {
+        match process_buffered_commands(ctx, buffered_commands) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -976,17 +973,17 @@ async fn execute_tool_batch(
                 ..
             } => {
                 tool_history.clear();
-                session.persist_to_disk();
+                ctx.session.persist_to_disk();
                 return ToolBatchOutcome::Restart(input);
             }
             PendingCommandEffect::MessagesInjected { .. } | PendingCommandEffect::None => {}
         }
 
-        if maybe_update_context_summary(session, ctx, &response.usage, cmd_rx).await {
+        if maybe_update_context_summary(ctx, &response.usage, cmd_rx).await {
             return ToolBatchOutcome::Cancelled;
         }
 
-        match drain_pending_commands_async(session, ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx) {
             PendingCommandEffect::Terminate | PendingCommandEffect::Shutdown => {
                 return ToolBatchOutcome::Cancelled;
             }
@@ -996,20 +993,20 @@ async fn execute_tool_batch(
             } => {
                 tool_history.clear();
                 if let Some(input) = current_agent_input {
-                    session.persist_to_disk();
+                    ctx.session.persist_to_disk();
                     return ToolBatchOutcome::Restart(input);
                 }
-                session.persist_to_disk();
+                ctx.session.persist_to_disk();
             }
             PendingCommandEffect::None => {}
         }
-        flush_deferred_tool_injections(session, ctx);
+        flush_deferred_tool_injections(ctx);
     }
 
     if needs_failure_recovery {
-        append_failure_recovery_prompt(session, tool_history, request_tools);
+        append_failure_recovery_prompt(ctx, tool_history, request_tools);
     } else {
-        session.persist_to_disk();
+        ctx.session.persist_to_disk();
     }
     ToolBatchOutcome::Continue
 }
@@ -1026,7 +1023,6 @@ enum ReactPhaseOutcome {
 #[allow(clippy::too_many_arguments)]
 async fn execute_react_phase(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     start_round: usize,
     outer_iteration: u32,
@@ -1046,11 +1042,11 @@ async fn execute_react_phase(
     'react_loop: loop {
         if round == 0 {
             debug_assert!(
-                session.system_prompt_message.is_some(),
+                ctx.session.system_prompt_message.is_some(),
                 "TurnContext 构建前应已注入 system prompt"
             );
         }
-        match drain_pending_commands_async(session, ctx, cmd_rx) {
+        match drain_pending_commands_async(ctx, cmd_rx) {
             PendingCommandEffect::Terminate => {
                 return ReactPhaseOutcome::Cancelled;
             }
@@ -1063,13 +1059,13 @@ async fn execute_react_phase(
             } => {
                 tool_history.clear();
                 if let Some(input) = current_agent_input {
-                    session.persist_to_disk();
+                    ctx.session.persist_to_disk();
                     return ReactPhaseOutcome::Restart(input);
                 }
             }
             PendingCommandEffect::None => {}
         }
-        crate::react::message::flush_deferred_tool_injections(session, ctx);
+        crate::react::message::flush_deferred_tool_injections(ctx);
 
         // 工具执行完进入下一轮模型请求前，通知前端"正在分析工具结果"，
         // 避免前端把模型等待时间算到最后一个工具上。
@@ -1086,10 +1082,10 @@ async fn execute_react_phase(
             return ReactPhaseOutcome::EnterSummary { round };
         }
 
-        let request_tools = tools_for_current_turn(&ctx.tools, session, user_input);
+        let request_tools = tools_for_current_turn(ctx, user_input);
 
         let (pending_msg_id, response) =
-            match request_react_response(ctx, session, cmd_rx, request_tools.clone()).await {
+            match request_react_response(ctx, cmd_rx, request_tools.clone()).await {
                 ReactRequestOutcome::Completed {
                     pending_msg_id: response_message_id,
                     response_result,
@@ -1105,9 +1101,8 @@ async fn execute_react_phase(
                                     && error_message.contains("stop_reason=end_turn"))
                             {
                                 tracing::warn!("检测到上下文超限，尝试强制压缩");
-                                let before_summary_up_to = session.summary_up_to;
+                                let before_summary_up_to = ctx.session.summary_up_to;
                                 let compression_cancelled = maybe_update_context_summary(
-                                    session,
                                     ctx,
                                     &TokenUsage {
                                         prompt_tokens: ctx.context_limit,
@@ -1122,11 +1117,11 @@ async fn execute_react_phase(
                                 if compression_cancelled {
                                     return ReactPhaseOutcome::Cancelled;
                                 }
-                                if session.summary_up_to > before_summary_up_to {
+                                if ctx.session.summary_up_to > before_summary_up_to {
                                     continue 'react_loop;
                                 }
                             }
-                            persist_error(session, format!("ReAct 循环请求失败：{error_message}"));
+                            persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
                             return ReactPhaseOutcome::Failed(error_message);
                         }
                     };
@@ -1138,7 +1133,7 @@ async fn execute_react_phase(
                 } => {
                     accumulated_usage.accumulate(&usage);
                     tool_history.clear();
-                    session.persist_to_disk();
+                    ctx.session.persist_to_disk();
                     return ReactPhaseOutcome::Restart(current_agent_input);
                 }
                 ReactRequestOutcome::Cancelled { usage } => {
@@ -1151,7 +1146,7 @@ async fn execute_react_phase(
         emit_token_usage(
             &ctx.stream_tx,
             &response.usage,
-            Some(response.usage.prompt_tokens.max(session.current_tokens)),
+            Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
             ctx.context_limit,
             format!("react-round-{round}", round = round + 1),
             None,
@@ -1162,7 +1157,6 @@ async fn execute_react_phase(
         if response.tool_calls.is_empty() {
             match handle_text_response(
                 ctx,
-                session,
                 cmd_rx,
                 &pending_msg_id,
                 &response,
@@ -1189,7 +1183,6 @@ async fn execute_react_phase(
         executed_tool_in_iteration = true;
         match execute_tool_batch(
             ctx,
-            session,
             cmd_rx,
             &pending_msg_id,
             &response,
@@ -1225,15 +1218,11 @@ enum SummaryStepOutcome {
 /// 执行一次总结判断，并把继续执行或结束本轮的决策返回给外层编排。
 async fn execute_summary_step(
     ctx: &mut TurnContext,
-    session: &mut Session,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
     outer_iteration: &mut u32,
     accumulated_usage: &mut TokenUsage,
 ) -> SummaryStepOutcome {
-    match ctx
-        .run_summary_phase(session, cmd_rx, *outer_iteration + 1)
-        .await
-    {
+    match ctx.run_summary_phase(cmd_rx, *outer_iteration + 1).await {
         SummaryPhaseResult::Completed(usage) => {
             accumulated_usage.accumulate(&usage);
             SummaryStepOutcome::Completed
@@ -1243,7 +1232,7 @@ async fn execute_summary_step(
             *outer_iteration += 1;
             if *outer_iteration >= ctx.max_outer_iterations {
                 return match ctx
-                    .force_final_response(session, cmd_rx, ForceFinalReason::OuterLimit)
+                    .force_final_response(cmd_rx, ForceFinalReason::OuterLimit)
                     .await
                 {
                     ForceFinalResult::Completed(usage) => {
@@ -1257,26 +1246,26 @@ async fn execute_summary_step(
 
             // 使用合法工具调用配对注入未完成原因，保证后续 Provider 历史协议完整。
             inject_tool_to_messages(
-                session,
+                &mut ctx.session,
                 "summary_need_more_work",
                 &serde_json::json!({
                     "reason": reason.trim(),
                     "instruction": "上轮总结判定任务未完成，请根据原因继续执行剩余工作。",
                 }),
             );
-            session.persist_to_disk();
+            ctx.session.persist_to_disk();
             SummaryStepOutcome::Continue
         }
         SummaryPhaseResult::Cancelled(usage) => {
             accumulated_usage.accumulate(&usage);
-            session.persist_to_disk();
+            ctx.session.persist_to_disk();
             SummaryStepOutcome::Cancelled
         }
         SummaryPhaseResult::Failed { message, usage } => {
             accumulated_usage.accumulate(&usage);
-            persist_error(session, format!("总结阶段失败：{message}"));
+            persist_error(ctx, format!("总结阶段失败：{message}"));
             match ctx
-                .force_final_response(session, cmd_rx, ForceFinalReason::SummaryError)
+                .force_final_response(cmd_rx, ForceFinalReason::SummaryError)
                 .await
             {
                 ForceFinalResult::Completed(usage) => {
@@ -1294,7 +1283,7 @@ async fn execute_summary_step(
             usage,
         } => {
             accumulated_usage.accumulate(&usage);
-            session.persist_to_disk();
+            ctx.session.persist_to_disk();
             SummaryStepOutcome::Interrupted(current_agent_input)
         }
     }
@@ -1307,104 +1296,95 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    let mut owned_session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    let result = {
-        let session = &mut owned_session;
-        let usage_sink = ctx.turn_usage_sink().clone();
-        let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
-        let merge_plugin_usage = |acc: &mut TokenUsage| {
-            acc.accumulate(&usage_sink.take_usage());
-        };
-        let mut round = 0usize;
-        let mut outer_iteration = 0u32;
-        let mut accumulated_usage = TokenUsage::default();
-        // 插件用量在本轮内即时累加；guard 离开此作用域后自动解绑。
-        let mut tool_history = ToolCallHistory::default();
-        let mut user_input = session
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::User)
-            .map(|message| message.text_content())
-            .unwrap_or_default();
+    let usage_sink = ctx.turn_usage_sink().clone();
+    let _usage_guard = usage_sink.bind(ctx.stream_tx.clone(), ctx.context_limit);
+    let merge_plugin_usage = |acc: &mut TokenUsage| {
+        acc.accumulate(&usage_sink.take_usage());
+    };
+    let mut round = 0usize;
+    let mut outer_iteration = 0u32;
+    let mut accumulated_usage = TokenUsage::default();
+    // 插件用量在本轮内即时累加；guard 离开 execute_turn 时自动解绑。
+    let mut tool_history = ToolCallHistory::default();
+    let mut user_input = ctx
+        .session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+        .map(|message| message.text_content())
+        .unwrap_or_default();
 
-        // 外层只编排 ReAct 与总结两个独立阶段；具体过程由各阶段函数负责。
-        'outer: loop {
-            match execute_react_phase(
-                ctx,
-                session,
-                cmd_rx,
-                round,
-                outer_iteration,
-                &user_input,
-                &mut accumulated_usage,
-                &mut tool_history,
-            )
-            .await
-            {
-                ReactPhaseOutcome::EnterSummary { round: next_round } => {
-                    round = next_round;
-                }
-                ReactPhaseOutcome::Restart(input) => {
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                    continue 'outer;
-                }
-                ReactPhaseOutcome::Completed => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::success(accumulated_usage);
-                }
-                ReactPhaseOutcome::Cancelled => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::cancelled(accumulated_usage);
-                }
-                ReactPhaseOutcome::Failed(message) => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::failed(accumulated_usage, message);
-                }
+    // 外层只编排 ReAct 与总结两个独立阶段；具体过程由各阶段函数负责。
+    'outer: loop {
+        match execute_react_phase(
+            ctx,
+            cmd_rx,
+            round,
+            outer_iteration,
+            &user_input,
+            &mut accumulated_usage,
+            &mut tool_history,
+        )
+        .await
+        {
+            ReactPhaseOutcome::EnterSummary { round: next_round } => {
+                round = next_round;
             }
-
-            match execute_summary_step(
-                ctx,
-                session,
-                cmd_rx,
-                &mut outer_iteration,
-                &mut accumulated_usage,
-            )
-            .await
-            {
-                SummaryStepOutcome::Completed => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::success(accumulated_usage);
-                }
-                SummaryStepOutcome::Continue => {
-                    tool_history.clear();
-                    continue 'outer;
-                }
-                SummaryStepOutcome::Interrupted(input) => {
-                    tool_history.clear();
-                    user_input = input;
-                    round = 0;
-                    outer_iteration = 0;
-                    continue 'outer;
-                }
-                SummaryStepOutcome::Cancelled => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::cancelled(accumulated_usage);
-                }
-                SummaryStepOutcome::Failed(message) => {
-                    merge_plugin_usage(&mut accumulated_usage);
-                    break 'outer TurnExecutionResult::failed(accumulated_usage, message);
-                }
+            ReactPhaseOutcome::Restart(input) => {
+                user_input = input;
+                round = 0;
+                outer_iteration = 0;
+                continue 'outer;
+            }
+            ReactPhaseOutcome::Completed => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::success(accumulated_usage);
+            }
+            ReactPhaseOutcome::Cancelled => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::cancelled(accumulated_usage);
+            }
+            ReactPhaseOutcome::Failed(message) => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::failed(accumulated_usage, message);
             }
         }
-    };
-    ctx.session = owned_session;
-    result
+
+        match execute_summary_step(ctx, cmd_rx, &mut outer_iteration, &mut accumulated_usage).await
+        {
+            SummaryStepOutcome::Completed => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::success(accumulated_usage);
+            }
+            SummaryStepOutcome::Continue => {
+                tool_history.clear();
+                continue 'outer;
+            }
+            SummaryStepOutcome::Interrupted(input) => {
+                tool_history.clear();
+                user_input = input;
+                round = 0;
+                outer_iteration = 0;
+                continue 'outer;
+            }
+            SummaryStepOutcome::Cancelled => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::cancelled(accumulated_usage);
+            }
+            SummaryStepOutcome::Failed(message) => {
+                merge_plugin_usage(&mut accumulated_usage);
+                break 'outer TurnExecutionResult::failed(accumulated_usage, message);
+            }
+        }
+    }
 }
 
-pub(super) fn tools_for_current_turn(
+pub(super) fn tools_for_current_turn(ctx: &TurnContext, user_input: &str) -> Vec<ToolSpec> {
+    filter_tools_for_current_turn(&ctx.tools, &ctx.session, user_input)
+}
+
+fn filter_tools_for_current_turn(
     tools: &[ToolSpec],
     session: &Session,
     user_input: &str,
@@ -1474,7 +1454,7 @@ mod tests {
         let session = Session::new("test");
         let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
 
-        let names = tool_names(tools_for_current_turn(
+        let names = tool_names(filter_tools_for_current_turn(
             &tools,
             &session,
             "执行 git diff 看一下改动",
@@ -1491,7 +1471,7 @@ mod tests {
             .push(Message::new(MessageRole::User, "执行 git diff 看一下改动"));
         let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
 
-        let names = tool_names(tools_for_current_turn(&tools, &session, ""));
+        let names = tool_names(filter_tools_for_current_turn(&tools, &session, ""));
 
         assert_eq!(names, vec!["run_shell"]);
     }
@@ -1505,7 +1485,7 @@ mod tests {
         ));
         let tools = vec![tool("run_shell"), tool("spawn_task"), tool("wait_tasks")];
 
-        let names = tool_names(tools_for_current_turn(&tools, &session, ""));
+        let names = tool_names(filter_tools_for_current_turn(&tools, &session, ""));
 
         assert_eq!(names, vec!["run_shell", "spawn_task", "wait_tasks"]);
     }

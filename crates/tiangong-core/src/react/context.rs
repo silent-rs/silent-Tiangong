@@ -10,7 +10,6 @@ use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
-use crate::session::Session;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
@@ -18,14 +17,14 @@ use tiangong_types::StreamEvent;
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
 /// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
-pub(crate) fn rebuild_system_prompt(session: &mut Session, ctx: &TurnContext) {
+pub(crate) fn rebuild_system_prompt(ctx: &mut TurnContext) {
     let plugin_sections = ctx
         .plugins
         .iter()
         .flat_map(|plugin| plugin.prompt_sections())
         .collect();
     let config = SystemPromptConfig::from_plugin_sections(plugin_sections);
-    session.rebuild_system_prompt(&config);
+    ctx.session.rebuild_system_prompt(&config);
 }
 
 pub(crate) fn compression_threshold_tokens(context_limit: usize) -> usize {
@@ -80,8 +79,7 @@ pub(crate) fn emit_token_usage(
 }
 
 pub(crate) async fn maybe_update_context_summary(
-    session: &mut Session,
-    ctx: &TurnContext,
+    ctx: &mut TurnContext,
     observed_usage: &TokenUsage,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> bool {
@@ -92,15 +90,16 @@ pub(crate) async fn maybe_update_context_summary(
     if !organizer.needs_compression(observed_tokens) {
         return false;
     }
-    let total_messages = session.messages.len();
+    let total_messages = ctx.session.messages.len();
     let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
-        summary_up_to: session.summary_up_to,
+        summary_up_to: ctx.session.summary_up_to,
         total_messages,
     });
+    let client = &ctx.client;
     let update = tokio::select! {
         update = organizer.maybe_update_summary_with_usage_async(
-            session,
-            ctx.client(),
+            &mut ctx.session,
+            client,
             observed_tokens,
         ) => update,
         _cmd = cmd_rx.recv() => {
@@ -114,15 +113,19 @@ pub(crate) async fn maybe_update_context_summary(
     match update {
         Ok(update) if update.compressed => {
             // 重置 current_tokens，压缩后上下文已大幅缩减
-            session.current_tokens = 0;
-            let remaining = session.messages.len().saturating_sub(session.summary_up_to);
+            ctx.session.current_tokens = 0;
+            let remaining = ctx
+                .session
+                .messages
+                .len()
+                .saturating_sub(ctx.session.summary_up_to);
             // 估算压缩后的 token 数（基于剩余消息比例）
             let estimated_tokens = (observed_tokens as f64
                 * (remaining as f64 / total_messages.max(1) as f64))
                 as usize;
-            session.current_tokens = estimated_tokens;
+            ctx.session.current_tokens = estimated_tokens;
             // 压缩后重建 system prompt（摘要已更新）
-            rebuild_system_prompt(session, ctx);
+            rebuild_system_prompt(ctx);
             emit_token_usage(
                 &ctx.stream_tx,
                 &update.usage,
@@ -133,24 +136,24 @@ pub(crate) async fn maybe_update_context_summary(
             );
             let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
                 action: tiangong_types::stream::ContextCompressAction::Auto,
-                summary_up_to: session.summary_up_to,
+                summary_up_to: ctx.session.summary_up_to,
                 remaining_messages: remaining,
             });
-            session.persist_to_disk();
+            ctx.session.persist_to_disk();
             tracing::info!(
-                session_id = %session.id,
+                session_id = %ctx.session.id,
                 observed_tokens,
                 observed_prompt_tokens = observed_usage.prompt_tokens,
                 observed_completion_tokens = observed_usage.completion_tokens,
                 threshold_tokens = organizer.token_threshold(),
-                summary_up_to = session.summary_up_to,
+                summary_up_to = ctx.session.summary_up_to,
                 "上下文与本轮输出达到压缩阈值，已更新早期对话摘要"
             );
         }
         Ok(_) => {}
         Err(err) => {
             tracing::warn!(
-                session_id = %session.id,
+                session_id = %ctx.session.id,
                 error = %err,
                 "上下文压缩失败，继续使用原始上下文"
             );
@@ -186,14 +189,14 @@ pub(crate) fn select_client_for_request<'a>(
 /// 不会与前端 `StreamEvent::Error` 落盘的 `[错误]` System 消息跨格式去重——因此
 /// 前端若也落盘，UI 上仍可能出现重复错误消息。engine 侧落盘作为前端时序丢失的
 /// 兜底，确保会话重载后至少能看到失败原因。
-pub(crate) fn persist_error(session: &mut Session, message: impl Into<String>) {
+pub(crate) fn persist_error(ctx: &mut TurnContext, message: impl Into<String>) {
     let message = message.into();
     let payload = serde_json::json!({
         "error": message,
         "instruction": "上一步执行失败，请基于已有结果继续或向用户说明原因。",
     });
-    crate::react::message::inject_tool_to_messages(session, "react_loop_error", &payload);
-    session.persist_to_disk();
+    crate::react::message::inject_tool_to_messages(&mut ctx.session, "react_loop_error", &payload);
+    ctx.session.persist_to_disk();
 }
 
 #[cfg(test)]

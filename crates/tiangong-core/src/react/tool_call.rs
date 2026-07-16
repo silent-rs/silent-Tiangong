@@ -4,19 +4,17 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::model::ToolCall;
-use crate::session::Session;
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
 
 /// 根据本轮工具覆盖表启动一个工具调用。
 pub(super) fn start_tool_call(
-    ctx: &TurnContext,
+    ctx: &mut TurnContext,
     call: &ToolCall,
-    session: &mut Session,
     actor_id: &str,
 ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
     if let Some(handler) = ctx.tool_overrides.get(&call.name).cloned() {
-        let handler_future = handler.handle(call, session, actor_id);
+        let handler_future = handler.handle(call, &mut ctx.session, actor_id);
         let tool_name = call.name.clone();
         return Box::pin(async move {
             if let Some(result) = handler_future.await {

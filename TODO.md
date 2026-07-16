@@ -82,8 +82,9 @@
 - [x] 明确职责边界：`deliver(Message)` 完整构建本轮 Session，`run_turn` 只负责执行、收尾与持久化
 - [x] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点
 - [x] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `ctx.session` 读取
-- [ ] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
+- [x] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
 - [x] 合并 `execute_agent_loop` 与 `execute_turn`，由 `execute_turn` 直接编排并返回本轮结果
+- [x] 执行链统一只传 `TurnContext`，通过 `ctx.session` 访问会话，删除占位 Session 与 `ctx + session` 双参数
 
 ### 调用方适配
 - [ ] `app.rs ensure_core`:先 persist session 文件再创建 Core(不再传 session 给 builder)

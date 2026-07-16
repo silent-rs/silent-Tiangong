@@ -254,25 +254,22 @@ impl Drop for TiangongCore {
     }
 }
 
-pub(crate) fn reset_context_for_session(
-    session: &mut Session,
-    ctx: &crate::turn_context::TurnContext,
-) {
-    let total = session.messages.len();
-    session.summary_up_to = total;
-    crate::context::compressor::mark_compact_boundary(&mut session.messages, total);
-    session.context_summary = None;
-    session.current_tokens = 0;
-    session.active_agent_current_tokens = 0;
-    session.agent_current_tokens.clear();
+pub(crate) fn reset_context(ctx: &mut crate::turn_context::TurnContext) {
+    let total = ctx.session.messages.len();
+    ctx.session.summary_up_to = total;
+    crate::context::compressor::mark_compact_boundary(&mut ctx.session.messages, total);
+    ctx.session.context_summary = None;
+    ctx.session.current_tokens = 0;
+    ctx.session.active_agent_current_tokens = 0;
+    ctx.session.agent_current_tokens.clear();
     // 清空后重建 system prompt
-    crate::react::context::rebuild_system_prompt(session, ctx);
+    crate::react::context::rebuild_system_prompt(ctx);
     let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
         action: tiangong_types::stream::ContextCompressAction::Clear,
         summary_up_to: total,
         remaining_messages: 0,
     });
-    session.persist_to_disk();
+    ctx.session.persist_to_disk();
 }
 
 #[cfg(test)]
