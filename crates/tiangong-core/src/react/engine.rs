@@ -4,7 +4,6 @@
 //! 定义 ReAct 循环方法（`execute_turn` / `run_summary_phase` / `force_final_response`）。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::Sender as StdSender;
 
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -55,17 +54,8 @@ impl TurnContext {
         injections: impl IntoIterator<Item = (String, serde_json::Value)>,
     ) {
         for (tool_name, payload) in injections {
-            crate::react::message::defer_tool_injection(
-                session,
-                self,
-                tool_name,
-                payload,
-            );
+            crate::react::message::defer_tool_injection(session, self, tool_name, payload);
         }
-    }
-
-    pub(super) fn flush_deferred_tool_injections(&mut self, session: &mut Session) {
-        crate::react::message::flush_deferred_tool_injections(session, &self);
     }
 
     fn build_thinking_config(
@@ -193,7 +183,7 @@ impl TurnContext {
                     }
                     PendingCommandEffect::None => {}
                 }
-                self.flush_deferred_tool_injections(session);
+                crate::react::message::flush_deferred_tool_injections(session, self);
 
                 // 工具执行完进入下一轮模型请求前，通知前端"正在分析工具结果"，
                 // 避免前端把模型等待时间算到最后一个工具上。
@@ -637,11 +627,7 @@ impl TurnContext {
                     response.reasoning_signature.clone(),
                     &executable_calls,
                 );
-                crate::react::message::emit_session_message_upsert(
-                    session,
-                    self,
-                    &pending_msg_id,
-                );
+                crate::react::message::emit_session_message_upsert(session, self, &pending_msg_id);
 
                 // 执行工具
                 let mut need_failure_recovery_prompt = false;
@@ -808,7 +794,7 @@ impl TurnContext {
                                     ) {
                                         Ok(input) => {
                                             break ApprovalWaitOutcome::CurrentInput(input);
-                                        },
+                                        }
                                         Err(err) => tracing::warn!(
                                             error = %err,
                                             "审批等待阶段追加用户消息持久化失败"
@@ -836,9 +822,7 @@ impl TurnContext {
                                     });
                                 }
                                 Some(Command::ResetContext) => {
-                                    crate::core::reset_context_for_session(
-                                        session, self,
-                                    );
+                                    crate::core::reset_context_for_session(session, self);
                                 }
                                 Some(Command::EmitStreamEvent(ev)) => {
                                     let ev = *ev;
@@ -887,7 +871,7 @@ impl TurnContext {
                                 )),
                                 true,
                             );
-                            self.flush_deferred_tool_injections(session);
+                            crate::react::message::flush_deferred_tool_injections(session, self);
                             session.persist_to_disk();
                             let _ = self.stream_tx.send(StreamEvent::ToolResult {
                                 name: call.name.clone(),
@@ -954,11 +938,8 @@ impl TurnContext {
                             duration_ms: Some(tool_start_time.elapsed().as_millis() as u64),
                         });
                         append_tool_result_message(session, &call.id, &call.name, output, true);
-                        let buffered_effect = process_buffered_commands(
-                            session,
-                            self,
-                            buffered_tool_commands,
-                        );
+                        let buffered_effect =
+                            process_buffered_commands(session, self, buffered_tool_commands);
                         if let PendingCommandEffect::MessagesInjected {
                             current_agent_input: Some(input),
                             ..
@@ -1031,11 +1012,7 @@ impl TurnContext {
                         &call.name,
                         format_tool_trace_message(&result),
                     );
-                    match process_buffered_commands(
-                        session,
-                        self,
-                        buffered_tool_commands,
-                    ) {
+                    match process_buffered_commands(session, self, buffered_tool_commands) {
                         PendingCommandEffect::Terminate => {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1115,7 +1092,7 @@ impl TurnContext {
                         }
                         PendingCommandEffect::None => {}
                     }
-                    self.flush_deferred_tool_injections(session);
+                    crate::react::message::flush_deferred_tool_injections(session, self);
                 }
 
                 if need_failure_recovery_prompt {
@@ -1167,12 +1144,8 @@ impl TurnContext {
                     outer_iteration += 1;
                     if outer_iteration >= self.max_outer_iterations {
                         // 重入次数已达上限，强制输出最终回复。
-                        self.force_final_response(
-                            session,
-                            cmd_rx,
-                            ForceFinalReason::OuterLimit,
-                        )
-                        .await;
+                        self.force_final_response(session, cmd_rx, ForceFinalReason::OuterLimit)
+                            .await;
                         {
                             merge_plugin_usage(&mut accumulated_usage);
                             return accumulated_usage;
@@ -1209,12 +1182,8 @@ impl TurnContext {
                     // 初次总结失败只是可恢复的中间状态；只有强制终结也失败时，
                     // run_text_finalization_llm 才发送唯一终态 Error。
                     persist_error(session, format!("总结阶段失败：{message}"));
-                    self.force_final_response(
-                        session,
-                        cmd_rx,
-                        ForceFinalReason::SummaryError,
-                    )
-                    .await;
+                    self.force_final_response(session, cmd_rx, ForceFinalReason::SummaryError)
+                        .await;
                     {
                         merge_plugin_usage(&mut accumulated_usage);
                         return accumulated_usage;

@@ -509,7 +509,7 @@ impl TiangongApp {
         content: String,
     ) -> Result<(), String> {
         use std::sync::mpsc;
-        use tiangong_types::{ContentBlock, SessionStreamEvent};
+        use tiangong_types::{ContentBlock, SessionEvent};
 
         if session_id.trim().is_empty() {
             return Err("定时消息目标会话 ID 不能为空".to_string());

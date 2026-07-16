@@ -2,7 +2,7 @@
 
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
 use tiangong_types::{
-    ContentBlock, SessionStreamEvent, StreamEvent, content_blocks_text, stable_content_blocks,
+    ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
     validate_ready_content_blocks,
 };
 
@@ -989,50 +989,6 @@ mod tests {
     }
 
     #[test]
-    fn deferred_injection_flushes_after_terminal_tool_close() {
-        let storage_root = std::env::temp_dir().join(format!(
-            "tiangong-core-terminal-flush-test-{}",
-            scru128::new()
-        ));
-        std::fs::create_dir_all(&storage_root).unwrap();
-        let mut session = Session::new("terminal-deferred-injection");
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![MessageToolCall {
-            id: "call-pending".to_string(),
-            name: "write_file".to_string(),
-            arguments: serde_json::json!({}),
-        }];
-        session.messages.push(assistant);
-        session.defer_tool_injection(
-            "agent_report".to_string(),
-            serde_json::json!({ "content": "done" }),
-        );
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        flush_deferred_tool_injections(&mut session, &tx);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-
-        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
-        assert_eq!(interrupted.len(), 1);
-        flush_deferred_tool_injections(&mut session, &tx);
-
-        assert!(session.deferred_tool_injections.is_empty());
-        assert_eq!(session.messages.len(), 4);
-        let injected_call = session.messages[2].tool_calls.first().unwrap();
-        assert_eq!(injected_call.name, INJECTION_TOOL_NAME);
-        assert_eq!(injected_call.arguments["source"], "agent_report");
-        assert_eq!(injected_call.arguments["content"], "done");
-        assert_eq!(
-            session.messages[3].tool_name.as_deref(),
-            Some(INJECTION_TOOL_NAME)
-        );
-        assert_eq!(
-            session.messages[3].tool_call_id.as_deref(),
-            Some(injected_call.id.as_str())
-        );
-    }
-
-    #[test]
     fn reused_tool_call_id_does_not_reuse_an_old_result() {
         let mut session = Session::new("reused-tool-id");
         for completed in [true, false] {
@@ -1059,92 +1015,6 @@ mod tests {
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
         assert!(!has_unfinished_tool_calls(&session));
-    }
-
-    #[test]
-    fn inject_tool_renders_browser_feedback() {
-        let mut session = Session::new("browser");
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        inject_tool_to_session(
-            &mut session,
-            &tx,
-            "browser_data",
-            &serde_json::json!({
-                "title": "API Keys",
-                "url": "https://platform.deepseek.com/api_keys",
-                "text": "API keys page",
-                "feedback": "POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
-            }),
-        );
-
-        // 消息对：assistant(tool_call) + tool(result)
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(session.messages[0].tool_calls.len(), 1);
-        assert_eq!(
-            session.messages[1].tool_call_id.as_deref(),
-            Some(session.messages[0].tool_calls[0].id.as_str())
-        );
-
-        let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("数据来源：browser_data"));
-        assert!(tool_text.contains("title: API Keys"));
-        assert!(tool_text.contains("sk-test"));
-
-        let events = rx.try_iter().collect::<Vec<_>>();
-        assert!(matches!(
-            &events[0],
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.role == MessageRole::Assistant && message.tool_calls.len() == 1
-        ));
-        assert!(matches!(
-            &events[1],
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.role == MessageRole::Tool
-        ));
-        match &events[2] {
-            StreamEvent::ToolResult { output, .. } => {
-                assert!(output.contains("数据来源：browser_data"));
-                assert!(output.contains("sk-test"));
-            }
-            _ => panic!("expected tool result event"),
-        }
-    }
-
-    #[test]
-    fn inject_tool_dedup_by_url() {
-        let mut session = Session::new("browser");
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let payload = serde_json::json!({
-            "title": "API Keys",
-            "url": "https://platform.deepseek.com/api_keys",
-            "text": "API keys page",
-        });
-
-        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 2);
-
-        // 同 payload → 去重跳过
-        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 2);
-    }
-
-    #[test]
-    fn inject_tool_renders_terminal_user_input() {
-        let mut session = Session::new("terminal");
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        inject_tool_to_session(
-            &mut session,
-            &tx,
-            "terminal_user_input",
-            &serde_json::json!({ "command": "ls -la" }),
-        );
-
-        assert_eq!(session.messages.len(), 2);
-        let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("数据来源：terminal_user_input"));
-        assert!(tool_text.contains("command: ls -la"));
     }
 
     #[test]

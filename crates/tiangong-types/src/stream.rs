@@ -284,7 +284,7 @@ pub struct MemoryRecallHitSummary {
 /// Core 输出的所有事件都携带 session_id，
 /// 消费端（GUI / CLI / Server）可据此路由到正确的会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionStreamEvent {
+pub struct SessionEvent {
     /// 产生该事件的会话 ID
     pub session_id: String,
     /// 原始流事件

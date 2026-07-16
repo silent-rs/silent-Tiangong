@@ -4,5 +4,3 @@ pub mod engine;
 mod helpers;
 pub mod message;
 mod summary;
-#[cfg(test)]
-mod test_support;

@@ -16,7 +16,7 @@ use tiangong_media_archive::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
 };
 use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionStreamEvent,
+    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionEvent,
     StreamEvent, stable_content_blocks,
 };
 use tokio::sync::Mutex as AsyncMutex;

@@ -9,8 +9,6 @@
 //! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
 //! core 不再感知浏览器快照注入。
 
-use std::sync::mpsc::Sender as StdSender;
-
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::{Command, PendingCommandEffect};

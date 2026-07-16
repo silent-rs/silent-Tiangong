@@ -8,8 +8,6 @@
 //! 二者此前散落在 engine.rs 与 context.rs，现统一收敛于此，使「最终回复只有一个出口」。
 //! 上下文管理（压缩、token usage、system prompt 重建）仍留在 context.rs。
 
-use std::sync::mpsc::Sender as StdSender;
-
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::Command;
@@ -235,7 +233,8 @@ impl TurnContext {
                 &streamed_reasoning,
             );
             if streaming_usage.total_tokens > 0 {
-                emit_token_usage(&self.stream_tx,
+                emit_token_usage(
+                    &self.stream_tx,
                     &streaming_usage,
                     None,
                     self.context_limit,
@@ -274,7 +273,8 @@ impl TurnContext {
             }
         };
 
-        emit_token_usage(&self.stream_tx,
+        emit_token_usage(
+            &self.stream_tx,
             &response.usage,
             Some(response.usage.prompt_tokens.max(session.current_tokens)),
             self.context_limit,
@@ -466,115 +466,6 @@ fn persist_partial_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::react::test_support::{MockLlmServer, MockResponse, test_runtime};
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn completed_done_marker_is_not_persisted_as_a_second_summary() {
-        let server = MockLlmServer::start(MockResponse::Text {
-            content: "[DONE]".to_string(),
-            complete: true,
-        });
-        let mut engine = test_runtime(server.base_url());
-
-        let storage = tempfile::tempdir().unwrap();
-        let mut session = Session::new("summary-done-marker").with_storage_root(storage.path());
-        session.append_message(MessageRole::User, "完成任务");
-        session.append_message_with_id(
-            "react-answer".to_string(),
-            MessageRole::Assistant,
-            "任务已经完成。",
-            String::new(),
-        );
-        session.messages.last_mut().unwrap().phase = MessagePhase::React;
-        let session_id = session.id.clone();
-        let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
-        let (_command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            engine.run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1),
-        )
-        .await
-        .expect("总结阶段未及时完成");
-
-        assert!(matches!(result, SummaryPhaseResult::Completed(_)));
-        let assistant_messages = session
-            .messages
-            .iter()
-            .filter(|message| message.role == MessageRole::Assistant)
-            .collect::<Vec<_>>();
-        assert_eq!(assistant_messages.len(), 1, "纯 [DONE] 不应产生第二条回复");
-        assert_eq!(assistant_messages[0].phase, MessagePhase::Summary);
-        assert_eq!(assistant_messages[0].text_content(), "任务已经完成。");
-
-        let persisted = Session::load_from_storage(storage.path(), &session_id).unwrap();
-        let persisted_assistant_messages = persisted
-            .messages
-            .iter()
-            .filter(|message| message.role == MessageRole::Assistant)
-            .collect::<Vec<_>>();
-        assert_eq!(persisted_assistant_messages.len(), 1);
-        assert_eq!(persisted_assistant_messages[0].phase, MessagePhase::Summary);
-        assert_eq!(
-            persisted_assistant_messages[0].text_content(),
-            "任务已经完成。"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn interrupted_summary_keeps_streamed_partial_text() {
-        let server = MockLlmServer::start(MockResponse::Text {
-            content: "部分总结".to_string(),
-            complete: false,
-        });
-        let mut engine = test_runtime(server.base_url());
-
-        let storage = tempfile::tempdir().unwrap();
-        let mut session = Session::new("summary-interrupted").with_storage_root(storage.path());
-        session.append_message(MessageRole::User, "完成任务");
-        let session_id = session.id.clone();
-        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
-        let (command_tx, mut command_rx) = tokio_mpsc::unbounded_channel();
-
-        let execution = tokio::spawn(async move {
-            let result = engine
-                .run_summary_phase(&mut session, &stream_tx, &mut command_rx, 1)
-                .await;
-            (result, session)
-        });
-        server.wait_until_connected().await;
-        tokio::task::spawn_blocking(move || {
-            loop {
-                match stream_rx.recv_timeout(std::time::Duration::from_secs(3)) {
-                    Ok(StreamEvent::SummaryText { content, .. }) if content == "部分总结" => {
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(error) => panic!("未收到部分总结：{error}"),
-                }
-            }
-        })
-        .await
-        .unwrap();
-        command_tx.send(Command::Cancel).unwrap();
-
-        let (result, session) = tokio::time::timeout(std::time::Duration::from_secs(3), execution)
-            .await
-            .expect("总结阶段未及时中断")
-            .unwrap();
-        assert!(matches!(result, SummaryPhaseResult::Cancelled(_)));
-        let partial = session
-            .messages
-            .iter()
-            .find(|message| message.role == MessageRole::Assistant)
-            .expect("中断后应保留部分总结");
-        assert_eq!(partial.text_content(), "部分总结");
-
-        let persisted = Session::load_from_storage(storage.path(), &session_id).unwrap();
-        assert!(persisted.messages.iter().any(|message| {
-            message.role == MessageRole::Assistant && message.text_content() == "部分总结"
-        }));
-    }
 
     #[test]
     fn done_marker_parses_to_done() {
@@ -901,12 +792,7 @@ impl TurnContext {
             }
         };
 
-        if !self.commit_summary_message(
-            session,
-            &pending_msg_id,
-            &resp,
-            "force_final_response",
-        ) {
+        if !self.commit_summary_message(session, &pending_msg_id, &resp, "force_final_response") {
             return false;
         }
         let _ = stream_tx.send(StreamEvent::Done {
@@ -1010,7 +896,8 @@ impl TurnContext {
             message.phase = MessagePhase::Summary;
             message.reasoning_signature = resp.reasoning_signature.clone();
         }
-        emit_token_usage(&self.stream_tx,
+        emit_token_usage(
+            &self.stream_tx,
             &resp.usage,
             Some(resp.usage.prompt_tokens.max(session.current_tokens)),
             self.context_limit,

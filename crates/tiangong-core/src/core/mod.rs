@@ -5,16 +5,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender, Sender as StdSender};
+use std::sync::mpsc::{Sender, Sender as StdSender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
 use crate::react::message::{AcceptedUserMessage, accept_user_message};
 use crate::session::{MessageRole, Session};
-use tiangong_types::{ContentBlock, StreamEvent};
+use tiangong_types::StreamEvent;
 
 pub mod command;
 pub(crate) use command::Command;
@@ -176,7 +175,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 let session_ready_fired = self.session_ready_fired.clone();
                 // stream_tx 直接用 core 的通道(发 StreamEvent 到 app 层)
                 let stream_tx = self.stream_tx.clone();
-                let run_stream_tx = stream_tx.clone();
 
                 let agent_config = crate::agent_config::AgentConfig {
                     trust_mode: config.trust_mode,
@@ -214,17 +212,12 @@ impl crate::agent_input::AgentInput for TiangongCore {
 
                 let message_id = message_id.unwrap_or_else(|| scru128::new().to_string());
                 let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-                let accepted = accept_user_message(
-                    &mut session,
-                    &ctx,
-                    Some(message_id),
-                    prepared,
-                    true,
-                )
-                .map_err(|error| {
-                    tracing::warn!(%error, "持久化本轮用户消息失败");
-                    CoreError::WorkerStopped
-                })?;
+                let accepted =
+                    accept_user_message(&mut session, &ctx, Some(message_id), prepared, true)
+                        .map_err(|error| {
+                            tracing::warn!(%error, "持久化本轮用户消息失败");
+                            CoreError::WorkerStopped
+                        })?;
                 ctx.session = session;
 
                 crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
@@ -245,7 +238,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         tracing::warn!(%error, "持久化本轮系统提示失败");
                         CoreError::WorkerStopped
                     })?;
-                    Ok(run_turn(ctx, cmd_rx, stream_tx, accepted))
+                    Ok(run_turn(ctx, cmd_rx, accepted))
                 })
             }
             AgentInputKind::Tool(tool) => self.send_cmd(Command::InjectTool {
@@ -282,11 +275,9 @@ impl Drop for TiangongCore {
 async fn run_turn(
     mut ctx: crate::turn_context::TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    stream_tx: Sender<StreamEvent>,
     accepted: AcceptedUserMessage,
 ) {
     let stream_tx = ctx.stream_tx.clone();
-    let session_id = ctx.session.id.clone();
 
     let turn_capture = Arc::new(TurnCaptureState {
         capture: Mutex::new(TurnCapture::default()),
@@ -310,15 +301,8 @@ async fn run_turn(
     }
 
     let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
-    execute_turn_async(
-        &mut session,
-        &user_msg_id,
-        &prepared,
-        &mut ctx,
-        &stream_tx,
-        &mut cmd_rx,
-    )
-    .await;
+    ctx.execute_turn(&mut session, Some((&user_msg_id, &prepared)), &mut cmd_rx)
+        .await;
     ctx.session = session;
 
     wait_for_stream_boundary(&stream_tx, &turn_capture, &mut turn_boundary_id).await;
@@ -338,8 +322,7 @@ async fn run_turn(
         }
     }
 
-    let interrupted_tools =
-        {
+    let interrupted_tools = {
         let mut session = std::mem::replace(&mut ctx.session, Session::new("placeholder"));
         let result = crate::react::message::close_unfinished_tool_calls_for_turn(&mut session);
         ctx.session = session;
@@ -784,17 +767,4 @@ impl TurnOutcome {
         };
         Self { status }
     }
-}
-
-/// 执行一个完整的对话轮次（可能多轮工具调用），async 版
-async fn execute_turn_async(
-    session: &mut Session,
-    message_id: &str,
-    prepared: &[ContentBlock],
-    ctx: &mut crate::turn_context::TurnContext,
-    stream_tx: &StdSender<StreamEvent>,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) {
-    ctx.execute_turn(session, Some((message_id, prepared)), cmd_rx)
-        .await;
 }

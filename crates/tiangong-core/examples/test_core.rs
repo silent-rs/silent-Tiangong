@@ -3,12 +3,12 @@ use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::Session;
-use tiangong_types::{SessionStreamEvent, StreamEvent};
+use tiangong_types::{SessionEvent, StreamEvent};
 
 fn main() {
     // 示例：使用默认配置（第三方开发者可直接构造 CoreConfig）
     let config = CoreConfigProvider::new(CoreConfig::default());
-    let (tx, rx) = mpsc::channel::<SessionStreamEvent>();
+    let (tx, rx) = mpsc::channel::<SessionEvent>();
     // storage_root 必须由调用方提供（core 不自行计算路径）。
     // 这里用 home 目录下的 .tiangong 作为示例；生产入口由 tiangong-app-state 注入。
     let storage_root = dirs::home_dir()
