@@ -75,7 +75,9 @@
 - [ ] `on_session_ready` 只负责基于本轮 Session 刷新插件状态；插件自行保证一次性后台初始化不重复，重点处理 Agent Team `Coordinator::initialize` 的幂等性
 
 ### execute_turn 内部简化
-- [x] 将 `TurnContext::execute_turn` 从 Context 成员方法改为 `react/turn.rs` 的独立基础函数，并删除失去独立职责的 `engine` 模块
+- [x] 将 `TurnContext::execute_turn` 从 Context 成员方法改为 `react/execute.rs` 的独立基础函数，并删除失去独立职责的 `engine` 模块
+- [x] 将 `execute_turn` 迁入独立模块，按命令处理、模型请求、响应处理、工具执行与总结步骤拆分 Agent Loop
+- [x] 将 `start_tool_call` 从 `TurnContext` 抽离到独立的 ReAct 工具执行模块
 - [x] `execute_turn` 从 `ctx.session` 取得本轮 Session，不接收额外 Session 参数
 - [x] 明确职责边界：`deliver(Message)` 完整构建本轮 Session，`run_turn` 只负责执行、收尾与持久化
 - [x] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点

@@ -4,19 +4,16 @@
 //! 构造,turn 结束后整体销毁。它持有 turn 执行所需的 client / 权限 / 工具 / 用量收集器。
 //!
 //! 与 `react/` 模块的关系:`TurnContext` 是被 react 层消费的能力集合,本身不属于
-//! ReAct 执行流程。`react/turn.rs` 通过独立的 `execute_turn` 函数消费本结构。
+//! ReAct 执行流程。`react/execute.rs` 通过独立的 `execute_turn` 函数消费本结构。
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use crate::agent_config::AgentConfig;
 use crate::core::plugin::Plugin;
-use crate::model::{SingleProviderClient, ToolCall, ToolSpec};
+use crate::model::{SingleProviderClient, ToolSpec};
 use crate::session::Session;
-use crate::tool::ToolResult;
 use crate::tool_override::ToolOverrideHandler;
 use tiangong_types::StreamEvent;
 
@@ -50,7 +47,7 @@ pub struct TurnContext {
     /// 观测器（审计日志写入,持有 storage_root）
     pub observer: crate::observe::Observer,
     /// 构建前收集完成的工具覆盖处理器。
-    tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+    pub(crate) tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
     /// Turn-scoped 插件 usage 收集器
     pub turn_usage_sink: Arc<crate::core::plugin::TurnUsageSink>,
     // ===== turn 级配置 =====
@@ -77,49 +74,5 @@ impl TurnContext {
 
     pub fn turn_usage_sink(&self) -> &Arc<crate::core::plugin::TurnUsageSink> {
         &self.turn_usage_sink
-    }
-
-    // ===== 工具执行 =====
-
-    /// 执行单个工具调用。
-    ///
-    /// 权限审批在 turn 层统一完成（turn.rs 的工具执行循环）;
-    /// 到达此方法时审批已通过,handler 直接执行。
-    pub(crate) fn start_tool_call(
-        &self,
-        call: &ToolCall,
-        session: &mut Session,
-        actor_id: &str,
-    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
-        if let Some(handler) = self.tool_overrides.get(&call.name).cloned() {
-            let handler_future = handler.handle(call, session, actor_id);
-            let tool_name = call.name.clone();
-            return Box::pin(async move {
-                if let Some(result) = handler_future.await {
-                    return result;
-                }
-
-                ToolResult {
-                    ok: false,
-                    summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
-                    stdout: String::new(),
-                    stderr: format!("tool {tool_name} not handled by any plugin"),
-                    exit_code: 1,
-                    execution: None,
-                }
-            });
-        }
-
-        let tool_name = call.name.clone();
-        Box::pin(async move {
-            ToolResult {
-                ok: false,
-                summary: format!("未注册的工具：{tool_name}（请确认对应插件已启用）"),
-                stdout: String::new(),
-                stderr: format!("tool {tool_name} not handled by any plugin"),
-                exit_code: 1,
-                execution: None,
-            }
-        })
     }
 }
