@@ -516,7 +516,6 @@ impl Session {
         });
         self.updated_at = now_text();
     }
-
     /// 用宿主准备好的内容原样替换已有用户消息。
     pub fn update_prepared_user_message(
         &mut self,

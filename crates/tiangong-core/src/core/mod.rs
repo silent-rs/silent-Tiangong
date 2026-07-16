@@ -139,16 +139,23 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         tracing::warn!(%error, %session_id, "加载本轮 Session 失败");
                         CoreError::WorkerStopped
                     })?;
-                session.append_prepared_user_message_with_id(
-                    message_id.unwrap_or(scru128::new_string()),
+                let stream_tx = self.stream_tx.clone();
+                crate::react::message::accept_prepared_user_message_with_options(
+                    &mut session,
+                    &stream_tx,
+                    message_id,
                     prepared,
-                );
+                    true,
+                )
+                .map_err(|error| {
+                    tracing::warn!(%error, "持久化本轮用户消息失败");
+                    CoreError::WorkerStopped
+                })?;
                 let trust_mode = *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner());
                 let config = (*self.config.snapshot()).clone();
                 let storage_root = self.storage_root.clone();
                 let plugins = self.plugins.clone();
                 // stream_tx 直接用 core 的通道(发 StreamEvent 到 app 层)
-                let stream_tx = self.stream_tx.clone();
 
                 let agent_config = crate::agent_config::AgentConfig {
                     trust_mode: config.trust_mode,

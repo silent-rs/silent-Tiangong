@@ -61,14 +61,15 @@
 - [x] 插件 `on_session_ready` 与提示段落注入调整到 feedback 绑定之后、turn task 启动之前
 - [x] `deliver(Message)` 删除本轮命令通道创建与 `cmd_tx` 传参
 - [x] 删除 `std::mem::forget(turn_cmd_tx)` 占位逻辑
-- [ ] 删除 `TiangongCore.session_ready_fired`，每轮 Session 加载完成并绑定 feedback 后、收集提示段落与执行 Agent Loop 前调用 `on_session_ready`
+- [x] 删除 `TiangongCore.session_ready_fired`，每轮 Session 加载完成并绑定 feedback 后、收集提示段落与执行 Agent Loop 前调用 `on_session_ready`
 - [ ] `on_session_ready` 只负责基于本轮 Session 刷新插件状态；插件自行保证一次性后台初始化不重复，重点处理 Agent Team `Coordinator::initialize` 的幂等性
 
 ### execute_turn 内部简化
-- [ ] `execute_turn` 从 `self.session` 读取(当前仍接收 `session: &mut Session` 参数)
-- [ ] 明确职责边界：`deliver(Message)` 完整构建本轮 Session，`run_turn` 只负责执行、收尾与持久化
-- [ ] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点
-- [ ] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `self.session` 读取
+- [x] 将 `TurnContext::execute_turn` 从 Context 成员方法改为 `react/turn.rs` 的独立基础函数，并删除失去独立职责的 `engine` 模块
+- [x] `execute_turn` 从 `ctx.session` 取得本轮 Session，不接收额外 Session 参数
+- [x] 明确职责边界：`deliver(Message)` 完整构建本轮 Session，`run_turn` 只负责执行、收尾与持久化
+- [x] 删除 `AcceptedUserMessage` 及 `run_turn` 的对应参数，统一从 `ctx.session` 使用本轮用户消息、消息 ID 与轮次起点
+- [x] 删除 `execute_turn` 的 `initial_user_message` 参数，当前用户输入统一从 `ctx.session` 读取
 - [ ] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
 - [ ] `execute_turn_async` wrapper 函数简化或内联
 

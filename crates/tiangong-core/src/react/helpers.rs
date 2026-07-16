@@ -54,22 +54,25 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
 
 /// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
 pub(super) fn drain_pending_commands_async(
+    session: &mut Session,
     ctx: &TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> PendingCommandEffect {
     let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(ctx, commands)
+    process_commands(session, ctx, commands)
 }
 
 /// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
 pub(super) fn process_buffered_commands(
+    session: &mut Session,
     ctx: &TurnContext,
     commands: Vec<Command>,
 ) -> PendingCommandEffect {
-    process_commands(ctx, commands)
+    process_commands(session, ctx, commands)
 }
 
 fn process_commands(
+    session: &mut Session,
     ctx: &TurnContext,
     commands: impl IntoIterator<Item = Command>,
 ) -> PendingCommandEffect {
@@ -87,7 +90,7 @@ fn process_commands(
             Command::Message {
                 prepared,
                 message_id,
-            } => match accept_runtime_user_message(session, ctx, message_id, prepared) {
+            } => match accept_runtime_user_message(session, &ctx.stream_tx, message_id, prepared) {
                 Ok(text) => current_agent_input = Some(text),
                 Err(err) => tracing::warn!(
                     error = %err,
@@ -114,7 +117,7 @@ fn process_commands(
                 let _ = ctx.stream_tx.send(ev);
             }
             Command::SetTrustMode(_) => {
-                // trust_mode 更新由 engine.rs 的 select! 分支处理(拥有 &mut self)
+                // trust_mode 更新由 turn.rs 的 select! 分支处理(拥有 &mut self)
             }
         }
     }

@@ -4,8 +4,7 @@
 //! 构造,turn 结束后整体销毁。它持有 turn 执行所需的 client / 权限 / 工具 / 用量收集器。
 //!
 //! 与 `react/` 模块的关系:`TurnContext` 是被 react 层消费的能力集合,本身不属于
-//! ReAct 执行流程。`react/engine.rs` 在 `impl TurnContext` 上定义 `execute_turn`
-//! 等 ReAct 循环方法。
+//! ReAct 执行流程。`react/turn.rs` 通过独立的 `execute_turn` 函数消费本结构。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -84,7 +83,7 @@ impl TurnContext {
 
     /// 执行单个工具调用。
     ///
-    /// 权限审批在 turn 层统一完成（engine.rs 的工具执行循环）;
+    /// 权限审批在 turn 层统一完成（turn.rs 的工具执行循环）;
     /// 到达此方法时审批已通过,handler 直接执行。
     pub(crate) fn start_tool_call(
         &self,

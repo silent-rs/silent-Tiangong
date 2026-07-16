@@ -22,7 +22,7 @@ use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use tiangong_types::StreamEvent;
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, emit_cancelled};
-use super::engine::{TurnPhase, tools_for_current_turn};
+use super::turn::{TurnPhase, tools_for_current_turn};
 use crate::turn_context::TurnContext;
 
 /// 总结阶段的执行结果。
@@ -133,7 +133,7 @@ impl TurnContext {
                                     crate::session::MessagePhase::Summary,
                                 );
                             }
-                            match accept_runtime_user_message(session, self,
+                            match accept_runtime_user_message(session, &self.stream_tx,
                                 message_id,
                                 prepared,
                             ) {

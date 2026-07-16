@@ -33,13 +33,6 @@ pub fn append_or_reuse_user_message(
     Ok(message_id)
 }
 
-pub(crate) struct AcceptedUserMessage {
-    pub message_id: String,
-    /// 该用户消息在 Session 中的实际索引；快照预含同 ID 消息时可能小于接收前 len。
-    pub turn_start_idx: usize,
-    pub prepared: Vec<ContentBlock>,
-}
-
 pub(crate) fn emit_session_message_upsert(
     session: &Session,
     ctx: &crate::turn_context::TurnContext,
@@ -96,11 +89,12 @@ pub(crate) fn defer_tool_injection(
 ///
 /// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
 pub(crate) fn accept_prepared_user_message_with_options(
-    ctx: &crate::turn_context::TurnContext,
+    session: &mut Session,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
     close_pending_tools: bool,
-) -> Result<AcceptedUserMessage, String> {
+) -> Result<String, String> {
     validate_ready_content_blocks(&prepared)?;
     let before = session.clone();
     // Desktop/Server 会先把稳定 User 乐观写入宿主快照。执行中追加时必须先取出
@@ -119,7 +113,6 @@ pub(crate) fn accept_prepared_user_message_with_options(
         Vec::new()
     };
     let text = content_blocks_text(&prepared);
-    let accepted_prepared = prepared.clone();
     let stable_content = stable_content_blocks(&prepared);
     let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
         Ok(message_id) => message_id,
@@ -128,20 +121,17 @@ pub(crate) fn accept_prepared_user_message_with_options(
             return Err(err);
         }
     };
-    let turn_start_idx = match user_message_turn_start_idx(session, &message_id) {
-        Some(index) => index,
-        None => {
-            let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
-            *session = before;
-            return Err(err);
-        }
-    };
+    if user_message_turn_start_idx(session, &message_id).is_none() {
+        let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
+        *session = before;
+        return Err(err);
+    }
     if let Err(err) = session.try_persist_to_disk() {
         *session = before;
         return Err(err);
     }
     for (tool_call_id, tool_name, output) in interrupted_tool_calls {
-        let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
+        let _ = stream_tx.send(StreamEvent::ToolResult {
             name: tool_name,
             tool_call_id: Some(tool_call_id),
             ok: false,
@@ -156,18 +146,14 @@ pub(crate) fn accept_prepared_user_message_with_options(
         .find(|message| message.id == message_id)
         .map(|message| message.extract_media_assets())
         .unwrap_or_default();
-    let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
+    let _ = stream_tx.send(StreamEvent::UserMessage {
         message_id: message_id.clone(),
         content: text.clone(),
         content_blocks: stable_content,
         media: media.clone(),
         model_excluded: false,
     });
-    Ok(AcceptedUserMessage {
-        message_id,
-        turn_start_idx,
-        prepared: accepted_prepared,
-    })
+    Ok(message_id)
 }
 
 /// 在追加新的 User 消息前闭合所有尚未返回结果的工具调用，保持 Provider 协议顺序。
@@ -238,24 +224,16 @@ fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 持久化用户消息，并直接交给当前 Agent 处理。
-pub(crate) fn accept_user_message(
-    ctx: &crate::turn_context::TurnContext,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-    close_pending_tools: bool,
-) -> Result<AcceptedUserMessage, String> {
-    accept_prepared_user_message_with_options(ctx, message_id, prepared, close_pending_tools)
-}
-
 /// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
 pub(crate) fn accept_runtime_user_message(
-    ctx: &crate::turn_context::TurnContext,
+    session: &mut Session,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     message_id: Option<String>,
     prepared: Vec<ContentBlock>,
 ) -> Result<String, String> {
-    let accepted = accept_user_message(ctx, message_id, prepared, true)?;
-    Ok(content_blocks_text(&accepted.prepared))
+    let text = content_blocks_text(&prepared);
+    accept_prepared_user_message_with_options(session, stream_tx, message_id, prepared, true)?;
+    Ok(text)
 }
 
 fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
