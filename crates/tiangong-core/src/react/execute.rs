@@ -21,7 +21,7 @@ use crate::session::{Message, MessageRole};
 use crate::stream_throttle::ThrottledStreamSink;
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_types::{StreamEvent, StreamToolCall, stream::ContextCompressAction};
+use tiangong_types::{StreamEvent, StreamToolCall};
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, run_cancelable_child};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
@@ -255,12 +255,7 @@ async fn handle_text_response(
     ctx.session.persist_to_disk();
 
     if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-        maybe_update_context_summary(
-            ctx,
-            &response.usage,
-            ContextCompressAction::Auto,
-            child_cancel,
-        )
+        maybe_update_context_summary(ctx, &response.usage, child_cancel)
     })
     .await
     {
@@ -774,12 +769,7 @@ async fn execute_tool_batch(
         );
 
         if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            maybe_update_context_summary(
-                ctx,
-                &response.usage,
-                ContextCompressAction::Auto,
-                child_cancel,
-            )
+            maybe_update_context_summary(ctx, &response.usage, child_cancel)
         })
         .await
         {
@@ -952,12 +942,8 @@ pub(super) async fn execute_turn(
                         // 压缩本身也可能请求模型，因此继续监听命令，并沿用逐层取消协议。
                         let (cancel_tx, cancel_rx) = oneshot::channel();
                         let mut cancel_tx = Some(cancel_tx);
-                        let mut compression_future = Box::pin(maybe_update_context_summary(
-                            ctx,
-                            &forced_usage,
-                            ContextCompressAction::Auto,
-                            cancel_rx,
-                        ));
+                        let mut compression_future =
+                            Box::pin(maybe_update_context_summary(ctx, &forced_usage, cancel_rx));
                         let mut parent_cancelled = false;
                         let compression_cancelled = loop {
                             tokio::select! {

@@ -6,10 +6,12 @@ use std::sync::mpsc::Sender as StdSender;
 
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
+use crate::context::compressor::ContextCompressor;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
+use crate::session::{Message, MessageRole};
 use crate::turn_context::TurnContext;
 use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
@@ -129,28 +131,33 @@ pub(crate) fn emit_token_usage(
 pub(crate) async fn maybe_update_context_summary(
     ctx: &mut TurnContext,
     observed_usage: &TokenUsage,
+    cancel_rx: oneshot::Receiver<()>,
+) -> bool {
+    let organizer = ContextOrganizer::new(ctx.context_limit).with_threshold(0.95);
+    if !organizer.needs_compression(observed_total_tokens(observed_usage)) {
+        return false;
+    }
+    compress_context_summary(
+        ctx,
+        None,
+        Some(observed_usage),
+        ContextCompressAction::Auto,
+        cancel_rx,
+    )
+    .await
+}
+
+async fn compress_context_summary(
+    ctx: &mut TurnContext,
+    messages_to_compress: Option<Vec<Message>>,
+    observed_usage: Option<&TokenUsage>,
     action: ContextCompressAction,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> bool {
     let is_manual = action == ContextCompressAction::Compress;
-    let organizer = ContextOrganizer::new(ctx.context_limit)
-        .with_threshold(0.95)
-        .with_keep_recent_turns(6);
-    let observed_tokens = observed_total_tokens(observed_usage);
-    if !organizer.needs_compression(observed_tokens) {
-        if is_manual {
-            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                action: ContextCompressAction::Noop,
-                summary_up_to: ctx.session.summary_up_to,
-                remaining_messages: ctx
-                    .session
-                    .messages
-                    .len()
-                    .saturating_sub(ctx.session.summary_up_to),
-            });
-        }
-        return false;
-    }
+    let observed_tokens = observed_usage
+        .map(observed_total_tokens)
+        .unwrap_or_default();
     let total_messages = ctx.session.messages.len();
     let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
         summary_up_to: ctx.session.summary_up_to,
@@ -158,12 +165,22 @@ pub(crate) async fn maybe_update_context_summary(
     });
     let summary_up_to_before = ctx.session.summary_up_to;
     let remaining_before = total_messages.saturating_sub(summary_up_to_before);
+    let compressor = ContextCompressor::new(6);
     let update = {
-        let update_future = organizer.maybe_update_summary_with_usage_async(
-            &mut ctx.session,
-            &ctx.client,
-            observed_tokens,
-        );
+        let update_future = async {
+            match messages_to_compress {
+                Some(messages) => {
+                    compressor
+                        .update_summary_from_context_async(&mut ctx.session, &ctx.client, messages)
+                        .await
+                }
+                None => {
+                    compressor
+                        .update_summary_with_usage_async(&mut ctx.session, &ctx.client)
+                        .await
+                }
+            }
+        };
         tokio::pin!(update_future);
         tokio::select! {
             biased;
@@ -234,11 +251,10 @@ pub(crate) async fn maybe_update_context_summary(
             tracing::info!(
                 session_id = %ctx.session.id,
                 observed_tokens,
-                observed_prompt_tokens = observed_usage.prompt_tokens,
-                observed_completion_tokens = observed_usage.completion_tokens,
-                threshold_tokens = organizer.token_threshold(),
+                observed_prompt_tokens = observed_usage.map(|usage| usage.prompt_tokens),
+                observed_completion_tokens = observed_usage.map(|usage| usage.completion_tokens),
                 summary_up_to = ctx.session.summary_up_to,
-                "上下文与本轮输出达到压缩阈值，已更新早期对话摘要"
+                "上下文摘要已更新"
             );
         }
         Ok(_) => {
@@ -291,97 +307,46 @@ pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     }
 }
 
-/// 在独立 turn task 中执行手动压缩，并把运行时命令转发给统一压缩流程。
+/// 在独立 turn task 中执行手动压缩，只监听取消命令。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
+    keep_recent_turns: usize,
 ) {
-    let forced_usage = TokenUsage {
-        prompt_tokens: ctx.context_limit,
-        completion_tokens: 0,
-        total_tokens: ctx.context_limit,
-        prompt_cache_hit_tokens: None,
-        prompt_cache_miss_tokens: None,
-    };
-    let stream_tx = ctx.stream_tx.clone();
-    let context_limit = ctx.context_limit;
+    let mut messages_to_compress = ctx.session.context();
+    let mut remaining_turns = keep_recent_turns;
+    while remaining_turns > 0 {
+        let Some(message) = messages_to_compress.pop() else {
+            break;
+        };
+        if message.role == MessageRole::User {
+            remaining_turns -= 1;
+        }
+    }
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    let mut cancel_tx = Some(cancel_tx);
-    let mut compression_future = Box::pin(maybe_update_context_summary(
+    let mut compression_future = Box::pin(compress_context_summary(
         &mut ctx,
-        &forced_usage,
+        Some(messages_to_compress),
+        None,
         ContextCompressAction::Compress,
         cancel_rx,
     ));
-    let mut reported_usage = TokenUsage::default();
-    let mut pending_trust_mode = None;
-    let mut deferred_tool_injections = Vec::new();
-    let mut session_changed = false;
-
-    loop {
-        tokio::select! {
-            biased;
-            command = cmd_rx.recv() => match command {
-                Some(Command::Cancel | Command::Shutdown) | None => {
-                    cmd_rx.close();
-                    if let Some(cancel_tx) = cancel_tx.take() {
-                        let _ = cancel_tx.send(());
-                    }
-                    let _ = (&mut compression_future).await;
-                    break;
-                }
-                Some(Command::Approval { .. }) => {}
-                Some(Command::SetTrustMode(mode)) => {
-                    pending_trust_mode = Some(mode);
-                    session_changed = true;
-                }
-                Some(Command::InjectTool { tool_name, payload }) => {
-                    deferred_tool_injections.push((tool_name, payload));
-                }
-                Some(Command::EmitStreamEvent(event)) => {
-                    let _ = stream_tx.send(*event);
-                }
-                Some(Command::ReportUsage {
-                    usage,
-                    source,
-                    emit_event,
-                }) => {
-                    reported_usage.accumulate(&usage);
-                    session_changed = true;
-                    if emit_event {
-                        emit_token_usage(
-                            &stream_tx,
-                            &usage,
-                            None,
-                            context_limit,
-                            source,
-                            None,
-                        );
-                    }
-                }
-            },
-            _ = &mut compression_future => break,
+    let cancel_command = async move {
+        loop {
+            match cmd_rx.recv().await {
+                Some(Command::Cancel | Command::Shutdown) | None => return,
+                Some(_) => {}
+            }
         }
-    }
-    drop(compression_future);
-
-    ctx.session.token_usage.accumulate(&reported_usage);
-    if let Some(mode) = pending_trust_mode {
-        ctx.trust_mode = mode;
-        ctx.session.trust_mode = mode;
-        for plugin in &ctx.plugins {
-            plugin.set_trust_mode(mode);
+    };
+    tokio::pin!(cancel_command);
+    tokio::select! {
+        biased;
+        _ = &mut cancel_command => {
+            let _ = cancel_tx.send(());
+            let _ = (&mut compression_future).await;
         }
-    }
-    let had_tool_injections = !deferred_tool_injections.is_empty();
-    for (tool_name, payload) in deferred_tool_injections {
-        crate::react::message::defer_tool_injection(&mut ctx, tool_name, payload);
-    }
-    if had_tool_injections {
-        crate::react::message::flush_deferred_tool_injections(&mut ctx);
-    }
-    if session_changed && !had_tool_injections {
-        let _ = ctx.session.try_persist_to_disk();
+        _ = &mut compression_future => {}
     }
 }
 

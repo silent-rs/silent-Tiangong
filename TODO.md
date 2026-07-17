@@ -96,6 +96,8 @@
 - [x] 为 `TiangongCore` 增加无参数的 `build_turn_context`，内部加载 Session；普通投递统一通过 `ctx.session` 写入用户消息
 - [x] `reset_context` 和手动压缩结束时不重建系统提示，下一轮对话启动时再统一重建
 - [x] 删除手动压缩开始前的重复落盘，并让手动与自动压缩统一使用 `maybe_update_context_summary`
+- [x] 简化手动压缩：使用 `Session.context()` 取得安全消息并按轮弹出，`maybe_update_context_summary` 只接收待压缩消息，由压缩器内部推导持久化边界
+- [x] 拆分压缩阈值判断与压缩执行收尾，手动压缩直接执行且不再伪造用量
 
 ### 调用方适配
 - [ ] `app.rs ensure_core`:先 persist session 文件再创建 Core(不再传 session 给 builder)

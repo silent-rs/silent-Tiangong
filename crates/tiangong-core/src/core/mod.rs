@@ -150,12 +150,9 @@ impl TiangongCore {
 
         let ctx = self.build_turn_context()?;
 
-        crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
-            for plugin in &ctx.plugins {
-                plugin.on_session_ready(&mut ctx.session);
-            }
+        crate::shared_runtime::spawn_turn(ctx, move |ctx, cmd_rx| {
             Ok(crate::react::context::run_manual_context_compression(
-                ctx, cmd_rx,
+                ctx, cmd_rx, 6,
             ))
         })
     }
