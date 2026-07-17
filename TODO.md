@@ -91,6 +91,11 @@
 - [x] 删除未参与控制流的 `TurnPhase` 枚举和无效阶段赋值，阶段变化只通过 `StreamEvent::PhaseChanged` 发布
 - [x] 删除 `PendingCommandEffect`、运行中消息追加链路及通用命令处理封装；主 `cmd_rx` 直接在 `execute_turn` 外层 `react_loop` 中展开，收到 `Cancel` / `Shutdown` 后立即关闭接收端，并通过逐层新建的 `oneshot` 通知内层 `execute_loop` 由内向外收尾退出
 - [x] 补齐 `execute_turn` 的请求失败、运行时命令、审批、工具/总结取消、总结重入与强制收尾测试，并用覆盖率报告复核关键控制分支
+- [x] 补充 `execute_turn` 关键执行节点注释，说明双层循环、命令处理、取消传播、工具执行、总结重入与结果出口，不改变执行逻辑
+- [x] 收紧忙碌期控制边界：手动压缩与清空上下文仅在 Core 空闲时执行，`execute_turn` 只接收取消、信任模式切换、审批及内部反馈；信任模式立即更新运行态并随轮次统一落盘；手动压缩复用 `spawn_turn`，并与自动压缩统一使用滚动摘要流程
+- [x] 为 `TiangongCore` 增加无参数的 `build_turn_context`，内部加载 Session；普通投递统一通过 `ctx.session` 写入用户消息
+- [x] `reset_context` 和手动压缩结束时不重建系统提示，下一轮对话启动时再统一重建
+- [x] 删除手动压缩开始前的重复落盘，并让手动与自动压缩统一使用 `maybe_update_context_summary`
 
 ### 调用方适配
 - [ ] `app.rs ensure_core`:先 persist session 文件再创建 Core(不再传 session 给 builder)

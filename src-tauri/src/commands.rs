@@ -2647,15 +2647,7 @@ pub async fn set_trust_mode(
     }
     // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
     state.set_core_trust_mode(&session_id, trust_mode);
-
-    // 信任模式已由 app 内存快照更新（含 persist_app_only），再持久化完整 session 文件。
-    if let Err(error) = state
-        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-        .await
-    {
-        rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
-        return Err(error.to_string());
-    }
+    // Session 中的 trust_mode 不在这里单独落盘，由当前 turn 或下一轮统一持久化。
     Ok(())
 }
 

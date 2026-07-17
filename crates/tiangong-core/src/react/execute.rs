@@ -12,7 +12,8 @@ use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{ModelFunctionResponse, ModelRequest, TokenUsage, ToolCall, ToolSpec};
 use crate::permission::TrustMode;
 use crate::react::context::{
-    emit_token_usage, maybe_update_context_summary, persist_error, select_client_for_request,
+    build_thinking_config, emit_token_usage, maybe_update_context_summary, persist_error,
+    select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -20,7 +21,7 @@ use crate::session::{Message, MessageRole};
 use crate::stream_throttle::ThrottledStreamSink;
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_types::{StreamEvent, StreamToolCall};
+use tiangong_types::{StreamEvent, StreamToolCall, stream::ContextCompressAction};
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, run_cancelable_child};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
@@ -48,96 +49,39 @@ struct ApprovalResponse {
     approved: bool,
 }
 
-enum DeferredTurnCommand {
-    CompressContext,
-    ResetContext,
-    InjectTool {
-        tool_name: String,
-        payload: serde_json::Value,
-    },
-}
-
-/// 在没有活跃子循环时应用本阶段暂存的 Session 命令。
+/// 在没有活跃子循环时写入本阶段暂存的工具注入。
 ///
-/// 子循环（模型请求 / 工具执行等）持有 `&mut ctx`，期间收到的需要修改 Session
-/// 的命令（`ResetContext` / `InjectTool`）不能立即执行，故转发到 `deferred_tx`
-/// 暂存；待子循环结束、ctx 借用归还后，在循环顶部统一 apply。`CompressContext`
-/// 在回合执行中一律跳过（仅提示），因为压缩需在稳定的 Session 状态上进行。
-fn apply_deferred_turn_commands(
+/// 子循环（模型请求 / 工具执行等）持有 `&mut ctx`，期间收到的工具注入不能立即
+/// 修改 Session，故先暂存；待子循环结束、ctx 借用归还后再统一写入。
+fn apply_deferred_tool_injections(
     ctx: &mut TurnContext,
-    deferred_rx: &mut tokio_mpsc::UnboundedReceiver<DeferredTurnCommand>,
+    deferred_rx: &mut tokio_mpsc::UnboundedReceiver<(String, serde_json::Value)>,
 ) {
-    while let Ok(command) = deferred_rx.try_recv() {
-        match command {
-            DeferredTurnCommand::CompressContext => {
-                let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
-                    agent_id: "system".to_string(),
-                    agent_label: "系统".to_string(),
-                    content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
-                    level: "warning".to_string(),
-                });
-            }
-            DeferredTurnCommand::ResetContext => crate::core::reset_context(ctx),
-            DeferredTurnCommand::InjectTool { tool_name, payload } => {
-                crate::react::message::defer_tool_injection(ctx, tool_name, payload);
-            }
-        }
+    while let Ok((tool_name, payload)) = deferred_rx.try_recv() {
+        crate::react::message::defer_tool_injection(ctx, tool_name, payload);
     }
     crate::react::message::flush_deferred_tool_injections(ctx);
+}
+
+/// 将 watch 中的最新信任模式同步到本轮执行状态。
+///
+/// 这里只更新内存；Session 会在本轮既有持久化节点统一落盘。
+fn apply_turn_trust_mode(ctx: &mut TurnContext, trust_rx: &mut watch::Receiver<TrustMode>) {
+    let mode = *trust_rx.borrow_and_update();
+    if ctx.trust_mode == mode && ctx.session.trust_mode == mode {
+        return;
+    }
+    ctx.trust_mode = mode;
+    ctx.session.trust_mode = mode;
+    for plugin in &ctx.plugins {
+        plugin.set_trust_mode(mode);
+    }
 }
 
 // TurnContext 定义与基础能力方法位于 `crate::turn_context`。本文件只实现单轮
 // Agent Loop 的阶段编排与具体执行步骤。
 
 // ===== turn 执行辅助 =====
-
-fn build_thinking_config(
-    ctx: &TurnContext,
-) -> (
-    Option<crate::model::ThinkingConfig>,
-    Option<crate::model::ReasoningEffort>,
-    bool,
-) {
-    let effort_str = ctx.agent_config.reasoning_effort.trim().to_lowercase();
-    match effort_str.as_str() {
-        "none" | "" => (None, None, true),
-        "low" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Low),
-            false,
-        ),
-        "medium" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-        "high" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 8192,
-            }),
-            Some(crate::model::ReasoningEffort::High),
-            false,
-        ),
-        "max" => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 16384,
-            }),
-            Some(crate::model::ReasoningEffort::Max),
-            false,
-        ),
-        _ => (
-            Some(crate::model::ThinkingConfig {
-                budget_tokens: 4096,
-            }),
-            Some(crate::model::ReasoningEffort::Medium),
-            false,
-        ),
-    }
-}
 
 enum ReactRequestOutcome {
     Completed {
@@ -311,7 +255,12 @@ async fn handle_text_response(
     ctx.session.persist_to_disk();
 
     if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-        maybe_update_context_summary(ctx, &response.usage, child_cancel)
+        maybe_update_context_summary(
+            ctx,
+            &response.usage,
+            ContextCompressAction::Auto,
+            child_cancel,
+        )
     })
     .await
     {
@@ -495,7 +444,7 @@ async fn request_tool_approval(
     call: &ToolCall,
     args_summary: &str,
 ) -> ToolApprovalOutcome {
-    ctx.trust_mode = *trust_rx.borrow_and_update();
+    apply_turn_trust_mode(ctx, trust_rx);
     let trust_mode = format!("{:?}", ctx.trust_mode);
     if ctx.trust_mode == TrustMode::FullTrust {
         ctx.observer.audit_permission(
@@ -528,7 +477,10 @@ async fn request_tool_approval(
             _ = &mut cancel_rx => return ToolApprovalOutcome::Cancelled,
             changed = trust_rx.changed() => {
                 if changed.is_ok() {
-                    ctx.trust_mode = *trust_rx.borrow_and_update();
+                    apply_turn_trust_mode(ctx, trust_rx);
+                    if ctx.trust_mode == TrustMode::FullTrust {
+                        return ToolApprovalOutcome::Approved;
+                    }
                 }
             }
             response = approval_rx.recv() => match response {
@@ -822,7 +774,12 @@ async fn execute_tool_batch(
         );
 
         if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            maybe_update_context_summary(ctx, &response.usage, child_cancel)
+            maybe_update_context_summary(
+                ctx,
+                &response.usage,
+                ContextCompressAction::Auto,
+                child_cancel,
+            )
         })
         .await
         {
@@ -850,24 +807,32 @@ pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
+    // 主命令通道只在本函数消费；内部通道分别承接工具注入、审批回复和实时信任模式，
+    // 避免把 cmd_rx 继续下传给具体执行阶段。
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
-    let (deferred_tx, mut deferred_rx) = tokio_mpsc::unbounded_channel();
+    let (tool_injection_tx, mut tool_injection_rx) = tokio_mpsc::unbounded_channel();
     let (approval_tx, mut approval_rx) = tokio_mpsc::unbounded_channel();
     let (trust_tx, mut trust_rx) = watch::channel(ctx.trust_mode);
+
+    // round 和用量覆盖整个 turn；工具历史则在总结要求继续工作时重新开始记录。
     let mut round = 0usize;
     let mut outer_iteration = 0u32;
     let mut accumulated_usage = TokenUsage::default();
     let mut tool_history = ToolCallHistory::default();
 
+    // 一次外层迭代由“模型/工具执行 + 总结判断”组成；总结判定未完成时才会重入。
     'react_loop: loop {
         let iteration_start_round = round;
         let mut executed_tool_in_iteration = false;
 
+        // 内层循环持续执行“请求模型 -> 执行工具”，直到得到最终文本或达到工具轮次上限。
         'execute_loop: loop {
-            apply_deferred_turn_commands(ctx, &mut deferred_rx);
-            ctx.trust_mode = *trust_rx.borrow();
+            // 在阶段边界先同步权限，再写入暂存的工具内容，避免并发修改 Session。
+            apply_turn_trust_mode(ctx, &mut trust_rx);
+            apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
 
+            // 首轮校验构建合同；后续轮次向宿主发布重新分析状态。
             if round == 0 {
                 debug_assert!(
                     ctx.session.system_prompt_message.is_some(),
@@ -880,10 +845,12 @@ pub(super) async fn execute_turn(
                     iteration: (round + 1) as u32,
                 });
             }
+            // 上限按当前外层迭代单独计算，超限后转入总结阶段，而不是直接判定失败。
             if round.saturating_sub(iteration_start_round) >= ctx.max_tool_rounds {
                 break 'execute_loop;
             }
 
+            // 每个耗时阶段使用独立 oneshot 接收取消；主命令仍由本层 select 统一分发。
             let request_tools = ctx.tools.clone();
             let (cancel_tx, cancel_rx) = oneshot::channel();
             let mut cancel_tx = Some(cancel_tx);
@@ -898,6 +865,7 @@ pub(super) async fn execute_turn(
                     biased;
                     command = cmd_rx.recv() => match command {
                         Some(Command::Cancel | Command::Shutdown) | None => {
+                            // 取消后关闭主接收端，丢弃后续命令，并等待子阶段完成自身收尾。
                             cmd_rx.close();
                             if let Some(cancel_tx) = cancel_tx.take() {
                                 let _ = cancel_tx.send(());
@@ -912,19 +880,10 @@ pub(super) async fn execute_turn(
                             });
                         }
                         Some(Command::SetTrustMode(mode)) => {
-                            let _ = trust_tx.send(mode);
-                        }
-                        Some(Command::CompressContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                        }
-                        Some(Command::ResetContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                            trust_tx.send_replace(mode);
                         }
                         Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                tool_name,
-                                payload,
-                            });
+                            let _ = tool_injection_tx.send((tool_name, payload));
                         }
                         Some(Command::EmitStreamEvent(event)) => {
                             let _ = stream_tx.send(*event);
@@ -947,6 +906,7 @@ pub(super) async fn execute_turn(
             };
             drop(request_future);
             if parent_cancelled {
+                // 请求可能在收到取消前已经产生用量，返回前仍要把这部分计入本轮总量。
                 match request_outcome {
                     ReactRequestOutcome::Completed {
                         response_result: Ok(response),
@@ -960,13 +920,14 @@ pub(super) async fn execute_turn(
                 return TurnExecutionResult::cancelled(accumulated_usage);
             }
 
+            // 正常响应进入后续处理；仅上下文超限类错误允许先压缩再重试。
             let (pending_msg_id, response) = match request_outcome {
                 ReactRequestOutcome::Completed {
                     pending_msg_id,
                     response_result: Ok(response),
                 } => {
-                    apply_deferred_turn_commands(ctx, &mut deferred_rx);
-                    ctx.trust_mode = *trust_rx.borrow();
+                    apply_turn_trust_mode(ctx, &mut trust_rx);
+                    apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
                     (pending_msg_id, response)
                 }
                 ReactRequestOutcome::Completed {
@@ -988,10 +949,15 @@ pub(super) async fn execute_turn(
                             prompt_cache_hit_tokens: None,
                             prompt_cache_miss_tokens: None,
                         };
+                        // 压缩本身也可能请求模型，因此继续监听命令，并沿用逐层取消协议。
                         let (cancel_tx, cancel_rx) = oneshot::channel();
                         let mut cancel_tx = Some(cancel_tx);
-                        let mut compression_future =
-                            Box::pin(maybe_update_context_summary(ctx, &forced_usage, cancel_rx));
+                        let mut compression_future = Box::pin(maybe_update_context_summary(
+                            ctx,
+                            &forced_usage,
+                            ContextCompressAction::Auto,
+                            cancel_rx,
+                        ));
                         let mut parent_cancelled = false;
                         let compression_cancelled = loop {
                             tokio::select! {
@@ -1007,19 +973,10 @@ pub(super) async fn execute_turn(
                                     }
                                     Some(Command::Approval { .. }) => {}
                                     Some(Command::SetTrustMode(mode)) => {
-                                        let _ = trust_tx.send(mode);
-                                    }
-                                    Some(Command::CompressContext) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                                    }
-                                    Some(Command::ResetContext) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                                        trust_tx.send_replace(mode);
                                     }
                                     Some(Command::InjectTool { tool_name, payload }) => {
-                                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                            tool_name,
-                                            payload,
-                                        });
+                                        let _ = tool_injection_tx.send((tool_name, payload));
                                     }
                                     Some(Command::EmitStreamEvent(event)) => {
                                         let _ = stream_tx.send(*event);
@@ -1041,11 +998,12 @@ pub(super) async fn execute_turn(
                             }
                         };
                         drop(compression_future);
-                        apply_deferred_turn_commands(ctx, &mut deferred_rx);
-                        ctx.trust_mode = *trust_rx.borrow();
+                        apply_turn_trust_mode(ctx, &mut trust_rx);
+                        apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
                         if parent_cancelled || compression_cancelled {
                             return TurnExecutionResult::cancelled(accumulated_usage);
                         }
+                        // 只有压缩确实推进了摘要边界才重试，避免相同错误无限循环。
                         if ctx.session.summary_up_to > before_summary_up_to {
                             continue 'execute_loop;
                         }
@@ -1059,6 +1017,7 @@ pub(super) async fn execute_turn(
                 }
             };
 
+            // 模型和插件用量统一汇总到 accumulated_usage；单次模型用量同时实时反馈宿主。
             accumulated_usage.accumulate(&response.usage);
             emit_token_usage(
                 &ctx.stream_tx,
@@ -1070,6 +1029,7 @@ pub(super) async fn execute_turn(
             );
             round += 1;
 
+            // 无工具调用时由文本处理决定直接完成，或在已执行过工具后转入总结确认。
             if response.tool_calls.is_empty() {
                 let (cancel_tx, cancel_rx) = oneshot::channel();
                 let mut cancel_tx = Some(cancel_tx);
@@ -1099,19 +1059,10 @@ pub(super) async fn execute_turn(
                             }
                             Some(Command::Approval { .. }) => {}
                             Some(Command::SetTrustMode(mode)) => {
-                                let _ = trust_tx.send(mode);
-                            }
-                            Some(Command::CompressContext) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                            }
-                            Some(Command::ResetContext) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                                trust_tx.send_replace(mode);
                             }
                             Some(Command::InjectTool { tool_name, payload }) => {
-                                let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                    tool_name,
-                                    payload,
-                                });
+                                let _ = tool_injection_tx.send((tool_name, payload));
                             }
                             Some(Command::EmitStreamEvent(event)) => {
                                 let _ = stream_tx.send(*event);
@@ -1136,8 +1087,8 @@ pub(super) async fn execute_turn(
                 if parent_cancelled {
                     return TurnExecutionResult::cancelled(accumulated_usage);
                 }
-                apply_deferred_turn_commands(ctx, &mut deferred_rx);
-                ctx.trust_mode = *trust_rx.borrow();
+                apply_turn_trust_mode(ctx, &mut trust_rx);
+                apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
                 match text_outcome {
                     TextResponseOutcome::Completed => {
                         return TurnExecutionResult::success(accumulated_usage);
@@ -1149,6 +1100,7 @@ pub(super) async fn execute_turn(
                 }
             }
 
+            // 工具批次通过专用通道接收审批和信任模式变化；主循环继续负责运行时命令与取消。
             executed_tool_in_iteration = true;
             let (cancel_tx, cancel_rx) = oneshot::channel();
             let mut cancel_tx = Some(cancel_tx);
@@ -1183,19 +1135,10 @@ pub(super) async fn execute_turn(
                             });
                         }
                         Some(Command::SetTrustMode(mode)) => {
-                            let _ = trust_tx.send(mode);
-                        }
-                        Some(Command::CompressContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                        }
-                        Some(Command::ResetContext) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                            trust_tx.send_replace(mode);
                         }
                         Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                                tool_name,
-                                payload,
-                            });
+                            let _ = tool_injection_tx.send((tool_name, payload));
                         }
                         Some(Command::EmitStreamEvent(event)) => {
                             let _ = stream_tx.send(*event);
@@ -1220,8 +1163,9 @@ pub(super) async fn execute_turn(
             if parent_cancelled {
                 return TurnExecutionResult::cancelled(accumulated_usage);
             }
-            apply_deferred_turn_commands(ctx, &mut deferred_rx);
-            ctx.trust_mode = *trust_rx.borrow();
+            apply_turn_trust_mode(ctx, &mut trust_rx);
+            apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
+            // Continue 触发下一轮模型请求；Completed/Cancelled 则直接形成 turn 结果。
             match tool_outcome {
                 ToolBatchOutcome::Continue => continue 'execute_loop,
                 ToolBatchOutcome::Completed => {
@@ -1233,6 +1177,7 @@ pub(super) async fn execute_turn(
             }
         }
 
+        // 进入这里表示文本处理要求确认完成度，或本次迭代已经达到工具轮次上限。
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let mut cancel_tx = Some(cancel_tx);
         let mut summary_future = Box::pin(async {
@@ -1245,6 +1190,7 @@ pub(super) async fn execute_turn(
                 SummaryPhaseResult::Completed(usage) => SummaryPhaseResult::Completed(usage),
                 SummaryPhaseResult::NeedMoreWork { reason, usage } => {
                     outer_iteration += 1;
+                    // 防止“继续工作”无限重入；达到上限时要求模型给出强制最终回复。
                     if outer_iteration >= ctx.max_outer_iterations {
                         let force_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
                             ctx.force_final_response(child_cancel, ForceFinalReason::OuterLimit)
@@ -1263,6 +1209,7 @@ pub(super) async fn execute_turn(
                         };
                     }
 
+                    // 把未完成原因写回会话，确保下一次 ReAct 请求能看到明确的继续指令。
                     inject_tool_to_messages(
                         &mut ctx.session,
                         "summary_need_more_work",
@@ -1279,6 +1226,7 @@ pub(super) async fn execute_turn(
                     SummaryPhaseResult::Cancelled(usage)
                 }
                 SummaryPhaseResult::Failed { message, usage } => {
+                    // 总结失败不立即终止，先记录错误并尝试生成一次可交付的最终回复。
                     persist_error(ctx, format!("总结阶段失败：{message}"));
                     let force_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
                         ctx.force_final_response(child_cancel, ForceFinalReason::SummaryError)
@@ -1301,6 +1249,8 @@ pub(super) async fn execute_turn(
                 }
             }
         });
+
+        // 总结及其可能触发的强制回复共用本阶段取消信号，主通道仍在外层持续响应。
         let mut parent_cancelled = false;
         let summary_result = loop {
             tokio::select! {
@@ -1316,19 +1266,10 @@ pub(super) async fn execute_turn(
                     }
                     Some(Command::Approval { .. }) => {}
                     Some(Command::SetTrustMode(mode)) => {
-                        let _ = trust_tx.send(mode);
-                    }
-                    Some(Command::CompressContext) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                    }
-                    Some(Command::ResetContext) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                        trust_tx.send_replace(mode);
                     }
                     Some(Command::InjectTool { tool_name, payload }) => {
-                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
-                            tool_name,
-                            payload,
-                        });
+                        let _ = tool_injection_tx.send((tool_name, payload));
                     }
                     Some(Command::EmitStreamEvent(event)) => {
                         let _ = stream_tx.send(*event);
@@ -1355,13 +1296,16 @@ pub(super) async fn execute_turn(
             SummaryPhaseResult::NeedMoreWork { usage, .. }
             | SummaryPhaseResult::Failed { usage, .. } => usage,
         };
+        // 总结即使取消或失败也可能已经产生用量，因此必须先累计再决定最终结果。
         accumulated_usage.accumulate(summary_usage);
         if parent_cancelled {
             return TurnExecutionResult::cancelled(accumulated_usage);
         }
-        apply_deferred_turn_commands(ctx, &mut deferred_rx);
-        ctx.trust_mode = *trust_rx.borrow();
+        // 总结期间收到的运行态变化只能在总结 Future 释放后安全写入 Session。
+        apply_turn_trust_mode(ctx, &mut trust_rx);
+        apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
 
+        // NeedMoreWork 是唯一重入外层循环的出口，其余状态都在此结束本轮。
         match summary_result {
             SummaryPhaseResult::Completed(_) => {
                 return TurnExecutionResult::success(accumulated_usage);
@@ -1834,7 +1778,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn handles_runtime_commands_while_request_is_running() {
+    async fn handles_runtime_feedback_while_request_is_running() {
         let server = MockServer::start().await;
         mount_sse(
             &server,
@@ -1843,8 +1787,6 @@ mod tests {
         .await;
 
         let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        harness.cmd_tx.send(Command::CompressContext).unwrap();
-        harness.cmd_tx.send(Command::ResetContext).unwrap();
         harness
             .cmd_tx
             .send(Command::InjectTool {
@@ -1885,7 +1827,6 @@ mod tests {
             result.outcome
         );
         assert_eq!(result.usage.total_tokens, 22);
-        assert!(harness.ctx.session.summary_up_to > 0);
         assert!(harness.ctx.session.messages.iter().any(|message| {
             message.role == MessageRole::Tool && message.text_content().contains("runtime_probe")
         }));
@@ -1898,13 +1839,6 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event,
             StreamEvent::TokenUsage { source, .. } if source == "runtime-probe"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            StreamEvent::ContextCompressed {
-                action: tiangong_types::stream::ContextCompressAction::Clear,
-                ..
-            }
         )));
     }
 

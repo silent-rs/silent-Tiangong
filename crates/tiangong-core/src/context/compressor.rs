@@ -118,7 +118,7 @@ impl ContextCompressor {
     }
 
     /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
-    fn find_split_point(&self, messages: &[Message]) -> usize {
+    pub(crate) fn find_split_point(&self, messages: &[Message]) -> usize {
         let mut turn_count = 0;
         let mut split_point = messages.len();
 

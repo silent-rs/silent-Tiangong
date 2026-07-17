@@ -9,12 +9,6 @@ pub enum Command {
     Approval { request_id: String, approved: bool },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
-    /// 手动触发上下文压缩
-    #[allow(dead_code)]
-    CompressContext,
-    /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）
-    #[allow(dead_code)]
-    ResetContext,
     /// 工具类内容自动注入（浏览器页面、终端用户操作等，不触发 turn）。
     InjectTool {
         tool_name: String,

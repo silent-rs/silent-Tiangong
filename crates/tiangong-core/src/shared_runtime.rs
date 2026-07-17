@@ -80,6 +80,9 @@ where
     Fut: Future<Output = ()> + Send + 'static,
 {
     let session_id = context.session.id.clone();
+    if is_running(&session_id) {
+        return Err(crate::core::CoreError::Busy);
+    }
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
     for plugin in &context.plugins {
         plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx.clone()));
@@ -94,18 +97,26 @@ where
         }
         remove_turn(&sid);
     });
-    turn_tasks()
+    let mut tasks = turn_tasks()
         .lock()
-        .map_err(|_| crate::core::CoreError::WorkerStopped)?
-        .insert(session_id, (cmd_tx, handle));
+        .map_err(|_| crate::core::CoreError::WorkerStopped)?;
+    if tasks
+        .get(&session_id)
+        .is_some_and(|(_, handle)| !handle.is_finished())
+    {
+        handle.abort();
+        return Err(crate::core::CoreError::Busy);
+    }
+    tasks.insert(session_id, (cmd_tx, handle));
+    drop(tasks);
     start_tx
         .send(())
         .map_err(|_| crate::core::CoreError::WorkerStopped)
 }
 
-/// 向活跃 turn task 发送命令(Cancel/Approval/InjectTool)。
+/// 向当前活跃任务发送命令(Cancel/Approval/InjectTool/SetTrustMode)。
 ///
-/// 无活跃 turn task 时返回 false(命令被忽略)。
+/// 无活跃任务时返回 false(命令被忽略)。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
     if let Ok(tasks) = turn_tasks().lock()
         && let Some((tx, handle)) = tasks.get(session_id)

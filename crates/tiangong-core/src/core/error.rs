@@ -17,6 +17,8 @@ pub enum CoreError {
     MissingBuilderField(&'static str),
     /// worker 已停止，命令通道已关闭——`deliver` 无法投递命令。
     WorkerStopped,
+    /// 当前 Core 正在执行任务，不能同时执行空闲期维护操作。
+    Busy,
     /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
 }
@@ -28,6 +30,7 @@ impl fmt::Display for CoreError {
                 write!(f, "Builder 缺少必填字段：{name}")
             }
             CoreError::WorkerStopped => write!(f, "worker 已停止，命令通道已关闭"),
+            CoreError::Busy => write!(f, "Core 正在执行，当前操作仅允许在空闲时进行"),
             CoreError::WorkerPanicked => write!(f, "worker 线程 panic，会话不可恢复"),
         }
     }

@@ -11,6 +11,7 @@ use crate::core_config::{CoreConfig, CoreConfigProvider};
 use crate::model::SingleProviderClient;
 use crate::react::turn::run_turn;
 use crate::session::Session;
+use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
 pub mod command;
@@ -86,9 +87,102 @@ impl TiangongCore {
     ///
     /// 更新后对当前会话的权限门与插件实时生效。
     pub fn set_trust_mode(&self, mode: crate::permission::TrustMode) {
-        // 更新 Core 持有的值(下次 turn 用) + 发送到活跃 turn task(即时生效)
-        *self.trust_mode.lock().unwrap() = mode;
+        // Core 和插件立即使用新值；Session 字段由活跃 turn 或下一轮统一写入。
+        *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        for plugin in &self.plugins {
+            plugin.set_trust_mode(mode);
+        }
         let _ = self.send_cmd(Command::SetTrustMode(mode));
+    }
+
+    fn load_session(&self) -> Result<Session, CoreError> {
+        Session::load_from_storage(&self.storage_root, &self.session_id).map_err(|error| {
+            tracing::warn!(%error, session_id = %self.session_id, "加载 Session 失败");
+            CoreError::WorkerStopped
+        })
+    }
+
+    /// 加载当前 Session，并根据 Core 当前配置构建本轮执行上下文。
+    fn build_turn_context(&self) -> Result<TurnContext, CoreError> {
+        let mut session = self.load_session()?;
+        let trust_mode = *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner());
+        session.trust_mode = trust_mode;
+
+        let config = self.config.snapshot();
+        let stream_tx = self.stream_tx.clone();
+        let plugins = self.plugins.clone();
+        let retry_tx = stream_tx.clone();
+        let on_retry: crate::model::OnRetryCallback =
+            Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
+                let _ = retry_tx.send(StreamEvent::Retry {
+                    message: error_text.to_string(),
+                    attempt,
+                    max_attempts,
+                });
+            });
+        let client = SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
+        let prepared_plugins =
+            crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
+
+        Ok(TurnContext::builder()
+            .client(client)
+            .session(session)
+            .stream_tx(stream_tx)
+            .plugins(plugins)
+            .context_limit(config.context_limit)
+            .agent_config(crate::agent_config::AgentConfig {
+                trust_mode,
+                default_trust_mode: config.default_trust_mode,
+                custom_system_prompt: config.custom_system_prompt.clone(),
+                reasoning_effort: config.reasoning_effort.clone(),
+            })
+            .trust_mode(trust_mode)
+            .observer(crate::observe::Observer::new(self.storage_root.clone()))
+            .tool_overrides(prepared_plugins.tool_overrides)
+            .tools(prepared_plugins.tools)
+            .build())
+    }
+
+    fn compress_context(&self) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+
+        let ctx = self.build_turn_context()?;
+
+        crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
+            for plugin in &ctx.plugins {
+                plugin.on_session_ready(&mut ctx.session);
+            }
+            Ok(crate::react::context::run_manual_context_compression(
+                ctx, cmd_rx,
+            ))
+        })
+    }
+
+    fn reset_context(&self) -> Result<(), CoreError> {
+        if self.is_busy() {
+            return Err(CoreError::Busy);
+        }
+
+        let mut session = self.load_session()?;
+        let total = session.messages.len();
+        session.summary_up_to = total;
+        crate::context::compressor::mark_compact_boundary(&mut session.messages, total);
+        session.context_summary = None;
+        session.current_tokens = 0;
+        session.active_agent_current_tokens = 0;
+        session.agent_current_tokens.clear();
+        session.try_persist_to_disk().map_err(|error| {
+            tracing::warn!(%error, session_id = %self.session_id, "清空上下文落盘失败");
+            CoreError::WorkerStopped
+        })?;
+        let _ = self.stream_tx.send(StreamEvent::ContextCompressed {
+            action: tiangong_types::stream::ContextCompressAction::Clear,
+            summary_up_to: total,
+            remaining_messages: 0,
+        });
+        Ok(())
     }
 
     /// 关闭并获取最终 session。
@@ -133,24 +227,18 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     }
                 }
 
-                let session_id = self.session_id.clone();
-                let mut session = Session::load_from_storage(&self.storage_root, &session_id)
-                    .map_err(|error| {
-                        tracing::warn!(%error, %session_id, "加载本轮 Session 失败");
-                        CoreError::WorkerStopped
-                    })?;
+                let mut ctx = self.build_turn_context()?;
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
                 let content = tiangong_types::content_blocks_text(&prepared);
                 let content_blocks = tiangong_types::stable_content_blocks(&prepared);
-                session
+                ctx.session
                     .try_append_prepared_user_message_with_id(message_id.clone(), prepared)
                     .map_err(|error| {
                         tracing::warn!(%error, "持久化本轮用户消息失败");
                         CoreError::WorkerStopped
                     })?;
-                let stream_tx = self.stream_tx.clone();
                 // 返回前先发出 StreamEvent::UserMessage,让调用方确认本轮消息已被 core 接收。
-                stream_tx
+                ctx.stream_tx
                     .send(StreamEvent::UserMessage {
                         message_id,
                         content,
@@ -159,43 +247,6 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         model_excluded: false,
                     })
                     .map_err(|_| CoreError::WorkerStopped)?;
-                let trust_mode = *self.trust_mode.lock().unwrap_or_else(|p| p.into_inner());
-                let config = (*self.config.snapshot()).clone();
-                let storage_root = self.storage_root.clone();
-                let plugins = self.plugins.clone();
-                // stream_tx 直接用 core 的通道(发 StreamEvent 到 app 层)
-
-                let agent_config = crate::agent_config::AgentConfig {
-                    trust_mode: config.trust_mode,
-                    default_trust_mode: config.default_trust_mode,
-                    custom_system_prompt: config.custom_system_prompt.clone(),
-                    reasoning_effort: config.reasoning_effort.clone(),
-                };
-                let retry_tx = stream_tx.clone();
-                let on_retry: crate::model::OnRetryCallback =
-                    Arc::new(move |attempt, max_attempts, _delay_ms, error_text| {
-                        let _ = retry_tx.send(StreamEvent::Retry {
-                            message: error_text.to_string(),
-                            attempt,
-                            max_attempts,
-                        });
-                    });
-                let client =
-                    SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
-                let prepared_plugins =
-                    crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
-                let ctx = crate::turn_context::TurnContext::builder()
-                    .client(client)
-                    .session(session)
-                    .stream_tx(stream_tx.clone())
-                    .plugins(plugins)
-                    .context_limit(config.context_limit)
-                    .agent_config(agent_config)
-                    .trust_mode(trust_mode)
-                    .observer(crate::observe::Observer::new(storage_root))
-                    .tool_overrides(prepared_plugins.tool_overrides)
-                    .tools(prepared_plugins.tools)
-                    .build();
 
                 crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
                     // 每轮都触发 on_session_ready:插件自行保证幂等性(如 index 扫描的 last_scanned
@@ -231,15 +282,12 @@ impl crate::agent_input::AgentInput for TiangongCore {
             }),
             AgentInputKind::Command(cmd) => match cmd {
                 CommandInput::Cancel => self.send_cmd(Command::Cancel),
-                CommandInput::SetTrustMode(truest_mod) => {
-                    self.trust_mode
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .clone_from(&truest_mod);
-                    self.send_cmd(Command::SetTrustMode(truest_mod))
+                CommandInput::SetTrustMode(trust_mode) => {
+                    self.set_trust_mode(trust_mode);
+                    Ok(())
                 }
-                CommandInput::CompressContext => self.send_cmd(Command::CompressContext),
-                CommandInput::ResetContext => self.send_cmd(Command::ResetContext),
+                CommandInput::CompressContext => self.compress_context(),
+                CommandInput::ResetContext => self.reset_context(),
             },
         }
     }
@@ -250,24 +298,6 @@ impl Drop for TiangongCore {
         // 发 Cancel 终止活跃 turn(如有)
         crate::shared_runtime::send_command(&self.session_id, Command::Cancel);
     }
-}
-
-pub(crate) fn reset_context(ctx: &mut crate::turn_context::TurnContext) {
-    let total = ctx.session.messages.len();
-    ctx.session.summary_up_to = total;
-    crate::context::compressor::mark_compact_boundary(&mut ctx.session.messages, total);
-    ctx.session.context_summary = None;
-    ctx.session.current_tokens = 0;
-    ctx.session.active_agent_current_tokens = 0;
-    ctx.session.agent_current_tokens.clear();
-    // 清空后重建 system prompt
-    crate::react::context::rebuild_system_prompt(ctx);
-    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-        action: tiangong_types::stream::ContextCompressAction::Clear,
-        summary_up_to: total,
-        remaining_messages: 0,
-    });
-    ctx.session.persist_to_disk();
 }
 
 #[cfg(test)]

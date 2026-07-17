@@ -18,7 +18,7 @@ use crate::react::context::{
 use crate::react::message::upsert_assistant_text_message;
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
-use tiangong_types::StreamEvent;
+use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
 use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, run_cancelable_child};
 use crate::turn_context::TurnContext;
@@ -217,7 +217,12 @@ impl TurnContext {
                 crate::react::message::emit_session_message_upsert(self, &message_id);
             }
             let compression_cancelled = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-                maybe_update_context_summary(self, &usage, child_cancel)
+                maybe_update_context_summary(
+                    self,
+                    &usage,
+                    ContextCompressAction::Auto,
+                    child_cancel,
+                )
             })
             .await;
             if compression_cancelled {
@@ -250,7 +255,7 @@ impl TurnContext {
         }
         crate::react::message::emit_session_message_upsert(self, &pending_msg_id);
         let compression_cancelled = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            maybe_update_context_summary(self, &usage, child_cancel)
+            maybe_update_context_summary(self, &usage, ContextCompressAction::Auto, child_cancel)
         })
         .await;
         if compression_cancelled {
