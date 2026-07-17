@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "天工",
+  "productName": "tiangong",
   "version": "0.12.1",
   "identifier": "com.silent.tiangong",
   "build": {
@@ -47,8 +47,19 @@
       "icons/icon.ico"
     ],
     "macOS": {
+      "bundleName": "天工",
       "entitlements": null,
       "infoPlist": "Info.plist"
+    },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "templates/app.desktop"
+      }
+    },
+    "windows": {
+      "nsis": {
+        "template": "templates/installer.nsi"
+      }
     }
   },
   "plugins": {

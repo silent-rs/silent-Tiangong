@@ -4,7 +4,7 @@
 //! 其他命令 → 委托给 tiangong_entry（cli/server/mcp/skill）
 //!
 //! DMG 安装后可通过 symlink 获得 CLI 能力：
-//! ln -s /Applications/天工.app/Contents/MacOS/天工 /usr/local/bin/tiangong
+//! ln -s /Applications/tiangong.app/Contents/MacOS/tiangong-app /usr/local/bin/tiangong
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
