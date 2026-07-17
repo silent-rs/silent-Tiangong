@@ -10,7 +10,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive, Clock } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive, Clock } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -2634,8 +2634,18 @@ function AppUpdateSettings() {
 
   return (
     <div className="space-y-4 p-4">
-      <div>
+      <div className="flex items-center justify-between gap-4">
         <h3 className="text-lg font-medium">关于与更新</h3>
+        <a
+          href="https://github.com/silent-rs/silent-Tiangong"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          title="在 GitHub 上查看本项目"
+        >
+          <Github className="h-4 w-4" />
+          <span>GitHub</span>
+        </a>
       </div>
 
       <Card>
