@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
@@ -36,30 +38,35 @@ impl ContextCompressor {
         client: &SingleProviderClient,
     ) -> Result<CompressionUpdate> {
         let split_point = self.find_split_point(&session.messages);
-        if split_point == 0 {
-            return Ok(CompressionUpdate::default());
-        }
+        self.update_summary_at_with_usage(session, client, split_point)
+    }
 
+    pub(crate) fn update_summary_at_with_usage(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+        split_point: usize,
+    ) -> Result<CompressionUpdate> {
+        let split_point = split_point.min(session.messages.len());
         if split_point <= session.summary_up_to {
             return Ok(CompressionUpdate::default());
         }
 
-        let new_messages = session.messages[session.summary_up_to..split_point]
+        let messages_count = session.messages[session.summary_up_to..split_point]
             .iter()
             .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-            .cloned()
-            .collect::<Vec<_>>();
+            .count();
 
-        if new_messages.is_empty() {
+        if messages_count == 0 {
             return Ok(CompressionUpdate::default());
         }
 
-        let (summary, usage) = self.fold_summary(session, &new_messages, client)?;
+        let (summary, usage) = self.fold_summary(session, split_point, client)?;
 
         tracing::info!(
             old_summary_up_to = session.summary_up_to,
             new_summary_up_to = split_point,
-            messages_count = new_messages.len(),
+            messages_count,
             summary_len = summary.len(),
             "滚动摘要已更新"
         );
@@ -79,20 +86,60 @@ impl ContextCompressor {
         client: &SingleProviderClient,
     ) -> Result<CompressionUpdate> {
         let split_point = self.find_split_point(&session.messages);
-        if split_point == 0 || split_point <= session.summary_up_to {
+        self.update_summary_at_with_usage_async(session, client, split_point, None)
+            .await
+    }
+
+    pub(crate) async fn update_summary_from_context_async(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+        messages_to_compress: Vec<Message>,
+    ) -> Result<CompressionUpdate> {
+        let compressed_ids = messages_to_compress
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<HashSet<_>>();
+        let split_point = session.messages[session.summary_up_to..]
+            .iter()
+            .position(|message| {
+                message.role == MessageRole::User
+                    && !message.model_excluded
+                    && !compressed_ids.contains(message.id.as_str())
+            })
+            .map(|index| session.summary_up_to + index)
+            .unwrap_or(session.messages.len());
+
+        self.update_summary_at_with_usage_async(
+            session,
+            client,
+            split_point,
+            Some(messages_to_compress),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_summary_at_with_usage_async(
+        &self,
+        session: &mut Session,
+        client: &SingleProviderClient,
+        split_point: usize,
+        compression_context: Option<Vec<Message>>,
+    ) -> Result<CompressionUpdate> {
+        let split_point = split_point.min(session.messages.len());
+        if split_point <= session.summary_up_to {
             return Ok(CompressionUpdate::default());
         }
-        let new_messages = session.messages[session.summary_up_to..split_point]
+        let messages_count = session.messages[session.summary_up_to..split_point]
             .iter()
             .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-            .cloned()
-            .collect::<Vec<_>>();
-        if new_messages.is_empty() {
+            .count();
+        if messages_count == 0 {
             return Ok(CompressionUpdate::default());
         }
 
         let (summary, usage) = self
-            .fold_summary_async(session, &new_messages, client)
+            .fold_summary_async(session, split_point, compression_context, client)
             .await?;
         session.context_summary = Some(summary);
         session.summary_up_to = split_point;
@@ -118,7 +165,7 @@ impl ContextCompressor {
     }
 
     /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
-    fn find_split_point(&self, messages: &[Message]) -> usize {
+    pub(crate) fn find_split_point(&self, messages: &[Message]) -> usize {
         let mut turn_count = 0;
         let mut split_point = messages.len();
 
@@ -138,59 +185,14 @@ impl ContextCompressor {
         split_point
     }
 
-    /// 折叠摘要：将待压缩消息作为对话流发送给 LLM
-    ///
-    /// context_summary 和压缩指令作为 user 消息附加在对话流中，
-    /// system prompt 保持默认以复用 KV cache。
+    /// 折叠摘要：取得边界内上下文，并在末尾追加内部压缩要求。
     fn fold_summary(
         &self,
         session: &Session,
-        new_messages: &[Message],
+        split_point: usize,
         client: &SingleProviderClient,
     ) -> Result<(String, TokenUsage)> {
-        let mut context = Vec::new();
-
-        let mut instruction = String::from(
-            "请将以下对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。直接输出摘要内容。",
-        );
-        if let Some(summary) = session
-            .context_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
-        }
-
-        context.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::User,
-            content: vec![ContentBlock::text(instruction)],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            worker_id: None,
-            elapsed_ms: None,
-            turn_status: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            model_excluded: false,
-            phase: MessagePhase::Normal,
-            created_at: crate::session::now_text(),
-        });
-
-        context.extend(new_messages.iter().cloned());
-
-        let req = ModelRequest {
-            session_title: String::new(),
-            user_input: String::new(),
-            context,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
-        };
+        let req = Self::summary_request(session, split_point, None);
         let resp = client.complete(&req)?;
         Ok((resp.text, resp.usage))
     }
@@ -198,12 +200,31 @@ impl ContextCompressor {
     async fn fold_summary_async(
         &self,
         session: &Session,
-        new_messages: &[Message],
+        split_point: usize,
+        compression_context: Option<Vec<Message>>,
         client: &SingleProviderClient,
     ) -> Result<(String, TokenUsage)> {
-        let mut context = Vec::new();
+        let req = Self::summary_request(session, split_point, compression_context);
+        let resp = client.complete_async(&req).await?;
+        Ok((resp.text, resp.usage))
+    }
+
+    fn summary_request(
+        session: &Session,
+        split_point: usize,
+        compression_context: Option<Vec<Message>>,
+    ) -> ModelRequest {
+        let mut context = compression_context.unwrap_or_else(|| {
+            let split_point = split_point.min(session.messages.len());
+            let start = session.summary_up_to.min(split_point);
+            session.messages[start..split_point]
+                .iter()
+                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         let mut instruction = String::from(
-            "请将以下对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。直接输出摘要内容。",
+            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。",
         );
         if let Some(summary) = session
             .context_summary
@@ -213,35 +234,15 @@ impl ContextCompressor {
         {
             instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
         }
-        context.push(Message {
-            id: scru128::new().to_string(),
-            role: MessageRole::User,
-            content: vec![ContentBlock::text(instruction)],
-            reasoning_content: String::new(),
-            reasoning_signature: None,
-            worker_id: None,
-            elapsed_ms: None,
-            turn_status: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-            tool_result_is_error: false,
-            compact: false,
-            model_excluded: false,
-            phase: MessagePhase::Normal,
-            created_at: crate::session::now_text(),
-        });
-        context.extend(new_messages.iter().cloned());
-        let req = ModelRequest {
-            session_title: String::new(),
+        context.push(Message::new(MessageRole::User, instruction));
+        ModelRequest {
+            session_title: session.title.clone(),
             user_input: String::new(),
             context,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
-        };
-        let resp = client.complete_async(&req).await?;
-        Ok((resp.text, resp.usage))
+        }
     }
 }
 

@@ -90,18 +90,6 @@ impl Plugin for BrowserPlugin {
             watcher.pause_inject();
         })
     }
-
-    fn tool_permission_overrides(
-        &self,
-    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
-        // web_form_extract 是只读表单提取工具，声明为 Safe，避免 core 硬编码。
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(
-            "web_form_extract".to_string(),
-            tiangong_core::permission::PermissionLevel::Safe,
-        );
-        overrides
-    }
 }
 
 impl ToolOverrideHandler for BrowserPlugin {

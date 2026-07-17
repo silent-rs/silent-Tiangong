@@ -199,18 +199,6 @@ impl Plugin for MemoryPlugin {
             guard.remove(&session.id);
         }
     }
-
-    fn tool_permission_overrides(
-        &self,
-    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
-        // recall_memory 是只读记忆召回工具，声明为 Safe，避免 core 硬编码。
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(
-            "recall_memory".to_string(),
-            tiangong_core::permission::PermissionLevel::Safe,
-        );
-        overrides
-    }
 }
 
 /// 注入三级 Memory Injection（Profile / Workspace / Session 的 agent.md），

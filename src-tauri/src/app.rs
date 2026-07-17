@@ -438,8 +438,7 @@ impl TiangongApp {
                     continue;
                 };
                 use std::sync::mpsc;
-                use tiangong_types::SessionStreamEvent;
-                let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+                let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
                     .ensure_core(&session_id, session_snapshot, stream_tx)
                     .await;
@@ -509,7 +508,7 @@ impl TiangongApp {
         content: String,
     ) -> Result<(), String> {
         use std::sync::mpsc;
-        use tiangong_types::{ContentBlock, SessionStreamEvent};
+        use tiangong_types::ContentBlock;
 
         if session_id.trim().is_empty() {
             return Err("定时消息目标会话 ID 不能为空".to_string());
@@ -559,7 +558,7 @@ impl TiangongApp {
             })
             .await?;
 
-        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = self
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
@@ -993,14 +992,15 @@ impl TiangongApp {
 
     /// 获取或创建会话对应的 TiangongCore。
     ///
-    /// 存活 Core 直接复用（热更配置/cwd/trust）；无存活 Core（不存在或已停止）
-    /// 则清理 stopped 残留后调用 `create_core` 新建。本方法不主动关闭存活 Core ——
-    /// 关闭是删除会话/失败回滚的职责。
+    /// 已存在的 Core 直接复用（热更配置/trust）；不存在时调用 `create_core` 新建。
+    ///
+    /// Core 是会话级资源，空闲只表示当前没有 turn task，并不表示实例已经停止。
+    /// 关闭和移除是删除会话、失败回滚等显式流程的职责。
     pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
         let creation_lock = self.core_creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
@@ -1012,22 +1012,15 @@ impl TiangongApp {
         };
 
         {
-            let mut cores = self.lock_cores();
-            if cores.get(session_id).is_some_and(|core| !core.is_stopped()) {
-                // 复用存活 Core：热更配置/cwd/trust。
-                let core = cores.get(session_id).expect("上文已确认存活");
+            let cores = self.lock_cores();
+            if let Some(core) = cores.get(session_id) {
+                // cwd 由 app-state 快照维护，下次 turn 从磁盘重载，无需投递到 Core。
                 let _ = core.replace_config(session_config.clone());
-                let _ = core.deliver(AgentInputKind::update_cwd(session.cwd.clone()));
                 core.set_trust_mode(session.trust_mode);
                 return EnsuredCore {
                     session_id: session_id.to_string(),
                     is_new: false,
                 };
-            }
-            // 清理已停止 Core（worker 已结束，安全）。core_creation_lock 保证
-            // 同会话无并发写入者。
-            if cores.remove(session_id).is_some() {
-                warn!(session_id, "移除已停止的 TiangongCore");
             }
         }
 
@@ -1042,13 +1035,12 @@ impl TiangongApp {
 
     /// 构造全新的 TiangongCore（memory handle + 全部插件 + builder.build）。
     ///
-    /// 纯构建流程，不操作 cores map。每次新建 Core（首次创建 / stopped 后重建）
-    /// 都复用本方法。
+    /// 纯构建流程，不操作 cores map。首次创建或显式移除后重建都复用本方法。
     async fn create_core(
         &self,
         session: tiangong_core::session::Session,
         session_config: tiangong_core::core_config::CoreConfig,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::SessionStreamEvent>,
+        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> TiangongCore {
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
             self.config.generation(),
@@ -1178,13 +1170,13 @@ impl TiangongApp {
         ));
 
         TiangongCore::builder()
+            .session_id(session.id.clone())
             .config(CoreConfigProvider::new(session_config))
-            .session(session)
-            .event_sender(stream_tx)
+            .trust_mode(session.trust_mode)
+            .storage_root(storage_root)
+            .stream_tx(stream_tx)
             .plugins(plugins)
-            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
             .build()
-            .expect("Builder 必填字段已齐")
     }
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
@@ -1214,41 +1206,22 @@ impl TiangongApp {
         }
     }
 
-    /// 仅移除已经停止的 Core。
+    /// 指定会话是否持有可投递的 Core 实例。
     ///
-    /// 重建只发生在 turn 完成或未开始的安全点，旧 Core 的流消费者在那之前已收到终态
-    /// 并退出，不会有迟到事件命中新实例。此处仅做保守清理：map 里同 session 的 Core
-    /// 若已停止才移除，避免误删一个刚刚重建起来的新实例。
-    pub fn remove_stopped_core(&self, session_id: &str) -> bool {
-        let mut cores = self.lock_cores();
-        cores
-            .get(session_id)
-            .is_some_and(TiangongCore::is_stopped)
-            .then(|| cores.remove(session_id))
-            .is_some()
-    }
-
-    /// 指定会话是否存在存活的 Core（worker 未结束、通道未关闭）。
-    ///
-    /// 供流消费者在处理每个事件前确认该会话仍有可投递的 Core；Core 重建只发生在
-    /// turn 完成或未开始时，旧消费者收到的终态之后的迟到事件会因为新 Core 尚未就绪
-    /// 或自身已退出而被跳过。
+    /// 空闲 Core 没有活跃 turn task，但仍可接收下一条用户消息。
     pub fn has_live_core(&self, session_id: &str) -> bool {
-        self.lock_cores()
-            .get(session_id)
-            .is_some_and(|core| !core.is_stopped())
+        self.lock_cores().contains_key(session_id)
     }
 
-    /// 仅当指定会话存在存活 Core 时投递输入。
+    /// 仅当指定会话存在 Core 时投递输入。
     pub fn deliver_to_core_if_live(&self, session_id: &str, input: AgentInputKind) -> bool {
         let cores = self.lock_cores();
         cores
             .get(session_id)
-            .filter(|core| !core.is_stopped())
             .is_some_and(|core| core.deliver(input).is_ok())
     }
 
-    /// 向存活 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
+    /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
     pub fn deliver_prepared_if_live(
         &self,
         session_id: &str,
@@ -1261,8 +1234,7 @@ impl TiangongApp {
         let cores = self.lock_cores();
         let core = cores
             .get(session_id)
-            .filter(|core| !core.is_stopped())
-            .ok_or_else(|| "会话 Core 不存在或已停止".to_string())?;
+            .ok_or_else(|| "会话 Core 不存在".to_string())?;
         core.deliver(AgentInputKind::prepared_with_id(message_id, prepared))
             .map_err(|error| error.to_string())
     }
@@ -1395,49 +1367,36 @@ mod tests {
         assert!(entered.load(Ordering::Acquire));
     }
 
-    /// 构造真实 Core 验证 has_live_core / remove_stopped_core 的生命周期语义。
+    /// 空闲 Core 仍是可复用的会话级资源，只有从映射移除后才不再可投递。
     #[tokio::test]
-    async fn has_live_core_and_remove_stopped_core_track_real_core_state() {
+    async fn has_live_core_tracks_core_instance_presence() {
         use std::sync::mpsc;
-        use tiangong_core::core::CoreStorageLocation;
         use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 
         let app = TiangongApp::new();
         let session_id = "session-lifecycle-test";
         assert!(!app.has_live_core(session_id), "初始无 Core");
 
-        // 插入一个真实存活的 Core。
         let session = tiangong_core::session::Session::new(session_id);
         let (event_tx, _event_rx) = mpsc::channel();
         let storage_root = tempfile::tempdir().unwrap();
         let core = tiangong_core::core::TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
-            .event_sender(event_tx)
+            .session_id(session.id)
+            .stream_tx(event_tx)
             .plugins(Vec::new())
-            .storage(CoreStorageLocation::new(storage_root.path()))
-            .build()
-            .unwrap();
+            .storage_root(storage_root.path())
+            .trust_mode(session.trust_mode)
+            .build();
+        assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");
         app.lock_cores().insert(session_id.to_string(), core);
 
-        assert!(app.has_live_core(session_id), "插入存活 Core 后应判活");
-        // 存活 Core 不应被 remove_stopped_core 移除。
-        assert!(
-            !app.remove_stopped_core(session_id),
-            "存活 Core 不应被 remove_stopped 移除"
-        );
-        assert!(app.has_live_core(session_id), "存活 Core 仍在");
-
-        // 取出并等待 worker 结束 -> Core 停止。
+        assert!(app.has_live_core(session_id), "空闲 Core 仍应可投递新消息");
         let core = app.take_core(session_id).expect("应能取回 Core");
         tokio::task::spawn_blocking(move || core.shutdown_join())
             .await
             .unwrap()
             .unwrap();
-
-        // 重新插入一个已停止的 Core（模拟僵尸实例），验证 remove_stopped_core 移除它。
-        // 这里无法直接构造"已停止"的 Core（构造即 spawn worker），改用 has_live_core
-        // 在 map 为空时的语义。
         assert!(!app.has_live_core(session_id), "移除后无 Core");
     }
 

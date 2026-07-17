@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::agent_input::AgentInputKind;
 use tracing::{debug, warn};
 
 use crate::workspace_tabs::{
@@ -1174,7 +1174,7 @@ async fn send_message_inner(
     state: &TiangongApp,
 ) -> Result<(), String> {
     use std::sync::mpsc;
-    use tiangong_types::SessionStreamEvent;
+    use tiangong_types::StreamEvent;
 
     let UserMessageDeliveryRequest {
         session_id,
@@ -1323,7 +1323,7 @@ async fn send_message_inner(
     transaction.commit();
 
     // 获取或创建 TiangongCore
-    let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+    let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
@@ -1448,11 +1448,11 @@ pub(crate) async fn attachment_capability_snapshot(
         .await
 }
 
-/// 消费 SessionStreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
+/// 消费 StreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
-    stream_rx: std::sync::mpsc::Receiver<tiangong_types::SessionStreamEvent>,
+    stream_rx: std::sync::mpsc::Receiver<tiangong_types::StreamEvent>,
 ) {
     use tiangong_types::StreamEvent;
 
@@ -1460,9 +1460,15 @@ pub(crate) fn start_stream_consumer(
     thread::spawn(move || {
         let mut assistant_msg_id: Option<String> = None;
         let mut last_tool_args_summary = String::new();
-        let mut remote_turn_correlation = crate::embedded_server::RemoteTurnCorrelation::default();
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
+            if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
+                if app_state.has_live_core(&session_id) {
+                    let _ = app.emit("stream_event", &session_event);
+                }
+                continue;
+            }
+
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
             if !app_state.has_live_core(&session_id) {
@@ -1471,7 +1477,7 @@ pub(crate) fn start_stream_consumer(
             }
 
             let terminal_event = matches!(
-                &session_event.event,
+                &session_event,
                 StreamEvent::Done { .. } | StreamEvent::Error { .. }
             );
             // 普通流事件立即转发；终态必须等 Core 权威会话重载完成后再对外发布。
@@ -1479,11 +1485,10 @@ pub(crate) fn start_stream_consumer(
                 let _ = app.emit("stream_event", &session_event);
             }
 
-            let sid = session_event.session_id;
-            let event = session_event.event;
+            let sid = session_id.clone();
+            let event = session_event;
             let is_done = matches!(event, StreamEvent::Done { .. });
             let is_error = matches!(event, StreamEvent::Error { .. });
-            let completed_remote_message_id = remote_turn_correlation.observe(&event);
             if let StreamEvent::AgentOutput {
                 agent_id,
                 agent_role,
@@ -1506,12 +1511,6 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
                     _ => None,
                 };
-                let final_user_snapshot = matches!(
-                    &event,
-                    StreamEvent::SessionMessageUpsert { message, .. }
-                        if message.role == tiangong_core::session::MessageRole::User
-                            && message.turn_status.is_some()
-                );
                 if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
                     match &event {
                         StreamEvent::UserMessage {
@@ -1778,7 +1777,7 @@ pub(crate) fn start_stream_consumer(
                 if let Some(message_id) = accepted_message_id {
                     core_state.accept_pending_message_for(&sid, &message_id);
                 }
-                if final_user_snapshot {
+                if is_done || is_error {
                     core_state.complete_accepted_turn_for(&sid);
                 }
                 // RunStatus/usage 更新
@@ -2012,8 +2011,8 @@ pub(crate) fn start_stream_consumer(
             }
 
             if is_done || is_error {
-                // Done：先持久化，再异步生成标题（不阻塞消费线程）
                 let final_sid = sid.clone();
+                let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
                 // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
                 let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
@@ -2080,13 +2079,7 @@ pub(crate) fn start_stream_consumer(
                     ));
                 }
 
-                let _ = app.emit(
-                    "stream_event",
-                    &tiangong_types::SessionStreamEvent {
-                        session_id: final_sid.clone(),
-                        event: event.clone(),
-                    },
-                );
+                let _ = app.emit("stream_event", &event);
 
                 // 异步生成标题（不阻塞消费线程）
                 if let Ok(Some((input, provider_config))) = title_task {
@@ -2152,7 +2145,9 @@ pub(crate) fn start_stream_consumer(
         let app_state = app.state::<TiangongApp>();
         let eof_lock = app_state.session_send_lock(&session_id);
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
-        if app_state.remove_stopped_core(&session_id) {
+        // 通道关闭说明持有该发送端的 Core 已被显式移除。若同会话已经创建了新 Core，
+        // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
+        if !app_state.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 if let Err(error) = core_state.reload_session_from_disk(&session_id) {
                     tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
@@ -2172,11 +2167,8 @@ pub(crate) fn start_stream_consumer(
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
             let _ = app.emit(
                 "stream_event",
-                &tiangong_types::SessionStreamEvent {
-                    session_id,
-                    event: tiangong_types::StreamEvent::Error {
-                        message: "Core 事件流已关闭".to_string(),
-                    },
+                &tiangong_types::StreamEvent::Error {
+                    message: "Core 事件流已关闭".to_string(),
                 },
             );
         }
@@ -2329,7 +2321,7 @@ pub async fn edit_and_resend(
         .with_state(|core_state| core_state.persist_session_and_app(&session_id))
         .await?;
 
-    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+    let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;
@@ -2493,7 +2485,7 @@ async fn run_context_slash_command(
             continue;
         };
 
-        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, session_snapshot, stream_tx)
             .await;
@@ -2655,15 +2647,7 @@ pub async fn set_trust_mode(
     }
     // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
     state.set_core_trust_mode(&session_id, trust_mode);
-
-    // 信任模式已由 app 内存快照更新（含 persist_app_only），再持久化完整 session 文件。
-    if let Err(error) = state
-        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-        .await
-    {
-        rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
-        return Err(error.to_string());
-    }
+    // Session 中的 trust_mode 不在这里单独落盘，由当前 turn 或下一轮统一持久化。
     Ok(())
 }
 
@@ -3622,24 +3606,7 @@ pub async fn set_workspace_dir(
     // 发送 cd 使已打开的终端进入新 workspace。
     tiangong_plugin_terminal::sync_workspace_cwd(&app, &workspace_dir);
 
-    // 同步活跃 core 的 cwd（仅限无对话的 Inherit 会话）
-    let active_session_id = state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .sessions()
-                .iter()
-                .find(|s| s.id == core_state.active_session_id())
-                .filter(|s| s.cwd_mode == tiangong_core::session::SessionCwdMode::Inherit)
-                .filter(|s| !s.has_user_messages())
-                .map(|s| s.id.clone()))
-        })
-        .await?;
-    if let Some(sid) = &active_session_id {
-        let cores = state.cores.lock().map_err(|e| e.to_string())?;
-        if let Some(core) = cores.get(sid) {
-            let _ = core.deliver(AgentInputKind::update_cwd(workspace_dir.clone()));
-        }
-    }
+    // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 
     Ok(())
 }
@@ -3662,13 +3629,7 @@ pub async fn set_session_cwd(
         .with_state(|core_state| core_state.update_session_cwd(&session_id, cwd.clone()))
         .await?;
 
-    // 只同步目标会话 Core，不受此时活动会话切换影响。
-    {
-        let cores = state.cores.lock().map_err(|e| e.to_string())?;
-        if let Some(core) = cores.get(&session_id) {
-            let _ = core.deliver(AgentInputKind::update_cwd(cwd.clone()));
-        }
-    }
+    // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 
     Ok(())
 }

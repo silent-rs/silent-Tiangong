@@ -3,19 +3,20 @@
 //! [`Plugin`] 是能力的声明式聚合：通过 supertrait 约束同时要求实现工具规格、
 //! 工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //!
-//! core 通过 trait 默认方法统一注入运行时上下文（均在收集 tool_specs 前调用）：
+//! core 通过 trait 默认方法统一注入运行时上下文：
 //! - [`Plugin::set_workspace`]：会话工作目录（文件类工具据此感知 cwd）。
-//! - [`Plugin::set_trust_mode`]：会话信任模式解析句柄（插件可据此放宽校验）。
+//! - [`Plugin::set_trust_mode`]：会话信任模式（插件可据此放宽校验）。
 //! - [`Plugin::set_feedback_tx`]：状态反馈通道（插件可向 session 投递外部事件）。
 //!
-//! 三者都带默认实现，不需要的插件无需任何改动。其中信任模式的**查询**（如
-//! 各插件自定义的 `is_full_trust` 固有方法）是插件内部工具，不作为 trait 能力暴露，
-//! 插件按需读取注入的解析句柄即可。
+//! workspace 与 trust mode 在收集 tool_specs 前注入；feedback 在 TurnContext 构建后、
+//! `on_session_ready` 与 turn task 启动前注入。三者都带默认实现，不需要的插件无需
+//! 任何改动。其中信任模式的**查询**（如各插件自定义的 `is_full_trust` 固有方法）
+//! 是插件内部工具，不作为 trait 能力暴露，插件按需读取注入的信任模式即可。
 
 use std::path::Path;
 
 use crate::core::plugin::feedback::PluginFeedbackTx;
-use crate::permission::TrustModeHandle;
+use crate::permission::TrustMode;
 use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
 /// 进程内插件：封装自己的全部能力，在 engine 创建/重建时自行注册。
@@ -23,11 +24,12 @@ use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecP
 /// 通过 supertrait 约束声明三种能力（`ToolSpecProvider` / `ToolOverrideHandler` /
 /// `PromptSectionProvider`），三者均提供默认空实现——插件只需覆写自己关心的部分。
 ///
-/// core 在 engine 创建时遍历插件，依次：
+/// core 在每轮 Context 准备与启动时遍历插件，依次：
 /// 1. [`set_workspace`](Plugin::set_workspace) 注入会话工作目录；
-/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式解析句柄；
-/// 3. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入状态反馈通道；
-/// 4. 收集 `tool_specs` / 注册 override handler / 注册 prompt section。
+/// 2. [`set_trust_mode`](Plugin::set_trust_mode) 注入信任模式；
+/// 3. 收集 `tool_specs` / 注册 override handler 并构建 TurnContext；
+/// 4. [`set_feedback_tx`](Plugin::set_feedback_tx) 注入本轮状态反馈通道；
+/// 5. 首轮调用 `on_session_ready`，然后收集 Prompt 段落写入 Session。
 ///
 /// 插件初始化自身状态（如读取配置、启动后台调度器）在 [`Plugin::on_config_updated`]
 /// 中完成（core 在收集 specs 前调用）。
@@ -42,34 +44,34 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
 
     /// 注入当前会话的工作目录。
     ///
-    /// core 在 engine 创建时以及每次会话工作目录变更（`Command::UpdateCwd`）时调用。
-    /// 传入 `None` 表示当前会话无有效工作目录（如 cwd 为空或不存在），插件应清空
-    /// 之前缓存的 workspace，避免在旧目录上继续操作。
+    /// core 在 engine 创建时（每 turn 现建）调用，工作目录变更在下次 turn 开始时
+    /// 自动生效。传入 `None` 表示当前会话无有效工作目录（如 cwd 为空或不存在），
+    /// 插件应清空之前缓存的 workspace，避免在旧目录上继续操作。
     ///
     /// 默认实现为空操作；需要感知工作目录的插件（如文件工具）应覆写此方法，将路径
     /// 存入内部状态，供后续工具调用使用。工作区变更后的副作用（如重建索引）也应
     /// 在此方法内触发，避免职责分散到多个钩子。
     fn set_workspace(&self, _workspace: Option<&Path>) {}
 
-    /// 注入信任模式解析句柄（与 [`crate::permission::PermissionGate`] 共享同一解析器）。
+    /// 注入当前会话的信任模式（[`crate::permission::TrustMode`]）。
     ///
     /// core 在 engine 创建时、收集 tool_specs 之前调用一次。需要感知信任模式的
     /// 插件（如 `fs` / `command` / `fetch`）应覆写此方法，把入参存入内部字段，
     /// 之后在其自身的固有方法里读取（例如 `is_full_trust`）。
     ///
     /// 默认实现为空操作——不关心信任模式的插件（`scheduler` / `terminal` / `browser`）
-    /// 无需覆写；这些插件的工具执行仍受 engine 层 [`PermissionGate::check`] 统一兜底。
+    /// 无需覆写；这些插件的工具执行仍受 engine 层信任模式审批统一兜底
+    ///（`FullTrust` 放行一切，否则走 turn 层审批流程）。
     ///
     /// 注意：信任模式的查询是**插件内部工具**，不作为 `Plugin` trait 的状态/能力暴露。
-    /// 插件调用句柄的 `current()` 读取当前会话的有效模式。
-    fn set_trust_mode(&self, _trust: TrustModeHandle) {}
+    fn set_trust_mode(&self, _trust: TrustMode) {}
 
     /// 注入状态反馈通道（复用 worker 的命令通道）。
     ///
-    /// core 在 engine 创建时、收集 tool_specs 之前调用一次。需要向 session 主动
+    /// core 在 TurnContext 构建后、turn task 启动前调用一次。需要向 session 主动
     /// 投递外部事件（如浏览器页面变化、终端用户操作）的插件应覆写此方法，把入参
-    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx::send`] 投递
-    /// [`PluginFeedback`]，core 会统一注入到 session（以 tool result 形式）。
+    /// clone 后存入内部字段，之后通过 [`PluginFeedbackTx`] 投递会话内容、用量或
+    /// 流事件，Core 会按本轮命令顺序统一处理。
     ///
     /// 默认实现为空操作——不需要主动投递外部事件的插件无需覆写。
     fn set_feedback_tx(&self, _tx: PluginFeedbackTx) {}
@@ -92,19 +94,6 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     /// 传入合并后的完整 env。需要读取合并 env 的插件（如 `command` / `task`，在
     /// 执行子进程时注入）应覆写此方法存储。默认空操作——不消费 env 的插件无需覆写。
     fn set_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
-
-    /// 贡献插件工具的权限等级覆盖（供 core 权限门统一汇总）。
-    ///
-    /// core 在「所有插件注册完成时」统一遍历所有插件调用此方法，合并到
-    /// `PermissionGate` 的覆盖表——避免 core 的 `classify_tool` 硬编码任何插件
-    /// 工具名。插件工具名未命中覆盖表时走 core 的默认分类（按工具名前缀/特征推断）。
-    ///
-    /// 默认返回空——不贡献权限覆盖的插件无需覆写。
-    fn tool_permission_overrides(
-        &self,
-    ) -> std::collections::BTreeMap<String, crate::permission::PermissionLevel> {
-        std::collections::BTreeMap::new()
-    }
 
     /// 用户取消当前 turn 时通知插件响应取消意图。
     ///
@@ -138,13 +127,12 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     // 在 worker_loop 的对应节点遍历插件回调，传入 `&mut Session` 供插件处理
     //（如维护索引、归档记忆等）。全部默认空实现，插件按需覆写。
 
-    /// worker 首次处理命令前会按需 build engine；首次 build + 插件注册完成后调用一次。
+    /// 首轮 TurnContext 构建且 feedback 注入完成后、turn task 启动前调用一次。
     ///
-    /// 注意：此钩子在「收到首条命令后、处理该命令前」触发（worker 收到命令才会按需
-    /// build engine），并非在接收命令前。此时 [`set_workspace`](Plugin::set_workspace) /
+    /// 此时 [`set_workspace`](Plugin::set_workspace) /
     /// [`set_trust_mode`](Plugin::set_trust_mode) / [`set_feedback_tx`](Plugin::set_feedback_tx)
     /// 均已注入，插件可安全读取已存储的上下文。适合做一次性的会话级初始化（如对工作
-    /// 目录做首次全量扫描）。仅触发一次；后续 engine 重建由 [`Plugin::on_config_updated`]
+    /// 目录做首次全量扫描）。仅触发一次；后续 Context 重建由 [`Plugin::on_config_updated`]
     /// 承载再配置语义。
     fn on_session_ready(&self, _session: &mut crate::session::Session) {}
 

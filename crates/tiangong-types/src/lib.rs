@@ -27,7 +27,7 @@ pub use process::{configure_no_window, configure_tokio_no_window};
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;
-pub use stream::{MemoryRecallHitSummary, SessionStreamEvent, StreamEvent, StreamToolCall};
+pub use stream::{MemoryRecallHitSummary, SessionEvent, StreamEvent, StreamToolCall};
 pub use token::TokenUsage;
 pub use trust_mode::TrustMode;
 

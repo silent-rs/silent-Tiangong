@@ -119,11 +119,6 @@ impl TiangongState {
             .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
         let active_trust_mode = state.active_session_trust_mode();
         state.store.agent.agent_config.trust_mode = active_trust_mode;
-        state
-            .services
-            .runtime
-            .permission_gate()
-            .set_trust_mode(active_trust_mode);
         state.rebuild_runtime_from_current_config();
         state.store.provider.model_list = normalize_model_list(
             state.store.provider.model_list.clone(),

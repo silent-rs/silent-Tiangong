@@ -19,7 +19,7 @@ use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler};
 use crate::capability::TerminalProvider;
 use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
 use crate::session_pty::SessionAwareTerminalProvider;
-use tiangong_core::permission::TrustModeHandle;
+use tiangong_core::permission::TrustMode;
 
 /// 终端插件：聚合终端能力、工具覆盖处理器与 Prompt 段落提供者。
 ///
@@ -65,7 +65,7 @@ impl Plugin for TerminalPlugin {
     // 不再经 RuntimeEngine 中转注入（#225 能力下沉）。
 
     /// 注入信任模式解析句柄：透传给 handler，FullTrust 时跳过 run_command 校验。
-    fn set_trust_mode(&self, trust: TrustModeHandle) {
+    fn set_trust_mode(&self, trust: TrustMode) {
         self.override_handler.set_trust_mode(trust);
     }
 

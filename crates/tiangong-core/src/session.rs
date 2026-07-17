@@ -289,11 +289,11 @@ impl Session {
     }
 
     /// 创建隔离模式的会话（用于 Connector 接入）
-    pub fn new_isolated(title: impl Into<String>) -> Self {
+    pub fn new_isolated(title: impl Into<String>, storage_root: &std::path::Path) -> Self {
         let id = new_id();
         let now = now_text();
-        // 在 ~/.tiangong/workspaces/{session_id}/ 下创建独立目录
-        let workspace_dir = crate::storage::storage_root().join("workspaces").join(&id);
+        // 在 {storage_root}/workspaces/{session_id}/ 下创建独立目录
+        let workspace_dir = storage_root.join("workspaces").join(&id);
         let _ = std::fs::create_dir_all(&workspace_dir);
         Self {
             id,
@@ -378,10 +378,9 @@ impl Session {
     /// 尝试将稳定会话状态持久化到磁盘，并把失败返回给调用方。
     /// 图片块中的瞬时 `data` 由类型合同保证永不序列化。
     pub fn try_persist_to_disk(&self) -> Result<(), String> {
-        let storage_root = self
-            .storage_root
-            .clone()
-            .unwrap_or_else(crate::storage::storage_root);
+        let storage_root = self.storage_root.as_ref().ok_or_else(|| {
+            "session 未绑定 storage_root（创建或加载 Session 时必须绑定）".to_string()
+        })?;
         let path = storage_root
             .join("sessions")
             .join(format!("{}.json", self.id));
@@ -516,6 +515,141 @@ impl Session {
             created_at: now_text(),
         });
         self.updated_at = now_text();
+    }
+
+    /// 校验并事务性写入 Core 已接收的用户消息。
+    ///
+    /// 同 ID 的宿主镜像消息会先移除；只有完整 Session 成功落盘后才返回。失败时
+    /// 恢复调用前的 Session。上一轮遗留工具调用由该轮取消收尾负责闭合。
+    pub(crate) fn try_append_prepared_user_message_with_id(
+        &mut self,
+        id: String,
+        content: Vec<ContentBlock>,
+    ) -> Result<(), String> {
+        tiangong_types::validate_ready_content_blocks(&content)?;
+
+        if self
+            .messages
+            .iter()
+            .any(|message| message.id == id && message.role != MessageRole::User)
+        {
+            return Err(format!("消息 ID {id} 已被非用户消息占用"));
+        }
+
+        let before = self.clone();
+        self.messages
+            .retain(|message| message.id != id || message.role != MessageRole::User);
+        self.append_prepared_user_message_with_id(id, content);
+
+        if let Err(error) = self.try_persist_to_disk() {
+            *self = before;
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    /// 补齐未完成工具调用的失败结果，并在有变更时立即落盘。
+    ///
+    /// 补齐结果落盘失败时，删除新增结果和对应的悬空调用后再次落盘，避免后续
+    /// 请求读取到不完整的工具调用协议。二次落盘仍失败时保留清理后的内存状态，
+    /// 供 turn 最终持久化继续重试。
+    pub(crate) fn close_unfinished_tool_calls_with_reason(
+        &mut self,
+        reason: &str,
+    ) -> Vec<(String, String, String)> {
+        let Some((assistant_index, assistant)) = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| !message.tool_calls.is_empty())
+        else {
+            return Vec::new();
+        };
+        let completed = self.messages[assistant_index + 1..]
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        let unfinished = assistant
+            .tool_calls
+            .iter()
+            .filter(|call| !completed.contains(call.id.as_str()))
+            .map(|call| (call.id.clone(), call.name.clone()))
+            .collect::<Vec<_>>();
+        if unfinished.is_empty() {
+            return Vec::new();
+        }
+
+        let message_count_before_close = self.messages.len();
+        let interrupted = unfinished
+            .into_iter()
+            .map(|(tool_call_id, tool_name)| {
+                let output = reason.to_string();
+                self.messages.push(
+                    Message::tool_result(&tool_call_id, &tool_name, &output, true)
+                        .with_phase(MessagePhase::React),
+                );
+                (tool_call_id, tool_name, output)
+            })
+            .collect::<Vec<_>>();
+        self.updated_at = now_text();
+        if let Err(close_error) = self.try_persist_to_disk() {
+            self.messages.truncate(message_count_before_close);
+            let interrupted_ids = interrupted
+                .iter()
+                .map(|(tool_call_id, _, _)| tool_call_id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.messages[assistant_index]
+                .tool_calls
+                .retain(|call| !interrupted_ids.contains(call.id.as_str()));
+            self.updated_at = now_text();
+
+            if let Err(remove_error) = self.try_persist_to_disk() {
+                tracing::error!(
+                    close_error = %close_error,
+                    remove_error = %remove_error,
+                    count = interrupted.len(),
+                    "补齐未完成工具调用及删除悬空调用均持久化失败"
+                );
+                return Vec::new();
+            }
+
+            tracing::warn!(
+                error = %close_error,
+                count = interrupted.len(),
+                "补齐未完成工具调用持久化失败，已删除悬空调用并重新落盘"
+            );
+            return Vec::new();
+        }
+
+        interrupted
+    }
+
+    pub(crate) fn has_unfinished_tool_calls(&self) -> bool {
+        !self.unfinished_tool_calls().is_empty()
+    }
+
+    fn unfinished_tool_calls(&self) -> Vec<(String, String)> {
+        let Some((assistant_index, assistant)) = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, message)| !message.tool_calls.is_empty())
+        else {
+            return Vec::new();
+        };
+        let completed = self.messages[assistant_index + 1..]
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        assistant
+            .tool_calls
+            .iter()
+            .filter(|call| !completed.contains(call.id.as_str()))
+            .map(|call| (call.id.clone(), call.name.clone()))
+            .collect()
     }
 
     /// 用宿主准备好的内容原样替换已有用户消息。
@@ -994,6 +1128,16 @@ impl Session {
         self.messages.truncate(idx + 1);
         remove_count
     }
+
+    /// 获取最新用户消息的index
+    pub fn latest_user_message_index(&self) -> Option<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, m)| m.role == MessageRole::User)
+            .map(|(idx, _)| idx)
+    }
 }
 
 fn new_id() -> String {
@@ -1039,6 +1183,45 @@ mod persistence_tests {
         assert_eq!(entries.len(), 1, "成功替换后不应遗留临时文件");
         assert_eq!(entries[0].path(), target);
         Ok(())
+    }
+
+    #[test]
+    fn close_fallback_removes_only_unfinished_tool_calls() {
+        let mut session = Session::new("tool-call-fallback");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![
+            MessageToolCall {
+                id: "completed-call".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            MessageToolCall {
+                id: "unfinished-call".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ];
+        session.messages.push(assistant);
+        session.messages.push(Message::tool_result(
+            "completed-call",
+            "read_file",
+            "done",
+            false,
+        ));
+
+        let interrupted = session.close_unfinished_tool_calls_with_reason("interrupted");
+
+        let remaining_calls = &session.messages[0].tool_calls;
+        assert!(interrupted.is_empty());
+        assert_eq!(remaining_calls.len(), 1);
+        assert_eq!(remaining_calls[0].id, "completed-call");
+        assert!(!session.has_unfinished_tool_calls());
+        assert!(
+            session
+                .messages
+                .iter()
+                .all(|message| message.tool_call_id.as_deref() != Some("unfinished-call"))
+        );
     }
 
     #[test]

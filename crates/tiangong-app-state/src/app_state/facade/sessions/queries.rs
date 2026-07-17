@@ -111,8 +111,8 @@ impl TiangongState {
         pending.accepted_message_ids.insert(message_id.to_string());
     }
 
-    /// 当前 turn 的最终 User 快照已提交：清除本轮所有已接受消息，只保留仍在
-    /// Core 命令队列、尚未开始的后续消息。
+    /// 当前 turn 已收到终态：清除本轮所有已接受消息，只保留仍在 Core 命令队列、
+    /// 尚未开始的后续消息。
     pub fn complete_accepted_turn_for(&mut self, session_id: &str) {
         let should_remove = self
             .store

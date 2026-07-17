@@ -330,26 +330,6 @@ impl Plugin for TaskPlugin {
             *guard = env;
         }
     }
-
-    fn tool_permission_overrides(
-        &self,
-    ) -> std::collections::BTreeMap<String, tiangong_core::permission::PermissionLevel> {
-        use std::collections::BTreeMap;
-        use tiangong_core::permission::PermissionLevel;
-        // spawn_task 可执行任意命令，与 run_command/run_shell 同属高风险，
-        // 归为 Critical（Supervised 模式需审批）。
-        let mut overrides = BTreeMap::new();
-        overrides.insert("spawn_task".to_string(), PermissionLevel::Critical);
-        // query/list/wait 是只读查询，Safe。
-        overrides.insert("query_task".to_string(), PermissionLevel::Safe);
-        overrides.insert("list_tasks".to_string(), PermissionLevel::Safe);
-        overrides.insert("wait_tasks".to_string(), PermissionLevel::Safe);
-        // cancel_task 会终止既有后台进程。这些进程已经过 spawn_task 的 Critical
-        // 审批启动，cancel 只是停止已授权的任务、不执行新命令，故不再二次审批。
-        // 若未来要求「停止任务也需确认」，可提升为 Elevated/Critical。
-        overrides.insert("cancel_task".to_string(), PermissionLevel::Safe);
-        overrides
-    }
 }
 
 impl ToolSpecProvider for TaskPlugin {

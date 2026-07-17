@@ -17,14 +17,8 @@ pub enum CoreError {
     MissingBuilderField(&'static str),
     /// worker 已停止，命令通道已关闭——`deliver` 无法投递命令。
     WorkerStopped,
-    /// Prepared 用户消息未能持久化，Core 已恢复投递前的内存状态。
-    MessagePersistenceFailed(String),
-    /// 会话元数据未能持久化，Core 已恢复更新前的内存状态。
-    MetadataPersistenceFailed(String),
-    /// 消息已入队，但 worker 未返回持久化确认。
-    PersistenceConfirmationDropped,
-    /// 元数据更新已入队，但 worker 未返回持久化确认。
-    MetadataPersistenceConfirmationDropped,
+    /// 当前 Core 正在执行任务，不能同时执行空闲期维护操作。
+    Busy,
     /// worker 线程 panic，会话不可恢复，关闭并等待 worker 的操作失败。
     WorkerPanicked,
 }
@@ -36,18 +30,7 @@ impl fmt::Display for CoreError {
                 write!(f, "Builder 缺少必填字段：{name}")
             }
             CoreError::WorkerStopped => write!(f, "worker 已停止，命令通道已关闭"),
-            CoreError::MessagePersistenceFailed(message) => {
-                write!(f, "用户消息持久化失败：{message}")
-            }
-            CoreError::MetadataPersistenceFailed(message) => {
-                write!(f, "会话元数据持久化失败：{message}")
-            }
-            CoreError::PersistenceConfirmationDropped => {
-                write!(f, "worker 未返回用户消息持久化确认")
-            }
-            CoreError::MetadataPersistenceConfirmationDropped => {
-                write!(f, "worker 未返回会话元数据持久化确认")
-            }
+            CoreError::Busy => write!(f, "Core 正在执行，当前操作仅允许在空闲时进行"),
             CoreError::WorkerPanicked => write!(f, "worker 线程 panic，会话不可恢复"),
         }
     }

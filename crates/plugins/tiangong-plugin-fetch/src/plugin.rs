@@ -4,13 +4,13 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::{TrustMode, TrustModeHandle};
+use tiangong_core::permission::TrustMode;
 
 /// web_fetch 插件。
 #[derive(Default)]
 pub struct FetchPlugin {
     workspace: RwLock<Option<PathBuf>>,
-    trust_mode: RwLock<Option<TrustModeHandle>>,
+    trust_mode: RwLock<Option<TrustMode>>,
 }
 
 impl FetchPlugin {
@@ -29,7 +29,7 @@ impl FetchPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.current() == TrustMode::FullTrust
+        *tm == TrustMode::FullTrust
     }
 }
 
@@ -44,7 +44,7 @@ impl Plugin for FetchPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: TrustModeHandle) {
+    fn set_trust_mode(&self, trust: TrustMode) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
 use tiangong_core::core::plugin::{Plugin, PluginFeedbackTx};
-use tiangong_core::core::{CoreStorageLocation, TiangongCore};
+use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::{Message, MessagePhase, MessageRole, Session};
-use tiangong_types::{ContentBlock, SessionStreamEvent, StreamEvent, TokenUsage, TurnStatus};
+use tiangong_types::{ContentBlock, StreamEvent, TokenUsage, TurnStatus};
 
 use crate::constants::{CHILD_PLUGIN_ID, PLUGIN_ID};
 use crate::state::AgentDescriptor;
@@ -41,6 +41,8 @@ pub(crate) struct ChildTurnResult {
 pub(crate) struct ChildRuntime {
     descriptor: AgentDescriptor,
     core: Mutex<Option<TiangongCore>>,
+    /// 子 Agent 会话存储根目录，用于在工作目录变更时直接更新磁盘 session。
+    storage_root: PathBuf,
     /// 串行化“进入 Running + waiter 登记 + Message 入队”与 Cancel 入队。
     command_gate: Mutex<()>,
     delivery_gate: tokio::sync::Mutex<()>,
@@ -52,13 +54,11 @@ pub(crate) struct ChildRuntime {
 }
 
 impl ChildRuntime {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         descriptor: AgentDescriptor,
         mut session: Session,
         config: CoreConfig,
         child_storage_root: PathBuf,
-        core_storage_root: PathBuf,
         mut plugins: Vec<Arc<dyn Plugin>>,
         team_client: Arc<dyn Plugin>,
         base_feedback: SharedFeedback,
@@ -70,13 +70,13 @@ impl ChildRuntime {
             ));
         }
         let completed_messages = Arc::new(Mutex::new(recover_completed_messages(&session)));
-        session.bind_storage_root(child_storage_root);
+        session.bind_storage_root(child_storage_root.clone());
         session.try_persist_to_disk()?;
 
         plugins.retain(|plugin| plugin.id() != PLUGIN_ID && plugin.id() != CHILD_PLUGIN_ID);
         plugins.push(team_client);
 
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<SessionStreamEvent>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let active_turn = Arc::new(Mutex::new(None));
         let state = Arc::new(Mutex::new(RuntimeState::Idle));
         let event_thread = spawn_event_bridge(
@@ -87,24 +87,21 @@ impl ChildRuntime {
             base_feedback,
             event_rx,
         );
-        let core = match TiangongCore::builder()
+        let session_id = session.id.clone();
+        let trust_mode = session.trust_mode;
+        let core = TiangongCore::builder()
+            .session_id(session_id)
             .config(CoreConfigProvider::new(config))
-            .session(session)
-            .event_sender(event_tx)
+            .trust_mode(trust_mode)
+            .storage_root(child_storage_root.clone())
+            .stream_tx(event_tx)
             .plugins(plugins)
-            .storage(CoreStorageLocation::new(core_storage_root))
-            .build()
-        {
-            Ok(core) => core,
-            Err(error) => {
-                let _ = event_thread.join();
-                return Err(format!("构造子 Agent Core 失败：{error}"));
-            }
-        };
+            .build();
 
         Ok(Arc::new(Self {
             descriptor,
             core: Mutex::new(Some(core)),
+            storage_root: child_storage_root,
             command_gate: Mutex::new(()),
             delivery_gate: tokio::sync::Mutex::new(()),
             shutdown_gate: tokio::sync::Mutex::new(()),
@@ -191,30 +188,30 @@ impl ChildRuntime {
             });
         }
 
-        let receipt = match (|| {
+        // fire-and-forget：deliver 后不等持久化确认。worker 在消息持久化失败时会
+        // 发出 Error 终态，由下方 terminal_rx 的 Err 路径接管。
+        if let Err(error) = (|| {
             let core = self
                 .core
                 .lock()
                 .map_err(|_| "子 Agent Core 状态锁定失败".to_string())?;
             core.as_ref()
                 .ok_or_else(|| "子 Agent Core 已关闭".to_string())?
-                .enqueue_prepared_with_receipt(message_id.clone(), prepared)
+                .deliver(
+                    tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                        message_id.clone(),
+                        prepared,
+                    ),
+                )
                 .map_err(|error| format!("投递子 Agent 消息失败：{error}"))
         })() {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                self.remove_active_turn(&message_id);
-                return Err(error);
-            }
-        };
+            self.remove_active_turn(&message_id);
+            return Err(error);
+        }
         // Message 已经与 Running/waiter 一起原子排在任何后续 Cancel 之前；异步
-        // 等待持久化和终态时不持有同步锁。
+        // 等待终态时不持有同步锁。
         drop(command_guard);
 
-        if let Err(error) = receipt.await {
-            self.remove_active_turn(&message_id);
-            return Err(format!("子 Agent 消息持久化失败：{error}"));
-        }
         let result = terminal_rx
             .await
             .map_err(|_| "子 Agent 外部事件流在终态前关闭".to_string())??;
@@ -281,14 +278,13 @@ impl ChildRuntime {
         let cwd = workspace
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let core = self
-            .core
-            .lock()
-            .map_err(|_| "子 Agent Core 状态锁定失败".to_string())?;
-        core.as_ref()
-            .ok_or_else(|| "子 Agent Core 已关闭".to_string())?
-            .deliver(AgentInputKind::update_cwd(cwd))
-            .map_err(|error| format!("同步子 Agent 工作目录失败：{error}"))
+        // 工作目录变更直接更新磁盘 session；下次 turn 从磁盘重载 cwd。
+        let mut session = Session::load_from_storage(&self.storage_root, &self.descriptor.agent_id)
+            .map_err(|error| format!("加载子 Agent 会话失败：{error}"))?;
+        session.cwd = cwd;
+        session
+            .try_persist_to_disk()
+            .map_err(|error| format!("持久化子 Agent 工作目录失败：{error}"))
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -621,7 +617,7 @@ fn spawn_event_bridge(
     state: Arc<Mutex<RuntimeState>>,
     completed_messages: Arc<Mutex<HashMap<String, ChildTurnResult>>>,
     base_feedback: SharedFeedback,
-    event_rx: std::sync::mpsc::Receiver<SessionStreamEvent>,
+    event_rx: std::sync::mpsc::Receiver<StreamEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(event) = event_rx.recv() {
@@ -631,7 +627,7 @@ fn spawn_event_bridge(
                 &state,
                 &completed_messages,
                 &base_feedback,
-                event.event,
+                event,
             );
         }
         // 锁顺序固定为 active_turn → state。通道关闭后即使 waiter 已被调用方
@@ -1025,9 +1021,7 @@ fn namespaced_message_id(
 }
 
 fn forward_event(feedback: &PluginFeedbackTx, event: StreamEvent) {
-    if !feedback.send_turn_stream_event(event.clone()) {
-        feedback.send_stream_event(event);
-    }
+    feedback.send_stream_event(event);
 }
 
 fn forward_status(feedback: &PluginFeedbackTx, descriptor: &AgentDescriptor, status: &str) {
@@ -1414,27 +1408,26 @@ mod tests {
     async fn independent_core_waits_for_external_terminal_and_persists_child_session() {
         let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let server = OneShotSseServer::start();
 
         // 真实 Core 注册一个最小插件，取得合法的父反馈通道供子事件桥转发。
+        // 投递一条消息触发 worker 循环（engine 构建 + 插件注册），不等 turn 完成。
         let capture = Arc::new(FeedbackCapturePlugin::default());
         let mut parent_session = Session::new("parent");
         parent_session.cwd = storage.path().to_string_lossy().into_owned();
         parent_session.bind_storage_root(storage.path());
+        parent_session.try_persist_to_disk().unwrap();
         let (parent_events_tx, _parent_events_rx) = std::sync::mpsc::channel();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(parent_session)
-            .event_sender(parent_events_tx)
+            .session_id(parent_session.id)
+            .stream_tx(parent_events_tx)
             .plugins(vec![capture.clone()])
-            .storage(CoreStorageLocation::new(storage.path()))
-            .build()
-            .unwrap();
+            .storage_root(storage.path())
+            .trust_mode(parent_session.trust_mode)
+            .build();
         parent_core
-            .deliver(AgentInputKind::update_cwd(
-                storage.path().to_string_lossy().into_owned(),
-            ))
+            .deliver(AgentInputKind::message("trigger plugin registration"))
             .unwrap();
         let feedback = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -1571,7 +1564,6 @@ mod tests {
             child_session,
             config,
             child_storage.clone(),
-            storage.path().to_path_buf(),
             Vec::new(),
             Arc::new(EmptyPlugin),
             base_feedback,

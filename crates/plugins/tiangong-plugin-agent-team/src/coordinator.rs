@@ -10,7 +10,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::{PermissionLevel, TrustMode};
+use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{now_text, Message, MessageRole, Session};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -698,7 +698,6 @@ impl Coordinator {
             session,
             config,
             child_root(&self.storage_root, &parent.id, &record.descriptor.agent_id),
-            self.storage_root.clone(),
             self.fresh_child_plugins(),
             Arc::new(ChildTeamClientPlugin::new(Arc::downgrade(self))),
             Arc::clone(&self.feedback),
@@ -839,9 +838,7 @@ impl Coordinator {
 
     fn emit(&self, event: StreamEvent) {
         if let Some(feedback) = self.feedback() {
-            if !feedback.send_turn_stream_event(event.clone()) {
-                feedback.send_stream_event(event);
-            }
+            feedback.send_stream_event(event);
         }
     }
 
@@ -915,8 +912,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
             .feedback
             .read()
             .ok()
-            .and_then(|feedback| feedback.clone())
-            .map(PluginFeedbackTx::for_current_turn);
+            .and_then(|feedback| feedback.clone());
         let call = call.clone();
         let actor_id = actor_id.to_string();
         Box::pin(async move {
@@ -949,13 +945,6 @@ impl Plugin for ChildTeamClientPlugin {
         if let Ok(mut current) = self.feedback.write() {
             *current = Some(feedback);
         }
-    }
-
-    fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
-        child_tool_specs()
-            .into_iter()
-            .map(|spec| (spec.name, PermissionLevel::Safe))
-            .collect()
     }
 }
 
@@ -1156,7 +1145,6 @@ mod tests {
     async fn create_agent_uses_session_id_as_agent_id_and_persists_under_teams() {
         let _guard = crate::test_support::storage_test_guard_async().await;
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let coordinator = Coordinator::new(storage.path().to_path_buf(), empty_factory());
         let mut parent = Session::new("parent");
         parent.cwd = storage.path().to_string_lossy().into_owned();

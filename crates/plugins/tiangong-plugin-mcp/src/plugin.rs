@@ -15,7 +15,7 @@ use std::sync::RwLock;
 use anyhow::{Context, Result};
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
-use tiangong_core::permission::TrustModeHandle;
+use tiangong_core::permission::TrustMode;
 
 use crate::capability::McpCapabilityIndex;
 use crate::config::McpConfig;
@@ -201,7 +201,7 @@ impl Plugin for McpPlugin {
         }
     }
 
-    fn set_trust_mode(&self, _trust: TrustModeHandle) {
+    fn set_trust_mode(&self, _trust: TrustMode) {
         // MCP 工具执行受 engine 层 PermissionGate 统一兜底，无需插件自行感知。
     }
 

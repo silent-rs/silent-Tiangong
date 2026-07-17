@@ -7,9 +7,9 @@
 //! - [`Plugin`] 是能力的声明式聚合：通过 supertrait 约束同时要求实现工具规格、
 //!   工具覆盖与 Prompt 段落三种能力（均提供默认空实现，插件按需覆写）。
 //! - core 在收集 tool_specs 前会先通过 [`Plugin::set_workspace`] 注入当前会话
-//!   工作目录、通过 [`Plugin::set_trust_mode`] 注入会话信任解析句柄、通过
-//!   [`Plugin::set_feedback_tx`] 注入反馈通道，并在配置变更时调
-//!   [`Plugin::on_config_updated`] 让插件初始化内部状态。
+//!   工作目录、通过 [`Plugin::set_trust_mode`] 注入会话信任解析句柄，并在配置变更
+//!   时调 [`Plugin::on_config_updated`] 让插件初始化内部状态。TurnContext 构建后，
+//!   `spawn_turn` 再通过 [`Plugin::set_feedback_tx`] 注入本轮反馈通道。
 //! - `PageFetcher` / `TerminalProvider` 等外部能力 trait 已随能力下沉重构（#225）
 //!   迁入对应插件 crate，core 不再持有这些 trait；插件经 [`Plugin::set_feedback_tx`]
 //!   注入的通道自行向会话投递外部事件（如浏览器页面快照）。
@@ -29,8 +29,8 @@ mod registry;
 mod tool_spec;
 mod trait_def;
 
-pub use feedback::{PluginFeedback, PluginFeedbackTx, TurnUsageGuard, TurnUsageSink};
+pub use feedback::{PluginFeedback, PluginFeedbackTx};
 pub use trait_def::Plugin;
 
 pub(crate) use injection::injection_tool_spec;
-pub(crate) use registry::register_plugin;
+pub(crate) use registry::prepare_plugins;

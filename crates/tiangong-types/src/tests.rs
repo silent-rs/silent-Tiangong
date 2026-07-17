@@ -349,6 +349,10 @@ fn stream_event_serde() {
     let json = serde_json::to_string(&tool).unwrap();
     assert!(json.contains(r#""type":"tool_calls""#));
     assert!(json.contains("read_file"));
+
+    let elapsed = StreamEvent::TurnElapsed { seconds: 3 };
+    let json = serde_json::to_string(&elapsed).unwrap();
+    assert_eq!(json, r#"{"type":"turn_elapsed","seconds":3}"#);
 }
 
 #[test]

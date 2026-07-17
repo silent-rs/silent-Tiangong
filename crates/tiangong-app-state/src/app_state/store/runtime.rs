@@ -14,7 +14,7 @@ pub struct PendingTurnStub {
     pub session_id: String,
     /// 已入 Core 命令队列、尚未收到 UserMessage 接受事件的消息。
     pub queued_message_ids: HashSet<String>,
-    /// 已被当前 Core turn 接受、等待最终 User 快照确认的消息。
+    /// 已被当前 Core turn 接受、等待终态确认的消息。
     pub accepted_message_ids: HashSet<String>,
     /// 兼容没有消息 ID 的旧入口。
     pub legacy_pending: bool,

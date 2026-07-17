@@ -1,62 +1,26 @@
 //! ReAct 循环中的消息构造、格式化和工具结果处理
 
-use std::sync::mpsc::Sender as StdSender;
-
 use crate::session::{Message, MessageRole, MessageToolCall, Session};
-use tiangong_types::{
-    ContentBlock, StreamEvent, content_blocks_text, stable_content_blocks,
-    validate_ready_content_blocks,
-};
+#[cfg(test)]
+use tiangong_types::ContentBlock;
+use tiangong_types::StreamEvent;
 
 const TOOL_RESULT_STREAM_MAX_CHARS: usize = 8_000;
 
-pub fn append_or_reuse_user_message(
-    session: &mut Session,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-) -> Result<String, String> {
-    if let Some(message_id) = message_id {
-        if session
-            .messages
-            .iter()
-            .any(|message| message.id == message_id)
-        {
-            if !session.update_prepared_user_message(&message_id, prepared) {
-                return Err(format!("消息 ID {message_id} 已被非用户消息占用"));
-            }
-        } else {
-            session.append_prepared_user_message_with_id(message_id.clone(), prepared);
-        }
-        return Ok(message_id);
-    }
-
-    let message_id = scru128::new().to_string();
-    session.append_prepared_user_message_with_id(message_id.clone(), prepared);
-    Ok(message_id)
-}
-
-pub(crate) struct AcceptedUserMessage {
-    pub message_id: String,
-    /// 该用户消息在 Session 中的实际索引；快照预含同 ID 消息时可能小于接收前 len。
-    pub turn_start_idx: usize,
-    pub prepared: Vec<ContentBlock>,
-}
-
 pub(crate) fn emit_session_message_upsert(
-    session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: &str,
 ) {
-    emit_session_message_upsert_with_state(session, stream_tx, message_id, false);
+    emit_session_message_upsert_with_state(ctx, message_id, false);
 }
 
 pub(crate) fn emit_session_message_upsert_with_state(
-    session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &crate::turn_context::TurnContext,
     message_id: &str,
     include_deferred_tool_injections: bool,
 ) {
-    let Some(mut message) = session
+    let Some(mut message) = ctx
+        .session
         .messages
         .iter()
         .find(|message| message.id == message_id)
@@ -65,242 +29,30 @@ pub(crate) fn emit_session_message_upsert_with_state(
         return;
     };
     message.clear_transient_data();
-    let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+    let _ = ctx.stream_tx.send(StreamEvent::SessionMessageUpsert {
         message,
         deferred_tool_injections: include_deferred_tool_injections
-            .then(|| session.deferred_tool_injections.clone()),
+            .then(|| ctx.session.deferred_tool_injections.clone()),
     });
 }
 
-pub(crate) fn emit_deferred_tool_injections_changed(
-    session: &Session,
-    stream_tx: &StdSender<StreamEvent>,
-) {
-    let _ = stream_tx.send(StreamEvent::DeferredToolInjectionsChanged {
-        injections: session.deferred_tool_injections.clone(),
-    });
-}
-
-pub(crate) fn defer_tool_injection(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    tool_name: String,
-    payload: serde_json::Value,
-) {
-    session.defer_tool_injection(tool_name, payload);
-    session.persist_to_disk();
-    emit_deferred_tool_injections_changed(session, stream_tx);
-}
-
-/// 把 Prepared 用户消息写入 Session，持久化成功后才确认并发出 UserMessage 事件。
-///
-/// 失败时恢复完整的投递前 Session 快照，保证消息和运行态内容都不会半写入。
-pub(crate) fn accept_prepared_user_message_with_options(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    close_pending_tools: bool,
-) -> Result<AcceptedUserMessage, String> {
-    if let Err(err) = validate_ready_content_blocks(&prepared) {
-        if let Some(ack) = persistence_ack {
-            let _ = ack.send(Err(err.clone()));
-        }
-        return Err(err);
-    }
-    let before = session.clone();
-    // Desktop/Server 会先把稳定 User 乐观写入宿主快照。执行中追加时必须先取出
-    // 这条预写消息，闭合未完成 tool calls 后再把 User 放回末尾，保持协议顺序。
-    if let Some(message_id) = message_id.as_deref()
-        && let Some(index) = session
-            .messages
-            .iter()
-            .position(|message| message.id == message_id && message.role == MessageRole::User)
-    {
-        session.messages.remove(index);
-    }
-    let interrupted_tool_calls = if close_pending_tools {
-        close_unfinished_tool_calls(session)
-    } else {
-        Vec::new()
-    };
-    let text = content_blocks_text(&prepared);
-    let accepted_prepared = prepared.clone();
-    let stable_content = stable_content_blocks(&prepared);
-    let message_id = match append_or_reuse_user_message(session, message_id, prepared) {
-        Ok(message_id) => message_id,
-        Err(err) => {
-            *session = before;
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Err(err.clone()));
-            }
-            return Err(err);
-        }
-    };
-    let turn_start_idx = match user_message_turn_start_idx(session, &message_id) {
-        Some(index) => index,
-        None => {
-            let err = format!("用户消息 {message_id} 写入后未出现在 Session 中");
-            *session = before;
-            if let Some(ack) = persistence_ack {
-                let _ = ack.send(Err(err.clone()));
-            }
-            return Err(err);
-        }
-    };
-    if let Err(err) = session.try_persist_to_disk() {
-        *session = before;
-        if let Some(ack) = persistence_ack {
-            let _ = ack.send(Err(err.clone()));
-        }
-        return Err(err);
-    }
-
-    if let Some(ack) = persistence_ack {
-        let _ = ack.send(Ok(()));
-    }
-    for (tool_call_id, tool_name, output) in interrupted_tool_calls {
-        let _ = stream_tx.send(StreamEvent::ToolResult {
-            name: tool_name,
-            tool_call_id: Some(tool_call_id),
-            ok: false,
-            output,
-            full_output: None,
-            duration_ms: None,
+pub(crate) fn emit_deferred_tool_injections_changed(ctx: &crate::turn_context::TurnContext) {
+    let _ = ctx
+        .stream_tx
+        .send(StreamEvent::DeferredToolInjectionsChanged {
+            injections: ctx.session.deferred_tool_injections.clone(),
         });
-    }
-    let media = session
-        .messages
-        .iter()
-        .find(|message| message.id == message_id)
-        .map(|message| message.extract_media_assets())
-        .unwrap_or_default();
-    let _ = stream_tx.send(StreamEvent::UserMessage {
-        message_id: message_id.clone(),
-        content: text.clone(),
-        content_blocks: stable_content,
-        media: media.clone(),
-        model_excluded: false,
-    });
-    Ok(AcceptedUserMessage {
-        message_id,
-        turn_start_idx,
-        prepared: accepted_prepared,
-    })
 }
 
-/// 在追加新的 User 消息前闭合所有尚未返回结果的工具调用，保持 Provider 协议顺序。
-fn close_unfinished_tool_calls(session: &mut Session) -> Vec<(String, String, String)> {
-    close_unfinished_tool_calls_with_reason(session, "工具调用因新的用户消息而中断，未执行。")
-}
-
-/// 在轮次终态提交前闭合所有未完成的工具调用，保持 Provider 历史协议完整。
-pub(crate) fn close_unfinished_tool_calls_for_turn(
-    session: &mut Session,
-) -> Vec<(String, String, String)> {
-    close_unfinished_tool_calls_with_reason(session, "工具调用因本轮结束而中断，未执行。")
-}
-
-fn close_unfinished_tool_calls_with_reason(
-    session: &mut Session,
-    reason: &str,
-) -> Vec<(String, String, String)> {
-    let pending = unfinished_tool_calls(session);
-
-    pending
-        .into_iter()
-        .map(|(tool_call_id, tool_name)| {
-            let output = reason.to_string();
-            append_tool_result_message(session, &tool_call_id, &tool_name, output.clone(), true);
-            (tool_call_id, tool_name, output)
-        })
-        .collect()
-}
-
-pub(crate) fn has_unfinished_tool_calls(session: &Session) -> bool {
-    !unfinished_tool_calls(session).is_empty()
-}
-
-pub(crate) fn flush_deferred_tool_injections(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-) {
-    if has_unfinished_tool_calls(session) {
+pub(crate) fn flush_deferred_tool_injections(ctx: &mut crate::turn_context::TurnContext) {
+    if ctx.session.has_unfinished_tool_calls() || ctx.session.deferred_tool_injections.is_empty() {
         return;
     }
-    for injection in std::mem::take(&mut session.deferred_tool_injections) {
-        inject_tool_to_session(session, stream_tx, &injection.tool_name, &injection.payload);
+    for injection in std::mem::take(&mut ctx.session.deferred_tool_injections) {
+        inject_tool_to_session(ctx, &injection.tool_name, &injection.payload);
     }
-    session.persist_to_disk();
-    emit_deferred_tool_injections_changed(session, stream_tx);
-}
-
-fn unfinished_tool_calls(session: &Session) -> Vec<(String, String)> {
-    let Some((assistant_index, assistant)) = session
-        .messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, message)| !message.tool_calls.is_empty())
-    else {
-        return Vec::new();
-    };
-    let completed = session.messages[assistant_index + 1..]
-        .iter()
-        .filter_map(|message| message.tool_call_id.as_deref())
-        .collect::<std::collections::HashSet<_>>();
-    assistant
-        .tool_calls
-        .iter()
-        .filter(|call| !completed.contains(call.id.as_str()))
-        .map(|call| (call.id.clone(), call.name.clone()))
-        .collect()
-}
-
-/// 持久化用户消息，并直接交给当前 Agent 处理。
-pub(crate) fn accept_user_message(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    close_pending_tools: bool,
-) -> Result<AcceptedUserMessage, String> {
-    accept_prepared_user_message_with_options(
-        session,
-        stream_tx,
-        message_id,
-        prepared,
-        persistence_ack,
-        close_pending_tools,
-    )
-}
-
-/// 持久化执行中的追加消息，并返回给当前 Agent 的纯文本输入。
-pub(crate) fn accept_runtime_user_message(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
-    message_id: Option<String>,
-    prepared: Vec<ContentBlock>,
-    persistence_ack: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-) -> Result<String, String> {
-    let accepted = accept_user_message(
-        session,
-        stream_tx,
-        message_id,
-        prepared,
-        persistence_ack,
-        true,
-    )?;
-    Ok(content_blocks_text(&accepted.prepared))
-}
-
-fn user_message_turn_start_idx(session: &Session, message_id: &str) -> Option<usize> {
-    session
-        .messages
-        .iter()
-        .position(|message| message.id == message_id && message.role == MessageRole::User)
+    ctx.session.persist_to_disk();
+    emit_deferred_tool_injections_changed(ctx);
 }
 
 pub(crate) fn is_synthetic_tool_call_placeholder(text: &str) -> bool {
@@ -549,10 +301,6 @@ pub(crate) fn classify_tool_result_failure(result: &crate::tool::ToolResult) -> 
     }
 }
 
-pub(crate) fn structured_tool_failure_provider_text(record: &ToolFailureRecord) -> String {
-    record.render_for_model()
-}
-
 fn classify_failure_message(message: &str) -> ToolFailureKind {
     let lowered = message.to_lowercase();
     if lowered.contains("__parse_error") || lowered.contains("参数") || lowered.contains("json") {
@@ -663,8 +411,7 @@ pub(crate) fn canonical_json(value: &serde_json::Value) -> String {
 }
 
 pub(crate) fn append_duplicate_tool_result(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &mut crate::turn_context::TurnContext,
     tool_call_id: &str,
     tool_name: &str,
 ) {
@@ -672,7 +419,7 @@ pub(crate) fn append_duplicate_tool_result(
         "本轮已经成功执行过完全相同的 {tool_name} 工具调用，系统已跳过重复执行。\
         请查看上方历史消息中的工具执行结果，直接基于已有结果继续后续任务，不要再次发起相同调用。"
     );
-    let _ = stream_tx.send(StreamEvent::ToolResult {
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.to_string()),
         ok: true,
@@ -680,17 +427,22 @@ pub(crate) fn append_duplicate_tool_result(
         full_output: Some(message.clone()),
         duration_ms: None,
     });
-    append_tool_result_message(session, tool_call_id, tool_name, message.clone(), false);
+    append_tool_result_message(
+        &mut ctx.session,
+        tool_call_id,
+        tool_name,
+        message.clone(),
+        false,
+    );
     append_runtime_tool_message(
-        session,
+        &mut ctx.session,
         tool_name,
         format!("跳过重复工具调用 [{tool_name}]\n{message}"),
     );
 }
 
 pub(crate) fn append_repeated_failed_tool_result(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &mut crate::turn_context::TurnContext,
     tool_call_id: &str,
     tool_name: &str,
     original_error: &str,
@@ -703,7 +455,7 @@ pub(crate) fn append_repeated_failed_tool_result(
     let message = format!(
         "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；如果失败原因包含 __parse_error，请重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数；也可以切换到其他可行方式。"
     );
-    let _ = stream_tx.send(StreamEvent::ToolResult {
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
         tool_call_id: Some(tool_call_id.to_string()),
         ok: false,
@@ -711,9 +463,15 @@ pub(crate) fn append_repeated_failed_tool_result(
         full_output: Some(message.clone()),
         duration_ms: None,
     });
-    append_tool_result_message(session, tool_call_id, tool_name, message.clone(), true);
+    append_tool_result_message(
+        &mut ctx.session,
+        tool_call_id,
+        tool_name,
+        message.clone(),
+        true,
+    );
     append_runtime_tool_message(
-        session,
+        &mut ctx.session,
         tool_name,
         format!("跳过重复失败工具调用 [{tool_name}]\n{message}"),
     );
@@ -824,34 +582,51 @@ pub fn inject_tool_to_messages(
 
 /// 向 session 注入工具消息并发送 StreamEvent（core worker 路径使用）。
 pub fn inject_tool_to_session(
-    session: &mut Session,
-    stream_tx: &StdSender<StreamEvent>,
+    ctx: &mut crate::turn_context::TurnContext,
     tool_name: &str,
     payload: &serde_json::Value,
 ) {
     // 先注入消息对（共用逻辑）
-    let was_injected = inject_tool_to_messages(session, tool_name, payload);
+    let was_injected = inject_tool_to_messages(&mut ctx.session, tool_name, payload);
     if !was_injected {
         return;
     }
     // 找到刚注入的 tool result 消息，发送 StreamEvent
-    if let Some(assistant_msg) = session.messages.iter().rev().nth(1)
-        && let Some(tc) = assistant_msg.tool_calls.first()
-    {
-        let assistant_id = assistant_msg.id.clone();
-        let tool_result_id = session.messages.last().map(|message| message.id.clone());
-        emit_session_message_upsert(session, stream_tx, &assistant_id);
+    let injected = ctx
+        .session
+        .messages
+        .iter()
+        .rev()
+        .nth(1)
+        .and_then(|assistant| {
+            assistant.tool_calls.first().map(|tool_call| {
+                let tool_result_id = ctx
+                    .session
+                    .messages
+                    .last()
+                    .map(|message| message.id.clone());
+                let output = ctx
+                    .session
+                    .messages
+                    .last()
+                    .map(|message| message.text_content())
+                    .unwrap_or_default();
+                (
+                    assistant.id.clone(),
+                    tool_result_id,
+                    tool_call.id.clone(),
+                    output,
+                )
+            })
+        });
+    if let Some((assistant_id, tool_result_id, tool_call_id, output)) = injected {
+        emit_session_message_upsert(ctx, &assistant_id);
         if let Some(tool_result_id) = tool_result_id {
-            emit_session_message_upsert(session, stream_tx, &tool_result_id);
+            emit_session_message_upsert(ctx, &tool_result_id);
         }
-        let output = session
-            .messages
-            .last()
-            .map(|m| m.text_content())
-            .unwrap_or_default();
-        let _ = stream_tx.send(StreamEvent::ToolResult {
+        let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
             name: INJECTION_TOOL_NAME.to_string(),
-            tool_call_id: Some(tc.id.clone()),
+            tool_call_id: Some(tool_call_id),
             ok: true,
             output,
             full_output: None,
@@ -922,35 +697,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preloaded_same_id_message_uses_its_actual_index_as_turn_start() {
-        let mut session = Session::new("preloaded-turn");
-        session.append_message(MessageRole::Assistant, "before");
-        session.append_prepared_user_message_with_id(
-            "preloaded-user".to_string(),
-            vec![ContentBlock::text("old content")],
-        );
-        session.append_message(MessageRole::Assistant, "after");
-        let accept_before_len = session.messages.len();
-
-        let message_id = append_or_reuse_user_message(
-            &mut session,
-            Some("preloaded-user".to_string()),
-            vec![ContentBlock::text("new content")],
-        )
-        .unwrap();
-        let turn_start_idx = user_message_turn_start_idx(&session, &message_id).unwrap();
-
-        assert_eq!(turn_start_idx, 1);
-        assert_ne!(turn_start_idx, accept_before_len);
-        assert_eq!(
-            session.messages[turn_start_idx].text_content(),
-            "new content"
-        );
-    }
-
-    #[test]
-    fn new_user_message_closes_every_unfinished_tool_call_first() {
-        let mut session = Session::new("tool-interruption");
+    fn turn_finalization_closes_every_unfinished_tool_call_before_next_user() {
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("tool-interruption").with_storage_root(storage.path());
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![
             MessageToolCall {
@@ -973,10 +722,11 @@ mod tests {
             false,
         );
 
-        let interrupted = close_unfinished_tool_calls(&mut session);
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-2");
-        assert!(!has_unfinished_tool_calls(&session));
+        assert!(!session.has_unfinished_tool_calls());
 
         session.append_prepared_user_message_with_id(
             "next-user".to_string(),
@@ -1006,7 +756,7 @@ mod tests {
         }];
         session.messages.push(assistant);
 
-        assert!(has_unfinished_tool_calls(&session));
+        assert!(session.has_unfinished_tool_calls());
         append_tool_result_message(
             &mut session,
             "call-pending",
@@ -1014,57 +764,13 @@ mod tests {
             "done".to_string(),
             false,
         );
-        assert!(!has_unfinished_tool_calls(&session));
-    }
-
-    #[test]
-    fn deferred_injection_flushes_after_terminal_tool_close() {
-        let storage_root = std::env::temp_dir().join(format!(
-            "tiangong-core-terminal-flush-test-{}",
-            scru128::new()
-        ));
-        std::fs::create_dir_all(&storage_root).unwrap();
-        crate::storage::set_storage_root(storage_root);
-        let mut session = Session::new("terminal-deferred-injection");
-        let mut assistant = Message::new(MessageRole::Assistant, "");
-        assistant.tool_calls = vec![MessageToolCall {
-            id: "call-pending".to_string(),
-            name: "write_file".to_string(),
-            arguments: serde_json::json!({}),
-        }];
-        session.messages.push(assistant);
-        session.defer_tool_injection(
-            "agent_report".to_string(),
-            serde_json::json!({ "content": "done" }),
-        );
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        flush_deferred_tool_injections(&mut session, &tx);
-        assert_eq!(session.deferred_tool_injections.len(), 1);
-
-        let interrupted = close_unfinished_tool_calls_for_turn(&mut session);
-        assert_eq!(interrupted.len(), 1);
-        flush_deferred_tool_injections(&mut session, &tx);
-
-        assert!(session.deferred_tool_injections.is_empty());
-        assert_eq!(session.messages.len(), 4);
-        let injected_call = session.messages[2].tool_calls.first().unwrap();
-        assert_eq!(injected_call.name, INJECTION_TOOL_NAME);
-        assert_eq!(injected_call.arguments["source"], "agent_report");
-        assert_eq!(injected_call.arguments["content"], "done");
-        assert_eq!(
-            session.messages[3].tool_name.as_deref(),
-            Some(INJECTION_TOOL_NAME)
-        );
-        assert_eq!(
-            session.messages[3].tool_call_id.as_deref(),
-            Some(injected_call.id.as_str())
-        );
+        assert!(!session.has_unfinished_tool_calls());
     }
 
     #[test]
     fn reused_tool_call_id_does_not_reuse_an_old_result() {
-        let mut session = Session::new("reused-tool-id");
+        let storage = tempfile::tempdir().unwrap();
+        let mut session = Session::new("reused-tool-id").with_storage_root(storage.path());
         for completed in [true, false] {
             let mut assistant = Message::new(MessageRole::Assistant, "");
             assistant.tool_calls = vec![MessageToolCall {
@@ -1084,97 +790,12 @@ mod tests {
             }
         }
 
-        assert!(has_unfinished_tool_calls(&session));
-        let interrupted = close_unfinished_tool_calls(&mut session);
+        assert!(session.has_unfinished_tool_calls());
+        let interrupted =
+            session.close_unfinished_tool_calls_with_reason("工具调用因本轮结束而中断，未执行。");
         assert_eq!(interrupted.len(), 1);
         assert_eq!(interrupted[0].0, "call-1");
-        assert!(!has_unfinished_tool_calls(&session));
-    }
-
-    #[test]
-    fn inject_tool_renders_browser_feedback() {
-        let mut session = Session::new("browser");
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        inject_tool_to_session(
-            &mut session,
-            &tx,
-            "browser_data",
-            &serde_json::json!({
-                "title": "API Keys",
-                "url": "https://platform.deepseek.com/api_keys",
-                "text": "API keys page",
-                "feedback": "POST /api_keys (状态 200)\n{\"key\":\"sk-test\"}",
-            }),
-        );
-
-        // 消息对：assistant(tool_call) + tool(result)
-        assert_eq!(session.messages.len(), 2);
-        assert_eq!(session.messages[0].tool_calls.len(), 1);
-        assert_eq!(
-            session.messages[1].tool_call_id.as_deref(),
-            Some(session.messages[0].tool_calls[0].id.as_str())
-        );
-
-        let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("数据来源：browser_data"));
-        assert!(tool_text.contains("title: API Keys"));
-        assert!(tool_text.contains("sk-test"));
-
-        let events = rx.try_iter().collect::<Vec<_>>();
-        assert!(matches!(
-            &events[0],
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.role == MessageRole::Assistant && message.tool_calls.len() == 1
-        ));
-        assert!(matches!(
-            &events[1],
-            StreamEvent::SessionMessageUpsert { message, .. }
-                if message.role == MessageRole::Tool
-        ));
-        match &events[2] {
-            StreamEvent::ToolResult { output, .. } => {
-                assert!(output.contains("数据来源：browser_data"));
-                assert!(output.contains("sk-test"));
-            }
-            _ => panic!("expected tool result event"),
-        }
-    }
-
-    #[test]
-    fn inject_tool_dedup_by_url() {
-        let mut session = Session::new("browser");
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let payload = serde_json::json!({
-            "title": "API Keys",
-            "url": "https://platform.deepseek.com/api_keys",
-            "text": "API keys page",
-        });
-
-        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 2);
-
-        // 同 payload → 去重跳过
-        inject_tool_to_session(&mut session, &tx, "browser_data", &payload);
-        assert_eq!(session.messages.len(), 2);
-    }
-
-    #[test]
-    fn inject_tool_renders_terminal_user_input() {
-        let mut session = Session::new("terminal");
-        let (tx, _rx) = std::sync::mpsc::channel();
-
-        inject_tool_to_session(
-            &mut session,
-            &tx,
-            "terminal_user_input",
-            &serde_json::json!({ "command": "ls -la" }),
-        );
-
-        assert_eq!(session.messages.len(), 2);
-        let tool_text = session.messages[1].text_content();
-        assert!(tool_text.contains("数据来源：terminal_user_input"));
-        assert!(tool_text.contains("command: ls -la"));
+        assert!(!session.has_unfinished_tool_calls());
     }
 
     #[test]
@@ -1187,7 +808,7 @@ mod tests {
             "工具参数 JSON 无效：__parse_error",
         );
 
-        let text = structured_tool_failure_provider_text(&record);
+        let text = record.render_for_model();
 
         assert!(text.contains("[tool_failure]"));
         assert!(text.contains("tool_name: read_file"));

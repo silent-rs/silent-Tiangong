@@ -13,8 +13,9 @@
 pub trait AgentInput: Send + Sync {
     /// 投递一个外部输入到 Agent。
     ///
-    /// 成功进入命令通道返回 `Ok(())`；worker 已停止、通道关闭时返回
-    /// [`crate::core::CoreError::WorkerStopped`]，调用方据此清理僵尸 core。
+    /// 输入被接受后返回 `Ok(())`；需要活跃任务但当前任务已结束时返回
+    /// [`crate::core::CoreError::WorkerStopped`]，空闲期维护操作遇到忙碌 Core 时返回
+    /// [`crate::core::CoreError::Busy`]。
     fn deliver(&self, input: AgentInputKind) -> Result<(), crate::core::CoreError>;
 }
 
@@ -97,22 +98,12 @@ impl AgentInputKind {
         AgentInputKind::Command(CommandInput::Cancel)
     }
 
-    /// 便捷构造：更新工作目录。
-    pub fn update_cwd(cwd: impl Into<String>) -> Self {
-        AgentInputKind::Command(CommandInput::UpdateCwd { cwd: cwd.into() })
-    }
-
-    /// 便捷构造：重新加载配置。
-    pub fn reload_config() -> Self {
-        AgentInputKind::Command(CommandInput::ReloadConfig)
-    }
-
-    /// 便捷构造：手动触发上下文压缩。
+    /// 便捷构造：在 Core 空闲时手动触发上下文压缩。
     pub fn compress_context() -> Self {
         AgentInputKind::Command(CommandInput::CompressContext)
     }
 
-    /// 便捷构造：重置上下文。
+    /// 便捷构造：在 Core 空闲时重置上下文。
     pub fn reset_context() -> Self {
         AgentInputKind::Command(CommandInput::ResetContext)
     }
@@ -144,13 +135,11 @@ pub enum ApprovalInput {
 pub enum CommandInput {
     /// 取消当前执行。
     Cancel,
-    /// 更新当前会话工作目录。
-    UpdateCwd { cwd: String },
-    /// 重新加载共享配置。
-    ReloadConfig,
-    /// 手动触发上下文压缩。
+    /// 运行时更新信任模式(即时生效到活跃 turn task)。
+    SetTrustMode(crate::permission::TrustMode),
+    /// 手动触发上下文压缩（仅允许 Core 空闲时执行）。
     CompressContext,
-    /// 清理上下文（重置摘要，LLM 下次只看到 system prompt）。
+    /// 清理上下文（仅允许 Core 空闲时执行，LLM 下次只看到 system prompt）。
     ResetContext,
 }
 

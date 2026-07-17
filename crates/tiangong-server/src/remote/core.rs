@@ -2,8 +2,6 @@ use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-#[cfg(test)]
-use std::time::Duration;
 
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
@@ -16,8 +14,8 @@ use tiangong_media_archive::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
 };
 use tiangong_types::{
-    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, SessionStreamEvent,
-    StreamEvent, stable_content_blocks,
+    ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
+    stable_content_blocks,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -183,19 +181,15 @@ impl ServerCoreManager {
             .await?;
         let tracker = self.tracker_for(&session_id);
         let turn_id = tracker.start_turn(msg_id.clone());
-        let receipt = match self.enqueue_prepared(&session_id, &msg_id, prepared) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                tracker.cancel_turn(turn_id);
-                return Err(error);
-            }
-        };
+        // fire-and-forget：enqueue 成功即提交附件。worker 在消息持久化失败时会发出
+        // Error 终态，由下方 wait_for_turn 捕获并转为失败返回。
         let created_paths = commit_enqueued_attachment_transaction(transaction);
-        if let Err(error) = receipt.await_persisted().await {
+        if let Err(error) = self.enqueue_prepared(&session_id, &msg_id, prepared) {
+            cleanup_created_attachment_paths(&created_paths).ok();
             tracker.cancel_turn(turn_id);
-            return Err(attachment_delivery_failure(error, &created_paths));
+            return Err(error);
         }
-        // 消息稳定内容已确认；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
+        // 消息已入队；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
         drop(session_guard);
 
         let tracker_for_wait = tracker.clone();
@@ -310,7 +304,7 @@ impl ServerCoreManager {
         session_id: &str,
         message_id: &str,
         prepared: Vec<ContentBlock>,
-    ) -> Result<tiangong_core::core::PreparedMessageReceipt> {
+    ) -> Result<()> {
         let cores = self
             .cores
             .lock()
@@ -318,8 +312,13 @@ impl ServerCoreManager {
         let core = cores
             .get(session_id)
             .ok_or_else(|| anyhow!("会话 core 不存在：{session_id}"))?;
-        core.enqueue_prepared_with_receipt(message_id.to_string(), prepared)
-            .map_err(|error| anyhow!("消息投递失败：{error}"))
+        core.deliver(
+            tiangong_core::agent_input::AgentInputKind::prepared_with_id(
+                message_id.to_string(),
+                prepared,
+            ),
+        )
+        .map_err(|error| anyhow!("消息投递失败：{error}"))
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
@@ -360,7 +359,7 @@ impl ServerCoreManager {
             return Ok((session_id, capabilities));
         }
 
-        let (stream_tx, stream_rx) = mpsc::channel::<SessionStreamEvent>();
+        let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
 
         // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
@@ -413,9 +412,11 @@ impl ServerCoreManager {
         let attachment_capabilities = attachment_capability_snapshot(&models);
         let storage_root = tiangong_app_state::app_state::storage_root();
         let core = tiangong_core::core::TiangongCore::builder()
+            .session_id(session.id.clone())
             .config(isolated_core_config_provider(&session_config))
-            .session(session.clone())
-            .event_sender(stream_tx)
+            .trust_mode(session.trust_mode)
+            .storage_root(storage_root.clone())
+            .stream_tx(stream_tx)
             .plugins({
                 // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
                 // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
@@ -523,8 +524,7 @@ impl ServerCoreManager {
                 ));
                 plugins
             })
-            .storage(tiangong_core::core::CoreStorageLocation::new(storage_root))
-            .build()?;
+            .build();
         core.set_trust_mode(TrustMode::FullTrust);
         let actual_session_id = core.session_id().to_string();
         let installed =
@@ -602,7 +602,8 @@ impl ServerCoreManager {
             {
                 session.id.clone()
             } else {
-                let mut session = Session::new_isolated(title);
+                let mut session =
+                    Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
                 session.trust_mode = TrustMode::FullTrust;
                 let session_id = session.id.clone();
                 state.sessions_mut().push(session);
@@ -623,14 +624,13 @@ impl ServerCoreManager {
     fn spawn_stream_forwarder(
         &self,
         session_id: String,
-        stream_rx: mpsc::Receiver<SessionStreamEvent>,
+        stream_rx: mpsc::Receiver<StreamEvent>,
         tracker: Arc<ExecutionTracker>,
     ) {
         let state = self.state.clone();
         let event_bus = self.event_bus.clone();
         thread::spawn(move || {
-            for session_event in stream_rx {
-                let event = session_event.event;
+            for event in stream_rx {
                 sync_stream_event_to_state(&state, &event_bus, &session_id, &event);
                 // 终态先完成 Core 权威会话重载，再唤醒等待者；否则等待线程可能读到
                 // 尚未提交的流式镜像。
@@ -789,16 +789,6 @@ fn commit_enqueued_attachment_transaction(
     let created_paths = transaction.newly_created_paths().to_vec();
     transaction.commit();
     created_paths
-}
-
-fn attachment_delivery_failure(
-    error: impl std::fmt::Display,
-    created_paths: &[std::path::PathBuf],
-) -> anyhow::Error {
-    match cleanup_created_attachment_paths(created_paths) {
-        Ok(()) => anyhow!("消息持久化失败：{error}"),
-        Err(cleanup_error) => anyhow!("消息持久化失败：{error}；清理本批附件失败：{cleanup_error}"),
-    }
 }
 
 fn cleanup_created_attachment_paths(paths: &[std::path::PathBuf]) -> Result<()> {
@@ -1420,40 +1410,11 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    use tiangong_core::core::{CoreStorageLocation, Plugin, TiangongCore};
+    use tiangong_core::core::{Plugin, TiangongCore};
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
-    use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-    };
     use tiangong_types::{ContentBlock, StoredAsset};
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
-
-    struct BlockingEndPlugin {
-        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    impl ToolOverrideHandler for BlockingEndPlugin {}
-    impl ToolSpecProvider for BlockingEndPlugin {}
-    impl PromptSectionProvider for BlockingEndPlugin {}
-
-    impl Plugin for BlockingEndPlugin {
-        fn id(&self) -> &str {
-            "blocking-end-test"
-        }
-
-        fn on_session_ended(&self, _session: &mut Session) {
-            if let Some(entered) = self.entered.lock().unwrap().take() {
-                let _ = entered.send(());
-            }
-            let (released, notify) = &*self.release;
-            let mut released = released.lock().unwrap();
-            while !*released {
-                released = notify.wait(released).unwrap();
-            }
-        }
-    }
 
     fn isolated_test_manager(
         root: &Path,
@@ -1487,12 +1448,12 @@ mod tests {
         let (event_tx, _event_rx) = std::sync::mpsc::channel();
         TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
-            .event_sender(event_tx)
+            .session_id(session.id)
+            .stream_tx(event_tx)
             .plugins(plugins)
-            .storage(CoreStorageLocation::new(storage_root))
+            .storage_root(storage_root)
+            .trust_mode(session.trust_mode)
             .build()
-            .unwrap()
     }
 
     fn image_asset() -> StoredAsset {
@@ -1555,8 +1516,7 @@ mod tests {
         assert_eq!(created_paths.len(), 1);
         assert!(created_paths[0].is_file());
 
-        let error = attachment_delivery_failure("receipt failed", &created_paths);
-        assert!(error.to_string().contains("receipt failed"));
+        cleanup_created_attachment_paths(&created_paths).unwrap();
         assert!(!created_paths[0].exists());
     }
 
@@ -1661,90 +1621,6 @@ mod tests {
         assert_eq!(stored_session_id.as_deref(), Some(session.id.as_str()));
 
         assert!(manager.delete_session(&session.id).await.unwrap());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_waits_for_core_join_before_removing_session_state() {
-        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
-        let root = tempfile::tempdir().unwrap();
-        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
-        let (manager, session, session_path, state) = isolated_test_manager(root.path());
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let plugin = Arc::new(BlockingEndPlugin {
-            entered: Mutex::new(Some(entered_tx)),
-            release: release.clone(),
-        });
-        let core = test_core(session.clone(), root.path(), vec![plugin]);
-        assert!(
-            manager
-                .install_core_if_absent(&session.id, core, AttachmentCapabilitySnapshot::default(),)
-                .unwrap()
-        );
-        manager.tracker_for(&session.id);
-        manager
-            .remote_sessions
-            .lock()
-            .unwrap()
-            .insert("test:channel".to_string(), session.id.clone());
-
-        let delete_task = {
-            let manager = manager.clone();
-            let session_id = session.id.clone();
-            tokio::spawn(async move { manager.delete_session(&session_id).await })
-        };
-        tokio::time::timeout(Duration::from_secs(5), entered_rx)
-            .await
-            .expect("Core 应进入结束钩子")
-            .expect("结束钩子通知不应丢失");
-        assert!(!delete_task.is_finished());
-        assert!(manager.cores.lock().unwrap().get(&session.id).is_none());
-        assert!(
-            state
-                .lock()
-                .await
-                .sessions()
-                .iter()
-                .any(|candidate| candidate.id == session.id)
-        );
-        assert!(session_path.is_file());
-
-        {
-            let (released, notify) = &*release;
-            *released.lock().unwrap() = true;
-            notify.notify_all();
-        }
-        let deleted = tokio::time::timeout(Duration::from_secs(5), delete_task)
-            .await
-            .expect("删除任务不应超时")
-            .expect("删除任务不应 panic")
-            .expect("删除会话应成功");
-        assert!(deleted);
-        assert!(
-            !state
-                .lock()
-                .await
-                .sessions()
-                .iter()
-                .any(|candidate| candidate.id == session.id)
-        );
-        assert!(!session_path.exists());
-        assert!(
-            !manager
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .contains_key(&session.id)
-        );
-        assert!(!manager.trackers.lock().unwrap().contains_key(&session.id));
-        assert!(
-            !manager
-                .remote_sessions
-                .lock()
-                .unwrap()
-                .values()
-                .any(|mapped_session_id| mapped_session_id == &session.id)
-        );
     }
 
     #[test]
@@ -2019,54 +1895,5 @@ mod tests {
             session.messages[result_indices[1]].text_content(),
             "new-result-updated"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prepared_receipt_confirms_stable_message_persistence() {
-        let _guard = STORAGE_TEST_LOCK.lock().await;
-        let root = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(root.path().to_path_buf());
-        let session = Session::new("receipt");
-        let session_id = session.id.clone();
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
-        let core = TiangongCore::builder()
-            .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session(session)
-            .event_sender(event_tx)
-            .storage(CoreStorageLocation::new(root.path()))
-            .build()
-            .unwrap();
-
-        let receipt = core
-            .enqueue_prepared_with_receipt(
-                "receipt-message",
-                vec![
-                    ContentBlock::Text {
-                        text: "hello".to_string(),
-                    },
-                    ContentBlock::Image {
-                        asset: image_asset(),
-                        data: Some("RECEIPT_RUNTIME_SECRET".to_string()),
-                    },
-                ],
-            )
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), receipt.await_persisted())
-            .await
-            .expect("持久化确认不应超时")
-            .expect("Prepared 消息应持久化成功");
-
-        let json = std::fs::read_to_string(
-            root.path()
-                .join("sessions")
-                .join(format!("{session_id}.json")),
-        )
-        .unwrap();
-        assert!(json.contains("receipt-message"));
-        assert!(json.contains("\"type\": \"image\""));
-        assert!(json.contains("asset-server"));
-        assert!(!json.contains("RECEIPT_RUNTIME_SECRET"));
-
-        drop(core);
     }
 }

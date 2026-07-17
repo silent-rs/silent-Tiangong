@@ -38,6 +38,8 @@ pub enum StreamEvent {
         /// 第几次外层循环（从 1 开始）
         iteration: u32,
     },
+    /// 当前 turn 已运行的整秒数，仅用于实时展示，不进入 Session。
+    TurnElapsed { seconds: u64 },
     /// 思考过程增量
     Reasoning {
         /// 所属消息 ID
@@ -284,7 +286,7 @@ pub struct MemoryRecallHitSummary {
 /// Core 输出的所有事件都携带 session_id，
 /// 消费端（GUI / CLI / Server）可据此路由到正确的会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionStreamEvent {
+pub struct SessionEvent {
     /// 产生该事件的会话 ID
     pub session_id: String,
     /// 原始流事件

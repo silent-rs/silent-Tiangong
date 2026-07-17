@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 
 use tiangong_core::core::Plugin;
-use tiangong_core::permission::{TrustMode, TrustModeHandle};
+use tiangong_core::permission::TrustMode;
 
 /// 基础文件工具插件。
 ///
@@ -19,7 +19,7 @@ pub struct FsPlugin {
     /// 当前会话工作目录（可变，由 core 注入）。
     workspace: RwLock<Option<PathBuf>>,
     /// 信任模式解析句柄（set_trust_mode 时注入，FullTrust 时放宽路径校验）。
-    trust_mode: RwLock<Option<TrustModeHandle>>,
+    trust_mode: RwLock<Option<TrustMode>>,
 }
 
 impl FsPlugin {
@@ -40,7 +40,7 @@ impl FsPlugin {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.current() == TrustMode::FullTrust
+        *tm == TrustMode::FullTrust
     }
 }
 
@@ -55,7 +55,7 @@ impl Plugin for FsPlugin {
         }
     }
 
-    fn set_trust_mode(&self, trust: TrustModeHandle) {
+    fn set_trust_mode(&self, trust: TrustMode) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }

@@ -6,7 +6,6 @@ use std::sync::{Arc, RwLock};
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
-use tiangong_core::permission::PermissionLevel;
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -68,7 +67,7 @@ impl ToolOverrideHandler for AgentTeamPlugin {
         let coordinator = Arc::clone(&self.coordinator);
         let call = call.clone();
         let actor_id = actor_id.to_string();
-        let feedback = self.feedback().map(PluginFeedbackTx::for_current_turn);
+        let feedback = self.feedback();
         Box::pin(async move {
             let Some(feedback) = feedback else {
                 return Some(error_result(&call.name, "Agent Team 反馈通道不可用"));
@@ -137,13 +136,6 @@ impl Plugin for AgentTeamPlugin {
             coordinator.shutdown().await;
         });
     }
-
-    fn tool_permission_overrides(&self) -> std::collections::BTreeMap<String, PermissionLevel> {
-        root_tool_specs()
-            .into_iter()
-            .map(|spec| (spec.name, PermissionLevel::Safe))
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -156,13 +148,11 @@ mod tests {
 
     use serde_json::{json, Value};
     use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-    use tiangong_core::core::{CoreStorageLocation, Plugin, TiangongCore};
+    use tiangong_core::core::{Plugin, TiangongCore};
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider, ModelEndpoint};
     use tiangong_core::permission::TrustMode;
     use tiangong_core::session::Session;
-    use tiangong_types::{
-        ContentBlock, MessagePhase, MessageRole, SessionStreamEvent, StreamEvent,
-    };
+    use tiangong_types::{ContentBlock, MessagePhase, MessageRole, StreamEvent};
 
     use crate::test_support::storage_test_guard;
     use crate::{build_plugin, ChildPluginFactory};
@@ -391,7 +381,6 @@ mod tests {
     fn parent_continues_after_synchronous_child_turn_and_emits_one_final_done() {
         let _guard = storage_test_guard();
         let storage = tempfile::tempdir().unwrap();
-        tiangong_core::storage::set_storage_root(storage.path().to_path_buf());
         let server = ParentChildSseServer::start();
         let mut config = CoreConfig::default();
         config.llm.chat = ModelEndpoint {
@@ -408,18 +397,18 @@ mod tests {
         parent_session.cwd = storage.path().to_string_lossy().into_owned();
         parent_session.trust_mode = TrustMode::FullTrust;
         parent_session.bind_storage_root(storage.path());
-        let parent_session_id = parent_session.id.clone();
+        parent_session.try_persist_to_disk().unwrap();
         let child_factory: Arc<dyn ChildPluginFactory> = Arc::new(Vec::<Arc<dyn Plugin>>::new);
         let plugin = build_plugin(storage.path().to_path_buf(), child_factory);
-        let (event_tx, event_rx) = std::sync::mpsc::channel::<SessionStreamEvent>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(config))
-            .session(parent_session)
-            .event_sender(event_tx)
+            .session_id(parent_session.id)
+            .stream_tx(event_tx)
             .plugins(vec![plugin])
-            .storage(CoreStorageLocation::new(storage.path()))
-            .build()
-            .unwrap();
+            .storage_root(storage.path())
+            .trust_mode(parent_session.trust_mode)
+            .build();
         parent_core
             .deliver(AgentInputKind::prepared_with_id(
                 "parent-turn",
@@ -441,7 +430,7 @@ mod tests {
             let request_count = server.requests.lock().unwrap().len();
             let done_count = events
                 .iter()
-                .filter(|event| matches!(event.event, StreamEvent::Done { .. }))
+                .filter(|event| matches!(event, StreamEvent::Done { .. }))
                 .count();
             if request_count >= 3 && done_count >= 1 {
                 let settled = completed_at.get_or_insert_with(Instant::now);
@@ -478,10 +467,7 @@ mod tests {
 
         let parent_done = events
             .iter()
-            .filter(|event| {
-                event.session_id == parent_session_id
-                    && matches!(event.event, StreamEvent::Done { .. })
-            })
+            .filter(|event| matches!(event, StreamEvent::Done { .. }))
             .count();
         assert_eq!(
             parent_done, 1,
@@ -491,7 +477,7 @@ mod tests {
             .iter()
             .position(|event| {
                 matches!(
-                    &event.event,
+                    &event,
                     StreamEvent::SessionMessageUpsert { message, .. }
                         if message.role == MessageRole::System
                             && message.text_content().contains("[Agent] Reviewer (reviewer) 已加入团队")
@@ -502,7 +488,7 @@ mod tests {
             .iter()
             .position(|event| {
                 matches!(
-                    &event.event,
+                    &event,
                     StreamEvent::AgentStatusChanged { label, status, .. }
                         if label == "Reviewer" && status == "running"
                 )
@@ -514,7 +500,7 @@ mod tests {
         );
         assert!(events.iter().any(|event| {
             matches!(
-                &event.event,
+                &event,
                 StreamEvent::SessionMessageUpsert { message, .. }
                     if message.phase == MessagePhase::Summary
                         && message.text_content().contains("主 Agent 已读取子 Agent 的检查结果")

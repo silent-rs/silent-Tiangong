@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use tiangong_core::audit;
+use tiangong_core::observe as audit;
 
 use crate::plugin::SkillPlugin;
 use crate::skill_config::{InstalledSkillConfig, SkillSourceConfig};

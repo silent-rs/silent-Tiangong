@@ -1,22 +1,13 @@
 //! ReAct 主循环的通用辅助函数。
 //!
-//! 这些函数不依赖 `ReactEngine` 自身状态（无 `&self`），而是操作传入的
-//! `Session` / `RuntimeEngine` / 命令通道，属于与主状态机解耦的纯过程性逻辑：
-//! - 命令排空（`drain_pending_commands_async`）
-//! - 非阻塞取消检查（`check_cancel`）
+//! 这里只保留不参与命令路由的独立逻辑：
 //! - 最终回答启发式判断（`looks_like_final_answer`）
+//! - 插件模型用量累计与事件发布（`record_plugin_usage`）
 //!
 //! 浏览器页面自动观察已随 PageFetcher 能力下沉迁入 browser 插件（#225），
 //! core 不再感知浏览器快照注入。
 
-use std::sync::mpsc::Sender as StdSender;
-
-use tokio::sync::mpsc as tokio_mpsc;
-
-use crate::core::command::{Command, PendingCommandEffect};
-use crate::react::message::accept_runtime_user_message;
-use crate::runtime::RuntimeEngine;
-use crate::session::Session;
+use crate::model::TokenUsage;
 use tiangong_types::StreamEvent;
 
 /// 判断 ReAct 阶段的文本回复是否「看起来像一个完整回答」（而非向用户提问）。
@@ -54,120 +45,58 @@ pub(super) fn looks_like_final_answer(text: &str) -> bool {
     true
 }
 
-/// 非阻塞排空命令队列，处理排队的用户命令（消息注入/取消/上下文压缩等）。
-pub(super) fn drain_pending_commands_async(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    stream_tx: &StdSender<StreamEvent>,
-    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
-) -> PendingCommandEffect {
-    let commands = std::iter::from_fn(|| cmd_rx.try_recv().ok());
-    process_commands(session, engine, stream_tx, commands)
-}
-
-/// 处理工具执行期间暂存的命令；工具结果闭合后再调用以保持 Provider 消息顺序。
-pub(super) fn process_buffered_commands(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    stream_tx: &StdSender<StreamEvent>,
-    commands: Vec<Command>,
-) -> PendingCommandEffect {
-    process_commands(session, engine, stream_tx, commands)
-}
-
-fn process_commands(
-    session: &mut Session,
-    engine: &RuntimeEngine,
-    stream_tx: &StdSender<StreamEvent>,
-    commands: impl IntoIterator<Item = Command>,
-) -> PendingCommandEffect {
-    let mut current_agent_input = None;
-
-    for cmd in commands {
-        match cmd {
-            Command::Cancel => {
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "已取消".into(),
-                });
-                return PendingCommandEffect::Terminate;
-            }
-            Command::Shutdown => return PendingCommandEffect::Shutdown,
-            Command::Message {
-                prepared,
-                message_id,
-                persistence_ack,
-            } => {
-                match accept_runtime_user_message(
-                    session,
-                    stream_tx,
-                    message_id,
-                    prepared,
-                    persistence_ack,
-                ) {
-                    Ok(text) => current_agent_input = Some(text),
-                    Err(err) => tracing::warn!(
-                        error = %err,
-                        "排空队列时追加用户消息持久化失败"
-                    ),
-                }
-            }
-            Command::UpdateCwd { cwd } => {
-                session.cwd = cwd;
-                crate::core::apply_session_cwd(session);
-                let _ = stream_tx.send(StreamEvent::Error {
-                    message: "工作目录已更新，本轮已安全中断，请重新发送消息".to_string(),
-                });
-                return PendingCommandEffect::Terminate;
-            }
-            Command::UpdateSessionMetadata {
-                update,
-                persistence_ack,
-            } => {
-                let trust_mode = engine.permission_gate().trust_mode_handle();
-                if let Err(error) = crate::core::apply_session_metadata_update(
-                    session,
-                    &trust_mode,
-                    update,
-                    persistence_ack,
-                ) {
-                    tracing::warn!(%error, "执行中更新会话元数据失败");
-                }
-            }
-            Command::ReloadConfig => {}
-            Command::Approval { .. } => {}
-            Command::InjectTool { tool_name, payload } => {
-                crate::react::message::defer_tool_injection(session, stream_tx, tool_name, payload);
-            }
-            Command::CompressContext => {
-                let _ = stream_tx.send(StreamEvent::AgentNotification {
-                    agent_id: "system".to_string(),
-                    agent_label: "系统".to_string(),
-                    content: "当前轮次执行中，已跳过手动压缩，请在轮次结束后重试".to_string(),
-                    level: "warning".to_string(),
-                });
-            }
-            Command::ResetContext => {
-                crate::core::reset_context_for_session(session, stream_tx, engine);
-            }
-            Command::EmitStreamEvent(ev) => {
-                let ev = *ev;
-                let _ = stream_tx.send(ev);
-            }
-        }
-    }
-
-    if current_agent_input.is_some() {
-        PendingCommandEffect::MessagesInjected {
-            current_agent_input,
-        }
-    } else {
-        PendingCommandEffect::None
+pub(super) fn record_plugin_usage(
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+    accumulated_usage: &mut TokenUsage,
+    usage: TokenUsage,
+    source: String,
+    emit_event: bool,
+) {
+    accumulated_usage.accumulate(&usage);
+    if emit_event {
+        crate::react::context::emit_token_usage(
+            stream_tx,
+            &usage,
+            None,
+            context_limit,
+            source,
+            None,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_usage_is_accumulated_and_optionally_emitted() {
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel();
+        let usage = TokenUsage {
+            prompt_tokens: 7,
+            completion_tokens: 5,
+            total_tokens: 12,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+        };
+        let mut accumulated = TokenUsage::default();
+
+        record_plugin_usage(
+            &stream_tx,
+            1_000,
+            &mut accumulated,
+            usage,
+            "plugin".to_string(),
+            true,
+        );
+
+        assert_eq!(accumulated.total_tokens, 12);
+        let StreamEvent::TokenUsage { source, .. } = stream_rx.try_recv().unwrap() else {
+            panic!("expected token usage event");
+        };
+        assert_eq!(source, "plugin");
+    }
 
     #[test]
     fn looks_like_final_answer_empty_is_not_final() {

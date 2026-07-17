@@ -1,28 +1,33 @@
 use std::sync::mpsc;
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::{CoreStorageLocation, TiangongCore};
+use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_core::session::Session;
-use tiangong_types::{SessionStreamEvent, StreamEvent};
+use tiangong_types::StreamEvent;
 
 fn main() {
     // 示例：使用默认配置（第三方开发者可直接构造 CoreConfig）
     let config = CoreConfigProvider::new(CoreConfig::default());
-    let (tx, rx) = mpsc::channel::<SessionStreamEvent>();
+    let (tx, rx) = mpsc::channel::<StreamEvent>();
     // storage_root 必须由调用方提供（core 不自行计算路径）。
     // 这里用 home 目录下的 .tiangong 作为示例；生产入口由 tiangong-app-state 注入。
     let storage_root = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".tiangong");
-    // session 由调用方创建后传入，core 不再持有产品文案。
+    let mut session = Session::new("测试");
+    session.bind_storage_root(storage_root.clone());
+    session
+        .try_persist_to_disk()
+        .expect("初始 Session 应保存成功");
+    // Core 只持有会话 ID，实际 Session 在每轮开始时从存储中加载。
     let core = TiangongCore::builder()
+        .session_id(session.id.clone())
         .config(config)
-        .session(Session::new("测试"))
-        .event_sender(tx)
+        .trust_mode(session.trust_mode)
+        .storage_root(storage_root)
+        .stream_tx(tx)
         .plugins(Vec::new())
-        .storage(CoreStorageLocation::new(storage_root))
-        .build()
-        .expect("Builder 必填字段已齐");
+        .build();
 
     println!("=== 发送: 你好 ===");
     let _ = core.deliver(AgentInputKind::message("你好"));
@@ -30,7 +35,7 @@ fn main() {
     let mut got_done = false;
     loop {
         match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-            Ok(se) => match &se.event {
+            Ok(se) => match &se {
                 StreamEvent::UserMessage { content, .. } => println!("[用户] {content}"),
                 StreamEvent::Delta { content: text, .. } => print!("{text}"),
                 StreamEvent::Reasoning { .. } => print!("[R]"),
@@ -63,7 +68,7 @@ fn main() {
 
         loop {
             match rx.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(se) => match &se.event {
+                Ok(se) => match &se {
                     StreamEvent::Delta { content: text, .. } => print!("{text}"),
                     StreamEvent::Reasoning { .. } => print!("[R]"),
                     StreamEvent::Done { .. } => {

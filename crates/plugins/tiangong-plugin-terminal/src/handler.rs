@@ -4,7 +4,7 @@ use tiangong_core::tool::ToolResult;
 
 use crate::capability::TerminalProvider;
 use crate::util::shell_quote;
-use tiangong_core::permission::{TrustMode, TrustModeHandle};
+use tiangong_core::permission::TrustMode;
 
 const OUTPUT_THRESHOLD: usize = 2000;
 
@@ -16,7 +16,7 @@ const OUTPUT_THRESHOLD: usize = 2000;
 pub struct TerminalToolOverride {
     provider: Arc<dyn TerminalProvider>,
     /// 信任模式解析句柄（由 Plugin::set_trust_mode 注入）。FullTrust 时跳过命令校验。
-    trust_mode: RwLock<Option<TrustModeHandle>>,
+    trust_mode: RwLock<Option<TrustMode>>,
 }
 
 impl TerminalToolOverride {
@@ -28,7 +28,7 @@ impl TerminalToolOverride {
     }
 
     /// 注入信任模式解析句柄（供 FullTrust 下跳过 run_command 校验）。
-    pub fn set_trust_mode(&self, trust: TrustModeHandle) {
+    pub fn set_trust_mode(&self, trust: TrustMode) {
         if let Ok(mut guard) = self.trust_mode.write() {
             *guard = Some(trust);
         }
@@ -41,7 +41,7 @@ impl TerminalToolOverride {
         let Some(tm) = handle.as_ref() else {
             return false;
         };
-        tm.current() == TrustMode::FullTrust
+        *tm == TrustMode::FullTrust
     }
 
     fn truncate_text(text: &str, max_chars: usize) -> String {
