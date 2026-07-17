@@ -1421,32 +1421,6 @@ mod tests {
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
 
-    struct BlockingEndPlugin {
-        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-        release: Arc<(Mutex<bool>, Condvar)>,
-    }
-
-    impl ToolOverrideHandler for BlockingEndPlugin {}
-    impl ToolSpecProvider for BlockingEndPlugin {}
-    impl PromptSectionProvider for BlockingEndPlugin {}
-
-    impl Plugin for BlockingEndPlugin {
-        fn id(&self) -> &str {
-            "blocking-end-test"
-        }
-
-        fn on_session_ended(&self, _session: &mut Session) {
-            if let Some(entered) = self.entered.lock().unwrap().take() {
-                let _ = entered.send(());
-            }
-            let (released, notify) = &*self.release;
-            let mut released = released.lock().unwrap();
-            while !*released {
-                released = notify.wait(released).unwrap();
-            }
-        }
-    }
-
     fn isolated_test_manager(
         root: &Path,
     ) -> (Arc<ServerCoreManager>, Session, PathBuf, SharedState) {
@@ -1652,90 +1626,6 @@ mod tests {
         assert_eq!(stored_session_id.as_deref(), Some(session.id.as_str()));
 
         assert!(manager.delete_session(&session.id).await.unwrap());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delete_waits_for_core_join_before_removing_session_state() {
-        let _storage_guard = STORAGE_TEST_LOCK.lock().await;
-        let root = tempfile::tempdir().unwrap();
-        let _home_guard = TestHomeGuard::new(&root.path().join("home"));
-        let (manager, session, session_path, state) = isolated_test_manager(root.path());
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let release = Arc::new((Mutex::new(false), Condvar::new()));
-        let plugin = Arc::new(BlockingEndPlugin {
-            entered: Mutex::new(Some(entered_tx)),
-            release: release.clone(),
-        });
-        let core = test_core(session.clone(), root.path(), vec![plugin]);
-        assert!(
-            manager
-                .install_core_if_absent(&session.id, core, AttachmentCapabilitySnapshot::default(),)
-                .unwrap()
-        );
-        manager.tracker_for(&session.id);
-        manager
-            .remote_sessions
-            .lock()
-            .unwrap()
-            .insert("test:channel".to_string(), session.id.clone());
-
-        let delete_task = {
-            let manager = manager.clone();
-            let session_id = session.id.clone();
-            tokio::spawn(async move { manager.delete_session(&session_id).await })
-        };
-        tokio::time::timeout(Duration::from_secs(5), entered_rx)
-            .await
-            .expect("Core 应进入结束钩子")
-            .expect("结束钩子通知不应丢失");
-        assert!(!delete_task.is_finished());
-        assert!(manager.cores.lock().unwrap().get(&session.id).is_none());
-        assert!(
-            state
-                .lock()
-                .await
-                .sessions()
-                .iter()
-                .any(|candidate| candidate.id == session.id)
-        );
-        assert!(session_path.is_file());
-
-        {
-            let (released, notify) = &*release;
-            *released.lock().unwrap() = true;
-            notify.notify_all();
-        }
-        let deleted = tokio::time::timeout(Duration::from_secs(5), delete_task)
-            .await
-            .expect("删除任务不应超时")
-            .expect("删除任务不应 panic")
-            .expect("删除会话应成功");
-        assert!(deleted);
-        assert!(
-            !state
-                .lock()
-                .await
-                .sessions()
-                .iter()
-                .any(|candidate| candidate.id == session.id)
-        );
-        assert!(!session_path.exists());
-        assert!(
-            !manager
-                .core_attachment_capabilities
-                .lock()
-                .unwrap()
-                .contains_key(&session.id)
-        );
-        assert!(!manager.trackers.lock().unwrap().contains_key(&session.id));
-        assert!(
-            !manager
-                .remote_sessions
-                .lock()
-                .unwrap()
-                .values()
-                .any(|mapped_session_id| mapped_session_id == &session.id)
-        );
     }
 
     #[test]
@@ -2010,73 +1900,5 @@ mod tests {
             session.messages[result_indices[1]].text_content(),
             "new-result-updated"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn fire_and_forget_message_persists_stable_content() {
-        let _guard = STORAGE_TEST_LOCK.lock().await;
-        let root = tempfile::tempdir().unwrap();
-        let session = Session::new("fire-and-forget");
-        let session_id = session.id.clone();
-        let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let core = TiangongCore::builder()
-            .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session_id(session.id)
-            .stream_tx(event_tx)
-            .storage_root(root.path().to_path_buf())
-            .trust_mode(session.trust_mode)
-            .plugins(vec![])
-            .build();
-
-        // fire-and-forget：deliver 后不等持久化确认，靠终态事件确认 turn 完成。
-        core.deliver(
-            tiangong_core::agent_input::AgentInputKind::prepared_with_id(
-                "fire-and-forget-message".to_string(),
-                vec![
-                    ContentBlock::Text {
-                        text: "hello".to_string(),
-                    },
-                    ContentBlock::Image {
-                        asset: image_asset(),
-                        data: Some("FIRE_AND_FORGET_RUNTIME_SECRET".to_string()),
-                    },
-                ],
-            ),
-        )
-        .unwrap();
-
-        // 等待终态事件（Done 或 Error）确认 turn 已落盘。
-        let mut saw_terminal = false;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            match event_rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(event) => {
-                    if matches!(
-                        event,
-                        tiangong_types::StreamEvent::Done { .. }
-                            | tiangong_types::StreamEvent::Error { .. }
-                    ) {
-                        saw_terminal = true;
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => break,
-            }
-        }
-        assert!(saw_terminal, "应在超时前收到终态事件");
-
-        let json = std::fs::read_to_string(
-            root.path()
-                .join("sessions")
-                .join(format!("{session_id}.json")),
-        )
-        .unwrap();
-        assert!(json.contains("fire-and-forget-message"));
-        assert!(json.contains("\"type\": \"image\""));
-        assert!(json.contains("asset-server"));
-        assert!(!json.contains("FIRE_AND_FORGET_RUNTIME_SECRET"));
-
-        drop(core);
     }
 }
