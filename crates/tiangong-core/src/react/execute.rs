@@ -3,30 +3,45 @@
 //! 本模块只负责从已构建的 TurnContext 执行模型请求、工具调用与总结阶段；
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
-use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
+use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::context::compressor::{CompressionUpdate, ContextCompressor, mark_compact_boundary};
+use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
+use crate::core::plugin::Plugin;
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
-use crate::model::{ModelFunctionResponse, ModelRequest, TokenUsage, ToolCall, ToolSpec};
+use crate::model::{
+    ModelFunctionResponse, ModelRequest, ModelStreamChunk, TokenUsage, ToolCall, ToolChoice,
+    ToolSpec,
+};
 use crate::permission::TrustMode;
 use crate::react::context::{
-    build_thinking_config, emit_token_usage, maybe_update_context_summary, persist_error,
-    select_client_for_request,
+    build_thinking_config, emit_token_usage, observed_total_tokens, persist_error,
+    rebuild_system_prompt, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::{Message, MessageRole};
-use crate::stream_throttle::ThrottledStreamSink;
+use crate::session::{Message, MessagePhase, MessageRole, Session};
+use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_types::{StreamEvent, StreamToolCall};
+use tiangong_types::{
+    DeferredToolInjection, StreamEvent, StreamToolCall, stream::ContextCompressAction,
+};
 
-use super::cancel::{CancelSignal, abort_and_join, emit_cancel_usage, run_cancelable_child};
+use super::cancel::{abort_and_join, emit_cancel_usage};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
-use super::summary::{ForceFinalReason, ForceFinalResult, SummaryPhaseResult};
+use super::summary::{
+    ForceFinalReason, SummaryDecision, build_force_final_request, commit_summary_message,
+    parse_summary_phase_output, persist_partial_summary, promote_last_react_message_to_summary,
+    request_for_summary_phase,
+};
 use super::tool_call::start_tool_call;
 
 #[derive(Default)]
@@ -44,36 +59,76 @@ impl ToolCallHistory {
     }
 }
 
-struct ApprovalResponse {
-    request_id: String,
-    approved: bool,
+struct ToolInjectionBuffer {
+    session_deferred: Vec<DeferredToolInjection>,
+    pending: VecDeque<DeferredToolInjection>,
+    generation: u64,
 }
 
-/// 在没有活跃子循环时写入本阶段暂存的工具注入。
-///
-/// 子循环（模型请求 / 工具执行等）持有 `&mut ctx`，期间收到的工具注入不能立即
-/// 修改 Session，故先暂存；待子循环结束、ctx 借用归还后再统一写入。
-fn apply_deferred_tool_injections(
-    ctx: &mut TurnContext,
-    deferred_rx: &mut tokio_mpsc::UnboundedReceiver<(String, serde_json::Value)>,
-) {
-    while let Ok((tool_name, payload)) = deferred_rx.try_recv() {
-        crate::react::message::defer_tool_injection(ctx, tool_name, payload);
+impl ToolInjectionBuffer {
+    fn new(ctx: &TurnContext) -> Self {
+        Self {
+            session_deferred: ctx.session.deferred_tool_injections.clone(),
+            pending: VecDeque::new(),
+            generation: 0,
+        }
     }
-    crate::react::message::flush_deferred_tool_injections(ctx);
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 接收即向宿主发布待处理快照；真正写入 Session 仍等待当前子过程释放 ctx。
+    fn receive(
+        &mut self,
+        stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+        tool_name: String,
+        payload: serde_json::Value,
+    ) {
+        self.pending
+            .push_back(DeferredToolInjection { tool_name, payload });
+        self.generation = self.generation.saturating_add(1);
+
+        let mut injections = Vec::with_capacity(self.session_deferred.len() + self.pending.len());
+        injections.extend(self.session_deferred.iter().cloned());
+        injections.extend(self.pending.iter().cloned());
+        let _ = stream_tx.send(StreamEvent::DeferredToolInjectionsChanged { injections });
+    }
+
+    /// 在工具协议安全时注入完整消息对；否则持久化到 Session 延迟队列等待下一边界。
+    fn commit(&mut self, ctx: &mut TurnContext) {
+        let received_new_injections = !self.pending.is_empty();
+        while let Some(injection) = self.pending.pop_front() {
+            ctx.session
+                .defer_tool_injection(injection.tool_name, injection.payload);
+        }
+        if ctx.session.deferred_tool_injections.is_empty() {
+            self.session_deferred.clear();
+            return;
+        }
+        if ctx.session.has_unfinished_tool_calls() {
+            if received_new_injections {
+                ctx.session.persist_to_disk();
+            }
+            self.session_deferred = ctx.session.deferred_tool_injections.clone();
+            return;
+        }
+        crate::react::message::flush_deferred_tool_injections(ctx);
+        self.session_deferred = ctx.session.deferred_tool_injections.clone();
+    }
 }
 
-/// 将 watch 中的最新信任模式同步到本轮执行状态。
-///
-/// 这里只更新内存；Session 会在本轮既有持久化节点统一落盘。
-fn apply_turn_trust_mode(ctx: &mut TurnContext, trust_rx: &mut watch::Receiver<TrustMode>) {
-    let mode = *trust_rx.borrow_and_update();
-    if ctx.trust_mode == mode && ctx.session.trust_mode == mode {
+/// 立即更新本轮权限判断和插件运行态；Session 在 turn 结束时统一接收最终值。
+fn set_runtime_trust_mode(
+    trust_mode: &mut TrustMode,
+    plugins: &[Arc<dyn Plugin>],
+    mode: TrustMode,
+) {
+    if *trust_mode == mode {
         return;
     }
-    ctx.trust_mode = mode;
-    ctx.session.trust_mode = mode;
-    for plugin in &ctx.plugins {
+    *trust_mode = mode;
+    for plugin in plugins {
         plugin.set_trust_mode(mode);
     }
 }
@@ -83,218 +138,13 @@ fn apply_turn_trust_mode(ctx: &mut TurnContext, trust_rx: &mut watch::Receiver<T
 
 // ===== turn 执行辅助 =====
 
-enum ReactRequestOutcome {
-    Completed {
-        pending_msg_id: String,
-        response_result: anyhow::Result<crate::model::ModelFunctionResponse>,
-    },
-    Cancelled {
-        usage: TokenUsage,
-    },
-}
-
-/// 发起一轮流式模型请求；取消由父循环通过独立 oneshot 传入。
-async fn request_react_response(
-    ctx: &mut TurnContext,
-    mut cancel_rx: oneshot::Receiver<()>,
-    request_tools: Vec<ToolSpec>,
-) -> ReactRequestOutcome {
-    let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
-    let request = ModelRequest {
-        session_title: ctx.session.title.clone(),
-        // 当前用户消息已经在 deliver 阶段写入 Session，多轮请求不得重复追加。
-        user_input: String::new(),
-        context: ctx.session.context(),
-        thinking,
-        reasoning_effort,
-        thinking_disabled,
-    };
-    let pending_msg_id = scru128::new().to_string();
-    let sink = ThrottledStreamSink::with_text_kind(
-        pending_msg_id.clone(),
-        ctx.stream_tx.clone(),
-        crate::stream_throttle::StreamTextKind::React,
-    );
-
-    let (chunk_tx, mut chunk_rx) =
-        tokio_mpsc::unbounded_channel::<crate::model::ModelStreamChunk>();
-    let client = select_client_for_request(ctx, &request).clone();
-    let mut llm_task = Some(tokio::task::spawn(async move {
-        client
-            .stream_function_calls_with_tool_choice(request, request_tools, None, chunk_tx)
-            .await
-    }));
-    let mut streamed_text = String::new();
-    let mut streamed_reasoning = String::new();
-    let mut streaming_usage = TokenUsage::default();
-
-    let response_result = loop {
-        tokio::select! {
-            biased;
-            _ = &mut cancel_rx => break Err(anyhow::Error::new(CancelSignal::Abort)),
-            chunk = chunk_rx.recv() => {
-                match chunk {
-                    Some(chunk) => {
-                        if let Some(chunk_usage) = &chunk.usage {
-                            let usage: TokenUsage = chunk_usage.clone().into();
-                            streaming_usage.accumulate(&usage);
-                        }
-                        streamed_text.push_str(&chunk.content);
-                        streamed_reasoning.push_str(&chunk.reasoning_content);
-                        sink.push_chunk(&chunk);
-                    }
-                    None => {
-                        let result = match llm_task.take().expect("模型任务必须存在").await {
-                            Ok(result) => result,
-                            Err(error) if error.is_cancelled() => {
-                                sink.finish();
-                                emit_cancel_usage(
-                                    &ctx.stream_tx,
-                                    &streaming_usage,
-                                    ctx.context_limit,
-                                );
-                                return ReactRequestOutcome::Cancelled {
-                                    usage: streaming_usage,
-                                };
-                            }
-                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
-                        };
-                        break result;
-                    }
-                }
-            }
-        }
-    };
-    sink.finish();
-
-    if !streamed_text.trim().is_empty() || !streamed_reasoning.trim().is_empty() {
-        upsert_assistant_text_message(
-            &mut ctx.session,
-            &pending_msg_id,
-            &streamed_text,
-            &streamed_reasoning,
-            crate::session::MessagePhase::React,
-        );
-        emit_session_message_upsert(ctx, &pending_msg_id);
-    }
-
-    if response_result
-        .as_ref()
-        .err()
-        .and_then(CancelSignal::from_error)
-        .is_some()
-    {
-        if let Some(handle) = llm_task.take() {
-            abort_and_join(handle).await;
-        }
-        emit_cancel_usage(&ctx.stream_tx, &streaming_usage, ctx.context_limit);
-        return ReactRequestOutcome::Cancelled {
-            usage: streaming_usage,
-        };
-    }
-
-    ReactRequestOutcome::Completed {
-        pending_msg_id,
-        response_result,
-    }
-}
-
-enum TextResponseOutcome {
-    Completed,
-    EnterSummary,
-    Cancelled,
-}
-
-struct TextResponseState {
-    round: usize,
-    outer_iteration: u32,
-    executed_tool: bool,
-}
-
-/// 保存无工具调用的模型响应，并判断是否可直接作为本轮最终回复。
-async fn handle_text_response(
-    ctx: &mut TurnContext,
-    mut cancel_rx: oneshot::Receiver<()>,
-    pending_msg_id: &str,
-    response: &crate::model::ModelFunctionResponse,
-    state: TextResponseState,
-) -> TextResponseOutcome {
-    if is_synthetic_tool_call_placeholder(&response.text) {
-        return TextResponseOutcome::EnterSummary;
-    }
-
-    upsert_assistant_text_message(
-        &mut ctx.session,
-        pending_msg_id,
-        &response.text,
-        &response.reasoning_content,
-        crate::session::MessagePhase::React,
-    );
-    if let Some(message) = ctx
-        .session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == pending_msg_id)
-    {
-        message.reasoning_signature = response.reasoning_signature.clone();
-    }
-    emit_session_message_upsert(ctx, pending_msg_id);
-    let output = LlmOutputRecord {
-        stage: format!("react-round-{}", state.round),
-        content: response.text.clone(),
-        reasoning_content: response.reasoning_content.clone(),
-        tool_calls: Vec::new(),
-        usage: response.usage.clone(),
-    };
-    append_runtime_tool_message_with_reasoning(
-        &mut ctx.session,
-        "llm_output",
-        format_llm_output_message(&output),
-        response.reasoning_content.clone(),
-    );
-    ctx.session.persist_to_disk();
-
-    if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-        maybe_update_context_summary(ctx, &response.usage, child_cancel)
-    })
-    .await
-    {
-        return TextResponseOutcome::Cancelled;
-    }
-
-    let can_promote_direct_answer =
-        state.outer_iteration == 0 && !state.executed_tool && !response.text.trim().is_empty();
-    let can_promote_tool_answer = state.executed_tool && looks_like_final_answer(&response.text);
-    if !can_promote_direct_answer && !can_promote_tool_answer {
-        return TextResponseOutcome::EnterSummary;
-    }
-
-    if let Some(message) = ctx
-        .session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == pending_msg_id)
-    {
-        message.phase = crate::session::MessagePhase::Summary;
-    }
-    emit_session_message_upsert(ctx, pending_msg_id);
-    ctx.session.persist_to_disk();
-    TextResponseOutcome::Completed
-}
-
-enum ToolBatchOutcome {
-    Continue,
-    Completed,
-    Cancelled,
-}
-
-fn record_tool_calls<'a>(
+fn record_tool_calls(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
-    response: &'a ModelFunctionResponse,
+    response: &ModelFunctionResponse,
     round: usize,
-) -> Vec<&'a ToolCall> {
-    let calls = response.tool_calls.iter().collect::<Vec<_>>();
+) -> Vec<ToolCall> {
+    let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
 
     let tool_names = calls
@@ -333,7 +183,7 @@ fn record_tool_calls<'a>(
         &response.text,
         &response.reasoning_content,
         response.reasoning_signature.clone(),
-        &calls,
+        &calls.iter().collect::<Vec<_>>(),
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     calls
@@ -425,77 +275,6 @@ fn prepare_tool_call(
     }
 }
 
-enum ToolApprovalOutcome {
-    Approved,
-    Rejected,
-    Cancelled,
-}
-
-async fn request_tool_approval(
-    ctx: &mut TurnContext,
-    mut cancel_rx: oneshot::Receiver<()>,
-    approval_rx: &mut tokio_mpsc::UnboundedReceiver<ApprovalResponse>,
-    trust_rx: &mut watch::Receiver<TrustMode>,
-    call: &ToolCall,
-    args_summary: &str,
-) -> ToolApprovalOutcome {
-    apply_turn_trust_mode(ctx, trust_rx);
-    let trust_mode = format!("{:?}", ctx.trust_mode);
-    if ctx.trust_mode == TrustMode::FullTrust {
-        ctx.observer.audit_permission(
-            &ctx.session.id,
-            &call.name,
-            "approved",
-            &trust_mode,
-            (!args_summary.is_empty()).then_some(args_summary),
-        );
-        return ToolApprovalOutcome::Approved;
-    }
-
-    let request_id = scru128::new().to_string();
-    ctx.observer.audit_permission(
-        &ctx.session.id,
-        &call.name,
-        "needs_approval",
-        &trust_mode,
-        (!args_summary.is_empty()).then_some(args_summary),
-    );
-    let _ = ctx.stream_tx.send(StreamEvent::ApprovalNeeded {
-        request_id: request_id.clone(),
-        tool_name: call.name.clone(),
-        args_summary: args_summary.to_string(),
-    });
-
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut cancel_rx => return ToolApprovalOutcome::Cancelled,
-            changed = trust_rx.changed() => {
-                if changed.is_ok() {
-                    apply_turn_trust_mode(ctx, trust_rx);
-                    if ctx.trust_mode == TrustMode::FullTrust {
-                        return ToolApprovalOutcome::Approved;
-                    }
-                }
-            }
-            response = approval_rx.recv() => match response {
-                Some(ApprovalResponse {
-                    request_id: response_id,
-                    approved,
-                }) if response_id == request_id => {
-                    return if approved {
-                        ToolApprovalOutcome::Approved
-                    } else {
-                        ToolApprovalOutcome::Rejected
-                    };
-                }
-                Some(_) => {}
-                None => return ToolApprovalOutcome::Cancelled,
-            }
-        }
-    }
-}
-
 fn record_rejected_tool_call(ctx: &mut TurnContext, call: &ToolCall, args_summary: &str) {
     ctx.observer.audit_tool_execution(
         &ctx.session.id,
@@ -523,7 +302,6 @@ fn record_rejected_tool_call(ctx: &mut TurnContext, call: &ToolCall, args_summar
         .render_for_model(),
         true,
     );
-    flush_deferred_tool_injections(ctx);
     ctx.session.persist_to_disk();
     let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: call.name.clone(),
@@ -533,45 +311,6 @@ fn record_rejected_tool_call(ctx: &mut TurnContext, call: &ToolCall, args_summar
         full_output: None,
         duration_ms: None,
     });
-}
-
-enum RunningToolOutcome {
-    Completed {
-        result: ToolResult,
-        duration_ms: u64,
-    },
-    Cancelled {
-        duration_ms: u64,
-    },
-}
-
-async fn run_tool_call(
-    ctx: &mut TurnContext,
-    mut cancel_rx: oneshot::Receiver<()>,
-    call: &ToolCall,
-    args_summary: &str,
-) -> RunningToolOutcome {
-    let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
-        name: call.name.clone(),
-        args_summary: args_summary.to_string(),
-    });
-    let started_at = std::time::Instant::now();
-    let actor_id = ctx.session.id.clone();
-    let mut tool_future = start_tool_call(ctx, call, &actor_id);
-    let result = tokio::select! {
-        biased;
-        _ = &mut cancel_rx => None,
-        result = &mut tool_future => Some(result),
-    };
-    drop(tool_future);
-    let duration_ms = started_at.elapsed().as_millis() as u64;
-    match result {
-        Some(result) => RunningToolOutcome::Completed {
-            result,
-            duration_ms,
-        },
-        None => RunningToolOutcome::Cancelled { duration_ms },
-    }
 }
 
 struct CompletedToolCall<'a> {
@@ -683,631 +422,1157 @@ fn append_failure_recovery_prompt(
     ctx.session.persist_to_disk();
 }
 
-/// 记录并执行一批工具调用，所有跨循环转向都通过明确结果返回。
-#[allow(clippy::too_many_arguments)]
-async fn execute_tool_batch(
-    ctx: &mut TurnContext,
-    mut cancel_rx: oneshot::Receiver<()>,
-    approval_rx: &mut tokio_mpsc::UnboundedReceiver<ApprovalResponse>,
-    trust_rx: &mut watch::Receiver<TrustMode>,
-    pending_msg_id: &str,
-    response: &ModelFunctionResponse,
-    round: usize,
-    request_tools: &[ToolSpec],
-    tool_history: &mut ToolCallHistory,
-) -> ToolBatchOutcome {
-    let calls = record_tool_calls(ctx, pending_msg_id, response, round);
-    let mut needs_failure_recovery = false;
-
-    for call in calls {
-        let (args_summary, dedupe_key) = match prepare_tool_call(ctx, call, tool_history) {
-            ToolPreflightOutcome::Execute {
-                args_summary,
-                dedupe_key,
-            } => (args_summary, dedupe_key),
-            ToolPreflightOutcome::Skip { needs_recovery } => {
-                needs_failure_recovery |= needs_recovery;
-                continue;
-            }
-        };
-
-        let approval = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            request_tool_approval(
-                ctx,
-                child_cancel,
-                approval_rx,
-                trust_rx,
-                call,
-                &args_summary,
-            )
-        })
-        .await;
-        match approval {
-            ToolApprovalOutcome::Approved => {}
-            ToolApprovalOutcome::Rejected => {
-                record_rejected_tool_call(ctx, call, &args_summary);
-                return ToolBatchOutcome::Completed;
-            }
-            ToolApprovalOutcome::Cancelled => return ToolBatchOutcome::Cancelled,
-        }
-
-        let running_tool = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            run_tool_call(ctx, child_cancel, call, &args_summary)
-        })
-        .await;
-        let (result, duration_ms) = match running_tool {
-            RunningToolOutcome::Completed {
-                result,
-                duration_ms,
-            } => (result, duration_ms),
-            RunningToolOutcome::Cancelled { duration_ms } => {
-                let output = "工具调用因执行取消或会话关闭而中断。".to_string();
-                let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-                    name: call.name.clone(),
-                    tool_call_id: Some(call.id.clone()),
-                    ok: false,
-                    output: output.clone(),
-                    full_output: None,
-                    duration_ms: Some(duration_ms),
-                });
-                append_tool_result_message(&mut ctx.session, &call.id, &call.name, output, true);
-                // Cancel 由当前工具循环向外返回；执行期间缓存的其他命令随本轮放弃。
-                return ToolBatchOutcome::Cancelled;
-            }
-        };
-
-        needs_failure_recovery |= record_completed_tool_call(
-            ctx,
-            CompletedToolCall {
-                call,
-                args_summary: &args_summary,
-                dedupe_key,
-                result: &result,
-                duration_ms,
-            },
-            tool_history,
-        );
-
-        if run_cancelable_child(&mut cancel_rx, |child_cancel| {
-            maybe_update_context_summary(ctx, &response.usage, child_cancel)
-        })
-        .await
-        {
-            return ToolBatchOutcome::Cancelled;
-        }
-
-        flush_deferred_tool_injections(ctx);
-    }
-
-    if needs_failure_recovery {
-        append_failure_recovery_prompt(ctx, tool_history, request_tools);
-    } else {
-        ctx.session.persist_to_disk();
-    }
-    ToolBatchOutcome::Continue
+enum NextStep {
+    StartReact,
+    DriveTools,
+    StartSummary,
+    StartForceFinal {
+        reason: ForceFinalReason,
+        request_injection_generation: u64,
+        summary_error: Option<String>,
+    },
+    Waiting,
+    Finish(TurnExecutionResult),
 }
 
-/// 执行一个完整的对话轮次（可能多轮工具调用）。
+struct AgentLoopState {
+    round: usize,
+    react_rounds_in_phase: usize,
+    outer_iteration: u32,
+    executed_tool_in_phase: bool,
+    accumulated_usage: TokenUsage,
+    tool_history: ToolCallHistory,
+    tool_batch: Option<ToolBatchState>,
+    next_step: NextStep,
+}
+
+impl AgentLoopState {
+    fn new() -> Self {
+        Self {
+            round: 0,
+            react_rounds_in_phase: 0,
+            outer_iteration: 0,
+            executed_tool_in_phase: false,
+            accumulated_usage: TokenUsage::default(),
+            tool_history: ToolCallHistory::default(),
+            tool_batch: None,
+            next_step: NextStep::StartReact,
+        }
+    }
+
+    fn reset_react_phase(&mut self) {
+        self.react_rounds_in_phase = 0;
+        self.executed_tool_in_phase = false;
+        self.tool_history.clear();
+        self.tool_batch = None;
+    }
+}
+
+struct ToolBatchState {
+    calls: VecDeque<ToolCall>,
+    response_usage: TokenUsage,
+    request_injection_generation: u64,
+    needs_failure_recovery: bool,
+}
+
+struct PreparedToolCall {
+    call: ToolCall,
+    args_summary: String,
+    dedupe_key: String,
+}
+
+struct PendingApproval {
+    request_id: String,
+    tool: PreparedToolCall,
+}
+
+type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
+
+struct ActiveToolCall {
+    tool: PreparedToolCall,
+    started_at: std::time::Instant,
+    future: ToolFuture,
+}
+
+enum LlmPurpose {
+    React {
+        request_injection_generation: u64,
+    },
+    Summary {
+        iteration: u32,
+        request_injection_generation: u64,
+    },
+    ForceFinal {
+        request_injection_generation: u64,
+        summary_error: Option<String>,
+    },
+}
+
+struct ActiveLlm {
+    purpose: LlmPurpose,
+    pending_msg_id: String,
+    sink: ThrottledStreamSink,
+    chunk_rx: tokio_mpsc::UnboundedReceiver<ModelStreamChunk>,
+    task: tokio::task::JoinHandle<anyhow::Result<ModelFunctionResponse>>,
+    streamed_text: String,
+    streamed_reasoning: String,
+    streaming_usage: TokenUsage,
+}
+
+#[derive(Clone, Copy)]
+enum ReactTextDisposition {
+    Complete,
+    EnterSummary,
+}
+
+enum CompressionContinuation {
+    ReactText {
+        pending_msg_id: String,
+        disposition: ReactTextDisposition,
+        request_injection_generation: u64,
+    },
+    ToolBatch,
+    Summary {
+        decision: SummaryDecision,
+        request_injection_generation: u64,
+    },
+    ContextRetry {
+        previous_summary_up_to: usize,
+        error_message: String,
+    },
+}
+
+type CompressionTaskOutput = (Session, anyhow::Result<CompressionUpdate>);
+
+struct ActiveCompression {
+    task: tokio::task::JoinHandle<CompressionTaskOutput>,
+    observed_usage: TokenUsage,
+    previous_summary_up_to: usize,
+    total_messages: usize,
+    continuation: CompressionContinuation,
+}
+
+fn build_react_request(ctx: &TurnContext) -> ModelRequest {
+    let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
+    ModelRequest {
+        session_title: ctx.session.title.clone(),
+        user_input: String::new(),
+        context: ctx.session.context(),
+        thinking,
+        reasoning_effort,
+        thinking_disabled,
+    }
+}
+
+fn start_llm_request(
+    ctx: &TurnContext,
+    request: ModelRequest,
+    purpose: LlmPurpose,
+    text_kind: StreamTextKind,
+    tool_choice: Option<ToolChoice>,
+) -> ActiveLlm {
+    let pending_msg_id = scru128::new().to_string();
+    let sink = ThrottledStreamSink::with_text_kind(
+        pending_msg_id.clone(),
+        ctx.stream_tx.clone(),
+        text_kind,
+    );
+    let (chunk_tx, chunk_rx) = tokio_mpsc::unbounded_channel();
+    let client = select_client_for_request(ctx, &request).clone();
+    let tools = ctx.tools.clone();
+    let task = tokio::spawn(async move {
+        client
+            .stream_function_calls_with_tool_choice(request, tools, tool_choice, chunk_tx)
+            .await
+    });
+
+    ActiveLlm {
+        purpose,
+        pending_msg_id,
+        sink,
+        chunk_rx,
+        task,
+        streamed_text: String::new(),
+        streamed_reasoning: String::new(),
+        streaming_usage: TokenUsage::default(),
+    }
+}
+
+fn persist_streamed_react_message(
+    ctx: &mut TurnContext,
+    pending_msg_id: &str,
+    streamed_text: &str,
+    streamed_reasoning: &str,
+) {
+    if streamed_text.trim().is_empty() && streamed_reasoning.trim().is_empty() {
+        return;
+    }
+    upsert_assistant_text_message(
+        &mut ctx.session,
+        pending_msg_id,
+        streamed_text,
+        streamed_reasoning,
+        MessagePhase::React,
+    );
+    emit_session_message_upsert(ctx, pending_msg_id);
+}
+
+fn handle_react_text_response(
+    ctx: &mut TurnContext,
+    pending_msg_id: &str,
+    response: &ModelFunctionResponse,
+    state: &AgentLoopState,
+) -> ReactTextDisposition {
+    if is_synthetic_tool_call_placeholder(&response.text) {
+        return ReactTextDisposition::EnterSummary;
+    }
+
+    upsert_assistant_text_message(
+        &mut ctx.session,
+        pending_msg_id,
+        &response.text,
+        &response.reasoning_content,
+        MessagePhase::React,
+    );
+    if let Some(message) = ctx
+        .session
+        .messages
+        .iter_mut()
+        .find(|message| message.id == pending_msg_id)
+    {
+        message.reasoning_signature = response.reasoning_signature.clone();
+    }
+    emit_session_message_upsert(ctx, pending_msg_id);
+    append_runtime_tool_message_with_reasoning(
+        &mut ctx.session,
+        "llm_output",
+        format_llm_output_message(&LlmOutputRecord {
+            stage: format!("react-round-{}", state.round),
+            content: response.text.clone(),
+            reasoning_content: response.reasoning_content.clone(),
+            tool_calls: Vec::new(),
+            usage: response.usage.clone(),
+        }),
+        response.reasoning_content.clone(),
+    );
+    ctx.session.persist_to_disk();
+
+    let direct_answer = state.outer_iteration == 0
+        && !state.executed_tool_in_phase
+        && !response.text.trim().is_empty();
+    let tool_answer = state.executed_tool_in_phase && looks_like_final_answer(&response.text);
+    if direct_answer || tool_answer {
+        ReactTextDisposition::Complete
+    } else {
+        ReactTextDisposition::EnterSummary
+    }
+}
+
+fn start_tool_execution(ctx: &mut TurnContext, tool: PreparedToolCall) -> ActiveToolCall {
+    let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
+        name: tool.call.name.clone(),
+        args_summary: tool.args_summary.clone(),
+    });
+    let actor_id = ctx.session.id.clone();
+    let future = start_tool_call(ctx, &tool.call, &actor_id);
+    ActiveToolCall {
+        tool,
+        started_at: std::time::Instant::now(),
+        future,
+    }
+}
+
+fn start_context_compression(
+    ctx: &TurnContext,
+    observed_usage: TokenUsage,
+    continuation: CompressionContinuation,
+) -> ActiveCompression {
+    let previous_summary_up_to = ctx.session.summary_up_to;
+    let total_messages = ctx.session.messages.len();
+    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
+        summary_up_to: previous_summary_up_to,
+        total_messages,
+    });
+    let mut session = ctx.session.clone();
+    let client = ctx.client.clone();
+    let task = tokio::spawn(async move {
+        let result = ContextCompressor::new(6)
+            .update_summary_with_usage_async(&mut session, &client)
+            .await;
+        (session, result)
+    });
+    ActiveCompression {
+        task,
+        observed_usage,
+        previous_summary_up_to,
+        total_messages,
+        continuation,
+    }
+}
+
+fn apply_context_compression(
+    ctx: &mut TurnContext,
+    active: ActiveCompression,
+    result: Result<CompressionTaskOutput, tokio::task::JoinError>,
+) -> CompressionContinuation {
+    let ActiveCompression {
+        observed_usage,
+        previous_summary_up_to,
+        total_messages,
+        continuation,
+        ..
+    } = active;
+    let result = match result {
+        Ok((session, result)) => result.map(|update| (session, update)),
+        Err(error) => Err(anyhow::anyhow!(error.to_string())),
+    };
+
+    match result {
+        Ok((session, update)) if update.compressed => {
+            ctx.session.context_summary = session.context_summary;
+            ctx.session.summary_up_to = session.summary_up_to;
+            mark_compact_boundary(&mut ctx.session.messages, ctx.session.summary_up_to);
+            let remaining = ctx
+                .session
+                .messages
+                .len()
+                .saturating_sub(ctx.session.summary_up_to);
+            let current_tokens = (observed_total_tokens(&observed_usage) as f64
+                * (remaining as f64 / total_messages.max(1) as f64))
+                as usize;
+            ctx.session.current_tokens = current_tokens;
+            ctx.session.token_usage.accumulate(&update.usage);
+            rebuild_system_prompt(ctx);
+            if let Err(error) = ctx.session.try_persist_to_disk() {
+                tracing::warn!(%error, session_id = %ctx.session.id, "上下文压缩落盘失败");
+                return continuation;
+            }
+            emit_token_usage(
+                &ctx.stream_tx,
+                &update.usage,
+                Some(current_tokens),
+                ctx.context_limit,
+                "context_summary",
+                None,
+            );
+            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Auto,
+                summary_up_to: ctx.session.summary_up_to,
+                remaining_messages: remaining,
+            });
+            tracing::info!(
+                session_id = %ctx.session.id,
+                observed_tokens = observed_total_tokens(&observed_usage),
+                old_summary_up_to = previous_summary_up_to,
+                summary_up_to = ctx.session.summary_up_to,
+                "上下文摘要已更新"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id = %ctx.session.id,
+                error = %error,
+                "上下文压缩失败，继续使用原始上下文"
+            );
+        }
+    }
+
+    continuation
+}
+
+fn needs_context_compression(ctx: &TurnContext, usage: &TokenUsage) -> bool {
+    ContextOrganizer::new(ctx.context_limit)
+        .with_threshold(0.95)
+        .needs_compression(observed_total_tokens(usage))
+}
+
+fn finish_react_text(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    pending_msg_id: String,
+    disposition: ReactTextDisposition,
+    request_injection_generation: u64,
+) {
+    let received_new_injection = injections.generation() > request_injection_generation;
+    injections.commit(ctx);
+    if received_new_injection {
+        state.next_step = NextStep::StartReact;
+        return;
+    }
+
+    match disposition {
+        ReactTextDisposition::Complete => {
+            if let Some(message) = ctx
+                .session
+                .messages
+                .iter_mut()
+                .find(|message| message.id == pending_msg_id)
+            {
+                message.phase = MessagePhase::Summary;
+            }
+            emit_session_message_upsert(ctx, &pending_msg_id);
+            ctx.session.persist_to_disk();
+            state.next_step = NextStep::Finish(TurnExecutionResult::success(
+                state.accumulated_usage.clone(),
+            ));
+        }
+        ReactTextDisposition::EnterSummary => state.next_step = NextStep::StartSummary,
+    }
+}
+
+fn finish_summary(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    decision: SummaryDecision,
+    request_injection_generation: u64,
+) {
+    ctx.session.persist_to_disk();
+    let received_new_injection = injections.generation() > request_injection_generation;
+    injections.commit(ctx);
+    if received_new_injection {
+        state.reset_react_phase();
+        state.next_step = NextStep::StartReact;
+        return;
+    }
+
+    match decision {
+        SummaryDecision::Done(_) | SummaryDecision::AskUser(_) => {
+            state.next_step = NextStep::Finish(TurnExecutionResult::success(
+                state.accumulated_usage.clone(),
+            ));
+        }
+        SummaryDecision::NeedMoreWork(reason) => {
+            state.outer_iteration += 1;
+            if state.outer_iteration >= ctx.max_outer_iterations {
+                state.next_step = NextStep::StartForceFinal {
+                    reason: ForceFinalReason::OuterLimit,
+                    request_injection_generation,
+                    summary_error: None,
+                };
+                return;
+            }
+            inject_tool_to_messages(
+                &mut ctx.session,
+                "summary_need_more_work",
+                &serde_json::json!({
+                    "reason": reason.trim(),
+                    "instruction": "上轮总结判定任务未完成，请根据原因继续执行剩余工作。",
+                }),
+            );
+            ctx.session.persist_to_disk();
+            state.reset_react_phase();
+            state.next_step = NextStep::StartReact;
+        }
+    }
+}
+
+/// 执行一个完整的对话轮次。
 ///
-/// Session 已在 deliver 阶段完整构建；本函数只消费 TurnContext 并执行本轮。
-///
-/// 外层 `react_loop` 负责 ReAct 与总结之间的切换，内层 `execute_loop` 负责模型请求
-/// 和工具调用。`cmd_rx` 只在这两层循环的等待点直接展开，不再由长期 Future 包裹。
+/// `cmd_rx` 只在这一处消费。模型 chunk、工具结果和上下文压缩结果与命令进入同一个
+/// `tokio::select!`，因此任何异步阶段运行期间都能立即响应取消和运行态反馈。
 pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
-    // 主命令通道只在本函数消费；内部通道分别承接工具注入、审批回复和实时信任模式，
-    // 避免把 cmd_rx 继续下传给具体执行阶段。
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
-    let (tool_injection_tx, mut tool_injection_rx) = tokio_mpsc::unbounded_channel();
-    let (approval_tx, mut approval_rx) = tokio_mpsc::unbounded_channel();
-    let (trust_tx, mut trust_rx) = watch::channel(ctx.trust_mode);
+    let plugins = ctx.plugins.clone();
+    let request_tools = ctx.tools.clone();
+    let mut trust_mode = ctx.trust_mode;
+    let mut injections = ToolInjectionBuffer::new(ctx);
+    let mut state = AgentLoopState::new();
+    let mut active_llm: Option<ActiveLlm> = None;
+    let mut active_tool: Option<ActiveToolCall> = None;
+    let mut active_compression: Option<ActiveCompression> = None;
+    let mut pending_approval: Option<PendingApproval> = None;
 
-    // round 和用量覆盖整个 turn；工具历史则在总结要求继续工作时重新开始记录。
-    let mut round = 0usize;
-    let mut outer_iteration = 0u32;
-    let mut accumulated_usage = TokenUsage::default();
-    let mut tool_history = ToolCallHistory::default();
+    let result = 'agent_loop: loop {
+        let can_advance = active_llm.is_none()
+            && active_tool.is_none()
+            && active_compression.is_none()
+            && pending_approval.is_none()
+            && !matches!(state.next_step, NextStep::Waiting);
 
-    // 一次外层迭代由“模型/工具执行 + 总结判断”组成；总结判定未完成时才会重入。
-    'react_loop: loop {
-        let iteration_start_round = round;
-        let mut executed_tool_in_iteration = false;
+        tokio::select! {
+            biased;
 
-        // 内层循环持续执行“请求模型 -> 执行工具”，直到得到最终文本或达到工具轮次上限。
-        'execute_loop: loop {
-            // 在阶段边界先同步权限，再写入暂存的工具内容，避免并发修改 Session。
-            apply_turn_trust_mode(ctx, &mut trust_rx);
-            apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
+            // 命令永远具有最高优先级；Cancel/Shutdown 会关闭接收端并直接终止活跃任务。
+            command = cmd_rx.recv() => match command {
+                Some(Command::Cancel | Command::Shutdown) | None => {
+                    cmd_rx.close();
 
-            // 首轮校验构建合同；后续轮次向宿主发布重新分析状态。
-            if round == 0 {
-                debug_assert!(
-                    ctx.session.system_prompt_message.is_some(),
-                    "TurnContext 构建前应已注入 system prompt"
-                );
-            }
-            if round > 0 {
-                let _ = ctx.stream_tx.send(StreamEvent::PhaseChanged {
-                    phase: "analyzing".to_string(),
-                    iteration: (round + 1) as u32,
-                });
-            }
-            // 上限按当前外层迭代单独计算，超限后转入总结阶段，而不是直接判定失败。
-            if round.saturating_sub(iteration_start_round) >= ctx.max_tool_rounds {
-                break 'execute_loop;
-            }
-
-            // 每个耗时阶段使用独立 oneshot 接收取消；主命令仍由本层 select 统一分发。
-            let request_tools = ctx.tools.clone();
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let mut cancel_tx = Some(cancel_tx);
-            let mut request_future = Box::pin(request_react_response(
-                ctx,
-                cancel_rx,
-                request_tools.clone(),
-            ));
-            let mut parent_cancelled = false;
-            let request_outcome = loop {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => match command {
-                        Some(Command::Cancel | Command::Shutdown) | None => {
-                            // 取消后关闭主接收端，丢弃后续命令，并等待子阶段完成自身收尾。
-                            cmd_rx.close();
-                            if let Some(cancel_tx) = cancel_tx.take() {
-                                let _ = cancel_tx.send(());
-                            }
-                            parent_cancelled = true;
-                            break (&mut request_future).await;
+                    if let Some(active) = active_llm.take() {
+                        let ActiveLlm {
+                            purpose,
+                            pending_msg_id,
+                            sink,
+                            task,
+                            streamed_text,
+                            streamed_reasoning,
+                            streaming_usage,
+                            ..
+                        } = active;
+                        sink.finish();
+                        abort_and_join(task).await;
+                        match purpose {
+                            LlmPurpose::React { .. } => persist_streamed_react_message(
+                                ctx,
+                                &pending_msg_id,
+                                &streamed_text,
+                                &streamed_reasoning,
+                            ),
+                            LlmPurpose::Summary { .. } => persist_partial_summary(
+                                ctx,
+                                &pending_msg_id,
+                                &streamed_text,
+                                &streamed_reasoning,
+                            ),
+                            LlmPurpose::ForceFinal { .. } => {}
                         }
-                        Some(Command::Approval { request_id, approved }) => {
-                            let _ = approval_tx.send(ApprovalResponse {
-                                request_id,
-                                approved,
-                            });
-                        }
-                        Some(Command::SetTrustMode(mode)) => {
-                            trust_tx.send_replace(mode);
-                        }
-                        Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = tool_injection_tx.send((tool_name, payload));
-                        }
-                        Some(Command::EmitStreamEvent(event)) => {
-                            let _ = stream_tx.send(*event);
-                        }
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &stream_tx,
-                            context_limit,
-                            &mut accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                    },
-                    outcome = &mut request_future => break outcome,
-                }
-            };
-            drop(request_future);
-            if parent_cancelled {
-                // 请求可能在收到取消前已经产生用量，返回前仍要把这部分计入本轮总量。
-                match request_outcome {
-                    ReactRequestOutcome::Completed {
-                        response_result: Ok(response),
-                        ..
-                    } => accumulated_usage.accumulate(&response.usage),
-                    ReactRequestOutcome::Cancelled { usage } => {
-                        accumulated_usage.accumulate(&usage)
+                        emit_cancel_usage(&stream_tx, &streaming_usage, context_limit);
+                        state.accumulated_usage.accumulate(&streaming_usage);
                     }
-                    ReactRequestOutcome::Completed { .. } => {}
-                }
-                return TurnExecutionResult::cancelled(accumulated_usage);
-            }
 
-            // 正常响应进入后续处理；仅上下文超限类错误允许先压缩再重试。
-            let (pending_msg_id, response) = match request_outcome {
-                ReactRequestOutcome::Completed {
+                    if let Some(active) = active_tool.take() {
+                        let duration_ms = active.started_at.elapsed().as_millis() as u64;
+                        let output = "工具调用因执行取消或会话关闭而中断。".to_string();
+                        let _ = stream_tx.send(StreamEvent::ToolResult {
+                            name: active.tool.call.name.clone(),
+                            tool_call_id: Some(active.tool.call.id.clone()),
+                            ok: false,
+                            output: output.clone(),
+                            full_output: None,
+                            duration_ms: Some(duration_ms),
+                        });
+                        append_tool_result_message(
+                            &mut ctx.session,
+                            &active.tool.call.id,
+                            &active.tool.call.name,
+                            output,
+                            true,
+                        );
+                    }
+
+                    if let Some(active) = active_compression.take() {
+                        abort_and_join(active.task).await;
+                    }
+
+                    // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
+                    injections.commit(ctx);
+                    break 'agent_loop TurnExecutionResult::cancelled(state.accumulated_usage);
+                }
+                Some(Command::Approval { request_id, approved }) => {
+                    let matches_pending = pending_approval
+                        .as_ref()
+                        .is_some_and(|pending| pending.request_id == request_id);
+                    if matches_pending {
+                        let pending = pending_approval.take().expect("审批状态必须存在");
+                        if approved {
+                            active_tool = Some(start_tool_execution(ctx, pending.tool));
+                            state.next_step = NextStep::Waiting;
+                        } else {
+                            record_rejected_tool_call(
+                                ctx,
+                                &pending.tool.call,
+                                &pending.tool.args_summary,
+                            );
+                            let request_generation = state
+                                .tool_batch
+                                .take()
+                                .map(|batch| batch.request_injection_generation)
+                                .unwrap_or_else(|| injections.generation());
+                            let received_new_injection =
+                                injections.generation() > request_generation;
+                            injections.commit(ctx);
+                            state.next_step = if received_new_injection {
+                                NextStep::StartReact
+                            } else {
+                                NextStep::Finish(TurnExecutionResult::success(
+                                    state.accumulated_usage.clone(),
+                                ))
+                            };
+                        }
+                    }
+                }
+                Some(Command::SetTrustMode(mode)) => {
+                    set_runtime_trust_mode(&mut trust_mode, &plugins, mode);
+                    if mode == TrustMode::FullTrust
+                        && let Some(pending) = pending_approval.take()
+                    {
+                        active_tool = Some(start_tool_execution(ctx, pending.tool));
+                        state.next_step = NextStep::Waiting;
+                    }
+                }
+                Some(Command::InjectTool { tool_name, payload }) => {
+                    injections.receive(&stream_tx, tool_name, payload);
+                }
+                Some(Command::EmitStreamEvent(event)) => {
+                    let _ = stream_tx.send(*event);
+                }
+                Some(Command::ReportUsage {
+                    usage,
+                    source,
+                    emit_event,
+                }) => record_plugin_usage(
+                    &stream_tx,
+                    context_limit,
+                    &mut state.accumulated_usage,
+                    usage,
+                    source,
+                    emit_event,
+                ),
+            },
+
+            // 模型任务把流式内容写入此通道；通道关闭表示完整响应已经可以收取。
+            chunk = async {
+                active_llm
+                    .as_mut()
+                    .expect("LLM 分支只在请求活跃时启用")
+                    .chunk_rx
+                    .recv()
+                    .await
+            }, if active_llm.is_some() => {
+                if let Some(chunk) = chunk {
+                    let active = active_llm.as_mut().expect("LLM 状态必须存在");
+                    if let Some(chunk_usage) = &chunk.usage {
+                        let usage: TokenUsage = chunk_usage.clone().into();
+                        active.streaming_usage.accumulate(&usage);
+                    }
+                    active.streamed_text.push_str(&chunk.content);
+                    active.streamed_reasoning.push_str(&chunk.reasoning_content);
+                    active.sink.push_chunk(&chunk);
+                    continue 'agent_loop;
+                }
+
+                let active = active_llm.take().expect("LLM 状态必须存在");
+                let ActiveLlm {
+                    purpose,
                     pending_msg_id,
-                    response_result: Ok(response),
-                } => {
-                    apply_turn_trust_mode(ctx, &mut trust_rx);
-                    apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
-                    (pending_msg_id, response)
-                }
-                ReactRequestOutcome::Completed {
-                    response_result: Err(error),
+                    sink,
+                    task,
+                    streamed_text,
+                    streamed_reasoning,
+                    streaming_usage,
                     ..
-                } => {
-                    let error_message = error.to_string();
-                    let should_compress = error_message.contains("context_window_exceeded")
-                        || error_message.contains("context_length_exceeded")
-                        || (error_message.contains("content_blocks=0")
-                            && error_message.contains("stop_reason=end_turn"));
-                    if should_compress {
-                        tracing::warn!("检测到上下文超限，尝试强制压缩");
-                        let before_summary_up_to = ctx.session.summary_up_to;
-                        let forced_usage = TokenUsage {
-                            prompt_tokens: context_limit,
-                            completion_tokens: 0,
-                            total_tokens: context_limit,
-                            prompt_cache_hit_tokens: None,
-                            prompt_cache_miss_tokens: None,
-                        };
-                        // 压缩本身也可能请求模型，因此继续监听命令，并沿用逐层取消协议。
-                        let (cancel_tx, cancel_rx) = oneshot::channel();
-                        let mut cancel_tx = Some(cancel_tx);
-                        let mut compression_future =
-                            Box::pin(maybe_update_context_summary(ctx, &forced_usage, cancel_rx));
-                        let mut parent_cancelled = false;
-                        let compression_cancelled = loop {
-                            tokio::select! {
-                                biased;
-                                command = cmd_rx.recv() => match command {
-                                    Some(Command::Cancel | Command::Shutdown) | None => {
-                                        cmd_rx.close();
-                                        if let Some(cancel_tx) = cancel_tx.take() {
-                                            let _ = cancel_tx.send(());
-                                        }
-                                        parent_cancelled = true;
-                                        break (&mut compression_future).await;
-                                    }
-                                    Some(Command::Approval { .. }) => {}
-                                    Some(Command::SetTrustMode(mode)) => {
-                                        trust_tx.send_replace(mode);
-                                    }
-                                    Some(Command::InjectTool { tool_name, payload }) => {
-                                        let _ = tool_injection_tx.send((tool_name, payload));
-                                    }
-                                    Some(Command::EmitStreamEvent(event)) => {
-                                        let _ = stream_tx.send(*event);
-                                    }
-                                    Some(Command::ReportUsage {
-                                        usage,
-                                        source,
-                                        emit_event,
-                                    }) => record_plugin_usage(
-                                        &stream_tx,
-                                        context_limit,
-                                        &mut accumulated_usage,
-                                        usage,
-                                        source,
-                                        emit_event,
-                                    ),
-                                },
-                                result = &mut compression_future => break result,
-                            }
-                        };
-                        drop(compression_future);
-                        apply_turn_trust_mode(ctx, &mut trust_rx);
-                        apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
-                        if parent_cancelled || compression_cancelled {
-                            return TurnExecutionResult::cancelled(accumulated_usage);
-                        }
-                        // 只有压缩确实推进了摘要边界才重试，避免相同错误无限循环。
-                        if ctx.session.summary_up_to > before_summary_up_to {
-                            continue 'execute_loop;
-                        }
-                    }
-                    persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
-                    return TurnExecutionResult::failed(accumulated_usage, error_message);
-                }
-                ReactRequestOutcome::Cancelled { usage } => {
-                    accumulated_usage.accumulate(&usage);
-                    return TurnExecutionResult::cancelled(accumulated_usage);
-                }
-            };
-
-            // 模型和插件用量统一汇总到 accumulated_usage；单次模型用量同时实时反馈宿主。
-            accumulated_usage.accumulate(&response.usage);
-            emit_token_usage(
-                &ctx.stream_tx,
-                &response.usage,
-                Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
-                ctx.context_limit,
-                format!("react-round-{round}", round = round + 1),
-                None,
-            );
-            round += 1;
-
-            // 无工具调用时由文本处理决定直接完成，或在已执行过工具后转入总结确认。
-            if response.tool_calls.is_empty() {
-                let (cancel_tx, cancel_rx) = oneshot::channel();
-                let mut cancel_tx = Some(cancel_tx);
-                let mut text_future = Box::pin(handle_text_response(
-                    ctx,
-                    cancel_rx,
-                    &pending_msg_id,
-                    &response,
-                    TextResponseState {
-                        round,
-                        outer_iteration,
-                        executed_tool: executed_tool_in_iteration,
-                    },
-                ));
-                let mut parent_cancelled = false;
-                let text_outcome = loop {
-                    tokio::select! {
-                        biased;
-                        command = cmd_rx.recv() => match command {
-                            Some(Command::Cancel | Command::Shutdown) | None => {
-                                cmd_rx.close();
-                                if let Some(cancel_tx) = cancel_tx.take() {
-                                    let _ = cancel_tx.send(());
-                                }
-                                parent_cancelled = true;
-                                break (&mut text_future).await;
-                            }
-                            Some(Command::Approval { .. }) => {}
-                            Some(Command::SetTrustMode(mode)) => {
-                                trust_tx.send_replace(mode);
-                            }
-                            Some(Command::InjectTool { tool_name, payload }) => {
-                                let _ = tool_injection_tx.send((tool_name, payload));
-                            }
-                            Some(Command::EmitStreamEvent(event)) => {
-                                let _ = stream_tx.send(*event);
-                            }
-                            Some(Command::ReportUsage {
-                                usage,
-                                source,
-                                emit_event,
-                            }) => record_plugin_usage(
-                                &stream_tx,
-                                context_limit,
-                                &mut accumulated_usage,
-                                usage,
-                                source,
-                                emit_event,
-                            ),
-                        },
-                        outcome = &mut text_future => break outcome,
-                    }
+                } = active;
+                sink.finish();
+                let response_result = match task.await {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::anyhow!(error.to_string())),
                 };
-                drop(text_future);
-                if parent_cancelled {
-                    return TurnExecutionResult::cancelled(accumulated_usage);
-                }
-                apply_turn_trust_mode(ctx, &mut trust_rx);
-                apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
-                match text_outcome {
-                    TextResponseOutcome::Completed => {
-                        return TurnExecutionResult::success(accumulated_usage);
+
+                match purpose {
+                    LlmPurpose::React {
+                        request_injection_generation,
+                    } => {
+                        persist_streamed_react_message(
+                            ctx,
+                            &pending_msg_id,
+                            &streamed_text,
+                            &streamed_reasoning,
+                        );
+                        let response = match response_result {
+                            Ok(response) => response,
+                            Err(error) => {
+                                let error_message = error.to_string();
+                                let should_compress = error_message.contains("context_window_exceeded")
+                                    || error_message.contains("context_length_exceeded")
+                                    || (error_message.contains("content_blocks=0")
+                                        && error_message.contains("stop_reason=end_turn"));
+                                if should_compress {
+                                    tracing::warn!("检测到上下文超限，尝试强制压缩");
+                                    let previous_summary_up_to = ctx.session.summary_up_to;
+                                    let forced_usage = TokenUsage {
+                                        prompt_tokens: context_limit,
+                                        completion_tokens: 0,
+                                        total_tokens: context_limit,
+                                        prompt_cache_hit_tokens: None,
+                                        prompt_cache_miss_tokens: None,
+                                    };
+                                    active_compression = Some(start_context_compression(
+                                        ctx,
+                                        forced_usage,
+                                        CompressionContinuation::ContextRetry {
+                                            previous_summary_up_to,
+                                            error_message,
+                                        },
+                                    ));
+                                    state.next_step = NextStep::Waiting;
+                                } else {
+                                    injections.commit(ctx);
+                                    persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
+                                    state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                        state.accumulated_usage.clone(),
+                                        error_message,
+                                    ));
+                                }
+                                continue 'agent_loop;
+                            }
+                        };
+
+                        state.accumulated_usage.accumulate(&response.usage);
+                        emit_token_usage(
+                            &stream_tx,
+                            &response.usage,
+                            Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
+                            context_limit,
+                            format!("react-round-{}", state.round + 1),
+                            None,
+                        );
+                        state.round += 1;
+                        state.react_rounds_in_phase += 1;
+
+                        if response.tool_calls.is_empty() {
+                            let disposition = handle_react_text_response(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                &state,
+                            );
+                            if needs_context_compression(ctx, &response.usage) {
+                                active_compression = Some(start_context_compression(
+                                    ctx,
+                                    response.usage,
+                                    CompressionContinuation::ReactText {
+                                        pending_msg_id,
+                                        disposition,
+                                        request_injection_generation,
+                                    },
+                                ));
+                                state.next_step = NextStep::Waiting;
+                            } else {
+                                finish_react_text(
+                                    ctx,
+                                    &mut state,
+                                    &mut injections,
+                                    pending_msg_id,
+                                    disposition,
+                                    request_injection_generation,
+                                );
+                            }
+                        } else {
+                            state.executed_tool_in_phase = true;
+                            let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
+                            state.tool_batch = Some(ToolBatchState {
+                                calls: calls.into(),
+                                response_usage: response.usage,
+                                request_injection_generation,
+                                needs_failure_recovery: false,
+                            });
+                            state.next_step = NextStep::DriveTools;
+                        }
                     }
-                    TextResponseOutcome::EnterSummary => break 'execute_loop,
-                    TextResponseOutcome::Cancelled => {
-                        return TurnExecutionResult::cancelled(accumulated_usage);
+                    LlmPurpose::Summary {
+                        iteration,
+                        request_injection_generation,
+                    } => {
+                        let response = match response_result {
+                            Ok(response) => response,
+                            Err(error) => {
+                                let message = error.to_string();
+                                persist_partial_summary(
+                                    ctx,
+                                    &pending_msg_id,
+                                    &streamed_text,
+                                    &streamed_reasoning,
+                                );
+                                state.accumulated_usage.accumulate(&streaming_usage);
+                                persist_error(ctx, format!("总结阶段失败：{message}"));
+                                state.next_step = NextStep::StartForceFinal {
+                                    reason: ForceFinalReason::SummaryError,
+                                    request_injection_generation,
+                                    summary_error: Some(message),
+                                };
+                                continue 'agent_loop;
+                            }
+                        };
+
+                        emit_token_usage(
+                            &stream_tx,
+                            &response.usage,
+                            Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
+                            context_limit,
+                            format!("summary-iteration-{iteration}"),
+                            None,
+                        );
+                        let mut usage = response.usage.clone();
+                        if usage.total_tokens == 0 {
+                            usage.accumulate(&streaming_usage);
+                        }
+                        state.accumulated_usage.accumulate(&usage);
+
+                        if !response.tool_calls.is_empty() {
+                            tracing::warn!(
+                                count = response.tool_calls.len(),
+                                protocol = ?ctx.client().protocol(),
+                                "summary phase returned tool calls despite ToolChoice::None"
+                            );
+                            if response.text.trim().is_empty() {
+                                let message =
+                                    "总结阶段无视 ToolChoice::None 返回了工具调用且无文本回复"
+                                        .to_string();
+                                persist_error(ctx, format!("总结阶段失败：{message}"));
+                                state.next_step = NextStep::StartForceFinal {
+                                    reason: ForceFinalReason::SummaryError,
+                                    request_injection_generation,
+                                    summary_error: Some(message),
+                                };
+                                continue 'agent_loop;
+                            }
+                        }
+
+                        let decision = parse_summary_phase_output(&response.text);
+                        let summary_content = decision.payload().to_string();
+                        let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
+                        if !needs_more_work && summary_content.trim().is_empty() {
+                            if let Some(message_id) = promote_last_react_message_to_summary(&mut ctx.session) {
+                                emit_session_message_upsert(ctx, &message_id);
+                            }
+                        } else {
+                            upsert_assistant_text_message(
+                                &mut ctx.session,
+                                &pending_msg_id,
+                                &summary_content,
+                                &response.reasoning_content,
+                                MessagePhase::Normal,
+                            );
+                            if let Some(message) = ctx
+                                .session
+                                .messages
+                                .iter_mut()
+                                .find(|message| message.id == pending_msg_id)
+                            {
+                                message.reasoning_signature = response.reasoning_signature;
+                                message.phase = if needs_more_work {
+                                    MessagePhase::React
+                                } else {
+                                    MessagePhase::Summary
+                                };
+                            }
+                            emit_session_message_upsert(ctx, &pending_msg_id);
+                        }
+
+                        if needs_context_compression(ctx, &usage) {
+                            active_compression = Some(start_context_compression(
+                                ctx,
+                                usage,
+                                CompressionContinuation::Summary {
+                                    decision,
+                                    request_injection_generation,
+                                },
+                            ));
+                            state.next_step = NextStep::Waiting;
+                        } else {
+                            finish_summary(
+                                ctx,
+                                &mut state,
+                                &mut injections,
+                                decision,
+                                request_injection_generation,
+                            );
+                        }
+                    }
+                    LlmPurpose::ForceFinal {
+                        request_injection_generation,
+                        summary_error,
+                    } => {
+                        let force_result = match response_result {
+                            Ok(response) => match commit_summary_message(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                "force_final_response",
+                            ) {
+                                Ok(()) => {
+                                    state.accumulated_usage.accumulate(&response.usage);
+                                    Ok(())
+                                }
+                                Err(message) => Err(message),
+                            },
+                            Err(error) => {
+                                let message = error.to_string();
+                                persist_error(ctx, format!("force_final_response 失败：{message}"));
+                                Err(message)
+                            }
+                        };
+                        let received_new_injection =
+                            injections.generation() > request_injection_generation;
+                        injections.commit(ctx);
+                        if received_new_injection {
+                            state.reset_react_phase();
+                            state.next_step = NextStep::StartReact;
+                            continue 'agent_loop;
+                        }
+                        state.next_step = match force_result {
+                            Ok(()) => NextStep::Finish(TurnExecutionResult::success(
+                                state.accumulated_usage.clone(),
+                            )),
+                            Err(message) => {
+                                let message = summary_error.map_or(message.clone(), |summary_error| {
+                                    format!(
+                                        "总结阶段失败：{summary_error}；强制最终回复失败：{message}"
+                                    )
+                                });
+                                NextStep::Finish(TurnExecutionResult::failed(
+                                    state.accumulated_usage.clone(),
+                                    message,
+                                ))
+                            }
+                        };
                     }
                 }
             }
 
-            // 工具批次通过专用通道接收审批和信任模式变化；主循环继续负责运行时命令与取消。
-            executed_tool_in_iteration = true;
-            let (cancel_tx, cancel_rx) = oneshot::channel();
-            let mut cancel_tx = Some(cancel_tx);
-            let mut tool_future = Box::pin(execute_tool_batch(
-                ctx,
-                cancel_rx,
-                &mut approval_rx,
-                &mut trust_rx,
-                &pending_msg_id,
-                &response,
-                round,
-                &request_tools,
-                &mut tool_history,
-            ));
-            let mut parent_cancelled = false;
-            let tool_outcome = loop {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => match command {
-                        Some(Command::Cancel | Command::Shutdown) | None => {
-                            cmd_rx.close();
-                            if let Some(cancel_tx) = cancel_tx.take() {
-                                let _ = cancel_tx.send(());
-                            }
-                            parent_cancelled = true;
-                            break (&mut tool_future).await;
+            // 工具 Future 与模型流处于互斥阶段；完成后记录结果并继续当前工具批次。
+            tool_result = async {
+                active_tool
+                    .as_mut()
+                    .expect("工具分支只在调用活跃时启用")
+                    .future
+                    .as_mut()
+                    .await
+            }, if active_tool.is_some() => {
+                let active = active_tool.take().expect("工具状态必须存在");
+                let duration_ms = active.started_at.elapsed().as_millis() as u64;
+                let needs_recovery = record_completed_tool_call(
+                    ctx,
+                    CompletedToolCall {
+                        call: &active.tool.call,
+                        args_summary: &active.tool.args_summary,
+                        dedupe_key: active.tool.dedupe_key,
+                        result: &tool_result,
+                        duration_ms,
+                    },
+                    &mut state.tool_history,
+                );
+                let usage = state
+                    .tool_batch
+                    .as_ref()
+                    .expect("工具结果必须属于活跃批次")
+                    .response_usage
+                    .clone();
+                state
+                    .tool_batch
+                    .as_mut()
+                    .expect("工具结果必须属于活跃批次")
+                    .needs_failure_recovery |= needs_recovery;
+                if needs_context_compression(ctx, &usage) {
+                    active_compression = Some(start_context_compression(
+                        ctx,
+                        usage,
+                        CompressionContinuation::ToolBatch,
+                    ));
+                    state.next_step = NextStep::Waiting;
+                } else {
+                    state.next_step = NextStep::DriveTools;
+                }
+            }
+
+            // 自动压缩也在同一循环中等待，避免压缩请求期间失去取消响应。
+            compression_result = async {
+                (&mut active_compression
+                    .as_mut()
+                    .expect("压缩分支只在任务活跃时启用")
+                    .task)
+                    .await
+            }, if active_compression.is_some() =>
+            {
+                let active = active_compression.take().expect("压缩状态必须存在");
+                let continuation = apply_context_compression(ctx, active, compression_result);
+                match continuation {
+                    CompressionContinuation::ReactText {
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    } => finish_react_text(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ToolBatch => {
+                        state.next_step = NextStep::DriveTools;
+                    }
+                    CompressionContinuation::Summary {
+                        decision,
+                        request_injection_generation,
+                    } => finish_summary(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        decision,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ContextRetry {
+                        previous_summary_up_to,
+                        error_message,
+                    } => {
+                        injections.commit(ctx);
+                        if ctx.session.summary_up_to > previous_summary_up_to {
+                            state.next_step = NextStep::StartReact;
+                        } else {
+                            persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
+                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                state.accumulated_usage.clone(),
+                                error_message,
+                            ));
                         }
-                        Some(Command::Approval { request_id, approved }) => {
-                            let _ = approval_tx.send(ApprovalResponse {
-                                request_id,
-                                approved,
+                    }
+                }
+            }
+
+            // 无异步阶段活跃时推进一次状态；命令分支 biased 在前，会先排空已到达命令。
+            _ = std::future::ready(()), if can_advance => {
+                let next_step = std::mem::replace(&mut state.next_step, NextStep::Waiting);
+                match next_step {
+                    NextStep::StartReact => {
+                        if state.react_rounds_in_phase >= ctx.max_tool_rounds {
+                            state.next_step = NextStep::StartSummary;
+                            continue 'agent_loop;
+                        }
+                        injections.commit(ctx);
+                        let request_injection_generation = injections.generation();
+                        if state.round == 0 {
+                            debug_assert!(
+                                ctx.session.system_prompt_message.is_some(),
+                                "TurnContext 构建前应已注入 system prompt"
+                            );
+                        } else {
+                            let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                                phase: "analyzing".to_string(),
+                                iteration: (state.round + 1) as u32,
                             });
                         }
-                        Some(Command::SetTrustMode(mode)) => {
-                            trust_tx.send_replace(mode);
-                        }
-                        Some(Command::InjectTool { tool_name, payload }) => {
-                            let _ = tool_injection_tx.send((tool_name, payload));
-                        }
-                        Some(Command::EmitStreamEvent(event)) => {
-                            let _ = stream_tx.send(*event);
-                        }
-                        Some(Command::ReportUsage {
-                            usage,
-                            source,
-                            emit_event,
-                        }) => record_plugin_usage(
-                            &stream_tx,
-                            context_limit,
-                            &mut accumulated_usage,
-                            usage,
-                            source,
-                            emit_event,
-                        ),
-                    },
-                    outcome = &mut tool_future => break outcome,
-                }
-            };
-            drop(tool_future);
-            if parent_cancelled {
-                return TurnExecutionResult::cancelled(accumulated_usage);
-            }
-            apply_turn_trust_mode(ctx, &mut trust_rx);
-            apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
-            // Continue 触发下一轮模型请求；Completed/Cancelled 则直接形成 turn 结果。
-            match tool_outcome {
-                ToolBatchOutcome::Continue => continue 'execute_loop,
-                ToolBatchOutcome::Completed => {
-                    return TurnExecutionResult::success(accumulated_usage);
-                }
-                ToolBatchOutcome::Cancelled => {
-                    return TurnExecutionResult::cancelled(accumulated_usage);
-                }
-            }
-        }
-
-        // 进入这里表示文本处理要求确认完成度，或本次迭代已经达到工具轮次上限。
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        let mut cancel_tx = Some(cancel_tx);
-        let mut summary_future = Box::pin(async {
-            let mut cancel_rx = cancel_rx;
-            let summary_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-                ctx.run_summary_phase(child_cancel, outer_iteration + 1)
-            })
-            .await;
-            match summary_result {
-                SummaryPhaseResult::Completed(usage) => SummaryPhaseResult::Completed(usage),
-                SummaryPhaseResult::NeedMoreWork { reason, usage } => {
-                    outer_iteration += 1;
-                    // 防止“继续工作”无限重入；达到上限时要求模型给出强制最终回复。
-                    if outer_iteration >= ctx.max_outer_iterations {
-                        let force_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-                            ctx.force_final_response(child_cancel, ForceFinalReason::OuterLimit)
-                        })
-                        .await;
-                        return match force_result {
-                            ForceFinalResult::Completed(force_usage) => {
-                                let mut combined_usage = usage;
-                                combined_usage.accumulate(&force_usage);
-                                SummaryPhaseResult::Completed(combined_usage)
+                        active_llm = Some(start_llm_request(
+                            ctx,
+                            build_react_request(ctx),
+                            LlmPurpose::React {
+                                request_injection_generation,
+                            },
+                            StreamTextKind::React,
+                            None,
+                        ));
+                    }
+                    NextStep::DriveTools => {
+                        let call = state
+                            .tool_batch
+                            .as_mut()
+                            .and_then(|batch| batch.calls.pop_front());
+                        let Some(call) = call else {
+                            let batch = state.tool_batch.take().expect("工具批次必须存在");
+                            if batch.needs_failure_recovery {
+                                append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
+                            } else {
+                                ctx.session.persist_to_disk();
                             }
-                            ForceFinalResult::Cancelled => SummaryPhaseResult::Cancelled(usage),
-                            ForceFinalResult::Failed(message) => {
-                                SummaryPhaseResult::Failed { message, usage }
-                            }
+                            injections.commit(ctx);
+                            state.next_step = NextStep::StartReact;
+                            continue 'agent_loop;
                         };
-                    }
 
-                    // 把未完成原因写回会话，确保下一次 ReAct 请求能看到明确的继续指令。
-                    inject_tool_to_messages(
-                        &mut ctx.session,
-                        "summary_need_more_work",
-                        &serde_json::json!({
-                            "reason": reason.trim(),
-                            "instruction": "上轮总结判定任务未完成，请根据原因继续执行剩余工作。",
-                        }),
-                    );
-                    ctx.session.persist_to_disk();
-                    SummaryPhaseResult::NeedMoreWork { reason, usage }
-                }
-                SummaryPhaseResult::Cancelled(usage) => {
-                    ctx.session.persist_to_disk();
-                    SummaryPhaseResult::Cancelled(usage)
-                }
-                SummaryPhaseResult::Failed { message, usage } => {
-                    // 总结失败不立即终止，先记录错误并尝试生成一次可交付的最终回复。
-                    persist_error(ctx, format!("总结阶段失败：{message}"));
-                    let force_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
-                        ctx.force_final_response(child_cancel, ForceFinalReason::SummaryError)
-                    })
-                    .await;
-                    match force_result {
-                        ForceFinalResult::Completed(force_usage) => {
-                            let mut combined_usage = usage;
-                            combined_usage.accumulate(&force_usage);
-                            SummaryPhaseResult::Completed(combined_usage)
+                        match prepare_tool_call(ctx, &call, &mut state.tool_history) {
+                            ToolPreflightOutcome::Skip { needs_recovery } => {
+                                state
+                                    .tool_batch
+                                    .as_mut()
+                                    .expect("工具批次必须存在")
+                                    .needs_failure_recovery |= needs_recovery;
+                                state.next_step = NextStep::DriveTools;
+                            }
+                            ToolPreflightOutcome::Execute {
+                                args_summary,
+                                dedupe_key,
+                            } => {
+                                let tool = PreparedToolCall {
+                                    call,
+                                    args_summary,
+                                    dedupe_key,
+                                };
+                                let trust_mode_label = format!("{trust_mode:?}");
+                                if trust_mode == TrustMode::FullTrust {
+                                    ctx.observer.audit_permission(
+                                        &ctx.session.id,
+                                        &tool.call.name,
+                                        "approved",
+                                        &trust_mode_label,
+                                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
+                                    );
+                                    active_tool = Some(start_tool_execution(ctx, tool));
+                                } else {
+                                    let request_id = scru128::new().to_string();
+                                    ctx.observer.audit_permission(
+                                        &ctx.session.id,
+                                        &tool.call.name,
+                                        "needs_approval",
+                                        &trust_mode_label,
+                                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
+                                    );
+                                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                                        request_id: request_id.clone(),
+                                        tool_name: tool.call.name.clone(),
+                                        args_summary: tool.args_summary.clone(),
+                                    });
+                                    pending_approval = Some(PendingApproval { request_id, tool });
+                                }
+                            }
                         }
-                        ForceFinalResult::Cancelled => SummaryPhaseResult::Cancelled(usage),
-                        ForceFinalResult::Failed(force_message) => SummaryPhaseResult::Failed {
-                            message: format!(
-                                "总结阶段失败：{message}；强制最终回复失败：{force_message}"
-                            ),
-                            usage,
-                        },
                     }
-                }
-            }
-        });
-
-        // 总结及其可能触发的强制回复共用本阶段取消信号，主通道仍在外层持续响应。
-        let mut parent_cancelled = false;
-        let summary_result = loop {
-            tokio::select! {
-                biased;
-                command = cmd_rx.recv() => match command {
-                    Some(Command::Cancel | Command::Shutdown) | None => {
-                        cmd_rx.close();
-                        if let Some(cancel_tx) = cancel_tx.take() {
-                            let _ = cancel_tx.send(());
+                    NextStep::StartSummary => {
+                        injections.commit(ctx);
+                        let request_injection_generation = injections.generation();
+                        let iteration = state.outer_iteration + 1;
+                        let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                            phase: "summary".to_string(),
+                            iteration,
+                        });
+                        if ctx.session.system_prompt_message.is_none() {
+                            rebuild_system_prompt(ctx);
                         }
-                        parent_cancelled = true;
-                        break (&mut summary_future).await;
+                        active_llm = Some(start_llm_request(
+                            ctx,
+                            request_for_summary_phase(&ctx.session),
+                            LlmPurpose::Summary {
+                                iteration,
+                                request_injection_generation,
+                            },
+                            StreamTextKind::Summary,
+                            Some(ToolChoice::None),
+                        ));
                     }
-                    Some(Command::Approval { .. }) => {}
-                    Some(Command::SetTrustMode(mode)) => {
-                        trust_tx.send_replace(mode);
+                    NextStep::StartForceFinal {
+                        reason,
+                        request_injection_generation,
+                        summary_error,
+                    } => {
+                        let request = build_force_final_request(ctx, reason);
+                        active_llm = Some(start_llm_request(
+                            ctx,
+                            request,
+                            LlmPurpose::ForceFinal {
+                                request_injection_generation,
+                                summary_error,
+                            },
+                            StreamTextKind::Summary,
+                            Some(ToolChoice::None),
+                        ));
                     }
-                    Some(Command::InjectTool { tool_name, payload }) => {
-                        let _ = tool_injection_tx.send((tool_name, payload));
-                    }
-                    Some(Command::EmitStreamEvent(event)) => {
-                        let _ = stream_tx.send(*event);
-                    }
-                    Some(Command::ReportUsage {
-                        usage,
-                        source,
-                        emit_event,
-                    }) => record_plugin_usage(
-                        &stream_tx,
-                        context_limit,
-                        &mut accumulated_usage,
-                        usage,
-                        source,
-                        emit_event,
-                    ),
-                },
-                result = &mut summary_future => break result,
-            }
-        };
-        drop(summary_future);
-        let summary_usage = match &summary_result {
-            SummaryPhaseResult::Completed(usage) | SummaryPhaseResult::Cancelled(usage) => usage,
-            SummaryPhaseResult::NeedMoreWork { usage, .. }
-            | SummaryPhaseResult::Failed { usage, .. } => usage,
-        };
-        // 总结即使取消或失败也可能已经产生用量，因此必须先累计再决定最终结果。
-        accumulated_usage.accumulate(summary_usage);
-        if parent_cancelled {
-            return TurnExecutionResult::cancelled(accumulated_usage);
-        }
-        // 总结期间收到的运行态变化只能在总结 Future 释放后安全写入 Session。
-        apply_turn_trust_mode(ctx, &mut trust_rx);
-        apply_deferred_tool_injections(ctx, &mut tool_injection_rx);
-
-        // NeedMoreWork 是唯一重入外层循环的出口，其余状态都在此结束本轮。
-        match summary_result {
-            SummaryPhaseResult::Completed(_) => {
-                return TurnExecutionResult::success(accumulated_usage);
-            }
-            SummaryPhaseResult::NeedMoreWork { .. } => {
-                tool_history.clear();
-                continue 'react_loop;
-            }
-            SummaryPhaseResult::Cancelled(_) => {
-                return TurnExecutionResult::cancelled(accumulated_usage);
-            }
-            SummaryPhaseResult::Failed { message, .. } => {
-                return TurnExecutionResult::failed(accumulated_usage, message);
+                    NextStep::Finish(result) => break 'agent_loop result,
+                    NextStep::Waiting => unreachable!("等待状态不能主动推进"),
+                }
             }
         }
-    }
+    };
+
+    // 信任模式运行时即时生效，Session 仍只在本轮唯一出口接收最终值。
+    ctx.trust_mode = trust_mode;
+    ctx.session.trust_mode = trust_mode;
+    injections.commit(ctx);
+    result
 }
 
 /// 通用工具参数摘要:把 JSON arguments 的 key=value 拼成简短字符串。
@@ -1353,6 +1618,7 @@ mod tests {
     use super::execute_turn;
     use crate::agent_config::AgentConfig;
     use crate::core::command::Command;
+    use crate::core::plugin::Plugin;
     use crate::model::SingleProviderClient;
     use crate::model::{ToolCall, ToolSpec};
     use crate::observe::Observer;
@@ -1360,7 +1626,7 @@ mod tests {
     use crate::prompt::SystemPromptConfig;
     use crate::session::{MessageRole, Session};
     use crate::tool::ToolResult;
-    use crate::tool_override::ToolOverrideHandler;
+    use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
     use crate::turn_context::TurnContext;
     use std::collections::HashMap;
     use std::future::Future;
@@ -1536,6 +1802,24 @@ mod tests {
         }
     }
 
+    struct TrustTrackingPlugin {
+        modes: Arc<Mutex<Vec<TrustMode>>>,
+    }
+
+    impl ToolOverrideHandler for TrustTrackingPlugin {}
+    impl ToolSpecProvider for TrustTrackingPlugin {}
+    impl PromptSectionProvider for TrustTrackingPlugin {}
+
+    impl Plugin for TrustTrackingPlugin {
+        fn id(&self) -> &str {
+            "trust-tracker"
+        }
+
+        fn set_trust_mode(&self, trust: TrustMode) {
+            self.modes.lock().unwrap().push(trust);
+        }
+    }
+
     fn tool_spec(name: &str) -> ToolSpec {
         ToolSpec {
             name: name.to_string(),
@@ -1635,7 +1919,12 @@ mod tests {
             result.outcome
         );
         assert_eq!(result.usage.total_tokens, 15);
-        harness.drain_stream();
+        assert!(
+            !harness
+                .stream_rx
+                .try_iter()
+                .any(|event| matches!(event, StreamEvent::DeferredToolInjectionsChanged { .. }))
+        );
     }
 
     /// 发送 `Command::Cancel` 应中断执行并返回 `Cancelled`(覆盖本次重构的
@@ -1659,12 +1948,21 @@ mod tests {
             .await;
 
         let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let trust_modes = Arc::new(Mutex::new(Vec::new()));
+        harness.ctx.plugins.push(Arc::new(TrustTrackingPlugin {
+            modes: trust_modes.clone(),
+        }));
 
         // cmd_tx 是 Send 的,可以移到独立任务里延时发送 Cancel;
         // 主任务独占 ctx + cmd_rx 跑 execute_turn。
         let cmd_tx = harness.cmd_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = cmd_tx.send(Command::SetTrustMode(TrustMode::Supervised));
+            let _ = cmd_tx.send(Command::InjectTool {
+                tool_name: "cancelled_probe".to_string(),
+                payload: serde_json::json!({"value": 1}),
+            });
             let _ = cmd_tx.send(Command::Cancel);
         });
 
@@ -1675,7 +1973,24 @@ mod tests {
             "收到 Cancel 应返回 Cancelled,实际: {:?}",
             result.outcome
         );
-        harness.drain_stream();
+        assert_eq!(*trust_modes.lock().unwrap(), vec![TrustMode::Supervised]);
+        assert_eq!(harness.ctx.trust_mode, TrustMode::Supervised);
+        assert_eq!(harness.ctx.session.trust_mode, TrustMode::Supervised);
+        assert!(harness.ctx.session.deferred_tool_injections.is_empty());
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool && message.text_content().contains("cancelled_probe")
+        }));
+        let injection_snapshots = harness
+            .stream_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                StreamEvent::DeferredToolInjectionsChanged { injections } => Some(injections),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(injection_snapshots.len(), 2);
+        assert_eq!(injection_snapshots[0].len(), 1);
+        assert!(injection_snapshots[1].is_empty());
     }
 
     /// 工具调用路径:模型先调用工具 → 工具执行 → 模型给出非最终回答(问号结尾)→
@@ -1766,58 +2081,98 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn handles_runtime_feedback_while_request_is_running() {
         let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(
+                        sse_body(&[text_delta_chunk("运行时命令已处理。"), usage_chunk(10, 5)]),
+                        "text/event-stream",
+                    )
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
         mount_sse(
             &server,
-            vec![text_delta_chunk("运行时命令已处理。"), usage_chunk(10, 5)],
+            vec![text_delta_chunk("插件结果已处理。"), usage_chunk(6, 2)],
         )
         .await;
 
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        harness
-            .cmd_tx
-            .send(Command::InjectTool {
-                tool_name: "runtime_probe".to_string(),
-                payload: serde_json::json!({"value": 1}),
-            })
-            .unwrap();
-        harness
-            .cmd_tx
-            .send(Command::EmitStreamEvent(Box::new(
-                StreamEvent::AgentNotification {
-                    agent_id: "runtime-probe".to_string(),
-                    agent_label: "测试".to_string(),
-                    content: "命令已转发".to_string(),
-                    level: "info".to_string(),
-                },
-            )))
-            .unwrap();
-        harness
-            .cmd_tx
-            .send(Command::ReportUsage {
-                usage: TokenUsage {
-                    prompt_tokens: 4,
-                    completion_tokens: 3,
-                    total_tokens: 7,
-                    prompt_cache_hit_tokens: None,
-                    prompt_cache_miss_tokens: None,
-                },
-                source: "runtime-probe".to_string(),
-                emit_event: true,
-            })
-            .unwrap();
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+        } = harness;
+        let runtime_cmd_tx = cmd_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            runtime_cmd_tx
+                .send(Command::InjectTool {
+                    tool_name: "runtime_probe".to_string(),
+                    payload: serde_json::json!({"value": 1}),
+                })
+                .unwrap();
+            runtime_cmd_tx
+                .send(Command::EmitStreamEvent(Box::new(
+                    StreamEvent::AgentNotification {
+                        agent_id: "runtime-probe".to_string(),
+                        agent_label: "测试".to_string(),
+                        content: "命令已转发".to_string(),
+                        level: "info".to_string(),
+                    },
+                )))
+                .unwrap();
+            runtime_cmd_tx
+                .send(Command::ReportUsage {
+                    usage: TokenUsage {
+                        prompt_tokens: 4,
+                        completion_tokens: 3,
+                        total_tokens: 7,
+                        prompt_cache_hit_tokens: None,
+                        prompt_cache_miss_tokens: None,
+                    },
+                    source: "runtime-probe".to_string(),
+                    emit_event: true,
+                })
+                .unwrap();
+        });
+        let pending_event_task = tokio::task::spawn_blocking(move || {
+            let event = stream_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("模型请求完成前应收到插件待处理快照");
+            (event, stream_rx)
+        });
+        let mut execution = Box::pin(execute_turn(&mut ctx, &mut cmd_rx));
+        let (first_event, stream_rx) = tokio::select! {
+            event = pending_event_task => event.unwrap(),
+            result = &mut execution => panic!("插件待处理快照晚于 turn 结束：{:?}", result.outcome),
+        };
+        assert!(matches!(
+            &first_event,
+            StreamEvent::DeferredToolInjectionsChanged { injections }
+                if injections.len() == 1 && injections[0].tool_name == "runtime_probe"
+        ));
 
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        let result = execution.await;
+        drop(cmd_tx);
         assert!(
             matches!(result.outcome, TurnExecutionOutcome::Success),
             "运行时命令处理结果: {:?}",
             result.outcome
         );
-        assert_eq!(result.usage.total_tokens, 22);
-        assert!(harness.ctx.session.messages.iter().any(|message| {
+        assert_eq!(result.usage.total_tokens, 30);
+        assert!(ctx.session.messages.iter().any(|message| {
             message.role == MessageRole::Tool && message.text_content().contains("runtime_probe")
         }));
+        assert!(ctx.session.deferred_tool_injections.is_empty());
 
-        let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
+        let mut events = vec![first_event];
+        events.extend(stream_rx.try_iter());
         assert!(events.iter().any(|event| matches!(
             event,
             StreamEvent::AgentNotification { agent_id, .. } if agent_id == "runtime-probe"
@@ -1826,6 +2181,16 @@ mod tests {
             event,
             StreamEvent::TokenUsage { source, .. } if source == "runtime-probe"
         )));
+        let injection_snapshots = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::DeferredToolInjectionsChanged { injections } => Some(injections),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(injection_snapshots.len(), 2);
+        assert_eq!(injection_snapshots[0].len(), 1);
+        assert!(injection_snapshots[1].is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2072,7 +2437,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reenters_react_loop_when_summary_needs_more_work() {
+    async fn reenters_agent_loop_when_summary_needs_more_work() {
         let server = MockServer::start().await;
         mount_sse(
             &server,
@@ -2122,6 +2487,84 @@ mod tests {
             message.text_content().contains("summary_need_more_work")
                 || message.text_content().contains("继续处理剩余步骤")
         }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reenters_agent_loop_when_plugin_result_arrives_during_summary() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(
+                        sse_body(&[text_delta_chunk("[DONE]\n旧总结"), usage_chunk(12, 2)]),
+                        "text/event-stream",
+                    )
+                    .set_delay(Duration::from_millis(500)),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("新插件结果已处理。"), usage_chunk(20, 3)],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+        } = harness;
+        let injection_tx = cmd_tx.clone();
+        let injection_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("等待总结阶段事件超时");
+                if matches!(
+                    event,
+                    StreamEvent::PhaseChanged { ref phase, .. } if phase == "summary"
+                ) {
+                    injection_tx
+                        .send(Command::InjectTool {
+                            tool_name: "summary_probe".to_string(),
+                            payload: serde_json::json!({"value": 1}),
+                        })
+                        .unwrap();
+                    break;
+                }
+            }
+            stream_rx
+        });
+
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        let stream_rx = injection_task.await.unwrap();
+        drop(cmd_tx);
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(result.usage.total_tokens, 48);
+        assert!(ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool && message.text_content().contains("summary_probe")
+        }));
+        let injection_snapshots = stream_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                StreamEvent::DeferredToolInjectionsChanged { injections } => Some(injections),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(injection_snapshots.len(), 2);
+        assert_eq!(injection_snapshots[0].len(), 1);
+        assert!(injection_snapshots[1].is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

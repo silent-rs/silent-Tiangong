@@ -85,6 +85,9 @@
 - [x] `run_summary_phase` / `force_final_response` 同理改用 `self.session`
 - [x] 合并 `execute_agent_loop` 与 `execute_turn`，由 `execute_turn` 直接编排并返回本轮结果
 - [x] 将 `execute_react_phase` 平铺进 `execute_turn`，固定为外层 `react_loop`、内层 `execute_loop`，在各阶段等待点直接监听运行时命令；不使用包裹整轮的 `execute_future`，不再抽离阶段编排方法或增加阶段结果转换
+- [x] 将 `execute_turn` 的内层 `execute_loop` 原样抽离为独立方法，保留外层 `react_loop` 的总结重入编排与既有取消、命令、用量语义
+- [x] 修正运行时插件注入合同：接收后立即向 App 发布待处理快照，在安全边界完整写入 Session，取消前已接收的数据不得丢失，且晚于当前请求到达的结果必须由 Agent 在后续请求中消费
+- [x] 将 `execute_turn` 收敛为唯一事件循环和唯一 `cmd_rx` 接收者：在同一个 `tokio::select!` 中处理命令、模型流与工具执行，保留工具阶段轮次上限、总结重入上限、取消传播、实时插件反馈和用量累计语义
 - [x] 执行链统一只传 `TurnContext`，通过 `ctx.session` 访问会话，删除占位 Session 与 `ctx + session` 双参数
 - [x] 删除 `TurnUsageSink` 与 turn 绑定旁路；插件用量统一通过 `PluginFeedbackTx` 命令上报，并直接累计到 `execute_turn` 本轮用量
 - [x] 删除基于关键词的后台工具意图过滤和 `user_input` 局部状态，所有工具统一交由主模型结合 Session 上下文选择

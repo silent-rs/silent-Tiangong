@@ -44,18 +44,8 @@ pub(crate) fn emit_deferred_tool_injections_changed(ctx: &crate::turn_context::T
         });
 }
 
-pub(crate) fn defer_tool_injection(
-    ctx: &mut crate::turn_context::TurnContext,
-    tool_name: String,
-    payload: serde_json::Value,
-) {
-    ctx.session.defer_tool_injection(tool_name, payload);
-    ctx.session.persist_to_disk();
-    emit_deferred_tool_injections_changed(ctx);
-}
-
 pub(crate) fn flush_deferred_tool_injections(ctx: &mut crate::turn_context::TurnContext) {
-    if ctx.session.has_unfinished_tool_calls() {
+    if ctx.session.has_unfinished_tool_calls() || ctx.session.deferred_tool_injections.is_empty() {
         return;
     }
     for injection in std::mem::take(&mut ctx.session.deferred_tool_injections) {

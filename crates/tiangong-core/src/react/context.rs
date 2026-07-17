@@ -128,25 +128,6 @@ pub(crate) fn emit_token_usage(
     });
 }
 
-pub(crate) async fn maybe_update_context_summary(
-    ctx: &mut TurnContext,
-    observed_usage: &TokenUsage,
-    cancel_rx: oneshot::Receiver<()>,
-) -> bool {
-    let organizer = ContextOrganizer::new(ctx.context_limit).with_threshold(0.95);
-    if !organizer.needs_compression(observed_total_tokens(observed_usage)) {
-        return false;
-    }
-    compress_context_summary(
-        ctx,
-        None,
-        Some(observed_usage),
-        ContextCompressAction::Auto,
-        cancel_rx,
-    )
-    .await
-}
-
 async fn compress_context_summary(
     ctx: &mut TurnContext,
     messages_to_compress: Option<Vec<Message>>,
