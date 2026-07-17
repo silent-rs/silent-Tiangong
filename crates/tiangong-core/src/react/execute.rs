@@ -86,93 +86,6 @@ fn apply_deferred_turn_commands(
     crate::react::message::flush_deferred_tool_injections(ctx);
 }
 
-/// 命令分发目标：execute_turn 内部转发运行时命令所需的全部通道。
-///
-/// 这些通道由 `execute_turn` 顶部创建一次,在各子循环驱动期间共享。
-/// `forward_approval` 区分两类调用点：工具相关阶段(request / tool_batch)转发
-/// Approval,其余阶段(compression / text / summary)无活跃审批,丢弃即可。
-struct CommandDispatch<'a> {
-    cmd_rx: &'a mut tokio_mpsc::UnboundedReceiver<Command>,
-    cancel_tx: &'a mut Option<oneshot::Sender<()>>,
-    approval_tx: &'a tokio_mpsc::UnboundedSender<ApprovalResponse>,
-    trust_tx: &'a watch::Sender<TrustMode>,
-    deferred_tx: &'a tokio_mpsc::UnboundedSender<DeferredTurnCommand>,
-    stream_tx: &'a std::sync::mpsc::Sender<StreamEvent>,
-    context_limit: usize,
-    accumulated_usage: &'a mut TokenUsage,
-    /// 工具相关阶段为 true(转发 Approval),其余阶段为 false(丢弃)。
-    forward_approval: bool,
-}
-
-/// 驱动子循环 future 的同时分发运行时命令。
-///
-/// 这是 request / compression / text / tool_batch / summary 五处 `select!` 循环
-/// 的统一实现。收到 `Cancel` / `Shutdown` 或 `cmd_rx` 关闭时,关闭接收端、通知
-/// 子循环收尾,返回 `(outcome, true)`;子循环自然结束返回 `(outcome, false)`。
-/// 其余命令转发到 `CommandDispatch` 持有的专用通道。
-///
-/// `parent_cancelled=true` 时 `outcome` 是子循环被中断后的部分结果,调用方据此
-/// 决定如何提取 usage 并返回 `TurnExecutionResult::cancelled`。
-async fn drive_with_command_dispatch<F>(
-    dispatch: &mut CommandDispatch<'_>,
-    child: &mut std::pin::Pin<&mut F>,
-) -> (F::Output, bool)
-where
-    F: std::future::Future,
-{
-    let mut parent_cancelled = false;
-    let outcome = loop {
-        let CommandDispatch {
-            cmd_rx,
-            cancel_tx,
-            approval_tx,
-            trust_tx,
-            deferred_tx,
-            stream_tx,
-            context_limit,
-            accumulated_usage,
-            forward_approval,
-        } = dispatch;
-        tokio::select! {
-            biased;
-            command = cmd_rx.recv() => match command {
-                Some(Command::Cancel | Command::Shutdown) | None => {
-                    cmd_rx.close();
-                    if let Some(cancel_tx) = cancel_tx.take() {
-                        let _ = cancel_tx.send(());
-                    }
-                    parent_cancelled = true;
-                    break child.as_mut().await;
-                }
-                Some(Command::Approval { request_id, approved }) if *forward_approval => {
-                    let _ = approval_tx.send(ApprovalResponse { request_id, approved });
-                }
-                Some(Command::Approval { .. }) => {}
-                Some(Command::SetTrustMode(mode)) => {
-                    let _ = trust_tx.send(mode);
-                }
-                Some(Command::CompressContext) => {
-                    let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
-                }
-                Some(Command::ResetContext) => {
-                    let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
-                }
-                Some(Command::InjectTool { tool_name, payload }) => {
-                    let _ = deferred_tx.send(DeferredTurnCommand::InjectTool { tool_name, payload });
-                }
-                Some(Command::EmitStreamEvent(event)) => {
-                    let _ = stream_tx.send(*event);
-                }
-                Some(Command::ReportUsage { usage, source, emit_event }) => {
-                    record_plugin_usage(stream_tx, *context_limit, accumulated_usage, usage, source, emit_event);
-                }
-            },
-            outcome = child.as_mut() => break outcome,
-        }
-    };
-    (outcome, parent_cancelled)
-}
-
 // TurnContext 定义与基础能力方法位于 `crate::turn_context`。本文件只实现单轮
 // Agent Loop 的阶段编排与具体执行步骤。
 
@@ -931,49 +844,29 @@ async fn execute_tool_batch(
 ///
 /// Session 已在 deliver 阶段完整构建；本函数只消费 TurnContext 并执行本轮。
 ///
-/// # 命令路由架构（本次重构核心）
-///
-/// 本函数是 `cmd_rx` 的**唯一监听者**。所有运行时命令在此处的 `select!` 中
-/// 统一分发，子循环（模型请求 / 工具执行 / 审批 / 总结）不再各自持有 `cmd_rx`，
-/// 而是通过 `oneshot::Receiver<()>` 接收取消信号：
-/// - 收到 `Cancel` / `Shutdown` 或 `cmd_rx` 关闭时，立即 `cmd_rx.close()` 并通过
-///   对应的 `cancel_tx` 通知当前子循环自行收尾，再 await 其结果后返回 `cancelled`。
-/// - `Approval` / `SetTrustMode` / `CompressContext` / `ResetContext` / `InjectTool`
-///   等命令被转发到各自的专用通道（`approval_tx` / `trust_tx` / `deferred_tx`），
-///   由子循环在合适的时机消费。
-///
-/// 这样做的收益：删除了此前散落在各阶段的 `process_commands` / 命令排空逻辑、
-/// 运行时消息注入（`Command::Message`）以及 `Interrupted` / `Restart` 中间状态，
-/// turn 执行流程简化为「线性执行 + 可取消」。
-///
-/// # 两层循环
-///
-/// 外层 `'execute_loop` 负责 ReAct↔Summary 阶段切换（summary 判定 NeedMoreWork 时重入）；
-/// 内层 `'react_loop` 负责多轮工具调用，直到无工具调用或达到 `max_tool_rounds`。
+/// 外层 `react_loop` 负责 ReAct 与总结之间的切换，内层 `execute_loop` 负责模型请求
+/// 和工具调用。`cmd_rx` 只在这两层循环的等待点直接展开，不再由长期 Future 包裹。
 pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
+    let stream_tx = ctx.stream_tx.clone();
+    let context_limit = ctx.context_limit;
+    let (deferred_tx, mut deferred_rx) = tokio_mpsc::unbounded_channel();
+    let (approval_tx, mut approval_rx) = tokio_mpsc::unbounded_channel();
+    let (trust_tx, mut trust_rx) = watch::channel(ctx.trust_mode);
     let mut round = 0usize;
     let mut outer_iteration = 0u32;
     let mut accumulated_usage = TokenUsage::default();
     let mut tool_history = ToolCallHistory::default();
-    // stream_tx / context_limit 提前 clone/copy，避免在 select! 分支里借用 ctx
-    // （ctx 的 &mut 已移交给子循环 future）。
-    let stream_tx = ctx.stream_tx.clone();
-    let context_limit = ctx.context_limit;
-    // 三条本回合内部分发通道：子循环消费，父层 select 写入。
-    let (deferred_tx, mut deferred_rx) = tokio_mpsc::unbounded_channel();
-    let (approval_tx, mut approval_rx) = tokio_mpsc::unbounded_channel();
-    let (trust_tx, mut trust_rx) = watch::channel(ctx.trust_mode);
 
-    'execute_loop: loop {
+    'react_loop: loop {
         let iteration_start_round = round;
         let mut executed_tool_in_iteration = false;
 
-        'react_loop: loop {
+        'execute_loop: loop {
             apply_deferred_turn_commands(ctx, &mut deferred_rx);
-            ctx.trust_mode = *trust_tx.borrow();
+            ctx.trust_mode = *trust_rx.borrow();
 
             if round == 0 {
                 debug_assert!(
@@ -988,7 +881,7 @@ pub(super) async fn execute_turn(
                 });
             }
             if round.saturating_sub(iteration_start_round) >= ctx.max_tool_rounds {
-                break 'react_loop;
+                break 'execute_loop;
             }
 
             let request_tools = ctx.tools.clone();
@@ -999,20 +892,59 @@ pub(super) async fn execute_turn(
                 cancel_rx,
                 request_tools.clone(),
             ));
-            // request 阶段会发起工具调用,需要转发 Approval。
-            let mut dispatch = CommandDispatch {
-                cmd_rx,
-                cancel_tx: &mut cancel_tx,
-                approval_tx: &approval_tx,
-                trust_tx: &trust_tx,
-                deferred_tx: &deferred_tx,
-                stream_tx: &stream_tx,
-                context_limit,
-                accumulated_usage: &mut accumulated_usage,
-                forward_approval: true,
+            let mut parent_cancelled = false;
+            let request_outcome = loop {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv() => match command {
+                        Some(Command::Cancel | Command::Shutdown) | None => {
+                            cmd_rx.close();
+                            if let Some(cancel_tx) = cancel_tx.take() {
+                                let _ = cancel_tx.send(());
+                            }
+                            parent_cancelled = true;
+                            break (&mut request_future).await;
+                        }
+                        Some(Command::Approval { request_id, approved }) => {
+                            let _ = approval_tx.send(ApprovalResponse {
+                                request_id,
+                                approved,
+                            });
+                        }
+                        Some(Command::SetTrustMode(mode)) => {
+                            let _ = trust_tx.send(mode);
+                        }
+                        Some(Command::CompressContext) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                        }
+                        Some(Command::ResetContext) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                        }
+                        Some(Command::InjectTool { tool_name, payload }) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
+                                tool_name,
+                                payload,
+                            });
+                        }
+                        Some(Command::EmitStreamEvent(event)) => {
+                            let _ = stream_tx.send(*event);
+                        }
+                        Some(Command::ReportUsage {
+                            usage,
+                            source,
+                            emit_event,
+                        }) => record_plugin_usage(
+                            &stream_tx,
+                            context_limit,
+                            &mut accumulated_usage,
+                            usage,
+                            source,
+                            emit_event,
+                        ),
+                    },
+                    outcome = &mut request_future => break outcome,
+                }
             };
-            let (request_outcome, parent_cancelled) =
-                drive_with_command_dispatch(&mut dispatch, &mut request_future.as_mut()).await;
             drop(request_future);
             if parent_cancelled {
                 match request_outcome {
@@ -1034,7 +966,7 @@ pub(super) async fn execute_turn(
                     response_result: Ok(response),
                 } => {
                     apply_deferred_turn_commands(ctx, &mut deferred_rx);
-                    ctx.trust_mode = *trust_tx.borrow();
+                    ctx.trust_mode = *trust_rx.borrow();
                     (pending_msg_id, response)
                 }
                 ReactRequestOutcome::Completed {
@@ -1060,29 +992,62 @@ pub(super) async fn execute_turn(
                         let mut cancel_tx = Some(cancel_tx);
                         let mut compression_future =
                             Box::pin(maybe_update_context_summary(ctx, &forced_usage, cancel_rx));
-                        let mut dispatch = CommandDispatch {
-                            cmd_rx,
-                            cancel_tx: &mut cancel_tx,
-                            approval_tx: &approval_tx,
-                            trust_tx: &trust_tx,
-                            deferred_tx: &deferred_tx,
-                            stream_tx: &stream_tx,
-                            context_limit,
-                            accumulated_usage: &mut accumulated_usage,
-                            forward_approval: false,
+                        let mut parent_cancelled = false;
+                        let compression_cancelled = loop {
+                            tokio::select! {
+                                biased;
+                                command = cmd_rx.recv() => match command {
+                                    Some(Command::Cancel | Command::Shutdown) | None => {
+                                        cmd_rx.close();
+                                        if let Some(cancel_tx) = cancel_tx.take() {
+                                            let _ = cancel_tx.send(());
+                                        }
+                                        parent_cancelled = true;
+                                        break (&mut compression_future).await;
+                                    }
+                                    Some(Command::Approval { .. }) => {}
+                                    Some(Command::SetTrustMode(mode)) => {
+                                        let _ = trust_tx.send(mode);
+                                    }
+                                    Some(Command::CompressContext) => {
+                                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                                    }
+                                    Some(Command::ResetContext) => {
+                                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                                    }
+                                    Some(Command::InjectTool { tool_name, payload }) => {
+                                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
+                                            tool_name,
+                                            payload,
+                                        });
+                                    }
+                                    Some(Command::EmitStreamEvent(event)) => {
+                                        let _ = stream_tx.send(*event);
+                                    }
+                                    Some(Command::ReportUsage {
+                                        usage,
+                                        source,
+                                        emit_event,
+                                    }) => record_plugin_usage(
+                                        &stream_tx,
+                                        context_limit,
+                                        &mut accumulated_usage,
+                                        usage,
+                                        source,
+                                        emit_event,
+                                    ),
+                                },
+                                result = &mut compression_future => break result,
+                            }
                         };
-                        let (compression_cancelled, parent_cancelled) =
-                            drive_with_command_dispatch(
-                                &mut dispatch,
-                                &mut compression_future.as_mut(),
-                            )
-                            .await;
                         drop(compression_future);
+                        apply_deferred_turn_commands(ctx, &mut deferred_rx);
+                        ctx.trust_mode = *trust_rx.borrow();
                         if parent_cancelled || compression_cancelled {
                             return TurnExecutionResult::cancelled(accumulated_usage);
                         }
                         if ctx.session.summary_up_to > before_summary_up_to {
-                            continue 'react_loop;
+                            continue 'execute_loop;
                         }
                     }
                     persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
@@ -1119,30 +1084,65 @@ pub(super) async fn execute_turn(
                         executed_tool: executed_tool_in_iteration,
                     },
                 ));
-                let mut dispatch = CommandDispatch {
-                    cmd_rx,
-                    cancel_tx: &mut cancel_tx,
-                    approval_tx: &approval_tx,
-                    trust_tx: &trust_tx,
-                    deferred_tx: &deferred_tx,
-                    stream_tx: &stream_tx,
-                    context_limit,
-                    accumulated_usage: &mut accumulated_usage,
-                    forward_approval: false,
+                let mut parent_cancelled = false;
+                let text_outcome = loop {
+                    tokio::select! {
+                        biased;
+                        command = cmd_rx.recv() => match command {
+                            Some(Command::Cancel | Command::Shutdown) | None => {
+                                cmd_rx.close();
+                                if let Some(cancel_tx) = cancel_tx.take() {
+                                    let _ = cancel_tx.send(());
+                                }
+                                parent_cancelled = true;
+                                break (&mut text_future).await;
+                            }
+                            Some(Command::Approval { .. }) => {}
+                            Some(Command::SetTrustMode(mode)) => {
+                                let _ = trust_tx.send(mode);
+                            }
+                            Some(Command::CompressContext) => {
+                                let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                            }
+                            Some(Command::ResetContext) => {
+                                let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                            }
+                            Some(Command::InjectTool { tool_name, payload }) => {
+                                let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
+                                    tool_name,
+                                    payload,
+                                });
+                            }
+                            Some(Command::EmitStreamEvent(event)) => {
+                                let _ = stream_tx.send(*event);
+                            }
+                            Some(Command::ReportUsage {
+                                usage,
+                                source,
+                                emit_event,
+                            }) => record_plugin_usage(
+                                &stream_tx,
+                                context_limit,
+                                &mut accumulated_usage,
+                                usage,
+                                source,
+                                emit_event,
+                            ),
+                        },
+                        outcome = &mut text_future => break outcome,
+                    }
                 };
-                let (text_outcome, parent_cancelled) =
-                    drive_with_command_dispatch(&mut dispatch, &mut text_future.as_mut()).await;
                 drop(text_future);
                 if parent_cancelled {
                     return TurnExecutionResult::cancelled(accumulated_usage);
                 }
                 apply_deferred_turn_commands(ctx, &mut deferred_rx);
-                ctx.trust_mode = *trust_tx.borrow();
+                ctx.trust_mode = *trust_rx.borrow();
                 match text_outcome {
                     TextResponseOutcome::Completed => {
                         return TurnExecutionResult::success(accumulated_usage);
                     }
-                    TextResponseOutcome::EnterSummary => break 'react_loop,
+                    TextResponseOutcome::EnterSummary => break 'execute_loop,
                     TextResponseOutcome::Cancelled => {
                         return TurnExecutionResult::cancelled(accumulated_usage);
                     }
@@ -1163,28 +1163,67 @@ pub(super) async fn execute_turn(
                 &request_tools,
                 &mut tool_history,
             ));
-            // tool_batch 内会发起审批请求,需要转发 Approval。
-            let mut dispatch = CommandDispatch {
-                cmd_rx,
-                cancel_tx: &mut cancel_tx,
-                approval_tx: &approval_tx,
-                trust_tx: &trust_tx,
-                deferred_tx: &deferred_tx,
-                stream_tx: &stream_tx,
-                context_limit,
-                accumulated_usage: &mut accumulated_usage,
-                forward_approval: true,
+            let mut parent_cancelled = false;
+            let tool_outcome = loop {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv() => match command {
+                        Some(Command::Cancel | Command::Shutdown) | None => {
+                            cmd_rx.close();
+                            if let Some(cancel_tx) = cancel_tx.take() {
+                                let _ = cancel_tx.send(());
+                            }
+                            parent_cancelled = true;
+                            break (&mut tool_future).await;
+                        }
+                        Some(Command::Approval { request_id, approved }) => {
+                            let _ = approval_tx.send(ApprovalResponse {
+                                request_id,
+                                approved,
+                            });
+                        }
+                        Some(Command::SetTrustMode(mode)) => {
+                            let _ = trust_tx.send(mode);
+                        }
+                        Some(Command::CompressContext) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                        }
+                        Some(Command::ResetContext) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                        }
+                        Some(Command::InjectTool { tool_name, payload }) => {
+                            let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
+                                tool_name,
+                                payload,
+                            });
+                        }
+                        Some(Command::EmitStreamEvent(event)) => {
+                            let _ = stream_tx.send(*event);
+                        }
+                        Some(Command::ReportUsage {
+                            usage,
+                            source,
+                            emit_event,
+                        }) => record_plugin_usage(
+                            &stream_tx,
+                            context_limit,
+                            &mut accumulated_usage,
+                            usage,
+                            source,
+                            emit_event,
+                        ),
+                    },
+                    outcome = &mut tool_future => break outcome,
+                }
             };
-            let (tool_outcome, parent_cancelled) =
-                drive_with_command_dispatch(&mut dispatch, &mut tool_future.as_mut()).await;
             drop(tool_future);
             if parent_cancelled {
                 return TurnExecutionResult::cancelled(accumulated_usage);
             }
             apply_deferred_turn_commands(ctx, &mut deferred_rx);
-            ctx.trust_mode = *trust_tx.borrow();
+            ctx.trust_mode = *trust_rx.borrow();
             match tool_outcome {
-                ToolBatchOutcome::Continue => continue 'react_loop,
+                ToolBatchOutcome::Continue => continue 'execute_loop,
                 ToolBatchOutcome::Completed => {
                     return TurnExecutionResult::success(accumulated_usage);
                 }
@@ -1196,10 +1235,6 @@ pub(super) async fn execute_turn(
 
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let mut cancel_tx = Some(cancel_tx);
-        // 总结阶段以一个 async 块封装：内部可能串行调用 run_summary_phase →
-        // force_final_response，两者共享同一个 cancel_rx（第一层未触发取消时
-        // 第二层可复用）。闭包内修改 outer_iteration 会反映到外层（future drop
-        // 后借用归还），用于 NeedMoreWork 后下一轮 'execute_loop 的迭代计数。
         let mut summary_future = Box::pin(async {
             let mut cancel_rx = cancel_rx;
             let summary_result = run_cancelable_child(&mut cancel_rx, |child_cancel| {
@@ -1266,19 +1301,54 @@ pub(super) async fn execute_turn(
                 }
             }
         });
-        let mut dispatch = CommandDispatch {
-            cmd_rx,
-            cancel_tx: &mut cancel_tx,
-            approval_tx: &approval_tx,
-            trust_tx: &trust_tx,
-            deferred_tx: &deferred_tx,
-            stream_tx: &stream_tx,
-            context_limit,
-            accumulated_usage: &mut accumulated_usage,
-            forward_approval: false,
+        let mut parent_cancelled = false;
+        let summary_result = loop {
+            tokio::select! {
+                biased;
+                command = cmd_rx.recv() => match command {
+                    Some(Command::Cancel | Command::Shutdown) | None => {
+                        cmd_rx.close();
+                        if let Some(cancel_tx) = cancel_tx.take() {
+                            let _ = cancel_tx.send(());
+                        }
+                        parent_cancelled = true;
+                        break (&mut summary_future).await;
+                    }
+                    Some(Command::Approval { .. }) => {}
+                    Some(Command::SetTrustMode(mode)) => {
+                        let _ = trust_tx.send(mode);
+                    }
+                    Some(Command::CompressContext) => {
+                        let _ = deferred_tx.send(DeferredTurnCommand::CompressContext);
+                    }
+                    Some(Command::ResetContext) => {
+                        let _ = deferred_tx.send(DeferredTurnCommand::ResetContext);
+                    }
+                    Some(Command::InjectTool { tool_name, payload }) => {
+                        let _ = deferred_tx.send(DeferredTurnCommand::InjectTool {
+                            tool_name,
+                            payload,
+                        });
+                    }
+                    Some(Command::EmitStreamEvent(event)) => {
+                        let _ = stream_tx.send(*event);
+                    }
+                    Some(Command::ReportUsage {
+                        usage,
+                        source,
+                        emit_event,
+                    }) => record_plugin_usage(
+                        &stream_tx,
+                        context_limit,
+                        &mut accumulated_usage,
+                        usage,
+                        source,
+                        emit_event,
+                    ),
+                },
+                result = &mut summary_future => break result,
+            }
         };
-        let (summary_result, parent_cancelled) =
-            drive_with_command_dispatch(&mut dispatch, &mut summary_future.as_mut()).await;
         drop(summary_future);
         let summary_usage = match &summary_result {
             SummaryPhaseResult::Completed(usage) | SummaryPhaseResult::Cancelled(usage) => usage,
@@ -1290,7 +1360,7 @@ pub(super) async fn execute_turn(
             return TurnExecutionResult::cancelled(accumulated_usage);
         }
         apply_deferred_turn_commands(ctx, &mut deferred_rx);
-        ctx.trust_mode = *trust_tx.borrow();
+        ctx.trust_mode = *trust_rx.borrow();
 
         match summary_result {
             SummaryPhaseResult::Completed(_) => {
@@ -1298,7 +1368,7 @@ pub(super) async fn execute_turn(
             }
             SummaryPhaseResult::NeedMoreWork { .. } => {
                 tool_history.clear();
-                continue 'execute_loop;
+                continue 'react_loop;
             }
             SummaryPhaseResult::Cancelled(_) => {
                 return TurnExecutionResult::cancelled(accumulated_usage);
@@ -1366,8 +1436,10 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
-    use tiangong_types::StreamEvent;
+    use tiangong_types::{StreamEvent, TokenUsage};
+    use tokio::sync::Notify;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1447,6 +1519,24 @@ mod tests {
             .await;
     }
 
+    /// 挂载一条不重试的 OpenAI 兼容请求错误。
+    async fn mount_request_error(server: &MockServer, message: &str) {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": "test_error",
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+    }
+
     /// 一个总是返回固定成功结果的工具覆盖处理器,用于测试工具调用路径。
     struct EchoTool {
         invocations: Arc<Mutex<Vec<ToolCall>>>,
@@ -1471,6 +1561,56 @@ mod tests {
                     execution: None,
                 })
             })
+        }
+    }
+
+    /// 一直等待取消的工具，用于确认工具执行阶段能向内传播 Cancel。
+    struct BlockingTool {
+        started: Arc<Notify>,
+    }
+
+    impl ToolOverrideHandler for BlockingTool {
+        fn handle(
+            &self,
+            _call: &ToolCall,
+            _session: &mut Session,
+            _actor_id: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending::<Option<ToolResult>>().await
+            })
+        }
+    }
+
+    struct FailingTool;
+
+    impl ToolOverrideHandler for FailingTool {
+        fn handle(
+            &self,
+            _call: &ToolCall,
+            _session: &mut Session,
+            _actor_id: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+            Box::pin(async {
+                Some(ToolResult {
+                    ok: false,
+                    summary: "测试工具执行失败".to_string(),
+                    stdout: String::new(),
+                    stderr: "test failure".to_string(),
+                    exit_code: 1,
+                    execution: None,
+                })
+            })
+        }
+    }
+
+    fn tool_spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: format!("测试工具 {name}"),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
         }
     }
 
@@ -1669,5 +1809,507 @@ mod tests {
             "echo 工具应被调用一次"
         );
         harness.drain_stream();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_failed_when_react_request_fails() {
+        let server = MockServer::start().await;
+        mount_request_error(&server, "execute turn request rejected").await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        let TurnExecutionOutcome::Failed(message) = &result.outcome else {
+            panic!("模型请求失败应返回 Failed，实际: {:?}", result.outcome);
+        };
+        assert!(!message.is_empty(), "模型请求失败必须返回错误原因");
+        assert!(
+            harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|session_message| session_message.text_content().contains(message))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handles_runtime_commands_while_request_is_running() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("运行时命令已处理。"), usage_chunk(10, 5)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness.cmd_tx.send(Command::CompressContext).unwrap();
+        harness.cmd_tx.send(Command::ResetContext).unwrap();
+        harness
+            .cmd_tx
+            .send(Command::InjectTool {
+                tool_name: "runtime_probe".to_string(),
+                payload: serde_json::json!({"value": 1}),
+            })
+            .unwrap();
+        harness
+            .cmd_tx
+            .send(Command::EmitStreamEvent(Box::new(
+                StreamEvent::AgentNotification {
+                    agent_id: "runtime-probe".to_string(),
+                    agent_label: "测试".to_string(),
+                    content: "命令已转发".to_string(),
+                    level: "info".to_string(),
+                },
+            )))
+            .unwrap();
+        harness
+            .cmd_tx
+            .send(Command::ReportUsage {
+                usage: TokenUsage {
+                    prompt_tokens: 4,
+                    completion_tokens: 3,
+                    total_tokens: 7,
+                    prompt_cache_hit_tokens: None,
+                    prompt_cache_miss_tokens: None,
+                },
+                source: "runtime-probe".to_string(),
+                emit_event: true,
+            })
+            .unwrap();
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "运行时命令处理结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 22);
+        assert!(harness.ctx.session.summary_up_to > 0);
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool && message.text_content().contains("runtime_probe")
+        }));
+
+        let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::AgentNotification { agent_id, .. } if agent_id == "runtime-probe"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::TokenUsage { source, .. } if source == "runtime-probe"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: tiangong_types::stream::ContextCompressAction::Clear,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejects_supervised_tool_after_approval_response() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_reject", "echo", "{}"),
+                usage_chunk(8, 2),
+            ],
+        )
+        .await;
+
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        let harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+        } = harness;
+        cmd_tx
+            .send(Command::SetTrustMode(TrustMode::Supervised))
+            .unwrap();
+        let approval_cmd_tx = cmd_tx.clone();
+        let approval_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("等待审批事件超时");
+                if let StreamEvent::ApprovalNeeded { request_id, .. } = event {
+                    approval_cmd_tx
+                        .send(Command::Approval {
+                            request_id,
+                            approved: false,
+                        })
+                        .unwrap();
+                    break;
+                }
+            }
+        });
+
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        approval_task.await.unwrap();
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "监督模式拒绝后的结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(ctx.trust_mode, TrustMode::Supervised);
+        assert!(invocations.lock().unwrap().is_empty());
+        assert!(
+            ctx.session
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("用户拒绝执行"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn executes_supervised_tool_after_approval_response() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_approve", "echo", "{}"),
+                usage_chunk(8, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(10, 3)],
+        )
+        .await;
+
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        let harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+        } = harness;
+        cmd_tx
+            .send(Command::SetTrustMode(TrustMode::Supervised))
+            .unwrap();
+        let approval_cmd_tx = cmd_tx.clone();
+        let approval_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("等待审批事件超时");
+                if let StreamEvent::ApprovalNeeded { request_id, .. } = event {
+                    approval_cmd_tx
+                        .send(Command::Approval {
+                            request_id,
+                            approved: true,
+                        })
+                        .unwrap();
+                    break;
+                }
+            }
+        });
+
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        approval_task.await.unwrap();
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "监督模式批准后的结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 23);
+        assert_eq!(invocations.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_cancelled_when_tool_execution_is_cancelled() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_block", "blocking", "{}"),
+                usage_chunk(9, 2),
+            ],
+        )
+        .await;
+
+        let started = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "blocking".to_string(),
+            Arc::new(BlockingTool {
+                started: started.clone(),
+            }),
+        );
+        let mut harness = TestHarness::new(&server, vec![tool_spec("blocking")], overrides);
+        let cmd_tx = harness.cmd_tx.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), started.notified())
+                .await
+                .expect("阻塞工具未开始执行");
+            cmd_tx.send(Command::Cancel).unwrap();
+        });
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        cancel_task.await.unwrap();
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Cancelled));
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool && message.text_content().contains("中断")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn continues_after_tool_failure_with_recovery_context() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_fail", "failing", "{}"),
+                usage_chunk(9, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已改用其他方案完成。"), usage_chunk(11, 3)],
+        )
+        .await;
+
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert("failing".to_string(), Arc::new(FailingTool));
+        let mut harness = TestHarness::new(&server, vec![tool_spec("failing")], overrides);
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "工具失败恢复后的结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 25);
+        assert!(
+            harness.ctx.session.messages.iter().any(|message| {
+                message.tool_name.as_deref() == Some("react_failed_tool_recovery")
+            })
+        );
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_name.as_deref() == Some("failing")
+                && message.text_content().contains("test failure")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_cancelled_when_summary_is_cancelled() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(
+                        sse_body(&[text_delta_chunk("[DONE]\n不应完成")]),
+                        "text/event-stream",
+                    )
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness.ctx.max_tool_rounds = 0;
+        let cmd_tx = harness.cmd_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cmd_tx.send(Command::Cancel).unwrap();
+        });
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Cancelled));
+        assert!(harness.stream_rx.try_iter().any(|event| matches!(
+            event,
+            StreamEvent::PhaseChanged { phase, .. } if phase == "summary"
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reenters_react_loop_when_summary_needs_more_work() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("[NEED_MORE_WORK]\n继续处理剩余步骤"),
+                usage_chunk(12, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("继续执行后的结果"), usage_chunk(20, 3)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[DONE]\n任务完成"), usage_chunk(24, 4)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "总结重入结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 76);
+        let summary_phases = harness
+            .stream_rx
+            .try_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    StreamEvent::PhaseChanged { phase, .. } if phase == "summary"
+                )
+            })
+            .count();
+        assert_eq!(summary_phases, 2);
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.text_content().contains("summary_need_more_work")
+                || message.text_content().contains("继续处理剩余步骤")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forces_final_response_when_outer_iteration_limit_is_reached() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("[NEED_MORE_WORK]\n仍有一步"),
+                usage_chunk(7, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("强制收尾完成"), usage_chunk(8, 3)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness.ctx.max_outer_iterations = 1;
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "外层上限强制收尾结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 26);
+        assert!(
+            harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("强制收尾完成"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forces_final_response_after_summary_request_fails() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
+        )
+        .await;
+        mount_request_error(&server, "summary request rejected").await;
+        mount_request_error(&server, "summary request rejected").await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("总结失败后完成收尾"), usage_chunk(8, 3)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "总结失败兜底结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 17);
+        assert!(
+            harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("总结阶段失败"))
+        );
+        assert!(
+            harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("总结失败后完成收尾"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_failed_when_summary_and_force_final_both_fail() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
+        )
+        .await;
+        mount_request_error(&server, "summary stream rejected").await;
+        mount_request_error(&server, "summary fallback rejected").await;
+        mount_request_error(&server, "force final stream rejected").await;
+        mount_request_error(&server, "force final fallback rejected").await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        let TurnExecutionOutcome::Failed(message) = result.outcome else {
+            panic!("总结与强制收尾都失败时必须返回 Failed");
+        };
+        assert!(message.contains("总结阶段失败"));
+        assert!(message.contains("强制最终回复失败"));
+        assert_eq!(result.usage.total_tokens, 6);
     }
 }
