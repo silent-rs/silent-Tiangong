@@ -4,11 +4,10 @@
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
+use tokio::task::{Id as TaskId, JoinSet};
 
 use crate::context::compressor::{CompressionUpdate, ContextCompressor, mark_compact_boundary};
 use crate::context::organizer::ContextOrganizer;
@@ -275,6 +274,34 @@ fn prepare_tool_call(
     }
 }
 
+fn record_parallel_duplicate_tool_call(ctx: &mut TurnContext, call: &ToolCall) {
+    let message = format!(
+        "同一批次已经安排了完全相同的 {} 工具调用，本次重复调用已跳过；请直接使用同批调用返回的结果。",
+        call.name
+    );
+    append_tool_result_message(
+        &mut ctx.session,
+        &call.id,
+        &call.name,
+        message.clone(),
+        false,
+    );
+    append_runtime_tool_message(
+        &mut ctx.session,
+        &call.name,
+        format!("跳过同批重复工具调用 [{}]\n{message}", call.name),
+    );
+    ctx.session.persist_to_disk();
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
+        name: call.name.clone(),
+        tool_call_id: Some(call.id.clone()),
+        ok: true,
+        output: message.clone(),
+        full_output: Some(message),
+        duration_ms: None,
+    });
+}
+
 fn record_rejected_tool_call(ctx: &mut TurnContext, call: &ToolCall, args_summary: &str) {
     ctx.observer.audit_tool_execution(
         &ctx.session.id,
@@ -340,14 +367,6 @@ fn record_completed_tool_call(
         (!args_summary.is_empty()).then_some(args_summary),
         &result.summary,
     );
-    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
-        name: call.name.clone(),
-        tool_call_id: Some(call.id.clone()),
-        ok: result.ok,
-        output: tool_result_stream_output(result),
-        full_output: Some(tool_result_full_output(result)),
-        duration_ms: Some(duration_ms),
-    });
     append_tool_result_message(
         &mut ctx.session,
         &call.id,
@@ -372,7 +391,7 @@ fn record_completed_tool_call(
         format_tool_trace_message(result),
     );
 
-    if result.ok {
+    let needs_recovery = if result.ok {
         history.failed_calls.remove(&dedupe_key);
         history.failed_names.remove(&call.name);
         history.successful_keys.insert(dedupe_key);
@@ -389,7 +408,17 @@ fn record_completed_tool_call(
         history.failed_calls.insert(dedupe_key, error_summary);
         history.failed_names.insert(call.name.clone());
         true
-    }
+    };
+    ctx.session.persist_to_disk();
+    let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
+        name: call.name.clone(),
+        tool_call_id: Some(call.id.clone()),
+        ok: result.ok,
+        output: tool_result_stream_output(result),
+        full_output: Some(tool_result_full_output(result)),
+        duration_ms: Some(duration_ms),
+    });
+    needs_recovery
 }
 
 fn append_failure_recovery_prompt(
@@ -469,13 +498,16 @@ impl AgentLoopState {
 }
 
 struct ToolBatchState {
-    calls: VecDeque<ToolCall>,
+    calls: VecDeque<(usize, ToolCall)>,
+    ready_tools: Vec<PreparedToolCall>,
+    prepared_keys: HashSet<String>,
     response_usage: TokenUsage,
     request_injection_generation: u64,
     needs_failure_recovery: bool,
 }
 
 struct PreparedToolCall {
+    index: usize,
     call: ToolCall,
     args_summary: String,
     dedupe_key: String,
@@ -486,12 +518,14 @@ struct PendingApproval {
     tool: PreparedToolCall,
 }
 
-type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
-
-struct ActiveToolCall {
+struct RunningToolCall {
     tool: PreparedToolCall,
     started_at: std::time::Instant,
-    future: ToolFuture,
+}
+
+struct ToolTaskOutput {
+    result: ToolResult,
+    duration_ms: u64,
 }
 
 enum LlmPurpose {
@@ -668,18 +702,27 @@ fn handle_react_text_response(
     }
 }
 
-fn start_tool_execution(ctx: &mut TurnContext, tool: PreparedToolCall) -> ActiveToolCall {
+fn start_tool_execution(
+    ctx: &mut TurnContext,
+    tool: PreparedToolCall,
+    tasks: &mut JoinSet<ToolTaskOutput>,
+    running_tools: &mut HashMap<TaskId, RunningToolCall>,
+) {
     let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
         name: tool.call.name.clone(),
         args_summary: tool.args_summary.clone(),
     });
     let actor_id = ctx.session.id.clone();
     let future = start_tool_call(ctx, &tool.call, &actor_id);
-    ActiveToolCall {
-        tool,
-        started_at: std::time::Instant::now(),
-        future,
-    }
+    let started_at = std::time::Instant::now();
+    let task = tasks.spawn(async move {
+        let result = future.await;
+        ToolTaskOutput {
+            result,
+            duration_ms: started_at.elapsed().as_millis() as u64,
+        }
+    });
+    running_tools.insert(task.id(), RunningToolCall { tool, started_at });
 }
 
 fn start_context_compression(
@@ -885,13 +928,14 @@ pub(super) async fn execute_turn(
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new();
     let mut active_llm: Option<ActiveLlm> = None;
-    let mut active_tool: Option<ActiveToolCall> = None;
+    let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
+    let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
     let mut active_compression: Option<ActiveCompression> = None;
     let mut pending_approval: Option<PendingApproval> = None;
 
     let result = 'agent_loop: loop {
         let can_advance = active_llm.is_none()
-            && active_tool.is_none()
+            && tool_tasks.is_empty()
             && active_compression.is_none()
             && pending_approval.is_none()
             && !matches!(state.next_step, NextStep::Waiting);
@@ -936,24 +980,34 @@ pub(super) async fn execute_turn(
                         state.accumulated_usage.accumulate(&streaming_usage);
                     }
 
-                    if let Some(active) = active_tool.take() {
-                        let duration_ms = active.started_at.elapsed().as_millis() as u64;
-                        let output = "工具调用因执行取消或会话关闭而中断。".to_string();
-                        let _ = stream_tx.send(StreamEvent::ToolResult {
-                            name: active.tool.call.name.clone(),
-                            tool_call_id: Some(active.tool.call.id.clone()),
-                            ok: false,
-                            output: output.clone(),
-                            full_output: None,
-                            duration_ms: Some(duration_ms),
-                        });
-                        append_tool_result_message(
-                            &mut ctx.session,
-                            &active.tool.call.id,
-                            &active.tool.call.name,
-                            output,
-                            true,
-                        );
+                    if !running_tools.is_empty() {
+                        tool_tasks.shutdown().await;
+                        let mut interrupted = running_tools.drain().map(|(_, tool)| tool).collect::<Vec<_>>();
+                        interrupted.sort_by_key(|running| running.tool.index);
+                        let mut interrupted_events = Vec::with_capacity(interrupted.len());
+                        for running in interrupted {
+                            let duration_ms = running.started_at.elapsed().as_millis() as u64;
+                            let output = "工具调用因执行取消或会话关闭而中断。".to_string();
+                            append_tool_result_message(
+                                &mut ctx.session,
+                                &running.tool.call.id,
+                                &running.tool.call.name,
+                                output,
+                                true,
+                            );
+                            interrupted_events.push(StreamEvent::ToolResult {
+                                name: running.tool.call.name,
+                                tool_call_id: Some(running.tool.call.id),
+                                ok: false,
+                                output: "工具调用因执行取消或会话关闭而中断。".to_string(),
+                                full_output: None,
+                                duration_ms: Some(duration_ms),
+                            });
+                        }
+                        ctx.session.persist_to_disk();
+                        for event in interrupted_events {
+                            let _ = stream_tx.send(event);
+                        }
                     }
 
                     if let Some(active) = active_compression.take() {
@@ -971,7 +1025,12 @@ pub(super) async fn execute_turn(
                     if matches_pending {
                         let pending = pending_approval.take().expect("审批状态必须存在");
                         if approved {
-                            active_tool = Some(start_tool_execution(ctx, pending.tool));
+                            start_tool_execution(
+                                ctx,
+                                pending.tool,
+                                &mut tool_tasks,
+                                &mut running_tools,
+                            );
                             state.next_step = NextStep::Waiting;
                         } else {
                             record_rejected_tool_call(
@@ -1002,8 +1061,13 @@ pub(super) async fn execute_turn(
                     if mode == TrustMode::FullTrust
                         && let Some(pending) = pending_approval.take()
                     {
-                        active_tool = Some(start_tool_execution(ctx, pending.tool));
-                        state.next_step = NextStep::Waiting;
+                        state
+                            .tool_batch
+                            .as_mut()
+                            .expect("审批必须属于活跃工具批次")
+                            .ready_tools
+                            .push(pending.tool);
+                        state.next_step = NextStep::DriveTools;
                     }
                 }
                 Some(Command::InjectTool { tool_name, payload }) => {
@@ -1157,7 +1221,9 @@ pub(super) async fn execute_turn(
                             state.executed_tool_in_phase = true;
                             let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
                             state.tool_batch = Some(ToolBatchState {
-                                calls: calls.into(),
+                                calls: calls.into_iter().enumerate().collect(),
+                                ready_tools: Vec::new(),
+                                prepared_keys: HashSet::new(),
                                 response_usage: response.usage,
                                 request_injection_generation,
                                 needs_failure_recovery: false,
@@ -1326,39 +1392,69 @@ pub(super) async fn execute_turn(
                 }
             }
 
-            // 工具 Future 与模型流处于互斥阶段；完成后记录结果并继续当前工具批次。
-            tool_result = async {
-                active_tool
-                    .as_mut()
-                    .expect("工具分支只在调用活跃时启用")
-                    .future
-                    .as_mut()
-                    .await
-            }, if active_tool.is_some() => {
-                let active = active_tool.take().expect("工具状态必须存在");
-                let duration_ms = active.started_at.elapsed().as_millis() as u64;
+            // 每个工具都是独立 Tokio task；单项完成后立即反馈并持久化，但必须等整批结束才继续。
+            tool_result = tool_tasks.join_next_with_id(), if !tool_tasks.is_empty() => {
+                let joined = tool_result.expect("工具任务集合非空时必须返回结果");
+                let (task_id, task_output) = match joined {
+                    Ok((task_id, output)) => (task_id, output),
+                    Err(error) => {
+                        let task_id = error.id();
+                        let running = running_tools
+                            .get(&task_id)
+                            .expect("异常工具任务必须存在运行记录");
+                        let message = format!("工具任务异常结束：{error}");
+                        (
+                            task_id,
+                            ToolTaskOutput {
+                                result: ToolResult {
+                                    ok: false,
+                                    summary: message.clone(),
+                                    stdout: String::new(),
+                                    stderr: message,
+                                    exit_code: 1,
+                                    execution: None,
+                                },
+                                duration_ms: running.started_at.elapsed().as_millis() as u64,
+                            },
+                        )
+                    }
+                };
+                let running = running_tools
+                    .remove(&task_id)
+                    .expect("完成的工具任务必须存在运行记录");
                 let needs_recovery = record_completed_tool_call(
                     ctx,
                     CompletedToolCall {
-                        call: &active.tool.call,
-                        args_summary: &active.tool.args_summary,
-                        dedupe_key: active.tool.dedupe_key,
-                        result: &tool_result,
-                        duration_ms,
+                        call: &running.tool.call,
+                        args_summary: &running.tool.args_summary,
+                        dedupe_key: running.tool.dedupe_key,
+                        result: &task_output.result,
+                        duration_ms: task_output.duration_ms,
                     },
                     &mut state.tool_history,
                 );
-                let usage = state
-                    .tool_batch
-                    .as_ref()
-                    .expect("工具结果必须属于活跃批次")
-                    .response_usage
-                    .clone();
+                // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
                 state
                     .tool_batch
                     .as_mut()
                     .expect("工具结果必须属于活跃批次")
                     .needs_failure_recovery |= needs_recovery;
+
+                if !tool_tasks.is_empty() {
+                    state.next_step = NextStep::Waiting;
+                    continue 'agent_loop;
+                }
+
+                let batch = state
+                    .tool_batch
+                    .as_ref()
+                    .expect("工具结果必须属于活跃批次");
+                if !batch.calls.is_empty() || !batch.ready_tools.is_empty() {
+                    state.next_step = NextStep::DriveTools;
+                    continue 'agent_loop;
+                }
+
+                let usage = batch.response_usage.clone();
                 if needs_context_compression(ctx, &usage) {
                     active_compression = Some(start_context_compression(
                         ctx,
@@ -1463,7 +1559,27 @@ pub(super) async fn execute_turn(
                             .tool_batch
                             .as_mut()
                             .and_then(|batch| batch.calls.pop_front());
-                        let Some(call) = call else {
+                        let Some((index, call)) = call else {
+                            let ready_tools = std::mem::take(
+                                &mut state
+                                    .tool_batch
+                                    .as_mut()
+                                    .expect("工具批次必须存在")
+                                    .ready_tools,
+                            );
+                            if !ready_tools.is_empty() {
+                                for tool in ready_tools {
+                                    start_tool_execution(
+                                        ctx,
+                                        tool,
+                                        &mut tool_tasks,
+                                        &mut running_tools,
+                                    );
+                                }
+                                state.next_step = NextStep::Waiting;
+                                continue 'agent_loop;
+                            }
+
                             let batch = state.tool_batch.take().expect("工具批次必须存在");
                             if batch.needs_failure_recovery {
                                 append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
@@ -1482,13 +1598,26 @@ pub(super) async fn execute_turn(
                                     .as_mut()
                                     .expect("工具批次必须存在")
                                     .needs_failure_recovery |= needs_recovery;
+                                ctx.session.persist_to_disk();
                                 state.next_step = NextStep::DriveTools;
                             }
                             ToolPreflightOutcome::Execute {
                                 args_summary,
                                 dedupe_key,
                             } => {
+                                let first_in_batch = state
+                                    .tool_batch
+                                    .as_mut()
+                                    .expect("工具批次必须存在")
+                                    .prepared_keys
+                                    .insert(dedupe_key.clone());
+                                if !first_in_batch {
+                                    record_parallel_duplicate_tool_call(ctx, &call);
+                                    state.next_step = NextStep::DriveTools;
+                                    continue 'agent_loop;
+                                }
                                 let tool = PreparedToolCall {
+                                    index,
                                     call,
                                     args_summary,
                                     dedupe_key,
@@ -1502,7 +1631,13 @@ pub(super) async fn execute_turn(
                                         &trust_mode_label,
                                         (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
                                     );
-                                    active_tool = Some(start_tool_execution(ctx, tool));
+                                    state
+                                        .tool_batch
+                                        .as_mut()
+                                        .expect("工具批次必须存在")
+                                        .ready_tools
+                                        .push(tool);
+                                    state.next_step = NextStep::DriveTools;
                                 } else {
                                     let request_id = scru128::new().to_string();
                                     ctx.observer.audit_permission(
@@ -1635,7 +1770,7 @@ mod tests {
     use std::time::Duration;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
     use tiangong_types::{StreamEvent, TokenUsage};
-    use tokio::sync::Notify;
+    use tokio::sync::{Barrier, Notify};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1760,22 +1895,58 @@ mod tests {
         }
     }
 
-    /// 一直等待取消的工具，用于确认工具执行阶段能向内传播 Cancel。
-    struct BlockingTool {
-        started: Arc<Notify>,
+    /// 同批工具全部启动后一直等待取消，用于确认 Cancel 会终止整个并行批次。
+    struct BlockingBatchTool {
+        barrier: Arc<Barrier>,
+        all_started: Arc<Notify>,
     }
 
-    impl ToolOverrideHandler for BlockingTool {
+    impl ToolOverrideHandler for BlockingBatchTool {
         fn handle(
             &self,
             _call: &ToolCall,
             _session: &mut Session,
             _actor_id: &str,
         ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
-            let started = self.started.clone();
+            let barrier = self.barrier.clone();
+            let all_started = self.all_started.clone();
             Box::pin(async move {
-                started.notify_one();
+                if barrier.wait().await.is_leader() {
+                    all_started.notify_one();
+                }
                 std::future::pending::<Option<ToolResult>>().await
+            })
+        }
+    }
+
+    struct ParallelTool {
+        barrier: Arc<Barrier>,
+        completed: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ToolOverrideHandler for ParallelTool {
+        fn handle(
+            &self,
+            call: &ToolCall,
+            _session: &mut Session,
+            _actor_id: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+            let name = call.name.clone();
+            let barrier = self.barrier.clone();
+            let completed = self.completed.clone();
+            Box::pin(async move {
+                barrier.wait().await;
+                let delay_ms = if name == "slow_probe" { 100 } else { 10 };
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                completed.lock().unwrap().push(name.clone());
+                Some(ToolResult {
+                    ok: true,
+                    summary: format!("{name} 已完成"),
+                    stdout: name,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                })
             })
         }
     }
@@ -2056,6 +2227,103 @@ mod tests {
         harness.drain_stream();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn runs_tool_batch_in_parallel_and_persists_each_completion() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1_slow", "slow_probe", "{}"),
+                tool_call_chunk("call_2_fast", "fast_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("两个并行工具均已完成，结果已经保存。"),
+                usage_chunk(20, 4),
+            ],
+        )
+        .await;
+
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let handler: Arc<dyn ToolOverrideHandler> = Arc::new(ParallelTool {
+            barrier: Arc::new(Barrier::new(2)),
+            completed: completed.clone(),
+        });
+        let mut overrides = HashMap::new();
+        overrides.insert("slow_probe".to_string(), handler.clone());
+        overrides.insert("fast_probe".to_string(), handler);
+        let harness = TestHarness::new(
+            &server,
+            vec![tool_spec("slow_probe"), tool_spec("fast_probe")],
+            overrides,
+        );
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        let storage_root = ctx
+            .session
+            .bound_storage_root()
+            .expect("测试 Session 必须绑定存储目录")
+            .to_path_buf();
+        let session_id = ctx.session.id.clone();
+        let first_result_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("等待首个并行工具结果超时");
+                if let StreamEvent::ToolResult {
+                    name, tool_call_id, ..
+                } = event
+                {
+                    return (name, tool_call_id, stream_rx);
+                }
+            }
+        });
+
+        let mut execution = Box::pin(execute_turn(&mut ctx, &mut cmd_rx));
+        let (first_name, first_call_id, stream_rx) = tokio::select! {
+            event = first_result_task => event.expect("首个工具结果监听任务失败"),
+            result = &mut execution => panic!("全部工具完成前不应结束 turn：{:?}", result.outcome),
+        };
+        assert_eq!(first_name, "fast_probe");
+        assert_eq!(first_call_id.as_deref(), Some("call_2_fast"));
+
+        // ToolResult 事件发出前已经完成落盘，此时慢工具仍在运行。
+        let persisted = Session::load_from_storage(&storage_root, &session_id)
+            .expect("首个工具完成后应能从磁盘恢复 Session");
+        let persisted_results = persisted
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(persisted_results, vec!["call_2_fast"]);
+
+        let result = execution.await;
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(
+            *completed.lock().unwrap(),
+            vec!["fast_probe".to_string(), "slow_probe".to_string()]
+        );
+        let session_results = ctx
+            .session
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(session_results, vec!["call_2_fast", "call_1_slow"]);
+        assert!(stream_rx.try_iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolResult { name, .. } if name == "slow_probe"
+        )));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn returns_failed_when_react_request_fails() {
         let server = MockServer::start().await;
@@ -2330,26 +2598,31 @@ mod tests {
         mount_sse(
             &server,
             vec![
-                tool_call_chunk("call_block", "blocking", "{}"),
+                tool_call_chunk("call_block_1", "blocking_1", "{}"),
+                tool_call_chunk("call_block_2", "blocking_2", "{}"),
                 usage_chunk(9, 2),
             ],
         )
         .await;
 
-        let started = Arc::new(Notify::new());
+        let all_started = Arc::new(Notify::new());
+        let handler: Arc<dyn ToolOverrideHandler> = Arc::new(BlockingBatchTool {
+            barrier: Arc::new(Barrier::new(2)),
+            all_started: all_started.clone(),
+        });
         let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
-        overrides.insert(
-            "blocking".to_string(),
-            Arc::new(BlockingTool {
-                started: started.clone(),
-            }),
+        overrides.insert("blocking_1".to_string(), handler.clone());
+        overrides.insert("blocking_2".to_string(), handler);
+        let mut harness = TestHarness::new(
+            &server,
+            vec![tool_spec("blocking_1"), tool_spec("blocking_2")],
+            overrides,
         );
-        let mut harness = TestHarness::new(&server, vec![tool_spec("blocking")], overrides);
         let cmd_tx = harness.cmd_tx.clone();
         let cancel_task = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(5), started.notified())
+            tokio::time::timeout(Duration::from_secs(5), all_started.notified())
                 .await
-                .expect("阻塞工具未开始执行");
+                .expect("并行阻塞工具未全部开始执行");
             cmd_tx.send(Command::Cancel).unwrap();
         });
 
@@ -2357,9 +2630,26 @@ mod tests {
         cancel_task.await.unwrap();
 
         assert!(matches!(result.outcome, TurnExecutionOutcome::Cancelled));
-        assert!(harness.ctx.session.messages.iter().any(|message| {
-            message.role == MessageRole::Tool && message.text_content().contains("中断")
-        }));
+        let interrupted_ids = harness
+            .ctx
+            .session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Tool && message.text_content().contains("中断")
+            })
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(interrupted_ids, vec!["call_block_1", "call_block_2"]);
+        let app_results = harness
+            .stream_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolResult { tool_call_id, .. } => tool_call_id,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(app_results, vec!["call_block_1", "call_block_2"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

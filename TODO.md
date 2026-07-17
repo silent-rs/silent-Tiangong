@@ -88,6 +88,7 @@
 - [x] 将 `execute_turn` 的内层 `execute_loop` 原样抽离为独立方法，保留外层 `react_loop` 的总结重入编排与既有取消、命令、用量语义
 - [x] 修正运行时插件注入合同：接收后立即向 App 发布待处理快照，在安全边界完整写入 Session，取消前已接收的数据不得丢失，且晚于当前请求到达的结果必须由 Agent 在后续请求中消费
 - [x] 将 `execute_turn` 收敛为唯一事件循环和唯一 `cmd_rx` 接收者：在同一个 `tokio::select!` 中处理命令、模型流与工具执行，保留工具阶段轮次上限、总结重入上限、取消传播、实时插件反馈和用量累计语义
+- [x] 同一 LLM 回复中的工具调用使用 Tokio 并行执行；每项完成后立即向 App 反馈、写入并持久化 Session，全部工具结束后再继续 Agent Loop，取消时统一终止并闭合未完成调用
 - [x] 执行链统一只传 `TurnContext`，通过 `ctx.session` 访问会话，删除占位 Session 与 `ctx + session` 双参数
 - [x] 删除 `TurnUsageSink` 与 turn 绑定旁路；插件用量统一通过 `PluginFeedbackTx` 命令上报，并直接累计到 `execute_turn` 本轮用量
 - [x] 删除基于关键词的后台工具意图过滤和 `user_input` 局部状态，所有工具统一交由主模型结合 Session 上下文选择
