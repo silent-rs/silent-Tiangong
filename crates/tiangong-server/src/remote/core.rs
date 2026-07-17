@@ -2,8 +2,6 @@ use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-#[cfg(test)]
-use std::time::Duration;
 
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
@@ -1414,9 +1412,6 @@ mod tests {
 
     use tiangong_core::core::{Plugin, TiangongCore};
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
-    use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
-    };
     use tiangong_types::{ContentBlock, StoredAsset};
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
