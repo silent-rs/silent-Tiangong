@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::context::compressor::{CompressionUpdate, ContextCompressor};
+use crate::context::compressor::ContextCompressor;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -460,16 +460,6 @@ enum NextStep {
         request_injection_generation: u64,
         summary_error: Option<String>,
     },
-    /// 压缩已完成（不可取消），待执行压缩后的后续动作。
-    ///
-    /// 压缩在触发点立即 await 完成，此处只承载「后续做什么」。can_advance
-    /// 守卫保证命令优先——命令排空后才推进到本步骤。Cancel 到来时（命令分支）
-    /// 据 `resume_message_id` 作废续接消息，避免下一轮继续已取消的任务；
-    /// 压缩结果（摘要、边界）保留。
-    AfterCompression {
-        continuation: CompressionContinuation,
-        resume_message_id: Option<String>,
-    },
     Waiting,
     Finish(TurnExecutionResult),
 }
@@ -567,23 +557,6 @@ struct ActiveLlm {
 enum ReactTextDisposition {
     Complete,
     EnterSummary,
-}
-
-enum CompressionContinuation {
-    ReactText {
-        pending_msg_id: String,
-        disposition: ReactTextDisposition,
-        request_injection_generation: u64,
-    },
-    ToolBatch,
-    Summary {
-        decision: SummaryDecision,
-        request_injection_generation: u64,
-    },
-    ContextRetry {
-        previous_summary_up_to: usize,
-        error_message: String,
-    },
 }
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
@@ -727,15 +700,15 @@ fn start_tool_execution(
 
 /// 执行上下文压缩（不可取消）。
 ///
-/// 压缩期间收到的命令保留在队列，压缩正常完成并保存结果。返回的 `update`
-/// 供调用方做后续流程；`continuation` 由调用方存入 `pending_compression_continuation`，
-/// 待命令队列排空后再取出执行。
+/// 执行上下文压缩（不可取消）。
 ///
-/// 压缩失败时记录告警，update.compressed 为 false，调用方据 continuation 决定退路。
-async fn run_context_compression(
-    ctx: &mut TurnContext,
-    observed_usage: &TokenUsage,
-) -> CompressionUpdate {
+/// 压缩在调用点同步 await 完成，期间收到的命令保留在队列，回主循环后由
+/// command 分支处理。本函数完成全部副作用：摘要、边界、续接消息、用量
+/// 累计、system prompt 重建、落盘、界面反馈（ContextCompressing/Compressed）。
+///
+/// 调用方在 await 返回后直接执行压缩前的后续动作（如 finish_react_text）。
+/// 压缩是否推进了边界可由 `ctx.session.summary_up_to` 判断（超限重试场景）。
+async fn run_context_compression(ctx: &mut TurnContext, observed_usage: &TokenUsage) {
     let previous_summary_up_to = ctx.session.summary_up_to;
     let total_messages = ctx.session.messages.len();
     let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
@@ -743,8 +716,7 @@ async fn run_context_compression(
         total_messages,
     });
 
-    let result = ContextCompressor::new(ctx).compress().await;
-    match result {
+    match ContextCompressor::new(ctx).compress().await {
         Ok(update) if update.compressed => {
             let remaining = ctx
                 .session
@@ -776,16 +748,14 @@ async fn run_context_compression(
                 summary_up_to = ctx.session.summary_up_to,
                 "上下文摘要已更新"
             );
-            update
         }
-        Ok(update) => update,
+        Ok(_) => {}
         Err(error) => {
             tracing::warn!(
                 session_id = %ctx.session.id,
                 error = %error,
                 "上下文压缩失败，继续使用原始上下文"
             );
-            CompressionUpdate::default()
         }
     }
 }
@@ -796,13 +766,17 @@ fn needs_context_compression(ctx: &TurnContext, usage: &TokenUsage) -> bool {
         .needs_compression(observed_total_tokens(usage))
 }
 
-/// 作废指定 id 的消息：标记 model_excluded，使其不再进入模型上下文。
+/// 作废本轮注入但尚未消费的 `CompressedResume` 续接消息。
 ///
-/// 用于取消当前轮次时移除压缩注入的 `CompressedResume` 续接消息——
-/// 避免下一轮继续执行已取消的任务。消息本身保留在 session（历史可见）。
-fn invalidate_message(session: &mut crate::session::Session, message_id: &str) {
-    if let Some(msg) = session.messages.iter_mut().find(|m| m.id == message_id) {
-        msg.model_excluded = true;
+/// 取消当前轮次时调用：压缩若在本轮发生并注入了续接消息，但后续 LLM 请求
+/// 尚未消费它（cancel 先于推进到达），标记 model_excluded 使下一轮不再读取，
+/// 避免模型继续执行已取消的任务。消息本身保留在 session（历史可见）。
+fn invalidate_pending_resume_messages(session: &mut crate::session::Session) {
+    use crate::session::MessagePhase;
+    for msg in session.messages.iter_mut() {
+        if msg.phase == MessagePhase::CompressedResume && !msg.model_excluded {
+            msg.model_excluded = true;
+        }
     }
 }
 
@@ -984,16 +958,10 @@ pub(super) async fn execute_turn(
                         }
                     }
 
-                    // 压缩已完成（压缩阶段不可取消）。若当前正停在压缩后的后续动作，
-                    // 作废本次注入的续接消息——避免下一轮继续执行已取消的任务。
-                    // 压缩结果本身（摘要、边界）保留。
-                    if let NextStep::AfterCompression {
-                        resume_message_id: Some(resume_id),
-                        ..
-                    } = &state.next_step
-                    {
-                        invalidate_message(&mut ctx.session, resume_id);
-                    }
+                    // 压缩已完成（压缩阶段不可取消）。作废本轮注入但尚未被
+                    // 后续 LLM 请求消费的 CompressedResume 续接消息——避免下一轮
+                    // 继续执行已取消的任务。压缩结果本身（摘要、边界）保留。
+                    invalidate_pending_resume_messages(&mut ctx.session);
 
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
                     injections.commit(ctx);
@@ -1137,14 +1105,21 @@ pub(super) async fn execute_turn(
                                         prompt_cache_hit_tokens: None,
                                         prompt_cache_miss_tokens: None,
                                     };
-                                    let update = run_context_compression(ctx, &forced_usage).await;
-                                    state.next_step = NextStep::AfterCompression {
-                                        continuation: CompressionContinuation::ContextRetry {
-                                            previous_summary_up_to,
+                                    run_context_compression(ctx, &forced_usage).await;
+                                    injections.commit(ctx);
+                                    if ctx.session.summary_up_to > previous_summary_up_to {
+                                        // 压缩释放了空间，重试 ReAct 请求。
+                                        state.next_step = NextStep::StartReact;
+                                    } else {
+                                        persist_error(
+                                            ctx,
+                                            format!("ReAct 循环请求失败：{error_message}"),
+                                        );
+                                        state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                            state.accumulated_usage.clone(),
                                             error_message,
-                                        },
-                                        resume_message_id: update.resume_message_id.clone(),
-                                    };
+                                        ));
+                                    }
                                 } else {
                                     injections.commit(ctx);
                                     persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
@@ -1178,25 +1153,16 @@ pub(super) async fn execute_turn(
                             );
                             if needs_context_compression(ctx, &response.usage) {
                                 let usage = response.usage.clone();
-                                let update = run_context_compression(ctx, &usage).await;
-                                state.next_step = NextStep::AfterCompression {
-                                    continuation: CompressionContinuation::ReactText {
-                                        pending_msg_id,
-                                        disposition,
-                                        request_injection_generation,
-                                    },
-                                    resume_message_id: update.resume_message_id.clone(),
-                                };
-                            } else {
-                                finish_react_text(
-                                    ctx,
-                                    &mut state,
-                                    &mut injections,
-                                    pending_msg_id,
-                                    disposition,
-                                    request_injection_generation,
-                                );
+                                run_context_compression(ctx, &usage).await;
                             }
+                            finish_react_text(
+                                ctx,
+                                &mut state,
+                                &mut injections,
+                                pending_msg_id,
+                                disposition,
+                                request_injection_generation,
+                            );
                         } else {
                             state.executed_tool_in_phase = true;
                             let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
@@ -1302,23 +1268,9 @@ pub(super) async fn execute_turn(
                         }
 
                         if needs_context_compression(ctx, &usage) {
-                            let update = run_context_compression(ctx, &usage).await;
-                            state.next_step = NextStep::AfterCompression {
-                                continuation: CompressionContinuation::Summary {
-                                    decision,
-                                    request_injection_generation,
-                                },
-                                resume_message_id: update.resume_message_id.clone(),
-                            };
-                        } else {
-                            finish_summary(
-                                ctx,
-                                &mut state,
-                                &mut injections,
-                                decision,
-                                request_injection_generation,
-                            );
+                            run_context_compression(ctx, &usage).await;
                         }
+                        finish_summary(ctx, &mut state, &mut injections, decision, request_injection_generation);
                     }
                     LlmPurpose::ForceFinal {
                         request_injection_generation,
@@ -1435,14 +1387,9 @@ pub(super) async fn execute_turn(
 
                 let usage = batch.response_usage.clone();
                 if needs_context_compression(ctx, &usage) {
-                    let update = run_context_compression(ctx, &usage).await;
-                    state.next_step = NextStep::AfterCompression {
-                        continuation: CompressionContinuation::ToolBatch,
-                        resume_message_id: update.resume_message_id.clone(),
-                    };
-                } else {
-                    state.next_step = NextStep::DriveTools;
+                    run_context_compression(ctx, &usage).await;
                 }
+                state.next_step = NextStep::DriveTools;
             }
 
             // 无异步阶段活跃时推进一次状态；命令分支 biased 在前，会先排空已到达命令。
@@ -1619,51 +1566,6 @@ pub(super) async fn execute_turn(
                             Some(ToolChoice::None),
                         ));
                     }
-                    NextStep::AfterCompression {
-                        continuation,
-                        resume_message_id: _,
-                    } => match continuation {
-                        CompressionContinuation::ReactText {
-                            pending_msg_id,
-                            disposition,
-                            request_injection_generation,
-                        } => finish_react_text(
-                            ctx,
-                            &mut state,
-                            &mut injections,
-                            pending_msg_id,
-                            disposition,
-                            request_injection_generation,
-                        ),
-                        CompressionContinuation::ToolBatch => {
-                            state.next_step = NextStep::DriveTools;
-                        }
-                        CompressionContinuation::Summary {
-                            decision,
-                            request_injection_generation,
-                        } => finish_summary(
-                            ctx,
-                            &mut state,
-                            &mut injections,
-                            decision,
-                            request_injection_generation,
-                        ),
-                        CompressionContinuation::ContextRetry {
-                            previous_summary_up_to,
-                            error_message,
-                        } => {
-                            injections.commit(ctx);
-                            if ctx.session.summary_up_to > previous_summary_up_to {
-                                state.next_step = NextStep::StartReact;
-                            } else {
-                                persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
-                                state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                    state.accumulated_usage.clone(),
-                                    error_message,
-                                ));
-                            }
-                        }
-                    },
                     NextStep::Finish(result) => break 'agent_loop result,
                     NextStep::Waiting => unreachable!("等待状态不能主动推进"),
                 }

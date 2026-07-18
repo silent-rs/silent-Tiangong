@@ -13,8 +13,7 @@ use crate::turn_context::TurnContext;
 /// 是否需要压缩由调用方判断（本类型不做阈值检查）。
 ///
 /// 压缩阶段不可取消：压缩期间收到的命令保留在队列，压缩正常完成并保存结果。
-/// 取消当前轮次时调用方应据返回的 `resume_message_id` 作废续接消息，
-/// 避免下一轮继续执行已取消的任务。
+/// 取消当前轮次时由调用方扫描作废未消费的 `CompressedResume` 续接消息。
 pub struct ContextCompressor<'a> {
     ctx: &'a mut TurnContext,
 }
@@ -25,11 +24,6 @@ pub struct CompressionUpdate {
     pub usage: TokenUsage,
     /// 压缩时模型附带的「当前任务状态」，用于构造 `CompressedResume` 合成消息。
     pub current_task: Option<String>,
-    /// 本次压缩注入的 `CompressedResume` 消息 id。
-    ///
-    /// 取消当前轮次时，调用方应据此作废续接消息，避免下一轮继续已取消的任务。
-    /// 未注入（无 current_task 或未实际压缩）时为 `None`。
-    pub resume_message_id: Option<String>,
 }
 
 impl<'a> ContextCompressor<'a> {
@@ -76,13 +70,11 @@ impl<'a> ContextCompressor<'a> {
         mark_compact_boundary(&mut session.messages, split_point);
 
         // 注入「当前任务状态」续接消息，避免 turn 进行中压缩后重试失忆。
-        let resume_message_id = current_task.as_deref().map(|task| {
+        if let Some(task) = current_task.as_deref() {
             let resume = build_compressed_resume_message(task);
-            let id = resume.id.clone();
             let insert_at = session.summary_up_to.min(session.messages.len());
             session.messages.insert(insert_at, resume);
-            id
-        });
+        }
 
         self.ctx.session.token_usage.accumulate(&usage);
         crate::react::context::rebuild_system_prompt(self.ctx);
@@ -94,7 +86,6 @@ impl<'a> ContextCompressor<'a> {
             compressed: true,
             usage,
             current_task,
-            resume_message_id,
         })
     }
 
