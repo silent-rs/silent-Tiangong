@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session, now_text};
+use crate::session::{Message, MessageRole, Session};
 
 /// 上下文压缩器
 ///
@@ -150,6 +150,59 @@ impl ContextCompressor {
         })
     }
 
+    fn summary_request(
+        session: &Session,
+        split_point: usize,
+        compression_context: Option<Vec<Message>>,
+    ) -> ModelRequest {
+        // 压缩请求是原对话的延续：先让模型读完整段待压缩对话，
+        // 末尾追加压缩指令作为最后一条 User，头部注入 session 的 system prompt。
+        // 不能 pop 队尾 Assistant——否则会丢失待压缩内容（一次提问场景下会丢失全部对话）。
+        let body = compression_context.unwrap_or_else(|| {
+            let split_point = split_point.min(session.messages.len());
+            let start = session.summary_up_to.min(split_point);
+            session.messages[start..split_point]
+                .iter()
+                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+
+        let mut context = Vec::with_capacity(body.len() + 2);
+        if let Some(system) = session.system_prompt_message.as_ref() {
+            context.push(system.clone());
+        }
+        context.extend(body);
+        context.push(Message::new(
+            MessageRole::User,
+            Self::compress_instruction(session),
+        ));
+
+        ModelRequest {
+            user_input: String::new(),
+            context,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        }
+    }
+
+    /// 压缩指令：拼接已有摘要供模型增量更新。
+    fn compress_instruction(session: &Session) -> String {
+        let mut instruction = String::from(
+            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。",
+        );
+        if let Some(summary) = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+        {
+            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
+        }
+        instruction
+    }
+
     /// 构建发送给 LLM 的上下文消息列表
     pub fn build_context(&self, session: &Session) -> Vec<Message> {
         let split_point = if session.summary_up_to > 0 {
@@ -208,152 +261,6 @@ impl ContextCompressor {
         let resp = client.complete_async(&req).await?;
         Ok((resp.text, resp.usage))
     }
-
-    fn summary_request(
-        session: &Session,
-        split_point: usize,
-        compression_context: Option<Vec<Message>>,
-    ) -> ModelRequest {
-        let mut context = compression_context.unwrap_or_else(|| {
-            let split_point = split_point.min(session.messages.len());
-            let start = session.summary_up_to.min(split_point);
-            session.messages[start..split_point]
-                .iter()
-                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        let mut instruction = String::from(
-            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。",
-        );
-        if let Some(summary) = session
-            .context_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-        {
-            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
-        }
-        context.push(Message::new(MessageRole::User, instruction));
-        ModelRequest {
-            session_title: session.title.clone(),
-            user_input: String::new(),
-            context,
-            thinking: None,
-            reasoning_effort: None,
-            thinking_disabled: false,
-        }
-    }
-}
-
-/// 压缩 ReAct 循环内的 loop_messages
-///
-/// 当循环内消息过多时，对早期轮次的工具调用和结果进行摘要，
-/// 保留最近 N 轮的完整信息。
-pub fn compress_loop_messages(
-    loop_messages: &[Message],
-    keep_recent: usize,
-    client: &SingleProviderClient,
-) -> Result<Vec<Message>> {
-    // 按 Assistant + Tool/System 配对分组为"轮次"
-    let mut rounds: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0;
-    while i < loop_messages.len() {
-        let start = i;
-        if i < loop_messages.len() && loop_messages[i].role == MessageRole::Assistant {
-            i += 1;
-        }
-        while i < loop_messages.len()
-            && matches!(
-                loop_messages[i].role,
-                MessageRole::System | MessageRole::Tool
-            )
-        {
-            i += 1;
-        }
-        if i > start {
-            rounds.push((start, i));
-        } else {
-            i += 1;
-        }
-    }
-
-    if rounds.len() <= keep_recent {
-        return Ok(loop_messages.to_vec());
-    }
-
-    let compress_rounds = rounds.len() - keep_recent;
-    let compress_end = rounds[compress_rounds - 1].1;
-    let early_messages = &loop_messages[..compress_end];
-    let recent_messages = &loop_messages[compress_end..];
-
-    let mut text = String::new();
-    for msg in early_messages {
-        let label = match msg.role {
-            MessageRole::Assistant => "Agent",
-            MessageRole::System => "工具结果",
-            MessageRole::User => "用户",
-            MessageRole::Tool => "工具结果",
-        };
-        let content_text = msg.text_content();
-        let content = if content_text.chars().count() > 1000 {
-            let truncated: String = content_text.chars().take(1000).collect();
-            format!("{truncated}...(已截断)")
-        } else {
-            content_text.clone()
-        };
-        text.push_str(&format!("[{label}]: {content}\n"));
-    }
-
-    let prompt = format!(
-        "请将以下 Agent 执行过程压缩为简洁摘要。要求：\n\
-         1. 保留每个工具调用的名称和关键结果\n\
-         2. 保留成功/失败状态\n\
-         3. 保留发现的重要信息\n\
-         4. 去除工具输出的原始数据细节\n\
-         5. 直接输出摘要，不要前缀说明\n\n\
-         执行过程：\n{text}"
-    );
-
-    let req = ModelRequest {
-        session_title: String::new(),
-        user_input: prompt,
-        context: Vec::new(),
-        thinking: None,
-        reasoning_effort: None,
-        thinking_disabled: false,
-    };
-
-    let summary = match client.complete(&req) {
-        Ok(resp) => resp.text,
-        Err(err) => {
-            tracing::warn!("循环内消息摘要失败，保留原始消息：{err}");
-            return Ok(loop_messages.to_vec());
-        }
-    };
-
-    let mut result = vec![Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::Tool,
-        content: vec![ContentBlock::text(format!(
-            "[前 {compress_rounds} 轮执行摘要]\n{summary}"
-        ))],
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        worker_id: None,
-        elapsed_ms: None,
-        turn_status: None,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: Some("loop_summary".to_string()),
-        tool_result_is_error: false,
-        compact: true,
-        model_excluded: false,
-        phase: MessagePhase::Normal,
-        created_at: now_text(),
-    }];
-    result.extend_from_slice(recent_messages);
-    Ok(result)
 }
 
 pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
@@ -365,5 +272,91 @@ pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
         .and_then(|index| messages.get_mut(index))
     {
         boundary.compact = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::MessageRole;
+
+    fn user(text: &str) -> Message {
+        Message::new(MessageRole::User, text)
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::new(MessageRole::Assistant, text)
+    }
+
+    /// 单轮压缩（一次提问就触发）：body=[User, Assistant]，压缩指令应 append 到末尾，
+    /// 原对话的 User/Assistant 必须完整保留，不能因 pop 队尾 Assistant 而丢失。
+    #[test]
+    fn summary_request_single_turn_keeps_assistant_and_appends_instruction() {
+        let mut session = Session::new("test");
+        session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
+
+        let req = ContextCompressor::summary_request(&session, session.messages.len(), None);
+
+        // System 缺省（session.system_prompt_message = None），故 context 应为
+        // [User(你好), Assistant(回复), User(压缩指令)]。
+        assert_eq!(req.context.len(), 3);
+        assert_eq!(req.context[0].role, MessageRole::User);
+        assert_eq!(req.context[0].text_content(), "你好");
+        assert_eq!(req.context[1].role, MessageRole::Assistant);
+        assert_eq!(req.context[1].text_content(), "你好，有什么可以帮你？");
+        assert_eq!(req.context[2].role, MessageRole::User);
+        assert!(req.context[2].text_content().contains("压缩为简洁摘要"));
+    }
+
+    /// system_prompt_message 存在时应作为 context 首条注入。
+    #[test]
+    fn summary_request_prepends_system_prompt_when_present() {
+        let mut session = Session::new("test");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "你是天工助手。"));
+        session.messages = vec![user("问题"), assistant("回答")];
+
+        let req = ContextCompressor::summary_request(&session, session.messages.len(), None);
+
+        assert_eq!(req.context.len(), 4);
+        assert_eq!(req.context[0].role, MessageRole::System);
+        assert_eq!(req.context[0].text_content(), "你是天工助手。");
+        assert_eq!(req.context[3].role, MessageRole::User);
+        assert!(req.context[3].text_content().contains("压缩为简洁摘要"));
+    }
+
+    /// 已有摘要时应拼接到压缩指令末尾，供模型增量更新。
+    #[test]
+    fn summary_request_appends_existing_summary_to_instruction() {
+        let mut session = Session::new("test");
+        session.context_summary = Some("旧摘要内容".to_string());
+        session.messages = vec![user("问题"), assistant("回答")];
+
+        let req = ContextCompressor::summary_request(&session, session.messages.len(), None);
+
+        let instruction = req.context.last().unwrap().text_content();
+        assert!(instruction.contains("压缩为简洁摘要"));
+        assert!(instruction.contains("[已有摘要]"));
+        assert!(instruction.contains("旧摘要内容"));
+    }
+
+    /// 显式传入 compression_context 时应使用它而非 session.messages 切片。
+    #[test]
+    fn summary_request_uses_explicit_compression_context() {
+        let mut session = Session::new("test");
+        session.messages = vec![user("不应被使用"), assistant("不应被使用")];
+
+        let explicit = vec![
+            user("早期问题"),
+            assistant("早期回答"),
+            user("第二轮"),
+            assistant("第二轮回答"),
+        ];
+        let req = ContextCompressor::summary_request(&session, 0, Some(explicit));
+
+        // [U, A, U, A, User(指令)]
+        assert_eq!(req.context.len(), 5);
+        assert_eq!(req.context[0].text_content(), "早期问题");
+        assert_eq!(req.context[3].role, MessageRole::Assistant);
+        assert_eq!(req.context[3].text_content(), "第二轮回答");
     }
 }

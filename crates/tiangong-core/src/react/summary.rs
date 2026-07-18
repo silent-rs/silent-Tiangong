@@ -307,7 +307,6 @@ fn build_text_finalization_request(session: &Session, prompt: &str) -> ModelRequ
         );
     }
     ModelRequest {
-        session_title: session.title.clone(),
         user_input: String::new(),
         context,
         thinking: Some(crate::model::ThinkingConfig {

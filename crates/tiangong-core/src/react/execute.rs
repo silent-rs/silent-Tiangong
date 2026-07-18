@@ -589,7 +589,6 @@ struct ActiveCompression {
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     ModelRequest {
-        session_title: ctx.session.title.clone(),
         user_input: String::new(),
         context: ctx.session.context(),
         thinking,
