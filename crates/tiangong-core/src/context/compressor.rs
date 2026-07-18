@@ -284,18 +284,22 @@ impl ContextCompressor {
 
     /// 压缩请求的输出 token 预算。
     ///
-    /// 压缩常在 prompt 接近 context_limit 时触发，若 max_tokens 写死（如 32k），
-    /// `prompt + max_tokens` 可能超过 limit 导致 provider 报错。此处按
-    /// context_limit 的 1/4 预留摘要输出空间，下限 1024、上限 32k。
-    /// 压缩触发时 prompt 约 95%，剩余 ~5%——但输出预算是独立维度，
-    /// 给到 1/4 让模型有足够空间写完整摘要（provider 会按实际剩余截断）。
+    /// 压缩常在 prompt 达到 context_limit 的 95%（预防性压缩阈值）时触发，
+    /// 此时 provider 允许的 completion ≈ context_limit 的 5%。声明的 max_tokens
+    /// 不应超过这个剩余——部分 provider 严格校验 `prompt + max_tokens ≤ limit`，
+    /// 声明过大（如写死 32k）会直接报错。
+    ///
+    /// 此处按 context_limit 的 5%（1/20）如实计算，不设下限：
+    /// - 实际使用的 LLM ≥ 200k，5% = 10k+，写摘要充足；
+    /// - 小上下文（<200k，不在使用建议范围）如实给出小预算，不人为抬高下限
+    ///   导致声明超过实际剩余而报错。
     fn compression_output_budget(&self) -> u32 {
-        const FLOOR: u32 = 1024;
-        const CEIL: u32 = 32_768;
+        const RATIO: u32 = 20; // 1/20 ≈ 5%，对齐预防性压缩阈值
         if self.context_limit == 0 {
-            return CEIL;
+            // context_limit 未知时保守取 50k（对齐 1M 上下文的 5%）。
+            return 50_000;
         }
-        ((self.context_limit as u32) / 4).clamp(FLOOR, CEIL)
+        (self.context_limit as u32) / RATIO
     }
 
     /// 将模型输出按 `[[CURRENT_TASK]]` 分隔符切分为（历史摘要，当前任务状态）。
@@ -527,28 +531,28 @@ mod tests {
         assert_eq!(msg.text_content(), "");
     }
 
-    /// compression_output_budget：按 context_limit 的 1/4 计算，受上下限约束。
+    /// compression_output_budget：按 context_limit 的 5%（1/20）如实计算，无下限。
     #[test]
     fn compression_output_budget_scales_with_context_limit() {
-        // context_limit=0（缺省）走上限
+        // context_limit=0（未知）保守取 50k
         assert_eq!(
             ContextCompressor::new(0).compression_output_budget(),
-            32_768
+            50_000
         );
-        // 128k → 32k（1/4 = 32k，未触上限）
+        // 1M → 52428（5%）
         assert_eq!(
-            ContextCompressor::new(131_072).compression_output_budget(),
-            32_768
+            ContextCompressor::new(1_048_576).compression_output_budget(),
+            52_428
         );
-        // 8k → 2k（1/4 = 2k）
+        // 200k（实际使用下限）→ 10k（5%）
+        assert_eq!(
+            ContextCompressor::new(204_800).compression_output_budget(),
+            10_240
+        );
+        // 8k（不在建议范围）→ 409，如实给出小预算，不人为抬高
         assert_eq!(
             ContextCompressor::new(8_192).compression_output_budget(),
-            2_048
-        );
-        // 极小值走下限 1024
-        assert_eq!(
-            ContextCompressor::new(1_000).compression_output_budget(),
-            1_024
+            409
         );
     }
 }
