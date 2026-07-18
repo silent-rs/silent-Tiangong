@@ -314,6 +314,7 @@ fn build_text_finalization_request(session: &Session, prompt: &str) -> ModelRequ
         }),
         reasoning_effort: None,
         thinking_disabled: false,
+        max_output_tokens: None,
     }
 }
 

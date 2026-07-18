@@ -146,7 +146,7 @@ async fn compress_context_summary(
     });
     let summary_up_to_before = ctx.session.summary_up_to;
     let remaining_before = total_messages.saturating_sub(summary_up_to_before);
-    let compressor = ContextCompressor::new();
+    let compressor = ContextCompressor::new(ctx.context_limit);
     let update = {
         let update_future = async {
             match messages_to_compress {

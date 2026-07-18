@@ -596,6 +596,7 @@ fn build_react_request(ctx: &TurnContext) -> ModelRequest {
         thinking,
         reasoning_effort,
         thinking_disabled,
+        max_output_tokens: None,
     }
 }
 
@@ -739,8 +740,9 @@ fn start_context_compression(
     });
     let mut session = ctx.session.clone();
     let client = ctx.client.clone();
+    let context_limit = ctx.context_limit;
     let task = tokio::spawn(async move {
-        let result = ContextCompressor::new()
+        let result = ContextCompressor::new(context_limit)
             .update_summary_with_usage_async(&mut session, &client)
             .await;
         (session, result)

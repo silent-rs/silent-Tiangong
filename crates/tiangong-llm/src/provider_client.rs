@@ -58,11 +58,22 @@ pub struct ModelRequest {
     pub thinking: Option<ThinkingConfig>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub thinking_disabled: bool,
+    /// 该请求允许的最大输出 token 数。
+    ///
+    /// `None` 时由 llm 层用默认上限（`MAX_TOKENS_MAIN`）。压缩等空间敏感请求
+    /// 应显式设置：按 `context_limit - 预估 prompt_tokens` 计算，留出足够
+    /// 摘要输出空间，避免 provider 因 `prompt + max_tokens > limit` 报错。
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelRequest {
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.thinking = Some(ThinkingConfig { budget_tokens });
+        self
+    }
+
+    pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_tokens);
         self
     }
 }
@@ -175,7 +186,8 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
+        let request = build_provider_request(req, model, max_tokens, &[], None)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
@@ -832,7 +844,8 @@ impl ModelClient for SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
+        let request = build_provider_request(req, model, max_tokens, &[], None)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
@@ -1783,6 +1796,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         };
 
         let err = build_provider_messages(&req).unwrap_err();
@@ -2160,6 +2174,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         };
 
         let (system, messages) = build_provider_messages(&req).unwrap();

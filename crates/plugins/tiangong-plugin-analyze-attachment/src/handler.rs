@@ -155,6 +155,7 @@ impl AnalyzeAttachmentPlugin {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         };
 
         let feedback_tx = self.feedback_tx();

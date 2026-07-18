@@ -9,7 +9,12 @@ use crate::session::{Message, MessageRole, Session};
 ///
 /// 采用滚动摘要策略：压缩 `summary_up_to` 之后的所有消息（含旧摘要）
 /// 折叠为新摘要。早期历史细节由摘要和 `CompressedResume` 合成消息承接。
-pub struct ContextCompressor;
+#[derive(Default)]
+pub struct ContextCompressor {
+    /// 模型上下文上限（token）。压缩请求的输出预算据此动态计算，
+    /// 避免 prompt 接近上限时 provider 因 prompt + max_tokens 超限而报错。
+    context_limit: usize,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct CompressionUpdate {
@@ -23,15 +28,9 @@ pub struct CompressionUpdate {
     pub current_task: Option<String>,
 }
 
-impl Default for ContextCompressor {
-    fn default() -> Self {
-        Self
-    }
-}
-
 impl ContextCompressor {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(context_limit: usize) -> Self {
+        Self { context_limit }
     }
 
     pub fn update_summary_with_usage(
@@ -74,6 +73,8 @@ impl ContextCompressor {
             "滚动摘要已更新"
         );
 
+        // 摘要可能为空（模型输出空间不足等）。压缩的主目的是释放上下文空间，
+        // 故仍推进边界；历史记忆由 CompressedResume 和未来的会话检索承接。
         session.context_summary = Some(summary);
         session.summary_up_to = split_point;
         mark_compact_boundary(&mut session.messages, split_point);
@@ -145,6 +146,8 @@ impl ContextCompressor {
         let (summary, current_task, usage) = self
             .fold_summary_async(session, split_point, compression_context, client)
             .await?;
+
+        // 摘要可能为空（见同步版注释），仍推进边界以释放空间。
         session.context_summary = Some(summary);
         session.summary_up_to = split_point;
         mark_compact_boundary(&mut session.messages, split_point);
@@ -189,6 +192,7 @@ impl ContextCompressor {
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         }
     }
 
@@ -257,7 +261,8 @@ impl ContextCompressor {
         split_point: usize,
         client: &SingleProviderClient,
     ) -> Result<(String, Option<String>, TokenUsage)> {
-        let req = Self::summary_request(session, split_point, None);
+        let req = Self::summary_request(session, split_point, None)
+            .with_max_output_tokens(self.compression_output_budget());
         let resp = client.complete(&req)?;
         let (summary, current_task) = Self::split_summary_and_current_task(resp.text);
         Ok((summary, current_task, resp.usage))
@@ -270,10 +275,27 @@ impl ContextCompressor {
         compression_context: Option<Vec<Message>>,
         client: &SingleProviderClient,
     ) -> Result<(String, Option<String>, TokenUsage)> {
-        let req = Self::summary_request(session, split_point, compression_context);
+        let req = Self::summary_request(session, split_point, compression_context)
+            .with_max_output_tokens(self.compression_output_budget());
         let resp = client.complete_async(&req).await?;
         let (summary, current_task) = Self::split_summary_and_current_task(resp.text);
         Ok((summary, current_task, resp.usage))
+    }
+
+    /// 压缩请求的输出 token 预算。
+    ///
+    /// 压缩常在 prompt 接近 context_limit 时触发，若 max_tokens 写死（如 32k），
+    /// `prompt + max_tokens` 可能超过 limit 导致 provider 报错。此处按
+    /// context_limit 的 1/4 预留摘要输出空间，下限 1024、上限 32k。
+    /// 压缩触发时 prompt 约 95%，剩余 ~5%——但输出预算是独立维度，
+    /// 给到 1/4 让模型有足够空间写完整摘要（provider 会按实际剩余截断）。
+    fn compression_output_budget(&self) -> u32 {
+        const FLOOR: u32 = 1024;
+        const CEIL: u32 = 32_768;
+        if self.context_limit == 0 {
+            return CEIL;
+        }
+        ((self.context_limit as u32) / 4).clamp(FLOOR, CEIL)
     }
 
     /// 将模型输出按 `[[CURRENT_TASK]]` 分隔符切分为（历史摘要，当前任务状态）。
@@ -454,7 +476,7 @@ mod tests {
     /// find_split_point：始终压缩到末尾，不再按 User 轮次保留。
     #[test]
     fn find_split_point_compresses_everything_after_summary_up_to() {
-        let compressor = ContextCompressor::new();
+        let compressor = ContextCompressor::new(0);
         let messages = vec![
             user("U1"),
             assistant("A1"),
@@ -471,7 +493,7 @@ mod tests {
     /// 这是原 keep_recent_turns 策略失效的场景。
     #[test]
     fn find_split_point_handles_tool_accumulation() {
-        let compressor = ContextCompressor::new();
+        let compressor = ContextCompressor::new(0);
         let messages = vec![
             user("单次提问"),
             assistant("调用工具1"),
@@ -503,5 +525,30 @@ mod tests {
         assert!(text.contains("用户问X，已得结果Y"));
         // text_content 对 ModelInstruction 返回空（前端据此隐藏）
         assert_eq!(msg.text_content(), "");
+    }
+
+    /// compression_output_budget：按 context_limit 的 1/4 计算，受上下限约束。
+    #[test]
+    fn compression_output_budget_scales_with_context_limit() {
+        // context_limit=0（缺省）走上限
+        assert_eq!(
+            ContextCompressor::new(0).compression_output_budget(),
+            32_768
+        );
+        // 128k → 32k（1/4 = 32k，未触上限）
+        assert_eq!(
+            ContextCompressor::new(131_072).compression_output_budget(),
+            32_768
+        );
+        // 8k → 2k（1/4 = 2k）
+        assert_eq!(
+            ContextCompressor::new(8_192).compression_output_budget(),
+            2_048
+        );
+        // 极小值走下限 1024
+        assert_eq!(
+            ContextCompressor::new(1_000).compression_output_budget(),
+            1_024
+        );
     }
 }
