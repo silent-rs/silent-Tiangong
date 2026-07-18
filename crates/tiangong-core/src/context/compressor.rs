@@ -7,29 +7,31 @@ use crate::session::{Message, MessageRole, Session};
 
 /// 上下文压缩器
 ///
-/// 采用滚动摘要策略：保留最近 N 轮完整对话，对更早的消息（含旧摘要）
-/// 折叠为新摘要。摘要持久化到 Session，支持无限对话延伸。
-pub struct ContextCompressor {
-    keep_recent_turns: usize,
-}
+/// 采用滚动摘要策略：压缩 `summary_up_to` 之后的所有消息（含旧摘要）
+/// 折叠为新摘要。早期历史细节由摘要和 `CompressedResume` 合成消息承接。
+pub struct ContextCompressor;
 
 #[derive(Debug, Clone, Default)]
 pub struct CompressionUpdate {
     pub compressed: bool,
     pub usage: TokenUsage,
+    /// 压缩时模型附带的「当前任务状态」。
+    ///
+    /// 当压缩发生在 turn 进行中（存在未完成的工具调用）时，用于构造
+    /// `CompressedResume` 合成消息，避免重试请求失忆。turn 间滚动压缩
+    /// 无进行中任务时为 `None`。
+    pub current_task: Option<String>,
 }
 
 impl Default for ContextCompressor {
     fn default() -> Self {
-        Self {
-            keep_recent_turns: 6,
-        }
+        Self
     }
 }
 
 impl ContextCompressor {
-    pub fn new(keep_recent_turns: usize) -> Self {
-        Self { keep_recent_turns }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn update_summary_with_usage(
@@ -61,13 +63,14 @@ impl ContextCompressor {
             return Ok(CompressionUpdate::default());
         }
 
-        let (summary, usage) = self.fold_summary(session, split_point, client)?;
+        let (summary, current_task, usage) = self.fold_summary(session, split_point, client)?;
 
         tracing::info!(
             old_summary_up_to = session.summary_up_to,
             new_summary_up_to = split_point,
             messages_count,
             summary_len = summary.len(),
+            has_current_task = current_task.is_some(),
             "滚动摘要已更新"
         );
 
@@ -77,6 +80,7 @@ impl ContextCompressor {
         Ok(CompressionUpdate {
             compressed: true,
             usage,
+            current_task,
         })
     }
 
@@ -138,7 +142,7 @@ impl ContextCompressor {
             return Ok(CompressionUpdate::default());
         }
 
-        let (summary, usage) = self
+        let (summary, current_task, usage) = self
             .fold_summary_async(session, split_point, compression_context, client)
             .await?;
         session.context_summary = Some(summary);
@@ -147,6 +151,7 @@ impl ContextCompressor {
         Ok(CompressionUpdate {
             compressed: true,
             usage,
+            current_task,
         })
     }
 
@@ -187,10 +192,28 @@ impl ContextCompressor {
         }
     }
 
-    /// 压缩指令：拼接已有摘要供模型增量更新。
+    /// 压缩指令：拼接已有摘要供模型增量更新，并要求在末尾附上「当前任务状态」。
+    ///
+    /// 模型输出格式约定为：
+    /// ```text
+    /// <摘要正文>
+    ///
+    /// [[CURRENT_TASK]]
+    /// <当前任务状态>
+    /// ```
+    /// `[[CURRENT_TASK]]` 之前是历史摘要，之后是压缩后用于续接的当前任务状态
+    /// （最近用户提问、已完成结果、进行中工具、下一步）。解析时按此分隔符切分。
     fn compress_instruction(session: &Session) -> String {
         let mut instruction = String::from(
-            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。",
+            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。\n\n\
+             输出末尾必须附上「当前任务状态」段落，用于压缩后继续执行。格式如下（严格遵守）：\n\
+             <摘要正文>\n\
+             \n\
+             [[CURRENT_TASK]]\n\
+             用户最近提问：<原文摘录>\n\
+             已完成：<已得到的关键结果>\n\
+             进行中：<当前正在执行的工具调用及其结果，若无则填「无」>\n\
+             下一步：<推断的下一步动作>",
         );
         if let Some(summary) = session
             .context_summary
@@ -217,25 +240,14 @@ impl ContextCompressor {
             .collect()
     }
 
-    /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
+    /// 查找分割点：压缩 `summary_up_to` 之后的所有消息。
+    ///
+    /// 不再保留最近 N 轮——早期历史全部折叠进摘要，具体细节丢失由
+    /// 「当前任务状态」合成消息（`CompressedResume`）和未来的会话检索承接。
+    /// 调用方传入的 `messages` 长度即为压缩终点；`summary_up_to..len`
+    /// 为空时由上层 `update_summary_at_with_usage*` 自然判为 noop。
     pub(crate) fn find_split_point(&self, messages: &[Message]) -> usize {
-        let mut turn_count = 0;
-        let mut split_point = messages.len();
-
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if msg.role == MessageRole::User && !msg.model_excluded {
-                turn_count += 1;
-                if turn_count >= self.keep_recent_turns {
-                    split_point = i;
-                    break;
-                }
-            }
-        }
-
-        if split_point == messages.len() {
-            return 0;
-        }
-        split_point
+        messages.len()
     }
 
     /// 折叠摘要：取得边界内上下文，并在末尾追加内部压缩要求。
@@ -244,10 +256,11 @@ impl ContextCompressor {
         session: &Session,
         split_point: usize,
         client: &SingleProviderClient,
-    ) -> Result<(String, TokenUsage)> {
+    ) -> Result<(String, Option<String>, TokenUsage)> {
         let req = Self::summary_request(session, split_point, None);
         let resp = client.complete(&req)?;
-        Ok((resp.text, resp.usage))
+        let (summary, current_task) = Self::split_summary_and_current_task(resp.text);
+        Ok((summary, current_task, resp.usage))
     }
 
     async fn fold_summary_async(
@@ -256,10 +269,60 @@ impl ContextCompressor {
         split_point: usize,
         compression_context: Option<Vec<Message>>,
         client: &SingleProviderClient,
-    ) -> Result<(String, TokenUsage)> {
+    ) -> Result<(String, Option<String>, TokenUsage)> {
         let req = Self::summary_request(session, split_point, compression_context);
         let resp = client.complete_async(&req).await?;
-        Ok((resp.text, resp.usage))
+        let (summary, current_task) = Self::split_summary_and_current_task(resp.text);
+        Ok((summary, current_task, resp.usage))
+    }
+
+    /// 将模型输出按 `[[CURRENT_TASK]]` 分隔符切分为（历史摘要，当前任务状态）。
+    ///
+    /// - 无分隔符：整体视为摘要，当前任务为 `None`（兼容模型未遵守格式的情况）。
+    /// - 分隔符后为空：当前任务为 `None`。
+    fn split_summary_and_current_task(text: String) -> (String, Option<String>) {
+        const MARKER: &str = "[[CURRENT_TASK]]";
+        match text.split_once(MARKER) {
+            Some((summary, task)) => {
+                let summary = summary.trim().to_string();
+                let task = task.trim();
+                if task.is_empty() {
+                    (summary, None)
+                } else {
+                    (summary, Some(task.to_string()))
+                }
+            }
+            None => (text.trim().to_string(), None),
+        }
+    }
+}
+
+/// 构造压缩后用于续接的合成消息（`CompressedResume`）。
+///
+/// 当压缩发生在 turn 进行中时注入，避免重试请求失忆。消息对前端不可见
+///（`MessagePhase::CompressedResume`），但会发送给模型（`model_excluded: false`）。
+/// 内容由模型在压缩时附带的「当前任务状态」提供；缺失时返回 `None`。
+pub fn build_compressed_resume_message(current_task: &str) -> Message {
+    use crate::session::{ContentBlock, MessagePhase, now_text};
+    Message {
+        id: scru128::new().to_string(),
+        role: MessageRole::User,
+        content: vec![ContentBlock::model_instruction(format!(
+            "以下是上下文压缩后的当前任务状态，请据此继续执行，不要重新询问用户：\n\n{current_task}"
+        ))],
+        reasoning_content: String::new(),
+        reasoning_signature: None,
+        worker_id: None,
+        elapsed_ms: None,
+        turn_status: None,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        model_excluded: false,
+        phase: MessagePhase::CompressedResume,
+        created_at: now_text(),
     }
 }
 
@@ -358,5 +421,87 @@ mod tests {
         assert_eq!(req.context[0].text_content(), "早期问题");
         assert_eq!(req.context[3].role, MessageRole::Assistant);
         assert_eq!(req.context[3].text_content(), "第二轮回答");
+    }
+
+    /// split_summary_and_current_task：正常分隔符切分。
+    #[test]
+    fn split_extracts_summary_and_current_task() {
+        let text = "这是摘要正文。\n\n[[CURRENT_TASK]]\n用户最近提问：X\n进行中：工具Y";
+        let (summary, task) = ContextCompressor::split_summary_and_current_task(text.to_string());
+        assert_eq!(summary, "这是摘要正文。");
+        assert_eq!(task.as_deref(), Some("用户最近提问：X\n进行中：工具Y"));
+    }
+
+    /// split_summary_and_current_task：无分隔符时整体视为摘要，task 为 None。
+    #[test]
+    fn split_without_marker_treats_all_as_summary() {
+        let (summary, task) =
+            ContextCompressor::split_summary_and_current_task("纯摘要无任务".to_string());
+        assert_eq!(summary, "纯摘要无任务");
+        assert!(task.is_none());
+    }
+
+    /// split_summary_and_current_task：分隔符后为空时 task 为 None。
+    #[test]
+    fn split_with_empty_task_returns_none() {
+        let (summary, task) = ContextCompressor::split_summary_and_current_task(
+            "摘要\n\n[[CURRENT_TASK]]\n  ".to_string(),
+        );
+        assert_eq!(summary, "摘要");
+        assert!(task.is_none());
+    }
+
+    /// find_split_point：始终压缩到末尾，不再按 User 轮次保留。
+    #[test]
+    fn find_split_point_compresses_everything_after_summary_up_to() {
+        let compressor = ContextCompressor::new();
+        let messages = vec![
+            user("U1"),
+            assistant("A1"),
+            user("U2"),
+            assistant("A2"),
+            user("U3"),
+            assistant("A3"),
+        ];
+        // 无论消息多少，split_point 都应指向末尾（全压缩）。
+        assert_eq!(compressor.find_split_point(&messages), 6);
+    }
+
+    /// find_split_point：工具堆积场景（单 User + 大量 Tool）也能正确返回末尾。
+    /// 这是原 keep_recent_turns 策略失效的场景。
+    #[test]
+    fn find_split_point_handles_tool_accumulation() {
+        let compressor = ContextCompressor::new();
+        let messages = vec![
+            user("单次提问"),
+            assistant("调用工具1"),
+            user("(tool_result)"),
+            assistant("调用工具2"),
+            user("(tool_result)"),
+            assistant("调用工具3"),
+            user("(tool_result)"),
+        ];
+        // 旧策略会返回 0（noop），新策略返回末尾，触发压缩。
+        assert_eq!(compressor.find_split_point(&messages), 7);
+    }
+
+    /// build_compressed_resume_message：构造正确的合成消息。
+    #[test]
+    fn build_resume_message_marks_compressed_resume_phase() {
+        use crate::session::{ContentBlock, MessagePhase};
+
+        let msg = build_compressed_resume_message("用户问X，已得结果Y");
+        assert_eq!(msg.role, MessageRole::User);
+        assert_eq!(msg.phase, MessagePhase::CompressedResume);
+        assert!(!msg.model_excluded); // 必须发给模型
+        assert_eq!(msg.content.len(), 1);
+        // 内容应为 ModelInstruction（前端 text_content 取不到，不渲染为可见文本）
+        let text = match &msg.content[0] {
+            ContentBlock::ModelInstruction { text } => text.clone(),
+            other => panic!("期望 ModelInstruction，实际 {other:?}"),
+        };
+        assert!(text.contains("用户问X，已得结果Y"));
+        // text_content 对 ModelInstruction 返回空（前端据此隐藏）
+        assert_eq!(msg.text_content(), "");
     }
 }

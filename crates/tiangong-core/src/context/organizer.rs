@@ -37,11 +37,6 @@ impl ContextOrganizer {
         self
     }
 
-    pub fn with_keep_recent_turns(mut self, turns: usize) -> Self {
-        self.compressor = ContextCompressor::new(turns);
-        self
-    }
-
     /// 压缩阈值（token 数）
     pub fn token_threshold(&self) -> usize {
         (self.context_limit as f64 * self.compression_threshold) as usize

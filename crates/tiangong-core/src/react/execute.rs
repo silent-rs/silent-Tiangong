@@ -9,7 +9,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::context::compressor::{CompressionUpdate, ContextCompressor, mark_compact_boundary};
+use crate::context::compressor::{
+    CompressionUpdate, ContextCompressor, build_compressed_resume_message, mark_compact_boundary,
+};
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -738,7 +740,7 @@ fn start_context_compression(
     let mut session = ctx.session.clone();
     let client = ctx.client.clone();
     let task = tokio::spawn(async move {
-        let result = ContextCompressor::new(6)
+        let result = ContextCompressor::new()
             .update_summary_with_usage_async(&mut session, &client)
             .await;
         (session, result)
@@ -770,10 +772,17 @@ fn apply_context_compression(
     };
 
     match result {
-        Ok((session, update)) if update.compressed => {
+        Ok((session, mut update)) if update.compressed => {
             ctx.session.context_summary = session.context_summary;
             ctx.session.summary_up_to = session.summary_up_to;
             mark_compact_boundary(&mut ctx.session.messages, ctx.session.summary_up_to);
+            // turn 进行中压缩：注入「当前任务状态」合成消息，避免重试失忆。
+            // 消息插在 summary_up_to 处，作为压缩后首条进入 session.context()。
+            if let Some(task) = update.current_task.take() {
+                let resume = build_compressed_resume_message(&task);
+                let insert_at = ctx.session.summary_up_to.min(ctx.session.messages.len());
+                ctx.session.messages.insert(insert_at, resume);
+            }
             let remaining = ctx
                 .session
                 .messages

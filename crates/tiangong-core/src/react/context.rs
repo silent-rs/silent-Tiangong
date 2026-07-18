@@ -11,7 +11,7 @@ use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
-use crate::session::{Message, MessageRole};
+use crate::session::Message;
 use crate::turn_context::TurnContext;
 use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
@@ -146,7 +146,7 @@ async fn compress_context_summary(
     });
     let summary_up_to_before = ctx.session.summary_up_to;
     let remaining_before = total_messages.saturating_sub(summary_up_to_before);
-    let compressor = ContextCompressor::new(6);
+    let compressor = ContextCompressor::new();
     let update = {
         let update_future = async {
             match messages_to_compress {
@@ -180,8 +180,15 @@ async fn compress_context_summary(
     };
 
     match update {
-        Ok(update) if update.compressed => {
+        Ok(mut update) if update.compressed => {
             ctx.session.current_tokens = 0;
+            // 注入「当前任务状态」合成消息（若模型在压缩时附带了该段落）。
+            // turn 进行中的压缩依赖它避免重试失忆；turn 间手动压缩若模型未附带则为 None。
+            if let Some(task) = update.current_task.take() {
+                let resume = crate::context::compressor::build_compressed_resume_message(&task);
+                let insert_at = ctx.session.summary_up_to.min(ctx.session.messages.len());
+                ctx.session.messages.insert(insert_at, resume);
+            }
             let remaining = ctx
                 .session
                 .messages
@@ -289,25 +296,17 @@ pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
 }
 
 /// 在独立 turn task 中执行手动压缩，只监听取消命令。
+///
+/// 与自动压缩一致：压缩 `summary_up_to` 之后的所有消息，不保留最近 N 轮。
+/// 早期历史细节由摘要和 `CompressedResume` 合成消息承接。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-    keep_recent_turns: usize,
 ) {
-    let mut messages_to_compress = ctx.session.context();
-    let mut remaining_turns = keep_recent_turns;
-    while remaining_turns > 0 {
-        let Some(message) = messages_to_compress.pop() else {
-            break;
-        };
-        if message.role == MessageRole::User {
-            remaining_turns -= 1;
-        }
-    }
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let mut compression_future = Box::pin(compress_context_summary(
         &mut ctx,
-        Some(messages_to_compress),
+        None,
         None,
         ContextCompressAction::Compress,
         cancel_rx,

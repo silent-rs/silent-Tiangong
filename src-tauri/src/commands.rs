@@ -1330,6 +1330,9 @@ fn validate_editable_message(
     if message.compact || message_index < session.summary_up_to {
         return Err(anyhow::anyhow!("该消息已被压缩或清空，无法编辑"));
     }
+    if message.phase == tiangong_core::session::MessagePhase::CompressedResume {
+        return Err(anyhow::anyhow!("该消息为压缩恢复消息，无法编辑"));
+    }
     if message.content != base_content {
         return Err(anyhow::anyhow!("消息已被更新，请基于最新内容重新编辑"));
     }

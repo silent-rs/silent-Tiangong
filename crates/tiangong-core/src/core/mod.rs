@@ -191,7 +191,7 @@ impl TiangongCore {
 
         crate::shared_runtime::spawn_turn(ctx, move |ctx, cmd_rx| {
             Ok(crate::react::context::run_manual_context_compression(
-                ctx, cmd_rx, 6,
+                ctx, cmd_rx,
             ))
         })
     }

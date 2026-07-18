@@ -175,17 +175,25 @@ export function MessageList() {
 
   // agent_tab 过滤前置：将渲染时的 return null 改为数据层过滤
   const filteredGroups = useMemo(() => {
+    // 压缩后注入的「当前任务状态」合成消息对用户不可见，
+    // 但会发送给模型以避免 turn 内压缩后重试失忆。
+    const visibleGroups = messageGroups.filter(group => {
+      if (group.type === "user" && group.messages.some(m => m.phase === "compressedresume")) {
+        return false;
+      }
+      return true;
+    });
     if (!selectedAgentTab) {
       // 主对话视图：排除子 Agent 的过程消息（worker_id 以 "agent:" 开头），
       // 这些只在对应的 Agent Tab 中展示。
-      return messageGroups.filter(group => {
+      return visibleGroups.filter(group => {
         if (group.type === "worker") {
           return !group.worker_id?.startsWith("agent:");
         }
         return true;
       });
     }
-    return messageGroups.filter(group => {
+    return visibleGroups.filter(group => {
       if (group.type === "user") return false;
       if (group.type === "worker") {
         return workerBelongsToAgent(
