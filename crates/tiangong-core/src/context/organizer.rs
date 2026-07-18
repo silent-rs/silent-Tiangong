@@ -1,18 +1,12 @@
-use crate::context::compressor::{CompressionUpdate, ContextCompressor};
-use crate::model::SingleProviderClient;
-use crate::session::{Message, Session};
-
-/// 上下文组织器
+/// 上下文阈值计算器
 ///
-/// 管理对话上下文的构建与压缩策略。
-/// 采用滚动摘要机制：摘要持久化到 Session，原始消息保持完整。
+/// 仅负责压缩阈值的计算与判断。实际压缩由 `ContextCompressor` 承担
+/// （它持有 `&mut TurnContext`，通过 `new(ctx)` + `compress()` 使用）。
 pub struct ContextOrganizer {
     /// 模型上下文限制（token 数）
     context_limit: usize,
     /// 触发压缩的阈值比例（默认 0.95，接近模型限制前压缩）
     compression_threshold: f64,
-    /// 压缩器
-    compressor: ContextCompressor,
 }
 
 impl ContextOrganizer {
@@ -20,7 +14,6 @@ impl ContextOrganizer {
         Self {
             context_limit,
             compression_threshold: 0.95,
-            compressor: ContextCompressor::default(),
         }
     }
 
@@ -45,82 +38,5 @@ impl ContextOrganizer {
     /// 基于 API 返回的精确 prompt_tokens 判断是否需要压缩
     pub fn needs_compression(&self, actual_prompt_tokens: usize) -> bool {
         actual_prompt_tokens > self.token_threshold()
-    }
-
-    /// 基于 API 返回的精确 prompt_tokens 更新会话摘要（如果需要）
-    ///
-    /// 检查实际 prompt token 是否超过阈值，如果超过则更新 session 的滚动摘要。
-    /// 摘要持久化到 session，后续 turn 不会重复压缩。
-    pub fn maybe_update_summary(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-        actual_prompt_tokens: usize,
-    ) -> anyhow::Result<bool> {
-        Ok(self
-            .maybe_update_summary_with_usage(session, client, actual_prompt_tokens)?
-            .compressed)
-    }
-
-    pub fn maybe_update_summary_with_usage(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-        actual_prompt_tokens: usize,
-    ) -> anyhow::Result<CompressionUpdate> {
-        if actual_prompt_tokens == 0 || !self.needs_compression(actual_prompt_tokens) {
-            return Ok(CompressionUpdate::default());
-        }
-        self.compressor.update_summary_with_usage(session, client)
-    }
-
-    pub async fn maybe_update_summary_with_usage_async(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-        actual_prompt_tokens: usize,
-    ) -> anyhow::Result<CompressionUpdate> {
-        if actual_prompt_tokens == 0 || !self.needs_compression(actual_prompt_tokens) {
-            return Ok(CompressionUpdate::default());
-        }
-        self.compressor
-            .update_summary_with_usage_async(session, client)
-            .await
-    }
-
-    /// 强制压缩上下文（忽略 token 阈值检查）
-    pub fn force_update_summary(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> anyhow::Result<bool> {
-        Ok(self
-            .force_update_summary_with_usage(session, client)?
-            .compressed)
-    }
-
-    pub fn force_update_summary_with_usage(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> anyhow::Result<CompressionUpdate> {
-        self.compressor.update_summary_with_usage(session, client)
-    }
-
-    pub async fn force_update_summary_with_usage_async(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> anyhow::Result<CompressionUpdate> {
-        self.compressor
-            .update_summary_with_usage_async(session, client)
-            .await
-    }
-
-    /// 构建 LLM 请求上下文
-    ///
-    /// 直接返回 session.messages 中尚未被摘要覆盖的消息，不做过滤。
-    pub fn build_context(&self, session: &Session) -> Vec<Message> {
-        self.compressor.build_context(session)
     }
 }

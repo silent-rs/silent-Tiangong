@@ -4,14 +4,13 @@
 
 use std::sync::mpsc::Sender as StdSender;
 
-use tokio::sync::{mpsc as tokio_mpsc, oneshot};
+use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::context::compressor::ContextCompressor;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
-use crate::session::Message;
 use crate::turn_context::TurnContext;
 use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
@@ -128,165 +127,6 @@ pub(crate) fn emit_token_usage(
     });
 }
 
-async fn compress_context_summary(
-    ctx: &mut TurnContext,
-    messages_to_compress: Option<Vec<Message>>,
-    observed_usage: Option<&TokenUsage>,
-    action: ContextCompressAction,
-    mut cancel_rx: oneshot::Receiver<()>,
-) -> bool {
-    let is_manual = action == ContextCompressAction::Compress;
-    let observed_tokens = observed_usage
-        .map(observed_total_tokens)
-        .unwrap_or_default();
-    let total_messages = ctx.session.messages.len();
-    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
-        summary_up_to: ctx.session.summary_up_to,
-        total_messages,
-    });
-    let summary_up_to_before = ctx.session.summary_up_to;
-    let remaining_before = total_messages.saturating_sub(summary_up_to_before);
-    let compressor = ContextCompressor::new(ctx.context_limit);
-    let update = {
-        let update_future = async {
-            match messages_to_compress {
-                Some(messages) => {
-                    compressor
-                        .update_summary_from_context_async(&mut ctx.session, &ctx.client, messages)
-                        .await
-                }
-                None => {
-                    compressor
-                        .update_summary_with_usage_async(&mut ctx.session, &ctx.client)
-                        .await
-                }
-            }
-        };
-        tokio::pin!(update_future);
-        tokio::select! {
-            biased;
-            _ = &mut cancel_rx => {
-                if is_manual {
-                    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                        action: ContextCompressAction::Cancelled,
-                        summary_up_to: summary_up_to_before,
-                        remaining_messages: remaining_before,
-                    });
-                }
-                return true;
-            },
-            update = &mut update_future => update,
-        }
-    };
-
-    match update {
-        Ok(mut update) if update.compressed => {
-            ctx.session.current_tokens = 0;
-            // 注入「当前任务状态」合成消息（若模型在压缩时附带了该段落）。
-            // turn 进行中的压缩依赖它避免重试失忆；turn 间手动压缩若模型未附带则为 None。
-            if let Some(task) = update.current_task.take() {
-                let resume = crate::context::compressor::build_compressed_resume_message(&task);
-                let insert_at = ctx.session.summary_up_to.min(ctx.session.messages.len());
-                ctx.session.messages.insert(insert_at, resume);
-            }
-            let remaining = ctx
-                .session
-                .messages
-                .len()
-                .saturating_sub(ctx.session.summary_up_to);
-            let current_tokens = if is_manual {
-                ctx.session.active_agent_current_tokens = 0;
-                ctx.session.agent_current_tokens.clear();
-                0
-            } else {
-                let estimated_tokens = (observed_tokens as f64
-                    * (remaining as f64 / total_messages.max(1) as f64))
-                    as usize;
-                ctx.session.current_tokens = estimated_tokens;
-                // 自动压缩后当前 turn 还会继续，必须立即刷新包含新摘要的提示。
-                rebuild_system_prompt(ctx);
-                estimated_tokens
-            };
-            ctx.session.token_usage.accumulate(&update.usage);
-            if let Err(error) = ctx.session.try_persist_to_disk() {
-                tracing::warn!(%error, session_id = %ctx.session.id, "上下文压缩落盘失败");
-                if is_manual {
-                    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                        action: ContextCompressAction::Failed,
-                        summary_up_to: ctx.session.summary_up_to,
-                        remaining_messages: remaining,
-                    });
-                }
-                return false;
-            }
-            emit_token_usage(
-                &ctx.stream_tx,
-                &update.usage,
-                Some(current_tokens),
-                ctx.context_limit,
-                if is_manual {
-                    "manual_context_compress"
-                } else {
-                    "context_summary"
-                },
-                None,
-            );
-            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                action,
-                summary_up_to: ctx.session.summary_up_to,
-                remaining_messages: remaining,
-            });
-            tracing::info!(
-                session_id = %ctx.session.id,
-                observed_tokens,
-                observed_prompt_tokens = observed_usage.map(|usage| usage.prompt_tokens),
-                observed_completion_tokens = observed_usage.map(|usage| usage.completion_tokens),
-                summary_up_to = ctx.session.summary_up_to,
-                "上下文摘要已更新"
-            );
-        }
-        Ok(_) => {
-            if is_manual {
-                let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                    action: ContextCompressAction::Noop,
-                    summary_up_to: ctx.session.summary_up_to,
-                    remaining_messages: ctx
-                        .session
-                        .messages
-                        .len()
-                        .saturating_sub(ctx.session.summary_up_to),
-                });
-            }
-        }
-        Err(err) => {
-            tracing::warn!(
-                session_id = %ctx.session.id,
-                error = %err,
-                "上下文压缩失败，继续使用原始上下文"
-            );
-            if is_manual {
-                let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
-                    agent_id: "system".to_string(),
-                    agent_label: "系统".to_string(),
-                    content: format!("手动压缩上下文失败：{err}"),
-                    level: "error".to_string(),
-                });
-                let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                    action: ContextCompressAction::Failed,
-                    summary_up_to: ctx.session.summary_up_to,
-                    remaining_messages: ctx
-                        .session
-                        .messages
-                        .len()
-                        .saturating_sub(ctx.session.summary_up_to),
-                });
-            }
-        }
-    }
-
-    false
-}
-
 pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     if usage.total_tokens > 0 {
         usage.total_tokens
@@ -295,39 +135,94 @@ pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     }
 }
 
-/// 在独立 turn task 中执行手动压缩，只监听取消命令。
+/// 在独立 turn task 中执行手动压缩。
 ///
-/// 与自动压缩一致：压缩 `summary_up_to` 之后的所有消息，不保留最近 N 轮。
+/// 与自动压缩共用 `ContextCompressor`：压缩 `summary_up_to` 之后的所有消息，
 /// 早期历史细节由摘要和 `CompressedResume` 合成消息承接。
+///
+/// 压缩阶段不可取消：压缩期间收到的命令保留在队列，压缩正常完成并保存结果。
+/// 压缩完成后处理积压命令（Cancel 仅结束本 task，不撤销压缩结果）。
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
 ) {
-    let (cancel_tx, cancel_rx) = oneshot::channel();
-    let mut compression_future = Box::pin(compress_context_summary(
-        &mut ctx,
-        None,
-        None,
-        ContextCompressAction::Compress,
-        cancel_rx,
-    ));
-    let cancel_command = async move {
-        loop {
-            match cmd_rx.recv().await {
-                Some(Command::Cancel | Command::Shutdown) | None => return,
-                Some(_) => {}
-            }
+    let total_messages = ctx.session.messages.len();
+    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
+        summary_up_to: ctx.session.summary_up_to,
+        total_messages,
+    });
+
+    // 压缩不可取消：直接 await 完成。Compressor 内部已处理摘要、边界、
+    // 续接消息注入、用量累计、system prompt 重建、落盘。
+    let result = ContextCompressor::new(&mut ctx).compress().await;
+
+    match result {
+        Ok(update) if update.compressed => {
+            // 手动压缩重置 token 计数（下次请求会重新统计）。
+            ctx.session.current_tokens = 0;
+            ctx.session.active_agent_current_tokens = 0;
+            ctx.session.agent_current_tokens.clear();
+            let remaining = ctx
+                .session
+                .messages
+                .len()
+                .saturating_sub(ctx.session.summary_up_to);
+            emit_token_usage(
+                &ctx.stream_tx,
+                &update.usage,
+                Some(0),
+                ctx.context_limit,
+                "manual_context_compress",
+                None,
+            );
+            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Compress,
+                summary_up_to: ctx.session.summary_up_to,
+                remaining_messages: remaining,
+            });
+            tracing::info!(
+                session_id = %ctx.session.id,
+                summary_up_to = ctx.session.summary_up_to,
+                "手动上下文摘要已更新"
+            );
         }
-    };
-    tokio::pin!(cancel_command);
-    tokio::select! {
-        biased;
-        _ = &mut cancel_command => {
-            let _ = cancel_tx.send(());
-            let _ = (&mut compression_future).await;
+        Ok(_) => {
+            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Noop,
+                summary_up_to: ctx.session.summary_up_to,
+                remaining_messages: ctx
+                    .session
+                    .messages
+                    .len()
+                    .saturating_sub(ctx.session.summary_up_to),
+            });
         }
-        _ = &mut compression_future => {}
+        Err(err) => {
+            tracing::warn!(
+                session_id = %ctx.session.id,
+                error = %err,
+                "手动上下文压缩失败，继续使用原始上下文"
+            );
+            let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
+                agent_id: "system".to_string(),
+                agent_label: "系统".to_string(),
+                content: format!("手动压缩上下文失败：{err}"),
+                level: "error".to_string(),
+            });
+            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Failed,
+                summary_up_to: ctx.session.summary_up_to,
+                remaining_messages: ctx
+                    .session
+                    .messages
+                    .len()
+                    .saturating_sub(ctx.session.summary_up_to),
+            });
+        }
     }
+
+    // 排空积压命令（Cancel/Shutdown 仅结束本 task，不影响已完成的压缩）。
+    while cmd_rx.try_recv().is_ok() {}
 }
 
 pub(crate) fn select_client_for_request<'a>(
