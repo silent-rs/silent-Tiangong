@@ -546,10 +546,10 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
     state
         .with_state_read(|core_state| {
             Ok(core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .filter(|session| session.parent_session_id.is_none())
-                .map(SessionListItem::from_core)
+                .filter(|metadata| metadata.parent_session_id.is_none())
+                .map(SessionListItem::from_metadata)
                 .collect())
         })
         .await
@@ -564,9 +564,9 @@ pub async fn get_session_tabs(
     state
         .with_state_read(|core_state| {
             if !core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .any(|session| session.id == session_id)
+                .any(|m| m.id == session_id)
             {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
@@ -643,9 +643,9 @@ pub async fn set_session_tabs(
     state
         .with_state_read(|core_state| {
             if !core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .any(|session| session.id == session_id)
+                .any(|m| m.id == session_id)
             {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
@@ -736,9 +736,9 @@ pub async fn activate_draft_session(
                 return Ok(false);
             }
             if !core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .any(|session| session.id == session_id)
+                .any(|m| m.id == session_id)
             {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
@@ -763,18 +763,18 @@ pub async fn switch_session(
     let (trust_mode, cwd) = state
         .with_state(|core_state| {
             if !core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .any(|session| session.id == session_id)
+                .any(|m| m.id == session_id)
             {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
             core_state.switch_session(&session_id);
             state.mark_active_session_changed();
             let session = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == session_id)
+                .find(|m| m.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
             let cwd = if session.cwd.trim().is_empty() {
                 core_state.workspace_dir().to_string()
@@ -872,14 +872,13 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     // 命中 current-instance 清理分支。这里必须主动唤醒内嵌 HTTP 等待者；其 lease
     // 随请求返回释放 remote owner，避免删除后同会话永久保持“远端执行中”。
     state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
+    // 附件候选需遍历会话消息（完整 Session 字段）。Core 已停，磁盘稳定，
+    // 在锁外从磁盘加载（issue #245：session 真相源归磁盘）。
+    let deleted_session = state.inner().core_manager.load_session(&deleted_id).ok();
     let mut draft_attachments = state
         .with_state(|core_state| {
             let mut attachments = core_state.session_input_draft(&deleted_id).attachments;
-            if let Some(session) = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == deleted_id)
-            {
+            if let Some(session) = &deleted_session {
                 attachments.extend(session_attachment_candidates(session));
             }
             let active_before = core_state.active_session_id().to_string();
@@ -917,10 +916,10 @@ pub async fn delete_sessions_by_cwd(
     let mut deleted_ids = state
         .with_state_read(|core_state| {
             let ids: Vec<String> = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .filter(|session| session.cwd == cwd)
-                .map(|session| session.id.clone())
+                .filter(|metadata| metadata.cwd == cwd)
+                .map(|metadata| metadata.id.clone())
                 .collect();
             Ok::<_, anyhow::Error>(ids)
         })
@@ -938,22 +937,28 @@ pub async fn delete_sessions_by_cwd(
         stop_and_join_core(state.inner(), id).await;
         state.fail_remote_session_waiters(id, "目标会话已删除");
     }
+    // 附件候选需遍历会话消息；Core 已停、磁盘稳定，锁外从磁盘加载
+    //（issue #245：session 真相源归磁盘）。
+    let deleted_sessions: std::collections::HashMap<String, tiangong_core::session::Session> =
+        deleted_ids
+            .iter()
+            .filter_map(|id| {
+                state
+                    .inner()
+                    .core_manager
+                    .load_session(id)
+                    .ok()
+                    .map(|session| (id.clone(), session))
+            })
+            .collect();
     let mut draft_attachments = state
         .with_state(|core_state| {
             let mut candidates = Vec::new();
             let active_before = core_state.active_session_id().to_string();
             for id in &deleted_ids {
-                if core_state
-                    .sessions()
-                    .iter()
-                    .any(|session| session.id == *id)
-                {
+                if core_state.session_metadata().iter().any(|m| m.id == *id) {
                     candidates.extend(core_state.session_input_draft(id).attachments);
-                    if let Some(session) = core_state
-                        .sessions()
-                        .iter()
-                        .find(|session| session.id == *id)
-                    {
+                    if let Some(session) = deleted_sessions.get(id) {
                         candidates.extend(session_attachment_candidates(session));
                     }
                     core_state.delete_session_by_id(id)?;
@@ -1019,10 +1024,10 @@ pub async fn update_session_title(
                 return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
             }
             let previous_title = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == session_id)
-                .map(|session| session.title.clone())
+                .find(|m| m.id == session_id)
+                .map(|m| m.title.clone())
                 .ok_or_else(|| anyhow::anyhow!("当前会话不存在，无法重命名"))?;
             let previous_draft = core_state.session_title_draft().to_string();
             core_state.update_session_title_draft(title);
@@ -2098,12 +2103,11 @@ pub(crate) fn start_stream_consumer(
                                 let title_is_still_default = rt2
                                     .block_on(app_state.with_state_read(|core_state| {
                                         Ok(core_state
-                                            .sessions()
+                                            .session_metadata()
                                             .iter()
-                                            .find(|session| session.id == sid_for_title)
-                                            .is_some_and(|session| {
-                                                session.title == "新对话"
-                                                    || session.title.starts_with("会话 ")
+                                            .find(|m| m.id == sid_for_title)
+                                            .is_some_and(|m| {
+                                                m.title == "新对话" || m.title.starts_with("会话 ")
                                             }))
                                     }))
                                     .unwrap_or(false);
@@ -2588,10 +2592,10 @@ pub async fn get_trust_mode(
                 .as_deref()
                 .unwrap_or_else(|| core_state.active_session_id());
             let mode = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == target_id)
-                .map(|session| session.trust_mode)
+                .find(|m| m.id == target_id)
+                .map(|m| m.trust_mode)
                 .unwrap_or(core_state.agent_config().default_trust_mode);
             Ok(serde_json::to_value(mode)
                 .unwrap_or_default()
@@ -2627,10 +2631,10 @@ pub async fn set_trust_mode(
     let previous_mode = state
         .with_state(|core_state| {
             let previous_mode = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == session_id)
-                .map(|session| session.trust_mode)
+                .find(|m| m.id == session_id)
+                .map(|m| m.trust_mode)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置信任模式：{session_id}"))?;
             core_state.set_session_trust_mode_in_memory(&session_id, trust_mode)?;
             if let Err(error) = core_state.persist_app_only() {
@@ -2736,10 +2740,10 @@ pub async fn get_reasoning_effort(
                 .as_deref()
                 .unwrap_or_else(|| core_state.active_session_id());
             let effort = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == target_id)
-                .and_then(|session| session.reasoning_effort.as_deref())
+                .find(|m| m.id == target_id)
+                .and_then(|m| m.reasoning_effort.as_deref())
                 .map(str::trim)
                 .filter(|effort| !effort.is_empty())
                 .map(ToString::to_string)
@@ -2776,9 +2780,9 @@ pub async fn set_reasoning_effort(
     let (previous_override, previous_compatibility_value) = state
         .with_state(|core_state| {
             let previous_override = core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == session_id)
+                .find(|m| m.id == session_id)
                 .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置思考强度：{session_id}"))?
                 .reasoning_effort
                 .clone();
@@ -2948,22 +2952,25 @@ pub async fn get_session_cost(
     session_id: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    state
+    // task_records 是完整 Session 字段，session 真相源归磁盘（issue #245），
+    // 经 CoreManager 从磁盘加载，不在 app-state 的内存镜像里读。
+    let sid = state
         .with_state_read(|core_state| {
-            let sid = session_id
-                .as_deref()
-                .unwrap_or_else(|| core_state.active_session_id());
-            let session = core_state.sessions().iter().find(|s| s.id == sid);
-            match session {
-                Some(s) => {
-                    let cost =
-                        tiangong_core::observe::build_session_cost(s.id.clone(), &s.task_records);
-                    Ok(serde_json::to_value(cost).unwrap_or_default())
-                }
-                None => Ok(serde_json::json!({})),
-            }
+            Ok::<String, anyhow::Error>(
+                session_id
+                    .as_deref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| core_state.active_session_id().to_string()),
+            )
         })
-        .await
+        .await?;
+    match state.inner().core_manager.load_session(&sid) {
+        Ok(session) => {
+            let cost = tiangong_core::observe::build_session_cost(sid, &session.task_records);
+            Ok(serde_json::to_value(cost).unwrap_or_default())
+        }
+        Err(_) => Ok(serde_json::json!({})),
+    }
 }
 
 /// 获取当前活跃的 Worker 列表
@@ -3329,9 +3336,9 @@ pub async fn set_input_draft(
         let exists = state
             .with_state_read(|core_state| {
                 Ok(core_state
-                    .sessions()
+                    .session_metadata()
                     .iter()
-                    .any(|session| session.id == session_id))
+                    .any(|m| m.id == session_id))
             })
             .await?;
         if !exists {
@@ -3434,26 +3441,44 @@ pub(crate) async fn cleanup_unreferenced_draft_attachments(
         return;
     }
     let claimed_paths = state.claimed_draft_attachment_paths();
-    let referenced = state
+    // 引用扫描需要遍历消息内容（完整 Session 字段）。session 真相源归磁盘
+    //（issue #245）：先在锁外拿到会话 id 列表，再逐个从磁盘 load 扫描媒体引用，
+    // 避免在 app-state 锁内做文件 IO。
+    let session_ids: Vec<String> = state
+        .with_state_read(|core_state| {
+            Ok(core_state
+                .session_metadata()
+                .iter()
+                .map(|metadata| metadata.id.clone())
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap_or_default();
+    let mut referenced = state
         .with_state_read(|core_state| {
             let mut paths = claimed_paths;
             for draft in core_state.store.session.input_drafts.values() {
                 paths.extend(draft.attachments.iter().map(|item| item.source.clone()));
             }
-            for session in core_state.sessions() {
-                for message in &session.messages {
-                    paths.extend(
-                        message
-                            .extract_media_assets()
-                            .into_iter()
-                            .map(|item| item.url),
-                    );
-                }
-            }
             Ok(paths)
         })
         .await
         .unwrap_or_default();
+
+    // 从磁盘加载完整会话，扫描媒体引用（真相源归磁盘）。
+    for session_id in &session_ids {
+        let Ok(session) = state.core_manager.load_session(session_id) else {
+            continue;
+        };
+        for message in &session.messages {
+            referenced.extend(
+                message
+                    .extract_media_assets()
+                    .into_iter()
+                    .map(|item| item.url),
+            );
+        }
+    }
 
     let mut checked = std::collections::HashSet::new();
     for candidate in candidates {

@@ -82,6 +82,19 @@ impl SessionListItem {
             cwd: core_session.cwd.clone(),
         }
     }
+
+    /// 从 SessionMetadata 构造（issue #245）：UI 列表展示走元数据缓存，
+    /// 不再依赖完整 Session。
+    pub fn from_metadata(metadata: &tiangong_core_manager::SessionMetadata) -> Self {
+        Self {
+            id: metadata.id.clone(),
+            title: metadata.title.clone(),
+            created_at: metadata.created_at.clone(),
+            updated_at: metadata.updated_at.clone(),
+            message_count: metadata.message_count,
+            cwd: metadata.cwd.clone(),
+        }
+    }
 }
 
 /// 运行状态快照（前端使用的完整快照）

@@ -27,6 +27,12 @@ pub struct SessionMetadata {
     /// 工作目录模式。
     #[serde(default)]
     pub cwd_mode: SessionCwdMode,
+    /// 消息条数（UI 列表展示）。P3 移除完整 Session 后需另从磁盘/缓存取。
+    #[serde(default)]
+    pub message_count: usize,
+    /// 父会话 ID（Worker 子会话标注；UI 列表按此过滤掉子会话）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 impl From<&Session> for SessionMetadata {
@@ -40,6 +46,8 @@ impl From<&Session> for SessionMetadata {
             reasoning_effort: session.reasoning_effort.clone(),
             cwd: session.cwd.clone(),
             cwd_mode: session.cwd_mode.clone(),
+            message_count: session.messages.len(),
+            parent_session_id: session.parent_session_id.clone(),
         }
     }
 }
@@ -76,6 +84,8 @@ mod tests {
             reasoning_effort: Some("high".into()),
             cwd: "/tmp".into(),
             cwd_mode: SessionCwdMode::Inherit,
+            message_count: 3,
+            parent_session_id: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let back: SessionMetadata = serde_json::from_str(&json).unwrap();
@@ -93,6 +103,8 @@ mod tests {
             reasoning_effort: None,
             cwd: String::new(),
             cwd_mode: SessionCwdMode::Inherit,
+            message_count: 0,
+            parent_session_id: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("reasoning_effort"));
