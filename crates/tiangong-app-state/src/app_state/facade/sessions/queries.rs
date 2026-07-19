@@ -242,6 +242,29 @@ impl TiangongState {
         &self.store.session.session_title_draft
     }
 
+    /// 读取自动标题生成的输入：仅当会话标题仍为默认值（"新对话" / "会话 ..."）
+    /// 时返回首条用户消息文本，否则返回 None（issue #245：收敛调用方对
+    /// `sessions()` 的直接读取）。
+    pub fn title_generation_input(&self, session_id: &str) -> Option<String> {
+        let metadata = self
+            .session_metadata()
+            .iter()
+            .find(|metadata| metadata.id == session_id)?;
+        let is_default = metadata.title == "新对话" || metadata.title.starts_with("会话 ");
+        if !is_default {
+            return None;
+        }
+        let session = self
+            .sessions()
+            .iter()
+            .find(|session| session.id == session_id)?;
+        session
+            .messages
+            .iter()
+            .find(|message| message.role == tiangong_core::session::MessageRole::User)
+            .map(|message| message.text_content())
+    }
+
     pub fn update_session_title_draft(&mut self, value: String) {
         self.store.session.session_title_draft = value;
     }

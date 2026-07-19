@@ -261,25 +261,25 @@ async fn resolve_connector_session(
     .collect::<String>();
     let (session_id, created) = state
         .with_state(|core_state| {
-            if let Some(session) = core_state
-                .sessions()
+            if let Some(metadata) = core_state
+                .session_metadata()
                 .iter()
-                .find(|session| session.id == channel_id)
+                .find(|metadata| metadata.id == channel_id)
             {
-                return Ok((session.id.clone(), false));
+                return Ok((metadata.id.clone(), false));
             }
-            if let Some(session) = core_state
-                .sessions()
+            if let Some(metadata) = core_state
+                .session_metadata()
                 .iter()
-                .find(|session| session.title == title)
+                .find(|metadata| metadata.title == title)
             {
-                return Ok((session.id.clone(), false));
+                return Ok((metadata.id.clone(), false));
             }
             let mut session =
                 Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
             session.trust_mode = TrustMode::FullTrust;
             let session_id = session.id.clone();
-            core_state.sessions_mut().push(session);
+            core_state.add_session(session);
             core_state.persist_session_and_app(&session_id)?;
             Ok((session_id, true))
         })
@@ -322,20 +322,27 @@ async fn send_message_and_wait(
         state.wait_for_remote_turn_release(&session_id).await;
     };
 
-    let existing = state
+    // 会话存在性用 metadata 判定；消息字段需完整 Session，从磁盘 load
+    //（issue #245：真相源归磁盘）。
+    let session_exists = state
         .with_state_read(|core_state| {
-            let session = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            Ok(session
-                .messages
-                .iter()
-                .find(|message| message.id == message_id)
-                .map(|message| (message.role, message.turn_status)))
+            Ok::<_, anyhow::Error>(
+                core_state
+                    .session_metadata()
+                    .iter()
+                    .any(|m| m.id == session_id),
+            )
         })
         .await?;
+    if !session_exists {
+        return Err(format!("目标会话不存在：{session_id}"));
+    }
+    let loaded_session = state.core_manager.load_session(&session_id)?;
+    let existing = loaded_session
+        .messages
+        .iter()
+        .find(|message| message.id == message_id)
+        .map(|message| (message.role, message.turn_status));
     if let Some((role, turn_status)) = existing {
         if role != MessageRole::User {
             drop(send_guard);
@@ -395,32 +402,11 @@ async fn send_message_and_wait(
 
     let session_snapshot = state
         .with_state(|core_state| {
-            let index = core_state
-                .sessions()
-                .iter()
-                .position(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            let original_session = core_state.sessions()[index].clone();
-            core_state.sessions_mut()[index]
-                .append_prepared_user_message_with_id(message_id.clone(), stable_prepared);
-            core_state.sessions_mut()[index].updated_at = tiangong_core::session::now_text();
-            core_state.mark_pending_message_for(&session_id, &message_id);
-            if let Err(error) = core_state.persist_session_and_app(&session_id) {
-                core_state.sessions_mut()[index] = original_session;
-                core_state.remove_pending_message_for(&session_id, &message_id);
-                let rollback_error = core_state.persist_session_and_app(&session_id).err();
-                return Err(match rollback_error {
-                    Some(rollback_error) => {
-                        anyhow!("消息状态持久化失败：{error}；恢复原状态也失败：{rollback_error}")
-                    }
-                    None => anyhow!("消息状态持久化失败：{error}"),
-                });
-            }
-            let mut runtime_session = core_state.sessions()[index].clone();
-            if runtime_session.cwd.trim().is_empty() {
-                runtime_session.cwd = core_state.workspace_dir().to_string();
-            }
-            Ok(runtime_session)
+            core_state.append_prepared_user_message_for_turn(
+                &session_id,
+                &message_id,
+                stable_prepared,
+            )
         })
         .await?;
 
@@ -492,26 +478,33 @@ async fn completed_message_result(
     message_id: &str,
     status: TurnStatus,
 ) -> HostResult<OutgoingMessage> {
-    state
+    // 会话存在性用 metadata 判定；消息遍历需完整 Session，从磁盘 load
+    //（issue #245：真相源归磁盘）。
+    let session_exists = state
         .with_state_read(|core_state| {
-            let session = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            let (outgoing, direct_agent_reply) =
-                tiangong_server::remote::core::assistant_outgoing_after_user(session, message_id);
-            if status == TurnStatus::Success || direct_agent_reply {
-                Ok(outgoing)
-            } else {
-                Err(anyhow!(match status {
-                    TurnStatus::Cancelled => "执行已取消",
-                    TurnStatus::Failed => "执行失败",
-                    TurnStatus::Success => unreachable!(),
-                }))
-            }
+            Ok::<_, anyhow::Error>(
+                core_state
+                    .session_metadata()
+                    .iter()
+                    .any(|m| m.id == session_id),
+            )
         })
-        .await
+        .await?;
+    if !session_exists {
+        return Err(format!("目标会话不存在：{session_id}"));
+    }
+    let session = state.core_manager.load_session(session_id)?;
+    let (outgoing, direct_agent_reply) =
+        tiangong_server::remote::core::assistant_outgoing_after_user(&session, message_id);
+    if status == TurnStatus::Success || direct_agent_reply {
+        Ok(outgoing)
+    } else {
+        Err(match status {
+            TurnStatus::Cancelled => "执行已取消".to_string(),
+            TurnStatus::Failed => "执行失败".to_string(),
+            TurnStatus::Success => unreachable!(),
+        })
+    }
 }
 
 pub(crate) async fn complete_remote_turn_from_stream(
@@ -519,25 +512,19 @@ pub(crate) async fn complete_remote_turn_from_stream(
     session_id: &str,
     message_id: &str,
 ) {
-    let status = state
-        .with_state_read(|core_state| {
-            let status = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .and_then(|session| {
-                    session.messages.iter().find(|message| {
-                        message.id == message_id && message.role == MessageRole::User
-                    })
-                })
-                .and_then(|message| message.turn_status)
-                .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}"))?;
-            Ok(status)
-        })
-        .await;
+    // 消息终态需读 messages（完整 Session）；从磁盘 load（issue #245）。
+    let status = match state.core_manager.load_session(session_id) {
+        Ok(session) => session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id && message.role == MessageRole::User)
+            .and_then(|message| message.turn_status)
+            .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}")),
+        Err(error) => Err(anyhow!("加载会话失败：{error}")),
+    };
     let result = match status {
         Ok(status) => completed_message_result(state, session_id, message_id, status).await,
-        Err(error) => Err(error),
+        Err(error) => Err(error.to_string()),
     };
     state.complete_remote_turn_waiters(session_id, message_id, result);
 }
@@ -550,9 +537,9 @@ async fn delete_session(
     let exists = state
         .with_state_read(|core_state| {
             Ok(core_state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .any(|session| session.id == session_id))
+                .any(|m| m.id == session_id))
         })
         .await?;
     if !exists {
@@ -564,14 +551,13 @@ async fn delete_session(
     crate::commands::stop_and_join_core(state, session_id).await;
     // Core 已停止且从映射取走后，任何后续删除失败都不能再依赖流 EOF 唤醒等待者。
     state.fail_remote_session_waiters(session_id, "目标会话已删除");
+    // 附件候选需遍历消息；Core 已停、磁盘稳定，锁外从磁盘 load
+    //（issue #245：真相源归磁盘）。
+    let deleted_session = state.core_manager.load_session(session_id).ok();
     let mut attachments = state
         .with_state(|core_state| {
             let mut attachments = core_state.session_input_draft(session_id).attachments;
-            if let Some(session) = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-            {
+            if let Some(session) = &deleted_session {
                 attachments.extend(crate::commands::session_attachment_candidates(session));
             }
             let active_before = core_state.active_session_id().to_string();

@@ -52,6 +52,14 @@ impl TiangongState {
         let _ = self.persist_app_only();
     }
 
+    /// 把一个已构造好的 Session 加入列表（issue #245：收敛调用方对
+    /// `sessions_mut().push(...)` 的直接操纵，如 connector 创建隔离会话）。
+    /// 不改变 active_session_id；持久化由调用方触发。
+    pub fn add_session(&mut self, session: Session) {
+        self.store.session.sessions.push(session);
+        self.resync_session_metadata();
+    }
+
     /// 为草稿转正创建会话，但不改变全局活动会话。
     pub fn create_session_without_activation(
         &mut self,
@@ -108,6 +116,26 @@ impl TiangongState {
     pub fn save_active_session_title(&mut self) -> Result<()> {
         let (active_id, _) = self.apply_active_session_title_in_memory()?;
         self.persist_session_and_app(&active_id)
+    }
+
+    /// 按显式会话 ID 设置标题（仅内存镜像，不写 Session 文件）。
+    ///
+    /// 收敛 `rollback_session_title_mirror` 等调用方对 `sessions_mut()` 的直接操纵
+    /// （issue #245）。持久化由调用方按需 `persist_session_and_app` 触发，
+    /// metadata 由 persist 路径的 normalize 自动同步。
+    /// 同步刷新 updated_at（标题变化属于会话更新）。
+    pub fn set_session_title_in_memory(&mut self, session_id: &str, title: String) {
+        if let Some(session) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.title = title;
+            session.updated_at = tiangong_core::session::now_text();
+        }
+        self.resync_session_metadata();
     }
 
     /// 校验标题草稿并只更新宿主内存镜像，不写 Session 文件。

@@ -444,16 +444,20 @@ impl TiangongApp {
                 // 绑定和最终 deliver，禁止在 take→删除/重建空窗中复活孤立 Core。
                 let session_lock = app_state.session_send_lock(&session_id);
                 let _send_guard = session_lock.lock_owned().await;
-                let session_snapshot = {
-                    let guard = state.lock().await;
-                    guard
-                        .sessions()
-                        .iter()
-                        .find(|s| s.id == session_id)
-                        .cloned()
-                };
-                let Some(session_snapshot) = session_snapshot else {
+                // 会话存在性用 metadata 判定；ensure_core 需要的完整 session
+                // 从磁盘 load（issue #245：真相源归磁盘）。
+                let session_exists = state
+                    .lock()
+                    .await
+                    .session_metadata()
+                    .iter()
+                    .any(|m| m.id == session_id);
+                if !session_exists {
                     tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
+                    continue;
+                }
+                let Ok(session_snapshot) = app_state.core_manager.load_session(&session_id) else {
+                    tracing::warn!(session_id, "消费者无法恢复 core：session 磁盘加载失败");
                     continue;
                 };
                 use std::sync::mpsc;
@@ -548,32 +552,11 @@ impl TiangongApp {
         let stable_prepared = tiangong_types::stable_content_blocks(&prepared);
         let session_snapshot = self
             .with_state(|core_state| {
-                let index = core_state
-                    .sessions()
-                    .iter()
-                    .position(|session| session.id == session_id)
-                    .ok_or_else(|| anyhow::anyhow!("定时消息目标会话不存在：{session_id}"))?;
-                let original_session = core_state.sessions()[index].clone();
-                core_state.sessions_mut()[index]
-                    .append_prepared_user_message_with_id(message_id.clone(), stable_prepared);
-                core_state.sessions_mut()[index].updated_at = tiangong_core::session::now_text();
-                core_state.mark_pending_message_for(&session_id, &message_id);
-                if let Err(error) = core_state.persist_session_and_app(&session_id) {
-                    core_state.sessions_mut()[index] = original_session;
-                    core_state.remove_pending_message_for(&session_id, &message_id);
-                    let rollback_error = core_state.persist_session_and_app(&session_id).err();
-                    return Err(match rollback_error {
-                        Some(rollback_error) => anyhow::anyhow!(
-                            "定时消息状态持久化失败：{error}；恢复原状态也失败：{rollback_error}"
-                        ),
-                        None => anyhow::anyhow!("定时消息状态持久化失败：{error}"),
-                    });
-                }
-                let mut runtime_session = core_state.sessions()[index].clone();
-                if runtime_session.cwd.trim().is_empty() {
-                    runtime_session.cwd = core_state.workspace_dir().to_string();
-                }
-                Ok(runtime_session)
+                core_state.append_prepared_user_message_for_turn(
+                    &session_id,
+                    &message_id,
+                    stable_prepared,
+                )
             })
             .await?;
 
@@ -622,20 +605,14 @@ impl TiangongApp {
 
         self.with_state(|core_state| {
             core_state.reload_session_from_disk(session_id)?;
-            let session = core_state
-                .sessions_mut()
-                .iter_mut()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow::anyhow!("定时消息目标会话已不存在：{session_id}"))?;
-            if let Some(index) = session
-                .messages
+            if !core_state
+                .session_metadata()
                 .iter()
-                .position(|message| message.id == message_id)
+                .any(|m| m.id == session_id)
             {
-                session.messages.remove(index);
-                session.summary_up_to = session.summary_up_to.min(session.messages.len());
-                session.updated_at = tiangong_core::session::now_text();
+                return Err(anyhow::anyhow!("定时消息目标会话已不存在：{session_id}"));
             }
+            core_state.remove_message_for_failed_turn(session_id, message_id);
             core_state.remove_pending_message_for(session_id, message_id);
             core_state.persist_session_and_app(session_id)
         })
@@ -962,12 +939,12 @@ impl TiangongApp {
                 tiangong_config::registry::set_models(new_models);
                 let template = core_state.build_core_config_for_session_from_base(&base, "");
                 let session_configs = core_state
-                    .sessions()
+                    .session_metadata()
                     .iter()
-                    .map(|session| {
+                    .map(|metadata| {
                         (
-                            session.id.clone(),
-                            core_state.build_core_config_for_session_from_base(&base, &session.id),
+                            metadata.id.clone(),
+                            core_state.build_core_config_for_session_from_base(&base, &metadata.id),
                         )
                     })
                     .collect::<HashMap<_, _>>();

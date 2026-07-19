@@ -381,4 +381,25 @@ impl TiangongState {
             ))
         }
     }
+
+    /// 清除会话级思考强度覆盖（回滚到应用默认）。只更新内存镜像，不写 Session 文件。
+    ///
+    /// 收敛 rollback 路径对 `sessions_mut()` 的直接操纵（issue #245）。
+    pub fn clear_session_reasoning_effort_in_memory(&mut self, session_id: &str) -> Result<()> {
+        if let Some(session) = self
+            .store
+            .session
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.reasoning_effort = None;
+            self.resync_session_metadata();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "会话不存在，无法清除思考强度：{session_id}"
+            ))
+        }
+    }
 }
