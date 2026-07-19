@@ -910,16 +910,18 @@ pub(super) async fn execute_turn(
     let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
     let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
     let mut pending_approval: Option<PendingApproval> = None;
-    // 压缩后续动作。压缩完成后存入，返回主循环 FIFO 处理排队命令，命令清空后
-    // 由 select 的 continuation 分支取出执行。Cancel 到达时丢弃并作废续接消息。
+    // 压缩后续动作。压缩完成后存入，返回主循环 FIFO 处理排队命令；命令清空后
+    // 由状态推进分支取出执行。Cancel 到达时丢弃并作废续接消息。
     let mut pending_compression_continuation: Option<CompressionContinuation> = None;
 
     let result = 'agent_loop: loop {
+        // can_advance：无异步活跃时，若有待执行的压缩后续动作或待推进的 next_step，
+        // 则进入状态推进分支。biased select 保证 command 分支先排空排队命令。
         let can_advance = active_llm.is_none()
             && tool_tasks.is_empty()
             && pending_approval.is_none()
-            && pending_compression_continuation.is_none()
-            && !matches!(state.next_step, NextStep::Waiting);
+            && (pending_compression_continuation.is_some()
+                || !matches!(state.next_step, NextStep::Waiting));
 
         tokio::select! {
             biased;
@@ -1442,64 +1444,62 @@ pub(super) async fn execute_turn(
                 }
             }
 
-            // 压缩后续动作：仅在排队命令清空后执行。biased select 保证上方 command
-            // 分支优先——cmd_rx 有命令时 command 就绪，本分支等待；命令清空后
-            // command 分支 Pending，本分支（ready 立即就绪）取出 continuation 执行。
-            // Cancel 到达时由 command 分支处理：丢弃 continuation、作废续接消息、break。
-            _ = std::future::ready(()), if pending_compression_continuation.is_some() => {
-                let continuation = pending_compression_continuation
-                    .take()
-                    .expect("continuation 分支只在字段存在时启用");
-                match continuation {
-                    CompressionContinuation::ReactText {
-                        pending_msg_id,
-                        disposition,
-                        request_injection_generation,
-                    } => finish_react_text(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        pending_msg_id,
-                        disposition,
-                        request_injection_generation,
-                    ),
-                    CompressionContinuation::ToolBatch => {
-                        state.next_step = NextStep::DriveTools;
-                    }
-                    CompressionContinuation::Summary {
-                        decision,
-                        request_injection_generation,
-                    } => finish_summary(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        decision,
-                        request_injection_generation,
-                    ),
-                    CompressionContinuation::ContextRetry {
-                        previous_summary_up_to,
-                        error_message,
-                    } => {
-                        injections.commit(ctx);
-                        if ctx.session.summary_up_to > previous_summary_up_to {
-                            // 压缩释放了空间，重试 ReAct 请求。
-                            state.next_step = NextStep::StartReact;
-                        } else {
-                            persist_error(
-                                ctx,
-                                format!("ReAct 循环请求失败：{error_message}"),
-                            );
-                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                state.accumulated_usage.clone(),
-                                error_message,
-                            ));
+            // 状态推进分支：命令分支 biased 在前，会先排空已到达命令（含压缩期间
+            // 排队的命令）。队列清空后本分支就绪：若存在压缩后续动作则先执行它，
+            // 否则推进 next_step。
+            _ = std::future::ready(()), if can_advance => {
+                // 压缩后续动作优先：压缩在触发点同步完成（不可取消），后续动作延后
+                // 到此处执行，确保压缩期间排队的命令已按 FIFO 处理完。
+                if let Some(continuation) = pending_compression_continuation.take() {
+                    match continuation {
+                        CompressionContinuation::ReactText {
+                            pending_msg_id,
+                            disposition,
+                            request_injection_generation,
+                        } => finish_react_text(
+                            ctx,
+                            &mut state,
+                            &mut injections,
+                            pending_msg_id,
+                            disposition,
+                            request_injection_generation,
+                        ),
+                        CompressionContinuation::ToolBatch => {
+                            state.next_step = NextStep::DriveTools;
+                        }
+                        CompressionContinuation::Summary {
+                            decision,
+                            request_injection_generation,
+                        } => finish_summary(
+                            ctx,
+                            &mut state,
+                            &mut injections,
+                            decision,
+                            request_injection_generation,
+                        ),
+                        CompressionContinuation::ContextRetry {
+                            previous_summary_up_to,
+                            error_message,
+                        } => {
+                            injections.commit(ctx);
+                            if ctx.session.summary_up_to > previous_summary_up_to {
+                                // 压缩释放了空间，重试 ReAct 请求。
+                                state.next_step = NextStep::StartReact;
+                            } else {
+                                persist_error(
+                                    ctx,
+                                    format!("ReAct 循环请求失败：{error_message}"),
+                                );
+                                state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                    state.accumulated_usage.clone(),
+                                    error_message,
+                                ));
+                            }
                         }
                     }
+                    continue 'agent_loop;
                 }
-            }
 
-            // 无异步阶段活跃时推进一次状态；命令分支 biased 在前，会先排空已到达命令。
-            _ = std::future::ready(()), if can_advance => {
                 let next_step = std::mem::replace(&mut state.next_step, NextStep::Waiting);
                 match next_step {
                     NextStep::StartReact => {
