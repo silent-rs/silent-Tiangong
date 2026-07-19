@@ -564,6 +564,24 @@ struct ActiveCompression {
     continuation: CompressionContinuation,
 }
 
+impl ActiveCompression {
+    fn start(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        continuation: CompressionContinuation,
+        force_target_budget: bool,
+    ) -> Self {
+        let task =
+            ContextCompressor::start_auto(ctx, organizer, observed_tokens, force_target_budget);
+        Self {
+            task,
+            observed_tokens,
+            continuation,
+        }
+    }
+}
+
 struct ActiveLlm {
     purpose: LlmPurpose,
     pending_msg_id: String,
@@ -718,38 +736,6 @@ fn start_tool_execution(
         }
     });
     running_tools.insert(task.id(), RunningToolCall { tool, started_at });
-}
-
-fn start_context_compression(
-    ctx: &TurnContext,
-    context_organizer: &ContextOrganizer,
-    observed_usage: TokenUsage,
-    continuation: CompressionContinuation,
-    force_target_budget: bool,
-) -> ActiveCompression {
-    ContextCompressor::notify_started(ctx);
-    let compressor = ContextCompressor::new(ctx);
-    let observed_tokens = observed_total_tokens(&observed_usage);
-    let budget_tokens = if force_target_budget {
-        0
-    } else {
-        observed_tokens
-    };
-    let output_budget = context_organizer.compression_output_budget(budget_tokens);
-    let task = tokio::spawn(async move {
-        let Some(output_budget) = output_budget else {
-            return Err(CompressionError::new(
-                "上下文剩余空间不足 2048 tokens，无法生成有效摘要",
-            ));
-        };
-        compressor.compress(output_budget, true).await
-    });
-
-    ActiveCompression {
-        task,
-        observed_tokens,
-        continuation,
-    }
 }
 
 fn finish_react_text(
@@ -1142,17 +1128,10 @@ pub(super) async fn execute_turn(
                                 if should_compress {
                                     tracing::warn!("检测到上下文超限，尝试强制压缩");
                                     let previous_summary_up_to = ctx.session.summary_up_to;
-                                    let forced_usage = TokenUsage {
-                                        prompt_tokens: context_limit,
-                                        completion_tokens: 0,
-                                        total_tokens: context_limit,
-                                        prompt_cache_hit_tokens: None,
-                                        prompt_cache_miss_tokens: None,
-                                    };
-                                    active_compression = Some(start_context_compression(
+                                    active_compression = Some(ActiveCompression::start(
                                         ctx,
                                         &context_organizer,
-                                        forced_usage,
+                                        context_limit,
                                         CompressionContinuation::ContextRetry {
                                             previous_summary_up_to,
                                             error_message,
@@ -1191,14 +1170,12 @@ pub(super) async fn execute_turn(
                                 &response,
                                 &state,
                             );
-                            if context_organizer
-                                .needs_compression(observed_total_tokens(&response.usage))
-                            {
-                                let usage = response.usage.clone();
-                                active_compression = Some(start_context_compression(
+                            let observed_tokens = observed_total_tokens(&response.usage);
+                            if context_organizer.needs_compression(observed_tokens) {
+                                active_compression = Some(ActiveCompression::start(
                                     ctx,
                                     &context_organizer,
-                                    usage,
+                                    observed_tokens,
                                     CompressionContinuation::ReactText {
                                         pending_msg_id,
                                         disposition,
@@ -1321,11 +1298,12 @@ pub(super) async fn execute_turn(
                             emit_session_message_upsert(ctx, &pending_msg_id);
                         }
 
-                        if context_organizer.needs_compression(observed_total_tokens(&usage)) {
-                            active_compression = Some(start_context_compression(
+                        let observed_tokens = observed_total_tokens(&usage);
+                        if context_organizer.needs_compression(observed_tokens) {
+                            active_compression = Some(ActiveCompression::start(
                                 ctx,
                                 &context_organizer,
-                                usage,
+                                observed_tokens,
                                 CompressionContinuation::Summary {
                                     decision,
                                     request_injection_generation,
@@ -1456,12 +1434,12 @@ pub(super) async fn execute_turn(
                     continue 'agent_loop;
                 }
 
-                let usage = batch.response_usage.clone();
-                if context_organizer.needs_compression(observed_total_tokens(&usage)) {
-                    active_compression = Some(start_context_compression(
+                let observed_tokens = observed_total_tokens(&batch.response_usage);
+                if context_organizer.needs_compression(observed_tokens) {
+                    active_compression = Some(ActiveCompression::start(
                         ctx,
                         &context_organizer,
-                        usage,
+                        observed_tokens,
                         CompressionContinuation::ToolBatch,
                         false,
                     ));

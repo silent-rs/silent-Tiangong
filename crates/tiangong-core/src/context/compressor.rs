@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelRequest, SingleProviderClient, StopReason, TokenUsage};
 use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session};
 use crate::turn_context::TurnContext;
@@ -12,7 +13,7 @@ fn is_compressible(message: &Message) -> bool {
         && message.phase != MessagePhase::CompressedResume
 }
 
-/// 使用 Session 和客户端快照执行压缩请求，不直接修改真实会话。
+/// 使用 Session 和客户端快照执行压缩请求，并统一处理任务启动、结果提交和通知。
 pub struct ContextCompressor {
     session: Session,
     client: SingleProviderClient,
@@ -126,15 +127,63 @@ impl ContextCompressor {
         })
     }
 
-    pub(crate) fn notify_started(ctx: &TurnContext) {
+    pub(crate) fn start_auto(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        force_target_budget: bool,
+    ) -> tokio::task::JoinHandle<std::result::Result<CompressionUpdate, CompressionError>> {
+        Self::notify_started(ctx);
+        let budget_tokens = if force_target_budget {
+            0
+        } else {
+            observed_tokens
+        };
+        Self::start_task(Self::new(ctx), organizer, budget_tokens, true)
+    }
+
+    pub(crate) fn start_manual(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+    ) -> Option<tokio::task::JoinHandle<std::result::Result<CompressionUpdate, CompressionError>>>
+    {
+        Self::notify_started(ctx);
+        let compressor = Self::new(ctx);
+        if !compressor.has_pending_messages() {
+            Self::notify_result(ctx, ContextCompressAction::Noop);
+            return None;
+        }
+        Some(Self::start_task(
+            compressor,
+            organizer,
+            observed_tokens,
+            false,
+        ))
+    }
+
+    fn start_task(
+        compressor: Self,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        include_current_task: bool,
+    ) -> tokio::task::JoinHandle<std::result::Result<CompressionUpdate, CompressionError>> {
+        let output_budget = organizer.compression_output_budget(observed_tokens);
+        tokio::spawn(async move {
+            let output_budget = output_budget.ok_or_else(|| {
+                CompressionError::new("上下文剩余空间不足 2048 tokens，无法生成有效摘要")
+            })?;
+            compressor
+                .compress(output_budget, include_current_task)
+                .await
+        })
+    }
+
+    fn notify_started(ctx: &TurnContext) {
         let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
             summary_up_to: ctx.session.summary_up_to,
             total_messages: ctx.session.messages.len(),
         });
-    }
-
-    pub(crate) fn notify_noop(ctx: &TurnContext) {
-        Self::notify_result(ctx, ContextCompressAction::Noop);
     }
 
     pub(crate) fn notify_cancelled(ctx: &TurnContext) {
@@ -148,21 +197,14 @@ impl ContextCompressor {
         Self::notify_session_result(stream_tx, session, ContextCompressAction::Clear);
     }
 
-    pub(crate) fn notify_auto_success(
+    fn notify_auto_success(
         ctx: &TurnContext,
         update: &CompressionUpdate,
         current_tokens: usize,
         observed_tokens: usize,
     ) {
         Self::notify_result(ctx, ContextCompressAction::Auto);
-        crate::react::context::emit_token_usage(
-            &ctx.stream_tx,
-            &update.usage,
-            Some(current_tokens),
-            ctx.context_limit,
-            "context_summary",
-            None,
-        );
+        Self::notify_usage(ctx, &update.usage, Some(current_tokens), "context_summary");
         tracing::info!(
             session_id = %ctx.session.id,
             observed_tokens,
@@ -173,19 +215,8 @@ impl ContextCompressor {
         );
     }
 
-    pub(crate) fn notify_auto_failure(
-        ctx: &TurnContext,
-        usage: &TokenUsage,
-        error: &dyn std::fmt::Display,
-    ) {
-        crate::react::context::emit_token_usage(
-            &ctx.stream_tx,
-            usage,
-            None,
-            ctx.context_limit,
-            "context_summary_failed",
-            None,
-        );
+    fn notify_auto_failure(ctx: &TurnContext, usage: &TokenUsage, error: &dyn std::fmt::Display) {
+        Self::notify_usage(ctx, usage, None, "context_summary_failed");
         tracing::warn!(
             session_id = %ctx.session.id,
             error = %error,
@@ -194,19 +225,13 @@ impl ContextCompressor {
         Self::notify_result(ctx, ContextCompressAction::Failed);
     }
 
-    pub(crate) fn notify_manual_success(
-        ctx: &TurnContext,
-        update: &CompressionUpdate,
-        current_tokens: usize,
-    ) {
+    fn notify_manual_success(ctx: &TurnContext, update: &CompressionUpdate, current_tokens: usize) {
         Self::notify_result(ctx, ContextCompressAction::Compress);
-        crate::react::context::emit_token_usage(
-            &ctx.stream_tx,
+        Self::notify_usage(
+            ctx,
             &update.usage,
             Some(current_tokens),
-            ctx.context_limit,
             "manual_context_compress",
-            None,
         );
         tracing::info!(
             session_id = %ctx.session.id,
@@ -215,19 +240,8 @@ impl ContextCompressor {
         );
     }
 
-    pub(crate) fn notify_manual_failure(
-        ctx: &TurnContext,
-        usage: &TokenUsage,
-        error: &dyn std::fmt::Display,
-    ) {
-        crate::react::context::emit_token_usage(
-            &ctx.stream_tx,
-            usage,
-            None,
-            ctx.context_limit,
-            "manual_context_compress_failed",
-            None,
-        );
+    fn notify_manual_failure(ctx: &TurnContext, usage: &TokenUsage, error: &dyn std::fmt::Display) {
+        Self::notify_usage(ctx, usage, None, "manual_context_compress_failed");
         tracing::warn!(
             session_id = %ctx.session.id,
             error = %error,
@@ -240,6 +254,22 @@ impl ContextCompressor {
             level: "error".to_string(),
         });
         Self::notify_result(ctx, ContextCompressAction::Failed);
+    }
+
+    fn notify_usage(
+        ctx: &TurnContext,
+        usage: &TokenUsage,
+        current_tokens: Option<usize>,
+        source: &'static str,
+    ) {
+        crate::react::context::emit_token_usage(
+            &ctx.stream_tx,
+            usage,
+            current_tokens,
+            ctx.context_limit,
+            source,
+            None,
+        );
     }
 
     pub(crate) fn complete_auto(
@@ -274,6 +304,32 @@ impl ContextCompressor {
                 accumulated_usage.accumulate(&error.usage);
                 Self::notify_auto_failure(ctx, &error.usage, &error);
                 None
+            }
+        }
+    }
+
+    pub(crate) fn complete_manual(
+        ctx: &mut TurnContext,
+        result: std::result::Result<
+            std::result::Result<CompressionUpdate, CompressionError>,
+            tokio::task::JoinError,
+        >,
+    ) {
+        let result = result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())));
+
+        match result {
+            Ok(update) => match apply_compression(ctx, &update, true) {
+                Ok(current_tokens) => Self::notify_manual_success(ctx, &update, current_tokens),
+                Err(error) => {
+                    ctx.session.token_usage.accumulate(&update.usage);
+                    ctx.session.persist_to_disk();
+                    Self::notify_manual_failure(ctx, &update.usage, &error);
+                }
+            },
+            Err(error) => {
+                ctx.session.token_usage.accumulate(&error.usage);
+                ctx.session.persist_to_disk();
+                Self::notify_manual_failure(ctx, &error.usage, &error);
             }
         }
     }

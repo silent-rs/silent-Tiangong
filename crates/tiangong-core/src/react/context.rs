@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender as StdSender;
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use crate::context::compressor::{CompressionError, ContextCompressor, apply_compression};
+use crate::context::compressor::ContextCompressor;
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
@@ -163,25 +163,11 @@ pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
 ) {
-    ContextCompressor::notify_started(&ctx);
-
-    let compressor = ContextCompressor::new(&ctx);
-    if !compressor.has_pending_messages() {
-        ContextCompressor::notify_noop(&ctx);
-        return;
-    }
-
     let observed_tokens = ctx.session.current_tokens;
-    let output_budget =
-        ContextOrganizer::new(ctx.context_limit).compression_output_budget(observed_tokens);
-    let mut task = tokio::spawn(async move {
-        let Some(output_budget) = output_budget else {
-            return Err(CompressionError::new(
-                "上下文剩余空间不足 2048 tokens，无法生成有效摘要",
-            ));
-        };
-        compressor.compress(output_budget, false).await
-    });
+    let organizer = ContextOrganizer::new(ctx.context_limit);
+    let Some(mut task) = ContextCompressor::start_manual(&ctx, &organizer, observed_tokens) else {
+        return;
+    };
 
     let wait_for_cancel = async {
         loop {
@@ -199,28 +185,9 @@ pub(crate) async fn run_manual_context_compression(
             ContextCompressor::notify_cancelled(&ctx);
             return;
         }
-        result = &mut task => {
-            result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())))
-        }
+        result = &mut task => result
     };
-
-    match result {
-        Ok(update) => match apply_compression(&mut ctx, &update, true) {
-            Ok(current_tokens) => {
-                ContextCompressor::notify_manual_success(&ctx, &update, current_tokens);
-            }
-            Err(error) => {
-                ctx.session.token_usage.accumulate(&update.usage);
-                ctx.session.persist_to_disk();
-                ContextCompressor::notify_manual_failure(&ctx, &update.usage, &error);
-            }
-        },
-        Err(err) => {
-            ctx.session.token_usage.accumulate(&err.usage);
-            ctx.session.persist_to_disk();
-            ContextCompressor::notify_manual_failure(&ctx, &err.usage, &err);
-        }
-    }
+    ContextCompressor::complete_manual(&mut ctx, result);
 }
 
 pub(crate) fn select_client_for_request<'a>(

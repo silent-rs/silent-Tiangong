@@ -1,7 +1,6 @@
 /// 上下文阈值计算器
 ///
-/// 仅负责压缩阈值的计算与判断。实际压缩由 `ContextCompressor` 承担
-/// （它使用 TurnContext 快照发起请求，成功后再由调用方提交结果）。
+/// 仅负责压缩阈值的计算与判断。任务启动和结果提交由 `ContextCompressor` 承担。
 pub struct ContextOrganizer {
     /// 模型上下文限制（token 数）
     context_limit: usize,
