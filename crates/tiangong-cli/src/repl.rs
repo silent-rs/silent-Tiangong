@@ -247,14 +247,15 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     }
 
     output::status("再见！");
-    // 获取 Core 的最终 session 并持久化
-    // worker panic 时无法取回会话，记录告警后跳过持久化（避免丢失提示）。
-    match core.into_session() {
-        Ok(final_session) if !final_session.messages.is_empty() => {
-            state.save_core_session(final_session);
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "获取最终 session 失败，跳过持久化"),
+    // Core 终止:worker 已实时落盘,session 真相源归磁盘(issue #245)。
+    // into_session 负责 Cancel 终止活跃 turn;随后只需 reload 同步内存镜像,
+    // 不再 save_core_session 重复写盘。
+    if let Err(e) = core.into_session() {
+        tracing::warn!(error = %e, "终止 Core 最终 turn 失败");
+    }
+    let active_id = state.active_session_id().to_string();
+    if !active_id.is_empty() {
+        let _ = state.reload_session_from_disk(&active_id);
     }
     tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())

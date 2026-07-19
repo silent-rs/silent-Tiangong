@@ -1,37 +1,6 @@
 use super::super::super::*;
 
 impl TiangongState {
-    /// 保存 TiangongCore 退出时返回的 session
-    ///
-    /// 将 Core 的最终 session 合并到 TiangongState 并持久化。
-    /// 如果该 session 已存在则替换，否则插入。
-    pub fn save_core_session(&mut self, mut session: Session) {
-        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
-        let session_id = session.id.clone();
-        if let Some(existing) = self
-            .store
-            .session
-            .sessions
-            .iter_mut()
-            .find(|s| s.id == session_id)
-        {
-            let existing_cwd = existing.cwd.clone();
-            let existing_cwd_mode = existing.cwd_mode.clone();
-            let existing_trust_mode = existing.trust_mode;
-            *existing = session;
-            if existing_cwd_mode == tiangong_core::session::SessionCwdMode::Inherit {
-                existing.cwd = existing_cwd;
-                existing.cwd_mode = existing_cwd_mode;
-            }
-            existing.trust_mode = existing_trust_mode;
-        } else {
-            self.store.session.sessions.insert(0, session);
-            self.store.session.active_session_id = session_id.clone();
-        }
-        self.resync_session_metadata();
-        let _ = self.persist_session_and_app(&session_id);
-    }
-
     pub fn create_session(&mut self) {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
