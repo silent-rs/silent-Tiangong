@@ -1,8 +1,6 @@
 use tiangong_llm::ModelEndpoint;
 use tiangong_llm::models_config::RoutingSlot;
 
-use crate::app_state::support::RuntimeConfig;
-
 use super::super::*;
 
 impl TiangongState {
@@ -21,11 +19,6 @@ impl TiangongState {
             .resolve_slot(RoutingSlot::Chat)
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
-
-        let context_limit = Self::resolve_chat_context_limit(&models_config, &model_endpoint.model);
-        // issue #245:不再构造 RuntimeEngine(client/tool registry 已下放给 Core)。
-        // 仅缓存 context_limit 供会话派生量与 UI 展示。
-        let runtime = RuntimeConfig { context_limit };
 
         let mut state = Self {
             store: AppStore {
@@ -55,7 +48,6 @@ impl TiangongState {
                     app_storage_path,
                     sessions_dir_path,
                 }),
-                runtime,
             },
             core_manager: std::sync::OnceLock::new(),
         };
@@ -116,7 +108,7 @@ impl TiangongState {
             .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
         let active_trust_mode = state.active_session_trust_mode();
         state.store.agent.agent_config.trust_mode = active_trust_mode;
-        state.rebuild_runtime_from_current_config();
+        state.refresh_chat_endpoint();
         state.store.provider.model_list = normalize_model_list(
             state.store.provider.model_list.clone(),
             &state.store.provider.model_endpoint.model,
@@ -151,8 +143,7 @@ impl TiangongState {
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;
-            // agent_config 变更后需重建 runtime
-            self.rebuild_runtime_from_current_config();
+            self.refresh_chat_endpoint();
         }
         self.resync_session_metadata();
     }

@@ -218,8 +218,17 @@ impl TiangongState {
         session_id: &str,
     ) -> tiangong_core::core_config::CoreConfig {
         let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
-        // context_limit 由 config 层解析注入（core 不做配置磁盘 IO）。
-        let context_limit = Self::resolve_chat_context_limit(self.models_config(), &llm.chat.model);
+        // context_limit 由 config 层解析(模型名→context_window 映射 + 用户 override)。
+        // issue #245:不再经 app-state 的 resolve_chat_context_limit 包装,直接调 config 层。
+        let chat_override = self
+            .models_config()
+            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+            .and_then(|resolved| resolved.context_window);
+        let context_limit = tiangong_config::io::resolve_context_limit_with_override(
+            &tiangong_config::io::storage_root(),
+            &llm.chat.model,
+            chat_override,
+        );
         let target = self
             .session_metadata()
             .iter()

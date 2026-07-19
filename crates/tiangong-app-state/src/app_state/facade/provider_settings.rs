@@ -40,7 +40,7 @@ impl TiangongState {
             self.store.provider.model_list.clone(),
             &self.store.provider.model_endpoint.model,
         );
-        self.rebuild_runtime_from_current_config();
+        self.refresh_chat_endpoint();
         self.replace_run_snapshot(
             RunStatus::Idle,
             format!("模型已切换：{}", self.store.provider.model_endpoint.model),
@@ -106,7 +106,7 @@ impl TiangongState {
             .resolve_slot(RoutingSlot::Chat)
             .map(ModelEndpoint::from_resolved)
             .unwrap_or_default();
-        self.rebuild_runtime_from_current_config();
+        self.refresh_chat_endpoint();
         self.replace_run_snapshot(
             RunStatus::Idle,
             format!("模型供应商已更新：{}", self.provider_label()),

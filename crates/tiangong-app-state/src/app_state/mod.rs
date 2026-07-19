@@ -329,7 +329,7 @@ impl TiangongState {
         if self.store.session.active_session_id == session_id {
             // 兼容旧的状态读取；真实来源是当前会话。
             self.store.agent.agent_config.trust_mode = mode;
-            self.rebuild_runtime_from_current_config();
+            self.refresh_chat_endpoint();
         }
         self.resync_session_metadata();
         Ok(())
@@ -354,7 +354,7 @@ impl TiangongState {
             tiangong_config::io::save_custom_prompt(&prompt)?;
             self.store.agent.agent_config.custom_system_prompt = String::new();
         }
-        self.rebuild_runtime_from_current_config();
+        self.refresh_chat_endpoint();
         self.persist_app_only()
     }
 

@@ -5,7 +5,6 @@ impl TiangongState {
         let mut session = Session::new("新对话");
         session.cwd = self.store.session.workspace_dir.clone();
         session.trust_mode = self.store.agent.agent_config.default_trust_mode;
-        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.agent.agent_config.trust_mode = session.trust_mode;
         self.store.session.active_session_id = session.id.clone();
         self.store.session.session_title_draft = session.title.clone();
@@ -45,7 +44,6 @@ impl TiangongState {
         };
         session.trust_mode = trust_mode;
         session.reasoning_effort = Some(reasoning_effort);
-        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         let session_id = session.id.clone();
         self.store.session.sessions.push(session.clone());
         self.store
@@ -160,7 +158,6 @@ impl TiangongState {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
-            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store
@@ -231,7 +228,6 @@ impl TiangongState {
             let mut session = Session::new(DEFAULT_SESSION_TITLE);
             session.cwd = self.store.session.workspace_dir.clone();
             session.trust_mode = self.store.agent.agent_config.default_trust_mode;
-            Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
             self.store.session.active_session_id = session.id.clone();
             self.store.session.session_title_draft = session.title.clone();
             self.store

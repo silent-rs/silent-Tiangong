@@ -57,7 +57,6 @@ impl TiangongState {
             loaded.context_limit_tokens = existing.context_limit_tokens;
             *existing = loaded;
         } else {
-            Self::apply_derived_context_metrics(&mut loaded, self.services.runtime.context_limit);
             self.store.session.sessions.push(loaded);
         }
         self.resync_session_metadata();
@@ -103,7 +102,6 @@ impl TiangongState {
 
         let mut session = Session::new(DEFAULT_SESSION_TITLE);
         session.cwd = self.store.session.workspace_dir.clone();
-        Self::apply_derived_context_metrics(&mut session, self.services.runtime.context_limit);
         self.store.session.active_session_id = session.id.clone();
         self.store.session.sessions.push(session);
         self.store.session.sessions.len() - 1

@@ -51,17 +51,4 @@ pub struct AppPaths {
 #[derive(Debug)]
 pub struct AppServices {
     pub repository: AppRepository,
-    /// 轻量运行时配置缓存（issue #245:替代原 RuntimeEngine）。
-    /// 仅保留 UI 展示与派生量计算所需的 context_limit + provider_label,
-    /// 不再持有 client / tool_overrides / plugin provider registry——这些
-    /// 由 Core 每 turn 现建,app-state 不执行 turn。
-    pub runtime: RuntimeConfig,
-}
-
-/// 运行时配置缓存:从 models_config 派生的两个轻量字段。
-#[derive(Debug, Clone)]
-pub struct RuntimeConfig {
-    /// 当前 chat 模型的上下文窗口上限(供会话派生 context_limit /
-    /// compression_threshold)。
-    pub context_limit: usize,
 }
