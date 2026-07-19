@@ -868,14 +868,16 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
         .await?;
     let _draft_guard = state.draft_update_lock(&deleted_id).lock_owned().await;
     let _send_guard = state.session_send_lock(&deleted_id).lock_owned().await;
-    stop_and_join_core(state.inner(), &deleted_id).await;
-    // stop_and_join_core 会先从 Core 映射中取走实例，旧流消费者的 EOF 因而不会再
-    // 命中 current-instance 清理分支。这里必须主动唤醒内嵌 HTTP 等待者；其 lease
-    // 随请求返回释放 remote owner，避免删除后同会话永久保持“远端执行中”。
-    state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
-    // 附件候选需遍历会话消息（完整 Session 字段）。Core 已停，磁盘稳定，
-    // 在锁外从磁盘加载（issue #245：session 真相源归磁盘）。
+    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
     let deleted_session = state.inner().core_manager.load_session(&deleted_id).ok();
+    // 一步完成:retire core(取消在途 turn + 等待写盘) + 删 session.json。
+    state
+        .inner()
+        .core_manager
+        .delete_session(&deleted_id)
+        .await
+        .map_err(|error| format!("删除会话失败：{error}"))?;
+    state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
     let mut draft_attachments = state
         .with_state(|core_state| {
             let mut attachments = core_state.session_input_draft(&deleted_id).attachments;
@@ -883,7 +885,7 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
                 attachments.extend(session_attachment_candidates(session));
             }
             let active_before = core_state.active_session_id().to_string();
-            core_state.delete_session_by_id(&deleted_id)?;
+            core_state.remove_session_state(&deleted_id)?;
             if core_state.active_session_id() != active_before {
                 state.mark_active_session_changed();
             }
@@ -934,12 +936,7 @@ pub async fn delete_sessions_by_cwd(
     for id in &deleted_ids {
         send_guards.push(state.session_send_lock(id).lock_owned().await);
     }
-    for id in &deleted_ids {
-        stop_and_join_core(state.inner(), id).await;
-        state.fail_remote_session_waiters(id, "目标会话已删除");
-    }
-    // 附件候选需遍历会话消息；Core 已停、磁盘稳定，锁外从磁盘加载
-    //（issue #245：session 真相源归磁盘）。
+    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
     let deleted_sessions: std::collections::HashMap<String, tiangong_core::session::Session> =
         deleted_ids
             .iter()
@@ -952,6 +949,11 @@ pub async fn delete_sessions_by_cwd(
                     .map(|session| (id.clone(), session))
             })
             .collect();
+    // 一步完成:retire core + 删 session.json。
+    for id in &deleted_ids {
+        let _ = state.inner().core_manager.delete_session(id).await;
+        state.fail_remote_session_waiters(id, "目标会话已删除");
+    }
     let mut draft_attachments = state
         .with_state(|core_state| {
             let mut candidates = Vec::new();
@@ -962,7 +964,7 @@ pub async fn delete_sessions_by_cwd(
                     if let Some(session) = deleted_sessions.get(id) {
                         candidates.extend(session_attachment_candidates(session));
                     }
-                    core_state.delete_session_by_id(id)?;
+                    core_state.remove_session_state(id)?;
                 }
             }
             if core_state.active_session_id() != active_before {

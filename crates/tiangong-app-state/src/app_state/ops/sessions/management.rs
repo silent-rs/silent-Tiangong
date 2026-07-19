@@ -139,7 +139,12 @@ impl TiangongState {
 
     /// 按显式 ID 删除会话。调用方可以在等待 Core 停止期间仍固定原目标，
     /// 不会因用户切换活动会话而删错对象。
-    pub fn delete_session_by_id(&mut self, session_id: &str) -> Result<()> {
+    /// 删除会话的内存状态 + UI 状态（不含磁盘文件删除）。
+    ///
+    /// 磁盘 Core 清理 + session.json 删除由 `core_manager.delete_session` 统一完成
+    /// （issue #245）。本方法只做：内存 sessions vec 移除、草稿清理、active_session
+    /// 切换、列表清空时新建默认会话、app.json 持久化。
+    pub fn remove_session_state(&mut self, session_id: &str) -> Result<()> {
         let Some(remove_idx) = self
             .store
             .session
@@ -183,7 +188,6 @@ impl TiangongState {
             self.store.agent.agent_config.trust_mode = trust_mode;
         }
 
-        self.remove_session_file(session_id)?;
         if self.store.session.sessions.len() == 1
             && self.store.session.sessions[0].messages.is_empty()
         {
@@ -192,6 +196,15 @@ impl TiangongState {
         }
         self.resync_session_metadata();
         self.persist_app_only()
+    }
+
+    /// 删除会话：内存状态 + 磁盘文件（向后兼容入口）。
+    ///
+    /// issue #245:host 删除路径应优先用 `core_manager.delete_session`(retire core
+    /// + 删文件一步完成) + `remove_session_state`(UI 状态更新)。
+    pub fn delete_session_by_id(&mut self, session_id: &str) -> Result<()> {
+        self.remove_session_file(session_id)?;
+        self.remove_session_state(session_id)
     }
 
     /// 删除指定 workspace（cwd）下的所有会话。

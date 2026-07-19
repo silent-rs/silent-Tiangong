@@ -548,12 +548,11 @@ async fn delete_session(
 
     let _draft_guard = state.draft_update_lock(session_id).lock_owned().await;
     let _send_guard = state.session_send_lock(session_id).lock_owned().await;
-    crate::commands::stop_and_join_core(state, session_id).await;
-    // Core 已停止且从映射取走后，任何后续删除失败都不能再依赖流 EOF 唤醒等待者。
-    state.fail_remote_session_waiters(session_id, "目标会话已删除");
-    // 附件候选需遍历消息；Core 已停、磁盘稳定，锁外从磁盘 load
-    //（issue #245：真相源归磁盘）。
+    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
     let deleted_session = state.core_manager.load_session(session_id).ok();
+    // 一步完成:retire core(取消在途 turn + 等待写盘) + 删 session.json。
+    let _ = state.core_manager.delete_session(session_id).await;
+    state.fail_remote_session_waiters(session_id, "目标会话已删除");
     let mut attachments = state
         .with_state(|core_state| {
             let mut attachments = core_state.session_input_draft(session_id).attachments;
@@ -561,7 +560,7 @@ async fn delete_session(
                 attachments.extend(crate::commands::session_attachment_candidates(session));
             }
             let active_before = core_state.active_session_id().to_string();
-            core_state.delete_session_by_id(session_id)?;
+            core_state.remove_session_state(session_id)?;
             if core_state.active_session_id() != active_before {
                 state.mark_active_session_changed();
             }
