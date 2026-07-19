@@ -153,8 +153,9 @@ pub(crate) async fn run_manual_context_compression(
     });
 
     // 压缩不可取消：直接 await 完成。Compressor 内部已处理摘要、边界、
-    // 续接消息注入、用量累计、system prompt 重建、落盘。
-    let result = ContextCompressor::new(&mut ctx).compress().await;
+    // 用量累计、system prompt 重建、落盘。手动压缩不注入续接消息
+    //（无进行中 turn，续接消息无承接对象）。
+    let result = ContextCompressor::new(&mut ctx).compress(false).await;
 
     match result {
         Ok(update) if update.compressed => {

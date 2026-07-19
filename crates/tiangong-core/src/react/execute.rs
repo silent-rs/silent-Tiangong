@@ -740,7 +740,8 @@ async fn run_context_compression(ctx: &mut TurnContext, observed_usage: &TokenUs
         total_messages,
     });
 
-    match ContextCompressor::new(ctx).compress().await {
+    // 自动压缩发生在 turn 进行中，注入续接消息避免重试请求失忆。
+    match ContextCompressor::new(ctx).compress(true).await {
         Ok(update) if update.compressed => {
             let remaining = ctx
                 .session

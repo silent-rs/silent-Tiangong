@@ -1,8 +1,21 @@
 use anyhow::Result;
 
 use crate::model::{ModelRequest, TokenUsage};
-use crate::session::{Message, MessageRole, Session};
+use crate::session::{Message, MessagePhase, MessageRole, Session};
 use crate::turn_context::TurnContext;
+
+/// 判断消息是否为「可压缩的有效消息」。
+///
+/// 以下三类对压缩无价值，一律排除：
+/// - `model_excluded`：已被显式排除（如被作废的续接消息）；
+/// - `System`：system prompt 由调用方单独注入，不参与折叠；
+/// - `CompressedResume`：前端不可见的合成续接消息，一次性使用，
+///   不应计入 `messages_count`，也不应混入压缩请求污染摘要。
+fn is_compressible(message: &Message) -> bool {
+    !message.model_excluded
+        && message.role != MessageRole::System
+        && message.phase != MessagePhase::CompressedResume
+}
 
 /// 上下文压缩器
 ///
@@ -33,24 +46,48 @@ impl<'a> ContextCompressor<'a> {
 
     /// 压缩 `summary_up_to` 之后的所有消息。
     ///
+    /// `inject_resume` 为真时，若模型附带了「当前任务状态」，注入
+    /// `CompressedResume` 续接消息。仅在 **turn 进行中的自动压缩** 时传 `true`——
+    /// 续接消息用于避免重试请求失忆。**手动压缩** 发生在独立 task，没有进行中的
+    /// turn，续接消息无任务可承接，传 `false` 跳过注入。
+    ///
     /// 完成后 `ctx` 已包含：新摘要、推进的 `summary_up_to`、压缩边界标记、
-    /// （若有）注入的 `CompressedResume` 续接消息、累计的压缩用量、重建的
-    /// system prompt、已落盘的会话。返回 [`CompressionUpdate`] 供调用方
-    /// 做界面反馈与用量估算。
+    /// （`inject_resume` 为真且有任务时）注入的 `CompressedResume` 续接消息、
+    /// 累计的压缩用量、重建的 system prompt、已落盘的会话。返回
+    /// [`CompressionUpdate`] 供调用方做界面反馈与用量估算。
     ///
     /// 摘要可能为空（模型输出空间不足等）。压缩主目的是释放上下文空间，
     /// 故仍推进边界；历史记忆由续接消息和未来的会话检索承接。
-    pub async fn compress(self) -> Result<CompressionUpdate> {
+    ///
+    /// # 错误
+    ///
+    /// 以下情况属于调用方错误，直接返回 `Err`（而非静默 noop）：
+    /// - `summary_up_to` 之后没有消息（边界已在末尾，无可压缩内容）；
+    /// - 待压缩范围内没有有效消息（全部被 `model_excluded` 或为 System）。
+    ///
+    /// 调用方应在到达阈值前确保有可压缩内容，到达本函数时无内容通常意味着
+    /// 阈值/计数逻辑与实际消息流不一致。
+    pub async fn compress(self, inject_resume: bool) -> Result<CompressionUpdate> {
         let split_point = self.ctx.session.messages.len();
         if split_point <= self.ctx.session.summary_up_to {
-            return Ok(CompressionUpdate::default());
+            anyhow::bail!(
+                "无可压缩消息：summary_up_to({}) 已到达末尾({})，\
+                 阈值/计数逻辑可能与实际消息流不一致",
+                self.ctx.session.summary_up_to,
+                split_point,
+            );
         }
         let messages_count = self.ctx.session.messages[self.ctx.session.summary_up_to..split_point]
             .iter()
-            .filter(|m| !m.model_excluded && m.role != MessageRole::System)
+            .filter(|m| is_compressible(m))
             .count();
         if messages_count == 0 {
-            return Ok(CompressionUpdate::default());
+            anyhow::bail!(
+                "待压缩范围 [{}..{}] 内无有效消息（全部被 model_excluded、为 System、\
+                 或为前端不可见的 CompressedResume），阈值/计数逻辑可能与实际消息流不一致",
+                self.ctx.session.summary_up_to,
+                split_point,
+            );
         }
 
         let (summary, current_task, usage) = self.fold_summary(split_point).await?;
@@ -61,6 +98,7 @@ impl<'a> ContextCompressor<'a> {
             messages_count,
             summary_len = summary.len(),
             has_current_task = current_task.is_some(),
+            inject_resume,
             "滚动摘要已更新"
         );
 
@@ -69,8 +107,9 @@ impl<'a> ContextCompressor<'a> {
         session.summary_up_to = split_point;
         mark_compact_boundary(&mut session.messages, split_point);
 
-        // 注入「当前任务状态」续接消息，避免 turn 进行中压缩后重试失忆。
-        if let Some(task) = current_task.as_deref() {
+        // 仅在 turn 进行中的自动压缩注入续接消息，避免重试请求失忆。
+        // 手动压缩（inject_resume=false）跳过：无进行中 turn，续接消息无承接对象。
+        if inject_resume && let Some(task) = current_task.as_deref() {
             let resume = build_compressed_resume_message(task);
             let insert_at = session.summary_up_to.min(session.messages.len());
             session.messages.insert(insert_at, resume);
@@ -116,7 +155,7 @@ impl<'a> ContextCompressor<'a> {
         context.extend(
             session.messages[start..split_point]
                 .iter()
-                .filter(|m| !m.model_excluded && m.role != MessageRole::System)
+                .filter(|m| is_compressible(m))
                 .cloned(),
         );
         context.push(Message::new(
@@ -169,15 +208,24 @@ impl<'a> ContextCompressor<'a> {
 
     /// 压缩请求的输出 token 预算。
     ///
+    /// # 建议使用 context ≥ 200k 的模型
+    ///
+    /// 压缩摘要 + 「当前任务状态」段落的输出量较大，过小的输出预算会让模型
+    /// 截断输出，导致 `[[CURRENT_TASK]]` 段落缺失、压缩后 turn 内重试失忆。
+    /// 因此**建议选用上下文窗口 ≥ 200k 的模型**：按下方 5% 预算计算，200k
+    /// 可得 10k+ tokens 的输出空间，足以承载完整摘要与任务状态。
+    ///
+    /// # 预算推导
+    ///
     /// 压缩常在 prompt 达到 context_limit 的 95%（预防性压缩阈值）时触发，
     /// 此时 provider 允许的 completion ≈ context_limit 的 5%。声明的 max_tokens
     /// 不应超过这个剩余——部分 provider 严格校验 `prompt + max_tokens ≤ limit`，
     /// 声明过大（如写死 32k）会直接报错。
     ///
     /// 按 context_limit 的 5%（1/20）如实计算，不设下限：
-    /// - 实际使用的 LLM ≥ 200k，5% = 10k+，写摘要充足；
-    /// - 小上下文（<200k，不在使用建议范围）如实给出小预算，不人为抬高下限
-    ///   导致声明超过实际剩余而报错。
+    /// - 实际使用的 LLM ≥ 200k（建议范围），5% = 10k+，写摘要充足；
+    /// - 小上下文（<200k，不在建议范围）如实给出小预算，不人为抬高下限
+    ///   导致声明超过实际剩余而报错；此时摘要可能被截断。
     fn compression_output_budget(&self) -> u32 {
         const RATIO: u32 = 20; // 1/20 ≈ 5%，对齐预防性压缩阈值
         if self.ctx.context_limit == 0 {
@@ -358,5 +406,48 @@ mod tests {
         assert!(text.contains("用户问X，已得结果Y"));
         // text_content 对 ModelInstruction 返回空（前端据此隐藏）
         assert_eq!(msg.text_content(), "");
+    }
+
+    /// is_compressible：前端不可见的 CompressedResume 不算有效消息，
+    /// 即使它的 role 是 User 且 model_excluded=false。
+    #[test]
+    fn is_compressible_excludes_compressed_resume() {
+        use crate::session::MessagePhase;
+
+        let normal_user = user("你好");
+        assert!(is_compressible(&normal_user));
+
+        let mut resume = user("续接任务状态");
+        resume.phase = MessagePhase::CompressedResume;
+        // CompressedResume 默认 model_excluded=false（需发给模型），但不可压缩
+        assert!(!resume.model_excluded);
+        assert!(!is_compressible(&resume));
+    }
+
+    /// summary_request：前端不可见的 CompressedResume 不混入压缩请求，
+    /// 避免污染摘要。
+    #[test]
+    fn summary_request_excludes_compressed_resume_messages() {
+        use crate::session::MessagePhase;
+
+        let mut session = Session::new("test");
+        let mut resume = user("续接任务状态");
+        resume.phase = MessagePhase::CompressedResume;
+        session.messages = vec![user("你好"), assistant("回复"), resume];
+
+        let req = ContextCompressor::summary_request(&session, session.messages.len());
+
+        // context = [User(你好), Assistant(回复), User(压缩指令)]，
+        // CompressedResume 被排除，不进入压缩请求。
+        assert_eq!(req.context.len(), 3);
+        assert_eq!(req.context[0].text_content(), "你好");
+        assert_eq!(req.context[1].text_content(), "回复");
+        assert!(req.context[2].text_content().contains("压缩为简洁摘要"));
+        assert!(
+            !req.context
+                .iter()
+                .any(|m| m.phase == MessagePhase::CompressedResume),
+            "压缩请求不应包含 CompressedResume 消息"
+        );
     }
 }
