@@ -219,21 +219,15 @@ impl TiangongState {
     /// 配置构建不再依赖完整 `Vec<Session>`，逐步让 session 真相源归磁盘。
     pub fn build_core_config_for_session_from_base(
         &self,
-        _base: &tiangong_core::core_config::CoreConfig,
+        base: &tiangong_core::core_config::CoreConfig,
         session_id: &str,
     ) -> tiangong_core::core_config::CoreConfig {
         let models_config = self.models_config();
         let llm = tiangong_core::core_config::LlmConfig::from_models_config(&models_config);
-        // context_limit 由 config 层解析(模型名→context_window 映射 + 用户 override)。
-        // issue #245:不再经 app-state 的 resolve_chat_context_limit 包装,直接调 config 层。
-        let chat_override = models_config
-            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-            .and_then(|resolved| resolved.context_window);
-        let context_limit = tiangong_config::io::resolve_context_limit_with_override(
-            &tiangong_config::io::storage_root(),
-            &llm.chat.model,
-            chat_override,
-        );
+        // context_limit 已由 config 层解析(registry::set_models 时算好,写入
+        // TiangongConfig.context_limit → to_core_config → base.context_limit)。
+        // issue #245:app-state 不再重复解析。
+        let context_limit = base.context_limit;
         let target = self
             .session_metadata()
             .iter()
