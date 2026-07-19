@@ -76,7 +76,12 @@ pub struct TiangongApp {
     ///
     /// 由 setup 阶段经 [`Self::set_app_handle`] 注入（builder 链构造时尚无 handle）。
     /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例。
-    app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    /// `Arc` 包裹以便与 [`crate::core_factory::DesktopCoreFactory`] 共享同一 cell。
+    app_handle: std::sync::Arc<std::sync::OnceLock<tauri::AppHandle>>,
+    /// 会话级 Core 管理器（issue #245）：承接 app-state 收窄后的资源加载与管理。
+    ///
+    /// P1 阶段与既有 `cores` map 并存；P2 调用点逐步迁移到此后，移除 `cores`。
+    pub core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
     /// 消费者任务由 [`Self::start_tool_injection_consumer`] 启动。
@@ -206,6 +211,23 @@ impl TiangongApp {
             crate::scheduler::DesktopSchedulerContext::new(state.clone(), scheduled_message_tx),
         );
 
+        let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
+        let skill_plugin = std::sync::Arc::new(
+            tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
+        );
+        let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+            storage_root.clone(),
+        ));
+        let factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
+            app_handle: app_handle.clone(),
+            skill_plugin: skill_plugin.clone(),
+            mcp_plugin: mcp_plugin.clone(),
+            config: config.clone(),
+            storage_root: storage_root.clone(),
+        });
+        let core_manager =
+            tiangong_core_manager::CoreManager::new(config.clone(), factory, storage_root);
+
         Self {
             state,
             cores: Mutex::new(HashMap::new()),
@@ -219,18 +241,15 @@ impl TiangongApp {
             discarded_drafts: Mutex::new(HashSet::new()),
             active_session_epoch: AtomicU64::new(0),
             config,
+            core_manager,
             scheduler_context,
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
-            skill_plugin: std::sync::Arc::new(
-                tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
-            ),
-            mcp_plugin: std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-                storage_root,
-            )),
+            skill_plugin,
+            mcp_plugin,
             remote_turn_waiters: Mutex::new(HashMap::new()),
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),
-            app_handle: std::sync::OnceLock::new(),
+            app_handle,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }

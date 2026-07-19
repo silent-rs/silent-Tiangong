@@ -19,6 +19,10 @@ pub struct SessionInputDraft {
 #[derive(Debug)]
 pub struct SessionState {
     pub sessions: Vec<Session>,
+    /// 会话元数据缓存（issue #245）：UI 展示 + 配置构建所需的轻量视图，
+    /// 与 `sessions` **并行维护**。P2 阶段调用点逐步迁移到此处后，
+    /// P3 移除完整 `sessions` 字段，真相源归磁盘。
+    pub metadata: Vec<tiangong_core_manager::SessionMetadata>,
     pub active_session_id: String,
     pub workspace_dir: String,
     pub session_title_draft: String,

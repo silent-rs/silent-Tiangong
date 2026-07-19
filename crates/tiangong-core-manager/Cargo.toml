@@ -1,25 +1,18 @@
 [package]
-name = "tiangong-app-state"
+name = "tiangong-core-manager"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
 tiangong-core = { workspace = true }
-tiangong-core-manager = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-llm = { workspace = true }
-tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
-anyhow = { workspace = true }
-chrono = { workspace = true, default-features = false, features = [
-    "std",
-    "clock",
-] }
-scru128 = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-toml = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -9,6 +9,29 @@ impl TiangongState {
         &mut self.store.session.sessions
     }
 
+    /// 会话元数据缓存（issue #245）：UI 展示 + 配置构建所需的轻量视图。
+    ///
+    /// P1 阶段与 `sessions()` 并存；P2 调用点迁移、P3 移除完整 Session 列表后，
+    /// 真相源归磁盘，本缓存作为只读视图。
+    pub fn session_metadata(&self) -> &[tiangong_core_manager::SessionMetadata] {
+        &self.store.session.metadata
+    }
+
+    /// 从完整 `sessions` 重建元数据缓存。
+    ///
+    /// 在所有改变会话列表或会话字段（trust_mode / reasoning_effort / cwd /
+    /// cwd_mode / title / updated_at）的路径末尾调用，保证缓存与 sessions 一致。
+    /// P3 移除 `sessions` 后改为从磁盘扫描重建。
+    pub(in crate::app_state) fn resync_session_metadata(&mut self) {
+        self.store.session.metadata = self
+            .store
+            .session
+            .sessions
+            .iter()
+            .map(tiangong_core_manager::SessionMetadata::from)
+            .collect();
+    }
+
     pub fn active_session_id(&self) -> &str {
         &self.store.session.active_session_id
     }

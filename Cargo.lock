@@ -9623,6 +9623,7 @@ dependencies = [
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-core-manager",
  "tiangong-entry",
  "tiangong-llm",
  "tiangong-media",
@@ -9665,6 +9666,7 @@ dependencies = [
  "tempfile",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-core-manager",
  "tiangong-llm",
  "tiangong-media-archive",
  "tiangong-types",
@@ -9754,6 +9756,22 @@ dependencies = [
  "typed-builder",
  "wiremock",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "tiangong-core-manager"
+version = "0.12.2"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-config",
+ "tiangong-core",
+ "tiangong-llm",
+ "tiangong-types",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

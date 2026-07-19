@@ -36,6 +36,7 @@ impl TiangongState {
             store: AppStore {
                 session: SessionState {
                     sessions: Vec::new(),
+                    metadata: Vec::new(),
                     active_session_id: String::new(),
                     workspace_dir: default_workspace_dir(),
                     session_title_draft: DEFAULT_SESSION_TITLE.to_string(),
@@ -88,6 +89,7 @@ impl TiangongState {
             state.store.session.sessions.push(session);
             let _ = state.persist_to_disk();
         }
+        state.resync_session_metadata();
 
         if !state
             .store
@@ -165,6 +167,7 @@ impl TiangongState {
             // agent_config 变更后需重建 runtime
             self.rebuild_runtime_from_current_config();
         }
+        self.resync_session_metadata();
     }
 
     #[allow(dead_code)]

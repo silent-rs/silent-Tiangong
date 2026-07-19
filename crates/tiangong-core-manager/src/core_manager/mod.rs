@@ -1,0 +1,133 @@
+//! CoreManager：会话级 TiangongCore 注册表与资源管理层。
+//!
+//! 定位（见 issue #245）：
+//! - 持有 `session_id -> TiangongCore` 映射，承接 app-state 收窄后剥离的「资源
+//!   加载与管理」职责
+//! - **不执行 turn**（turn 仍由 Core 内部驱动）
+//! - session 真相源是磁盘，CoreManager 只做按需加载与缓存
+//!
+//! Core 的实际构造由 host 通过 [`crate::CoreFactory`] 注入（不同 host 的插件
+//! 构造差异极大，不能在共享层硬编码）。
+
+pub mod ensure;
+pub mod registry;
+
+pub use self::registry::{CoreRegistry, CoreRegistryGuard};
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Mutex as AsyncMutex;
+
+use tiangong_core::core::TiangongCore;
+use tiangong_core::core_config::CoreConfig;
+use tiangong_core::session::Session;
+
+use crate::CoreFactory;
+
+/// 会话级 TiangongCore 管理器。
+///
+/// 与 [`tiangong_server::remote::core::ServerCoreManager`] 同构：`#[derive(Clone)]`
+/// 的廉价句柄，内部状态全经 `Arc<Mutex<>>` 共享。
+#[derive(Clone)]
+pub struct CoreManager {
+    cores: Arc<Mutex<HashMap<String, TiangongCore>>>,
+    /// 每会话的创建互斥锁：覆盖同一会话从「检查 Core 是否存在」到「插入新 Core」
+    /// 的完整创建区间，防止两路并发为同一 session 各建一份 Core。
+    ///
+    /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
+    creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    config: tiangong_core::core_config::CoreConfigProvider,
+    factory: Arc<dyn CoreFactory>,
+    storage_root: PathBuf,
+}
+
+impl CoreManager {
+    /// 构造管理器。
+    ///
+    /// - `config`：全局配置模板 provider，用于 `ensure_core` 的 base 快照与
+    ///   `sync_config` 的模板替换
+    /// - `factory`：host 注入的 Core 构造工厂
+    /// - `storage_root`：session 文件根（形如 `~/.tiangong`）
+    pub fn new(
+        config: tiangong_core::core_config::CoreConfigProvider,
+        factory: Arc<dyn CoreFactory>,
+        storage_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            cores: Arc::new(Mutex::new(HashMap::new())),
+            creation_locks: Arc::new(Mutex::new(HashMap::new())),
+            config,
+            factory,
+            storage_root: storage_root.into(),
+        }
+    }
+
+    /// 全局配置 provider（host 用它取 base 快照构建 per-session 配置）。
+    pub fn config(&self) -> &tiangong_core::core_config::CoreConfigProvider {
+        &self.config
+    }
+
+    /// 会话文件根目录。
+    pub fn storage_root(&self) -> &Path {
+        &self.storage_root
+    }
+
+    /// 取回会话 Core（消费，用于持久化或显式切换）。
+    ///
+    /// 调用方负责 `shutdown_join`；本方法只负责从 registry 移除所有权。
+    /// 实现见 `core_manager/ensure.rs`（与 `retire_core` 等生命周期方法同文件）。
+
+    /// 从磁盘按 id 加载完整 Session（委托 `Session::load_from_storage`）。
+    pub fn load_session(&self, session_id: &str) -> Result<Session, String> {
+        Session::load_from_storage(&self.storage_root, session_id)
+    }
+
+    /// 同步配置快照到所有存活 Core。
+    ///
+    /// 对每个存活 Core 调用 `replace_config` + `set_trust_mode`。host 负责在调用
+    /// 前构建好 `session_id -> CoreConfig` 映射（通常读 app-state 的配置缓存）。
+    /// 同时把 `template` 替换为全局 provider 的最新模板（仅作新建 Core 的辅助，
+    /// 不承载任一会话的 trust/reasoning 覆盖）。
+    pub fn sync_config(&self, template: CoreConfig, session_configs: &HashMap<String, CoreConfig>) {
+        self.config.replace(template);
+        let mut registry = self.registry();
+        for (session_id, core) in registry.iter_mut() {
+            if let Some(config) = session_configs.get(session_id) {
+                let _ = core.replace_config(config.clone());
+                core.set_trust_mode(config.trust_mode);
+            }
+        }
+    }
+
+    /// 取得 registry 的句柄（暴露给 host 做 deliver / has_live 等只读访问）。
+    pub fn registry(&self) -> CoreRegistryGuard<'_> {
+        CoreRegistryGuard::lock(&self.cores)
+    }
+
+    /// 每会话的创建互斥锁句柄（供 host 取锁后串行化创建前后的额外工作）。
+    pub fn creation_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut locks = match self.creation_locks.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(error = %error, "Core 创建锁表已损坏，恢复后继续");
+                error.into_inner()
+            }
+        };
+        locks
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    /// 是否持有可投递的 Core。
+    pub fn has_live_core(&self, session_id: &str) -> bool {
+        self.registry().contains_key(session_id)
+    }
+
+    /// 引用注入的工厂（host 需要时使用，通常 `ensure_core` 已自动调用）。
+    pub fn factory(&self) -> &Arc<dyn CoreFactory> {
+        &self.factory
+    }
+}

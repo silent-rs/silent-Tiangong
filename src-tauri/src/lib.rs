@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod commands;
+mod core_factory;
 mod embedded_server;
 pub mod scheduler;
 pub mod view;
