@@ -305,6 +305,7 @@ impl TiangongState {
             self.store.agent.agent_config.trust_mode = mode;
             self.rebuild_runtime_from_current_config();
         }
+        self.resync_session_metadata();
         Ok(())
     }
 
@@ -372,6 +373,7 @@ impl TiangongState {
             if self.store.session.active_session_id == session_id {
                 self.store.agent.agent_config.reasoning_effort = effort;
             }
+            self.resync_session_metadata();
             Ok(())
         } else {
             Err(anyhow::anyhow!(

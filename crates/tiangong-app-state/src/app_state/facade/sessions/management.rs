@@ -28,6 +28,7 @@ impl TiangongState {
             self.store.session.sessions.insert(0, session);
             self.store.session.active_session_id = session_id.clone();
         }
+        self.resync_session_metadata();
         let _ = self.persist_session_and_app(&session_id);
     }
 
@@ -45,6 +46,7 @@ impl TiangongState {
             .entry(session.id.clone())
             .or_default();
         self.store.session.sessions.push(session);
+        self.resync_session_metadata();
         // 仅更新 app.json 中的 active_session_id，不持久化空会话文件
         // 会话文件将在用户发送第一条消息时自动持久化
         let _ = self.persist_app_only();
@@ -74,6 +76,7 @@ impl TiangongState {
             .input_drafts
             .entry(session_id.clone())
             .or_default();
+        self.resync_session_metadata();
         if let Err(error) = self.persist_app_only() {
             self.store
                 .session
@@ -99,6 +102,7 @@ impl TiangongState {
             let _ = self.persist_app_only();
             let _ = self.try_auto_resume_unfinished_plan_for_active_session();
         }
+        self.resync_session_metadata();
     }
 
     pub fn save_active_session_title(&mut self) -> Result<()> {
@@ -128,8 +132,10 @@ impl TiangongState {
         };
 
         session.title = new_title.to_string();
-        self.store.session.session_title_draft = session.title.clone();
-        Ok((active_id, session.title.clone()))
+        let title = session.title.clone();
+        self.store.session.session_title_draft = title.clone();
+        self.resync_session_metadata();
+        Ok((active_id, title))
     }
 
     pub fn delete_active_session(&mut self) -> Result<()> {
@@ -191,6 +197,7 @@ impl TiangongState {
             let current_id = self.store.session.sessions[0].id.clone();
             self.persist_session(&current_id)?;
         }
+        self.resync_session_metadata();
         self.persist_app_only()
     }
 
@@ -250,6 +257,7 @@ impl TiangongState {
             self.store.agent.agent_config.trust_mode = trust_mode;
         }
 
+        self.resync_session_metadata();
         self.persist_app_only()?;
         Ok(deleted_ids)
     }

@@ -60,6 +60,7 @@ impl TiangongState {
             Self::apply_derived_context_metrics(&mut loaded, self.services.runtime.context_limit);
             self.store.session.sessions.push(loaded);
         }
+        self.resync_session_metadata();
         Ok(true)
     }
 
@@ -166,5 +167,13 @@ impl TiangongState {
             .first()
             .map(|session| session.id.clone())
             .unwrap_or_default();
+        // ID 规范化会改写 sessions，重建元数据缓存保持同步。
+        self.store.session.metadata = self
+            .store
+            .session
+            .sessions
+            .iter()
+            .map(tiangong_core_manager::SessionMetadata::from)
+            .collect();
     }
 }

@@ -204,6 +204,9 @@ impl TiangongState {
 
     /// 按显式目标会话构建配置，异步发送期间即使活动会话切换也不会借用其他会话的
     /// trust_mode 或 reasoning_effort。
+    ///
+    /// trust_mode / reasoning_effort 从 [`SessionMetadata`] 读取（issue #245）：
+    /// 配置构建不再依赖完整 `Vec<Session>`，逐步让 session 真相源归磁盘。
     pub fn build_core_config_for_session_from_base(
         &self,
         _base: &tiangong_core::core_config::CoreConfig,
@@ -212,15 +215,15 @@ impl TiangongState {
         let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
         // context_limit 由 config 层解析注入（core 不做配置磁盘 IO）。
         let context_limit = Self::resolve_chat_context_limit(self.models_config(), &llm.chat.model);
-        let target_session = self
-            .sessions()
+        let target = self
+            .session_metadata()
             .iter()
-            .find(|session| session.id == session_id);
-        let trust_mode = target_session
-            .map(|session| session.trust_mode)
+            .find(|metadata| metadata.id == session_id);
+        let trust_mode = target
+            .map(|metadata| metadata.trust_mode)
             .unwrap_or(self.agent_config().default_trust_mode);
-        let reasoning_effort = target_session
-            .and_then(|session| session.reasoning_effort.as_deref())
+        let reasoning_effort = target
+            .and_then(|metadata| metadata.reasoning_effort.as_deref())
             .map(str::trim)
             .filter(|effort| !effort.is_empty())
             .map(ToString::to_string)
@@ -260,6 +263,7 @@ impl TiangongState {
                 session.cwd = self.store.session.workspace_dir.clone();
             }
         }
+        self.resync_session_metadata();
         self.persist_app_only()
     }
 
@@ -298,6 +302,7 @@ impl TiangongState {
         } else {
             return Err(anyhow::anyhow!("会话不存在：{session_id}"));
         }
+        self.resync_session_metadata();
         self.persist_session_and_app(session_id)
     }
 }

@@ -169,3 +169,72 @@ fn draft_session_creation_does_not_change_active_session() -> Result<()> {
         },
     )
 }
+
+/// 验证 session 字段写入路径会同步刷新 SessionMetadata（issue #245 P2-A）。
+///
+/// `build_core_config_for_session_from_base` 已改为读 metadata，所以 metadata 必须
+/// 与 sessions 保持一致——本测试覆盖 trust_mode / reasoning_effort / cwd / title。
+#[test]
+fn session_metadata_stays_in_sync_with_session_writes() -> Result<()> {
+    use tiangong_core::session::SessionCwdMode;
+    with_isolated_state("tiangong-state-metadata-sync", |_paths, state| {
+        state.store.agent.agent_config.default_trust_mode =
+            tiangong_core::permission::TrustMode::Supervised;
+        state.create_session();
+        let id = state.active_session_id().to_string();
+
+        // trust_mode 写入应反映到 metadata。
+        state.set_session_trust_mode_in_memory(
+            &id,
+            tiangong_core::permission::TrustMode::FullTrust,
+        )?;
+        let meta = state
+            .session_metadata()
+            .iter()
+            .find(|m| m.id == id)
+            .expect("metadata 缺失");
+        assert_eq!(
+            meta.trust_mode,
+            tiangong_core::permission::TrustMode::FullTrust
+        );
+
+        // reasoning_effort 写入应反映到 metadata。
+        state.set_session_reasoning_effort_in_memory(&id, "high".to_string())?;
+        let meta = state
+            .session_metadata()
+            .iter()
+            .find(|m| m.id == id)
+            .expect("metadata 缺失");
+        assert_eq!(meta.reasoning_effort.as_deref(), Some("high"));
+
+        // 标题写入应反映到 metadata。
+        state.update_session_title_draft("新标题".to_string());
+        state.apply_active_session_title_in_memory()?;
+        let meta = state
+            .session_metadata()
+            .iter()
+            .find(|m| m.id == id)
+            .expect("metadata 缺失");
+        assert_eq!(meta.title, "新标题");
+
+        // build_core_config_for_session_from_base 应读出 metadata 的 trust_mode。
+        let base = tiangong_core::core_config::CoreConfig::default();
+        let config = state.build_core_config_for_session_from_base(&base, &id);
+        assert_eq!(
+            config.trust_mode,
+            tiangong_core::permission::TrustMode::FullTrust
+        );
+        assert_eq!(config.reasoning_effort, "high");
+
+        // cwd 写入应反映到 metadata。
+        state.update_session_cwd(&id, "/custom/cwd".to_string())?;
+        let meta = state
+            .session_metadata()
+            .iter()
+            .find(|m| m.id == id)
+            .expect("metadata 缺失");
+        assert_eq!(meta.cwd, "/custom/cwd");
+        assert_eq!(meta.cwd_mode, SessionCwdMode::Custom);
+        Ok(())
+    })
+}

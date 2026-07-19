@@ -38,6 +38,7 @@ impl TiangongState {
         );
         self.store.session.sessions[idx].updated_at = now_text();
         self.persist_session_and_app(&session_id)?;
+        self.resync_session_metadata();
         let session = self.store.session.sessions[idx].clone();
         self.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
@@ -87,6 +88,7 @@ impl TiangongState {
         );
         self.store.session.sessions[idx].updated_at = now_text();
         self.persist_session_and_app(session_id)?;
+        self.resync_session_metadata();
         let session = self.store.session.sessions[idx].clone();
         self.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
         self.store.runtime.run.summary = "正在处理".to_string();
@@ -122,6 +124,7 @@ impl TiangongState {
 
         session.append_message(role, content);
         session.updated_at = now_text();
+        self.resync_session_metadata();
         self.persist_session_and_app(session_id)
     }
 }
