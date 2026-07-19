@@ -142,17 +142,6 @@ impl CoreManager {
         Ok(())
     }
 
-    /// 创建新会话并持久化到磁盘（issue #245：session CRUD 透过 CoreManager）。
-    ///
-    /// 写入 `{storage_root}/sessions/{id}.json`。如果已存在同 id 会话则覆盖。
-    pub fn create_session(&self, session: &Session) -> Result<(), String> {
-        let mut session = session.clone();
-        session.bind_storage_root(self.storage_root.clone());
-        session
-            .try_persist_to_disk()
-            .map_err(|error| format!("创建会话文件失败：{error}"))
-    }
-
     /// 删除会话：先 retire 对应 Core（取消在途 turn + 等待写盘），
     /// 再删除磁盘 session 文件（issue #245）。
     ///
