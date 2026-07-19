@@ -25,6 +25,8 @@ use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
 
+use crate::SessionMetadata;
+
 /// `ensure_core` 的返回：区分新建与复用既有 Core。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsuredCore {
@@ -78,6 +80,66 @@ impl CoreManager {
     /// 从磁盘按 id 加载完整 Session（委托 `Session::load_from_storage`）。
     pub fn load_session(&self, session_id: &str) -> Result<Session, String> {
         Session::load_from_storage(&self.storage_root, session_id)
+    }
+
+    /// 扫描磁盘 `sessions/` 目录，返回所有会话 id（issue #245：会话列表真相源归磁盘）。
+    pub fn list_session_ids(&self) -> Vec<String> {
+        let dir = self.storage_root.join("sessions");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                ids.push(stem.to_string());
+            }
+        }
+        ids
+    }
+
+    /// 批量加载所有会话的元数据（浅字段，不构造完整 Session）。
+    ///
+    /// 会话文件损坏时跳过（记 warn），不阻断列表。
+    pub fn list_session_metadata(&self) -> Vec<SessionMetadata> {
+        self.list_session_ids()
+            .iter()
+            .filter_map(
+                |id| match SessionMetadata::load_from_storage(&self.storage_root, id) {
+                    Ok(meta) => Some(meta),
+                    Err(error) => {
+                        tracing::warn!(session_id = %id, %error, "跳过损坏的会话文件");
+                        None
+                    }
+                },
+            )
+            .collect()
+    }
+
+    /// 指定会话在磁盘上是否存在。
+    pub fn session_exists(&self, session_id: &str) -> bool {
+        self.storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json"))
+            .exists()
+    }
+
+    /// 删除磁盘上的会话文件（不操作 cores registry——调用方按需 retire_core）。
+    pub fn delete_session_file(&self, session_id: &str) -> Result<(), String> {
+        let path = self
+            .storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| format!("删除会话文件失败：{error}"))?;
+        }
+        Ok(())
     }
 
     /// 同步配置快照到所有存活 Core。
