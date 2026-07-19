@@ -1,4 +1,4 @@
-mod agent_config_facade;
+mod agent_config;
 mod lifecycle;
 mod provider_settings;
 mod runtime;

@@ -10,7 +10,7 @@ use tiangong_core::agent_config::AgentConfig;
 use tiangong_core::runtime::{RunSnapshot, RunStatus};
 use tiangong_core::session::{MessageRole, Session, SessionTaskPlan, now_text};
 
-mod facade;
+mod ops;
 pub(crate) mod repository;
 mod store;
 pub(crate) mod support;
