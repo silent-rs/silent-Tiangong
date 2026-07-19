@@ -187,16 +187,21 @@ impl TiangongState {
     }
 
     pub fn provider_label(&self) -> String {
-        // 从 chat endpoint 直接派生(issue #245:不再经 RuntimeEngine)。
-        let endpoint = &self.store.provider.model_endpoint;
+        // 从 registry 的 chat endpoint 派生(issue #245:不再缓存 model_endpoint)。
+        let models = tiangong_config::registry::models();
+        let endpoint = models
+            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+            .map(tiangong_llm::ModelEndpoint::from_resolved)
+            .unwrap_or_default();
         format!(
             "{} @ {} · {}ms",
             endpoint.model, endpoint.base_url, endpoint.timeout_ms
         )
     }
 
-    pub fn models_config(&self) -> &tiangong_llm::models_config::ModelsConfig {
-        &self.store.provider.models_config
+    /// 模型配置从 config registry 读取(issue #245:不再 app-state 缓存)。
+    pub fn models_config(&self) -> tiangong_llm::models_config::ModelsConfig {
+        tiangong_config::registry::models()
     }
 
     /// 根据当前应用状态构建供 TiangongCore 使用的最小配置快照
@@ -217,11 +222,11 @@ impl TiangongState {
         _base: &tiangong_core::core_config::CoreConfig,
         session_id: &str,
     ) -> tiangong_core::core_config::CoreConfig {
-        let llm = tiangong_core::core_config::LlmConfig::from_models_config(self.models_config());
+        let models_config = self.models_config();
+        let llm = tiangong_core::core_config::LlmConfig::from_models_config(&models_config);
         // context_limit 由 config 层解析(模型名→context_window 映射 + 用户 override)。
         // issue #245:不再经 app-state 的 resolve_chat_context_limit 包装,直接调 config 层。
-        let chat_override = self
-            .models_config()
+        let chat_override = models_config
             .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
             .and_then(|resolved| resolved.context_window);
         let context_limit = tiangong_config::io::resolve_context_limit_with_override(

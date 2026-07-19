@@ -4163,7 +4163,7 @@ fn user_home_dir() -> Option<PathBuf> {
 #[tauri::command]
 pub async fn get_models_config(state: State<'_, TiangongApp>) -> Result<ModelsConfigView, String> {
     state
-        .with_state_read(|core_state| Ok(ModelsConfigView::from_core(core_state.models_config())))
+        .with_state_read(|core_state| Ok(ModelsConfigView::from_core(&core_state.models_config())))
         .await
 }
 
@@ -4191,7 +4191,7 @@ pub async fn get_memory_config(state: State<'_, TiangongApp>) -> Result<MemoryCo
         .with_state_read(|core_state| {
             Ok(MemoryConfigView::from_memory(
                 &config,
-                core_state.models_config(),
+                &core_state.models_config(),
             ))
         })
         .await
@@ -4206,7 +4206,7 @@ pub async fn set_memory_config(
     let memory_config = state
         .with_state_read(|core_state| {
             config
-                .to_memory(core_state.models_config())
+                .to_memory(&core_state.models_config())
                 .map_err(anyhow::Error::msg)
         })
         .await?;
