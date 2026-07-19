@@ -56,7 +56,6 @@ pub struct AppServices {
     /// 不再持有 client / tool_overrides / plugin provider registry——这些
     /// 由 Core 每 turn 现建,app-state 不执行 turn。
     pub runtime: RuntimeConfig,
-    pub turn_service: AppTurnService,
 }
 
 /// 运行时配置缓存:从 models_config 派生的两个轻量字段。

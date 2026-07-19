@@ -812,22 +812,6 @@ fn isolated_core_config_provider(config: &CoreConfig) -> CoreConfigProvider {
     CoreConfigProvider::new(config.clone())
 }
 
-fn resolve_explicit_session(
-    sessions: &[Session],
-    requested_session_id: &str,
-) -> Result<(String, Session)> {
-    let session_id = requested_session_id.trim();
-    if session_id.is_empty() {
-        return Err(anyhow!("会话 ID 不能为空"));
-    }
-    let session = sessions
-        .iter()
-        .find(|session| session.id == session_id)
-        .cloned()
-        .ok_or_else(|| anyhow!("会话不存在：{session_id}"))?;
-    Ok((session_id.to_string(), session))
-}
-
 fn prepare_user_message_blocking(
     media_root: std::path::PathBuf,
     raw: Vec<RawAttachment>,
@@ -1458,21 +1442,6 @@ mod tests {
             size: 4,
             kind: MediaKind::Image,
         }
-    }
-
-    #[test]
-    fn explicit_missing_session_never_falls_back_to_another_session() {
-        let active = Session::new("active");
-        let target = Session::new("target");
-        let sessions = vec![active.clone(), target.clone()];
-
-        let error = resolve_explicit_session(&sessions, "missing-session").unwrap_err();
-        assert!(error.to_string().contains("missing-session"));
-
-        let (resolved_id, resolved) = resolve_explicit_session(&sessions, &target.id).unwrap();
-        assert_eq!(resolved_id, target.id);
-        assert_eq!(resolved.id, target.id);
-        assert_ne!(resolved.id, active.id);
     }
 
     #[test]

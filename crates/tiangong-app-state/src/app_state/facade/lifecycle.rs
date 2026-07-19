@@ -56,7 +56,6 @@ impl TiangongState {
                     sessions_dir_path,
                 }),
                 runtime,
-                turn_service: AppTurnService,
             },
             core_manager: std::sync::OnceLock::new(),
         };
@@ -135,13 +134,6 @@ impl TiangongState {
             let _ = state.persist_to_disk();
         }
 
-        if let Ok(true) = state.try_auto_resume_unfinished_plan_for_active_session() {
-            state.store.runtime.run.summary =
-                "检测到未完成 plan，已在启动时自动继续执行".to_string();
-            state.store.runtime.run.last_result =
-                Some("auto_resumed_unfinished_plan_on_startup".to_string());
-            state.store.runtime.run.last_error = None;
-        }
         state.store.runtime.run.updated_at = now_text();
         // EventLoop 状态恢复已移除（TiangongCore 统一管理执行状态）
 
@@ -163,12 +155,5 @@ impl TiangongState {
             self.rebuild_runtime_from_current_config();
         }
         self.resync_session_metadata();
-    }
-
-    #[allow(dead_code)]
-    pub(in crate::app_state) fn rebuild_runtime_for_agent_config(&mut self) {
-        self.rebuild_runtime_from_current_config();
-        // 动态工具能力调度器由对应插件在 on_engine_rebuilt 时自管，
-        // core 不再触发能力刷新。
     }
 }

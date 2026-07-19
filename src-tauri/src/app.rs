@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use tauri::Manager;
 
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
+use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;

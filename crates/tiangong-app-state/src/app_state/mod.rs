@@ -12,7 +12,6 @@ use tiangong_core::session::{MessageRole, Session, SessionTaskPlan, now_text};
 
 mod facade;
 pub(crate) mod repository;
-mod services;
 mod store;
 pub(crate) mod support;
 #[cfg(test)]
@@ -23,7 +22,6 @@ use self::repository::{
     default_app_storage_path, default_sessions_dir_path, default_workspace_dir,
     normalize_model_list, validate_agent_config,
 };
-use self::services::AppTurnService;
 pub use self::support::StreamEvent;
 use self::support::{LegacyPersistedState, LoadedState, PersistedAppState};
 

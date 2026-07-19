@@ -77,7 +77,6 @@ impl TiangongState {
             self.store.session.session_title_draft = session.title.clone();
             self.store.agent.agent_config.trust_mode = session.trust_mode;
             let _ = self.persist_app_only();
-            let _ = self.try_auto_resume_unfinished_plan_for_active_session();
         }
         self.resync_session_metadata();
     }

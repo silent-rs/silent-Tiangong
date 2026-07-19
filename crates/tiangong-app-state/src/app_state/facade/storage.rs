@@ -109,14 +109,6 @@ impl TiangongState {
         self.store.session.sessions.len() - 1
     }
 
-    /// 自动恢复未完成的计划（已迁移到 TiangongCore 管理）
-    pub(in crate::app_state) fn try_auto_resume_unfinished_plan_for_active_session(
-        &mut self,
-    ) -> Result<bool> {
-        // TiangongCore 统一管理执行，不再从 TiangongState 启动 turn
-        Ok(false)
-    }
-
     pub(in crate::app_state) fn recover_interrupted_tasks(&mut self) -> usize {
         let mut recovered = 0usize;
         for session in &mut self.store.session.sessions {
