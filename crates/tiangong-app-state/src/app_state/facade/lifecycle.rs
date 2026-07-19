@@ -1,13 +1,12 @@
 use tiangong_llm::ModelEndpoint;
 use tiangong_llm::models_config::RoutingSlot;
 
+use crate::app_state::support::RuntimeConfig;
+
 use super::super::*;
 
 impl TiangongState {
     pub fn load_or_default() -> Self {
-        // storage_root 经 RuntimeEngine::new 注入 core cell（core 运行时持久化用）。
-        // app-state 自身的路径计算直接用 tiangong_config::io::storage_root()，不读 cell。
-        let storage_root = crate::app_state::repository::storage_root();
         let app_storage_path = default_app_storage_path();
         let sessions_dir_path = default_sessions_dir_path();
         let default_agent_config = AgentConfig::default();
@@ -24,13 +23,9 @@ impl TiangongState {
             .unwrap_or_default();
 
         let context_limit = Self::resolve_chat_context_limit(&models_config, &model_endpoint.model);
-        let runtime = RuntimeEngine::new(
-            SingleProviderClient::new(model_endpoint.clone()),
-            context_limit,
-            default_agent_config.clone(),
-            storage_root,
-        )
-        .with_models_config(models_config.clone());
+        // issue #245:不再构造 RuntimeEngine(client/tool registry 已下放给 Core)。
+        // 仅缓存 context_limit 供会话派生量与 UI 展示。
+        let runtime = RuntimeConfig { context_limit };
 
         let mut state = Self {
             store: AppStore {
@@ -128,8 +123,7 @@ impl TiangongState {
         );
 
         let recovered_count = state.recover_interrupted_tasks();
-        state.store.runtime.run.summary =
-            format!("模型供应商：{}", state.services.runtime.provider_label());
+        state.store.runtime.run.summary = format!("模型供应商：{}", state.provider_label());
         if recovered_count > 0 {
             state.store.runtime.run.status = RunStatus::Failed;
             state.store.runtime.run.summary =

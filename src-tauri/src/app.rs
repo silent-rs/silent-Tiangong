@@ -201,7 +201,6 @@ impl TiangongApp {
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
         let (scheduled_message_tx, scheduled_message_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // 构造 state：load_or_default 经 RuntimeEngine::new 注入 storage_root 到 core
         //（core 运行时持久化需要）。config 加载走自己的 dir，不依赖 core cell。
         let storage_root = tiangong_app_state::app_state::storage_root();
         let state = std::sync::Arc::new(AsyncMutex::new(

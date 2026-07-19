@@ -1,3 +1,4 @@
+use tiangong_core::model::SingleProviderClient;
 use tiangong_llm::ModelEndpoint;
 use tiangong_llm::models_config::RoutingSlot;
 
@@ -108,10 +109,7 @@ impl TiangongState {
         self.rebuild_runtime_from_current_config();
         self.replace_run_snapshot(
             RunStatus::Idle,
-            format!(
-                "模型供应商已更新：{}",
-                self.services.runtime.provider_label()
-            ),
+            format!("模型供应商已更新：{}", self.provider_label()),
             None,
         );
         self.persist_app_only()

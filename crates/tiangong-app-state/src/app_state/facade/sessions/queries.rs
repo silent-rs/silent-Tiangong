@@ -187,7 +187,12 @@ impl TiangongState {
     }
 
     pub fn provider_label(&self) -> String {
-        self.services.runtime.provider_label()
+        // 从 chat endpoint 直接派生(issue #245:不再经 RuntimeEngine)。
+        let endpoint = &self.store.provider.model_endpoint;
+        format!(
+            "{} @ {} · {}ms",
+            endpoint.model, endpoint.base_url, endpoint.timeout_ms
+        )
     }
 
     pub fn models_config(&self) -> &tiangong_llm::models_config::ModelsConfig {
