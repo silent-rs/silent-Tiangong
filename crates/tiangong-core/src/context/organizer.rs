@@ -1,6 +1,6 @@
 /// 上下文阈值计算器
 ///
-/// 仅负责压缩阈值的计算与判断。任务启动和结果提交由 `ContextCompressor` 承担。
+/// 仅负责压缩阈值的计算与判断。压缩任务生命周期由 `react::compression` 管理。
 pub struct ContextOrganizer {
     /// 模型上下文限制（token 数）
     context_limit: usize,

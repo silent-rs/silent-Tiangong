@@ -190,7 +190,7 @@ impl TiangongCore {
         let ctx = self.build_turn_context()?;
 
         crate::shared_runtime::spawn_turn(ctx, move |ctx, cmd_rx| {
-            Ok(crate::react::context::run_manual_context_compression(
+            Ok(crate::react::compression::run_manual_context_compression(
                 ctx, cmd_rx,
             ))
         })
@@ -213,7 +213,7 @@ impl TiangongCore {
             tracing::warn!(%error, session_id = %self.session_id, "清空上下文落盘失败");
             CoreError::WorkerStopped
         })?;
-        crate::context::compressor::ContextCompressor::notify_cleared(&self.stream_tx, &session);
+        crate::react::compression::notify_cleared(&self.stream_tx, &session);
         Ok(())
     }
 

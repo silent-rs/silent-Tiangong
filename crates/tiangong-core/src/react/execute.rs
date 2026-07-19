@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::context::compressor::{CompressionError, CompressionUpdate, ContextCompressor};
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -20,8 +19,8 @@ use crate::model::{
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
-    build_thinking_config, context_with_transient_resume, emit_token_usage, observed_total_tokens,
-    persist_error, rebuild_system_prompt, select_client_for_request,
+    build_thinking_config, context_with_transient_resume, emit_token_usage, persist_error,
+    rebuild_system_prompt, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -32,6 +31,7 @@ use crate::turn_context::TurnContext;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
+use super::compression::{ActiveCompression, observed_total_tokens};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
 use super::summary::{
@@ -558,30 +558,6 @@ enum LlmPurpose {
     },
 }
 
-struct ActiveCompression {
-    task: tokio::task::JoinHandle<std::result::Result<CompressionUpdate, CompressionError>>,
-    observed_tokens: usize,
-    continuation: CompressionContinuation,
-}
-
-impl ActiveCompression {
-    fn start(
-        ctx: &TurnContext,
-        organizer: &ContextOrganizer,
-        observed_tokens: usize,
-        continuation: CompressionContinuation,
-        force_target_budget: bool,
-    ) -> Self {
-        let task =
-            ContextCompressor::start_auto(ctx, organizer, observed_tokens, force_target_budget);
-        Self {
-            task,
-            observed_tokens,
-            continuation,
-        }
-    }
-}
-
 struct ActiveLlm {
     purpose: LlmPurpose,
     pending_msg_id: String,
@@ -837,7 +813,7 @@ pub(super) async fn execute_turn(
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new();
     let mut active_llm: Option<ActiveLlm> = None;
-    let mut active_compression: Option<ActiveCompression> = None;
+    let mut active_compression: Option<ActiveCompression<CompressionContinuation>> = None;
     let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
     let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
     let mut pending_approval: Option<PendingApproval> = None;
@@ -921,8 +897,7 @@ pub(super) async fn execute_turn(
                     }
 
                     if let Some(active) = active_compression.take() {
-                        abort_and_join(active.task).await;
-                        ContextCompressor::notify_cancelled(ctx);
+                        active.cancel(ctx).await;
                     }
 
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
@@ -1005,22 +980,17 @@ pub(super) async fn execute_turn(
                 let active = active_compression
                     .as_mut()
                     .expect("压缩分支只在任务活跃时启用");
-                (&mut active.task).await
+                active.wait().await
             }, if active_compression.is_some() => {
                 let active = active_compression
                     .take()
                     .expect("完成的压缩任务必须存在运行记录");
-                let ActiveCompression {
-                    observed_tokens,
-                    continuation,
-                    ..
-                } = active;
-                pending_resume = ContextCompressor::complete_auto(
+                let (continuation, resume) = active.complete(
                     ctx,
                     &mut state.accumulated_usage,
-                    observed_tokens,
                     compression_result,
                 );
+                pending_resume = resume;
 
                 match continuation {
                     CompressionContinuation::ReactText {
@@ -2279,7 +2249,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(2),
-            crate::react::context::run_manual_context_compression(ctx, cmd_rx),
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx),
         )
         .await
         .expect("取消手动压缩后任务应及时结束");

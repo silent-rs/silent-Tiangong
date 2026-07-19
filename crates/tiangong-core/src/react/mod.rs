@@ -1,4 +1,5 @@
 pub(crate) mod cancel;
+pub(crate) mod compression;
 pub mod context;
 mod execute;
 mod helpers;

@@ -1,14 +1,10 @@
-//! ReAct 循环上下文管理：system prompt 重建、token usage 上报、上下文压缩。
+//! ReAct 循环上下文管理：system prompt 重建与 token usage 上报。
 //!
 //! 最终化相关逻辑（总结阶段、强制最终回复）已迁移到 `summary.rs`。
 
 use std::sync::mpsc::Sender as StdSender;
 
-use tokio::sync::mpsc as tokio_mpsc;
-
-use crate::context::compressor::ContextCompressor;
 use crate::context::organizer::ContextOrganizer;
-use crate::core::command::Command;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
 use crate::session::{Message, MessageRole, Session};
@@ -148,48 +144,6 @@ pub(crate) fn emit_token_usage(
     });
 }
 
-pub(crate) fn observed_total_tokens(usage: &TokenUsage) -> usize {
-    if usage.total_tokens > 0 {
-        usage.total_tokens
-    } else {
-        usage.prompt_tokens.saturating_add(usage.completion_tokens)
-    }
-}
-
-/// 在独立 turn task 中执行手动压缩。
-///
-/// 与自动压缩共用 `ContextCompressor`，但不生成进行中任务续接。
-pub(crate) async fn run_manual_context_compression(
-    mut ctx: TurnContext,
-    mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-) {
-    let observed_tokens = ctx.session.current_tokens;
-    let organizer = ContextOrganizer::new(ctx.context_limit);
-    let Some(mut task) = ContextCompressor::start_manual(&ctx, &organizer, observed_tokens) else {
-        return;
-    };
-
-    let wait_for_cancel = async {
-        loop {
-            match cmd_rx.recv().await {
-                Some(Command::Cancel | Command::Shutdown) | None => return,
-                Some(_) => {}
-            }
-        }
-    };
-    tokio::pin!(wait_for_cancel);
-    let result = tokio::select! {
-        biased;
-        _ = &mut wait_for_cancel => {
-            crate::react::cancel::abort_and_join(task).await;
-            ContextCompressor::notify_cancelled(&ctx);
-            return;
-        }
-        result = &mut task => result
-    };
-    ContextCompressor::complete_manual(&mut ctx, result);
-}
-
 pub(crate) fn select_client_for_request<'a>(
     ctx: &'a TurnContext,
     _req: &ModelRequest,
@@ -222,33 +176,7 @@ pub(crate) fn persist_error(ctx: &mut TurnContext, message: impl Into<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::compressor::build_compression_resume_message;
-
-    #[test]
-    fn observed_total_tokens_prefers_provider_total() {
-        let usage = TokenUsage {
-            prompt_tokens: 900,
-            completion_tokens: 120,
-            total_tokens: 1100,
-            prompt_cache_hit_tokens: None,
-            prompt_cache_miss_tokens: None,
-        };
-
-        assert_eq!(observed_total_tokens(&usage), 1100);
-    }
-
-    #[test]
-    fn observed_total_tokens_falls_back_to_prompt_plus_completion() {
-        let usage = TokenUsage {
-            prompt_tokens: 900,
-            completion_tokens: 120,
-            total_tokens: 0,
-            prompt_cache_hit_tokens: None,
-            prompt_cache_miss_tokens: None,
-        };
-
-        assert_eq!(observed_total_tokens(&usage), 1020);
-    }
+    use crate::react::compression::build_compression_resume_message;
 
     #[test]
     fn transient_resume_is_inserted_once_after_system_prompt() {
