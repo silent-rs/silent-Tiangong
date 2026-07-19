@@ -104,24 +104,24 @@ fn handle_sessions(
     }
 
     // 按序号或 ID 前缀切换
-    let sessions = state.sessions();
+    let sessions = state.session_metadata();
     let target_id = if let Ok(idx) = arg.parse::<usize>() {
         sessions
             .get(idx.saturating_sub(1))
-            .map(|s| s.id.clone())
+            .map(|m| m.id.clone())
             .ok_or_else(|| anyhow!("序号超出范围：{idx}"))?
     } else {
         sessions
             .iter()
-            .find(|s| s.id.starts_with(arg))
-            .map(|s| s.id.clone())
+            .find(|m| m.id.starts_with(arg))
+            .map(|m| m.id.clone())
             .ok_or_else(|| anyhow!("未找到匹配的会话：{arg}"))?
     };
 
     let title = sessions
         .iter()
-        .find(|s| s.id == target_id)
-        .map(|s| s.title.clone())
+        .find(|m| m.id == target_id)
+        .map(|m| m.title.clone())
         .unwrap_or_default();
 
     state.switch_session(&target_id);

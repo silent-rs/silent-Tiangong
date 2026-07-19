@@ -73,13 +73,13 @@ impl ServerCoreManager {
             let mut template = state.build_core_config_for_session_from_base(&base, "");
             template.trust_mode = TrustMode::FullTrust;
             let session_configs = state
-                .sessions()
+                .session_metadata()
                 .iter()
-                .map(|session| {
+                .map(|metadata| {
                     let mut config =
-                        state.build_core_config_for_session_from_base(&base, &session.id);
+                        state.build_core_config_for_session_from_base(&base, &metadata.id);
                     config.trust_mode = TrustMode::FullTrust;
-                    (session.id.clone(), config)
+                    (metadata.id.clone(), config)
                 })
                 .collect::<HashMap<_, _>>();
             (template, session_configs)
@@ -271,11 +271,7 @@ impl ServerCoreManager {
             .retain(|_, mapped_session_id| mapped_session_id != &session_id);
 
         let mut state = self.state.lock().await;
-        if !state
-            .sessions()
-            .iter()
-            .any(|session| session.id == session_id)
-        {
+        if !state.session_metadata().iter().any(|m| m.id == session_id) {
             return Ok(false);
         }
         state.delete_session_by_id(&session_id)?;
@@ -329,7 +325,9 @@ impl ServerCoreManager {
         let session_id = normalize_session_id(requested_session_id)?;
         {
             let state = self.state.lock().await;
-            resolve_explicit_session(state.sessions(), &session_id)?;
+            if !state.session_metadata().iter().any(|m| m.id == session_id) {
+                return Err(anyhow!("会话不存在：{session_id}"));
+            }
         }
 
         // 先检查是否已有可用 Core；事件流已关闭的僵尸实例必须先移除再重建。
@@ -400,11 +398,12 @@ impl ServerCoreManager {
 
         // 删除或其他状态变化若绕过了会话锁，禁止使用 await 前的旧快照复活 Core。
         let base = self.config.snapshot();
-        let (session, mut session_config) = {
+        let mut session_config = {
             let state = self.state.lock().await;
-            let session = resolve_explicit_session(state.sessions(), &session_id)?.1;
-            let config = state.build_core_config_for_session_from_base(&base, &session_id);
-            (session, config)
+            if !state.session_metadata().iter().any(|m| m.id == session_id) {
+                return Err(anyhow!("会话不存在：{session_id}"));
+            }
+            state.build_core_config_for_session_from_base(&base, &session_id)
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
@@ -412,9 +411,9 @@ impl ServerCoreManager {
         let attachment_capabilities = attachment_capability_snapshot(&models);
         let storage_root = tiangong_app_state::app_state::storage_root();
         let core = tiangong_core::core::TiangongCore::builder()
-            .session_id(session.id.clone())
+            .session_id(session_id.clone())
             .config(isolated_core_config_provider(&session_config))
-            .trust_mode(session.trust_mode)
+            .trust_mode(session_config.trust_mode)
             .storage_root(storage_root.clone())
             .stream_tx(stream_tx)
             .plugins({
@@ -589,24 +588,20 @@ impl ServerCoreManager {
         let title = remote_session_title(connector, channel_id);
         let session_id = {
             let mut state = self.state.lock().await;
-            if state
-                .sessions()
-                .iter()
-                .any(|session| session.id == channel_id)
-            {
+            if state.session_metadata().iter().any(|m| m.id == channel_id) {
                 channel_id.to_string()
-            } else if let Some(session) = state
-                .sessions()
+            } else if let Some(metadata) = state
+                .session_metadata()
                 .iter()
-                .find(|session| session.title == title)
+                .find(|metadata| metadata.title == title)
             {
-                session.id.clone()
+                metadata.id.clone()
             } else {
                 let mut session =
                     Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
                 session.trust_mode = TrustMode::FullTrust;
                 let session_id = session.id.clone();
-                state.sessions_mut().push(session);
+                state.add_session(session);
                 state.persist_session(&session_id)?;
                 self.event_bus
                     .publish(TiangongEvent::SessionCreated(session_id.clone()));
@@ -649,16 +644,14 @@ impl ServerCoreManager {
     }
 
     async fn last_assistant_outgoing(&self, session_id: &str) -> (OutgoingMessage, bool) {
-        let state = self.state.lock().await;
-        let Some(session) = state
-            .sessions()
-            .iter()
-            .find(|session| session.id == session_id)
-        else {
+        // 消息遍历需完整 Session;从磁盘 load(issue #245:真相源归磁盘)。
+        let Ok(session) = tiangong_core::session::Session::load_from_storage(
+            &tiangong_config::io::storage_root(),
+            session_id,
+        ) else {
             return (text_outgoing("处理完成"), false);
         };
-
-        assistant_outgoing_after_last_user(session)
+        assistant_outgoing_after_last_user(&session)
     }
 }
 

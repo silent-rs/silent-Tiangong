@@ -15,12 +15,12 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
 
     super::run_modal(|terminal| {
         loop {
-            let sessions = state.sessions();
+            let sessions = state.session_metadata();
             let matched: Vec<usize> = sessions
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| {
-                    query.is_empty() || s.title.contains(&query) || s.id.starts_with(&query)
+                .filter(|(_, m)| {
+                    query.is_empty() || m.title.contains(&query) || m.id.starts_with(&query)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -47,8 +47,8 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
                     .iter()
                     .enumerate()
                     .map(|(vi, &si)| {
-                        let s = &sessions[si];
-                        let is_active = s.id == active_id;
+                        let m = &sessions[si];
+                        let is_active = m.id == active_id;
                         let marker = if is_active { "* " } else { "  " };
                         let style = if vi == selected {
                             Style::default()
@@ -65,9 +65,9 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
                             Span::styled(
                                 format!(
                                     "{} - {} ({} 条消息)",
-                                    &s.id[..8.min(s.id.len())],
-                                    s.title,
-                                    s.messages.len()
+                                    &m.id[..8.min(m.id.len())],
+                                    m.title,
+                                    m.message_count
                                 ),
                                 style,
                             ),

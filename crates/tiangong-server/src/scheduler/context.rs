@@ -30,7 +30,7 @@ impl SchedulerContext for ServerSchedulerContext {
     ) -> anyhow::Result<(String, bool)> {
         if let Some(sid) = requested_session_id {
             let state = self.state.lock().await;
-            if state.sessions().iter().any(|s| s.id == *sid) {
+            if state.session_metadata().iter().any(|m| m.id == *sid) {
                 return Ok((sid.to_string(), false));
             }
         }
@@ -42,7 +42,7 @@ impl SchedulerContext for ServerSchedulerContext {
             &tiangong_app_state::app_state::storage_root(),
         );
         let session_id = session.id.clone();
-        state.sessions_mut().push(session);
+        state.add_session(session);
         state.persist_session(&session_id)?;
         Ok((session_id, true))
     }

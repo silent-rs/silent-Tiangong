@@ -23,19 +23,19 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
         .transpose()?;
 
     let sessions: Vec<SessionSummary> = app
-        .sessions()
+        .session_metadata()
         .iter()
-        .filter(|session| {
+        .filter(|metadata| {
             visible_session_id
                 .as_deref()
-                .is_none_or(|visible_id| session.id == visible_id)
+                .is_none_or(|visible_id| metadata.id == visible_id)
         })
-        .map(|s| SessionSummary {
-            id: s.id.clone(),
-            title: s.title.clone(),
-            message_count: s.messages.len(),
-            created_at: s.created_at.clone(),
-            updated_at: s.updated_at.clone(),
+        .map(|metadata| SessionSummary {
+            id: metadata.id.clone(),
+            title: metadata.title.clone(),
+            message_count: metadata.message_count,
+            created_at: metadata.created_at.clone(),
+            updated_at: metadata.updated_at.clone(),
         })
         .collect();
 
@@ -75,11 +75,28 @@ pub async fn get_session(req: Request) -> Result<Response> {
 
     let requested_id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let app = app_ctx.state.lock().await;
-    let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
-
-    let session = app.sessions().iter().find(|s| s.id == id).ok_or_else(|| {
-        SilentError::business_error(StatusCode::NOT_FOUND, format!("会话 '{id}' 不存在"))
+    let (id, session_exists) = {
+        let app = app_ctx.state.lock().await;
+        let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
+        let exists = app.session_metadata().iter().any(|m| m.id == id);
+        (id, exists)
+    };
+    if !session_exists {
+        return Err(SilentError::business_error(
+            StatusCode::NOT_FOUND,
+            format!("会话 '{id}' 不存在"),
+        ));
+    }
+    // 消息内容需完整 Session；从磁盘 load（issue #245：真相源归磁盘）。
+    let session = tiangong_core::session::Session::load_from_storage(
+        &tiangong_config::io::storage_root(),
+        &id,
+    )
+    .map_err(|error| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("加载会话失败：{error}"),
+        )
     })?;
 
     let messages: Vec<MessageSummary> = session
@@ -112,11 +129,29 @@ pub async fn get_session_cost(req: Request) -> Result<Response> {
 
     let requested_id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let app = app_ctx.state.lock().await;
-    let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
+    let (id, session_exists) = {
+        let app = app_ctx.state.lock().await;
+        let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
+        let exists = app.session_metadata().iter().any(|m| m.id == id);
+        (id, exists)
+    };
 
-    let session = app.sessions().iter().find(|s| s.id == id).ok_or_else(|| {
-        SilentError::business_error(StatusCode::NOT_FOUND, format!("会话 '{id}' 不存在"))
+    if !session_exists {
+        return Err(SilentError::business_error(
+            StatusCode::NOT_FOUND,
+            format!("会话 '{id}' 不存在"),
+        ));
+    }
+    // task_records 是完整 Session 字段；从磁盘 load（issue #245）。
+    let session = tiangong_core::session::Session::load_from_storage(
+        &tiangong_config::io::storage_root(),
+        &id,
+    )
+    .map_err(|error| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("加载会话失败：{error}"),
+        )
     })?;
 
     let cost =
