@@ -785,7 +785,10 @@ pub async fn switch_session(
         })
         .await?;
     state.sync_core_config_from_state().await?;
-    state.set_core_trust_mode(&session_id, trust_mode);
+    state
+        .inner()
+        .core_manager
+        .set_core_trust_mode(&session_id, trust_mode);
 
     // 为新会话补充索引（后台执行，不阻塞 UI）
     let sid = session_id.clone();
@@ -991,13 +994,13 @@ pub async fn delete_sessions_by_cwd(
 }
 
 pub(crate) async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
-    state.retire_core(session_id, true).await;
+    state.core_manager.retire_core(session_id, true).await;
 }
 
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
 pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
-    state.retire_core(session_id, false).await;
+    state.core_manager.retire_core(session_id, false).await;
 }
 
 /// 更新会话标题
@@ -1434,7 +1437,7 @@ pub(crate) fn start_stream_consumer(
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
-                if app_state.has_live_core(&session_id) {
+                if app_state.core_manager.has_live_core(&session_id) {
                     let _ = app.emit("stream_event", &session_event);
                 }
                 continue;
@@ -1442,7 +1445,7 @@ pub(crate) fn start_stream_consumer(
 
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
-            if !app_state.has_live_core(&session_id) {
+            if !app_state.core_manager.has_live_core(&session_id) {
                 // 已退役 Core 的缓冲事件不得修改同会话新实例的 pending、消息或 UI。
                 continue;
             }
@@ -2099,7 +2102,7 @@ pub(crate) fn start_stream_consumer(
         let _eof_guard = rt.block_on(eof_lock.lock_owned());
         // 通道关闭说明持有该发送端的 Core 已被显式移除。若同会话已经创建了新 Core，
         // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
-        if !app_state.has_live_core(&session_id) {
+        if !app_state.core_manager.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 if let Err(error) = core_state.reload_session_from_disk(&session_id) {
                     tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
@@ -2244,7 +2247,11 @@ pub async fn edit_and_resend(
     // 最终校验及稳定消息落盘均成功后，才终止旧 Core（cancel + take + join）。
     // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
     // 此后已无旧写入者可覆盖。
-    state.retire_core(&session_id, true).await;
+    state
+        .inner()
+        .core_manager
+        .retire_core(&session_id, true)
+        .await;
     state
         .with_state(|core_state| core_state.persist_session_and_app(&session_id))
         .await?;
@@ -2333,7 +2340,10 @@ pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> 
         .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
         .await?;
     let session_lock = state.session_send_lock(&session_id);
-    Ok(cancel_after_session_send_boundary(session_lock, || state.cancel_core(&session_id)).await)
+    Ok(cancel_after_session_send_boundary(session_lock, || {
+        state.inner().core_manager.cancel_core(&session_id)
+    })
+    .await)
 }
 
 async fn cancel_after_session_send_boundary(
@@ -2408,7 +2418,9 @@ async fn run_context_slash_command(
             ContextSlashCommand::Compress => AgentInputKind::compress_context(),
             ContextSlashCommand::Reset => AgentInputKind::reset_context(),
         };
-        return Ok(state.deliver_to_core_if_live(&ensured.session_id, input));
+        return Ok(state
+            .core_manager
+            .deliver_to_core_if_live(&ensured.session_id, input));
     }
 }
 
@@ -2484,7 +2496,10 @@ pub async fn respond_approval(
     let session_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
         .await?;
-    state.respond_approval_to_core(&session_id, request_id, approved);
+    state
+        .inner()
+        .core_manager
+        .respond_approval_to_core(&session_id, request_id, approved);
     Ok(true)
 }
 
@@ -2558,7 +2573,10 @@ pub async fn set_trust_mode(
         return Err(error);
     }
     // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
-    state.set_core_trust_mode(&session_id, trust_mode);
+    state
+        .inner()
+        .core_manager
+        .set_core_trust_mode(&session_id, trust_mode);
     // Session 中的 trust_mode 不在这里单独落盘，由当前 turn 或下一轮统一持久化。
     Ok(())
 }
@@ -2585,7 +2603,9 @@ async fn rollback_session_trust_mode(
     if let Err(error) = state.sync_core_config_from_state().await {
         warn!(%error, %session_id, "回滚会话信任模式后同步配置失败");
     }
-    state.set_core_trust_mode(session_id, previous_mode);
+    state
+        .core_manager
+        .set_core_trust_mode(session_id, previous_mode);
 }
 
 #[tauri::command]

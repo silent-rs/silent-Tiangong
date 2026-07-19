@@ -5,7 +5,6 @@ use std::sync::Mutex;
 use tauri::Manager;
 
 use tiangong_core::agent_input::AgentInputKind;
-use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfigProvider;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
@@ -16,7 +15,7 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 /// 天工应用状态
 ///
 /// state: 应用管理（会话列表、配置、持久化）— Arc<tokio Mutex> 以支持嵌入式 server 共享
-/// cores: 活跃的对话核心（session_id → TiangongCore）
+/// core_manager: Core 操作入口（session_id → TiangongCore 注册表,issue #245 归 app-state）
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
@@ -459,6 +458,7 @@ impl TiangongApp {
                 }
 
                 let core_sent = app_state
+                    .core_manager
                     .deliver_to_core_if_live(&ensured.session_id, AgentInputKind::Tool(req.tool));
 
                 if !core_sent {
@@ -574,7 +574,7 @@ impl TiangongApp {
         session_id: &str,
         message_id: &str,
     ) -> Result<(), String> {
-        if let Some(core) = self.take_core(session_id) {
+        if let Some(core) = self.core_manager.take_core(session_id) {
             let sid = session_id.to_string();
             match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
                 Ok(Ok(())) => {}
@@ -615,9 +615,10 @@ impl TiangongApp {
         };
         let session_lock = self.session_send_lock(&session_id);
         let _send_guard = session_lock.lock_owned().await;
-        if self.has_live_core(&session_id) {
+        if self.core_manager.has_live_core(&session_id) {
             tracing::info!(session_id, tool_name, "注入工具消息 via deliver");
-            self.deliver_to_core_if_live(&session_id, AgentInputKind::Tool(tool))
+            self.core_manager
+                .deliver_to_core_if_live(&session_id, AgentInputKind::Tool(tool))
         } else {
             tracing::warn!(
                 session_id,
@@ -987,27 +988,10 @@ impl TiangongApp {
         }
     }
 
-    /// 取回 core 的 session（消费 core，用于持久化或切换会话）
-    pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
-        self.core_manager.take_core(session_id)
-    }
-
-    /// 关闭并等待指定会话的 Core 结束（issue #245：转走 core_manager）。
-    pub async fn retire_core(&self, session_id: &str, cancel: bool) {
-        self.core_manager.retire_core(session_id, cancel).await;
-    }
-
-    /// 指定会话是否持有可投递的 Core 实例。
-    pub fn has_live_core(&self, session_id: &str) -> bool {
-        self.core_manager.has_live_core(session_id)
-    }
-
-    /// 仅当指定会话存在 Core 时投递输入。
-    pub fn deliver_to_core_if_live(&self, session_id: &str, input: AgentInputKind) -> bool {
-        self.core_manager.deliver_to_core_if_live(session_id, input)
-    }
-
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
+    ///
+    /// 含 host 专属的远端 turn 所有权检查（`remote_turn_allows_message`），
+    /// Core 操作本身经 `core_manager`（issue #245）。
     pub fn deliver_prepared_if_live(
         &self,
         session_id: &str,
@@ -1029,29 +1013,9 @@ impl TiangongApp {
             .ok_or_else(|| "会话 Core 投递失败".to_string())
     }
 
-    /// 取消指定会话的执行
-    pub fn cancel_core(&self, session_id: &str) -> bool {
-        self.core_manager.cancel_core(session_id)
-    }
-
-    /// 取消指定会话中某个 Agent 的当前执行
+    /// 取消指定会话中某个 Agent 的当前执行（plugin 直调，不经 Core）。
     pub fn cancel_agent_core(&self, session_id: &str, role: String) -> bool {
         tiangong_plugin_agent_team::cancel_agent(session_id, &role)
-    }
-
-    /// 向指定会话的 core 发送审批响应
-    pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
-        self.core_manager
-            .respond_approval_to_core(session_id, request_id, approved);
-    }
-
-    /// 设置指定会话 core 的信任模式（实时生效）
-    pub fn set_core_trust_mode(
-        &self,
-        session_id: &str,
-        mode: tiangong_core::permission::TrustMode,
-    ) {
-        self.core_manager.set_core_trust_mode(session_id, mode);
     }
 
     /// 启动嵌入式 Server（共享 app 的 state 和 config）
@@ -1165,7 +1129,7 @@ mod tests {
 
         let app = TiangongApp::new();
         let session_id = "session-lifecycle-test";
-        assert!(!app.has_live_core(session_id), "初始无 Core");
+        assert!(!app.core_manager.has_live_core(session_id), "初始无 Core");
 
         let session = tiangong_core::session::Session::new(session_id);
         let (event_tx, _event_rx) = mpsc::channel();
@@ -1184,13 +1148,19 @@ mod tests {
             .registry()
             .insert(session_id.to_string(), core);
 
-        assert!(app.has_live_core(session_id), "空闲 Core 仍应可投递新消息");
-        let core = app.take_core(session_id).expect("应能取回 Core");
+        assert!(
+            app.core_manager.has_live_core(session_id),
+            "空闲 Core 仍应可投递新消息"
+        );
+        let core = app
+            .core_manager
+            .take_core(session_id)
+            .expect("应能取回 Core");
         tokio::task::spawn_blocking(move || core.shutdown_join())
             .await
             .unwrap()
             .unwrap();
-        assert!(!app.has_live_core(session_id), "移除后无 Core");
+        assert!(!app.core_manager.has_live_core(session_id), "移除后无 Core");
     }
 
     #[test]
