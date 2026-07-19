@@ -142,6 +142,37 @@ impl CoreManager {
         Ok(())
     }
 
+    /// 创建新会话并持久化到磁盘（issue #245：session CRUD 透过 CoreManager）。
+    ///
+    /// 写入 `{storage_root}/sessions/{id}.json`。如果已存在同 id 会话则覆盖。
+    pub fn create_session(&self, session: &Session) -> Result<(), String> {
+        let mut session = session.clone();
+        session.bind_storage_root(self.storage_root.clone());
+        session
+            .try_persist_to_disk()
+            .map_err(|error| format!("创建会话文件失败：{error}"))
+    }
+
+    /// 删除会话：先 retire 对应 Core（取消在途 turn + 等待写盘），
+    /// 再删除磁盘 session 文件（issue #245）。
+    ///
+    /// 这是安全的操作——retire_core 保证 worker 停止并写盘结束后才返回，
+    /// 随后删除文件不会影响在途 turn。Core 不存在时只删文件。
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        // 先从 registry 取走 Core 并等待其停止（如果在途 turn 中）。
+        if let Some(core) = self.take_core(session_id) {
+            let sid = session_id.to_string();
+            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(session_id = %sid, %error, "删除会话时关闭 Core 失败")
+                }
+                Err(error) => tracing::warn!(session_id = %sid, %error, "等待 Core 关闭失败"),
+            }
+        }
+        self.delete_session_file(session_id)
+    }
+
     /// 同步配置快照到所有存活 Core。
     ///
     /// 对每个存活 Core 调用 `replace_config` + `set_trust_mode`。host 负责在调用
