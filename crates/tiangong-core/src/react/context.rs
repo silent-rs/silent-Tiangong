@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender as StdSender;
 use crate::context::organizer::ContextOrganizer;
 use crate::model::{ModelRequest, SingleProviderClient, TokenUsage};
 use crate::prompt::SystemPromptConfig;
-use crate::session::{Message, MessageRole, Session};
+use crate::session::Session;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
@@ -29,22 +29,6 @@ pub(crate) fn rebuild_system_prompt_for_session(
         .collect();
     let config = SystemPromptConfig::from_plugin_sections(plugin_sections);
     session.rebuild_system_prompt(&config);
-}
-
-/// 将一次性续接插在 system prompt 之后、压缩期间新增消息之前。
-pub(crate) fn context_with_transient_resume(
-    session: &Session,
-    resume: Option<Message>,
-) -> Vec<Message> {
-    let mut context = session.context();
-    if let Some(resume) = resume {
-        let insert_at = context
-            .iter()
-            .position(|message| message.role != MessageRole::System)
-            .unwrap_or(context.len());
-        context.insert(insert_at, resume);
-    }
-    context
 }
 
 pub(crate) fn build_thinking_config(
@@ -171,44 +155,4 @@ pub(crate) fn persist_error(ctx: &mut TurnContext, message: impl Into<String>) {
     });
     crate::react::message::inject_tool_to_messages(&mut ctx.session, "react_loop_error", &payload);
     ctx.session.persist_to_disk();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::react::compression::build_compression_resume_message;
-
-    #[test]
-    fn transient_resume_is_inserted_once_after_system_prompt() {
-        let mut session = Session::new("test");
-        session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
-        session
-            .messages
-            .push(Message::new(MessageRole::User, "压缩后的新消息"));
-        let resume = build_compression_resume_message("只使用一次的任务状态");
-
-        let first_request = context_with_transient_resume(&session, Some(resume));
-        let next_request = context_with_transient_resume(&session, None);
-
-        assert_eq!(first_request[0].role, MessageRole::System);
-        assert!(matches!(
-            &first_request[1].content[0],
-            crate::session::ContentBlock::ModelInstruction { text }
-                if text.contains("只使用一次的任务状态")
-        ));
-        assert_eq!(first_request[2].text_content(), "压缩后的新消息");
-        assert_eq!(next_request.len(), 2);
-        assert!(
-            next_request
-                .iter()
-                .all(|message| message.content.iter().all(|block| {
-                    !matches!(
-                        block,
-                        crate::session::ContentBlock::ModelInstruction { text }
-                            if text.contains("只使用一次的任务状态")
-                    )
-                }))
-        );
-        assert_eq!(session.messages.len(), 1);
-    }
 }

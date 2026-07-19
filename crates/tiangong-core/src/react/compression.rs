@@ -64,36 +64,30 @@ impl<C> ActiveCompression<C> {
         ctx: &mut TurnContext,
         accumulated_usage: &mut TokenUsage,
         result: CompressionResult,
-    ) -> (C, Option<Message>) {
+    ) -> C {
         let Self {
             observed_tokens,
             continuation,
             ..
         } = self;
-        let resume = match result {
+        match result {
             Ok(update) => {
                 accumulated_usage.accumulate(&update.usage);
                 match apply_compression(ctx, &update, false) {
                     Ok(current_tokens) => {
                         notify_auto_success(ctx, &update, current_tokens, observed_tokens);
-                        update
-                            .current_task
-                            .as_deref()
-                            .map(build_compression_resume_message)
                     }
                     Err(error) => {
                         notify_auto_failure(ctx, &update.usage, &error);
-                        None
                     }
                 }
             }
             Err(error) => {
                 accumulated_usage.accumulate(&error.usage);
                 notify_auto_failure(ctx, &error.usage, &error);
-                None
             }
-        };
-        (continuation, resume)
+        }
+        continuation
     }
 }
 
@@ -145,12 +139,12 @@ pub(super) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     }
 }
 
-pub(super) fn build_compression_resume_message(current_task: &str) -> Message {
+fn build_compression_resume_message(current_task: &str) -> Message {
     let mut message = Message::new(MessageRole::User, "");
     message.content = vec![ContentBlock::model_instruction(format!(
         "以下是上下文压缩后的当前任务状态，请据此继续执行，不要重新询问用户：\n\n{current_task}"
     ))];
-    message.phase = MessagePhase::Normal;
+    message.phase = MessagePhase::CompressedResume;
     message
 }
 
@@ -227,6 +221,12 @@ fn apply_compression(
     candidate.context_summary = Some(update.summary.clone());
     candidate.summary_up_to = update.summary_up_to;
     mark_compact_boundary(&mut candidate.messages, update.summary_up_to);
+    if let Some(current_task) = update.current_task.as_deref() {
+        candidate.messages.insert(
+            update.summary_up_to,
+            build_compression_resume_message(current_task),
+        );
+    }
     if account_usage_in_session {
         candidate.token_usage.accumulate(&update.usage);
         candidate.active_agent_current_tokens = 0;
@@ -343,6 +343,59 @@ fn notify_session_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_config::AgentConfig;
+    use crate::model::SingleProviderClient;
+    use crate::observe::Observer;
+    use crate::permission::TrustMode;
+    use tiangong_llm::{ModelEndpoint, ProviderProtocol};
+
+    fn test_context(mut session: Session) -> (TurnContext, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("创建临时目录失败");
+        session.bind_storage_root(root.path());
+        let (stream_tx, _) = std::sync::mpsc::channel();
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 1_000,
+            options: serde_json::Value::Object(serde_json::Map::new()),
+        });
+        let ctx = TurnContext::builder()
+            .client(client)
+            .session(session)
+            .stream_tx(stream_tx)
+            .plugins(Vec::new())
+            .context_limit(200_000)
+            .agent_config(AgentConfig::default())
+            .trust_mode(TrustMode::FullTrust)
+            .observer(Observer::new(std::env::temp_dir()))
+            .tool_overrides(Default::default())
+            .tools(Vec::new())
+            .build();
+        (ctx, root)
+    }
+
+    fn update_for(
+        session: &Session,
+        previous_summary_up_to: usize,
+        summary: &str,
+        current_task: &str,
+    ) -> CompressionUpdate {
+        CompressionUpdate {
+            summary: summary.to_string(),
+            current_task: Some(current_task.to_string()),
+            usage: TokenUsage::default(),
+            previous_summary_up_to,
+            summary_up_to: session.messages.len(),
+            boundary_message_id: session
+                .messages
+                .last()
+                .expect("测试会话应存在消息")
+                .id
+                .clone(),
+        }
+    }
 
     #[test]
     fn observed_tokens_prefers_provider_total() {
@@ -371,15 +424,63 @@ mod tests {
     }
 
     #[test]
-    fn resume_message_is_transient_normal_phase() {
+    fn resume_message_is_model_visible_user_message() {
         let message = build_compression_resume_message("继续任务");
 
         assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.phase, MessagePhase::Normal);
+        assert_eq!(message.phase, MessagePhase::CompressedResume);
         assert!(!message.model_excluded);
         assert!(matches!(
             &message.content[0],
             ContentBlock::ModelInstruction { text } if text.contains("继续任务")
         ));
+    }
+
+    #[test]
+    fn consecutive_compressions_expose_only_latest_resume_to_model() {
+        let mut session = Session::new("test");
+        session.append_message(MessageRole::User, "第一轮问题");
+        session.append_message(MessageRole::Assistant, "第一轮回答");
+        let (mut ctx, _root) = test_context(session);
+
+        let first = update_for(&ctx.session, 0, "第一轮摘要", "第一轮续接");
+        apply_compression(&mut ctx, &first, false).expect("第一次压缩应成功");
+        let first_resume_id = ctx.session.messages[ctx.session.summary_up_to].id.clone();
+
+        ctx.session.append_message(MessageRole::User, "第二轮问题");
+        ctx.session
+            .append_message(MessageRole::Assistant, "第二轮回答");
+        let context = ctx.session.context();
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(context[1].id, first_resume_id);
+        assert_eq!(context[2].text_content(), "第二轮问题");
+
+        let previous_summary_up_to = ctx.session.summary_up_to;
+        let second = update_for(
+            &ctx.session,
+            previous_summary_up_to,
+            "第二轮摘要",
+            "第二轮续接",
+        );
+        apply_compression(&mut ctx, &second, false).expect("第二次压缩应成功");
+
+        let context = ctx.session.context();
+        assert_eq!(context.len(), 2);
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(context[1].phase, MessagePhase::CompressedResume);
+        assert!(matches!(
+            &context[1].content[0],
+            ContentBlock::ModelInstruction { text } if text.contains("第二轮续接")
+        ));
+        assert_ne!(context[1].id, first_resume_id);
+        assert_eq!(
+            ctx.session
+                .messages
+                .iter()
+                .filter(|message| message.phase == MessagePhase::CompressedResume)
+                .count(),
+            2,
+            "完整会话应保留历次续接消息"
+        );
     }
 }

@@ -19,8 +19,8 @@ use crate::model::{
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
-    build_thinking_config, context_with_transient_resume, emit_token_usage, persist_error,
-    rebuild_system_prompt, select_client_for_request,
+    build_thinking_config, emit_token_usage, persist_error, rebuild_system_prompt,
+    select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -575,11 +575,11 @@ enum ReactTextDisposition {
     EnterSummary,
 }
 
-fn build_react_request(ctx: &TurnContext, transient_resume: Option<Message>) -> ModelRequest {
+fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     ModelRequest {
         user_input: String::new(),
-        context: context_with_transient_resume(&ctx.session, transient_resume),
+        context: ctx.session.context(),
         thinking,
         reasoning_effort,
         thinking_disabled,
@@ -817,7 +817,6 @@ pub(super) async fn execute_turn(
     let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
     let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
     let mut pending_approval: Option<PendingApproval> = None;
-    let mut pending_resume: Option<Message> = None;
 
     let result = 'agent_loop: loop {
         let can_advance = active_llm.is_none()
@@ -985,12 +984,11 @@ pub(super) async fn execute_turn(
                 let active = active_compression
                     .take()
                     .expect("完成的压缩任务必须存在运行记录");
-                let (continuation, resume) = active.complete(
+                let continuation = active.complete(
                     ctx,
                     &mut state.accumulated_usage,
                     compression_result,
                 );
-                pending_resume = resume;
 
                 match continuation {
                     CompressionContinuation::ReactText {
@@ -1441,10 +1439,9 @@ pub(super) async fn execute_turn(
                                 iteration: (state.round + 1) as u32,
                             });
                         }
-                        let transient_resume = pending_resume.take();
                         active_llm = Some(start_llm_request(
                             ctx,
-                            build_react_request(ctx, transient_resume),
+                            build_react_request(ctx),
                             LlmPurpose::React {
                                 request_injection_generation,
                             },
@@ -1566,10 +1563,9 @@ pub(super) async fn execute_turn(
                         if ctx.session.system_prompt_message.is_none() {
                             rebuild_system_prompt(ctx);
                         }
-                        let transient_resume = pending_resume.take();
                         active_llm = Some(start_llm_request(
                             ctx,
-                            request_for_summary_phase(&ctx.session, transient_resume),
+                            request_for_summary_phase(&ctx.session),
                             LlmPurpose::Summary {
                                 iteration,
                                 request_injection_generation,
@@ -1583,7 +1579,7 @@ pub(super) async fn execute_turn(
                         request_injection_generation,
                         summary_error,
                     } => {
-                        let request = build_force_final_request(ctx, reason, pending_resume.take());
+                        let request = build_force_final_request(ctx, reason);
                         active_llm = Some(start_llm_request(
                             ctx,
                             request,
@@ -2034,7 +2030,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn compression_uses_dynamic_budget_without_persisting_resume() {
+    async fn compression_persists_model_visible_resume_after_system_prompt() {
         let server = MockServer::start().await;
         mount_sse(
             &server,
@@ -2060,15 +2056,48 @@ mod tests {
             harness.ctx.session.context_summary.as_deref(),
             Some("历史摘要")
         );
-        assert!(harness.ctx.session.messages.iter().all(|message| {
-            message.content.iter().all(|block| {
-                !matches!(
-                    block,
-                    crate::session::ContentBlock::ModelInstruction { text }
-                        if text.contains("当前任务已完成")
-                )
-            })
-        }));
+        let resume = &harness.ctx.session.messages[harness.ctx.session.summary_up_to];
+        assert_eq!(resume.role, MessageRole::User);
+        assert_eq!(resume.phase, crate::session::MessagePhase::CompressedResume);
+        assert!(!resume.model_excluded);
+        assert!(matches!(
+            &resume.content[0],
+            crate::session::ContentBlock::ModelInstruction { text }
+                if text.contains("当前任务已完成")
+        ));
+
+        let context = harness.ctx.session.context();
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(context[1].id, resume.id);
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+
+        let persisted = Session::load_from_storage(
+            harness
+                .ctx
+                .session
+                .bound_storage_root()
+                .expect("测试会话应绑定存储目录"),
+            &harness.ctx.session.id,
+        )
+        .expect("压缩结果应持久化");
+        assert_eq!(
+            persisted.messages[persisted.summary_up_to].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提出新问题");
+        let context = harness.ctx.session.context();
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+        assert_eq!(context[2].text_content(), "继续提出新问题");
 
         let requests = server.received_requests().await.unwrap();
         let compression_body: serde_json::Value =

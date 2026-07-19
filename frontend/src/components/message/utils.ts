@@ -174,6 +174,7 @@ export function groupMessages(messages: MessageItem[]): MessageGroup[] {
   let currentAgentTurn: MessageGroup | null = null;
 
   for (const msg of messages) {
+    if (msg.phase === "compressedresume") continue;
     if (msg.worker_id) {
       if (currentAgentTurn) { groups.push(currentAgentTurn); currentAgentTurn = null; }
       const previous = groups[groups.length - 1];
