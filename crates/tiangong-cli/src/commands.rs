@@ -147,7 +147,7 @@ fn handle_model(state: &mut TiangongState, command: &str) -> Result<()> {
         if !models.is_empty() {
             output::print_info("可用模型：");
             for m in models {
-                let marker = if m == current { " *" } else { "" };
+                let marker = if *m == current { " *" } else { "" };
                 output::print_info(&format!("  {m}{marker}"));
             }
         }

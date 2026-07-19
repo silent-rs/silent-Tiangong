@@ -73,6 +73,10 @@ where
         temp_root,
     };
     let _guard = TestEnvGuard::setup(&paths)?;
+    // models_config 已归 config registry(issue #245),测试需 init。
+    let storage = paths.fake_home.join(".tiangong");
+    std::fs::create_dir_all(&storage).ok();
+    tiangong_config::registry::init_from_dir(&storage);
     let mut state = TiangongState::load_or_default();
     test(&paths, &mut state)
 }

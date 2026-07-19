@@ -2014,20 +2014,14 @@ pub(crate) fn start_stream_consumer(
 
                     // 检查是否需要生成标题
                     if let Some(input) = core_state.title_generation_input(&final_sid) {
-                        let provider_config = core_state
-                            .store
-                            .provider
-                            .models_config
+                        let models = core_state.models_config();
+                        let provider_config = models
                             .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
                             .or_else(|| {
-                                core_state
-                                    .store
-                                    .provider
-                                    .models_config
-                                    .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+                                models.resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
                             })
                             .map(tiangong_llm::ModelEndpoint::from_resolved)
-                            .unwrap_or_else(|| core_state.store.provider.model_endpoint.clone());
+                            .unwrap_or_default();
                         return Ok(Some((input, provider_config)));
                     }
                     Ok(None)

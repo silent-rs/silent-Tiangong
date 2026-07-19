@@ -1,6 +1,3 @@
-use tiangong_llm::ModelEndpoint;
-use tiangong_llm::models_config::RoutingSlot;
-
 use super::super::*;
 
 impl TiangongState {
@@ -9,17 +6,7 @@ impl TiangongState {
         let sessions_dir_path = default_sessions_dir_path();
         let default_agent_config = AgentConfig::default();
 
-        // ModelsConfig 为主配置源（仅从 models.json 读取；环境变量回退已移除）。
-        let storage_dir = tiangong_config::io::storage_root();
-        let models_config = tiangong_config::io::load_models_config_at(&storage_dir);
-
-        // 从 models_config 解析 chat 端点（路由解析结果 → 扁平 ModelEndpoint），
-        // 未配置 chat 路由时得到 ModelEndpoint::default()（字段为空）。
-        let model_endpoint = models_config
-            .resolve_slot(RoutingSlot::Chat)
-            .map(ModelEndpoint::from_resolved)
-            .unwrap_or_default();
-
+        // models_config 由 config registry 管理(进程单例,启动时 init)。
         let mut state = Self {
             store: AppStore {
                 session: SessionState {
@@ -31,8 +18,6 @@ impl TiangongState {
                     input_drafts: HashMap::new(),
                 },
                 provider: ProviderState {
-                    models_config,
-                    model_endpoint,
                     model_list: Vec::new(),
                 },
                 agent: AgentState {
@@ -108,10 +93,9 @@ impl TiangongState {
             .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
         let active_trust_mode = state.active_session_trust_mode();
         state.store.agent.agent_config.trust_mode = active_trust_mode;
-        state.refresh_chat_endpoint();
         state.store.provider.model_list = normalize_model_list(
             state.store.provider.model_list.clone(),
-            &state.store.provider.model_endpoint.model,
+            &state.current_model(),
         );
 
         let recovered_count = state.recover_interrupted_tasks();
@@ -143,7 +127,6 @@ impl TiangongState {
         self.store.provider.model_list = loaded.model_list;
         if let Some(agent_config) = loaded.agent_config {
             self.store.agent.agent_config = agent_config;
-            self.refresh_chat_endpoint();
         }
         self.resync_session_metadata();
     }

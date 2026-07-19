@@ -1,9 +1,9 @@
-use tiangong_llm::ModelEndpoint;
-use tiangong_llm::models_config::ModelsConfig;
-
-#[derive(Debug)]
+/// Provider 状态：仅保留 UI 持久化的可用模型列表。
+///
+/// issue #245:`models_config` 已归 config registry(进程单例),
+/// `model_endpoint` 按需从 registry 派生,均不在 app-state 缓存。
+#[derive(Debug, Default)]
 pub struct ProviderState {
-    pub models_config: ModelsConfig,
-    pub model_endpoint: ModelEndpoint, // 从 models_config 自动生成（内部用）
+    /// UI 下拉列表用的可用模型名(持久化在 app.json)。
     pub model_list: Vec<String>,
 }
