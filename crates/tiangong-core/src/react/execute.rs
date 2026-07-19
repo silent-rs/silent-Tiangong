@@ -9,10 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::context::compressor::{
-    CompressionError, CompressionUpdate, ContextCompressor, apply_compression,
-    build_compression_resume_message,
-};
+use crate::context::compressor::{CompressionError, CompressionUpdate, ContextCompressor};
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -755,53 +752,6 @@ fn start_context_compression(
     }
 }
 
-fn complete_context_compression(
-    ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    active: ActiveCompression,
-    result: Result<
-        std::result::Result<CompressionUpdate, CompressionError>,
-        tokio::task::JoinError,
-    >,
-) -> (CompressionContinuation, Option<Message>) {
-    let ActiveCompression {
-        observed_tokens,
-        continuation,
-        ..
-    } = active;
-    let result = result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())));
-
-    match result {
-        Ok(update) => {
-            state.accumulated_usage.accumulate(&update.usage);
-            match apply_compression(ctx, &update, false) {
-                Ok(current_tokens) => {
-                    ContextCompressor::notify_auto_success(
-                        ctx,
-                        &update,
-                        current_tokens,
-                        observed_tokens,
-                    );
-                    let resume = update
-                        .current_task
-                        .as_deref()
-                        .map(build_compression_resume_message);
-                    (continuation, resume)
-                }
-                Err(error) => {
-                    ContextCompressor::notify_auto_failure(ctx, &update.usage, &error);
-                    (continuation, None)
-                }
-            }
-        }
-        Err(error) => {
-            state.accumulated_usage.accumulate(&error.usage);
-            ContextCompressor::notify_auto_failure(ctx, &error.usage, &error);
-            (continuation, None)
-        }
-    }
-}
-
 fn needs_context_compression(ctx: &TurnContext, usage: &TokenUsage) -> bool {
     ContextOrganizer::new(ctx.context_limit).needs_compression(observed_total_tokens(usage))
 }
@@ -1077,13 +1027,17 @@ pub(super) async fn execute_turn(
                 let active = active_compression
                     .take()
                     .expect("完成的压缩任务必须存在运行记录");
-                let (continuation, resume) = complete_context_compression(
+                let ActiveCompression {
+                    observed_tokens,
+                    continuation,
+                    ..
+                } = active;
+                pending_resume = ContextCompressor::complete_auto(
                     ctx,
-                    &mut state,
-                    active,
+                    &mut state.accumulated_usage,
+                    observed_tokens,
                     compression_result,
                 );
-                pending_resume = resume;
 
                 match continuation {
                     CompressionContinuation::ReactText {

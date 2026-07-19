@@ -242,6 +242,42 @@ impl ContextCompressor {
         Self::notify_result(ctx, ContextCompressAction::Failed);
     }
 
+    pub(crate) fn complete_auto(
+        ctx: &mut TurnContext,
+        accumulated_usage: &mut TokenUsage,
+        observed_tokens: usize,
+        result: std::result::Result<
+            std::result::Result<CompressionUpdate, CompressionError>,
+            tokio::task::JoinError,
+        >,
+    ) -> Option<Message> {
+        let result = result.unwrap_or_else(|error| Err(CompressionError::new(error.to_string())));
+
+        match result {
+            Ok(update) => {
+                accumulated_usage.accumulate(&update.usage);
+                match apply_compression(ctx, &update, false) {
+                    Ok(current_tokens) => {
+                        Self::notify_auto_success(ctx, &update, current_tokens, observed_tokens);
+                        update
+                            .current_task
+                            .as_deref()
+                            .map(build_compression_resume_message)
+                    }
+                    Err(error) => {
+                        Self::notify_auto_failure(ctx, &update.usage, &error);
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                accumulated_usage.accumulate(&error.usage);
+                Self::notify_auto_failure(ctx, &error.usage, &error);
+                None
+            }
+        }
+    }
+
     fn notify_result(ctx: &TurnContext, action: ContextCompressAction) {
         Self::notify_session_result(&ctx.stream_tx, &ctx.session, action);
     }
