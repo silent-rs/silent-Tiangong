@@ -213,11 +213,7 @@ impl TiangongCore {
             tracing::warn!(%error, session_id = %self.session_id, "清空上下文落盘失败");
             CoreError::WorkerStopped
         })?;
-        let _ = self.stream_tx.send(StreamEvent::ContextCompressed {
-            action: tiangong_types::stream::ContextCompressAction::Clear,
-            summary_up_to: total,
-            remaining_messages: 0,
-        });
+        crate::context::compressor::ContextCompressor::notify_cleared(&self.stream_tx, &session);
         Ok(())
     }
 

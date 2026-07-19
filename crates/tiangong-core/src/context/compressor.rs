@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use crate::model::{ModelRequest, SingleProviderClient, StopReason, TokenUsage};
 use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session};
 use crate::turn_context::TurnContext;
+use tiangong_types::{StreamEvent, stream::ContextCompressAction};
 
 /// 判断消息是否为可压缩的有效消息。
 fn is_compressible(message: &Message) -> bool {
@@ -123,6 +124,138 @@ impl ContextCompressor {
             summary_up_to: split_point,
             boundary_message_id,
         })
+    }
+
+    pub(crate) fn notify_started(ctx: &TurnContext) {
+        let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
+            summary_up_to: ctx.session.summary_up_to,
+            total_messages: ctx.session.messages.len(),
+        });
+    }
+
+    pub(crate) fn notify_noop(ctx: &TurnContext) {
+        Self::notify_result(ctx, ContextCompressAction::Noop);
+    }
+
+    pub(crate) fn notify_cancelled(ctx: &TurnContext) {
+        Self::notify_result(ctx, ContextCompressAction::Cancelled);
+    }
+
+    pub(crate) fn notify_cleared(
+        stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+        session: &Session,
+    ) {
+        Self::notify_session_result(stream_tx, session, ContextCompressAction::Clear);
+    }
+
+    pub(crate) fn notify_auto_success(
+        ctx: &TurnContext,
+        update: &CompressionUpdate,
+        current_tokens: usize,
+        observed_tokens: usize,
+    ) {
+        Self::notify_result(ctx, ContextCompressAction::Auto);
+        crate::react::context::emit_token_usage(
+            &ctx.stream_tx,
+            &update.usage,
+            Some(current_tokens),
+            ctx.context_limit,
+            "context_summary",
+            None,
+        );
+        tracing::info!(
+            session_id = %ctx.session.id,
+            observed_tokens,
+            old_summary_up_to = update.previous_summary_up_to,
+            summary_up_to = ctx.session.summary_up_to,
+            total_messages = update.summary_up_to,
+            "上下文摘要已更新"
+        );
+    }
+
+    pub(crate) fn notify_auto_failure(
+        ctx: &TurnContext,
+        usage: &TokenUsage,
+        error: &dyn std::fmt::Display,
+    ) {
+        crate::react::context::emit_token_usage(
+            &ctx.stream_tx,
+            usage,
+            None,
+            ctx.context_limit,
+            "context_summary_failed",
+            None,
+        );
+        tracing::warn!(
+            session_id = %ctx.session.id,
+            error = %error,
+            "上下文压缩失败，保留原始上下文"
+        );
+        Self::notify_result(ctx, ContextCompressAction::Failed);
+    }
+
+    pub(crate) fn notify_manual_success(
+        ctx: &TurnContext,
+        update: &CompressionUpdate,
+        current_tokens: usize,
+    ) {
+        Self::notify_result(ctx, ContextCompressAction::Compress);
+        crate::react::context::emit_token_usage(
+            &ctx.stream_tx,
+            &update.usage,
+            Some(current_tokens),
+            ctx.context_limit,
+            "manual_context_compress",
+            None,
+        );
+        tracing::info!(
+            session_id = %ctx.session.id,
+            summary_up_to = ctx.session.summary_up_to,
+            "手动上下文摘要已更新"
+        );
+    }
+
+    pub(crate) fn notify_manual_failure(
+        ctx: &TurnContext,
+        usage: &TokenUsage,
+        error: &dyn std::fmt::Display,
+    ) {
+        crate::react::context::emit_token_usage(
+            &ctx.stream_tx,
+            usage,
+            None,
+            ctx.context_limit,
+            "manual_context_compress_failed",
+            None,
+        );
+        tracing::warn!(
+            session_id = %ctx.session.id,
+            error = %error,
+            "手动上下文压缩失败，继续使用原始上下文"
+        );
+        let _ = ctx.stream_tx.send(StreamEvent::AgentNotification {
+            agent_id: "system".to_string(),
+            agent_label: "系统".to_string(),
+            content: format!("手动压缩上下文失败：{error}"),
+            level: "error".to_string(),
+        });
+        Self::notify_result(ctx, ContextCompressAction::Failed);
+    }
+
+    fn notify_result(ctx: &TurnContext, action: ContextCompressAction) {
+        Self::notify_session_result(&ctx.stream_tx, &ctx.session, action);
+    }
+
+    fn notify_session_result(
+        stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+        session: &Session,
+        action: ContextCompressAction,
+    ) {
+        let _ = stream_tx.send(StreamEvent::ContextCompressed {
+            action,
+            summary_up_to: session.summary_up_to,
+            remaining_messages: session.messages.len().saturating_sub(session.summary_up_to),
+        });
     }
 
     fn summary_request(

@@ -32,9 +32,7 @@ use crate::session::{Message, MessagePhase, MessageRole};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_types::{
-    DeferredToolInjection, StreamEvent, StreamToolCall, stream::ContextCompressAction,
-};
+use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
@@ -565,9 +563,7 @@ enum LlmPurpose {
 
 struct ActiveCompression {
     task: tokio::task::JoinHandle<std::result::Result<CompressionUpdate, CompressionError>>,
-    observed_usage: TokenUsage,
-    previous_summary_up_to: usize,
-    total_messages: usize,
+    observed_tokens: usize,
     continuation: CompressionContinuation,
 }
 
@@ -733,20 +729,16 @@ fn start_context_compression(
     continuation: CompressionContinuation,
     force_target_budget: bool,
 ) -> ActiveCompression {
-    let previous_summary_up_to = ctx.session.summary_up_to;
-    let total_messages = ctx.session.messages.len();
-    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
-        summary_up_to: previous_summary_up_to,
-        total_messages,
-    });
+    ContextCompressor::notify_started(ctx);
     let compressor = ContextCompressor::new(ctx);
-    let observed_tokens = if force_target_budget {
+    let observed_tokens = observed_total_tokens(&observed_usage);
+    let budget_tokens = if force_target_budget {
         0
     } else {
-        observed_total_tokens(&observed_usage)
+        observed_tokens
     };
     let output_budget =
-        ContextOrganizer::new(ctx.context_limit).compression_output_budget(observed_tokens);
+        ContextOrganizer::new(ctx.context_limit).compression_output_budget(budget_tokens);
     let task = tokio::spawn(async move {
         let Some(output_budget) = output_budget else {
             return Err(CompressionError::new(
@@ -758,9 +750,7 @@ fn start_context_compression(
 
     ActiveCompression {
         task,
-        observed_usage,
-        previous_summary_up_to,
-        total_messages,
+        observed_tokens,
         continuation,
     }
 }
@@ -775,9 +765,7 @@ fn complete_context_compression(
     >,
 ) -> (CompressionContinuation, Option<Message>) {
     let ActiveCompression {
-        observed_usage,
-        previous_summary_up_to,
-        total_messages,
+        observed_tokens,
         continuation,
         ..
     } = active;
@@ -788,31 +776,11 @@ fn complete_context_compression(
             state.accumulated_usage.accumulate(&update.usage);
             match apply_compression(ctx, &update, false) {
                 Ok(current_tokens) => {
-                    let remaining = ctx
-                        .session
-                        .messages
-                        .len()
-                        .saturating_sub(ctx.session.summary_up_to);
-                    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                        action: ContextCompressAction::Auto,
-                        summary_up_to: ctx.session.summary_up_to,
-                        remaining_messages: remaining,
-                    });
-                    emit_token_usage(
-                        &ctx.stream_tx,
-                        &update.usage,
-                        Some(current_tokens),
-                        ctx.context_limit,
-                        "context_summary",
-                        None,
-                    );
-                    tracing::info!(
-                        session_id = %ctx.session.id,
-                        observed_tokens = observed_total_tokens(&observed_usage),
-                        old_summary_up_to = previous_summary_up_to,
-                        summary_up_to = ctx.session.summary_up_to,
-                        total_messages,
-                        "上下文摘要已更新"
+                    ContextCompressor::notify_auto_success(
+                        ctx,
+                        &update,
+                        current_tokens,
+                        observed_tokens,
                     );
                     let resume = update
                         .current_task
@@ -821,52 +789,14 @@ fn complete_context_compression(
                     (continuation, resume)
                 }
                 Err(error) => {
-                    emit_token_usage(
-                        &ctx.stream_tx,
-                        &update.usage,
-                        None,
-                        ctx.context_limit,
-                        "context_summary_failed",
-                        None,
-                    );
-                    tracing::warn!(session_id = %ctx.session.id, %error, "上下文压缩提交失败");
-                    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                        action: ContextCompressAction::Failed,
-                        summary_up_to: ctx.session.summary_up_to,
-                        remaining_messages: ctx
-                            .session
-                            .messages
-                            .len()
-                            .saturating_sub(ctx.session.summary_up_to),
-                    });
+                    ContextCompressor::notify_auto_failure(ctx, &update.usage, &error);
                     (continuation, None)
                 }
             }
         }
         Err(error) => {
             state.accumulated_usage.accumulate(&error.usage);
-            emit_token_usage(
-                &ctx.stream_tx,
-                &error.usage,
-                None,
-                ctx.context_limit,
-                "context_summary_failed",
-                None,
-            );
-            tracing::warn!(
-                session_id = %ctx.session.id,
-                error = %error,
-                "上下文压缩失败，保留原始上下文"
-            );
-            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                action: ContextCompressAction::Failed,
-                summary_up_to: ctx.session.summary_up_to,
-                remaining_messages: ctx
-                    .session
-                    .messages
-                    .len()
-                    .saturating_sub(ctx.session.summary_up_to),
-            });
+            ContextCompressor::notify_auto_failure(ctx, &error.usage, &error);
             (continuation, None)
         }
     }
@@ -1059,15 +989,7 @@ pub(super) async fn execute_turn(
 
                     if let Some(active) = active_compression.take() {
                         abort_and_join(active.task).await;
-                        let _ = stream_tx.send(StreamEvent::ContextCompressed {
-                            action: ContextCompressAction::Cancelled,
-                            summary_up_to: ctx.session.summary_up_to,
-                            remaining_messages: ctx
-                                .session
-                                .messages
-                                .len()
-                                .saturating_sub(ctx.session.summary_up_to),
-                            });
+                        ContextCompressor::notify_cancelled(ctx);
                     }
 
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
