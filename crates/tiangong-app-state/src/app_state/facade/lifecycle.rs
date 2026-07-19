@@ -58,6 +58,7 @@ impl TiangongState {
                 runtime,
                 turn_service: AppTurnService,
             },
+            core_manager: std::sync::OnceLock::new(),
         };
 
         let mut loaded_from_disk = false;

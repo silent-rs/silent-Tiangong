@@ -36,17 +36,46 @@ pub use self::store::{
 };
 pub use self::support::{AppPaths, AppServices};
 
+pub use tiangong_core_manager::CoreManager;
+
 const DEFAULT_SESSION_TITLE: &str = "默认会话";
 
 #[derive(Debug)]
 pub struct TiangongState {
     pub store: AppStore,
     pub services: AppServices,
+    /// 会话级 TiangongCore 管理器（issue #245）。
+    ///
+    /// 延迟注入：`load_or_default` 构造时尚无 host 依赖（app_handle/skill/mcp），
+    /// 留空 OnceLock；host 构造完 state 后调用 [`Self::install_core_manager`]
+    /// 填充。访问前未注入会 panic（与 `set_app_handle` 同模式）。
+    pub core_manager: std::sync::OnceLock<CoreManager>,
 }
 
 impl Default for TiangongState {
     fn default() -> Self {
         Self::load_or_default()
+    }
+}
+
+impl TiangongState {
+    /// 注入 CoreManager（host 在构造完 state 后调用）。
+    ///
+    /// 重复注入会返回已有实例的引用（幂等，便于多入口安全调用）。
+    pub fn install_core_manager(
+        &self,
+        config: tiangong_core::core_config::CoreConfigProvider,
+        storage_root: impl Into<PathBuf>,
+    ) -> &CoreManager {
+        self.core_manager
+            .get_or_init(|| CoreManager::new(config, storage_root))
+    }
+
+    /// 访问 CoreManager。未注入时 panic。
+    pub fn core_manager(&self) -> &CoreManager {
+        self.core_manager
+            .get()
+            .expect("CoreManager 尚未注入，需先调用 install_core_manager")
     }
 }
 

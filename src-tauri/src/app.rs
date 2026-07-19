@@ -21,18 +21,11 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
-    pub(crate) cores: Mutex<HashMap<String, TiangongCore>>,
     /// 子 Agent 的过程消息仅供桌面端视图展示，不能进入父 Session 权威状态。
     ///
     /// 按父 Session 保存；构建 RunSnapshot 时合并到消息副本。这样 Core 重建、
     /// 编辑重发和 Session 持久化永远不会读到这些临时 worker 消息。
     agent_worker_views: Mutex<HashMap<String, Vec<tiangong_types::Message>>>,
-    /// 覆盖同一会话从首次检查到 Core 插入的完整创建区间。
-    ///
-    /// 当前入口还会统一持有 `session_send_locks` 覆盖完整业务生命周期；这里再独立
-    /// 防御任何未来直接调用 `ensure_core` 的路径，保证 builder 启动 worker 前已经
-    /// 取得唯一资格，避免落选 Core 仍执行插件恢复钩子。
-    core_creation_locks: CoreCreationLocks,
     /// 覆盖单个会话从附件准备到 Core 持久化确认的完整串行区间。
     /// 不同会话使用不同锁，可以并行发送；同一会话不会并发创建 Core 或抢占草稿。
     session_send_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
@@ -75,12 +68,17 @@ pub struct TiangongApp {
     /// Tauri 应用句柄（browser/terminal 插件构造需要）。
     ///
     /// 由 setup 阶段经 [`Self::set_app_handle`] 注入（builder 链构造时尚无 handle）。
-    /// 每次 [`Self::ensure_core`] 创建 Core 时，用此句柄现场构造全部插件实例。
-    /// `Arc` 包裹以便与 [`crate::core_factory::DesktopCoreFactory`] 共享同一 cell。
+    /// 每次 `ensure_core` 创建 Core 时，经 [`crate::core_factory::DesktopCoreFactory`]
+    /// 用此句柄现场构造全部插件实例。`Arc` 包裹以便与 factory 共享同一 cell。
     app_handle: std::sync::Arc<std::sync::OnceLock<tauri::AppHandle>>,
-    /// 会话级 Core 管理器（issue #245）：承接 app-state 收窄后的资源加载与管理。
+    /// 桌面端 Core 构造依赖（issue #245）：持有 app_handle/skill/mcp/config/
+    /// storage_root,提供 `build_plugins()` 供 `ensure_core` 前构造插件集合。
+    pub desktop_factory: std::sync::Arc<crate::core_factory::DesktopCoreFactory>,
+    /// CoreManager 句柄（与 `TiangongState.core_manager` 共享同一注册表实例）。
     ///
-    /// P1 阶段与既有 `cores` map 并存；P2 调用点逐步迁移到此后，移除 `cores`。
+    /// 真相源归 `TiangongState.core_manager`(根字段);这里持有 clone 仅供
+    /// `TiangongApp` 同步方法(has_live_core / deliver_* / cancel_core 等)访问,
+    /// 避免每个同步调用都 lock AsyncMutex<TiangongState>。
     pub core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
@@ -104,11 +102,6 @@ pub struct ToolInjection {
 struct DraftSendClaim {
     revision: u64,
     attachment_paths: Vec<String>,
-}
-
-#[derive(Default)]
-struct CoreCreationLocks {
-    by_session: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
 }
 
 pub(crate) struct EnsuredCore {
@@ -172,23 +165,6 @@ fn merge_agent_output_messages(
     }
 }
 
-impl CoreCreationLocks {
-    fn lock_for(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
-        let mut locks = match self.by_session.lock() {
-            Ok(guard) => guard,
-            Err(err) => {
-                warn!(error = %err, "core_creation_locks 锁已污染，尝试恢复");
-                err.into_inner()
-            }
-        };
-        // 运行期不删除已发布的 Arc，避免旧等待者与新锁并存。
-        locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
-            .clone()
-    }
-}
-
 impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
@@ -217,21 +193,29 @@ impl TiangongApp {
         let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root.clone(),
         ));
-        let factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
+        let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
             skill_plugin: skill_plugin.clone(),
             mcp_plugin: mcp_plugin.clone(),
             config: config.clone(),
             storage_root: storage_root.clone(),
         });
-        let core_manager =
-            tiangong_core_manager::CoreManager::new(config.clone(), factory, storage_root);
+        // 注入 CoreManager 到 TiangongState 根字段（issue #245）。
+        // 同时 clone 一份给 TiangongApp 供同步方法访问(共享同一 Arc 注册表)。
+        // 用 try_lock 避免在 async 上下文(如 tokio 测试)中调用 blocking_lock 导致 panic;
+        // new() 在构造期单线程调用,try_lock 必然成功。
+        let core_manager = {
+            let guard = state
+                .try_lock()
+                .expect("CoreManager 注入期 state 锁不应被占用");
+            guard
+                .install_core_manager(config.clone(), storage_root.clone())
+                .clone()
+        };
 
         Self {
             state,
-            cores: Mutex::new(HashMap::new()),
             agent_worker_views: Mutex::new(HashMap::new()),
-            core_creation_locks: CoreCreationLocks::default(),
             session_send_locks: Mutex::new(HashMap::new()),
             draft_update_locks: Mutex::new(HashMap::new()),
             draft_redirects: Mutex::new(HashMap::new()),
@@ -240,7 +224,6 @@ impl TiangongApp {
             discarded_drafts: Mutex::new(HashSet::new()),
             active_session_epoch: AtomicU64::new(0),
             config,
-            core_manager,
             scheduler_context,
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
             skill_plugin,
@@ -249,6 +232,8 @@ impl TiangongApp {
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),
             app_handle,
+            desktop_factory,
+            core_manager,
             tool_injection_tx,
             tool_injection_rx: Mutex::new(Some(tool_injection_rx)),
         }
@@ -643,16 +628,6 @@ impl TiangongApp {
         }
     }
 
-    fn lock_cores(&self) -> std::sync::MutexGuard<'_, HashMap<String, TiangongCore>> {
-        match self.cores.lock() {
-            Ok(guard) => guard,
-            Err(err) => {
-                warn!(error = %err, "cores 锁已污染，尝试恢复");
-                err.into_inner()
-            }
-        }
-    }
-
     pub fn session_send_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
         let mut locks = match self.session_send_locks.lock() {
             Ok(guard) => guard,
@@ -665,10 +640,6 @@ impl TiangongApp {
             .entry(session_id.to_string())
             .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
             .clone()
-    }
-
-    fn core_creation_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
-        self.core_creation_locks.lock_for(session_id)
     }
 
     pub fn active_session_epoch(&self) -> u64 {
@@ -953,18 +924,13 @@ impl TiangongApp {
         let plugin_set_changed = old_sig != new_sig;
         // 这份 provider 只作全局模板和新 Core 构造辅助，不承载任一会话的
         // trust/reasoning 覆盖。已存在 Core 使用各自独立的 provider。
-        self.config.replace(template);
         // 能力集合变化时，存活 Core 的插件列表无法热更（构造时固定）。
         // 存活 Core 继续用旧插件直到自然停止；下次 ensure_core 新建时用最新插件。
         // 仅 endpoint/trust/reasoning 变化时，按 session 热更存活 Core 的配置。
         if !plugin_set_changed {
-            let cores = self.lock_cores();
-            for (session_id, core) in cores.iter() {
-                if let Some(config) = session_configs.get(session_id) {
-                    let _ = core.replace_config(config.clone());
-                    core.set_trust_mode(config.trust_mode);
-                }
-            }
+            self.core_manager.sync_config(template, &session_configs);
+        } else {
+            self.config.replace(template);
         }
         Ok(())
     }
@@ -991,229 +957,54 @@ impl TiangongApp {
     ///
     /// Core 是会话级资源，空闲只表示当前没有 turn task，并不表示实例已经停止。
     /// 关闭和移除是删除会话、失败回滚等显式流程的职责。
+    /// 确保会话 Core 存在（issue #245：转走 core_manager）。
+    ///
+    /// 构建 per-session 配置 → 构造桌面插件集合 → 调
+    /// `core_manager.ensure_core`。命中既有 Core 则刷新配置；否则新建。
     pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
         session: tiangong_core::session::Session,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
-        let creation_lock = self.core_creation_lock(session_id);
-        let _creation_guard = creation_lock.lock_owned().await;
-
         let base = self.config.snapshot();
         let session_config = {
             let core_state = self.state.lock().await;
             core_state.build_core_config_for_session_from_base(&base, session_id)
         };
-
-        {
-            let cores = self.lock_cores();
-            if let Some(core) = cores.get(session_id) {
-                // cwd 由 app-state 快照维护，下次 turn 从磁盘重载，无需投递到 Core。
-                let _ = core.replace_config(session_config.clone());
-                core.set_trust_mode(session.trust_mode);
-                return EnsuredCore {
-                    session_id: session_id.to_string(),
-                    is_new: false,
-                };
-            }
-        }
-
-        let core = self.create_core(session, session_config, stream_tx).await;
-        let id = core.session_id().to_string();
-        self.lock_cores().insert(id.clone(), core);
+        // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
+        let plugins = self.desktop_factory.build_plugins().await;
+        let ensured = self
+            .core_manager
+            .ensure_core(session_id, session_config, stream_tx, plugins)
+            .await
+            .expect("ensure_core 不应失败");
+        // session 参数的 trust_mode 仅供既有 Core 刷新(ensure_core 内已用 config.trust_mode)。
+        let _ = session;
         EnsuredCore {
-            session_id: id,
-            is_new: true,
+            session_id: ensured.session_id,
+            is_new: ensured.is_new,
         }
-    }
-
-    /// 构造全新的 TiangongCore（memory handle + 全部插件 + builder.build）。
-    ///
-    /// 纯构建流程，不操作 cores map。首次创建或显式移除后重建都复用本方法。
-    async fn create_core(
-        &self,
-        session: tiangong_core::session::Session,
-        session_config: tiangong_core::core_config::CoreConfig,
-        stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
-    ) -> TiangongCore {
-        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
-            self.config.generation(),
-            tiangong_memory::ProcessType::Gui,
-        )
-        .await;
-
-        let storage_root = tiangong_app_state::app_state::storage_root();
-        let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-        // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-        plugins.extend(tiangong_plugin_prompt::default_plugins());
-        let Some(app_handle) = self.app_handle.get() else {
-            panic!("TiangongApp.app_handle 未注入，set_app_handle 应在 setup 阶段调用");
-        };
-        let browser_available =
-            if let Some(browser) = tiangong_plugin_browser::build_plugin(app_handle) {
-                plugins.push(browser);
-                true
-            } else {
-                warn!("浏览器插件构造失败（Tauri state 未就绪），浏览器能力将缺失");
-                false
-            };
-        let terminal_available =
-            if let Some(terminal) = tiangong_plugin_terminal::build_plugin(app_handle) {
-                plugins.push(terminal);
-                true
-            } else {
-                warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
-                false
-            };
-        plugins.push(tiangong_plugin_fs::build_plugin());
-        plugins.push(tiangong_plugin_index::build_plugin());
-        // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-        use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-        let models = tiangong_config::registry::models();
-        let resolve_ep = |cap: ModelCapability| {
-            models
-                .resolve_for_capability(cap)
-                .map(ModelEndpoint::from_resolved)
-        };
-        let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
-        let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-        let tts_endpoint = resolve_ep(ModelCapability::Tts);
-        let stt_endpoint = resolve_ep(ModelCapability::Stt);
-        let multimodal_endpoint =
-            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-                resolve_ep(ModelCapability::Multimodal)
-            } else {
-                None
-            };
-        if let Some(ep) = image_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-        }
-        if let Some(ep) = video_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-        }
-        if let Some(ep) = tts_endpoint.clone() {
-            plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-        }
-        if let Some(ep) = stt_endpoint.clone() {
-            plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-        }
-        plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
-        plugins.push(tiangong_plugin_scheduler::build_plugin());
-        plugins.push(tiangong_plugin_task::build_plugin());
-        if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-            plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-        }
-        // Skill / MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具，
-        // app 侧经 self.skill_plugin / self.mcp_plugin 做管理。
-        plugins.push(self.skill_plugin.clone());
-        plugins.push(self.mcp_plugin.clone());
-        // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-        let child_plugin_factory: std::sync::Arc<
-            dyn tiangong_plugin_agent_team::ChildPluginFactory,
-        > = std::sync::Arc::new({
-            let app_handle = app_handle.clone();
-            let storage_root = storage_root.clone();
-            move || {
-                let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
-                    Vec::new();
-                child_plugins.extend(tiangong_plugin_prompt::default_plugins());
-                if browser_available {
-                    if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
-                        child_plugins.push(browser);
-                    }
-                }
-                if terminal_available {
-                    if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle) {
-                        child_plugins.push(terminal);
-                    }
-                }
-                child_plugins.push(tiangong_plugin_fs::build_plugin());
-                child_plugins.push(tiangong_plugin_index::build_plugin());
-                if let Some(ep) = image_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                }
-                if let Some(ep) = video_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
-                if let Some(ep) = tts_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                }
-                if let Some(ep) = stt_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                }
-                child_plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
-                child_plugins.push(tiangong_plugin_scheduler::build_plugin());
-                child_plugins.push(tiangong_plugin_task::build_plugin());
-                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
-                child_plugins.push(std::sync::Arc::new(
-                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
-                        storage_root.join("skills"),
-                    ),
-                ));
-                child_plugins.push(std::sync::Arc::new(
-                    tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-                ));
-                child_plugins
-            }
-        });
-        plugins.push(tiangong_plugin_agent_team::build_plugin(
-            storage_root.clone(),
-            child_plugin_factory,
-        ));
-
-        TiangongCore::builder()
-            .session_id(session.id.clone())
-            .config(CoreConfigProvider::new(session_config))
-            .trust_mode(session.trust_mode)
-            .storage_root(storage_root)
-            .stream_tx(stream_tx)
-            .plugins(plugins)
-            .build()
     }
 
     /// 取回 core 的 session（消费 core，用于持久化或切换会话）
     pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
-        let mut cores = self.lock_cores();
-        cores.remove(session_id)
+        self.core_manager.take_core(session_id)
     }
 
-    /// 关闭并等待指定会话的 Core 结束。
-    ///
-    /// Core 的 worker join 是同步阻塞调用，本方法用 `spawn_blocking` 包裹以适配
-    /// async 调用方。`cancel` 为 true 时先投递 `Command::Cancel` 再 take+join，
-    /// 用于删除会话等需要主动终止在途 turn 的场景；失败回滚传 false（仅取走本次
-    /// 绑定的 Core 并等其写盘结束）。Core 不存在时直接返回。
+    /// 关闭并等待指定会话的 Core 结束（issue #245：转走 core_manager）。
     pub async fn retire_core(&self, session_id: &str, cancel: bool) {
-        if cancel {
-            let _ = self.cancel_core(session_id);
-        }
-        let Some(core) = self.take_core(session_id) else {
-            return;
-        };
-        let sid = session_id.to_string();
-        match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(session_id = %sid, %error, "关闭 Core 失败"),
-            Err(error) => tracing::warn!(session_id = %sid, %error, "等待 Core 关闭任务失败"),
-        }
+        self.core_manager.retire_core(session_id, cancel).await;
     }
 
     /// 指定会话是否持有可投递的 Core 实例。
-    ///
-    /// 空闲 Core 没有活跃 turn task，但仍可接收下一条用户消息。
     pub fn has_live_core(&self, session_id: &str) -> bool {
-        self.lock_cores().contains_key(session_id)
+        self.core_manager.has_live_core(session_id)
     }
 
     /// 仅当指定会话存在 Core 时投递输入。
     pub fn deliver_to_core_if_live(&self, session_id: &str, input: AgentInputKind) -> bool {
-        let cores = self.lock_cores();
-        cores
-            .get(session_id)
-            .is_some_and(|core| core.deliver(input).is_ok())
+        self.core_manager.deliver_to_core_if_live(session_id, input)
     }
 
     /// 向 Core 投递已准备好的用户消息（fire-and-forget，不等持久化确认）。
@@ -1226,20 +1017,21 @@ impl TiangongApp {
         if !self.remote_turn_allows_message(session_id, &message_id) {
             return Err("会话正在处理远端请求，拒绝插入其他用户消息".to_string());
         }
-        let cores = self.lock_cores();
-        let core = cores
-            .get(session_id)
-            .ok_or_else(|| "会话 Core 不存在".to_string())?;
-        core.deliver(AgentInputKind::prepared_with_id(message_id, prepared))
-            .map_err(|error| error.to_string())
+        if !self.core_manager.has_live_core(session_id) {
+            return Err("会话 Core 不存在".to_string());
+        }
+        self.core_manager
+            .deliver_to_core_if_live(
+                session_id,
+                AgentInputKind::prepared_with_id(message_id, prepared),
+            )
+            .then_some(())
+            .ok_or_else(|| "会话 Core 投递失败".to_string())
     }
 
     /// 取消指定会话的执行
     pub fn cancel_core(&self, session_id: &str) -> bool {
-        let cores = self.lock_cores();
-        cores
-            .get(session_id)
-            .is_some_and(|core| core.deliver(AgentInputKind::cancel()).is_ok())
+        self.core_manager.cancel_core(session_id)
     }
 
     /// 取消指定会话中某个 Agent 的当前执行
@@ -1249,7 +1041,8 @@ impl TiangongApp {
 
     /// 向指定会话的 core 发送审批响应
     pub fn respond_approval_to_core(&self, session_id: &str, request_id: String, approved: bool) {
-        self.deliver_to_core_if_live(session_id, AgentInputKind::approval(request_id, approved));
+        self.core_manager
+            .respond_approval_to_core(session_id, request_id, approved);
     }
 
     /// 设置指定会话 core 的信任模式（实时生效）
@@ -1258,10 +1051,7 @@ impl TiangongApp {
         session_id: &str,
         mode: tiangong_core::permission::TrustMode,
     ) {
-        let cores = self.lock_cores();
-        if let Some(core) = cores.get(session_id) {
-            core.set_trust_mode(mode);
-        }
+        self.core_manager.set_core_trust_mode(session_id, mode);
     }
 
     /// 启动嵌入式 Server（共享 app 的 state 和 config）
@@ -1332,10 +1122,15 @@ mod tests {
 
     #[tokio::test]
     async fn same_session_core_creation_uses_one_serial_boundary() {
-        let locks = CoreCreationLocks::default();
-        let first = locks.lock_for("session-1");
-        let second = locks.lock_for("session-1");
-        let other_session = locks.lock_for("session-2");
+        // CoreManager.creation_lock 替代了原 CoreCreationLocks(issue #245)。
+        use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+        let manager = tiangong_core_manager::CoreManager::new(
+            CoreConfigProvider::new(CoreConfig::default()),
+            std::path::PathBuf::from("/tmp"),
+        );
+        let first = manager.creation_lock("session-1");
+        let second = manager.creation_lock("session-1");
+        let other_session = manager.creation_lock("session-2");
 
         assert!(std::sync::Arc::ptr_eq(&first, &second));
         assert!(!std::sync::Arc::ptr_eq(&first, &other_session));
@@ -1384,7 +1179,10 @@ mod tests {
             .trust_mode(session.trust_mode)
             .build();
         assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");
-        app.lock_cores().insert(session_id.to_string(), core);
+        // 直接经 core_manager registry 插入(issue #245:不再有 TiangongApp.lock_cores)。
+        app.core_manager
+            .registry()
+            .insert(session_id.to_string(), core);
 
         assert!(app.has_live_core(session_id), "空闲 Core 仍应可投递新消息");
         let core = app.take_core(session_id).expect("应能取回 Core");

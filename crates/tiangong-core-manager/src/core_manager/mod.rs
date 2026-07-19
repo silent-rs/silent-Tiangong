@@ -6,8 +6,9 @@
 //! - **不执行 turn**（turn 仍由 Core 内部驱动）
 //! - session 真相源是磁盘，CoreManager 只做按需加载与缓存
 //!
-//! Core 的实际构造由 host 通过 [`crate::CoreFactory`] 注入（不同 host 的插件
-//! 构造差异极大，不能在共享层硬编码）。
+//! CoreManager 针对 `TiangongCore`，不抽象「其他 Core 类型」。Core 的实际构造
+//! 内置在 `ensure_core`：host 在调用前构造好 plugin 集合并作为参数传入
+//! （不同 host 的 plugin 构造差异大，不能在共享层硬编码）。
 
 pub mod ensure;
 pub mod registry;
@@ -24,12 +25,16 @@ use tiangong_core::core::TiangongCore;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
 
-use crate::CoreFactory;
+/// `ensure_core` 的返回：区分新建与复用既有 Core。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsuredCore {
+    pub session_id: String,
+    pub is_new: bool,
+}
 
 /// 会话级 TiangongCore 管理器。
 ///
-/// 与 [`tiangong_server::remote::core::ServerCoreManager`] 同构：`#[derive(Clone)]`
-/// 的廉价句柄，内部状态全经 `Arc<Mutex<>>` 共享。
+/// `#[derive(Clone)]` 的廉价句柄，内部状态全经 `Arc<Mutex<>>` 共享。
 #[derive(Clone)]
 pub struct CoreManager {
     cores: Arc<Mutex<HashMap<String, TiangongCore>>>,
@@ -39,7 +44,6 @@ pub struct CoreManager {
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
     creation_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     config: tiangong_core::core_config::CoreConfigProvider,
-    factory: Arc<dyn CoreFactory>,
     storage_root: PathBuf,
 }
 
@@ -48,18 +52,15 @@ impl CoreManager {
     ///
     /// - `config`：全局配置模板 provider，用于 `ensure_core` 的 base 快照与
     ///   `sync_config` 的模板替换
-    /// - `factory`：host 注入的 Core 构造工厂
     /// - `storage_root`：session 文件根（形如 `~/.tiangong`）
     pub fn new(
         config: tiangong_core::core_config::CoreConfigProvider,
-        factory: Arc<dyn CoreFactory>,
         storage_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             cores: Arc::new(Mutex::new(HashMap::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
             config,
-            factory,
             storage_root: storage_root.into(),
         }
     }
@@ -73,11 +74,6 @@ impl CoreManager {
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
     }
-
-    /// 取回会话 Core（消费，用于持久化或显式切换）。
-    ///
-    /// 调用方负责 `shutdown_join`；本方法只负责从 registry 移除所有权。
-    /// 实现见 `core_manager/ensure.rs`（与 `retire_core` 等生命周期方法同文件）。
 
     /// 从磁盘按 id 加载完整 Session（委托 `Session::load_from_storage`）。
     pub fn load_session(&self, session_id: &str) -> Result<Session, String> {
@@ -125,9 +121,14 @@ impl CoreManager {
     pub fn has_live_core(&self, session_id: &str) -> bool {
         self.registry().contains_key(session_id)
     }
+}
 
-    /// 引用注入的工厂（host 需要时使用，通常 `ensure_core` 已自动调用）。
-    pub fn factory(&self) -> &Arc<dyn CoreFactory> {
-        &self.factory
+impl std::fmt::Debug for CoreManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let live = self.cores.lock().map(|g| g.len()).unwrap_or(0);
+        f.debug_struct("CoreManager")
+            .field("live_cores", &live)
+            .field("storage_root", &self.storage_root)
+            .finish()
     }
 }

@@ -9762,7 +9762,6 @@ dependencies = [
 name = "tiangong-core-manager"
 version = "0.12.2"
 dependencies = [
- "async-trait",
  "serde",
  "serde_json",
  "tempfile",

@@ -1,18 +1,20 @@
 //! ensure / retire：Core 生命周期入口。
 //!
 //! `ensure_core` 复刻桌面 `app.rs` 的逻辑（issue #241/#234 已收窄）：先取创建锁，
-//! 命中既有 Core 则 replace_config + 同步 trust_mode；否则经 factory 构造新 Core
-//! 并插入 registry。`retire_core` 先 cancel（可选）再 take + shutdown_join。
+//! 命中既有 Core 则 replace_config + 同步 trust_mode；否则用 host 传入的 plugins
+//! 构造新 TiangongCore 并插入 registry。`retire_core` 先 cancel（可选）再 take +
+//! shutdown_join。
 
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::TiangongCore;
-use tiangong_core::core_config::CoreConfig;
+use tiangong_core::core::{Plugin, TiangongCore};
+use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
 use tiangong_types::StreamEvent;
 
 use crate::CoreManager;
-use crate::factory::EnsuredCore;
+use crate::core_manager::EnsuredCore;
 
 impl CoreManager {
     /// 确保 registry 中存在该会话的 Core，返回是否新建。
@@ -21,12 +23,16 @@ impl CoreManager {
     /// （`creation_lock`），避免落选 Core 仍执行插件恢复钩子。
     ///
     /// - 命中既有 Core：`replace_config(session_config)` + `set_trust_mode`，返回 `is_new=false`
-    /// - 未命中：经 `factory.create(...)` 构造并插入 registry，返回 `is_new=true`
+    /// - 未命中：用 host 传入的 `plugins` 构造全新 TiangongCore 并插入 registry
+    ///
+    /// `plugins` 由 host 构造（桌面/服务端的插件集合差异大，不能在共享层硬编码）。
+    /// session 真相源是磁盘，Core 内部按需 `load_from_storage`。
     pub async fn ensure_core(
         &self,
         session_id: &str,
         session_config: CoreConfig,
         stream_tx: Sender<StreamEvent>,
+        plugins: Vec<Arc<dyn Plugin>>,
     ) -> Result<EnsuredCore, String> {
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
@@ -44,11 +50,15 @@ impl CoreManager {
             }
         }
 
-        // 未命中：经 host 注入的工厂构造全新 Core。
-        let core = self
-            .factory
-            .create(session_id, session_config, stream_tx)
-            .await?;
+        // 未命中：用 host 传入的 plugins 构造全新 Core。
+        let core = TiangongCore::builder()
+            .session_id(session_id.to_string())
+            .config(CoreConfigProvider::new(session_config.clone()))
+            .trust_mode(session_config.trust_mode)
+            .storage_root(self.storage_root.to_path_buf())
+            .stream_tx(stream_tx)
+            .plugins(plugins)
+            .build();
         let id = core.session_id().to_string();
         self.registry().insert(id.clone(), core);
         Ok(EnsuredCore {
@@ -86,7 +96,7 @@ impl CoreManager {
             .is_some_and(|core| core.deliver(AgentInputKind::cancel()).is_ok())
     }
 
-    /// 取回 core 的 session（消费 core，用于持久化或切换会话）。
+    /// 取回会话 Core（消费，用于持久化或显式切换）。
     pub fn take_core(&self, session_id: &str) -> Option<TiangongCore> {
         self.registry().remove(session_id)
     }
