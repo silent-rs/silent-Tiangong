@@ -4,7 +4,9 @@
 //! `execute_turn` 的事件循环驱动。
 
 use crate::model::ModelRequest;
-use crate::react::context::{emit_token_usage, rebuild_system_prompt};
+use crate::react::context::{
+    context_with_transient_resume, emit_token_usage, rebuild_system_prompt,
+};
 use crate::react::message::upsert_assistant_text_message;
 use crate::session::{Message, MessagePhase, MessageRole, Session, now_text};
 use crate::turn_context::TurnContext;
@@ -289,18 +291,26 @@ pub(super) const SUMMARY_PHASE_PROMPT: &str = "\
 ///
 /// 将 `SUMMARY_PHASE_PROMPT` 作为运行时上下文追加到对话末尾。请求本身不携带 tools
 /// 选择信息；`execute_turn` 启动请求时显式使用 `ToolChoice::None`。
-pub(super) fn request_for_summary_phase(session: &Session) -> ModelRequest {
+pub(super) fn request_for_summary_phase(
+    session: &Session,
+    transient_resume: Option<Message>,
+) -> ModelRequest {
     build_text_finalization_request(
         session,
         &format!("<runtime_context>\n{SUMMARY_PHASE_PROMPT}\n</runtime_context>"),
+        transient_resume,
     )
 }
 
 /// 构建一次「只产出文本最终回复」的 LLM 请求（共用请求体）。
 ///
 /// 总结与强制终结仅在 runtime context 上不同；传空串时不追加 System 消息。
-fn build_text_finalization_request(session: &Session, prompt: &str) -> ModelRequest {
-    let mut context = session.context();
+fn build_text_finalization_request(
+    session: &Session,
+    prompt: &str,
+    transient_resume: Option<Message>,
+) -> ModelRequest {
+    let mut context = context_with_transient_resume(session, transient_resume);
     if !prompt.is_empty() {
         context.push(
             Message::new(MessageRole::System, prompt.to_string()).with_phase(MessagePhase::Normal),
@@ -353,6 +363,7 @@ impl ForceFinalReason {
 pub(super) fn build_force_final_request(
     ctx: &mut TurnContext,
     reason: ForceFinalReason,
+    transient_resume: Option<Message>,
 ) -> ModelRequest {
     if ctx.session.system_prompt_message.is_none() {
         rebuild_system_prompt(ctx);
@@ -379,7 +390,7 @@ pub(super) fn build_force_final_request(
         created_at: now_text(),
     });
 
-    build_text_finalization_request(&ctx.session, "")
+    build_text_finalization_request(&ctx.session, "", transient_resume)
 }
 
 pub(super) fn commit_summary_message(

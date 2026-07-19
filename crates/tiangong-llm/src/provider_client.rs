@@ -83,6 +83,7 @@ pub struct ModelResponse {
     pub text: String,
     pub reasoning_content: String,
     pub reasoning_signature: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
 }
@@ -193,6 +194,7 @@ impl SingleProviderClient {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
+            stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
         })
@@ -719,6 +721,7 @@ impl SingleProviderClient {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
+            stop_reason: None,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
         })
@@ -851,6 +854,7 @@ impl ModelClient for SingleProviderClient {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
+            stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
         })
@@ -1348,6 +1352,7 @@ fn convert_provider_response_to_function_response(
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: collect_provider_reasoning_signature(&response),
+        stop_reason: response.stop_reason,
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
     })
@@ -1566,6 +1571,7 @@ async fn consume_provider_stream_events_async(
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
+        stop_reason: None,
         usage: usage.into(),
         tool_calls,
     })
@@ -1611,6 +1617,7 @@ fn consume_provider_stream(
         text: response.text,
         reasoning_content: response.reasoning_content,
         reasoning_signature: response.reasoning_signature,
+        stop_reason: response.stop_reason,
         usage: response.usage,
         tool_calls: response.tool_calls,
     })
