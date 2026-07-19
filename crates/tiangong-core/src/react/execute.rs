@@ -451,6 +451,30 @@ fn append_failure_recovery_prompt(
     ctx.session.persist_to_disk();
 }
 
+/// 压缩完成后待执行的后续动作。
+///
+/// 压缩在触发点同步 await 完成（不可取消），但后续动作不立即执行——先存为
+/// continuation，返回主循环按 FIFO 处理 `cmd_rx` 排队命令，命令清空后再取出
+/// continuation 执行。遇到 Cancel 时，Cancel 作为终止边界：之前的命令保留效果，
+/// Cancel 之后的命令不再处理，continuation 被丢弃（压缩结果保留，但作废本轮
+/// 注入的续接消息避免下一轮继续已取消的任务）。
+enum CompressionContinuation {
+    ReactText {
+        pending_msg_id: String,
+        disposition: ReactTextDisposition,
+        request_injection_generation: u64,
+    },
+    ToolBatch,
+    Summary {
+        decision: SummaryDecision,
+        request_injection_generation: u64,
+    },
+    ContextRetry {
+        previous_summary_up_to: usize,
+        error_message: String,
+    },
+}
+
 enum NextStep {
     StartReact,
     DriveTools,
@@ -864,8 +888,13 @@ fn finish_summary(
 
 /// 执行一个完整的对话轮次。
 ///
-/// `cmd_rx` 只在这一处消费。模型 chunk、工具结果和上下文压缩结果与命令进入同一个
-/// `tokio::select!`，因此任何异步阶段运行期间都能立即响应取消和运行态反馈。
+/// `cmd_rx` 只在这一处消费。模型 chunk、工具结果与命令进入同一个 `tokio::select!`，
+/// 因此 LLM 请求或工具执行期间能立即响应取消和运行态反馈。
+///
+/// 上下文压缩是主循环中的独占阶段：在触发点同步 await 完成（不可取消），期间
+/// 收到的命令保留在 `cmd_rx` 按到达顺序排队。压缩完成后不立即执行后续动作，
+/// 而是存为 `pending_compression_continuation` 返回主循环——biased select 保证
+/// command 分支先逐条处理排队命令，队列清空后才取出 continuation 执行。
 pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
@@ -881,11 +910,15 @@ pub(super) async fn execute_turn(
     let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
     let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
     let mut pending_approval: Option<PendingApproval> = None;
+    // 压缩后续动作。压缩完成后存入，返回主循环 FIFO 处理排队命令，命令清空后
+    // 由 select 的 continuation 分支取出执行。Cancel 到达时丢弃并作废续接消息。
+    let mut pending_compression_continuation: Option<CompressionContinuation> = None;
 
     let result = 'agent_loop: loop {
         let can_advance = active_llm.is_none()
             && tool_tasks.is_empty()
             && pending_approval.is_none()
+            && pending_compression_continuation.is_none()
             && !matches!(state.next_step, NextStep::Waiting);
 
         tokio::select! {
@@ -958,9 +991,10 @@ pub(super) async fn execute_turn(
                         }
                     }
 
-                    // 压缩已完成（压缩阶段不可取消）。作废本轮注入但尚未被
-                    // 后续 LLM 请求消费的 CompressedResume 续接消息——避免下一轮
-                    // 继续执行已取消的任务。压缩结果本身（摘要、边界）保留。
+                    // 压缩已完成（压缩阶段不可取消）。若压缩后续动作尚在排队，
+                    // 丢弃它——避免取消后继续执行已取消的任务。续接消息同样作废。
+                    // 压缩结果本身（摘要、边界、落盘）保留。
+                    pending_compression_continuation.take();
                     invalidate_pending_resume_messages(&mut ctx.session);
 
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
@@ -1106,20 +1140,12 @@ pub(super) async fn execute_turn(
                                         prompt_cache_miss_tokens: None,
                                     };
                                     run_context_compression(ctx, &forced_usage).await;
-                                    injections.commit(ctx);
-                                    if ctx.session.summary_up_to > previous_summary_up_to {
-                                        // 压缩释放了空间，重试 ReAct 请求。
-                                        state.next_step = NextStep::StartReact;
-                                    } else {
-                                        persist_error(
-                                            ctx,
-                                            format!("ReAct 循环请求失败：{error_message}"),
-                                        );
-                                        state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                            state.accumulated_usage.clone(),
+                                    pending_compression_continuation =
+                                        Some(CompressionContinuation::ContextRetry {
+                                            previous_summary_up_to,
                                             error_message,
-                                        ));
-                                    }
+                                        });
+                                    state.next_step = NextStep::Waiting;
                                 } else {
                                     injections.commit(ctx);
                                     persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
@@ -1154,15 +1180,23 @@ pub(super) async fn execute_turn(
                             if needs_context_compression(ctx, &response.usage) {
                                 let usage = response.usage.clone();
                                 run_context_compression(ctx, &usage).await;
+                                pending_compression_continuation =
+                                    Some(CompressionContinuation::ReactText {
+                                        pending_msg_id,
+                                        disposition,
+                                        request_injection_generation,
+                                    });
+                                state.next_step = NextStep::Waiting;
+                            } else {
+                                finish_react_text(
+                                    ctx,
+                                    &mut state,
+                                    &mut injections,
+                                    pending_msg_id,
+                                    disposition,
+                                    request_injection_generation,
+                                );
                             }
-                            finish_react_text(
-                                ctx,
-                                &mut state,
-                                &mut injections,
-                                pending_msg_id,
-                                disposition,
-                                request_injection_generation,
-                            );
                         } else {
                             state.executed_tool_in_phase = true;
                             let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
@@ -1269,8 +1303,21 @@ pub(super) async fn execute_turn(
 
                         if needs_context_compression(ctx, &usage) {
                             run_context_compression(ctx, &usage).await;
+                            pending_compression_continuation =
+                                Some(CompressionContinuation::Summary {
+                                    decision,
+                                    request_injection_generation,
+                                });
+                            state.next_step = NextStep::Waiting;
+                        } else {
+                            finish_summary(
+                                ctx,
+                                &mut state,
+                                &mut injections,
+                                decision,
+                                request_injection_generation,
+                            );
                         }
-                        finish_summary(ctx, &mut state, &mut injections, decision, request_injection_generation);
                     }
                     LlmPurpose::ForceFinal {
                         request_injection_generation,
@@ -1388,8 +1435,67 @@ pub(super) async fn execute_turn(
                 let usage = batch.response_usage.clone();
                 if needs_context_compression(ctx, &usage) {
                     run_context_compression(ctx, &usage).await;
+                    pending_compression_continuation = Some(CompressionContinuation::ToolBatch);
+                    state.next_step = NextStep::Waiting;
+                } else {
+                    state.next_step = NextStep::DriveTools;
                 }
-                state.next_step = NextStep::DriveTools;
+            }
+
+            // 压缩后续动作：仅在排队命令清空后执行。biased select 保证上方 command
+            // 分支优先——cmd_rx 有命令时 command 就绪，本分支等待；命令清空后
+            // command 分支 Pending，本分支（ready 立即就绪）取出 continuation 执行。
+            // Cancel 到达时由 command 分支处理：丢弃 continuation、作废续接消息、break。
+            _ = std::future::ready(()), if pending_compression_continuation.is_some() => {
+                let continuation = pending_compression_continuation
+                    .take()
+                    .expect("continuation 分支只在字段存在时启用");
+                match continuation {
+                    CompressionContinuation::ReactText {
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    } => finish_react_text(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ToolBatch => {
+                        state.next_step = NextStep::DriveTools;
+                    }
+                    CompressionContinuation::Summary {
+                        decision,
+                        request_injection_generation,
+                    } => finish_summary(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        decision,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ContextRetry {
+                        previous_summary_up_to,
+                        error_message,
+                    } => {
+                        injections.commit(ctx);
+                        if ctx.session.summary_up_to > previous_summary_up_to {
+                            // 压缩释放了空间，重试 ReAct 请求。
+                            state.next_step = NextStep::StartReact;
+                        } else {
+                            persist_error(
+                                ctx,
+                                format!("ReAct 循环请求失败：{error_message}"),
+                            );
+                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                state.accumulated_usage.clone(),
+                                error_message,
+                            ));
+                        }
+                    }
+                }
             }
 
             // 无异步阶段活跃时推进一次状态；命令分支 biased 在前，会先排空已到达命令。
