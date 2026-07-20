@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot, type TabKind, type TabState, type TerminalTabInfo } from '@/api/tauri';
+import {
+  api,
+  type SessionStreamEvent,
+  type TabKind,
+  type TabState,
+  type TerminalTabInfo,
+} from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -98,7 +104,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
 }
 
 export function MainApp() {
-  const { loadSessions, updateFromSnapshot } = useStore();
+  const { applyStreamEvents, loadSessions } = useStore();
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
@@ -114,8 +120,8 @@ export function MainApp() {
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
-  const latestSnapshotRef = useRef<RunSnapshot | null>(null);
-  const snapshotTimerRef = useRef<number | null>(null);
+  const streamEventQueueRef = useRef<SessionStreamEvent[]>([]);
+  const streamEventTimerRef = useRef<number | null>(null);
   const savedWindowWidthRef = useRef<number | null>(null);
   const workspaceExpandedForBrowserRef = useRef(false);
   const preferredSidebarOpenRef = useRef(true);
@@ -185,7 +191,7 @@ export function MainApp() {
     setChatPanelWidth(MIN_CHAT_WIDTH);
 
     if (kind === 'terminal') {
-      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
+      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
@@ -196,7 +202,7 @@ export function MainApp() {
     savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
-    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
+    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     if (restoreSize && workspaceExpandedForBrowserRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -319,28 +325,21 @@ export function MainApp() {
 
     loadSessions();
 
-    const flushSnapshot = () => {
-      snapshotTimerRef.current = null;
-      const snapshot = latestSnapshotRef.current;
-      latestSnapshotRef.current = null;
-      if (snapshot) {
-        updateFromSnapshot(snapshot);
-      }
+    const flushStreamEvents = () => {
+      streamEventTimerRef.current = null;
+      const events = streamEventQueueRef.current;
+      streamEventQueueRef.current = [];
+      applyStreamEvents(events);
     };
 
-    const scheduleSnapshotUpdate = (snapshot: RunSnapshot) => {
-      latestSnapshotRef.current = snapshot;
-      if (snapshotTimerRef.current !== null) {
-        return;
-      }
-      snapshotTimerRef.current = window.setTimeout(flushSnapshot, 16);
+    const scheduleStreamEvent = (event: SessionStreamEvent) => {
+      streamEventQueueRef.current.push(event);
+      if (streamEventTimerRef.current !== null) return;
+      streamEventTimerRef.current = window.setTimeout(flushStreamEvents, 16);
     };
 
     const setupListener = async () => {
-      const unlisten = await api.onRunSnapshot((snapshot) => {
-        scheduleSnapshotUpdate(snapshot);
-      });
-      unlistenRef.current = unlisten;
+      const unlistenStream = await api.onStreamEvent(scheduleStreamEvent);
 
       const { listen } = await import('@tauri-apps/api/event');
       const unlistenSessions = await listen('sessions_updated', () => {
@@ -367,11 +366,11 @@ export function MainApp() {
       }>('terminal:tab_updated', async (event) => {
         const { session_id, active_tab_id, source } = event.payload;
         const store = useStore.getState();
-        const terminalSessionId = store.activeSessionId || store.draftTerminalId;
+        const terminalSessionId = store.activeSessionId || store.newConversationId;
         const isCurrentTerminalSession = Boolean(terminalSessionId && session_id === terminalSessionId);
-        const isDraftTerminalSession = Boolean(store.draftTerminalId && session_id === store.draftTerminalId);
+        const isNewConversationTerminalSession = Boolean(store.newConversationId && session_id === store.newConversationId);
         let synced = false;
-        if (!isDraftTerminalSession) {
+        if (!isNewConversationTerminalSession) {
           synced = await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null)
             .catch((error) => {
               console.error('同步终端 Tab 到会话失败：', error);
@@ -420,9 +419,8 @@ export function MainApp() {
         }
       });
 
-      const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
-        prevUnlisten?.();
+        unlistenStream();
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
@@ -433,9 +431,12 @@ export function MainApp() {
 
     setupListener();
 
-    Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
-      .then(([workspaceDir, sessionCwd]) => {
-        useStore.setState({ workspaceDir, sessionCwd });
+    api.getWorkspaceDir()
+      .then((workspaceDir) => {
+        useStore.setState((state) => ({
+          workspaceDir,
+          sessionCwd: state.activeSessionId ? state.sessionCwd : state.sessionCwd || workspaceDir,
+        }));
       })
       .catch(console.error);
 
@@ -443,7 +444,7 @@ export function MainApp() {
       const url = (e as CustomEvent).detail;
       if (typeof url !== 'string' || !url.trim()) return;
       const store = useStore.getState();
-      const sessionId = store.activeSessionId || store.draftTerminalId;
+      const sessionId = store.activeSessionId || store.newConversationId;
       if (!sessionId) {
         console.error('无法打开浏览器：缺少 session_id');
         return;
@@ -457,15 +458,17 @@ export function MainApp() {
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 
     return () => {
-      if (snapshotTimerRef.current !== null) {
-        window.clearTimeout(snapshotTimerRef.current);
-        snapshotTimerRef.current = null;
+      if (streamEventTimerRef.current !== null) {
+        window.clearTimeout(streamEventTimerRef.current);
+        streamEventTimerRef.current = null;
       }
+      streamEventQueueRef.current = [];
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
   }, [
     setSidebarOpenByLayout,
+    applyStreamEvents,
     openWorkspacePanel,
     closeWorkspacePanel,
     lockResize,

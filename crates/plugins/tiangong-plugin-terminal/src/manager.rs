@@ -103,19 +103,6 @@ impl TerminalManager {
         self.state.lock().unwrap().session_id.clone()
     }
 
-    /// 更新 PTY 所属的 session_id（草稿态 PTY 转正时使用）。
-    ///
-    /// 草稿态用临时 id 创建 PTY，首条消息转正后调用此方法把 PTY 归属迁移到
-    /// 真实 session_id。更新后：
-    /// - 命令循环内通过 `manager.session_id()` 读取的操作（如 reset 重启 shell）
-    ///   会使用新 id
-    /// - 输出读取线程 emit 的事件会以新 session_id 推送（output_reader 动态读取）
-    /// - 配合 `SessionPtyRegistry::attach_persistent_session_id` 重命名注册表 key
-    ///   和日志文件，完成完整迁移
-    pub(crate) fn set_session_id(&self, session_id: String) {
-        self.state.lock().unwrap().session_id = session_id;
-    }
-
     /// 更新前端 xterm.js 回传的屏幕快照（前端内容变化时调用）。
     pub(crate) fn update_screen_snapshot(&self, snapshot: String) {
         let mut state = self.state.lock().unwrap();

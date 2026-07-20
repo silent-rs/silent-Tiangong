@@ -101,7 +101,6 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin tiangong
 
 ```text
 ~/.tiangong/
-  app.json              应用主配置
   models.json           模型配置：Provider + Model + Routing
   server.json           Server 监听配置（host/port/auth_token）
   custom-prompt.md      自定义 Prompt（0.12.0 新增独立文件）

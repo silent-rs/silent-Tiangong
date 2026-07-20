@@ -8,7 +8,7 @@
 //!   ├── models      → CoreConfig.models
 //!   ├── mcp         → CoreConfig.mcp
 //!   ├── skills      → CoreConfig.skills
-//!   ├── trust_mode  → CoreConfig.trust_mode
+//!   ├── default_trust_mode → CoreConfig.trust_mode
 //!   ├── server      ← Core 不关心
 //!   └── connectors  ← Core 不关心
 //!              ↓ to_core_config()

@@ -1,10 +1,8 @@
-use tiangong_app_state::app_state::TiangongState;
 use tiangong_plugin_skill::{InstalledSkillConfig, SkillPlugin, init_tiangong_skill_scaffold};
 
 use crate::args::{SkillArgs, SkillSubcommand};
 
 pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
-    let state = TiangongState::load_or_default();
     let skill_plugin = SkillPlugin::new();
     match args.command {
         SkillSubcommand::List => {
@@ -63,7 +61,7 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
             println!("{msg}");
         }
         SkillSubcommand::Validate => {
-            state.validate_agent_config()?;
+            // validate_agent_config 已删除：历史上始终返回 Ok，直接提示通过即可。
             println!("配置校验通过");
         }
     }

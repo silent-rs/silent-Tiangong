@@ -10,7 +10,6 @@ permissions = [
     "allow-terminal-resize",
     "allow-terminal-ensure-session",
     "allow-terminal-destroy-session",
-    "allow-terminal-attach-session",
     "allow-terminal-session-send-input",
     "allow-terminal-report-user-command",
     "allow-terminal-session-recent-output",

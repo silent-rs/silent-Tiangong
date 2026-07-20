@@ -88,9 +88,9 @@ export function AppSidebar() {
   const {
     sessions,
     activeSessionId,
-    isDraft,
+    isNewConversation,
     sessionRunStatuses,
-    createSession,
+    startNewConversation,
     switchSession,
     deleteSession,
     deleteSessionsByCwd,
@@ -137,37 +137,44 @@ export function AppSidebar() {
 
   const renderSessionItem = (session: Session) => {
     const isRunning = !!sessionRunStatuses[session.id];
-    const isActive = !isDraft && activeSessionId === session.id;
+    const isActive = !isNewConversation && activeSessionId === session.id;
     return (
-      <button
+      <div
         key={session.id}
-        className={`w-full text-left px-3 py-1.5 rounded-md text-sm flex items-center gap-2 group transition-colors ${
+        className={`w-full px-3 py-1.5 rounded-md text-sm flex items-center gap-2 group transition-colors ${
           isActive
             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
         }`}
-        onClick={() => {
-          if (session.id !== activeSessionId || isDraft) {
-            switchSession(session.id);
-          }
-        }}
       >
-        <span className="flex-1 truncate">{session.title || '新对话'}</span>
-        {isRunning && (
-          <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
-        )}
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() => {
+            if (session.id !== activeSessionId || isNewConversation) {
+              switchSession(session.id);
+            }
+          }}
+        >
+          <span className="flex-1 truncate">{session.title || '新对话'}</span>
+          {isRunning && (
+            <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
+          )}
+        </button>
         {isActive && (
           <button
+            type="button"
             className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={() => {
               setShowDeleteConfirm(true);
             }}
+            aria-label="删除对话"
+            title="删除对话"
           >
             <Trash2 className="w-3 h-3" />
           </button>
         )}
-      </button>
+      </div>
     );
   };
 
@@ -215,7 +222,7 @@ export function AppSidebar() {
               </div>
               <button
                 className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
-                onClick={() => !isSending && createSession(group.fullPath)}
+                onClick={() => !isSending && startNewConversation(group.fullPath)}
                 disabled={isSending}
                 title="在此 workspace 下新建对话"
               >
@@ -238,7 +245,7 @@ export function AppSidebar() {
         <ContextMenuContent>
           <ContextMenuItem
             disabled={isSending}
-            onSelect={() => createSession(group.fullPath)}
+            onSelect={() => startNewConversation(group.fullPath)}
           >
             <FilePlus2 className="w-4 h-4 mr-2" />
             新对话
@@ -271,7 +278,7 @@ export function AppSidebar() {
           variant="ghost"
           className="w-full justify-start"
           disabled={isSending}
-          onClick={() => !isSending && createSession()}
+          onClick={() => !isSending && startNewConversation()}
         >
           <Plus className="w-4 h-4 mr-2" />
           新对话

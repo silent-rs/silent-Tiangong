@@ -4,7 +4,6 @@
 //! 旧的纯 session_id 调用会路由到当前活跃终端 Tab，新的 session_id:tab_id
 //! 复合 id 可以精确路由到指定 Tab。
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -165,14 +164,14 @@ impl SessionPtyRegistry {
 
     /// workspace 切换时同步：更新默认 cwd，并销毁所有存活 PTY。
     ///
-    /// workspace 切换发生在尚未产生对话的阶段（活跃 session 处于草稿/无消息状态），
+    /// workspace 切换发生在尚未产生消息的新对话阶段，
     /// 此时终端 PTY 不承载有价值的 shell 状态，直接销毁重建比发送 `cd` 更干净：
     /// - 不在终端历史里留下自动 `cd` 痕迹
     /// - 不误把 `cd` 当作按键发给交互式前台程序
     /// - 用户下次打开终端时 `ensure` 用新 `default_cwd` 创建全新 PTY
     ///
-    /// 已销毁的 PTY（如固定 id `__draft_terminal__`）会在前端 TerminalPanel 的
-    /// `ensure` effect 中被重新创建，xterm 渲染层会感知到后端 PTY 重建。
+    /// 已销毁的 PTY 会在前端 TerminalPanel 的 `ensure` effect 中按当前预留的
+    /// 对话 ID 重新创建，xterm 渲染层会感知到后端 PTY 重建。
     pub fn reset_all_for_workspace(&self, cwd: &str) {
         // 1. 更新默认 cwd，使后续懒创建的 PTY 落入新 workspace
         self.set_default_cwd(cwd.to_string());
@@ -552,12 +551,14 @@ impl SessionPtyRegistry {
         session_id: &str,
         tab_id: &str,
         title: Option<String>,
+        cwd: Option<String>,
     ) -> Result<(), String> {
         if session_id.trim().is_empty() || tab_id.trim().is_empty() {
             return Err("终端 Tab 恢复失败：session_id 或 tab_id 为空".to_string());
         }
         let terminal_id = terminal_instance_id(session_id, tab_id);
-        if !self.ensure_with_title(&terminal_id, "", title, false) {
+        let cwd = cwd.unwrap_or_default();
+        if !self.ensure_with_title(&terminal_id, &cwd, title, false) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
@@ -776,114 +777,6 @@ impl SessionPtyRegistry {
         }
         info!(session_id, tab_id, "终端 Tab 已删除");
         Ok(true)
-    }
-
-    /// 把临时草稿 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）。
-    ///
-    /// 草稿态新对话用稳定临时 id 创建 PTY（如 `__draft_<n>`），首条消息创建后端
-    /// session 拿到真实 id 后调用此方法完成迁移：
-    /// - 注册表 key：临时 id → 真实 id
-    /// - manager 内部 session_id：更新（命令循环/输出线程后续用新 id）
-    /// - 插件 Tab 元数据：临时 id → 真实 id（先写目标，再删除草稿状态）
-    ///
-    /// 幂等：真实 id 已存在或临时 id 不存在时安全返回（不破坏已有状态）。
-    /// 前端调用前应保证真实 id 尚未创建 PTY（否则会与转正迁移冲突）。
-    pub fn attach_persistent_session_id(&self, draft_id: &str, persistent_id: &str) {
-        if draft_id == persistent_id {
-            return;
-        }
-        let draft_tabs = {
-            let mut sessions = self.sessions.lock().unwrap();
-            sessions.remove(draft_id)
-        };
-
-        if let Some(draft_tabs) = draft_tabs {
-            {
-                let tabs = draft_tabs.tabs.lock().unwrap();
-                for (tab_id, slot) in tabs.iter() {
-                    let new_instance_id = terminal_instance_id(persistent_id, tab_id);
-                    slot.manager.set_session_id(new_instance_id);
-                }
-            }
-
-            let existing_tabs = {
-                let sessions = self.sessions.lock().unwrap();
-                sessions.get(persistent_id).cloned()
-            };
-
-            if let Some(existing_tabs) = existing_tabs {
-                let mut existing = existing_tabs.tabs.lock().unwrap();
-                let mut draft = draft_tabs.tabs.lock().unwrap();
-                for (tab_id, slot) in draft.drain() {
-                    existing.entry(tab_id).or_insert(slot);
-                }
-                if existing_tabs.active_tab_id.lock().unwrap().is_none() {
-                    *existing_tabs.active_tab_id.lock().unwrap() =
-                        draft_tabs.active_tab_id.lock().unwrap().clone();
-                }
-            } else {
-                let mut sessions = self.sessions.lock().unwrap();
-                match sessions.entry(persistent_id.to_string()) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(draft_tabs);
-                    }
-                    Entry::Occupied(entry) => {
-                        let existing_tabs = entry.get().clone();
-                        drop(sessions);
-                        let mut existing = existing_tabs.tabs.lock().unwrap();
-                        let mut draft = draft_tabs.tabs.lock().unwrap();
-                        for (tab_id, slot) in draft.drain() {
-                            existing.entry(tab_id).or_insert(slot);
-                        }
-                        if existing_tabs.active_tab_id.lock().unwrap().is_none() {
-                            *existing_tabs.active_tab_id.lock().unwrap() =
-                                draft_tabs.active_tab_id.lock().unwrap().clone();
-                        }
-                    }
-                }
-            }
-        }
-
-        let _guard = self.persistence.lock().unwrap();
-        let draft_state = match TerminalSessionStore::load(draft_id) {
-            Ok(state) => state,
-            Err(error) => {
-                warn!(%error, draft_id, "加载草稿终端会话状态失败，保留原状态");
-                return;
-            }
-        };
-        let mut target_state = match TerminalSessionStore::load_or_migrate_legacy(persistent_id) {
-            Ok(state) => state,
-            Err(error) => {
-                warn!(%error, persistent_id, "加载目标终端会话状态失败，保留草稿状态");
-                return;
-            }
-        };
-        let mut target_ids = target_state
-            .tabs
-            .iter()
-            .map(|tab| tab.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        for tab in draft_state.tabs {
-            if target_ids.insert(tab.id.clone()) {
-                target_state.tabs.push(tab);
-            }
-        }
-        if target_state.active_tab_id.is_none() {
-            target_state.active_tab_id = draft_state.active_tab_id;
-        }
-        target_state = self.merge_runtime_metadata(persistent_id, target_state);
-        if let Err(error) = TerminalSessionStore::save(persistent_id, &target_state) {
-            warn!(%error, persistent_id, "保存目标终端会话状态失败，保留草稿状态");
-            return;
-        }
-        if let Err(error) = TerminalSessionStore::remove(draft_id) {
-            warn!(%error, draft_id, "删除草稿终端会话状态失败");
-        }
-        info!(
-            draft_id,
-            persistent_id, "草稿终端 Tabs 已转正迁移到真实 session"
-        );
     }
 
     /// 列出所有 session 的状态摘要（phase 取自各对话的协作状态机）

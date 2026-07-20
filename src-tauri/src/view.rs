@@ -25,12 +25,15 @@ pub struct TokenStatsView {
 }
 
 impl TokenStatsView {
-    pub fn from_session(core_session: &tiangong_core::session::Session) -> Self {
+    pub fn from_session(
+        core_session: &tiangong_core::session::Session,
+        context_limit_tokens: usize,
+    ) -> Self {
         let usage = core_session.total_usage();
         Self {
             current_tokens: core_session.current_tokens,
-            compression_threshold_tokens: core_session.compression_threshold_tokens,
-            context_limit_tokens: core_session.context_limit_tokens,
+            compression_threshold_tokens: context_limit_tokens.saturating_mul(95) / 100,
+            context_limit_tokens,
             total_prompt_tokens: usage.prompt_tokens,
             total_completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
@@ -38,6 +41,52 @@ impl TokenStatsView {
             active_agent_id: core_session.active_agent_id.clone(),
             agent_current_tokens: core_session.agent_current_tokens.clone(),
             agent_token_usage: core_session.agent_token_usage.clone(),
+        }
+    }
+}
+
+/// 首次打开会话时从磁盘加载的界面数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadedSessionView {
+    pub id: String,
+    pub messages: Vec<tiangong_types::Message>,
+    pub token_stats: TokenStatsView,
+    pub current_plan: Option<TaskPlan>,
+    pub last_duration_ms: Option<u64>,
+    pub last_usage: Option<tiangong_types::TokenUsage>,
+    pub cwd: String,
+    pub reasoning_effort: String,
+}
+
+impl LoadedSessionView {
+    pub fn from_session(
+        session: &tiangong_core::session::Session,
+        context_limit_tokens: usize,
+        default_reasoning_effort: &str,
+    ) -> Self {
+        let usage = session.total_usage();
+        Self {
+            id: session.id.clone(),
+            messages: session.messages.clone(),
+            token_stats: TokenStatsView::from_session(session, context_limit_tokens),
+            current_plan: session
+                .task_plans
+                .first()
+                .map(TaskPlan::from_session_task_plan),
+            last_duration_ms: session
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| message.elapsed_ms),
+            last_usage: (usage.total_tokens > 0).then_some(usage),
+            cwd: session.cwd.clone(),
+            reasoning_effort: session
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .unwrap_or(default_reasoning_effort)
+                .to_string(),
         }
     }
 }
@@ -82,57 +131,17 @@ impl SessionListItem {
             cwd: core_session.cwd.clone(),
         }
     }
-}
 
-/// 运行状态快照（前端使用的完整快照）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunSnapshotView {
-    pub status: tiangong_types::RunStatus,
-    pub summary: String,
-    pub last_session_id: Option<String>,
-    pub last_task_id: Option<String>,
-    pub last_duration_ms: Option<u64>,
-    pub last_result: Option<String>,
-    pub last_plan: Option<String>,
-    pub last_tool_result: Option<String>,
-    pub last_error: Option<String>,
-    pub last_usage: Option<tiangong_types::TokenUsage>,
-    pub token_stats: TokenStatsView,
-    pub updated_at: String,
-    pub messages: Vec<tiangong_types::Message>,
-    pub input_draft: String,
-    pub current_plan: Option<TaskPlan>,
-    pub pending_session_ids: Vec<String>,
-    pub approval_request_id: Option<String>,
-}
-
-impl RunSnapshotView {
-    pub fn from_core_with_session(
-        core_snapshot: &tiangong_core::runtime::RunSnapshot,
-        messages: Vec<tiangong_types::Message>,
-        input_draft: String,
-        current_plan: Option<TaskPlan>,
-        pending_session_ids: Vec<String>,
-        token_stats: TokenStatsView,
-    ) -> Self {
+    /// 从 SessionMetadata 构造（issue #245）：UI 列表展示走元数据缓存，
+    /// 不再依赖完整 Session。
+    pub fn from_metadata(metadata: &tiangong_core_manager::SessionMetadata) -> Self {
         Self {
-            status: core_snapshot.status,
-            summary: core_snapshot.summary.clone(),
-            last_session_id: core_snapshot.last_session_id.clone(),
-            last_task_id: core_snapshot.last_task_id.clone(),
-            last_duration_ms: core_snapshot.last_duration_ms,
-            last_result: core_snapshot.last_result.clone(),
-            last_plan: core_snapshot.last_plan.clone(),
-            last_tool_result: core_snapshot.last_tool_result.clone(),
-            last_error: core_snapshot.last_error.clone(),
-            last_usage: core_snapshot.last_usage.clone(),
-            token_stats,
-            updated_at: core_snapshot.updated_at.clone(),
-            messages,
-            input_draft,
-            current_plan,
-            pending_session_ids,
-            approval_request_id: core_snapshot.approval_request_id.clone(),
+            id: metadata.id.clone(),
+            title: metadata.title.clone(),
+            created_at: metadata.created_at.clone(),
+            updated_at: metadata.updated_at.clone(),
+            message_count: metadata.message_count,
+            cwd: metadata.cwd.clone(),
         }
     }
 }

@@ -89,7 +89,7 @@ export function SettingsDialog() {
       return;
     }
 
-    const sid = useStore.getState().activeSessionId || useStore.getState().draftTerminalId;
+    const sid = useStore.getState().activeSessionId || useStore.getState().newConversationId;
     if (sid) api.browserHide(sid).catch(console.error);
   }, [open]);
 

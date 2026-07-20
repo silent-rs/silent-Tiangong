@@ -9623,6 +9623,7 @@ dependencies = [
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
+ "tiangong-core-manager",
  "tiangong-entry",
  "tiangong-llm",
  "tiangong-media",
@@ -9657,19 +9658,11 @@ dependencies = [
 name = "tiangong-app-state"
 version = "0.12.2"
 dependencies = [
- "anyhow",
- "chrono",
- "scru128",
  "serde",
- "serde_json",
- "tempfile",
  "tiangong-config",
  "tiangong-core",
- "tiangong-llm",
+ "tiangong-core-manager",
  "tiangong-media-archive",
- "tiangong-types",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]
@@ -9679,6 +9672,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "ratatui",
+ "scru128",
  "termimad",
  "tiangong-app-state",
  "tiangong-config",
@@ -9754,6 +9748,21 @@ dependencies = [
  "typed-builder",
  "wiremock",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "tiangong-core-manager"
+version = "0.12.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-config",
+ "tiangong-core",
+ "tiangong-llm",
+ "tiangong-types",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

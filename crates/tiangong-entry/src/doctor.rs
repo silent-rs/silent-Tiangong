@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use tiangong_config::default_tiangong_dir;
 use tiangong_config::io::custom_prompt_path;
-use tiangong_config::load_server_config;
+use tiangong_config::{load_server_config, load_tiangong_config};
 use tiangong_llm::models_config::RoutingSlot;
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
@@ -253,16 +253,26 @@ fn check_skills(report: &mut DoctorReport) {
 fn check_custom_prompt(report: &mut DoctorReport) {
     let path = custom_prompt_path();
     if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            let chars = content.trim().chars().count();
-            if chars == 0 {
-                report.warn("自定义 Prompt", "文件存在但为空");
-            } else {
+        match std::fs::read_to_string(&path) {
+            Ok(content) if !content.trim().is_empty() => {
+                let chars = content.trim().chars().count();
                 report.ok("自定义 Prompt", format!("已配置，{chars} 字"));
+                return;
             }
-        } else {
-            report.err("自定义 Prompt", format!("读取失败：{}", path.display()));
+            Ok(_) => {}
+            Err(_) => {
+                report.err("自定义 Prompt", format!("读取失败：{}", path.display()));
+                return;
+            }
         }
+    }
+
+    let prompt = load_tiangong_config().custom_system_prompt;
+    let chars = prompt.trim().chars().count();
+    if chars > 0 {
+        report.ok("自定义 Prompt", format!("已配置，{chars} 字"));
+    } else if path.exists() {
+        report.warn("自定义 Prompt", "文件存在但为空");
     } else {
         report.skip("自定义 Prompt", "未配置（可选）");
     }

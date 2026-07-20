@@ -8,6 +8,7 @@ members = [
     "crates/tiangong-memory",
     "crates/tiangong-app-state",
     "crates/tiangong-core",
+    "crates/tiangong-core-manager",
     "crates/tiangong-cli",
     "crates/tiangong-entry",
     "crates/tiangong-server",
@@ -47,6 +48,7 @@ tiangong-cli = { path = "crates/tiangong-cli" }
 tiangong-deepseek = { path = "crates/tiangong-deepseek" }
 tiangong-config = { path = "crates/tiangong-config" }
 tiangong-core = { path = "crates/tiangong-core" }
+tiangong-core-manager = { path = "crates/tiangong-core-manager" }
 tiangong-entry = { path = "crates/tiangong-entry" }
 tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }

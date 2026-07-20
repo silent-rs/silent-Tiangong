@@ -1,13 +1,14 @@
 //! 配置内存单例
 //!
-//! 进程级持有一份可变的 [`TiangongConfig`]，所有读取都从内存取（不每次读盘）。
-//! 配置变化时经 [`update`] 改内存并落盘。
+//! 进程级保留一份可变的 [`TiangongConfig`]，供尚未接入应用状态的插件和命令读取。
+//! 应用宿主持有自己的运行期配置；配置变化时经 [`update_models`] 可靠落盘，并同步
+//! 此兼容副本。
 //!
 //! ## 生命周期
 //!
 //! - 启动：入口层调 [`init`] 从磁盘加载到内存
-//! - 读取：[`models`] / [`config`] 从内存取最新值
-//! - 变更：[`update`] 改内存 + 落盘，调用方负责通知 core/plugin 刷新
+//! - 读取：兼容调用方经 [`models`] / [`config`] 从内存取最新值
+//! - 变更：[`update_models`] 先写盘成功再更新内存，返回 Result
 
 use std::sync::{OnceLock, RwLock};
 
@@ -19,20 +20,24 @@ fn config_cell() -> &'static RwLock<Option<TiangongConfig>> {
     CONFIG.get_or_init(|| RwLock::new(None))
 }
 
-/// 启动时从默认目录加载配置到内存单例。重复调用覆盖前值。
-pub fn init() {
+/// 启动时从默认目录加载配置到内存单例，并返回本次加载结果。
+///
+/// 返回值供应用状态直接持有，避免初始化后再从单例读取一次。
+pub fn init() -> TiangongConfig {
     let cfg = crate::loader::load_tiangong_config();
     if let Ok(mut guard) = config_cell().write() {
-        *guard = Some(cfg);
+        *guard = Some(cfg.clone());
     }
+    cfg
 }
 
 /// 从指定目录加载配置到内存单例（供测试 / 自定义目录）。
-pub fn init_from_dir(dir: &std::path::Path) {
+pub fn init_from_dir(dir: &std::path::Path) -> TiangongConfig {
     let cfg = crate::loader::load_tiangong_config_from_dir(dir);
     if let Ok(mut guard) = config_cell().write() {
-        *guard = Some(cfg);
+        *guard = Some(cfg.clone());
     }
+    cfg
 }
 
 /// 读取内存中的完整配置克隆（未 init 时 panic）。
@@ -49,46 +54,53 @@ pub fn models() -> tiangong_llm::models_config::ModelsConfig {
     config().models
 }
 
+/// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
+///
+/// 处理顺序：
+/// 1. 写 models.json 到磁盘
+/// 2. 写盘成功后更新内存
+/// 3. 返回 Result
+///
+/// `current` 是应用状态持有的当前配置，确保其余字段和实际存储目录不会被兼容
+/// 副本中的旧值覆盖。写盘失败时两份运行期配置都不变。
+pub fn update_models(
+    current: &TiangongConfig,
+    new_models: tiangong_llm::models_config::ModelsConfig,
+) -> anyhow::Result<TiangongConfig> {
+    let mut next = current.clone();
+    let dir = next.storage_root.clone();
+    // 先写盘——失败则内存不变。
+    crate::io::save_models_config_at(&dir, &new_models)?;
+    // 写盘成功，更新内存。
+    next.models = new_models;
+    if let Ok(mut guard) = config_cell().write() {
+        *guard = Some(next.clone());
+    }
+    Ok(next)
+}
+
 /// 更新内存配置并落盘。调用方负责通知 core/plugin 刷新。
-pub fn update(new_config: TiangongConfig) {
-    new_config.save_to_disk();
+pub fn update(new_config: TiangongConfig) -> anyhow::Result<()> {
+    new_config.save_to_disk()?;
     if let Ok(mut guard) = config_cell().write() {
         *guard = Some(new_config);
     }
-}
-
-/// 仅更新内存（不落盘），供内部同步使用（如 app-state 改了 models 后同步到单例）。
-/// 同步按新 chat model 重新解析 context_limit。
-pub fn set_models(new_models: tiangong_llm::models_config::ModelsConfig) {
-    let dir = crate::io::storage_root();
-    let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
-    // 取 Chat 路由模型的 context_window override（仅 Chat/Multimodal 模型适用）
-    let override_ctx = new_models
-        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
-        .and_then(|r| r.context_window);
-    let context_limit = if llm.chat.model.is_empty() {
-        tiangong_core::core_config::default_context_limit()
-    } else {
-        crate::io::resolve_context_limit_with_override(&dir, &llm.chat.model, override_ctx)
-    };
-    if let Ok(mut guard) = config_cell().write()
-        && let Some(cfg) = guard.as_mut()
-    {
-        cfg.models = new_models;
-        cfg.context_limit = context_limit;
-    }
+    Ok(())
 }
 
 impl TiangongConfig {
-    /// 落盘到默认存储目录。
-    pub fn save_to_disk(&self) {
-        let dir = crate::io::storage_root();
-        let _ = crate::io::save_models_config_at(&dir, &self.models);
+    /// 落盘到配置自身的数据目录（issue #245：不再吞错误）。
+    pub fn save_to_disk(&self) -> anyhow::Result<()> {
+        let dir = &self.storage_root;
+        crate::io::save_models_config_at(dir, &self.models)?;
+        let prompt_path = dir.join("custom-prompt.md");
         if self.custom_system_prompt.trim().is_empty() {
-            let _ = crate::io::clear_custom_prompt();
+            crate::io::clear_custom_prompt_at(&prompt_path)?;
         } else {
-            let _ = crate::io::save_custom_prompt(&self.custom_system_prompt);
+            crate::io::save_custom_prompt_at(&prompt_path, &self.custom_system_prompt)?;
         }
+        crate::io::save_app_config_at(dir, self.default_trust_mode, &self.workspace_dir)?;
+        Ok(())
     }
 }
 

@@ -81,6 +81,14 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
 
   useEffect(() => {
     let cancelled = false;
+    const unlisteners: Array<() => void | Promise<void>> = [];
+    const release = (unlisten: () => void | Promise<void>) => {
+      try {
+        void Promise.resolve(unlisten()).catch(() => {});
+      } catch {
+        // WebView reload or a concurrent cleanup may have already removed it.
+      }
+    };
     const setup = async () => {
       const unlistenOutput = await listen<{ session_id: string; text: string }>(
         'terminal:output',
@@ -92,6 +100,11 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
           pushScreenSnapshot();
         },
       );
+      if (cancelled) {
+        release(unlistenOutput);
+        return;
+      }
+      unlisteners.push(unlistenOutput);
       const unlistenReset = await listen('terminal:reset', () => {
         if (cancelled) return;
         terminalRef.current?.dispose();
@@ -101,23 +114,16 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
         setPtyVersion((version) => version + 1);
       });
       if (cancelled) {
-        unlistenOutput();
-        unlistenReset();
+        release(unlistenReset);
         return;
       }
-      return () => {
-        unlistenOutput();
-        unlistenReset();
-      };
+      unlisteners.push(unlistenReset);
     };
 
-    let cleanup: (() => void) | undefined;
-    setup().then((fn) => {
-      cleanup = fn;
-    }).catch(() => {});
+    setup().catch(() => {});
     return () => {
       cancelled = true;
-      cleanup?.();
+      unlisteners.splice(0).forEach(release);
     };
   }, [pushScreenSnapshot, terminalId]);
 
@@ -141,9 +147,9 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
     const mountTerminal = async () => {
       creatingRef.current = true;
       try {
-        await api.terminalTabRestore(sessionId, tabId, '终端');
-        await api.terminalTabSwitch(sessionId, tabId);
         const cwd = sessionCwd || workspaceDir || '';
+        await api.terminalTabRestore(sessionId, tabId, '终端', cwd);
+        await api.terminalTabSwitch(sessionId, tabId);
         const alive = await api.terminalEnsureSession(terminalId, cwd);
         if (!alive) {
           setDisplayInfo({ cwd: cwd || '终端', alive: false, error: 'PTY 启动失败' });

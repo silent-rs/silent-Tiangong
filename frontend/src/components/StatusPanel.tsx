@@ -48,7 +48,7 @@ function SearchButton() {
 }
 
 export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOpenTerminal }: StatusPanelProps) {
-  const { activeSessionId, isDraft, sessions, loadSessions, createSession, updateAvailable, setPendingSettingsTab } = useStore();
+  const { activeSessionId, isNewConversation, sessions, loadSessions, startNewConversation, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -95,8 +95,8 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
     };
   }, [terminalActive, toast]);
 
-  const activeSession = isDraft ? null : sessions.find((s) => s.id === activeSessionId);
-  const currentTitle = isDraft ? '新对话' : (activeSession?.title || '新对话');
+  const activeSession = isNewConversation ? null : sessions.find((s) => s.id === activeSessionId);
+  const currentTitle = isNewConversation ? '新对话' : (activeSession?.title || '新对话');
 
 
 
@@ -185,7 +185,7 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            onClick={() => createSession()}
+            onClick={() => startNewConversation()}
             title="新对话"
           >
             <SquarePen className="h-4 w-4" />
@@ -195,8 +195,8 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
         <Breadcrumb>
           <BreadcrumbList>
             <BreadcrumbItem>
-              {(isDraft || activeSession) && (
-                isDraft ? (
+              {(isNewConversation || activeSession) && (
+                isNewConversation ? (
                   <BreadcrumbPage>新对话</BreadcrumbPage>
                 ) : isEditing ? (
                   <input

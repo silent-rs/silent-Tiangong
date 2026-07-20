@@ -65,7 +65,7 @@ async fn on_connect(
         && let Some(app) = &app
     {
         let state = app.state.lock().await;
-        access.session_scope = Some(state.active_session_id().to_string());
+        access.session_scope = Some(state.active_session_id.as_str().to_string());
     }
 
     {
@@ -131,11 +131,11 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
     if let (Some(app), Some(access)) = (app, access) {
         let request = parse_ws_request(&text);
         tokio::spawn(async move {
-            let session_id = {
+            let mut session_id = {
                 let state = app.state.lock().await;
                 match resolve_visible_session_id(
                     &access,
-                    state.active_session_id(),
+                    state.active_session_id.as_str(),
                     request.session_id.as_deref(),
                 ) {
                     Ok(session_id) => session_id,
@@ -145,6 +145,9 @@ async fn on_receive(msg: Message, parts: Arc<RwLock<WebSocketParts>>) -> Result<
                     }
                 }
             };
+            if session_id.trim().is_empty() {
+                session_id = scru128::new().to_string();
+            }
 
             let incoming = IncomingMessage {
                 id: scru128::new().to_string(),

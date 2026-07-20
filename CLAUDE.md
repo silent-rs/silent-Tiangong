@@ -198,7 +198,6 @@ fn load_session(&self, id: &str) -> Result<Session> {
 
 ```
 ~/.tiangong/
-  app.json              # 应用主配置（会话/模型/UI 状态）
   skills.json           # Skill 配置
   mcp.json              # MCP 配置
   skills-lock.json      # Skill 依赖锁文件

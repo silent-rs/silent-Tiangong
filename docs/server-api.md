@@ -67,7 +67,8 @@ GET /api/v1/health
 POST /api/v1/chat
 ```
 
-向当前活跃会话或指定会话发送文本消息，同步等待 AI 回复。
+直接发送文本消息并同步等待 AI 回复。省略 `session_id` 时会发起新对话；继续已有
+对话时传入上一次响应中的 `session_id`。
 
 **请求体**：
 
@@ -80,7 +81,7 @@ POST /api/v1/chat
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| session_id | string | 否 | 为空时使用当前活跃会话 |
+| session_id | string | 否 | 省略时发起新对话；传入时继续对应会话 |
 | message | string | 是 | 用户消息内容 |
 
 **响应**：
@@ -229,24 +230,6 @@ GET /api/v1/sessions?limit=20&offset=0
     "updated_at": "2026-05-20T11:30:00"
   }
 ]
-```
-
-#### 创建会话
-
-```
-POST /api/v1/sessions
-```
-
-**请求体**：
-
-```json
-{ "title": "可选，会话标题" }
-```
-
-**响应**（201）：
-
-```json
-{ "session_id": "新会话 ID" }
 ```
 
 #### 获取会话详情

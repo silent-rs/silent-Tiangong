@@ -20,7 +20,7 @@ pub(crate) struct ScheduledMessageRequest {
 /// 这里不持有 Core，也不消费 Core 事件流。定时消息经通道投递给 TiangongApp，
 /// 并只等待消息稳定入队，不等待整个模型轮次完成。
 pub struct DesktopSchedulerContext {
-    state: Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
+    core_manager: tiangong_core_manager::CoreManager,
     scheduled_message_tx: mpsc::UnboundedSender<ScheduledMessageRequest>,
     scheduled_session_locks: ScheduledSessionLocks,
 }
@@ -43,11 +43,11 @@ impl ScheduledSessionLocks {
 
 impl DesktopSchedulerContext {
     pub(crate) fn new(
-        state: Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
+        core_manager: tiangong_core_manager::CoreManager,
         scheduled_message_tx: mpsc::UnboundedSender<ScheduledMessageRequest>,
     ) -> Self {
         Self {
-            state,
+            core_manager,
             scheduled_message_tx,
             scheduled_session_locks: ScheduledSessionLocks::default(),
         }
@@ -66,28 +66,16 @@ impl SchedulerContext for DesktopSchedulerContext {
         .await
     }
 
-    async fn resolve_or_create_session(
+    async fn resolve_session_id(
         &self,
         requested_session_id: Option<&str>,
-        trigger_name: &str,
     ) -> anyhow::Result<(String, bool)> {
         if let Some(sid) = requested_session_id {
-            let state = self.state.lock().await;
-            if state.sessions().iter().any(|s| s.id == *sid) {
+            if self.core_manager.session_exists(sid) {
                 return Ok((sid.to_string(), false));
             }
         }
-
-        let mut state = self.state.lock().await;
-        let title = format!("定时任务：{}", trigger_name);
-        let session = tiangong_core::session::Session::new_isolated(
-            title,
-            &tiangong_app_state::app_state::storage_root(),
-        );
-        let session_id = session.id.clone();
-        state.sessions_mut().push(session);
-        state.persist_session(&session_id)?;
-        Ok((session_id, true))
+        Ok((scru128::new().to_string(), true))
     }
 }
 

@@ -53,23 +53,6 @@ pub async fn terminal_destroy_session(
     Ok(())
 }
 
-/// 把草稿态临时 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）。
-///
-/// 草稿态新对话用稳定临时 id 创建 PTY；首条消息创建后端 session 拿到真实 id 后，
-/// 调用此命令把 PTY 归属、日志迁移到真实 id。幂等：草稿 id 不存在或真实 id 已
-/// 存在时安全返回。
-#[tauri::command]
-pub async fn terminal_attach_session(
-    draft_session_id: String,
-    persistent_session_id: String,
-    state: State<'_, TerminalPluginState>,
-) -> Result<(), String> {
-    state
-        .registry
-        .attach_persistent_session_id(&draft_session_id, &persistent_session_id);
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn terminal_session_send_input(
     session_id: String,
@@ -177,9 +160,10 @@ pub async fn terminal_tab_restore(
     session_id: String,
     tab_id: String,
     title: Option<String>,
+    cwd: Option<String>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state.registry.tab_restore(&session_id, &tab_id, title)
+    state.registry.tab_restore(&session_id, &tab_id, title, cwd)
 }
 
 #[tauri::command]

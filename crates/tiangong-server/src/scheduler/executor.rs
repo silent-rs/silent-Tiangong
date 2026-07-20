@@ -23,19 +23,24 @@ mod tests {
     use crate::scheduler::context::ServerSchedulerContext;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tiangong_app_state::app_state::TiangongState;
-    use tiangong_config::CoreConfigProvider;
     use tokio::sync::Mutex;
 
     fn setup_app_ctx() -> Arc<ServerAppContext> {
-        let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
-        let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
+        let state = tiangong_app_state::app_state::TiangongState::new();
+        let core_manager = state.core_manager.clone();
+        let storage_root = state.config.storage_root.clone();
+        let state = Arc::new(Mutex::new(state));
         let event_bus = Arc::new(EventBus::default());
-        Arc::new(ServerAppContext::new(state, config, event_bus))
+        Arc::new(ServerAppContext::new(
+            state,
+            core_manager,
+            event_bus,
+            storage_root,
+        ))
     }
 
     #[tokio::test]
-    async fn server_context_resolve_creates_session() {
+    async fn server_context_resolve_only_allocates_session_id() {
         let _storage_guard = crate::remote::core::test_support::STORAGE_TEST_LOCK
             .lock()
             .await;
@@ -48,19 +53,9 @@ mod tests {
             core_backend: app_ctx.core_backend.clone(),
         };
 
-        let (sid, created) = ctx
-            .resolve_or_create_session(None, "测试任务")
-            .await
-            .unwrap();
+        let (sid, created) = ctx.resolve_session_id(None).await.unwrap();
         assert!(created);
         assert!(!sid.is_empty());
-
-        // 再次调用应复用
-        let (sid2, created2) = ctx
-            .resolve_or_create_session(Some(&sid), "测试任务")
-            .await
-            .unwrap();
-        assert!(!created2);
-        assert_eq!(sid, sid2);
+        assert!(!app_ctx.state.lock().await.core_manager.session_exists(&sid));
     }
 }

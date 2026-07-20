@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
-use tiangong_config::io::{custom_prompt_path, load_custom_prompt};
-use tiangong_config::{default_tiangong_dir, load_server_config};
+use tiangong_config::io::custom_prompt_path;
+use tiangong_config::{default_tiangong_dir, load_server_config, load_tiangong_config};
 use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::{ConfigArgs, ConfigSubcommand};
@@ -23,7 +23,6 @@ pub(crate) fn run_config_command(args: ConfigArgs) -> Result<()> {
 fn print_paths() {
     let root = default_tiangong_dir();
     println!("配置目录：    {}", root.display());
-    println!("主配置：      {}", root.join("app.json").display());
     println!("模型配置：    {}", root.join("models.json").display());
     println!("MCP 配置：    {}", root.join("mcp.json").display());
     println!("Server 配置： {}", root.join("server.json").display());
@@ -63,8 +62,9 @@ fn count_skill_dirs(root: &std::path::Path) -> usize {
 
 fn print_overview() {
     let root = default_tiangong_dir();
-    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
-    let server = load_server_config();
+    let app_config = load_tiangong_config();
+    let models = &app_config.models;
+    let server = &app_config.server;
     let memory = MemoryConfig::load_or_default();
 
     // 模型
@@ -85,6 +85,13 @@ fn print_overview() {
         "Server：   {}:{}，{}",
         server.host, server.port, token_status
     );
+
+    let trust_mode = match app_config.default_trust_mode {
+        tiangong_core::permission::TrustMode::FullTrust => "完全信任",
+        tiangong_core::permission::TrustMode::Supervised => "监督审核",
+    };
+    println!("默认信任模式：{trust_mode}");
+    println!("默认工作区：{}", app_config.workspace_dir);
 
     // Memory
     let memory_model = memory
@@ -107,8 +114,8 @@ fn print_overview() {
     let skill_count = count_skill_dirs(&root);
     println!("Skill：    {skill_count} 个可用");
 
-    // 自定义 Prompt（直接读 custom-prompt.md）
-    let prompt = load_custom_prompt("").unwrap_or_default();
+    // 完整配置会兼容旧 app.json 中尚未迁移的 Prompt。
+    let prompt = app_config.custom_system_prompt;
     if prompt.trim().is_empty() {
         println!("自定义 Prompt：未配置");
     } else {

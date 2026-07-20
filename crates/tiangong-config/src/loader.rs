@@ -3,6 +3,7 @@
 //! 默认配置目录：`~/.tiangong/`
 //! 配置文件：
 //! - `models.json` — 模型配置
+//! - `app.json` — 应用长期配置
 //! - `mcp.json` — MCP 服务配置
 //! - `skills.json` — Skill 配置
 //! - `server.json` — Server 配置
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use tiangong_llm::models_config::ModelsConfig;
 use tiangong_plugin_skill::SkillsConfig;
+use tiangong_types::TrustMode;
 
 use crate::config::{ConnectorConfig, TiangongConfig};
 use crate::io;
@@ -24,12 +26,71 @@ struct ConnectorsFile {
     connectors: Vec<ConnectorConfig>,
 }
 
+/// `app.json` 只提取长期配置；旧的运行状态字段由 serde 自动忽略。
+#[derive(Default, serde::Deserialize)]
+struct AppConfigFile {
+    #[serde(default)]
+    workspace_dir: String,
+    #[serde(default)]
+    default_trust_mode: Option<TrustMode>,
+    #[serde(default)]
+    custom_system_prompt: String,
+    #[serde(default)]
+    agent_config: Option<LegacyAgentConfig>,
+}
+
+/// 兼容旧 `app.json.agent_config` 中仍属于长期配置的字段。
+#[derive(Default, serde::Deserialize)]
+struct LegacyAgentConfig {
+    #[serde(default)]
+    trust_mode: Option<TrustMode>,
+    #[serde(default)]
+    default_trust_mode: Option<TrustMode>,
+    #[serde(default)]
+    custom_system_prompt: String,
+}
+
+impl AppConfigFile {
+    fn resolved_default_trust_mode(&self) -> TrustMode {
+        self.default_trust_mode
+            .or_else(|| {
+                self.agent_config
+                    .as_ref()
+                    .and_then(|config| config.default_trust_mode)
+            })
+            .or_else(|| {
+                self.agent_config
+                    .as_ref()
+                    .and_then(|config| config.trust_mode)
+            })
+            .unwrap_or_default()
+    }
+
+    fn legacy_custom_system_prompt(&self) -> &str {
+        if self.custom_system_prompt.trim().is_empty() {
+            self.agent_config
+                .as_ref()
+                .map(|config| config.custom_system_prompt.as_str())
+                .unwrap_or_default()
+        } else {
+            &self.custom_system_prompt
+        }
+    }
+}
+
 /// 获取默认配置目录（~/.tiangong/）
 pub fn default_tiangong_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".tiangong")
+}
+
+/// 当前进程的默认工作目录。
+pub(crate) fn default_workspace_dir() -> String {
+    std::env::current_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 /// 从默认目录加载完整配置
@@ -39,6 +100,7 @@ pub fn load_tiangong_config() -> TiangongConfig {
 
 /// 从指定目录加载完整配置
 pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
+    let app = load_json_config::<AppConfigFile>(dir, "app.json").unwrap_or_default();
     let models = load_models_config(dir);
     let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
     let server = crate::config::load_server_config_from_dir(dir);
@@ -46,38 +108,36 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         .map(|f| f.connectors)
         .unwrap_or_default();
 
-    // 自定义 Prompt：从 custom-prompt.md 加载（兼容 app.json 旧字段为空回退）
-    let custom_system_prompt =
-        io::load_custom_prompt_at(&dir.join("custom-prompt.md"), "").unwrap_or_default();
+    let custom_system_prompt = io::load_custom_prompt_at(
+        &dir.join("custom-prompt.md"),
+        app.legacy_custom_system_prompt(),
+    )
+    .unwrap_or_else(|error| {
+        tracing::warn!("读取 custom-prompt.md 失败：{error}");
+        app.legacy_custom_system_prompt().to_string()
+    });
+    let workspace_dir =
+        if app.workspace_dir.trim().is_empty() || !Path::new(&app.workspace_dir).is_dir() {
+            default_workspace_dir()
+        } else {
+            app.workspace_dir.clone()
+        };
 
     // 首次安装：释放默认 context_windows.json
     io::ensure_context_windows(dir);
-
-    // context_limit 在加载阶段按 chat model 从「同一目录」的 context_windows.json
-    // 解析，避免 to_core_config 转换时误读默认 ~/.tiangong（自定义目录场景出错）。
-    let chat_resolved = models.resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat);
-    let chat_model = chat_resolved
-        .as_ref()
-        .map(|r| r.model.clone())
-        .unwrap_or_default();
-    let override_ctx = chat_resolved.and_then(|r| r.context_window);
-    let context_limit = if chat_model.is_empty() {
-        tiangong_core::core_config::default_context_limit()
-    } else {
-        io::resolve_context_limit_with_override(dir, &chat_model, override_ctx)
-    };
 
     // MCP 配置（mcp.json）与 capability 缓存由 tiangong-plugin-mcp 自管：
     // plugin 在 register 时加载缓存 + 启动后台调度器 + 预热探测，config 不再参与。
 
     TiangongConfig {
+        storage_root: dir.to_path_buf(),
         models,
         skills,
+        default_trust_mode: app.resolved_default_trust_mode(),
         custom_system_prompt,
-        context_limit,
+        workspace_dir,
         server,
         connectors,
-        ..Default::default()
     }
 }
 

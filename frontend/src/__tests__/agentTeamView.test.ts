@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Message, RunSnapshot } from '@/api/tauri';
+import type { Message } from '@/api/tauri';
 import { hasMessage, workerBelongsToAgent } from '@/components/message/utils';
 import { parseAgentsFromMessages, useStore } from '@/store/useStore';
 
@@ -57,24 +57,19 @@ describe('agent team view routing', () => {
       created_at: '2026-07-12 00:00:01',
     };
     const summaryMessage: Message = { ...reactMessage, phase: 'summary' };
-    const snapshot: RunSnapshot = {
-      status: 'idle',
-      last_session_id: 'session-main',
-      messages: [summaryMessage],
-      input_draft: '',
-      pending_session_ids: [],
-    };
-
     useStore.setState({
       activeSessionId: 'session-main',
-      isDraft: false,
+      isNewConversation: false,
       messages: [reactMessage],
       runStatus: 'idle',
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
     });
-    useStore.getState().updateFromSnapshot(snapshot);
+    useStore.getState().applyStreamEvents([{
+      session_id: 'session-main',
+      event: { type: 'session_message_upsert', message: summaryMessage },
+    }]);
 
     const [result] = useStore.getState().messages;
     expect(result).not.toBe(reactMessage);
@@ -82,22 +77,20 @@ describe('agent team view routing', () => {
   });
 
   it('keeps model exclusion changes and checks the requested streaming id', () => {
+    const sessionId = 'session-model-exclusion';
     const visible = systemMessage('agent-process', '执行过程');
     const excluded = { ...visible, model_excluded: true };
 
     useStore.setState({
-      activeSessionId: 'session-main',
-      isDraft: false,
+      activeSessionId: sessionId,
+      isNewConversation: false,
       messages: [visible],
       runStatus: 'idle',
     });
-    useStore.getState().updateFromSnapshot({
-      status: 'idle',
-      last_session_id: 'session-main',
-      messages: [excluded],
-      input_draft: '',
-      pending_session_ids: [],
-    });
+    useStore.getState().applyStreamEvents([{
+      session_id: sessionId,
+      event: { type: 'session_message_upsert', message: excluded },
+    }]);
 
     expect(useStore.getState().messages[0].model_excluded).toBe(true);
     expect(hasMessage([visible], 'missing')).toBe(false);

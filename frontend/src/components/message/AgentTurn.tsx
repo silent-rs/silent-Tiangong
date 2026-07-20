@@ -204,8 +204,7 @@ function AgentTurnView({
     if (selectedAgentTab && frag.type !== "agent_event") return null;
     if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
     if (frag.type === "thinking") {
-      // 历史/已完成思考块一律视为非活跃且默认折叠：不在 ThinkingBlock 上传入
-      // 整轮 elapsed_ms（那是「轮次耗时」而非「深度思考耗时」，会误导），也不启动计时。
+      // 历史/已完成思考块一律视为非活跃且默认折叠。
       return <div key={`think-${i}`} title={formatMessageTime(frag.time)}><ThinkingBlock content={frag.content} isActive={false} defaultExpanded={false} /></div>;
     }
         if (frag.type === "explanation") {

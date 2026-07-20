@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use tiangong_llm::models_config::ModelsConfig;
+use tiangong_types::TrustMode;
 
 const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
 
@@ -45,6 +46,40 @@ pub fn storage_root() -> PathBuf {
 /// 自定义 Prompt 独立文件路径：`~/.tiangong/custom-prompt.md`。
 pub fn custom_prompt_path() -> PathBuf {
     storage_root().join("custom-prompt.md")
+}
+
+// ---------------------------------------------------------------------------
+// 应用长期配置
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct AppConfigFile<'a> {
+    default_trust_mode: TrustMode,
+    workspace_dir: &'a str,
+}
+
+/// 保存应用长期配置到 `app.json`。
+///
+/// 自定义 Prompt 继续由 `custom-prompt.md` 保存；旧 `app.json` 中的运行状态字段
+/// 不再写回。
+pub fn save_app_config_at(
+    dir: &Path,
+    default_trust_mode: TrustMode,
+    workspace_dir: &str,
+) -> Result<()> {
+    let path = dir.join("app.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建目录失败：{}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(&AppConfigFile {
+        default_trust_mode,
+        workspace_dir,
+    })
+    .context("序列化应用配置失败")?;
+    std::fs::write(&path, content)
+        .with_context(|| format!("写入 app.json 失败：{}", path.display()))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

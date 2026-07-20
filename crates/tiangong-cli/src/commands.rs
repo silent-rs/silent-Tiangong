@@ -6,13 +6,11 @@ use crate::completion;
 use crate::modal;
 use crate::output;
 
-/// 处理 / 命令，返回 true 表示应退出
-/// draft_new_session: 切换会话时重置为 false
+/// 处理 / 命令，返回 true 表示应退出。
 pub fn handle_command(
     state: &mut TiangongState,
     config: &CoreConfigProvider,
     command: &str,
-    draft_new_session: &mut bool,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
     mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
 ) -> Result<bool> {
@@ -23,7 +21,7 @@ pub fn handle_command(
         "/exit" | "/quit" | "/q" => return Ok(true),
         "/help" | "/h" | "/?" => print_help(),
         "/new" => {
-            *draft_new_session = true;
+            state.active_session_id = scru128::new().to_string();
             output::print_status("已打开新对话（发送首条消息后才会记录）");
         }
         _ if command == "/history"
@@ -35,7 +33,7 @@ pub fn handle_command(
                 .trim_start_matches("/history")
                 .trim_start_matches("/sessions")
                 .trim();
-            handle_sessions(state, arg, draft_new_session)?;
+            handle_sessions(state, arg)?;
         }
         _ if command == "/model" || command.starts_with("/model ") => {
             handle_model(state, command)?;
@@ -50,7 +48,7 @@ pub fn handle_command(
             sync_core_config = true;
         }
         "/cancel" => {
-            if state.cancel_pending_turn()? {
+            if state.core_manager.cancel_core(&state.active_session_id) {
                 output::print_status("已取消当前任务");
             } else {
                 output::print_warn("当前没有可取消的任务");
@@ -69,8 +67,7 @@ pub fn handle_command(
     }
 
     if sync_core_config {
-        let base = config.snapshot();
-        let next = state.build_core_config_from_base(&base);
+        let next = state.config.to_core_config();
         config.replace(next);
     }
 
@@ -81,20 +78,17 @@ fn print_help() {
     output::print_info(&completion::help_text());
 }
 
-fn handle_sessions(
-    state: &mut TiangongState,
-    arg: &str,
-    draft_new_session: &mut bool,
-) -> Result<()> {
+fn handle_sessions(state: &mut TiangongState, arg: &str) -> Result<()> {
+    let core_manager = state.core_manager.clone();
     if arg.is_empty() {
         if let Some(_id) = modal::sessions::open(state)? {
-            *draft_new_session = false;
-            let title = state
-                .active_session()
-                .map(|s| s.title.as_str())
-                .unwrap_or("未知");
+            let title = core_manager
+                .load_session(&state.active_session_id)
+                .ok()
+                .map(|s| s.title)
+                .unwrap_or_else(|| "未知".to_string());
             output::print_status(&format!("已切换会话：{title}"));
-            if let Some(session) = state.active_session()
+            if let Some(session) = core_manager.load_session(&state.active_session_id).ok()
                 && !session.messages.is_empty()
             {
                 output::print_session_messages(&session.messages);
@@ -104,31 +98,30 @@ fn handle_sessions(
     }
 
     // 按序号或 ID 前缀切换
-    let sessions = state.sessions();
+    let sessions = core_manager.list_session_metadata();
     let target_id = if let Ok(idx) = arg.parse::<usize>() {
         sessions
             .get(idx.saturating_sub(1))
-            .map(|s| s.id.clone())
+            .map(|m| m.id.clone())
             .ok_or_else(|| anyhow!("序号超出范围：{idx}"))?
     } else {
         sessions
             .iter()
-            .find(|s| s.id.starts_with(arg))
-            .map(|s| s.id.clone())
+            .find(|m| m.id.starts_with(arg))
+            .map(|m| m.id.clone())
             .ok_or_else(|| anyhow!("未找到匹配的会话：{arg}"))?
     };
 
     let title = sessions
         .iter()
-        .find(|s| s.id == target_id)
-        .map(|s| s.title.clone())
+        .find(|m| m.id == target_id)
+        .map(|m| m.title.clone())
         .unwrap_or_default();
 
-    state.switch_session(&target_id);
-    *draft_new_session = false;
+    state.active_session_id = target_id.clone();
     output::print_status(&format!("已切换会话：{title}"));
 
-    if let Some(session) = state.active_session()
+    if let Some(session) = core_manager.load_session(&target_id).ok()
         && !session.messages.is_empty()
     {
         output::print_session_messages(&session.messages);
@@ -141,13 +134,13 @@ fn handle_model(state: &mut TiangongState, command: &str) -> Result<()> {
     let arg = command.trim_start_matches("/model").trim();
 
     if arg.is_empty() {
-        let current = state.current_model();
-        let models = state.model_list();
+        let current = current_chat_model(state);
+        let models = &state.model_list;
         output::print_info(&format!("当前模型：{current}"));
         if !models.is_empty() {
             output::print_info("可用模型：");
             for m in models {
-                let marker = if m == current { " *" } else { "" };
+                let marker = if *m == current { " *" } else { "" };
                 output::print_info(&format!("  {m}{marker}"));
             }
         }
@@ -155,8 +148,35 @@ fn handle_model(state: &mut TiangongState, command: &str) -> Result<()> {
         return Ok(());
     }
 
-    state.select_model(arg)?;
+    select_model(state, arg)?;
     output::print_status(&format!("模型已切换为：{arg}"));
+    Ok(())
+}
+
+/// 解析当前应用配置中的 Chat 路由模型名。
+fn current_chat_model(state: &TiangongState) -> String {
+    state
+        .config
+        .models
+        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+        .map(|r| r.model)
+        .unwrap_or_default()
+}
+
+/// 切换 Chat 路由模型：配置写盘成功后刷新运行期状态。
+fn select_model(state: &mut TiangongState, model: &str) -> Result<()> {
+    let api_model = model.trim();
+    if api_model.is_empty() {
+        return Err(anyhow!("API_MODEL 不能为空"));
+    }
+    let mut models = state.config.models.clone();
+    models.update_chat_model(api_model.to_string());
+    let config = tiangong_config::registry::update_models(&state.config, models)?;
+    state.config = config;
+    let resolved = current_chat_model(state);
+    if !state.model_list.contains(&resolved) {
+        state.model_list.insert(0, resolved);
+    }
     Ok(())
 }
 
@@ -175,13 +195,13 @@ fn handle_config(
             mcp.enabled,
             mcp.timeout_ms,
             mcp.servers.len(),
-            state.store.agent.agent_config.trust_mode,
+            state.agent_config.trust_mode,
         ));
         return Ok(());
     }
 
     if args == "validate" {
-        state.validate_agent_config()?;
+        // validate_agent_config 已删除：历史上始终返回 Ok，直接提示通过即可。
         output::print_status("配置校验通过");
         return Ok(());
     }

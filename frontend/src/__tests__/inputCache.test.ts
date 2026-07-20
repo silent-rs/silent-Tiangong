@@ -1,67 +1,52 @@
 import { describe, expect, it } from 'vitest';
 import {
-  emptySessionInputDraft,
-  mergePersistedDraft,
-  migrateDraftKey,
-  settleDraftSend,
-  updateDraftAttachments,
-  updateDraftText,
-  type SessionDraftMap,
-} from '@/store/sessionDrafts';
+  emptyInputCache,
+  mergeStoredInputCache,
+  settleInputCacheSend,
+  updateInputCacheAttachments,
+  updateInputCacheText,
+  type InputCacheMap,
+} from '@/store/inputCache';
 import { attachmentsFromContentBlocks } from '@/utils/attachments';
 import { hasMediaBlocks, textContent, type Message } from '@/api/tauri';
 
-describe('session drafts', () => {
+describe('input cache', () => {
   it('keeps text and attachments isolated between sessions', () => {
-    let drafts: SessionDraftMap = {
-      A: emptySessionInputDraft(),
-      B: emptySessionInputDraft(),
+    let caches: InputCacheMap = {
+      A: emptyInputCache(),
+      B: emptyInputCache(),
     };
-    drafts = updateDraftText(drafts, 'A', 'A draft');
-    drafts = updateDraftAttachments(drafts, 'B', [{
+    caches = updateInputCacheText(caches, 'A', 'A input');
+    caches = updateInputCacheAttachments(caches, 'B', [{
       kind: 'file',
       source: '/tmp/b.pdf',
       original_name: 'b.pdf',
       mime_type: 'application/pdf',
     }]);
 
-    expect(drafts.A.text).toBe('A draft');
-    expect(drafts.A.attachments).toEqual([]);
-    expect(drafts.B.text).toBe('');
-    expect(drafts.B.attachments[0]?.source).toBe('/tmp/b.pdf');
+    expect(caches.A.text).toBe('A input');
+    expect(caches.A.attachments).toEqual([]);
+    expect(caches.B.text).toBe('');
+    expect(caches.B.attachments[0]?.source).toBe('/tmp/b.pdf');
   });
 
-  it('ignores late persistence and late send cleanup after revision changes', () => {
-    let drafts: SessionDraftMap = { A: emptySessionInputDraft() };
-    drafts = updateDraftText(drafts, 'A', 'first');
-    const firstRevision = drafts.A.revision;
-    drafts = updateDraftText(drafts, 'A', 'typed while sending');
+  it('ignores late synchronization and late send cleanup after revision changes', () => {
+    let caches: InputCacheMap = { A: emptyInputCache() };
+    caches = updateInputCacheText(caches, 'A', 'first');
+    const firstRevision = caches.A.revision;
+    caches = updateInputCacheText(caches, 'A', 'typed while sending');
 
     const lateResponse = {
-      ...emptySessionInputDraft(),
+      ...emptyInputCache(),
       text: 'first',
       revision: firstRevision,
     };
-    const afterLateResponse = mergePersistedDraft(drafts, 'A', firstRevision, lateResponse);
-    const afterLateCleanup = settleDraftSend(afterLateResponse, 'A', firstRevision, true);
+    const afterLateResponse = mergeStoredInputCache(caches, 'A', firstRevision, lateResponse);
+    const afterLateCleanup = settleInputCacheSend(afterLateResponse, 'A', firstRevision, true);
 
-    expect(afterLateResponse).toBe(drafts);
+    expect(afterLateResponse).toBe(caches);
     expect(afterLateCleanup.A.text).toBe('typed while sending');
     expect(afterLateCleanup.A.revision).toBeGreaterThan(firstRevision);
-  });
-
-  it('migrates a temporary draft key without losing state', () => {
-    const temporary = updateDraftAttachments(
-      updateDraftText({ temp: emptySessionInputDraft() }, 'temp', 'new session'),
-      'temp',
-      [{ kind: 'image', source: 'data:image/png;base64,AA==', original_name: 'paste.png' }],
-    );
-
-    const migrated = migrateDraftKey(temporary, 'temp', 'real-session');
-
-    expect(migrated.temp).toBeUndefined();
-    expect(migrated['real-session']).toEqual(temporary.temp);
-    expect(migrated['real-session']).not.toBe(temporary.temp);
   });
 
   it('extracts ready and legacy resource blocks in their original order', () => {
@@ -76,7 +61,7 @@ describe('session drafts', () => {
           size: 12,
           kind: 'image',
         },
-        data: 'not-persisted',
+        data: 'not-stored',
       },
       {
         type: 'media',

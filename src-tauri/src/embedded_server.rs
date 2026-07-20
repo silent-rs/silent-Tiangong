@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use tauri::{AppHandle, Emitter, Manager};
 use tiangong_core::permission::TrustMode;
-use tiangong_core::session::{MessageRole, Session};
+use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
 use tiangong_server::remote::event::{EventBus, TiangongEvent};
 use tiangong_types::{MediaAsset, OutgoingMessage, TurnStatus};
@@ -162,34 +162,34 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                         reply,
                     } => {
                         let state = request_app.state::<TiangongApp>();
-                        let result = match resolve_connector_session(
-                            &request_app,
-                            state.inner(),
-                            &request_event_bus,
-                            &connector,
-                            &channel_id,
-                        )
-                        .await
-                        {
-                            Ok(session_id) => {
-                                let completion_session_id = session_id.clone();
-                                let result = send_message_and_wait(
-                                    request_app.clone(),
-                                    state.inner(),
-                                    session_id,
-                                    content,
-                                    message_id,
-                                    media,
-                                )
-                                .await;
-                                request_event_bus.publish(TiangongEvent::TurnCompleted {
-                                    session_id: completion_session_id,
-                                    success: result.is_ok(),
-                                });
-                                result
-                            }
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            match resolve_connector_session(state.inner(), &connector, &channel_id)
+                                .await
+                            {
+                                Ok((session_id, creates_session)) => {
+                                    let completion_session_id = session_id.clone();
+                                    let result = send_message_and_wait(
+                                        request_app.clone(),
+                                        state.inner(),
+                                        session_id,
+                                        content,
+                                        message_id,
+                                        media,
+                                    )
+                                    .await;
+                                    if creates_session && result.is_ok() {
+                                        request_event_bus.publish(TiangongEvent::SessionCreated(
+                                            completion_session_id.clone(),
+                                        ));
+                                    }
+                                    request_event_bus.publish(TiangongEvent::TurnCompleted {
+                                        session_id: completion_session_id,
+                                        success: result.is_ok(),
+                                    });
+                                    result
+                                }
+                                Err(error) => Err(error),
+                            };
                         let _ = reply.send(result);
                     }
                     EmbeddedCoreRequest::SendSession {
@@ -237,16 +237,16 @@ pub(crate) fn spawn_desktop_server_core_bridge(
 }
 
 async fn resolve_connector_session(
-    app: &AppHandle,
     state: &TiangongApp,
-    event_bus: &EventBus,
     connector: &str,
     channel_id: &str,
-) -> HostResult<String> {
+) -> HostResult<(String, bool)> {
     let channel_id = channel_id.trim();
     if channel_id.is_empty() {
         return state
-            .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+            .with_state_read(|core_state| {
+                Ok((core_state.active_session_id.as_str().to_string(), false))
+            })
             .await;
     }
 
@@ -259,36 +259,27 @@ async fn resolve_connector_session(
     .chars()
     .take(80)
     .collect::<String>();
-    let (session_id, created) = state
-        .with_state(|core_state| {
-            if let Some(session) = core_state
-                .sessions()
+    state
+        .with_state_read(|core_state| {
+            if let Some(metadata) = core_state
+                .core_manager
+                .list_session_metadata()
                 .iter()
-                .find(|session| session.id == channel_id)
+                .find(|metadata| metadata.id == channel_id)
             {
-                return Ok((session.id.clone(), false));
+                return Ok((metadata.id.clone(), false));
             }
-            if let Some(session) = core_state
-                .sessions()
+            if let Some(metadata) = core_state
+                .core_manager
+                .list_session_metadata()
                 .iter()
-                .find(|session| session.title == title)
+                .find(|metadata| metadata.title == title)
             {
-                return Ok((session.id.clone(), false));
+                return Ok((metadata.id.clone(), false));
             }
-            let mut session =
-                Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
-            session.trust_mode = TrustMode::FullTrust;
-            let session_id = session.id.clone();
-            core_state.sessions_mut().push(session);
-            core_state.persist_session_and_app(&session_id)?;
-            Ok((session_id, true))
+            Ok((scru128::new().to_string(), true))
         })
-        .await?;
-    if created {
-        let _ = app.emit("sessions_updated", &());
-        event_bus.publish(TiangongEvent::SessionCreated(session_id.clone()));
-    }
-    Ok(session_id)
+        .await
 }
 
 async fn send_message_and_wait(
@@ -322,20 +313,30 @@ async fn send_message_and_wait(
         state.wait_for_remote_turn_release(&session_id).await;
     };
 
-    let existing = state
+    // 会话存在性用 metadata 判定；消息字段需完整 Session，从磁盘 load
+    //（issue #245：真相源归磁盘）。
+    let session_exists = state
         .with_state_read(|core_state| {
-            let session = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            Ok(session
-                .messages
-                .iter()
-                .find(|message| message.id == message_id)
-                .map(|message| (message.role, message.turn_status)))
+            Ok::<_, anyhow::Error>(
+                core_state
+                    .core_manager
+                    .list_session_metadata()
+                    .iter()
+                    .any(|m| m.id == session_id),
+            )
         })
         .await?;
+    let existing = if session_exists {
+        state
+            .core_manager
+            .load_session(&session_id)?
+            .messages
+            .into_iter()
+            .find(|message| message.id == message_id)
+            .map(|message| (message.role, message.turn_status))
+    } else {
+        None
+    };
     if let Some((role, turn_status)) = existing {
         if role != MessageRole::User {
             drop(send_guard);
@@ -349,14 +350,18 @@ async fn send_message_and_wait(
             return result;
         }
         let has_pending_turn = state
-            .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
+            .with_state_read(|core_state| {
+                Ok(crate::state_ops::has_pending_turn(core_state, &session_id))
+            })
             .await?;
         drop(send_guard);
         return Err(incomplete_existing_message_error(has_pending_turn));
     }
 
     let has_pending_turn = state
-        .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
+        .with_state_read(|core_state| {
+            Ok(crate::state_ops::has_pending_turn(core_state, &session_id))
+        })
         .await?;
     if has_pending_turn {
         drop(send_guard);
@@ -391,39 +396,6 @@ async fn send_message_and_wait(
     .await
     .map_err(|error| format!("附件准备任务失败：{error}"))??;
     let (transaction, prepared) = prepared_batch;
-    let stable_prepared = tiangong_types::stable_content_blocks(&prepared);
-
-    let session_snapshot = state
-        .with_state(|core_state| {
-            let index = core_state
-                .sessions()
-                .iter()
-                .position(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            let original_session = core_state.sessions()[index].clone();
-            core_state.sessions_mut()[index]
-                .append_prepared_user_message_with_id(message_id.clone(), stable_prepared);
-            core_state.sessions_mut()[index].updated_at = tiangong_core::session::now_text();
-            core_state.mark_pending_message_for(&session_id, &message_id);
-            if let Err(error) = core_state.persist_session_and_app(&session_id) {
-                core_state.sessions_mut()[index] = original_session;
-                core_state.remove_pending_message_for(&session_id, &message_id);
-                let rollback_error = core_state.persist_session_and_app(&session_id).err();
-                return Err(match rollback_error {
-                    Some(rollback_error) => {
-                        anyhow!("消息状态持久化失败：{error}；恢复原状态也失败：{rollback_error}")
-                    }
-                    None => anyhow!("消息状态持久化失败：{error}"),
-                });
-            }
-            let mut runtime_session = core_state.sessions()[index].clone();
-            if runtime_session.cwd.trim().is_empty() {
-                runtime_session.cwd = core_state.workspace_dir().to_string();
-            }
-            Ok(runtime_session)
-        })
-        .await?;
-
     let created_paths = transaction
         .newly_created_paths()
         .iter()
@@ -432,8 +404,23 @@ async fn send_message_and_wait(
     transaction.commit();
 
     let (stream_tx, stream_rx) = std_mpsc::channel::<StreamEvent>();
+    let workspace_dir = if session_exists {
+        None
+    } else {
+        Some(
+            state
+                .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
+                .await?,
+        )
+    };
     let ensured = state
-        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .ensure_core(
+            &session_id,
+            workspace_dir,
+            (!session_exists).then_some(TrustMode::FullTrust),
+            None,
+            stream_tx,
+        )
         .await;
     let waiter = state.register_remote_turn_waiter(&session_id, &message_id);
     if let Err(error) =
@@ -445,6 +432,16 @@ async fn send_message_and_wait(
 
     if ensured.is_new {
         crate::commands::start_stream_consumer(app, ensured.session_id.clone(), stream_rx);
+    }
+    if !session_exists {
+        let _ = state
+            .with_state(|core_state| {
+                if core_state.active_session_id.trim().is_empty() {
+                    core_state.active_session_id = session_id.clone();
+                }
+                Ok(())
+            })
+            .await;
     }
     drop(send_guard);
 
@@ -479,7 +476,7 @@ async fn rollback_failed_delivery(
     {
         tracing::warn!(%error, %session_id, %message_id, "内嵌 Server 消息回滚失败");
     }
-    crate::commands::cleanup_unreferenced_draft_attachments(
+    crate::commands::cleanup_unreferenced_input_attachments(
         state,
         crate::commands::raw_attachments_for_paths(created_paths),
     )
@@ -492,26 +489,34 @@ async fn completed_message_result(
     message_id: &str,
     status: TurnStatus,
 ) -> HostResult<OutgoingMessage> {
-    state
+    // 会话存在性用 metadata 判定；消息遍历需完整 Session，从磁盘 load
+    //（issue #245：真相源归磁盘）。
+    let session_exists = state
         .with_state_read(|core_state| {
-            let session = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-            let (outgoing, direct_agent_reply) =
-                tiangong_server::remote::core::assistant_outgoing_after_user(session, message_id);
-            if status == TurnStatus::Success || direct_agent_reply {
-                Ok(outgoing)
-            } else {
-                Err(anyhow!(match status {
-                    TurnStatus::Cancelled => "执行已取消",
-                    TurnStatus::Failed => "执行失败",
-                    TurnStatus::Success => unreachable!(),
-                }))
-            }
+            Ok::<_, anyhow::Error>(
+                core_state
+                    .core_manager
+                    .list_session_metadata()
+                    .iter()
+                    .any(|m| m.id == session_id),
+            )
         })
-        .await
+        .await?;
+    if !session_exists {
+        return Err(format!("目标会话不存在：{session_id}"));
+    }
+    let session = state.core_manager.load_session(session_id)?;
+    let (outgoing, direct_agent_reply) =
+        tiangong_server::remote::core::assistant_outgoing_after_user(&session, message_id);
+    if status == TurnStatus::Success || direct_agent_reply {
+        Ok(outgoing)
+    } else {
+        Err(match status {
+            TurnStatus::Cancelled => "执行已取消".to_string(),
+            TurnStatus::Failed => "执行失败".to_string(),
+            TurnStatus::Success => unreachable!(),
+        })
+    }
 }
 
 pub(crate) async fn complete_remote_turn_from_stream(
@@ -519,25 +524,19 @@ pub(crate) async fn complete_remote_turn_from_stream(
     session_id: &str,
     message_id: &str,
 ) {
-    let status = state
-        .with_state_read(|core_state| {
-            let status = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-                .and_then(|session| {
-                    session.messages.iter().find(|message| {
-                        message.id == message_id && message.role == MessageRole::User
-                    })
-                })
-                .and_then(|message| message.turn_status)
-                .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}"))?;
-            Ok(status)
-        })
-        .await;
+    // 消息终态需读 messages（完整 Session）；从磁盘 load（issue #245）。
+    let status = match state.core_manager.load_session(session_id) {
+        Ok(session) => session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id && message.role == MessageRole::User)
+            .and_then(|message| message.turn_status)
+            .ok_or_else(|| anyhow!("未找到远程消息的终态：{message_id}")),
+        Err(error) => Err(anyhow!("加载会话失败：{error}")),
+    };
     let result = match status {
         Ok(status) => completed_message_result(state, session_id, message_id, status).await,
-        Err(error) => Err(error),
+        Err(error) => Err(error.to_string()),
     };
     state.complete_remote_turn_waiters(session_id, message_id, result);
 }
@@ -550,40 +549,35 @@ async fn delete_session(
     let exists = state
         .with_state_read(|core_state| {
             Ok(core_state
-                .sessions()
+                .core_manager
+                .list_session_metadata()
                 .iter()
-                .any(|session| session.id == session_id))
+                .any(|m| m.id == session_id))
         })
         .await?;
     if !exists {
         return Ok(false);
     }
 
-    let _draft_guard = state.draft_update_lock(session_id).lock_owned().await;
+    let _cache_guard = state.input_cache_update_lock(session_id).lock_owned().await;
     let _send_guard = state.session_send_lock(session_id).lock_owned().await;
-    crate::commands::stop_and_join_core(state, session_id).await;
-    // Core 已停止且从映射取走后，任何后续删除失败都不能再依赖流 EOF 唤醒等待者。
+    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
+    let deleted_session = state.core_manager.load_session(session_id).ok();
+    // 一步完成:retire core(取消在途 turn + 等待写盘) + 删 session.json。
+    let _ = state.core_manager.delete_session(session_id).await;
     state.fail_remote_session_waiters(session_id, "目标会话已删除");
     let mut attachments = state
         .with_state(|core_state| {
-            let mut attachments = core_state.session_input_draft(session_id).attachments;
-            if let Some(session) = core_state
-                .sessions()
-                .iter()
-                .find(|session| session.id == session_id)
-            {
+            let mut attachments = crate::state_ops::input_cache(core_state, session_id).attachments;
+            if let Some(session) = &deleted_session {
                 attachments.extend(crate::commands::session_attachment_candidates(session));
             }
-            let active_before = core_state.active_session_id().to_string();
-            core_state.delete_session_by_id(session_id)?;
-            if core_state.active_session_id() != active_before {
-                state.mark_active_session_changed();
-            }
+            crate::session_ops::remove_session_state(core_state, &state.core_manager, session_id);
             Ok(attachments)
         })
         .await?;
     attachments.extend(crate::commands::raw_attachments_for_paths(
-        state.release_any_draft_send_claim(session_id),
+        state.release_any_input_send_claim(session_id),
     ));
     state.remove_session_send_lock(session_id);
     tiangong_plugin_terminal::destroy_session_pty(app, session_id);
@@ -593,7 +587,7 @@ async fn delete_session(
     if let Err(error) = crate::workspace_tabs::remove_layout(session_id) {
         tracing::warn!(%error, %session_id, "删除工作区标签页布局失败");
     }
-    crate::commands::cleanup_unreferenced_draft_attachments(state, attachments).await;
+    crate::commands::cleanup_unreferenced_input_attachments(state, attachments).await;
     let _ = app.emit("sessions_updated", &());
     Ok(true)
 }
