@@ -59,6 +59,7 @@ export function MessageInput() {
   const endContextManagement = useStore((state) => state.endContextManagement);
   const runStatus = useStore((state) => state.runStatus);
   const runSummary = useStore((state) => state.runSummary);
+  const lastDurationMs = useStore((state) => state.lastDurationMs);
   const isNewConversation = useStore((state) => state.isNewConversation);
   const activeSessionId = useStore((state) => state.activeSessionId);
   const currentSessionRunStatus = useStore((state) => (
@@ -174,28 +175,8 @@ export function MessageInput() {
     && (inputContent.trim().length > 0 || attachments.length > 0);
   const isTextDropTargetActive = !voiceMode && !!cacheKey;
 
-  // 推理计时器：仅在执行态（非 idle）运行，实时累计本轮已用时长，
-  // 显示在「执行状态」指示器（Circle + runSummary）左侧；回到 idle 归零。
-  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
-  const liveStartRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (isIdle) {
-      liveStartRef.current = null;
-      setLiveElapsedMs(0);
-      return;
-    }
-    if (liveStartRef.current == null) {
-      liveStartRef.current = performance.now();
-    }
-    const timer = window.setInterval(() => {
-      if (liveStartRef.current != null) {
-        setLiveElapsedMs(performance.now() - liveStartRef.current);
-      }
-    }, 100);
-    return () => window.clearInterval(timer);
-  }, [isIdle, currentSessionStatus]);
-  const liveDurationLabel = liveElapsedMs >= 1000
-    ? `${(liveElapsedMs / 1000).toFixed(1)}s`
+  const liveDurationLabel = !isIdle && lastDurationMs != null && lastDurationMs >= 1000
+    ? `${Math.floor(lastDurationMs / 1000)}s`
     : '';
 
   // 自动调整文本框高度
@@ -865,7 +846,7 @@ export function MessageInput() {
               <div className="flex items-center gap-2 min-w-0">
                 {liveDurationLabel && (
                   <span className="inline-flex items-center gap-0.5 shrink-0 text-blue-500 tabular-nums" title="本轮已用时长">
-                    <Clock className="w-3 h-3 animate-pulse" />
+                    <Clock className="w-3 h-3" />
                     {liveDurationLabel}
                   </span>
                 )}

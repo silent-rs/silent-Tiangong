@@ -562,6 +562,7 @@ function applyEventToSessionView(
       messages = applyUserMessage(messages, event);
       runStatus = 'executing';
       runSummary = '正在处理';
+      lastDurationMs = null;
       approvalRequestId = null;
       currentPlan = undefined;
       break;
