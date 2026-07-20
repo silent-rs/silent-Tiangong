@@ -8,6 +8,7 @@ use tiangong_app_state::app_state::TiangongState;
 
 /// 打开会话管理 modal，返回切换到的会话 ID（如果有）
 pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
+    let core_manager = state.core_manager.clone();
     let mut selected: usize = 0;
     let mut query = String::new();
     let mut result = None;
@@ -15,7 +16,7 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
 
     super::run_modal(|terminal| {
         loop {
-            let sessions = state.session_metadata();
+            let sessions = core_manager.list_session_metadata();
             let matched: Vec<usize> = sessions
                 .iter()
                 .enumerate()
@@ -34,7 +35,7 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
                 Some(selected)
             });
 
-            let active_id = state.active_session_id().to_string();
+            let active_id = state.active_session_id.as_str().to_string();
 
             terminal.draw(|frame| {
                 let area = frame.area();
@@ -129,7 +130,7 @@ pub fn open(state: &mut TiangongState) -> Result<Option<String>> {
     })?;
 
     if let Some(id) = &result {
-        state.switch_session(id);
+        state.active_session_id = id.clone();
     }
     Ok(result)
 }

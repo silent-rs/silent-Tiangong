@@ -25,6 +25,11 @@ fn main() {
         .config(config)
         .trust_mode(session.trust_mode)
         .storage_root(storage_root)
+        .workspace_dir(
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy(),
+        )
         .stream_tx(tx)
         .plugins(Vec::new())
         .build();

@@ -31,6 +31,7 @@ impl CoreManager {
         &self,
         session_id: &str,
         session_config: CoreConfig,
+        workspace_dir: String,
         stream_tx: Sender<StreamEvent>,
         plugins: Vec<Arc<dyn Plugin>>,
     ) -> Result<EnsuredCore, String> {
@@ -56,6 +57,7 @@ impl CoreManager {
             .config(CoreConfigProvider::new(session_config.clone()))
             .trust_mode(session_config.trust_mode)
             .storage_root(self.storage_root.to_path_buf())
+            .workspace_dir(workspace_dir)
             .stream_tx(stream_tx)
             .plugins(plugins)
             .build();

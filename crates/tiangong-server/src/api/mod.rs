@@ -41,16 +41,19 @@ pub struct ServerAppContext {
 }
 
 impl ServerAppContext {
-    pub fn new(state: SharedState, config: CoreConfigProvider, event_bus: Arc<EventBus>) -> Self {
-        // storage_root 由 app-state 统一计算；plugin 由 app 注入同一根目录，
-        // 避免各自重复解析 ~/.tiangong。
-        let storage_root = tiangong_app_state::app_state::storage_root();
+    pub fn new(
+        state: SharedState,
+        core_manager: tiangong_app_state::app_state::CoreManager,
+        event_bus: Arc<EventBus>,
+        storage_root: std::path::PathBuf,
+    ) -> Self {
+        let config = core_manager.config().clone();
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root,
         ));
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
-            config.clone(),
+            core_manager,
             event_bus.clone(),
             mcp_plugin.clone(),
         ));
@@ -126,15 +129,12 @@ pub fn build_routes(
         .append(Route::new("chat").post(chat::chat))
         .append(Route::new("messages").post(messages::post_message))
         .append(
-            Route::new("sessions")
-                .get(sessions::list_sessions)
-                .post(sessions::create_session)
-                .append(
-                    Route::new("<id>")
-                        .get(sessions::get_session)
-                        .append(Route::new("cost").get(sessions::get_session_cost))
-                        .delete(sessions::delete_session),
-                ),
+            Route::new("sessions").get(sessions::list_sessions).append(
+                Route::new("<id>")
+                    .get(sessions::get_session)
+                    .append(Route::new("cost").get(sessions::get_session_cost))
+                    .delete(sessions::delete_session),
+            ),
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
         .append(Route::new("skills").get(skills::list_skills))
@@ -246,10 +246,9 @@ mod tests {
             Err(anyhow!("not used"))
         }
 
-        async fn resolve_or_create_session(
+        async fn resolve_session_id(
             &self,
             _requested_session_id: Option<&str>,
-            _trigger_name: &str,
         ) -> Result<(String, bool)> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Err(anyhow!("not used"))
@@ -264,8 +263,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _home_guard =
             crate::remote::core::test_support::TestHomeGuard::new(&temp.path().join("home"));
-        let state = Arc::new(Mutex::new(TiangongState::load_or_default()));
         let config = CoreConfigProvider::new(tiangong_config::CoreConfig::default());
+        let state = Arc::new(Mutex::new(
+            tiangong_app_state::app_state::TiangongState::new(),
+        ));
         let event_bus = Arc::new(EventBus::default());
         let backend_calls = Arc::new(AtomicUsize::new(0));
         let scheduler_calls = Arc::new(AtomicUsize::new(0));

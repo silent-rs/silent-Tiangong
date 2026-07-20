@@ -19,11 +19,12 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
     let app = app_ctx.state.lock().await;
 
     let visible_session_id = (!access.role.can_manage_sessions())
-        .then(|| resolve_visible_session_id(&access, app.active_session_id(), None))
+        .then(|| resolve_visible_session_id(&access, app.active_session_id.as_str(), None))
         .transpose()?;
 
     let sessions: Vec<SessionSummary> = app
-        .session_metadata()
+        .core_manager
+        .list_session_metadata()
         .iter()
         .filter(|metadata| {
             visible_session_id
@@ -45,26 +46,6 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
     })))
 }
 
-/// POST /api/v1/sessions — 创建新会话
-#[allow(deprecated)]
-pub async fn create_session(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
-    check_auth(&req, token.0.as_deref())?;
-    let access = extract_remote_access(&req)?;
-    ensure_remote_action(&access, access.role.can_manage_sessions(), "创建会话")?;
-
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let mut app = app_ctx.state.lock().await;
-
-    app.create_session();
-    let session_id = app.active_session_id().to_string();
-
-    Ok(Response::json(&serde_json::json!({
-        "session_id": session_id,
-    }))
-    .with_status(StatusCode::CREATED))
-}
-
 /// GET /api/v1/sessions/:id — 会话详情（消息列表）
 #[allow(deprecated)]
 pub async fn get_session(req: Request) -> Result<Response> {
@@ -75,11 +56,15 @@ pub async fn get_session(req: Request) -> Result<Response> {
 
     let requested_id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let (id, session_exists) = {
+    let (id, core_manager, session_exists) = {
         let app = app_ctx.state.lock().await;
-        let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
-        let exists = app.session_metadata().iter().any(|m| m.id == id);
-        (id, exists)
+        let id = resolve_visible_session_id(
+            &access,
+            app.active_session_id.as_str(),
+            Some(&requested_id),
+        )?;
+        let exists = app.core_manager.session_exists(&id);
+        (id, app.core_manager.clone(), exists)
     };
     if !session_exists {
         return Err(SilentError::business_error(
@@ -88,11 +73,7 @@ pub async fn get_session(req: Request) -> Result<Response> {
         ));
     }
     // 消息内容需完整 Session；从磁盘 load（issue #245：真相源归磁盘）。
-    let session = tiangong_core::session::Session::load_from_storage(
-        &tiangong_config::io::storage_root(),
-        &id,
-    )
-    .map_err(|error| {
+    let session = core_manager.load_session(&id).map_err(|error| {
         SilentError::business_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("加载会话失败：{error}"),
@@ -129,11 +110,15 @@ pub async fn get_session_cost(req: Request) -> Result<Response> {
 
     let requested_id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let (id, session_exists) = {
+    let (id, core_manager, session_exists) = {
         let app = app_ctx.state.lock().await;
-        let id = resolve_visible_session_id(&access, app.active_session_id(), Some(&requested_id))?;
-        let exists = app.session_metadata().iter().any(|m| m.id == id);
-        (id, exists)
+        let id = resolve_visible_session_id(
+            &access,
+            app.active_session_id.as_str(),
+            Some(&requested_id),
+        )?;
+        let exists = app.core_manager.session_exists(&id);
+        (id, app.core_manager.clone(), exists)
     };
 
     if !session_exists {
@@ -143,11 +128,7 @@ pub async fn get_session_cost(req: Request) -> Result<Response> {
         ));
     }
     // task_records 是完整 Session 字段；从磁盘 load（issue #245）。
-    let session = tiangong_core::session::Session::load_from_storage(
-        &tiangong_config::io::storage_root(),
-        &id,
-    )
-    .map_err(|error| {
+    let session = core_manager.load_session(&id).map_err(|error| {
         SilentError::business_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("加载会话失败：{error}"),

@@ -1,9 +1,7 @@
 //! CLI REPL — 类似 codex/claude code 风格交互
 
 use anyhow::Result;
-use tiangong_app_state::app_state::TiangongState;
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core::TiangongCore;
+use tiangong_core::agent_input::AgentInputKind;
 use tiangong_types::StreamEvent;
 
 use std::sync::mpsc;
@@ -25,16 +23,13 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         .with_writer(std::io::stderr)
         .try_init();
 
-    // 初始化 config 内存单例（从磁盘加载一次）。
-    tiangong_config::registry::init();
-    let core_config = tiangong_config::registry::config().to_core_config();
-    let models = tiangong_config::registry::models();
-
-    let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
-
-    let mut state = TiangongState::load_or_default();
-    // storage_root 由 app-state 统一计算；plugin 由 app 注入同一根目录。
-    let storage_root = tiangong_app_state::app_state::storage_root();
+    let mut state = tiangong_app_state::app_state::TiangongState::new();
+    let config = state.core_manager.config().clone();
+    let storage_root = state.config.storage_root.clone();
+    state.active_session_id = scru128::new().to_string();
+    state.workspace_dir = std::env::current_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
     let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> = std::sync::Arc::new(
         tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
     );
@@ -46,137 +41,14 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     );
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
-    // CLI 入口是同步函数，用临时 tokio runtime block_on。
-    let memory_handle = tokio::runtime::Runtime::new()
-        .map(|rt| {
-            rt.block_on(tiangong_memory::registry::init_memory_handle_for_process(
-                config.generation(),
-                tiangong_memory::ProcessType::Cli,
-            ))
-        })
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "创建临时 tokio runtime 失败，memory 将不可用");
-            None
-        });
-
-    let core = TiangongCore::builder()
-        .session_id("cli-session")
-        .config(config.clone())
-        .trust_mode(tiangong_core::permission::TrustMode::FullTrust)
-        .storage_root(tiangong_config::io::storage_root())
-        .stream_tx(stream_tx)
-        .plugins({
-            // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-            let resolve_ep = |cap: ModelCapability| {
-                models
-                    .resolve_for_capability(cap)
-                    .map(ModelEndpoint::from_resolved)
-            };
-            let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
-            let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-            let tts_endpoint = resolve_ep(ModelCapability::Tts);
-            let stt_endpoint = resolve_ep(ModelCapability::Stt);
-            let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
-                && !models.chat_is_multimodal()
-            {
-                resolve_ep(ModelCapability::Multimodal)
-            } else {
-                None
-            };
-            // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-            let mut plugins = tiangong_plugin_prompt::default_plugins();
-            plugins.extend(tiangong_plugin_fs::default_plugins());
-            plugins.extend(tiangong_plugin_index::default_plugins());
-            if let Some(ep) = image_endpoint.clone() {
-                plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-            }
-            if let Some(ep) = video_endpoint.clone() {
-                plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-            }
-            if let Some(ep) = tts_endpoint.clone() {
-                plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-            }
-            if let Some(ep) = stt_endpoint.clone() {
-                plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-            }
-            plugins.extend(tiangong_plugin_memory::default_plugins(
-                memory_handle.clone(),
-            ));
-            plugins.extend(tiangong_plugin_fetch::default_plugins());
-            plugins.extend(tiangong_plugin_command::default_plugins());
-            plugins.extend(tiangong_plugin_scheduler::default_plugins());
-            plugins.extend(tiangong_plugin_task::default_plugins());
-            // analyze-attachment：仅当配置了独立 multimodal 路由、且 chat 非 multimodal 时才注册。
-            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-            }
-            // Skill 插件：dual-ownership——core 拿 clone 做 LLM 工具，
-            // CLI 侧经 skill_plugin 做管理（modal 里的 remove/set_enabled）。
-            plugins.push(skill_plugin.clone());
-            // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具），
-            // CLI 侧经 mcp_plugin 做管理。
-            plugins.push(mcp_plugin.clone());
-            // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-            // 每次创建子 Core 都返回全新的插件外壳；MCP/Skill 重新从同一宿主
-            // 存储根读取配置，避免复用主会话的运行时状态。
-            let child_plugin_factory: std::sync::Arc<
-                dyn tiangong_plugin_agent_team::ChildPluginFactory,
-            > = std::sync::Arc::new({
-                let storage_root = storage_root.clone();
-                move || {
-                    let mut child_plugins = tiangong_plugin_prompt::default_plugins();
-                    child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                    child_plugins.extend(tiangong_plugin_index::default_plugins());
-                    if let Some(ep) = image_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                    }
-                    if let Some(ep) = video_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                    }
-                    if let Some(ep) = tts_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                    }
-                    if let Some(ep) = stt_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                    }
-                    child_plugins.extend(tiangong_plugin_memory::default_plugins(
-                        memory_handle.clone(),
-                    ));
-                    child_plugins.extend(tiangong_plugin_fetch::default_plugins());
-                    child_plugins.extend(tiangong_plugin_command::default_plugins());
-                    child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
-                    child_plugins.extend(tiangong_plugin_task::default_plugins());
-                    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new)
-                    {
-                        child_plugins
-                            .push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                    }
-                    child_plugins.push(std::sync::Arc::new(
-                        tiangong_plugin_skill::SkillPlugin::with_storage_root(
-                            storage_root.join("skills"),
-                        ),
-                    ));
-                    child_plugins.push(std::sync::Arc::new(
-                        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-                    ));
-                    child_plugins
-                }
-            });
-            plugins.extend(tiangong_plugin_agent_team::default_plugins(
-                storage_root.clone(),
-                child_plugin_factory,
-            ));
-            plugins
-        })
-        .build();
-
-    // CLI --trust-mode 参数覆盖
-    if let Some(mode) = trust_mode {
-        core.set_trust_mode(mode);
-    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    let memory_handle =
+        runtime.block_on(tiangong_memory::registry::init_memory_handle_for_process(
+            config.generation(),
+            tiangong_memory::ProcessType::Cli,
+        ));
+    let default_trust_mode = trust_mode.unwrap_or(tiangong_core::permission::TrustMode::FullTrust);
     let mut reader = InputReader::new();
-    let mut draft_new_session = true;
 
     output::welcome();
 
@@ -185,7 +57,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         while stream_rx.try_recv().is_ok() {}
 
         // prompt
-        let short_id: String = core.session_id().chars().take(8).collect();
+        let short_id: String = state.active_session_id.chars().take(8).collect();
         let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
         let input = {
@@ -212,14 +84,8 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(
-                &mut state,
-                &config,
-                trimmed,
-                &mut draft_new_session,
-                &skill_plugin,
-                &mcp_plugin,
-            ) {
+            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin, &mcp_plugin)
+            {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {
@@ -229,40 +95,181 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             }
         }
 
-        // 首次发送时创建会话
-        if draft_new_session {
-            state.create_session();
-            draft_new_session = false;
-        }
+        let session_id = state.active_session_id.clone();
+        let mut session_config = (*config.snapshot()).clone();
+        let workspace_dir = if let Ok(session) = state.core_manager.load_session(&session_id) {
+            session_config.trust_mode = session.trust_mode;
+            if let Some(reasoning_effort) = session.reasoning_effort {
+                session_config.reasoning_effort = reasoning_effort;
+            }
+            if session.cwd.trim().is_empty() {
+                state.workspace_dir.clone()
+            } else {
+                session.cwd
+            }
+        } else {
+            session_config.trust_mode = default_trust_mode;
+            state.workspace_dir.clone()
+        };
+        let plugins = if state.core_manager.has_live_core(&session_id) {
+            Vec::new()
+        } else {
+            build_cli_plugins(
+                &storage_root,
+                &state.config.models,
+                memory_handle.clone(),
+                &skill_plugin,
+                &mcp_plugin,
+            )
+        };
+        runtime
+            .block_on(state.core_manager.ensure_core(
+                &session_id,
+                session_config,
+                workspace_dir,
+                stream_tx.clone(),
+                plugins,
+            ))
+            .map_err(anyhow::Error::msg)?;
 
-        // 发送消息
-        if let Err(e) = core.deliver(AgentInputKind::message(trimmed.to_string())) {
-            tracing::warn!(error = %e, "消息投递失败（worker 可能已停止）");
+        // Session 由 Core 在首次 deliver 中创建并持久化。
+        if !state
+            .core_manager
+            .deliver_to_core_if_live(&session_id, AgentInputKind::message(trimmed.to_string()))
+        {
+            output::error("消息投递失败");
+            continue;
         }
 
         // 处理响应流
-        handle_response(&stream_rx, &core);
+        handle_response(&stream_rx, &state.core_manager, &session_id);
 
         output::separator();
     }
 
     output::status("再见！");
-    // Core 终止:worker 已实时落盘,session 真相源归磁盘(issue #245)。
-    // into_session 负责 Cancel 终止活跃 turn;随后只需 reload 同步内存镜像,
-    // 不再 save_core_session 重复写盘。
-    if let Err(e) = core.into_session() {
-        tracing::warn!(error = %e, "终止 Core 最终 turn 失败");
-    }
-    let active_id = state.active_session_id().to_string();
-    if !active_id.is_empty() {
-        let _ = state.reload_session_from_disk(&active_id);
+    let live_session_ids = {
+        let registry = state.core_manager.registry();
+        registry.keys().cloned().collect::<Vec<_>>()
+    };
+    for session_id in live_session_ids {
+        if let Some(core) = state.core_manager.take_core(&session_id)
+            && let Err(error) = core.shutdown_join()
+        {
+            tracing::warn!(%session_id, %error, "终止 Core 失败");
+        }
     }
     tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())
 }
 
+fn build_cli_plugins(
+    storage_root: &std::path::Path,
+    models: &tiangong_llm::models_config::ModelsConfig,
+    memory_handle: Option<tiangong_memory::MemoryHandle>,
+    skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
+    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
+) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
+    use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+
+    let storage_root = storage_root.to_path_buf();
+    let resolve_ep = |cap: ModelCapability| {
+        models
+            .resolve_for_capability(cap)
+            .map(ModelEndpoint::from_resolved)
+    };
+    let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+    let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+    let tts_endpoint = resolve_ep(ModelCapability::Tts);
+    let stt_endpoint = resolve_ep(ModelCapability::Stt);
+    let multimodal_endpoint =
+        if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
+            resolve_ep(ModelCapability::Multimodal)
+        } else {
+            None
+        };
+
+    let mut plugins = tiangong_plugin_prompt::default_plugins();
+    plugins.extend(tiangong_plugin_fs::default_plugins());
+    plugins.extend(tiangong_plugin_index::default_plugins());
+    if let Some(ep) = image_endpoint.clone() {
+        plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+    }
+    if let Some(ep) = video_endpoint.clone() {
+        plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+    }
+    if let Some(ep) = tts_endpoint.clone() {
+        plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+    }
+    if let Some(ep) = stt_endpoint.clone() {
+        plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+    }
+    plugins.extend(tiangong_plugin_memory::default_plugins(
+        memory_handle.clone(),
+    ));
+    plugins.extend(tiangong_plugin_fetch::default_plugins());
+    plugins.extend(tiangong_plugin_command::default_plugins());
+    plugins.extend(tiangong_plugin_scheduler::default_plugins());
+    plugins.extend(tiangong_plugin_task::default_plugins());
+    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+        plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+    }
+    plugins.push(skill_plugin.clone());
+    plugins.push(mcp_plugin.clone());
+
+    let child_plugin_factory: std::sync::Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
+        std::sync::Arc::new({
+            let storage_root = storage_root.clone();
+            move || {
+                let mut child_plugins = tiangong_plugin_prompt::default_plugins();
+                child_plugins.extend(tiangong_plugin_fs::default_plugins());
+                child_plugins.extend(tiangong_plugin_index::default_plugins());
+                if let Some(ep) = image_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+                }
+                if let Some(ep) = video_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                }
+                if let Some(ep) = tts_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                }
+                if let Some(ep) = stt_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                }
+                child_plugins.extend(tiangong_plugin_memory::default_plugins(
+                    memory_handle.clone(),
+                ));
+                child_plugins.extend(tiangong_plugin_fetch::default_plugins());
+                child_plugins.extend(tiangong_plugin_command::default_plugins());
+                child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                child_plugins.extend(tiangong_plugin_task::default_plugins());
+                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                }
+                child_plugins.push(std::sync::Arc::new(
+                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
+                        storage_root.join("skills"),
+                    ),
+                ));
+                child_plugins.push(std::sync::Arc::new(
+                    tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+                ));
+                child_plugins
+            }
+        });
+    plugins.extend(tiangong_plugin_agent_team::default_plugins(
+        storage_root,
+        child_plugin_factory,
+    ));
+    plugins
+}
+
 /// 处理完整的响应流
-fn handle_response(rx: &mpsc::Receiver<StreamEvent>, core: &TiangongCore) {
+fn handle_response(
+    rx: &mpsc::Receiver<StreamEvent>,
+    core_manager: &tiangong_app_state::app_state::CoreManager,
+    session_id: &str,
+) {
     let mut state = ResponseState::new();
     let mut last_event_at = Instant::now();
     let timeout = Duration::from_secs(300);
@@ -276,7 +283,7 @@ fn handle_response(rx: &mpsc::Receiver<StreamEvent>, core: &TiangongCore) {
                 Ok(session_event) => {
                     had_event = true;
                     last_event_at = Instant::now();
-                    if state.process(&session_event, core) {
+                    if state.process(&session_event, core_manager, session_id) {
                         return;
                     }
                 }
@@ -322,7 +329,12 @@ impl ResponseState {
     }
 
     /// 处理单个事件，返回 true 表示本轮结束
-    fn process(&mut self, event: &StreamEvent, core: &TiangongCore) -> bool {
+    fn process(
+        &mut self,
+        event: &StreamEvent,
+        core_manager: &tiangong_app_state::app_state::CoreManager,
+        session_id: &str,
+    ) -> bool {
         match event {
             StreamEvent::TurnBoundary { .. } => {}
             StreamEvent::UserMessage { .. } => {
@@ -406,9 +418,11 @@ impl ResponseState {
                         }
                     }
                 };
-                if let Err(e) = core.deliver(AgentInputKind::approval(request_id.clone(), approved))
-                {
-                    tracing::warn!(error = %e, "审批响应投递失败（worker 可能已停止）");
+                if !core_manager.deliver_to_core_if_live(
+                    session_id,
+                    AgentInputKind::approval(request_id.clone(), approved),
+                ) {
+                    tracing::warn!(%session_id, "审批响应投递失败（Core 可能已停止）");
                 }
                 if approved {
                     output::status("已允许");

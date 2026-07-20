@@ -13,7 +13,6 @@
 - `allow-terminal-resize`
 - `allow-terminal-ensure-session`
 - `allow-terminal-destroy-session`
-- `allow-terminal-attach-session`
 - `allow-terminal-session-send-input`
 - `allow-terminal-report-user-command`
 - `allow-terminal-session-recent-output`
@@ -37,32 +36,6 @@
 <th>Description</th>
 </tr>
 
-
-<tr>
-<td>
-
-`tiangong-plugin-terminal:allow-terminal-attach-session`
-
-</td>
-<td>
-
-Enables the terminal_attach_session command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`tiangong-plugin-terminal:deny-terminal-attach-session`
-
-</td>
-<td>
-
-Denies the terminal_attach_session command without any pre-configured scope.
-
-</td>
-</tr>
 
 <tr>
 <td>

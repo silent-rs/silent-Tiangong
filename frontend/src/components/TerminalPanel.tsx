@@ -18,9 +18,6 @@ interface TerminalEntry {
 
 const MAX_POOL_SIZE = 5;
 
-// 草稿态终端的稳定临时 id（与 store 中 createSession 生成的一致）。
-// 草稿态用此 id 创建 PTY；转正后前端把 pool 的 key 从此 id 迁移到真实 session_id。
-const DRAFT_TERMINAL_ID = '__draft_terminal__';
 // 屏幕快照回传节流间隔（毫秒）：xterm 每次输出后都序列化屏幕会过于频繁，
 // 用此间隔合并短时间内的多次输出为一次回传。
 const SCREEN_SNAPSHOT_THROTTLE_MS = 50;
@@ -70,7 +67,7 @@ const TERMINAL_CONFIG = {
  */
 export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const activeSessionId = useStore((s) => s.activeSessionId);
-  const draftTerminalId = useStore((s) => s.draftTerminalId);
+  const newConversationId = useStore((s) => s.newConversationId);
   const sessionCwd = useStore((s) => s.sessionCwd);
   const workspaceDir = useStore((s) => s.workspaceDir);
 
@@ -99,10 +96,8 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   // 重建当前会话的 xterm（effectiveId 不变，仅靠它无法触发重挂载）。
   const [ptyVersion, setPtyVersion] = useState(0);
 
-  // 按对话 PTY 模型：effectiveId 为当前对话 id。
-  // 草稿态（activeSessionId=null）用 draftTerminalId 作为临时 id 创建草稿 PTY，
-  // 转正后切换为真实 session_id（后端 PTY 已通过 terminalAttachSession 迁移归属）。
-  const effectiveId = activeSessionId || draftTerminalId || null;
+  // 新对话预留 ID 会直接成为首次投递后的 Session ID，PTY 无需迁移。
+  const effectiveId = activeSessionId || newConversationId || null;
 
   // 全局 output listener（按 session_id 分发）
   useEffect(() => {
@@ -205,23 +200,6 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     // 按对话 PTY 模型：effectiveId 即当前对话 id，尚未就绪时跳过
     if (!effectiveId) return;
-
-    // 草稿态转正过渡：effectiveId 从 DRAFT_TERMINAL_ID 切换到真实 session_id 时，
-    // 把前端 pool 里的 xterm entry key 从草稿 id 迁移到真实 id。
-    // 后端 PTY 已通过 terminalAttachSession 改名，前端 pool 同步改名后，
-    // 输出 listener（按 session_id 分发）和后续 ensure（命中后端已迁移的 PTY）
-    // 都能用真实 id 正确工作，避免重建 xterm 丢失草稿期已渲染的内容。
-    if (
-      effectiveId !== DRAFT_TERMINAL_ID &&
-      effectiveId !== currentIdRef.current &&
-      poolRef.current.has(DRAFT_TERMINAL_ID)
-    ) {
-      const draftEntry = poolRef.current.get(DRAFT_TERMINAL_ID);
-      if (draftEntry) {
-        poolRef.current.delete(DRAFT_TERMINAL_ID);
-        poolRef.current.set(effectiveId, draftEntry);
-      }
-    }
 
     if (effectiveId === currentIdRef.current && poolRef.current.has(effectiveId)) {
       return;

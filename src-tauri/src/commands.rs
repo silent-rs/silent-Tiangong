@@ -10,7 +10,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tauri_plugin_notification::{NotificationExt, PermissionState};
 use tiangong_core::agent_input::AgentInputKind;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::workspace_tabs::{
     WorkspaceTabKind as TabKind, WorkspaceTabRef, WorkspaceTabState as TabState,
@@ -34,33 +34,6 @@ fn done_event_keeps_turn_running(
     has_pending_turn: bool,
 ) -> bool {
     matches!(event, tiangong_types::StreamEvent::Done { .. }) && has_pending_turn
-}
-
-fn upsert_agent_status_message(
-    session: &mut tiangong_core::session::Session,
-    agent_id: &str,
-    label: &str,
-    status: &str,
-) {
-    let message_id = format!("agent-status:{agent_id}");
-    let content = format!("[Agent] {label} 状态变更: {status} id={agent_id}");
-    if let Some(message) = session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == message_id)
-    {
-        message.content = vec![tiangong_types::ContentBlock::text(content)];
-        message.model_excluded = true;
-    } else {
-        let mut message = tiangong_core::session::Message::new(
-            tiangong_core::session::MessageRole::System,
-            content,
-        );
-        message.id = message_id;
-        message.model_excluded = true;
-        session.messages.push(message);
-    }
-    session.updated_at = tiangong_core::session::now_text();
 }
 
 fn merge_agent_worker_messages(
@@ -235,7 +208,7 @@ async fn send_approval_notification_if_background(
 ) {
     let is_current_session = app
         .state::<TiangongApp>()
-        .with_state_read(|state| Ok(state.active_session_id() == session_id))
+        .with_state_read(|state| Ok(state.active_session_id.as_str() == session_id))
         .await
         .unwrap_or(false);
     if is_current_session && main_window_is_focused(&app) {
@@ -258,188 +231,6 @@ async fn send_approval_notification_if_background(
     let _ = show_desktop_notification(&app, title, body, "tiangong-approval-requests");
 }
 
-fn ensure_assistant_message(
-    session: &mut tiangong_core::session::Session,
-    assistant_msg_id: &mut Option<String>,
-    message_id: &str,
-) {
-    if !session.messages.iter().any(|msg| msg.id == message_id) {
-        session.append_message_with_id(
-            message_id.to_string(),
-            tiangong_core::session::MessageRole::Assistant,
-            String::new(),
-            String::new(),
-        );
-    }
-
-    *assistant_msg_id = Some(message_id.to_string());
-}
-
-fn append_assistant_delta(
-    session: &mut tiangong_core::session::Session,
-    assistant_msg_id: &mut Option<String>,
-    message_id: &str,
-    content: &str,
-) {
-    if content.trim().is_empty() && !session.messages.iter().any(|msg| msg.id == message_id) {
-        return;
-    }
-    ensure_assistant_message(session, assistant_msg_id, message_id);
-    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
-        if msg.text_content().trim().is_empty() && content.trim().is_empty() {
-            return;
-        }
-        match msg.content.last_mut() {
-            Some(tiangong_types::ContentBlock::Text { text }) => text.push_str(content),
-            _ => msg
-                .content
-                .push(tiangong_types::ContentBlock::text(content.to_string())),
-        }
-    }
-}
-
-fn append_assistant_reasoning(
-    session: &mut tiangong_core::session::Session,
-    assistant_msg_id: &mut Option<String>,
-    message_id: &str,
-    content: &str,
-) {
-    ensure_assistant_message(session, assistant_msg_id, message_id);
-    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
-        msg.reasoning_content.push_str(content);
-    }
-}
-
-fn cleanup_assistant_before_tool_calls(
-    session: &mut tiangong_core::session::Session,
-    assistant_msg_id: &mut Option<String>,
-) {
-    let Some(message_id) = assistant_msg_id.take() else {
-        return;
-    };
-    let Some(index) = session.messages.iter().position(|msg| {
-        msg.id == message_id && msg.role == tiangong_core::session::MessageRole::Assistant
-    }) else {
-        return;
-    };
-
-    let message = &mut session.messages[index];
-    if !message.text_content().trim().is_empty() {
-        return;
-    }
-    message.content.clear();
-    if message.reasoning_content.trim().is_empty() && !message.has_media() {
-        session.messages.remove(index);
-    }
-}
-
-fn finalize_assistant_tool_calls(
-    session: &mut tiangong_core::session::Session,
-    assistant_msg_id: &mut Option<String>,
-    message_id: &str,
-    calls: &[tiangong_types::StreamToolCall],
-) {
-    if calls.is_empty() {
-        cleanup_assistant_before_tool_calls(session, assistant_msg_id);
-        return;
-    }
-    ensure_assistant_message(session, assistant_msg_id, message_id);
-    if let Some(msg) = session.messages.iter_mut().find(|msg| msg.id == message_id) {
-        msg.tool_calls = calls
-            .iter()
-            .map(|call| tiangong_core::session::MessageToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-            })
-            .collect();
-    }
-    *assistant_msg_id = None;
-}
-
-fn append_tool_result_message(
-    session: &mut tiangong_core::session::Session,
-    tool_call_id: Option<&str>,
-    tool_name: &str,
-    content: String,
-    is_error: bool,
-) {
-    let Some(tool_call_id) = tool_call_id else {
-        return;
-    };
-    let current_assistant_index = session.messages.iter().rposition(|message| {
-        message.role == tiangong_core::session::MessageRole::Assistant
-            && message
-                .tool_calls
-                .iter()
-                .any(|call| call.id == tool_call_id)
-    });
-    let current_result = current_assistant_index.and_then(|assistant_index| {
-        session.messages[assistant_index + 1..]
-            .iter()
-            .take_while(|message| message.role == tiangong_core::session::MessageRole::Tool)
-            .position(|message| message.tool_call_id.as_deref() == Some(tool_call_id))
-            .map(|offset| assistant_index + 1 + offset)
-    });
-    if let Some(message) = current_result.and_then(|index| session.messages.get_mut(index)) {
-        message.content = vec![tiangong_core::session::ContentBlock::text(content)];
-        message.tool_name = Some(tool_name.to_string());
-        message.tool_result_is_error = is_error;
-        session.updated_at = tiangong_core::session::now_text();
-        return;
-    }
-    let message =
-        tiangong_core::session::Message::tool_result(tool_call_id, tool_name, content, is_error);
-    session.messages.push(message);
-    session.updated_at = tiangong_core::session::now_text();
-}
-
-fn record_session_token_usage(
-    session: &mut tiangong_core::session::Session,
-    usage: &tiangong_types::TokenUsage,
-    current_tokens: Option<usize>,
-    compression_threshold_tokens: Option<usize>,
-    context_limit_tokens: Option<usize>,
-    agent_id: Option<&str>,
-) {
-    let mut normalized_usage = usage.clone();
-    if normalized_usage.total_tokens == 0 {
-        normalized_usage.total_tokens =
-            normalized_usage.prompt_tokens + normalized_usage.completion_tokens;
-    }
-    if normalized_usage.total_tokens > 0 {
-        session.token_usage.accumulate(&normalized_usage);
-        if let Some(aid) = agent_id {
-            session
-                .agent_token_usage
-                .entry(aid.to_string())
-                .or_default()
-                .accumulate(&normalized_usage);
-        }
-    }
-    if let Some(current_tokens) = current_tokens {
-        if let Some(aid) = agent_id {
-            session.active_agent_id = Some(aid.to_string());
-            session.active_agent_current_tokens =
-                current_tokens.max(session.active_agent_current_tokens);
-            let agent_current_tokens = session
-                .agent_current_tokens
-                .entry(aid.to_string())
-                .or_default();
-            *agent_current_tokens = current_tokens.max(*agent_current_tokens);
-        } else {
-            session.current_tokens = current_tokens.max(session.current_tokens);
-        }
-    }
-    if let Some(compression_threshold_tokens) = compression_threshold_tokens {
-        session.compression_threshold_tokens = compression_threshold_tokens;
-    }
-    if let Some(context_limit_tokens) = context_limit_tokens {
-        session.context_limit_tokens = context_limit_tokens;
-    }
-    session.updated_at = tiangong_core::session::now_text();
-}
-
 fn parse_model_capability(
     capability: &str,
 ) -> Result<tiangong_llm::models_config::ModelCapability, String> {
@@ -451,7 +242,20 @@ fn has_capability_in_state(
     core_state: &tiangong_app_state::app_state::TiangongState,
     capability: tiangong_llm::models_config::ModelCapability,
 ) -> bool {
-    core_state.models_config().has_capability(capability)
+    core_state.config.models.has_capability(capability)
+}
+
+fn provider_label(core_state: &tiangong_app_state::app_state::TiangongState) -> String {
+    let endpoint = core_state
+        .config
+        .models
+        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
+        .map(tiangong_llm::ModelEndpoint::from_resolved)
+        .unwrap_or_default();
+    format!(
+        "{} @ {} · {}ms",
+        endpoint.model, endpoint.base_url, endpoint.timeout_ms
+    )
 }
 
 // ============================================================================
@@ -463,53 +267,61 @@ pub fn build_full_snapshot_with_status(
     core_state: &tiangong_app_state::app_state::TiangongState,
     is_executing: bool,
 ) -> RunSnapshotView {
-    let sid = core_state.active_session_id();
+    let sid = core_state.active_session_id.as_str();
     let agent_worker_messages = app_state.agent_worker_view_messages(sid);
-    build_session_snapshot(core_state, sid, is_executing, &agent_worker_messages)
+    build_session_snapshot(
+        app_state,
+        core_state,
+        sid,
+        is_executing,
+        &agent_worker_messages,
+    )
 }
 
 fn active_session_is_executing(core_state: &tiangong_app_state::app_state::TiangongState) -> bool {
-    let active_id = core_state.active_session_id();
-    let snapshot = core_state.run_snapshot();
-    core_state.has_pending_turn_for(active_id)
+    let active_id = core_state.active_session_id.as_str();
+    let snapshot = &core_state.run;
+    crate::state_ops::has_pending_turn(core_state, active_id)
         || (snapshot.last_session_id.as_deref() == Some(active_id)
             && snapshot.status != tiangong_types::RunStatus::Idle)
 }
 
 fn build_session_snapshot(
+    app_state: &TiangongApp,
     core_state: &tiangong_app_state::app_state::TiangongState,
     session_id: &str,
     is_session_executing: bool,
     agent_worker_messages: &[tiangong_types::Message],
 ) -> RunSnapshotView {
-    let core_snapshot = core_state.run_snapshot();
-    let input_draft = core_state.session_input_draft(session_id).text;
-
-    let selected_session = core_state.sessions().iter().find(|s| s.id == session_id);
+    let core_snapshot = &core_state.run;
+    let selected_session = app_state.core_manager.load_session(session_id).ok();
 
     let mut messages: Vec<tiangong_types::Message> = selected_session
-        .map(|s| s.messages.clone())
+        .as_ref()
+        .map(|session| session.messages.clone())
         .unwrap_or_default();
     merge_agent_worker_messages(&mut messages, agent_worker_messages);
 
-    let current_plan = core_state
-        .active_task_plans()
+    let current_plan = selected_session
+        .as_ref()
+        .map(|session| session.task_plans.to_vec())
+        .unwrap_or_default()
         .first()
         .map(TaskPlan::from_session_task_plan);
 
-    let pending_session_ids = core_state.pending_session_ids();
+    let pending_session_ids = crate::state_ops::pending_session_ids(core_state);
 
     let mut snapshot = RunSnapshotView::from_core_with_session(
         core_snapshot,
         messages,
-        input_draft,
         current_plan,
         pending_session_ids,
         selected_session
+            .as_ref()
             .map(TokenStatsView::from_session)
             .unwrap_or_default(),
     );
-    snapshot.last_usage = selected_session.and_then(|session| {
+    snapshot.last_usage = selected_session.as_ref().and_then(|session| {
         let usage = session.total_usage();
         (usage.total_tokens > 0).then_some(usage)
     });
@@ -546,7 +358,8 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
     state
         .with_state_read(|core_state| {
             Ok(core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .filter(|metadata| metadata.parent_session_id.is_none())
                 .map(SessionListItem::from_metadata)
@@ -564,7 +377,7 @@ pub async fn get_session_tabs(
     state
         .with_state_read(|core_state| {
             if !core_state
-                .session_metadata()
+                .core_manager.list_session_metadata()
                 .iter()
                 .any(|m| m.id == session_id)
             {
@@ -643,7 +456,8 @@ pub async fn set_session_tabs(
     state
         .with_state_read(|core_state| {
             if !core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .any(|m| m.id == session_id)
             {
@@ -655,207 +469,22 @@ pub async fn set_session_tabs(
         .await
 }
 
-/// 创建新会话
-#[tauri::command]
-pub async fn create_session(state: State<'_, TiangongApp>) -> Result<SessionListItem, String> {
-    let result = state
-        .with_state(|core_state| {
-            core_state.create_session();
-            state.mark_active_session_changed();
-            // 返回新创建的活动会话
-            core_state
-                .active_session()
-                .map(SessionListItem::from_core)
-                .ok_or_else(|| anyhow::anyhow!("Failed to create session"))
-        })
-        .await?;
-    state.sync_core_config_from_state().await?;
-    Ok(result)
-}
-
-#[derive(Debug, serde::Serialize)]
-pub struct DraftSessionCreationView {
-    pub session: SessionListItem,
-    pub activation_epoch: u64,
-    pub previous_active_session_id: String,
-}
-
-/// 草稿转正专用：原子写入初始会话配置，但不改变当前活动会话。
-#[tauri::command]
-pub async fn create_session_for_draft(
-    cwd: String,
-    trust_mode: String,
-    reasoning_effort: String,
-    state: State<'_, TiangongApp>,
-) -> Result<DraftSessionCreationView, String> {
-    let trust_mode = serde_json::from_value(serde_json::Value::String(trust_mode))
-        .map_err(|error| format!("无效的信任模式：{error}"))?;
-    let valid_efforts = ["none", "low", "medium", "high", "max"];
-    if !valid_efforts.contains(&reasoning_effort.as_str()) {
-        return Err(format!("无效的思考强度：{reasoning_effort}"));
-    }
-    state
-        .with_state(|core_state| {
-            let effective_cwd = if cwd.trim().is_empty() {
-                core_state.workspace_dir().to_string()
-            } else {
-                cwd
-            };
-            if !std::path::Path::new(&effective_cwd).is_dir() {
-                return Err(anyhow::anyhow!("路径不存在或不是目录：{effective_cwd}"));
-            }
-            let activation_epoch = state.active_session_epoch();
-            let previous_active_session_id = core_state.active_session_id().to_string();
-            let session = core_state.create_session_without_activation(
-                effective_cwd,
-                trust_mode,
-                reasoning_effort,
-            )?;
-            Ok(DraftSessionCreationView {
-                session: SessionListItem::from_core(&session),
-                activation_epoch,
-                previous_active_session_id,
-            })
-        })
-        .await
-}
-
-/// 只有用户自草稿发送开始后没有切换过会话，才激活转正后的会话。
-#[tauri::command]
-pub async fn activate_draft_session(
-    session_id: String,
-    expected_epoch: u64,
-    expected_active_session_id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<bool, String> {
-    let activated = state
-        .with_state(|core_state| {
-            if state.active_session_epoch() != expected_epoch
-                || core_state.active_session_id() != expected_active_session_id
-            {
-                return Ok(false);
-            }
-            if !core_state
-                .session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
-                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-            }
-            core_state.switch_session(&session_id);
-            state.mark_active_session_changed();
-            Ok(true)
-        })
-        .await?;
-    if activated {
-        state.sync_core_config_from_state().await?;
-    }
-    Ok(activated)
-}
-
 /// 切换到指定会话
 #[tauri::command]
 pub async fn switch_session(
     session_id: String,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let (trust_mode, cwd) = state
+    if !state.inner().core_manager.session_exists(&session_id) {
+        return Err(format!("会话不存在：{session_id}"));
+    }
+
+    state
         .with_state(|core_state| {
-            if !core_state
-                .session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
-                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-            }
-            core_state.switch_session(&session_id);
-            state.mark_active_session_changed();
-            let session = core_state
-                .session_metadata()
-                .iter()
-                .find(|m| m.id == session_id)
-                .ok_or_else(|| anyhow::anyhow!("会话不存在：{session_id}"))?;
-            let cwd = if session.cwd.trim().is_empty() {
-                core_state.workspace_dir().to_string()
-            } else {
-                session.cwd.clone()
-            };
-            Ok((session.trust_mode, cwd))
+            core_state.active_session_id = session_id;
+            Ok(())
         })
         .await?;
-    state.sync_core_config_from_state().await?;
-    state
-        .inner()
-        .core_manager
-        .set_core_trust_mode(&session_id, trust_mode);
-
-    // 为新会话补充索引（后台执行，不阻塞 UI）
-    let sid = session_id.clone();
-    let has_session_index = tiangong_plugin_index::session_index_exists(&sid);
-    let messages = if !has_session_index {
-        // session 真相源归磁盘（issue #245）：切换会话时无活跃 turn，
-        // 直接从磁盘 load 消息用于索引补建。
-        state
-            .inner()
-            .core_manager
-            .load_session(&sid)
-            .map(|session| session.messages)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    if !cwd.is_empty() || !messages.is_empty() {
-        let app_clone = app.clone();
-        let rt = tokio::runtime::Handle::current();
-        thread::spawn(move || {
-            let mut need_snapshot = false;
-
-            // Workspace 索引：仅在尚不存在时创建
-            if !cwd.is_empty()
-                && !tiangong_plugin_index::workspace_index_exists(std::path::Path::new(&cwd))
-            {
-                match tiangong_plugin_index::rebuild_workspace_index_for_gui(std::path::Path::new(
-                    &cwd,
-                )) {
-                    Ok(count) => {
-                        debug!(count, "切换会话后 Workspace 索引扫描完成");
-                        need_snapshot = true;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "切换会话后 Workspace 索引扫描失败");
-                    }
-                }
-            }
-
-            // Session 索引：回溯已有消息
-            if !messages.is_empty() {
-                match tiangong_plugin_index::backfill_session_index(&sid, &messages) {
-                    Ok(count) => {
-                        debug!(count, "切换会话后 Session 回溯索引完成");
-                        need_snapshot = true;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "切换会话后 Session 回溯索引失败");
-                    }
-                }
-            }
-
-            if need_snapshot {
-                let app_state = app_clone.state::<TiangongApp>();
-                if let Ok(snapshot) = rt.block_on(app_state.with_state_read(|s| {
-                    Ok(build_full_snapshot_with_status(
-                        app_state.inner(),
-                        s,
-                        active_session_is_executing(s),
-                    ))
-                })) {
-                    let _ = app_clone.emit("run_snapshot", &snapshot);
-                }
-            }
-        });
-    }
 
     Ok(())
 }
@@ -864,9 +493,12 @@ pub async fn switch_session(
 #[tauri::command]
 pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Result<(), String> {
     let deleted_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
-    let _draft_guard = state.draft_update_lock(&deleted_id).lock_owned().await;
+    let _cache_guard = state
+        .input_cache_update_lock(&deleted_id)
+        .lock_owned()
+        .await;
     let _send_guard = state.session_send_lock(&deleted_id).lock_owned().await;
     // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
     let deleted_session = state.inner().core_manager.load_session(&deleted_id).ok();
@@ -878,22 +510,19 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
         .await
         .map_err(|error| format!("删除会话失败：{error}"))?;
     state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
-    let mut draft_attachments = state
+    let mut input_attachments = state
         .with_state(|core_state| {
-            let mut attachments = core_state.session_input_draft(&deleted_id).attachments;
+            let mut attachments =
+                crate::state_ops::input_cache(core_state, &deleted_id).attachments;
             if let Some(session) = &deleted_session {
                 attachments.extend(session_attachment_candidates(session));
             }
-            let active_before = core_state.active_session_id().to_string();
-            core_state.remove_session_state(&deleted_id)?;
-            if core_state.active_session_id() != active_before {
-                state.mark_active_session_changed();
-            }
+            crate::session_ops::remove_session_state(core_state, &state.core_manager, &deleted_id);
             Ok(attachments)
         })
         .await?;
-    draft_attachments.extend(raw_attachments_for_paths(
-        state.release_any_draft_send_claim(&deleted_id),
+    input_attachments.extend(raw_attachments_for_paths(
+        state.release_any_input_send_claim(&deleted_id),
     ));
     state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
@@ -905,7 +534,7 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
     if let Err(error) = crate::workspace_tabs::remove_layout(&deleted_id) {
         warn!(%error, session_id = %deleted_id, "删除工作区标签页布局失败");
     }
-    cleanup_unreferenced_draft_attachments(state.inner(), draft_attachments).await;
+    cleanup_unreferenced_input_attachments(state.inner(), input_attachments).await;
     Ok(())
 }
 
@@ -919,7 +548,8 @@ pub async fn delete_sessions_by_cwd(
     let mut deleted_ids = state
         .with_state_read(|core_state| {
             let ids: Vec<String> = core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .filter(|metadata| metadata.cwd == cwd)
                 .map(|metadata| metadata.id.clone())
@@ -928,9 +558,9 @@ pub async fn delete_sessions_by_cwd(
         })
         .await?;
     deleted_ids.sort();
-    let mut draft_guards = Vec::with_capacity(deleted_ids.len());
+    let mut input_cache_guards = Vec::with_capacity(deleted_ids.len());
     for id in &deleted_ids {
-        draft_guards.push(state.draft_update_lock(id).lock_owned().await);
+        input_cache_guards.push(state.input_cache_update_lock(id).lock_owned().await);
     }
     let mut send_guards = Vec::with_capacity(deleted_ids.len());
     for id in &deleted_ids {
@@ -954,28 +584,22 @@ pub async fn delete_sessions_by_cwd(
         let _ = state.inner().core_manager.delete_session(id).await;
         state.fail_remote_session_waiters(id, "目标会话已删除");
     }
-    let mut draft_attachments = state
+    let mut input_attachments = state
         .with_state(|core_state| {
             let mut candidates = Vec::new();
-            let active_before = core_state.active_session_id().to_string();
             for id in &deleted_ids {
-                if core_state.session_metadata().iter().any(|m| m.id == *id) {
-                    candidates.extend(core_state.session_input_draft(id).attachments);
-                    if let Some(session) = deleted_sessions.get(id) {
-                        candidates.extend(session_attachment_candidates(session));
-                    }
-                    core_state.remove_session_state(id)?;
+                candidates.extend(crate::state_ops::input_cache(core_state, id).attachments);
+                if let Some(session) = deleted_sessions.get(id) {
+                    candidates.extend(session_attachment_candidates(session));
                 }
-            }
-            if core_state.active_session_id() != active_before {
-                state.mark_active_session_changed();
+                crate::session_ops::remove_session_state(core_state, &state.core_manager, id);
             }
             Ok(candidates)
         })
         .await?;
     for id in &deleted_ids {
-        draft_attachments.extend(raw_attachments_for_paths(
-            state.release_any_draft_send_claim(id),
+        input_attachments.extend(raw_attachments_for_paths(
+            state.release_any_input_send_claim(id),
         ));
     }
     // 逐个销毁被删会话的终端和浏览器运行时。
@@ -989,14 +613,10 @@ pub async fn delete_sessions_by_cwd(
         }
         state.remove_session_send_lock(id);
     }
-    cleanup_unreferenced_draft_attachments(state.inner(), draft_attachments).await;
+    cleanup_unreferenced_input_attachments(state.inner(), input_attachments).await;
     drop(send_guards);
-    drop(draft_guards);
+    drop(input_cache_guards);
     Ok(())
-}
-
-pub(crate) async fn stop_and_join_core(state: &TiangongApp, session_id: &str) {
-    state.core_manager.retire_core(session_id, true).await;
 }
 
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
@@ -1016,73 +636,19 @@ pub async fn update_session_title(
     }
 
     let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
-
-    let (previous_title, previous_draft, _applied_title) = state
-        .with_state(|core_state| {
-            if core_state.active_session_id() != session_id {
-                return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
-            }
-            let previous_title = core_state
-                .session_metadata()
-                .iter()
-                .find(|m| m.id == session_id)
-                .map(|m| m.title.clone())
-                .ok_or_else(|| anyhow::anyhow!("当前会话不存在，无法重命名"))?;
-            let previous_draft = core_state.session_title_draft().to_string();
-            core_state.update_session_title_draft(title);
-            let (updated_id, applied_title) = core_state.apply_active_session_title_in_memory()?;
-            if updated_id != session_id {
-                return Err(anyhow::anyhow!("活动会话已切换，请重新修改标题"));
-            }
-            Ok((previous_title, previous_draft, applied_title))
-        })
+    let active_session_id = state
+        .with_state_read(|core_state| Ok(core_state.active_session_id.clone()))
         .await?;
-
-    // 标题已由 app 内存快照更新，直接持久化。
-    if let Err(error) = state
-        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-        .await
-    {
-        rollback_session_title_mirror(
-            state.inner(),
-            &session_id,
-            previous_title,
-            previous_draft,
-            false,
-        )
-        .await;
-        return Err(error.to_string());
+    if active_session_id != session_id {
+        return Err("活动会话已切换，请重新修改标题".to_string());
     }
+    crate::session_ops::update_title(&state.core_manager, &session_id, title)
+        .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-async fn rollback_session_title_mirror(
-    state: &TiangongApp,
-    session_id: &str,
-    previous_title: String,
-    previous_draft: String,
-    persist_without_core: bool,
-) {
-    let rollback = state
-        .with_state(|core_state| {
-            let is_active = core_state.active_session_id() == session_id;
-            core_state.set_session_title_in_memory(session_id, previous_title);
-            if is_active {
-                core_state.update_session_title_draft(previous_draft);
-            }
-            if persist_without_core {
-                core_state.persist_session_and_app(session_id)?;
-            }
-            Ok(())
-        })
-        .await;
-    if let Err(error) = rollback {
-        warn!(%error, %session_id, "回滚会话标题失败");
-    }
 }
 
 // ============================================================================
@@ -1100,8 +666,11 @@ struct UserMessageDeliveryRequest {
     content: String,
     attachments: Vec<tiangong_media_archive::RawAttachment>,
     revision: u64,
+    workspace_dir: Option<String>,
+    initial_trust_mode: Option<tiangong_types::TrustMode>,
+    initial_reasoning_effort: Option<String>,
     delivery_kind: UserMessageDeliveryKind,
-    requires_draft_claim: bool,
+    requires_input_claim: bool,
 }
 
 /// 发送消息并执行
@@ -1111,6 +680,9 @@ pub async fn send_message(
     content: String,
     attachments: Vec<tiangong_media_archive::RawAttachment>,
     revision: u64,
+    cwd: Option<String>,
+    trust_mode: Option<tiangong_types::TrustMode>,
+    reasoning_effort: Option<String>,
     app: AppHandle,
     _window: Window,
     state: State<'_, TiangongApp>,
@@ -1121,8 +693,11 @@ pub async fn send_message(
             content,
             attachments,
             revision,
+            workspace_dir: cwd,
+            initial_trust_mode: trust_mode,
+            initial_reasoning_effort: reasoning_effort,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
-            requires_draft_claim: true,
+            requires_input_claim: true,
         },
         app,
         state.inner(),
@@ -1141,8 +716,8 @@ pub async fn send_message_with_media(
 ) -> Result<(), String> {
     let (session_id, revision) = state
         .with_state_read(|core_state| {
-            let session_id = core_state.active_session_id().to_string();
-            let revision = core_state.session_input_draft(&session_id).revision;
+            let session_id = core_state.active_session_id.as_str().to_string();
+            let revision = crate::state_ops::input_cache(core_state, &session_id).revision;
             Ok((session_id, revision))
         })
         .await?;
@@ -1161,8 +736,11 @@ pub async fn send_message_with_media(
             content,
             attachments,
             revision,
+            workspace_dir: None,
+            initial_trust_mode: None,
+            initial_reasoning_effort: None,
             delivery_kind: UserMessageDeliveryKind::NewTurn,
-            requires_draft_claim: false,
+            requires_input_claim: false,
         },
         app,
         state.inner(),
@@ -1183,8 +761,11 @@ async fn send_message_inner(
         content,
         attachments,
         revision,
+        workspace_dir,
+        initial_trust_mode,
+        initial_reasoning_effort,
         delivery_kind,
-        requires_draft_claim,
+        requires_input_claim,
     } = request;
 
     if session_id.trim().is_empty() {
@@ -1193,7 +774,7 @@ async fn send_message_inner(
 
     if let Some(command) = parse_context_slash_command(&content) {
         let active_id = state
-            .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+            .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
             .await?;
         if active_id != session_id {
             return Err("目标会话已切换，请在原会话中重试该命令".to_string());
@@ -1210,13 +791,15 @@ async fn send_message_inner(
         return Err("目标会话正在处理远端请求，请等待本轮完成".to_string());
     }
 
-    if requires_draft_claim && !state.has_draft_send_claim(&session_id, revision) {
+    if requires_input_claim && !state.has_input_send_claim(&session_id, revision) {
         abort_session_send(state, &session_id, revision, false).await;
-        return Err("发送草稿尚未冻结，请基于最新输入重试".to_string());
+        return Err("发送输入尚未冻结，请基于最新输入重试".to_string());
     }
 
     let has_pending_turn = state
-        .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
+        .with_state_read(|core_state| {
+            Ok(crate::state_ops::has_pending_turn(core_state, &session_id))
+        })
         .await?;
     match delivery_kind {
         UserMessageDeliveryKind::NewTurn if has_pending_turn => {
@@ -1229,9 +812,9 @@ async fn send_message_inner(
         }
         _ => {}
     }
-    if state.draft_revision_was_delivered(&session_id, revision) {
+    if state.input_revision_was_delivered(&session_id, revision) {
         abort_session_send(state, &session_id, revision, false).await;
-        return Err("该版本草稿已成功发送，已拒绝重复投递".to_string());
+        return Err("该版本输入已成功发送，已拒绝重复投递".to_string());
     }
 
     if let Err(error) = state.sync_core_config_from_state().await {
@@ -1239,7 +822,9 @@ async fn send_message_inner(
         return Err(error);
     }
     if let Err(error) = state
-        .with_state(|core_state| core_state.begin_session_send(&session_id, revision))
+        .with_state(|core_state| {
+            crate::state_ops::begin_input_send(core_state, &session_id, revision)
+        })
         .await
     {
         abort_session_send(state, &session_id, revision, false).await;
@@ -1287,12 +872,31 @@ async fn send_message_inner(
     // 获取或创建 TiangongCore(Core 的 deliver 负责 load session + 追加消息 +
     // persist,host 不再预写——issue #245 整改方案)。
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    let session_snapshot = state
-        .core_manager
-        .load_session(&session_id)
-        .map_err(|error| format!("加载会话失败：{error}"))?;
+    let workspace_dir = if state.core_manager.session_exists(&session_id) {
+        None
+    } else {
+        let cwd = match workspace_dir {
+            Some(cwd) if !cwd.trim().is_empty() => cwd,
+            _ => {
+                state
+                    .with_state_read(|core_state| Ok(core_state.workspace_dir.clone()))
+                    .await?
+            }
+        };
+        if !std::path::Path::new(&cwd).is_dir() {
+            abort_session_send(state, &session_id, revision, true).await;
+            return Err(format!("新对话工作目录不存在或不是目录：{cwd}"));
+        }
+        Some(cwd)
+    };
     let ensured = state
-        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .ensure_core(
+            &session_id,
+            workspace_dir,
+            initial_trust_mode,
+            initial_reasoning_effort,
+            stream_tx,
+        )
         .await;
     let sid = ensured.session_id.clone();
     if let Err(error) =
@@ -1300,41 +904,38 @@ async fn send_message_inner(
     {
         shutdown_join_core_if_current(state, &sid).await;
         let _ = restore_failed_user_message_state(state, &session_id, &user_message_id).await;
-        cleanup_unreferenced_draft_attachments(state, raw_attachments_for_paths(created_paths))
+        cleanup_unreferenced_input_attachments(state, raw_attachments_for_paths(created_paths))
             .await;
         abort_session_send(state, &session_id, revision, true).await;
         return Err(format!("消息投递失败：{error}"));
     }
 
     // 消息已投递给 Core（Core 内部会持久化），附件从此由消息引用持有，不能再自动回滚。
-    state.mark_draft_revision_delivered(&session_id, revision);
+    state.mark_input_revision_delivered(&session_id, revision);
     let finish_result = state
         .with_state(|core_state| {
-            if core_state.has_pending_turn_for(&session_id)
-                && core_state.active_session_id() == session_id
+            if crate::state_ops::has_pending_turn(core_state, &session_id)
+                && core_state.active_session_id.as_str() == session_id
             {
                 core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
                 core_state.run.summary = "正在处理".to_string();
                 core_state.run.last_session_id = Some(session_id.clone());
-                if let Some(session) = core_state
-                    .sessions()
-                    .iter()
-                    .find(|session| session.id == session_id)
-                {
+                if let Ok(session) = state.core_manager.load_session(&session_id) {
                     let usage = session.total_usage();
                     core_state.run.last_usage = (usage.total_tokens > 0).then_some(usage);
                 }
                 core_state.run.updated_at = tiangong_core::session::now_text();
             }
-            core_state.finish_session_send(&session_id, revision, true)
+            let cache =
+                crate::state_ops::finish_input_send(core_state, &session_id, revision, true)?;
+            Ok(cache)
         })
         .await;
     if let Err(error) = finish_result {
         // Core 已确认稳定消息，此时不能把已发送的消息误报为可重试失败。
-        // finish_session_send 在写盘前已更新内存，记录磁盘错误供诊断。
-        tracing::error!(session_id, revision, error = %error, "消息已发送，但草稿终态持久化失败");
+        tracing::error!(session_id, revision, error = %error, "消息已发送，但输入缓存终态更新失败");
     }
-    release_draft_send_claim_and_cleanup(state, &session_id, revision).await;
+    release_input_send_claim_and_cleanup(state, &session_id, revision).await;
 
     if ensured.is_new {
         start_stream_consumer(app, sid, stream_rx);
@@ -1346,20 +947,22 @@ async fn send_message_inner(
 async fn abort_session_send(state: &TiangongApp, session_id: &str, revision: u64, began: bool) {
     if began {
         let _ = state
-            .with_state(|core_state| core_state.finish_session_send(session_id, revision, false))
+            .with_state(|core_state| {
+                crate::state_ops::finish_input_send(core_state, session_id, revision, false)
+            })
             .await;
     }
-    release_draft_send_claim_and_cleanup(state, session_id, revision).await;
+    release_input_send_claim_and_cleanup(state, session_id, revision).await;
 }
 
-async fn release_draft_send_claim_and_cleanup(
+async fn release_input_send_claim_and_cleanup(
     state: &TiangongApp,
     session_id: &str,
     revision: u64,
 ) {
-    let paths = state.release_draft_send_claim(session_id, revision);
+    let paths = state.release_input_send_claim(session_id, revision);
     if !paths.is_empty() {
-        cleanup_unreferenced_draft_attachments(state, raw_attachments_for_paths(paths)).await;
+        cleanup_unreferenced_input_attachments(state, raw_attachments_for_paths(paths)).await;
     }
 }
 
@@ -1371,13 +974,18 @@ pub(crate) async fn restore_failed_user_message_state(
     state
         .with_state(|core_state| {
             if core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .any(|m| m.id == session_id)
             {
-                core_state.remove_message_for_failed_turn(session_id, message_id);
-                core_state.remove_pending_message_for(session_id, message_id);
-                core_state.persist_session_and_app(session_id)
+                crate::session_ops::remove_failed_message(
+                    &state.core_manager,
+                    session_id,
+                    message_id,
+                )?;
+                crate::state_ops::remove_pending_message(core_state, session_id, message_id);
+                Ok(())
             } else {
                 Err(anyhow::anyhow!("目标会话已不存在：{session_id}"))
             }
@@ -1391,7 +999,7 @@ pub(crate) async fn attachment_capability_snapshot(
     state
         .with_state_read(|core_state| {
             use tiangong_llm::ModelCapability;
-            let models = core_state.models_config();
+            let models = &core_state.config.models;
             let chat_multimodal = models.chat_is_multimodal();
             Ok(tiangong_media_archive::AttachmentCapabilitySnapshot {
                 chat_multimodal,
@@ -1419,8 +1027,6 @@ pub(crate) fn start_stream_consumer(
 
     let rt = tokio::runtime::Handle::current();
     thread::spawn(move || {
-        let mut assistant_msg_id: Option<String> = None;
-        let mut last_tool_args_summary = String::new();
         for session_event in stream_rx.iter() {
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
@@ -1472,274 +1078,11 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
                     _ => None,
                 };
-                if let Some(session) = core_state.sessions_mut().iter_mut().find(|s| s.id == sid) {
-                    match &event {
-                        StreamEvent::UserMessage {
-                            message_id,
-                            content,
-                            content_blocks,
-                            media,
-                            model_excluded,
-                        } => {
-                            let prepared = if content_blocks.is_empty() {
-                                let mut blocks = vec![tiangong_types::message::ContentBlock::text(
-                                    content.clone(),
-                                )];
-                                blocks.extend(media.iter().map(|asset| asset.to_content_block()));
-                                tiangong_types::stable_content_blocks(&blocks)
-                            } else {
-                                tiangong_types::stable_content_blocks(content_blocks)
-                            };
-                            let existing = session
-                                .messages
-                                .iter()
-                                .position(|message| {
-                                    message.id == *message_id
-                                        && message.role == tiangong_core::session::MessageRole::User
-                                })
-                                .map(|index| session.messages.remove(index));
-                            if let Some(mut message) = existing {
-                                // 兼容旧 Core 的状态更新事件：没有稳定块和 media 时
-                                // 保留已同步内容，仅更新可见性并移动到轮次末尾。
-                                if !content_blocks.is_empty()
-                                    || !media.is_empty()
-                                    || message.content.is_empty()
-                                    || message.text_content() != *content
-                                {
-                                    message.content = prepared;
-                                }
-                                message.model_excluded = *model_excluded;
-                                session.messages.push(message);
-                            } else {
-                                session.append_prepared_user_message_with_id(
-                                    message_id.clone(),
-                                    prepared,
-                                );
-                                session.set_message_model_excluded(message_id, *model_excluded);
-                            }
-                        }
-                        StreamEvent::SessionMessageUpsert {
-                            message,
-                            deferred_tool_injections,
-                        } => {
-                            if let Some(existing) = session
-                                .messages
-                                .iter_mut()
-                                .find(|existing| existing.id == message.id)
-                            {
-                                *existing = message.clone();
-                            } else {
-                                session.messages.push(message.clone());
-                            }
-                            if let Some(injections) = deferred_tool_injections {
-                                session.deferred_tool_injections = injections.clone();
-                            }
-                        }
-                        StreamEvent::DeferredToolInjectionsChanged { injections } => {
-                            session.deferred_tool_injections = injections.clone();
-                        }
-                        StreamEvent::Delta {
-                            message_id,
-                            content,
-                        }
-                        | StreamEvent::ReactText {
-                            message_id,
-                            content,
-                        }
-                        | StreamEvent::SummaryText {
-                            message_id,
-                            content,
-                        } => {
-                            append_assistant_delta(
-                                session,
-                                &mut assistant_msg_id,
-                                message_id,
-                                content,
-                            );
-                        }
-                        StreamEvent::Reasoning {
-                            message_id,
-                            content,
-                        } => {
-                            append_assistant_reasoning(
-                                session,
-                                &mut assistant_msg_id,
-                                message_id,
-                                content,
-                            );
-                        }
-                        StreamEvent::ToolCalls {
-                            message_id,
-                            names: _,
-                            calls,
-                            usage: _,
-                        } => {
-                            finalize_assistant_tool_calls(
-                                session,
-                                &mut assistant_msg_id,
-                                message_id,
-                                calls,
-                            );
-                        }
-                        StreamEvent::TokenUsage {
-                            usage,
-                            current_tokens,
-                            compression_threshold_tokens,
-                            context_limit_tokens,
-                            agent_id,
-                            ..
-                        } => {
-                            record_session_token_usage(
-                                session,
-                                usage,
-                                *current_tokens,
-                                *compression_threshold_tokens,
-                                *context_limit_tokens,
-                                agent_id.as_deref(),
-                            );
-                        }
-                        StreamEvent::ToolStart {
-                            ref args_summary, ..
-                        } => {
-                            // 不清除 pending_final_media，允许多轮工具调用后仍保留已生成的媒体
-                            last_tool_args_summary = args_summary.clone();
-                        }
-                        StreamEvent::ToolResult {
-                            ref name,
-                            ref tool_call_id,
-                            ok,
-                            ref output,
-                            ref full_output,
-                            duration_ms: _,
-                        } => {
-                            let persisted_output = full_output.as_deref().unwrap_or(output);
-
-                            // plugin_injection 的完整 Assistant+Tool 对由 SessionMessageUpsert
-                            // 先行同步；这里按 tool_call_id 原位更新，普通结果则追加。
-                            append_tool_result_message(
-                                session,
-                                tool_call_id.as_deref(),
-                                name,
-                                persisted_output.to_string(),
-                                !*ok,
-                            );
-                            last_tool_args_summary.clear();
-                        }
-                        StreamEvent::ApprovalNeeded { .. } => {
-                            // 审批请求不写入 session（前端通过 RunStatus 展示审批 UI）
-                        }
-                        StreamEvent::Error { ref message } => {
-                            let _ = message;
-                            assistant_msg_id = None;
-                        }
-                        StreamEvent::Retry {
-                            ref message,
-                            attempt,
-                            max_attempts,
-                        } => {
-                            let _ = (message, attempt, max_attempts);
-                        }
-                        StreamEvent::Done { .. } => {
-                            assistant_msg_id = None;
-                        }
-                        StreamEvent::MemoryRecallStart { .. } => {
-                            // 仅更新状态栏（见下方状态映射），不写入对话消息列表
-                        }
-                        StreamEvent::MemoryRecallDone { .. } => {
-                            // 仅更新状态栏（见下方状态映射），不写入对话消息列表
-                        }
-                        StreamEvent::AgentCreated {
-                            agent_id: _,
-                            role: _,
-                            label: _,
-                        } => {}
-                        StreamEvent::AgentStatusChanged {
-                            ref agent_id,
-                            ref label,
-                            ref status,
-                        } => {
-                            upsert_agent_status_message(session, agent_id, label, status);
-                            if status == "terminated" {
-                                session.agent_current_tokens.remove(agent_id);
-                                session.agent_token_usage.remove(agent_id);
-                            }
-                            if (status == "idle" || status == "terminated")
-                                && session.active_agent_id.as_deref() == Some(agent_id.as_str())
-                            {
-                                session.active_agent_id = None;
-                                session.active_agent_current_tokens = 0;
-                            }
-                        }
-                        StreamEvent::AgentNotification {
-                            ref agent_label,
-                            ref content,
-                            ..
-                        } => {
-                            // 通知只更新运行状态；稳定对话消息由 Core 的精确快照负责。
-                            let _ = (agent_label, content);
-                        }
-                        StreamEvent::AgentMessage {
-                            ref from_agent_id,
-                            ref from_agent_label,
-                            ref to_agent_id,
-                            ref content,
-                            ..
-                        } => {
-                            if from_agent_id == "user" {
-                                // 用户 @Agent 的原始输入已经作为用户消息存在，避免重复写入。
-                            } else if to_agent_id == "main" {
-                                // 最终回复由 SessionMessageUpsert 携带完整消息写入，避免宿主
-                                // 生成不同 ID 或丢失模型可见性标记。
-                                let _ = (from_agent_label, content);
-                            }
-                        }
-                        StreamEvent::AgentOutput { .. } => {}
-                        StreamEvent::FileLockChanged {
-                            ref path,
-                            ref holder_agent_label,
-                            ref action,
-                            ..
-                        } => {
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                format!(
-                                    "[文件锁] {path} {action} by {}",
-                                    holder_agent_label.as_deref().unwrap_or("未知")
-                                ),
-                            );
-                        }
-                        StreamEvent::ContextCompressing { .. } => {}
-                        StreamEvent::ContextCompressed {
-                            ref action,
-                            summary_up_to,
-                            ..
-                        } => {
-                            let message = format!("[上下文管理] 上下文已{}", action.display_text());
-                            session.append_message(
-                                tiangong_core::session::MessageRole::System,
-                                message,
-                            );
-                            // 同步 core worker 中对 session 字段的修改
-                            session.summary_up_to = *summary_up_to;
-                            tiangong_core::context::compressor::mark_compact_boundary(
-                                &mut session.messages,
-                                *summary_up_to,
-                            );
-                            session.current_tokens = 0;
-                            session.active_agent_current_tokens = 0;
-                            session.agent_current_tokens.clear();
-                            if *action == tiangong_types::stream::ContextCompressAction::Clear {
-                                session.context_summary = None;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
                 if let Some(message_id) = accepted_message_id {
-                    core_state.accept_pending_message_for(&sid, &message_id);
+                    crate::state_ops::accept_pending_message(core_state, &sid, &message_id);
                 }
                 if is_done || is_error {
-                    core_state.complete_accepted_turn_for(&sid);
+                    crate::state_ops::complete_accepted_turn(core_state, &sid);
                 }
                 // RunStatus/usage 更新
                 match &event {
@@ -1783,7 +1126,7 @@ pub(crate) fn start_stream_consumer(
                         core_state.run.summary = format!("正在执行：{}", names.join(", "));
                     }
                     StreamEvent::TokenUsage { .. } => {
-                        if let Some(session) = core_state.sessions().iter().find(|s| s.id == sid) {
+                        if let Ok(session) = app_state.core_manager.load_session(&sid) {
                             let total = session.total_usage();
                             core_state.run.last_usage = (total.total_tokens > 0).then_some(total);
                         }
@@ -1791,29 +1134,32 @@ pub(crate) fn start_stream_consumer(
                     StreamEvent::Done { .. } => {
                         if done_event_keeps_turn_running(
                             &event,
-                            core_state.has_pending_turn_for(&sid),
+                            crate::state_ops::has_pending_turn(core_state, &sid),
                         ) {
                             core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
                             core_state.run.summary = "正在处理".to_string();
                             core_state.run.last_session_id = Some(sid.clone());
                             core_state.run.updated_at = tiangong_core::session::now_text();
                         } else {
-                            core_state.report_run_idle(format!(
-                                "模型供应商：{}",
-                                core_state.provider_label()
-                            ));
-                            core_state.clear_pending_turn_for(&sid);
+                            crate::state_ops::report_run_idle(
+                                core_state,
+                                format!("模型供应商：{}", provider_label(core_state)),
+                            );
+                            crate::state_ops::clear_pending_turn(core_state, &sid);
                         }
                     }
                     StreamEvent::Error { ref message } => {
-                        if core_state.has_pending_turn_for(&sid) {
+                        if crate::state_ops::has_pending_turn(core_state, &sid) {
                             core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
                             core_state.run.summary = "正在处理下一条消息".to_string();
                             core_state.run.last_session_id = Some(sid.clone());
                             core_state.run.updated_at = tiangong_core::session::now_text();
                         } else {
-                            core_state.report_run_idle(format!("执行失败：{message}"));
-                            core_state.clear_pending_turn_for(&sid);
+                            crate::state_ops::report_run_idle(
+                                core_state,
+                                format!("执行失败：{message}"),
+                            );
+                            crate::state_ops::clear_pending_turn(core_state, &sid);
                         }
                     }
                     StreamEvent::Retry {
@@ -1898,10 +1244,10 @@ pub(crate) fn start_stream_consumer(
                     }
                     StreamEvent::ContextCompressed { ref action, .. } => {
                         let text = format!("上下文{}", action.display_text());
-                        if core_state.has_pending_turn_for(&sid) {
+                        if crate::state_ops::has_pending_turn(core_state, &sid) {
                             core_state.run.summary = text;
                         } else {
-                            core_state.report_run_idle(text);
+                            crate::state_ops::report_run_idle(core_state, text);
                         }
                     }
                     StreamEvent::IndexStatus { ref phase, count } => match phase.as_str() {
@@ -1955,44 +1301,43 @@ pub(crate) fn start_stream_consumer(
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
-                // 提取标题生成所需数据（在锁内完成，避免长时间持锁）
-                let title_task = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
-                    // Core 是执行中会话的唯一真相。终态已经在 Core 完成清理和落盘后
-                    // 发出，此处整会话重载，覆盖宿主为流式展示构造的临时消息。
-                    if let Err(error) = core_state.reload_session_from_disk(&final_sid) {
-                        tracing::warn!(%error, session_id = %final_sid, "终态重载 Core 会话失败");
-                    }
-                    let _ = core_state.persist_app_only();
-                    let still_running = done_event_keeps_turn_running(
-                        &event,
-                        core_state.has_pending_turn_for(&final_sid),
-                    );
-                    let snapshot = build_full_snapshot_with_status(
-                        app_state.inner(),
-                        core_state,
-                        active_session_is_executing(core_state),
-                    );
-                    let _ = app.emit("run_snapshot", &snapshot);
-                    let _ = app.emit("sessions_updated", &());
+                let title_task =
+                    rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
+                        let still_running = done_event_keeps_turn_running(
+                            &event,
+                            crate::state_ops::has_pending_turn(core_state, &final_sid),
+                        );
+                        let snapshot = build_full_snapshot_with_status(
+                            app_state.inner(),
+                            core_state,
+                            active_session_is_executing(core_state),
+                        );
+                        let _ = app.emit("run_snapshot", &snapshot);
+                        let _ = app.emit("sessions_updated", &());
 
-                    if still_running {
-                        return Ok(None);
-                    }
+                        if still_running {
+                            return Ok(None);
+                        }
 
-                    // 检查是否需要生成标题
-                    if let Some(input) = core_state.title_generation_input(&final_sid) {
-                        let models = core_state.models_config();
-                        let provider_config = models
-                            .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
-                            .or_else(|| {
-                                models.resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-                            })
-                            .map(tiangong_llm::ModelEndpoint::from_resolved)
-                            .unwrap_or_default();
-                        return Ok(Some((input, provider_config)));
-                    }
-                    Ok(None)
-                }));
+                        // 检查是否需要生成标题
+                        if let Some(input) = crate::session_ops::title_generation_input(
+                            &app_state.core_manager,
+                            &final_sid,
+                        ) {
+                            let models = &core_state.config.models;
+                            let provider_config = models
+                                .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
+                                .or_else(|| {
+                                    models.resolve_slot(
+                                        tiangong_llm::models_config::RoutingSlot::Chat,
+                                    )
+                                })
+                                .map(tiangong_llm::ModelEndpoint::from_resolved)
+                                .unwrap_or_default();
+                            return Ok(Some((input, provider_config)));
+                        }
+                        Ok(None)
+                    }));
 
                 if let Some(message_id) = completed_remote_message_id {
                     rt.block_on(crate::embedded_server::complete_remote_turn_from_stream(
@@ -2018,29 +1363,28 @@ pub(crate) fn start_stream_consumer(
                                 let app_state = app_for_title.state::<TiangongApp>();
                                 let title_lock = app_state.session_send_lock(&sid_for_title);
                                 let _title_guard = rt2.block_on(title_lock.lock_owned());
-                                let title_is_still_default = rt2
-                                    .block_on(app_state.with_state_read(|core_state| {
-                                        Ok(core_state
-                                            .session_metadata()
-                                            .iter()
-                                            .find(|m| m.id == sid_for_title)
-                                            .is_some_and(|m| {
-                                                m.title == "新对话" || m.title.starts_with("会话 ")
-                                            }))
-                                    }))
-                                    .unwrap_or(false);
+                                let title_is_still_default = app_state
+                                    .core_manager
+                                    .list_session_metadata()
+                                    .into_iter()
+                                    .find(|metadata| metadata.id == sid_for_title)
+                                    .is_some_and(|metadata| {
+                                        metadata.title == "新对话"
+                                            || metadata.title.starts_with("会话 ")
+                                    });
                                 if !title_is_still_default {
                                     return;
                                 }
-                                // 标题直接由 app 层写入内存快照 + 持久化 + 推送 UI。
-                                let _ = rt2.block_on(app_state.with_state(|core_state| {
-                                    let is_active = core_state.active_session_id() == sid_for_title;
-                                    core_state
-                                        .set_session_title_in_memory(&sid_for_title, clean.clone());
-                                    if is_active {
-                                        core_state.update_session_title_draft(clean.clone());
-                                    }
-                                    let _ = core_state.persist_session_and_app(&sid_for_title);
+                                if crate::session_ops::update_title(
+                                    &app_state.core_manager,
+                                    &sid_for_title,
+                                    clean,
+                                )
+                                .is_err()
+                                {
+                                    return;
+                                }
+                                let _ = rt2.block_on(app_state.with_state_read(|core_state| {
                                     let snapshot = build_full_snapshot_with_status(
                                         app_state.inner(),
                                         core_state,
@@ -2065,12 +1409,11 @@ pub(crate) fn start_stream_consumer(
         // 这是旧消费者的正常退出，不能按 session_id 清理新实例或覆盖新一轮状态。
         if !app_state.core_manager.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
-                if let Err(error) = core_state.reload_session_from_disk(&session_id) {
-                    tracing::warn!(%error, %session_id, "Core 事件流关闭后重载会话失败");
-                }
-                core_state.clear_pending_turn_for(&session_id);
-                core_state.report_run_idle("执行已中断：Core 事件流已关闭".to_string());
-                let _ = core_state.persist_app_only();
+                crate::state_ops::clear_pending_turn(core_state, &session_id);
+                crate::state_ops::report_run_idle(
+                    core_state,
+                    "执行已中断：Core 事件流已关闭".to_string(),
+                );
                 let snapshot = build_full_snapshot_with_status(
                     app_state.inner(),
                     core_state,
@@ -2123,7 +1466,9 @@ pub async fn edit_and_resend(
         return Err("目标会话正在处理远端请求，暂时不能编辑重发".to_string());
     }
     let has_pending_turn = state
-        .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
+        .with_state_read(|core_state| {
+            Ok(crate::state_ops::has_pending_turn(core_state, &session_id))
+        })
         .await?;
     if has_pending_turn {
         return Err("目标会话正在执行，暂时不能编辑重发".to_string());
@@ -2136,13 +1481,14 @@ pub async fn edit_and_resend(
             // 校验需读 messages（完整 Session 字段）。会话存在性用 metadata 判定，
             // 校验本身用从磁盘 load 的最新 session（issue #245：真相源归磁盘）。
             if !core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .any(|m| m.id == session_id)
             {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
-            if core_state.has_pending_turn_for(&session_id) {
+            if crate::state_ops::has_pending_turn(core_state, &session_id) {
                 return Err(anyhow::anyhow!("目标会话正在执行，暂时不能编辑重发"));
             }
             Ok(())
@@ -2175,7 +1521,9 @@ pub async fn edit_and_resend(
     let prepared_for_state = tiangong_types::stable_content_blocks(&prepared);
     let (original_session, session_snapshot) = state
         .with_state(|core_state| {
-            let (original, runtime) = core_state.edit_prepared_user_message_for_turn(
+            let (original, runtime) = crate::session_ops::edit_prepared_user_message(
+                core_state,
+                &state.core_manager,
                 &session_id,
                 &message_id,
                 prepared_for_state,
@@ -2213,19 +1561,18 @@ pub async fn edit_and_resend(
         .core_manager
         .retire_core(&session_id, true)
         .await;
-    state
-        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-        .await?;
+    crate::session_ops::restore_session(session_snapshot.clone())
+        .map_err(|error| error.to_string())?;
 
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
-        .ensure_core(&session_id, session_snapshot, stream_tx)
+        .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
     let sid = ensured.session_id.clone();
     if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
         shutdown_join_core_if_current(state.inner(), &sid).await;
         restore_edited_session(state.inner(), &session_id, original_session).await;
-        cleanup_unreferenced_draft_attachments(
+        cleanup_unreferenced_input_attachments(
             state.inner(),
             raw_attachments_for_paths(created_paths.clone()),
         )
@@ -2233,15 +1580,15 @@ pub async fn edit_and_resend(
         return Err(format!("编辑消息投递失败：{error}"));
     }
 
-    cleanup_unreferenced_draft_attachments(
+    cleanup_unreferenced_input_attachments(
         state.inner(),
         raw_attachments_for_paths(replaced_attachment_candidates),
     )
     .await;
     let _ = state
         .with_state(|core_state| {
-            if core_state.has_pending_turn_for(&session_id)
-                && core_state.active_session_id() == session_id
+            if crate::state_ops::has_pending_turn(core_state, &session_id)
+                && core_state.active_session_id.as_str() == session_id
             {
                 core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
                 core_state.run.summary = "正在重新发送编辑后的消息".to_string();
@@ -2288,9 +1635,8 @@ async fn restore_edited_session(
 ) {
     let _ = state
         .with_state(|core_state| {
-            core_state.restore_session_snapshot(session_id, original_session);
-            core_state.clear_pending_turn_for(session_id);
-            core_state.persist_session_and_app(session_id)?;
+            crate::session_ops::restore_session(original_session)?;
+            crate::state_ops::clear_pending_turn(core_state, session_id);
             Ok(())
         })
         .await;
@@ -2298,7 +1644,7 @@ async fn restore_edited_session(
 #[tauri::command]
 pub async fn cancel_turn(state: State<'_, TiangongApp>) -> Result<bool, String> {
     let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
     let session_lock = state.session_send_lock(&session_id);
     Ok(cancel_after_session_send_boundary(session_lock, || {
@@ -2341,36 +1687,23 @@ async fn run_context_slash_command(
     state.sync_core_config_from_state().await?;
     loop {
         let expected_session_id = state
-            .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+            .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
             .await?;
         let session_lock = state.session_send_lock(&expected_session_id);
         let _send_guard = session_lock.lock_owned().await;
         if state.remote_turn_owner(&expected_session_id).is_some() {
             return Err("目标会话正在处理远端请求，暂时不能修改上下文".to_string());
         }
-        let prepared = state
-            .with_state(|core_state| {
-                let idx = core_state.ensure_active_session_index();
-                let session_id = core_state.session_metadata()[idx].id.clone();
-                if session_id != expected_session_id {
-                    return Ok(None);
-                }
-                if !core_state.has_pending_turn_for(&session_id) {
-                    core_state.persist_session_and_app(&session_id)?;
-                }
-                Ok(Some(session_id))
-            })
+        let current_session_id = state
+            .with_state_read(|core_state| Ok(core_state.active_session_id.clone()))
             .await?;
-        let Some(session_id) = prepared else {
+        if current_session_id != expected_session_id {
             continue;
-        };
-        // ensure_core 需要会话 id + trust_mode 构造 Core；session 真相源归磁盘，
-        // 从磁盘 load（issue #245）。
-        let session_snapshot = state.core_manager.load_session(&session_id)?;
-
+        }
+        let session_id = current_session_id;
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
-            .ensure_core(&session_id, session_snapshot, stream_tx)
+            .ensure_core(&session_id, None, None, None, stream_tx)
             .await;
         if ensured.is_new {
             start_stream_consumer(app.clone(), ensured.session_id.clone(), stream_rx);
@@ -2404,7 +1737,7 @@ pub async fn reset_context(app: AppHandle, state: State<'_, TiangongApp>) -> Res
 #[tauri::command]
 pub async fn cancel_agent(role: String, state: State<'_, TiangongApp>) -> Result<bool, String> {
     let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
     Ok(state.cancel_agent_core(&session_id, role))
 }
@@ -2424,7 +1757,9 @@ pub async fn append_message(
     }
 
     let is_running = state
-        .with_state_read(|core_state| Ok(core_state.has_pending_turn_for(&session_id)))
+        .with_state_read(|core_state| {
+            Ok(crate::state_ops::has_pending_turn(core_state, &session_id))
+        })
         .await?;
     if !is_running {
         abort_session_send(state.inner(), &session_id, revision, false).await;
@@ -2437,8 +1772,11 @@ pub async fn append_message(
             content,
             attachments,
             revision,
+            workspace_dir: None,
+            initial_trust_mode: None,
+            initial_reasoning_effort: None,
             delivery_kind: UserMessageDeliveryKind::Append,
-            requires_draft_claim: true,
+            requires_input_claim: true,
         },
         app,
         state.inner(),
@@ -2455,7 +1793,7 @@ pub async fn respond_approval(
     state: State<'_, TiangongApp>,
 ) -> Result<bool, String> {
     let session_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
     state
         .inner()
@@ -2474,13 +1812,14 @@ pub async fn get_trust_mode(
         .with_state_read(|core_state| {
             let target_id = session_id
                 .as_deref()
-                .unwrap_or_else(|| core_state.active_session_id());
+                .unwrap_or_else(|| core_state.active_session_id.as_str());
             let mode = core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .find(|m| m.id == target_id)
                 .map(|m| m.trust_mode)
-                .unwrap_or(core_state.agent_config().default_trust_mode);
+                .unwrap_or(core_state.agent_config.default_trust_mode);
             Ok(serde_json::to_value(mode)
                 .unwrap_or_default()
                 .as_str()
@@ -2505,32 +1844,19 @@ pub async fn set_trust_mode(
         Some(session_id) => session_id,
         None => {
             state
-                .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+                .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
                 .await?
         }
     };
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
 
-    let previous_mode = state
-        .with_state(|core_state| {
-            let previous_mode = core_state
-                .session_metadata()
-                .iter()
-                .find(|m| m.id == session_id)
-                .map(|m| m.trust_mode)
-                .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置信任模式：{session_id}"))?;
-            core_state.set_session_trust_mode_in_memory(&session_id, trust_mode)?;
-            if let Err(error) = core_state.persist_app_only() {
-                let _ = core_state.set_session_trust_mode_in_memory(&session_id, previous_mode);
-                return Err(error);
-            }
-            Ok(previous_mode)
-        })
-        .await?;
+    let previous_mode =
+        crate::session_ops::update_trust_mode(&state.core_manager, &session_id, trust_mode)
+            .map_err(|error| error.to_string())?;
 
     if let Err(error) = state.sync_core_config_from_state().await {
-        rollback_session_trust_mode(state.inner(), &session_id, previous_mode, false).await;
+        rollback_session_trust_mode(state.inner(), &session_id, previous_mode).await;
         return Err(error);
     }
     // 配置替换命令可能排在当前 turn 后面，信任模式句柄必须立即生效。
@@ -2546,19 +1872,10 @@ async fn rollback_session_trust_mode(
     state: &TiangongApp,
     session_id: &str,
     previous_mode: tiangong_core::permission::TrustMode,
-    persist_without_core: bool,
 ) {
-    let rollback = state
-        .with_state(|core_state| {
-            core_state.set_session_trust_mode_in_memory(session_id, previous_mode)?;
-            if persist_without_core {
-                core_state.persist_session_and_app(session_id)
-            } else {
-                core_state.persist_app_only()
-            }
-        })
-        .await;
-    if let Err(error) = rollback {
+    if let Err(error) =
+        crate::session_ops::update_trust_mode(&state.core_manager, session_id, previous_mode)
+    {
         warn!(%error, %session_id, "回滚会话信任模式失败");
     }
     if let Err(error) = state.sync_core_config_from_state().await {
@@ -2573,7 +1890,7 @@ async fn rollback_session_trust_mode(
 pub async fn get_default_trust_mode(state: State<'_, TiangongApp>) -> Result<String, String> {
     state
         .with_state_read(|core_state| {
-            let mode = core_state.agent_config().default_trust_mode;
+            let mode = core_state.agent_config.default_trust_mode;
             Ok(serde_json::to_value(mode)
                 .unwrap_or_default()
                 .as_str()
@@ -2593,7 +1910,10 @@ pub async fn set_default_trust_mode(
             .map_err(|e| format!("无效的默认信任模式: {e}"))?;
 
     state
-        .with_state(|core_state| core_state.set_default_trust_mode(trust_mode))
+        .with_state(|core_state| {
+            core_state.agent_config.default_trust_mode = trust_mode;
+            Ok(())
+        })
         .await?;
     state.sync_core_config_from_state().await?;
     Ok(())
@@ -2602,7 +1922,7 @@ pub async fn set_default_trust_mode(
 #[tauri::command]
 pub async fn get_custom_system_prompt(state: State<'_, TiangongApp>) -> Result<String, String> {
     state
-        .with_state_read(|core_state| Ok(core_state.agent_config().custom_system_prompt.clone()))
+        .with_state_read(|core_state| Ok(core_state.config.custom_system_prompt.clone()))
         .await
 }
 
@@ -2611,8 +1931,17 @@ pub async fn set_custom_system_prompt(
     prompt: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    config.custom_system_prompt = prompt;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
     state
-        .with_state(|core_state| core_state.set_custom_system_prompt(prompt))
+        .with_state(|core_state| {
+            core_state.config = config;
+            core_state.agent_config.custom_system_prompt.clear();
+            Ok(())
+        })
         .await?;
     state.sync_core_config_from_state().await?;
     Ok(())
@@ -2623,23 +1952,23 @@ pub async fn get_reasoning_effort(
     session_id: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    state
+    let (target_id, default_effort) = state
         .with_state_read(|core_state| {
-            let target_id = session_id
-                .as_deref()
-                .unwrap_or_else(|| core_state.active_session_id());
-            let effort = core_state
-                .session_metadata()
-                .iter()
-                .find(|m| m.id == target_id)
-                .and_then(|m| m.reasoning_effort.as_deref())
-                .map(str::trim)
-                .filter(|effort| !effort.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_else(|| core_state.agent_config().reasoning_effort.clone());
-            Ok(effort)
+            Ok((
+                session_id.unwrap_or_else(|| core_state.active_session_id.clone()),
+                core_state.agent_config.reasoning_effort.clone(),
+            ))
         })
-        .await
+        .await?;
+    Ok(state
+        .inner()
+        .core_manager
+        .load_session(&target_id)
+        .ok()
+        .and_then(|session| session.reasoning_effort)
+        .map(|effort| effort.trim().to_string())
+        .filter(|effort| !effort.is_empty())
+        .unwrap_or(default_effort))
 }
 
 #[tauri::command]
@@ -2659,81 +1988,20 @@ pub async fn set_reasoning_effort(
         Some(session_id) => session_id,
         None => {
             state
-                .with_state_read(|core_state| Ok(core_state.active_session_id().to_string()))
+                .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
                 .await?
         }
     };
     let session_lock = state.session_send_lock(&session_id);
     let _send_guard = session_lock.lock_owned().await;
 
-    let (previous_override, previous_compatibility_value) = state
-        .with_state(|core_state| {
-            let previous_override = core_state
-                .session_metadata()
-                .iter()
-                .find(|m| m.id == session_id)
-                .ok_or_else(|| anyhow::anyhow!("会话不存在，无法设置思考强度：{session_id}"))?
-                .reasoning_effort
-                .clone();
-            let previous_compatibility_value = core_state.agent_config().reasoning_effort.clone();
-            core_state.set_session_reasoning_effort_in_memory(&session_id, effort.clone())?;
-            if let Err(error) = core_state.persist_app_only() {
-                let _ = restore_session_reasoning_effort_in_memory(
-                    core_state,
-                    &session_id,
-                    previous_override.clone(),
-                    previous_compatibility_value.clone(),
-                );
-                return Err(error);
-            }
-            Ok((previous_override, previous_compatibility_value))
-        })
-        .await?;
+    let previous_override =
+        crate::session_ops::update_reasoning_effort(&state.core_manager, &session_id, Some(effort))
+            .map_err(|error| error.to_string())?;
 
     if let Err(error) = state.sync_core_config_from_state().await {
-        rollback_session_reasoning_effort(
-            state.inner(),
-            &session_id,
-            previous_override,
-            previous_compatibility_value,
-            false,
-        )
-        .await;
+        rollback_session_reasoning_effort(state.inner(), &session_id, previous_override).await;
         return Err(error);
-    }
-
-    // 思考强度已由 app 内存快照更新（含 persist_app_only），再持久化完整 session 文件。
-    if let Err(error) = state
-        .with_state(|core_state| core_state.persist_session_and_app(&session_id))
-        .await
-    {
-        rollback_session_reasoning_effort(
-            state.inner(),
-            &session_id,
-            previous_override,
-            previous_compatibility_value,
-            false,
-        )
-        .await;
-        return Err(error.to_string());
-    }
-    Ok(())
-}
-
-fn restore_session_reasoning_effort_in_memory(
-    core_state: &mut tiangong_app_state::app_state::TiangongState,
-    session_id: &str,
-    previous_override: Option<String>,
-    previous_compatibility_value: String,
-) -> anyhow::Result<()> {
-    core_state.set_session_reasoning_effort_in_memory(
-        session_id,
-        previous_override
-            .clone()
-            .unwrap_or(previous_compatibility_value),
-    )?;
-    if previous_override.is_none() {
-        core_state.clear_session_reasoning_effort_in_memory(session_id)?;
     }
     Ok(())
 }
@@ -2742,25 +2010,12 @@ async fn rollback_session_reasoning_effort(
     state: &TiangongApp,
     session_id: &str,
     previous_override: Option<String>,
-    previous_compatibility_value: String,
-    persist_without_core: bool,
 ) {
-    let rollback = state
-        .with_state(|core_state| {
-            restore_session_reasoning_effort_in_memory(
-                core_state,
-                session_id,
-                previous_override,
-                previous_compatibility_value,
-            )?;
-            if persist_without_core {
-                core_state.persist_session_and_app(session_id)
-            } else {
-                core_state.persist_app_only()
-            }
-        })
-        .await;
-    if let Err(error) = rollback {
+    if let Err(error) = crate::session_ops::update_reasoning_effort(
+        &state.core_manager,
+        session_id,
+        previous_override,
+    ) {
         warn!(%error, %session_id, "回滚会话思考强度失败");
     }
     if let Err(error) = state.sync_core_config_from_state().await {
@@ -2775,7 +2030,7 @@ pub async fn get_provider_balance(
 ) -> Result<serde_json::Value, String> {
     let (base_url, api_key) = state
         .with_state_read(|core_state| {
-            let models = core_state.models_config();
+            let models = &core_state.config.models;
             let provider = models
                 .providers
                 .get(&provider_name)
@@ -2844,7 +2099,7 @@ pub async fn get_session_cost(
                 session_id
                     .as_deref()
                     .map(ToString::to_string)
-                    .unwrap_or_else(|| core_state.active_session_id().to_string()),
+                    .unwrap_or_else(|| core_state.active_session_id.as_str().to_string()),
             )
         })
         .await?;
@@ -2860,9 +2115,7 @@ pub async fn get_session_cost(
 /// 获取当前活跃的 Worker 列表
 #[tauri::command]
 pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_json::Value>, String> {
-    state
-        .with_state_read(|core_state| Ok(core_state.list_active_workers()))
-        .await
+    state.with_state_read(|_core_state| Ok(Vec::new())).await
 }
 
 /// 获取后台任务列表
@@ -2893,7 +2146,7 @@ pub async fn synthesize_speech(
     state: State<'_, TiangongApp>,
 ) -> Result<SpeechResult, String> {
     let models_config = state
-        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
     let output = tiangong_core::media::synthesize_speech(
         &models_config,
@@ -2971,7 +2224,8 @@ pub async fn get_available_capabilities(
                     display_name: capability.display_name().to_string(),
                     enabled: has_capability_in_state(core_state, *capability),
                     routed_model: core_state
-                        .models_config()
+                        .config
+                        .models
                         .routed_model(*capability)
                         .map(str::to_string),
                 })
@@ -2988,7 +2242,7 @@ pub async fn transcribe_speech(
     state: State<'_, TiangongApp>,
 ) -> Result<TranscribeResult, String> {
     let models_config = state
-        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
 
     // 解码 base64 音频数据
@@ -3033,7 +2287,7 @@ pub async fn list_tts_voices(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let models_config = state
-        .with_state_read(|core_state| Ok(core_state.models_config().clone()))
+        .with_state_read(|core_state| Ok(core_state.config.models.clone()))
         .await?;
     let voices = tiangong_core::media::list_tts_voices(&models_config)
         .await
@@ -3172,83 +2426,58 @@ pub async fn get_run_snapshot(state: State<'_, TiangongApp>) -> Result<RunSnapsh
         .await
 }
 
-/// 获取输入草稿
+/// 获取输入框缓存。
 #[tauri::command]
-pub async fn get_input_draft(
-    session_id: String,
+pub async fn get_input_cache(
+    cache_key: String,
     state: State<'_, TiangongApp>,
-) -> Result<tiangong_app_state::app_state::SessionInputDraft, String> {
-    if session_id.trim().is_empty() {
-        return Err("草稿会话 ID 不能为空".to_string());
+) -> Result<tiangong_app_state::app_state::InputCache, String> {
+    if cache_key.trim().is_empty() {
+        return Err("输入缓存键不能为空".to_string());
     }
-    let resolved_session_id = state.resolve_draft_session_id(&session_id);
     state
-        .with_state_read(|core_state| Ok(core_state.session_input_draft(&resolved_session_id)))
+        .with_state_read(|core_state| Ok(crate::state_ops::input_cache(core_state, &cache_key)))
         .await
 }
 
-/// 设置输入草稿
+/// 设置输入框缓存。
 #[tauri::command]
-pub async fn set_input_draft(
-    session_id: String,
-    mut draft: tiangong_app_state::app_state::SessionInputDraft,
+pub async fn set_input_cache(
+    cache_key: String,
+    mut cache: tiangong_app_state::app_state::InputCache,
     claim_revision: Option<u64>,
     state: State<'_, TiangongApp>,
-) -> Result<tiangong_app_state::app_state::SessionInputDraft, String> {
-    if session_id.trim().is_empty() {
-        return Err("草稿会话 ID 不能为空".to_string());
+) -> Result<tiangong_app_state::app_state::InputCache, String> {
+    if cache_key.trim().is_empty() {
+        return Err("输入缓存键不能为空".to_string());
     }
-    // 迁移可能恰好与一个已发出的旧 key 写入并发。获锁后再解析一次
-    // redirect，若目标变化则重新在新 key 的锁上排队。
-    let requested_session_id = session_id;
-    let (session_id, draft_guard) = loop {
-        if state.draft_was_discarded(&requested_session_id) {
-            return Err("该草稿已被丢弃".to_string());
-        }
-        let resolved = state.resolve_draft_session_id(&requested_session_id);
-        let guard = state.draft_update_lock(&resolved).lock_owned().await;
-        if state.draft_was_discarded(&requested_session_id) {
-            return Err("该草稿已被丢弃".to_string());
-        }
-        let confirmed = state.resolve_draft_session_id(&requested_session_id);
-        if confirmed == resolved {
-            break (resolved, guard);
-        }
-        drop(guard);
-    };
-    if session_id != requested_session_id {
-        let exists = state
-            .with_state_read(|core_state| {
-                Ok(core_state
-                    .session_metadata()
-                    .iter()
-                    .any(|m| m.id == session_id))
-            })
-            .await?;
-        if !exists {
-            return Err("草稿所属会话已删除".to_string());
-        }
+    if state.input_cache_was_discarded(&cache_key) {
+        return Err("该输入缓存已被丢弃".to_string());
+    }
+    let cache_guard = state.input_cache_update_lock(&cache_key).lock_owned().await;
+    if state.input_cache_was_discarded(&cache_key) {
+        return Err("该输入缓存已被丢弃".to_string());
     }
     let current = state
-        .with_state_read(|core_state| Ok(core_state.session_input_draft(&session_id)))
+        .with_state_read(|core_state| Ok(crate::state_ops::input_cache(core_state, &cache_key)))
         .await?;
-    if draft.revision < current.revision {
+    if cache.revision < current.revision {
         return Ok(current);
     }
 
     let old_attachments = current.attachments.clone();
     let mut transaction = None;
-    if same_draft_attachment_selection(&draft.attachments, &current.attachments) {
-        draft.attachments = current.attachments;
-    } else if !draft.attachments.is_empty() {
-        let raw = std::mem::take(&mut draft.attachments);
+    if same_input_attachment_selection(&cache.attachments, &current.attachments) {
+        cache.attachments = current.attachments;
+    } else if !cache.attachments.is_empty() {
+        let raw = std::mem::take(&mut cache.attachments);
         let staged = tokio::task::spawn_blocking(move || {
             tiangong_media_archive::AttachmentStore::default().store_batch(raw)
         })
         .await
-        .map_err(|error| format!("草稿附件保存任务失败：{error}"))?
-        .map_err(|error| format!("草稿附件保存失败：{error}"))?;
-        draft.attachments = staged
+        .map_err(|error| format!("输入附件保存任务失败：{error}"))?
+        .map_err(|error| format!("输入附件保存失败：{error}"))?;
+        cache.attachments = staged
             .stored()
             .iter()
             .map(|attachment| tiangong_media_archive::RawAttachment {
@@ -3261,10 +2490,8 @@ pub async fn set_input_draft(
         transaction = Some(staged);
     }
 
-    let (persisted, applied) = state
-        .with_state(|core_state| {
-            core_state.set_session_input_draft_with_outcome(&session_id, draft)
-        })
+    let (stored, applied) = state
+        .with_state(|core_state| crate::state_ops::set_input_cache(core_state, &cache_key, cache))
         .await?;
     if applied {
         if let Some(transaction) = transaction.take() {
@@ -3277,18 +2504,18 @@ pub async fn set_input_draft(
     let mut cleanup_candidates = if applied { old_attachments } else { Vec::new() };
     let mut claim_error = None;
     if let Some(revision) = claim_revision {
-        if persisted.revision != revision {
+        if stored.revision != revision {
             claim_error = Some(format!(
-                "草稿已在发送前更新（发送 revision={revision}，当前 revision={}）",
-                persisted.revision
+                "输入已在发送前更新（发送 revision={revision}，当前 revision={}）",
+                stored.revision
             ));
         } else {
-            let attachment_paths = persisted
+            let attachment_paths = stored
                 .attachments
                 .iter()
                 .map(|attachment| attachment.source.clone())
                 .collect();
-            match state.register_draft_send_claim(&session_id, revision, attachment_paths) {
+            match state.register_input_send_claim(&cache_key, revision, attachment_paths) {
                 Ok(replaced_paths) => {
                     cleanup_candidates.extend(raw_attachments_for_paths(replaced_paths));
                 }
@@ -3296,42 +2523,43 @@ pub async fn set_input_draft(
             }
         }
     }
-    // 草稿与租约已落盘/登记，清理等待 send lock 前释放 draft lock，
-    // 使慢发送期间的 R+1/R+2 新输入仍能按会话串行并立即持久化。
-    drop(draft_guard);
-    // 草稿状态已先落盘；文件清理再等待该会话发送事务结束，避免用户在慢发送期间
+    // 输入缓存与租约已更新/登记，清理等待 send lock 前释放缓存锁，
+    // 使慢发送期间的 R+1/R+2 新输入仍能按会话串行并立即同步。
+    drop(cache_guard);
+    // 输入缓存已先更新；文件清理再等待该会话发送事务结束，避免用户在慢发送期间
     // 删除附件时把正在投递的稳定文件提前移除。
-    let cleanup_lock = state.session_send_lock(&session_id);
+    let cleanup_lock = state.session_send_lock(&cache_key);
     let _cleanup_guard = cleanup_lock.lock().await;
-    cleanup_unreferenced_draft_attachments(state.inner(), cleanup_candidates).await;
+    cleanup_unreferenced_input_attachments(state.inner(), cleanup_candidates).await;
     if let Some(error) = claim_error {
         return Err(error);
     }
-    Ok(persisted)
+    Ok(stored)
 }
 
-fn same_draft_attachment_selection(
+fn same_input_attachment_selection(
     incoming: &[tiangong_media_archive::RawAttachment],
     current: &[tiangong_media_archive::RawAttachment],
 ) -> bool {
     incoming == current
 }
 
-pub(crate) async fn cleanup_unreferenced_draft_attachments(
+pub(crate) async fn cleanup_unreferenced_input_attachments(
     state: &TiangongApp,
     candidates: Vec<tiangong_media_archive::RawAttachment>,
 ) {
     if candidates.is_empty() {
         return;
     }
-    let claimed_paths = state.claimed_draft_attachment_paths();
+    let claimed_paths = state.claimed_input_attachment_paths();
     // 引用扫描需要遍历消息内容（完整 Session 字段）。session 真相源归磁盘
     //（issue #245）：先在锁外拿到会话 id 列表，再逐个从磁盘 load 扫描媒体引用，
     // 避免在 app-state 锁内做文件 IO。
     let session_ids: Vec<String> = state
         .with_state_read(|core_state| {
             Ok(core_state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .map(|metadata| metadata.id.clone())
                 .collect::<Vec<_>>())
@@ -3341,8 +2569,8 @@ pub(crate) async fn cleanup_unreferenced_draft_attachments(
     let mut referenced = state
         .with_state_read(|core_state| {
             let mut paths = claimed_paths;
-            for draft in core_state.input_drafts.values() {
-                paths.extend(draft.attachments.iter().map(|item| item.source.clone()));
+            for cache in core_state.input_caches.values() {
+                paths.extend(cache.attachments.iter().map(|item| item.source.clone()));
             }
             Ok(paths)
         })
@@ -3375,7 +2603,7 @@ pub(crate) async fn cleanup_unreferenced_draft_attachments(
             continue;
         }
         if let Err(error) = std::fs::remove_file(&candidate.source) {
-            tracing::warn!(path = %candidate.source, error = %error, "清理未引用草稿附件失败");
+            tracing::warn!(path = %candidate.source, error = %error, "清理未引用输入附件失败");
         }
     }
 }
@@ -3412,71 +2640,37 @@ pub(crate) fn session_attachment_candidates(
     raw_attachments_for_paths(paths)
 }
 
-/// 为尚未落盘的新会话生成稳定 SCRU128 草稿 ID。
+/// 为尚未落盘的新会话生成稳定 SCRU128 ID。这里只分配 ID，不创建 Session。
 #[tauri::command]
-pub fn new_draft_id() -> String {
+pub fn new_session_id() -> String {
     scru128::new().to_string()
 }
 
-/// 草稿会话创建真实 Session 后迁移全部文字、附件和 revision。
 #[tauri::command]
-pub async fn migrate_input_draft(
-    from_session_id: String,
-    to_session_id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<tiangong_app_state::app_state::SessionInputDraft, String> {
-    if from_session_id.trim().is_empty() || to_session_id.trim().is_empty() {
-        return Err("草稿会话 ID 和目标会话 ID 不能为空".to_string());
-    }
-    if from_session_id == to_session_id {
-        return state
-            .with_state_read(|core_state| Ok(core_state.session_input_draft(&to_session_id)))
-            .await;
-    }
-
-    // 所有双 key 锁均按 ID 排序：draft locks -> send locks -> app state。
-    // 这样可以与 set_input_draft 的锁顺序保持一致。
-    let mut ids = [from_session_id.clone(), to_session_id.clone()];
-    ids.sort();
-    let _first_draft_guard = state.draft_update_lock(&ids[0]).lock_owned().await;
-    let _second_draft_guard = state.draft_update_lock(&ids[1]).lock_owned().await;
-    let _first_send_guard = state.session_send_lock(&ids[0]).lock_owned().await;
-    let _second_send_guard = state.session_send_lock(&ids[1]).lock_owned().await;
-    if state.draft_was_discarded(&from_session_id) {
-        return Err("源草稿已被丢弃，无法迁移".to_string());
-    }
-
-    let migrated = state
-        .with_state(|core_state| {
-            core_state.migrate_session_input_draft(&from_session_id, &to_session_id)
-        })
-        .await?;
-    // 在锁仍持有时发布 redirect；之后拿到旧 key 锁的迟到写入会复查并
-    // 改投真实 session_id。运行期不删除旧 Arc 锁，避免新旧锁并存。
-    state.redirect_input_draft(&from_session_id, &to_session_id);
-    Ok(migrated)
-}
-
-#[tauri::command]
-pub async fn remove_input_draft(
-    session_id: String,
+pub async fn remove_input_cache(
+    cache_key: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    let draft_lock = state.draft_update_lock(&session_id);
-    let _draft_guard = draft_lock.lock_owned().await;
-    let send_lock = state.session_send_lock(&session_id);
+    let cache_lock = state.input_cache_update_lock(&cache_key);
+    let _cache_guard = cache_lock.lock_owned().await;
+    let send_lock = state.session_send_lock(&cache_key);
     let _send_guard = send_lock.lock_owned().await;
     let mut attachments = state
-        .with_state_read(|core_state| Ok(core_state.session_input_draft(&session_id).attachments))
+        .with_state_read(|core_state| {
+            Ok(crate::state_ops::input_cache(core_state, &cache_key).attachments)
+        })
         .await?;
     state
-        .with_state(|core_state| core_state.remove_session_input_draft(&session_id))
+        .with_state(|core_state| {
+            core_state.input_caches.remove(&cache_key);
+            Ok(())
+        })
         .await?;
     attachments.extend(raw_attachments_for_paths(
-        state.release_any_draft_send_claim(&session_id),
+        state.release_any_input_send_claim(&cache_key),
     ));
-    state.mark_draft_discarded(&session_id);
-    cleanup_unreferenced_draft_attachments(state.inner(), attachments).await;
+    state.mark_input_cache_discarded(&cache_key);
+    cleanup_unreferenced_input_attachments(state.inner(), attachments).await;
     Ok(())
 }
 
@@ -3484,7 +2678,12 @@ pub async fn remove_input_draft(
 #[tauri::command]
 pub async fn get_session_cwd(state: State<'_, TiangongApp>) -> Result<String, String> {
     state
-        .with_state_read(|core_state| Ok(core_state.active_session_cwd().to_string()))
+        .with_state_read(|core_state| {
+            Ok(crate::session_ops::active_session_cwd(
+                core_state,
+                &state.core_manager,
+            ))
+        })
         .await
 }
 
@@ -3492,7 +2691,7 @@ pub async fn get_session_cwd(state: State<'_, TiangongApp>) -> Result<String, St
 #[tauri::command]
 pub async fn get_workspace_dir(state: State<'_, TiangongApp>) -> Result<String, String> {
     state
-        .with_state_read(|core_state| Ok(core_state.workspace_dir().to_string()))
+        .with_state_read(|core_state| Ok(core_state.workspace_dir.as_str().to_string()))
         .await
 }
 
@@ -3508,7 +2707,13 @@ pub async fn set_workspace_dir(
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
     state
-        .with_state(|core_state| core_state.update_workspace_dir(workspace_dir.clone()))
+        .with_state(|core_state| {
+            crate::session_ops::update_workspace_dir(
+                core_state,
+                &state.core_manager,
+                workspace_dir.clone(),
+            )
+        })
         .await?;
 
     // 同步终端：更新终端默认 cwd（后续懒创建的 PTY），并对所有存活 PTY
@@ -3534,9 +2739,8 @@ pub async fn set_session_cwd(
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{cwd}"));
     }
-    state
-        .with_state(|core_state| core_state.update_session_cwd(&session_id, cwd.clone()))
-        .await?;
+    crate::session_ops::update_session_cwd(&state.core_manager, &session_id, cwd)
+        .map_err(|error| error.to_string())?;
 
     // cwd 由 app-state 快照维护，下次 turn 从快照重载，无需投递到 worker。
 
@@ -3890,8 +3094,10 @@ pub async fn set_skill_enabled(
 
 /// 获取 Server 配置
 #[tauri::command]
-pub fn get_server_config(state: State<'_, TiangongApp>) -> Result<ServerConfigView, String> {
-    let config = tiangong_server::config::load_server_config();
+pub async fn get_server_config(state: State<'_, TiangongApp>) -> Result<ServerConfigView, String> {
+    let config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
     let running = state.is_embedded_server_running() || is_server_running(&config);
     let auth_token_masked = config.masked_auth_token();
     Ok(ServerConfigView {
@@ -3908,8 +3114,11 @@ pub async fn set_server_config(
     host: String,
     port: u16,
     auth_token: Option<String>,
+    state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let current = tiangong_server::config::load_server_config();
+    let current = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
     let config = tiangong_server::config::ServerConfig {
         host,
         port,
@@ -3919,14 +3128,16 @@ pub async fn set_server_config(
             .or(current.auth_token),
         enabled: current.enabled,
     };
-    tiangong_server::config::save_server_config(&config).map_err(|e| e.to_string())?;
+    save_server_config_to_state(state.inner(), config).await?;
     Ok("Server 配置已保存".to_string())
 }
 
 /// 启动嵌入式 Server（Desktop 模式下 Server 运行在 app 进程内）
 #[tauri::command]
 pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, String> {
-    let config = tiangong_server::config::load_server_config();
+    let config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
 
     // 优先检查嵌入式 server 是否已运行
     if state.is_embedded_server_running() {
@@ -3949,7 +3160,10 @@ pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, Strin
     // 持久化 enabled 标记，重启后自动拉起
     let mut config = config;
     config.enabled = true;
-    let _ = tiangong_server::config::save_server_config(&config);
+    if let Err(error) = save_server_config_to_state(state.inner(), config.clone()).await {
+        let _ = state.stop_embedded_server();
+        return Err(error);
+    }
 
     Ok(format!("Server 已启动：{}:{}", config.host, config.port))
 }
@@ -3957,20 +3171,23 @@ pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, Strin
 /// 停止 Server
 #[tauri::command]
 pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String> {
+    let config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
+
     // 优先停止嵌入式 server
     if state.is_embedded_server_running() {
         state.stop_embedded_server()?;
 
         // 持久化 enabled 标记
-        let mut config = tiangong_server::config::load_server_config();
+        let mut config = config;
         config.enabled = false;
-        let _ = tiangong_server::config::save_server_config(&config);
+        save_server_config_to_state(state.inner(), config).await?;
 
         return Ok("Server 已停止".to_string());
     }
 
     // 兜底：检查是否有外部 server 进程
-    let config = tiangong_server::config::load_server_config();
     let running_by_health = server_health_check(&config);
     let running_by_pid = server_pid_alive();
     if !running_by_health && !running_by_pid {
@@ -3987,9 +3204,26 @@ pub async fn stop_server(state: State<'_, TiangongApp>) -> Result<String, String
     // 持久化 enabled 标记
     let mut config = config;
     config.enabled = false;
-    let _ = tiangong_server::config::save_server_config(&config);
+    save_server_config_to_state(state.inner(), config).await?;
 
     Ok("Server 已停止".to_string())
+}
+
+async fn save_server_config_to_state(
+    state: &TiangongApp,
+    config: tiangong_server::config::ServerConfig,
+) -> Result<(), String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tiangong_config::save_server_config_to_dir(&storage_root, &config)
+        .map_err(|error| error.to_string())?;
+    state
+        .with_state(|core_state| {
+            core_state.config.server = config;
+            Ok(())
+        })
+        .await
 }
 
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
@@ -4124,7 +3358,7 @@ fn user_home_dir() -> Option<PathBuf> {
 #[tauri::command]
 pub async fn get_models_config(state: State<'_, TiangongApp>) -> Result<ModelsConfigView, String> {
     state
-        .with_state_read(|core_state| Ok(ModelsConfigView::from_core(&core_state.models_config())))
+        .with_state_read(|core_state| Ok(ModelsConfigView::from_core(&core_state.config.models)))
         .await
 }
 
@@ -4134,10 +3368,15 @@ pub async fn set_models_config(
     config: ModelsConfigView,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
+    let current = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    let config = tiangong_config::registry::update_models(&current, config.to_core())
+        .map_err(|error| error.to_string())?;
     state
         .with_state(|core_state| {
-            let core_config = config.to_core();
-            core_state.save_models_config(core_config)
+            core_state.config = config;
+            Ok(())
         })
         .await?;
     state.sync_core_config_from_state().await?;
@@ -4152,7 +3391,7 @@ pub async fn get_memory_config(state: State<'_, TiangongApp>) -> Result<MemoryCo
         .with_state_read(|core_state| {
             Ok(MemoryConfigView::from_memory(
                 &config,
-                &core_state.models_config(),
+                &core_state.config.models,
             ))
         })
         .await
@@ -4167,7 +3406,7 @@ pub async fn set_memory_config(
     let memory_config = state
         .with_state_read(|core_state| {
             config
-                .to_memory(&core_state.models_config())
+                .to_memory(&core_state.config.models)
                 .map_err(anyhow::Error::msg)
         })
         .await?;
@@ -4333,7 +3572,7 @@ pub async fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String
 #[tauri::command]
 pub async fn get_model_list(state: State<'_, TiangongApp>) -> Result<Vec<String>, String> {
     state
-        .with_state_read(|core_state| Ok(core_state.model_list().to_vec()))
+        .with_state_read(|core_state| Ok(core_state.model_list.to_vec()))
         .await
 }
 
@@ -4705,8 +3944,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        append_tool_result_message, cancel_after_session_send_boundary,
-        done_event_keeps_turn_running, merge_agent_worker_messages, upsert_agent_status_message,
+        cancel_after_session_send_boundary, done_event_keeps_turn_running,
+        merge_agent_worker_messages,
     };
 
     #[tokio::test]
@@ -4767,28 +4006,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_status_message_uses_stable_frontend_protocol() {
-        use tiangong_core::session::{MessageRole, Session};
-
-        let mut session = Session::new("desktop-agent-status");
-        upsert_agent_status_message(&mut session, "agent-dev", "开发者", "running");
-        upsert_agent_status_message(&mut session, "agent-dev", "开发者", "idle");
-
-        let status_messages = session
-            .messages
-            .iter()
-            .filter(|message| message.id == "agent-status:agent-dev")
-            .collect::<Vec<_>>();
-        assert_eq!(status_messages.len(), 1);
-        assert_eq!(status_messages[0].role, MessageRole::System);
-        assert!(status_messages[0].model_excluded);
-        assert_eq!(
-            status_messages[0].text_content(),
-            "[Agent] 开发者 状态变更: idle id=agent-dev"
-        );
-    }
-
-    #[test]
     fn agent_worker_merge_is_scoped_by_worker_and_message_id() {
         use tiangong_core::session::{Message, MessageRole, Session};
 
@@ -4845,46 +4062,17 @@ mod tests {
         }));
         assert!(workers.iter().any(|message| message.id == "next"));
     }
-
-    #[test]
-    fn tool_result_deduplication_is_scoped_to_the_latest_call_batch() {
-        use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session};
-
-        let mut session = Session::new("desktop-reused-tool-id");
-        for (round, result) in [("first", "old"), ("second", "new")] {
-            if round == "second" {
-                session.append_message(MessageRole::User, "next");
-            }
-            let mut assistant = Message::new(MessageRole::Assistant, String::new());
-            assistant.tool_calls = vec![MessageToolCall {
-                id: "reused".to_string(),
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({}),
-            }];
-            session.messages.push(assistant);
-            append_tool_result_message(
-                &mut session,
-                Some("reused"),
-                "read_file",
-                result.to_string(),
-                false,
-            );
-        }
-
-        let results = session
-            .messages
-            .iter()
-            .filter(|message| message.tool_call_id.as_deref() == Some("reused"))
-            .map(Message::text_content)
-            .collect::<Vec<_>>();
-        assert_eq!(results, vec!["old", "new"]);
-    }
 }
 
 /// 按模型名从 context_windows.json 映射表解析默认 context_window（token 数）。
 /// 供前端在编辑模型时预填默认值。
 #[tauri::command]
-pub async fn resolve_model_context_window(model: String) -> Result<usize, String> {
-    let dir = tiangong_config::io::storage_root();
+pub async fn resolve_model_context_window(
+    model: String,
+    state: State<'_, TiangongApp>,
+) -> Result<usize, String> {
+    let dir = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
     Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
 }

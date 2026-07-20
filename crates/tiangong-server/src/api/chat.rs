@@ -20,14 +20,19 @@ pub async fn chat(mut req: Request) -> Result<Response> {
     let app = req.get_config::<SharedAppContext>()?.clone();
     let body: ChatRequest = req.json_parse().await?;
 
-    let session_id = {
+    let mut session_id = if body.session_id.is_none() && access.role.can_manage_sessions() {
+        scru128::new().to_string()
+    } else {
         let state = app.state.lock().await;
         resolve_visible_session_id(
             &access,
-            state.active_session_id(),
+            state.active_session_id.as_str(),
             body.session_id.as_deref(),
         )?
     };
+    if session_id.trim().is_empty() {
+        session_id = scru128::new().to_string();
+    }
 
     let outgoing = app
         .router

@@ -203,7 +203,6 @@ tiangong doctor                          # 环境诊断
 
 ```text
 ~/.tiangong/
-  app.json              应用主配置
   models.json           模型配置：Provider + Model + Routing
   server.json           Server 监听配置（host/port/auth_token）
   custom-prompt.md      自定义 Prompt（独立文件，CLI 可直接编辑）
@@ -215,7 +214,7 @@ tiangong doctor                          # 环境诊断
   memory/               长期记忆数据（含独立 config.json）
 ```
 
-模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可通过 `tiangong prompt` 命令管理，兼容旧的 `app.json` 内 `custom_system_prompt` 字段。
+模型配置采用 Provider、Model、Routing 三层结构。`api_key` 支持 `${ENV_VAR}` 环境变量引用，便于避免明文保存密钥。自定义 Prompt 独立存储为 `custom-prompt.md`，可通过 `tiangong prompt` 命令管理。
 
 详细的 Linux 服务器部署、systemd 托管、反向代理与更新策略见 [部署指南](docs/linux-server-deployment.md)。
 

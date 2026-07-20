@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// 宿主 App 按会话维护的输入草稿。
+/// 输入框缓存。已有会话以 Session ID 为键；新对话以预留的未来 Session ID 为键。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SessionInputDraft {
+pub struct InputCache {
     #[serde(default)]
     pub text: String,
     #[serde(default)]

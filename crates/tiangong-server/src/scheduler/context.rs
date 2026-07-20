@@ -23,27 +23,16 @@ impl SchedulerContext for ServerSchedulerContext {
             .map(|_| ())
     }
 
-    async fn resolve_or_create_session(
+    async fn resolve_session_id(
         &self,
         requested_session_id: Option<&str>,
-        trigger_name: &str,
     ) -> anyhow::Result<(String, bool)> {
         if let Some(sid) = requested_session_id {
             let state = self.state.lock().await;
-            if state.session_metadata().iter().any(|m| m.id == *sid) {
+            if state.core_manager.session_exists(sid) {
                 return Ok((sid.to_string(), false));
             }
         }
-
-        let mut state = self.state.lock().await;
-        let title = format!("定时任务：{}", trigger_name);
-        let session = tiangong_core::session::Session::new_isolated(
-            title,
-            &tiangong_app_state::app_state::storage_root(),
-        );
-        let session_id = session.id.clone();
-        state.add_session(session);
-        state.persist_session(&session_id)?;
-        Ok((session_id, true))
+        Ok((scru128::new().to_string(), true))
     }
 }

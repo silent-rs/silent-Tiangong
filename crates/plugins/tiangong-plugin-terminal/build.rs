@@ -8,7 +8,6 @@ const COMMANDS: &[&str] = &[
     "terminal_resize",
     "terminal_ensure_session",
     "terminal_destroy_session",
-    "terminal_attach_session",
     "terminal_session_send_input",
     "terminal_report_user_command",
     "terminal_session_recent_output",

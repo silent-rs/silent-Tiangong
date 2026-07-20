@@ -188,7 +188,7 @@ tiangong prompt clear                   # 清空
 tiangong prompt path                    # 显示存储路径
 ```
 
-加载优先级：`custom-prompt.md`（非空）> `app.json` 旧字段（兼容）> 空。`prompt set` / `edit` 写入后会清空旧字段，使 `.md` 成为唯一事实来源。
+自定义 Prompt 只从 `custom-prompt.md` 加载；文件不存在或内容为空时不设置自定义 Prompt。
 
 ---
 
@@ -219,7 +219,6 @@ tiangong doctor --deep # 深度诊断（含模型连通性与端口探活）
 
 ```text
 ~/.tiangong/
-  app.json              应用主配置
   models.json           模型配置：Provider + Model + Routing
   server.json           Server 监听配置（host/port/auth_token）
   custom-prompt.md      自定义 Prompt（独立文件）

@@ -88,9 +88,9 @@ export function AppSidebar() {
   const {
     sessions,
     activeSessionId,
-    isDraft,
+    isNewConversation,
     sessionRunStatuses,
-    createSession,
+    startNewConversation,
     switchSession,
     deleteSession,
     deleteSessionsByCwd,
@@ -137,7 +137,7 @@ export function AppSidebar() {
 
   const renderSessionItem = (session: Session) => {
     const isRunning = !!sessionRunStatuses[session.id];
-    const isActive = !isDraft && activeSessionId === session.id;
+    const isActive = !isNewConversation && activeSessionId === session.id;
     return (
       <button
         key={session.id}
@@ -147,7 +147,7 @@ export function AppSidebar() {
             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
         }`}
         onClick={() => {
-          if (session.id !== activeSessionId || isDraft) {
+          if (session.id !== activeSessionId || isNewConversation) {
             switchSession(session.id);
           }
         }}
@@ -215,7 +215,7 @@ export function AppSidebar() {
               </div>
               <button
                 className="p-1 rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground hover:bg-sidebar-accent/50 transition-opacity shrink-0"
-                onClick={() => !isSending && createSession(group.fullPath)}
+                onClick={() => !isSending && startNewConversation(group.fullPath)}
                 disabled={isSending}
                 title="在此 workspace 下新建对话"
               >
@@ -238,7 +238,7 @@ export function AppSidebar() {
         <ContextMenuContent>
           <ContextMenuItem
             disabled={isSending}
-            onSelect={() => createSession(group.fullPath)}
+            onSelect={() => startNewConversation(group.fullPath)}
           >
             <FilePlus2 className="w-4 h-4 mr-2" />
             新对话
@@ -271,7 +271,7 @@ export function AppSidebar() {
           variant="ghost"
           className="w-full justify-start"
           disabled={isSending}
-          onClick={() => !isSending && createSession()}
+          onClick={() => !isSending && startNewConversation()}
         >
           <Plus className="w-4 h-4 mr-2" />
           新对话

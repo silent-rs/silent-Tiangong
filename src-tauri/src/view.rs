@@ -113,7 +113,6 @@ pub struct RunSnapshotView {
     pub token_stats: TokenStatsView,
     pub updated_at: String,
     pub messages: Vec<tiangong_types::Message>,
-    pub input_draft: String,
     pub current_plan: Option<TaskPlan>,
     pub pending_session_ids: Vec<String>,
     pub approval_request_id: Option<String>,
@@ -123,7 +122,6 @@ impl RunSnapshotView {
     pub fn from_core_with_session(
         core_snapshot: &tiangong_core::runtime::RunSnapshot,
         messages: Vec<tiangong_types::Message>,
-        input_draft: String,
         current_plan: Option<TaskPlan>,
         pending_session_ids: Vec<String>,
         token_stats: TokenStatsView,
@@ -142,7 +140,6 @@ impl RunSnapshotView {
             token_stats,
             updated_at: core_snapshot.updated_at.clone(),
             messages,
-            input_draft,
             current_plan,
             pending_session_ids,
             approval_request_id: core_snapshot.approval_request_id.clone(),

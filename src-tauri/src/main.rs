@@ -309,7 +309,7 @@ fn run_gui() {
             tauri::async_runtime::spawn(async move {
                 let workspace = {
                     let guard = core_state.lock().await;
-                    guard.workspace_dir().to_string()
+                    guard.workspace_dir.clone()
                 };
                 tiangong_plugin_terminal::set_cwd(&app_handle, workspace).await;
             });
@@ -528,9 +528,6 @@ fn run_gui() {
             tiangong_app::commands::get_sessions,
             tiangong_app::commands::get_session_tabs,
             tiangong_app::commands::set_session_tabs,
-            tiangong_app::commands::create_session,
-            tiangong_app::commands::create_session_for_draft,
-            tiangong_app::commands::activate_draft_session,
             tiangong_app::commands::switch_session,
             tiangong_app::commands::delete_session,
             tiangong_app::commands::delete_sessions_by_cwd,
@@ -545,11 +542,10 @@ fn run_gui() {
             tiangong_app::commands::get_background_tasks,
             tiangong_app::commands::cancel_background_task,
             tiangong_app::commands::get_run_snapshot,
-            tiangong_app::commands::get_input_draft,
-            tiangong_app::commands::set_input_draft,
-            tiangong_app::commands::new_draft_id,
-            tiangong_app::commands::migrate_input_draft,
-            tiangong_app::commands::remove_input_draft,
+            tiangong_app::commands::get_input_cache,
+            tiangong_app::commands::set_input_cache,
+            tiangong_app::commands::new_session_id,
+            tiangong_app::commands::remove_input_cache,
             tiangong_app::commands::get_session_cwd,
             tiangong_app::commands::get_workspace_dir,
             tiangong_app::commands::set_session_cwd,

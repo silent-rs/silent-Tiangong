@@ -185,7 +185,7 @@ export function MainApp() {
     setChatPanelWidth(MIN_CHAT_WIDTH);
 
     if (kind === 'terminal') {
-      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
+      await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
@@ -196,7 +196,7 @@ export function MainApp() {
     savedWindowWidthRef.current = null;
     showWorkspacePanelRef.current = false;
     setShowWorkspacePanel(false);
-    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().draftTerminalId ?? '').catch(console.error);
+    await api.browserHide(useStore.getState().activeSessionId ?? useStore.getState().newConversationId ?? '').catch(console.error);
     if (restoreSize && workspaceExpandedForBrowserRef.current) {
       const appWindow = getCurrentWindow();
       const innerSize = await appWindow.innerSize();
@@ -367,11 +367,11 @@ export function MainApp() {
       }>('terminal:tab_updated', async (event) => {
         const { session_id, active_tab_id, source } = event.payload;
         const store = useStore.getState();
-        const terminalSessionId = store.activeSessionId || store.draftTerminalId;
+        const terminalSessionId = store.activeSessionId || store.newConversationId;
         const isCurrentTerminalSession = Boolean(terminalSessionId && session_id === terminalSessionId);
-        const isDraftTerminalSession = Boolean(store.draftTerminalId && session_id === store.draftTerminalId);
+        const isNewConversationTerminalSession = Boolean(store.newConversationId && session_id === store.newConversationId);
         let synced = false;
-        if (!isDraftTerminalSession) {
+        if (!isNewConversationTerminalSession) {
           synced = await syncTerminalRuntimeTabsToSession(session_id, active_tab_id ?? null)
             .catch((error) => {
               console.error('同步终端 Tab 到会话失败：', error);
@@ -443,7 +443,7 @@ export function MainApp() {
       const url = (e as CustomEvent).detail;
       if (typeof url !== 'string' || !url.trim()) return;
       const store = useStore.getState();
-      const sessionId = store.activeSessionId || store.draftTerminalId;
+      const sessionId = store.activeSessionId || store.newConversationId;
       if (!sessionId) {
         console.error('无法打开浏览器：缺少 session_id');
         return;

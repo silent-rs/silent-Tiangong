@@ -112,6 +112,8 @@
 - [ ] `embedded_server.rs`:适配新 builder API
 
 ### 后续独立 issue
-- [ ] #245 app-state 职责收窄(session 真相源归磁盘,移除完整 Session 列表 / RuntimeEngine / save_core_session)
+- [x] #245 app-state 仅保留本次运行状态(session 真相源归磁盘,移除完整 Session 列表 / RuntimeEngine / save_core_session / app.json 持久化)
+- [x] `TiangongState` 启动时加载完整配置并据此创建 `CoreManager`，Desktop / CLI / Server 共用该实例
+- [x] 新对话只预留最终 Session ID 和输入缓存，首次向 Core 投递消息时才创建并保存 Session
 - [ ] app-state 的 `RuntimeEngine` 替换为轻量配置结构体
 - [ ] `Command::Message` / `AgentInputKind::Message` 双层映射合并

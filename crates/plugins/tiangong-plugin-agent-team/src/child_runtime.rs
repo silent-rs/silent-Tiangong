@@ -89,11 +89,13 @@ impl ChildRuntime {
         );
         let session_id = session.id.clone();
         let trust_mode = session.trust_mode;
+        let workspace_dir = session.cwd.clone();
         let core = TiangongCore::builder()
             .session_id(session_id)
             .config(CoreConfigProvider::new(config))
             .trust_mode(trust_mode)
             .storage_root(child_storage_root.clone())
+            .workspace_dir(workspace_dir)
             .stream_tx(event_tx)
             .plugins(plugins)
             .build();
@@ -1420,6 +1422,7 @@ mod tests {
         let (parent_events_tx, _parent_events_rx) = std::sync::mpsc::channel();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(CoreConfig::default()))
+            .workspace_dir(parent_session.cwd.clone())
             .session_id(parent_session.id)
             .stream_tx(parent_events_tx)
             .plugins(vec![capture.clone()])

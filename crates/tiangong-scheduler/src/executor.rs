@@ -16,14 +16,13 @@ use crate::webhook::store::WebhookStore;
 /// Desktop 端通过 DesktopSchedulerContext 实现（使用 TiangongApp 的状态）。
 #[async_trait]
 pub trait SchedulerContext: Send + Sync + 'static {
-    /// 发送消息到指定会话（fire-and-forget），如 core 不存在则自动创建
+    /// 发送消息到指定会话（fire-and-forget），如 Core 不存在则自动创建。
     async fn send_message(&self, session_id: &str, content: String) -> anyhow::Result<()>;
 
-    /// 解析或创建会话，返回 (session_id, 是否新建)
-    async fn resolve_or_create_session(
+    /// 解析已有会话 ID，或为下一次投递分配新 ID。
+    async fn resolve_session_id(
         &self,
         requested_session_id: Option<&str>,
-        trigger_name: &str,
     ) -> anyhow::Result<(String, bool)>;
 }
 
@@ -44,7 +43,7 @@ pub enum RunTracker {
     Webhook { store: WebhookStore },
 }
 
-/// 消息发送器类型：接受 (session_id, message)，仅发送不等结果
+/// 消息发送器类型：接受 (session_id, message)，仅发送不等结果。
 type MessageSender = Box<
     dyn Fn(String, String) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
         + Send
@@ -140,9 +139,7 @@ async fn execute_core(
     let now = chrono::Local::now().naive_local().to_string();
 
     // 确定使用哪个 session
-    let (session_id, created_new) = match ctx
-        .resolve_or_create_session(params.session_id.as_deref(), &params.trigger_name)
-        .await
+    let (session_id, created_new) = match ctx.resolve_session_id(params.session_id.as_deref()).await
     {
         Ok(result) => result,
         Err(e) => {
@@ -398,10 +395,9 @@ mod tests {
             Ok(())
         }
 
-        async fn resolve_or_create_session(
+        async fn resolve_session_id(
             &self,
             requested_session_id: Option<&str>,
-            trigger_name: &str,
         ) -> anyhow::Result<(String, bool)> {
             if let Some(sid) = requested_session_id {
                 let sessions = self.sessions.lock().unwrap();
@@ -410,10 +406,7 @@ mod tests {
                 }
             }
             let session_id = scru128::new().to_string();
-            self.sessions
-                .lock()
-                .unwrap()
-                .push(format!("自动化任务：{}", trigger_name));
+            self.sessions.lock().unwrap().push(session_id.clone());
             Ok((session_id, true))
         }
     }

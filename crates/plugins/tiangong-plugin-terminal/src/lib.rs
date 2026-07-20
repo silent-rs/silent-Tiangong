@@ -39,7 +39,6 @@ pub fn init(cwd: String) -> TauriPlugin<Wry> {
         .invoke_handler(tauri::generate_handler![
             commands::terminal_ensure_session,
             commands::terminal_destroy_session,
-            commands::terminal_attach_session,
             commands::terminal_session_send_input,
             commands::terminal_report_user_command,
             commands::terminal_session_recent_output,

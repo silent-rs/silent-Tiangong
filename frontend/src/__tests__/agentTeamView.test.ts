@@ -61,13 +61,12 @@ describe('agent team view routing', () => {
       status: 'idle',
       last_session_id: 'session-main',
       messages: [summaryMessage],
-      input_draft: '',
       pending_session_ids: [],
     };
 
     useStore.setState({
       activeSessionId: 'session-main',
-      isDraft: false,
+      isNewConversation: false,
       messages: [reactMessage],
       runStatus: 'idle',
       streamingMessageId: null,
@@ -87,7 +86,7 @@ describe('agent team view routing', () => {
 
     useStore.setState({
       activeSessionId: 'session-main',
-      isDraft: false,
+      isNewConversation: false,
       messages: [visible],
       runStatus: 'idle',
     });
@@ -95,7 +94,6 @@ describe('agent team view routing', () => {
       status: 'idle',
       last_session_id: 'session-main',
       messages: [excluded],
-      input_draft: '',
       pending_session_ids: [],
     });
 

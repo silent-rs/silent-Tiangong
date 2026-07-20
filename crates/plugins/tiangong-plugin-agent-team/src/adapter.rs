@@ -403,6 +403,7 @@ mod tests {
         let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let parent_core = TiangongCore::builder()
             .config(CoreConfigProvider::new(config))
+            .workspace_dir(parent_session.cwd.clone())
             .session_id(parent_session.id)
             .stream_tx(event_tx)
             .plugins(vec![plugin])

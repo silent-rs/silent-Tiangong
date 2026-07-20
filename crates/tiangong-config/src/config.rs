@@ -162,8 +162,10 @@ pub struct ConnectorConfig {
 /// 以及应用层配置（server/connectors）。
 ///
 /// MCP 配置已脱离（由 tiangong-plugin-mcp 自管 ~/.tiangong/mcp.json）。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TiangongConfig {
+    /// 本配置对应的数据根目录。只参与运行时定位，不写入配置文件。
+    pub storage_root: PathBuf,
     // ===== Core 所需配置 =====
     /// LLM 模型配置
     pub models: ModelsConfig,
@@ -182,6 +184,21 @@ pub struct TiangongConfig {
     pub server: ServerConfig,
     /// Connector 配置列表
     pub connectors: Vec<ConnectorConfig>,
+}
+
+impl Default for TiangongConfig {
+    fn default() -> Self {
+        Self {
+            storage_root: crate::loader::default_tiangong_dir(),
+            models: ModelsConfig::default(),
+            skills: SkillsConfig::default(),
+            trust_mode: TrustMode::default(),
+            custom_system_prompt: String::new(),
+            context_limit: 0,
+            server: ServerConfig::default(),
+            connectors: Vec::new(),
+        }
+    }
 }
 
 impl TiangongConfig {

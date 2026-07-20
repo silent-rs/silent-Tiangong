@@ -69,7 +69,7 @@ impl MessageRouter {
         let media = extract_media(&msg);
         let channel_id = if msg.channel_id.trim().is_empty() {
             let state = self.state.lock().await;
-            state.active_session_id().to_string()
+            state.active_session_id.as_str().to_string()
         } else {
             msg.channel_id.clone()
         };
@@ -228,16 +228,22 @@ impl MessageRouter {
                     return Ok(None);
                 }
 
-                let (actual_session_id, mut outgoing) = self
-                    .core_backend
-                    .send_connector_message_and_wait(
-                        connector,
-                        &requested_session_id,
-                        text,
-                        message_id,
-                        media,
-                    )
-                    .await?;
+                let (actual_session_id, mut outgoing) =
+                    if matches!(connector, "server-api" | "server-ws") {
+                        self.core_backend
+                            .send_message_and_wait(&requested_session_id, text, message_id, media)
+                            .await?
+                    } else {
+                        self.core_backend
+                            .send_connector_message_and_wait(
+                                connector,
+                                &requested_session_id,
+                                text,
+                                message_id,
+                                media,
+                            )
+                            .await?
+                    };
                 outgoing.reply_to = reply_to;
                 self.event_bus.publish(TiangongEvent::MessageSent {
                     session_id: actual_session_id.clone(),
@@ -254,12 +260,16 @@ impl MessageRouter {
                 };
 
                 {
-                    let mut state = self.state.lock().await;
-                    state.append_session_message(
-                        &event.session_id,
-                        MessageRole::System,
-                        summary.clone(),
-                    )?;
+                    let state = self.state.lock().await;
+                    // session 真相源归磁盘（issue #245）：load → 追加 System 消息 → 落盘。
+                    let mut session = state
+                        .core_manager
+                        .load_session(&event.session_id)
+                        .map_err(|error| anyhow::anyhow!("加载会话失败：{error}"))?;
+                    session.append_message(MessageRole::System, summary.clone());
+                    session
+                        .try_persist_to_disk()
+                        .map_err(|error| anyhow::anyhow!("持久化会话失败：{error}"))?;
                 }
 
                 let outgoing = OutgoingMessage {

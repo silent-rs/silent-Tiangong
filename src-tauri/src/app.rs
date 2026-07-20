@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::Manager;
@@ -14,8 +13,8 @@ type RemoteTurnWaiter = tokio::sync::oneshot::Sender<RemoteTurnResult>;
 
 /// 天工应用状态
 ///
-/// state: 应用管理（会话列表、配置、持久化）— Arc<tokio Mutex> 以支持嵌入式 server 共享
-/// core_manager: Core 操作入口（session_id → TiangongCore 注册表,issue #245 归 app-state）
+/// state: 应用数据 — Arc<tokio Mutex> 以支持嵌入式 server 共享
+/// core_manager: 会话资源与 Core 操作入口
 /// config: 共享配置提供者
 /// embedded_server: 嵌入式 Server 句柄（Desktop 模式下 Server 运行在 app 进程内）
 pub struct TiangongApp {
@@ -26,23 +25,18 @@ pub struct TiangongApp {
     /// 编辑重发和 Session 持久化永远不会读到这些临时 worker 消息。
     agent_worker_views: Mutex<HashMap<String, Vec<tiangong_types::Message>>>,
     /// 覆盖单个会话从附件准备到 Core 持久化确认的完整串行区间。
-    /// 不同会话使用不同锁，可以并行发送；同一会话不会并发创建 Core 或抢占草稿。
+    /// 不同会话使用不同锁，可以并行发送；同一会话不会并发创建 Core 或抢占输入。
     session_send_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
-    /// 草稿归档/持久化串行锁。与发送锁分离，使用户等待发送期间的新输入能立即写入
+    /// 输入缓存归档/持久化串行锁。与发送锁分离，使用户等待发送期间的新输入能立即写入
     /// 新 revision，而不会等旧发送结束后才落盘。
-    draft_update_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
-    /// 临时草稿 ID 转正后的运行时重定向。迟到的旧 ID 写入会跟随到
-    /// 真实会话，避免迁移后又复活一份孤立草稿。
-    draft_redirects: Mutex<HashMap<String, String>>,
-    /// 已成功投递的最新草稿 revision，用于防止双击或迟到请求重复发送。
-    delivered_draft_revisions: Mutex<HashMap<String, u64>>,
+    input_cache_update_locks: Mutex<HashMap<String, std::sync::Arc<AsyncMutex<()>>>>,
+    /// 已成功投递的最新输入 revision，用于防止双击或迟到请求重复发送。
+    delivered_input_revisions: Mutex<HashMap<String, u64>>,
     /// 前端冻结发送快照后、真正进入 send_message 前的附件租约。
-    /// 该租约让草稿清理不会删掉已被本次发送冻结的归档路径。
-    draft_send_claims: Mutex<HashMap<String, DraftSendClaim>>,
-    /// 当前进程已明确丢弃/删除的草稿 ID，阻止早已发出的迟到写入复活。
-    discarded_drafts: Mutex<HashSet<String>>,
-    /// 活动会话变更代数，用于草稿转正后的条件激活。
-    active_session_epoch: AtomicU64,
+    /// 该租约让输入缓存清理不会删掉已被本次发送冻结的归档路径。
+    input_send_claims: Mutex<HashMap<String, InputSendClaim>>,
+    /// 当前进程已明确丢弃/删除的输入缓存键，阻止迟到写入复活。
+    discarded_input_caches: Mutex<HashSet<String>>,
     pub config: CoreConfigProvider,
     scheduler_context: std::sync::Arc<crate::scheduler::DesktopSchedulerContext>,
     /// Desktop 定时消息消费者。调度上下文只持 sender；receiver 由 setup 取出后，
@@ -73,11 +67,7 @@ pub struct TiangongApp {
     /// 桌面端 Core 构造依赖（issue #245）：持有 app_handle/skill/mcp/config/
     /// storage_root,提供 `build_plugins()` 供 `ensure_core` 前构造插件集合。
     pub desktop_factory: std::sync::Arc<crate::core_factory::DesktopCoreFactory>,
-    /// CoreManager 句柄（与 `TiangongState.core_manager` 共享同一注册表实例）。
-    ///
-    /// 真相源归 `TiangongState.core_manager`(根字段);这里持有 clone 仅供
-    /// `TiangongApp` 同步方法(has_live_core / deliver_* / cancel_core 等)访问,
-    /// 避免每个同步调用都 lock AsyncMutex<TiangongState>。
+    /// 与 `TiangongState.core_manager` 共享同一实例的快捷句柄，供同步入口使用。
     pub core_manager: tiangong_core_manager::CoreManager,
     /// 工具消息注入通道（插件作为生产者 push，app 消费者统一处理）。
     /// 插件通过 [`Self::tool_injection_tx`] 获取 sender，直接 push `ToolInjection`。
@@ -98,7 +88,7 @@ pub struct ToolInjection {
 }
 
 #[derive(Debug, Clone)]
-struct DraftSendClaim {
+struct InputSendClaim {
     revision: u64,
     attachment_paths: Vec<String>,
 }
@@ -168,22 +158,22 @@ impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        // 初始化 config 内存单例（从磁盘加载一次，后续读内存）。
-        tiangong_config::registry::init();
-        let core_config = tiangong_config::registry::config().to_core_config();
-        let config = CoreConfigProvider::new(core_config);
-
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
         let (scheduled_message_tx, scheduled_message_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        //（core 运行时持久化需要）。config 加载走自己的 dir，不依赖 core cell。
-        let storage_root = tiangong_app_state::app_state::storage_root();
-        let state = std::sync::Arc::new(AsyncMutex::new(
-            tiangong_app_state::app_state::TiangongState::load_or_default(),
-        ));
-        let scheduler_context = std::sync::Arc::new(
-            crate::scheduler::DesktopSchedulerContext::new(state.clone(), scheduled_message_tx),
-        );
+        let mut core_state = tiangong_app_state::app_state::TiangongState::new();
+        let config = core_state.core_manager.config().clone();
+        let storage_root = core_state.config.storage_root.clone();
+        let core_manager = core_state.core_manager.clone();
+        core_state.workspace_dir = std::env::current_dir()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let state = std::sync::Arc::new(AsyncMutex::new(core_state));
+        let scheduler_context =
+            std::sync::Arc::new(crate::scheduler::DesktopSchedulerContext::new(
+                core_manager.clone(),
+                scheduled_message_tx,
+            ));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
         let skill_plugin = std::sync::Arc::new(
@@ -199,29 +189,14 @@ impl TiangongApp {
             config: config.clone(),
             storage_root: storage_root.clone(),
         });
-        // 注入 CoreManager 到 TiangongState 根字段（issue #245）。
-        // 同时 clone 一份给 TiangongApp 供同步方法访问(共享同一 Arc 注册表)。
-        // 用 try_lock 避免在 async 上下文(如 tokio 测试)中调用 blocking_lock 导致 panic;
-        // new() 在构造期单线程调用,try_lock 必然成功。
-        let core_manager = {
-            let guard = state
-                .try_lock()
-                .expect("CoreManager 注入期 state 锁不应被占用");
-            guard
-                .install_core_manager(config.clone(), storage_root.clone())
-                .clone()
-        };
-
         Self {
             state,
             agent_worker_views: Mutex::new(HashMap::new()),
             session_send_locks: Mutex::new(HashMap::new()),
-            draft_update_locks: Mutex::new(HashMap::new()),
-            draft_redirects: Mutex::new(HashMap::new()),
-            delivered_draft_revisions: Mutex::new(HashMap::new()),
-            draft_send_claims: Mutex::new(HashMap::new()),
-            discarded_drafts: Mutex::new(HashSet::new()),
-            active_session_epoch: AtomicU64::new(0),
+            input_cache_update_locks: Mutex::new(HashMap::new()),
+            delivered_input_revisions: Mutex::new(HashMap::new()),
+            input_send_claims: Mutex::new(HashMap::new()),
+            discarded_input_caches: Mutex::new(HashSet::new()),
             config,
             scheduler_context,
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
@@ -415,7 +390,7 @@ impl TiangongApp {
                     Some(id) => id,
                     None => {
                         let guard = state.lock().await;
-                        guard.active_session_id().to_string()
+                        guard.active_session_id.as_str().to_string()
                     }
                 };
 
@@ -432,21 +407,18 @@ impl TiangongApp {
                 let session_exists = state
                     .lock()
                     .await
-                    .session_metadata()
+                    .core_manager
+                    .list_session_metadata()
                     .iter()
                     .any(|m| m.id == session_id);
                 if !session_exists {
                     tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
                     continue;
                 }
-                let Ok(session_snapshot) = app_state.core_manager.load_session(&session_id) else {
-                    tracing::warn!(session_id, "消费者无法恢复 core：session 磁盘加载失败");
-                    continue;
-                };
                 use std::sync::mpsc;
                 let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state
-                    .ensure_core(&session_id, session_snapshot, stream_tx)
+                    .ensure_core(&session_id, None, None, None, stream_tx)
                     .await;
                 if ensured.is_new {
                     crate::commands::start_stream_consumer(
@@ -533,20 +505,10 @@ impl TiangongApp {
         self.sync_core_config_from_state().await?;
         let message_id = scru128::new().to_string();
         let prepared = vec![ContentBlock::text(content)];
-        let stable_prepared = tiangong_types::stable_content_blocks(&prepared);
-        let session_snapshot = self
-            .with_state(|core_state| {
-                core_state.append_prepared_user_message_for_turn(
-                    &session_id,
-                    &message_id,
-                    stable_prepared,
-                )
-            })
-            .await?;
 
         let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = self
-            .ensure_core(&session_id, session_snapshot, stream_tx)
+            .ensure_core(&session_id, None, None, None, stream_tx)
             .await;
         let sid = ensured.session_id.clone();
         if let Err(error) = self.deliver_prepared_if_live(&sid, message_id.clone(), prepared) {
@@ -588,17 +550,12 @@ impl TiangongApp {
         }
 
         self.with_state(|core_state| {
-            core_state.reload_session_from_disk(session_id)?;
-            if !core_state
-                .session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
+            if !self.core_manager.session_exists(session_id) {
                 return Err(anyhow::anyhow!("定时消息目标会话已不存在：{session_id}"));
             }
-            core_state.remove_message_for_failed_turn(session_id, message_id);
-            core_state.remove_pending_message_for(session_id, message_id);
-            core_state.persist_session_and_app(session_id)
+            crate::session_ops::remove_failed_message(&self.core_manager, session_id, message_id)?;
+            crate::state_ops::remove_pending_message(core_state, session_id, message_id);
+            Ok(())
         })
         .await
     }
@@ -611,7 +568,7 @@ impl TiangongApp {
         let tool_name = tool.tool_name().to_string();
         let session_id = {
             let guard = self.state.lock().await;
-            guard.active_session_id().to_string()
+            guard.active_session_id.as_str().to_string()
         };
         let session_lock = self.session_send_lock(&session_id);
         let _send_guard = session_lock.lock_owned().await;
@@ -643,176 +600,91 @@ impl TiangongApp {
             .clone()
     }
 
-    pub fn active_session_epoch(&self) -> u64 {
-        self.active_session_epoch.load(Ordering::Acquire)
-    }
-
-    pub fn mark_active_session_changed(&self) -> u64 {
-        self.active_session_epoch.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
     pub fn remove_session_send_lock(&self, session_id: &str) {
         // 不从锁表删除 Arc：若旧 guard/等待者仍存活，新请求创建另一把锁
         // 会直接破坏互斥。这些小锁保留到进程结束。
-        let mut delivered = match self.delivered_draft_revisions.lock() {
+        let mut delivered = match self.delivered_input_revisions.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         delivered.remove(session_id);
         drop(delivered);
-        let mut claims = match self.draft_send_claims.lock() {
+        let mut claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         claims.remove(session_id);
         drop(claims);
-        let mut redirects = match self.draft_redirects.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        let discarded_aliases = redirects
-            .iter()
-            .filter(|(from, to)| from.as_str() == session_id || to.as_str() == session_id)
-            .map(|(from, _)| from.clone())
-            .collect::<Vec<_>>();
-        redirects.retain(|from, to| from != session_id && to != session_id);
-        drop(redirects);
-        let mut discarded = match self.discarded_drafts.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        discarded.insert(session_id.to_string());
-        discarded.extend(discarded_aliases);
-    }
-
-    pub fn resolve_draft_session_id(&self, session_id: &str) -> String {
-        let redirects = match self.draft_redirects.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        let mut resolved = session_id.to_string();
-        let mut seen = HashSet::new();
-        while seen.insert(resolved.clone()) {
-            let Some(next) = redirects.get(&resolved) else {
-                break;
-            };
-            resolved = next.clone();
-        }
-        resolved
-    }
-
-    pub fn redirect_input_draft(&self, from_session_id: &str, to_session_id: &str) {
-        if from_session_id == to_session_id {
-            return;
-        }
-        let resolved_target = self.resolve_draft_session_id(to_session_id);
-        let mut redirects = match self.draft_redirects.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        redirects.insert(from_session_id.to_string(), resolved_target.clone());
-        for target in redirects.values_mut() {
-            if target == from_session_id {
-                *target = resolved_target.clone();
-            }
-        }
-        drop(redirects);
-        let mut delivered = match self.delivered_draft_revisions.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        if let Some(from_revision) = delivered.remove(from_session_id) {
-            delivered
-                .entry(resolved_target.clone())
-                .and_modify(|current| *current = (*current).max(from_revision))
-                .or_insert(from_revision);
-        }
-        drop(delivered);
-        let mut claims = match self.draft_send_claims.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        if let Some(from_claim) = claims.remove(from_session_id) {
-            let should_replace = claims
-                .get(&resolved_target)
-                .map(|target| target.revision <= from_claim.revision)
-                .unwrap_or(true);
-            if should_replace {
-                claims.insert(resolved_target, from_claim);
-            }
-        }
-        drop(claims);
-        let mut discarded = match self.discarded_drafts.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        discarded.remove(from_session_id);
-        discarded.remove(to_session_id);
-    }
-
-    pub fn mark_draft_discarded(&self, session_id: &str) {
-        let mut discarded = match self.discarded_drafts.lock() {
+        let mut discarded = match self.discarded_input_caches.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         discarded.insert(session_id.to_string());
     }
 
-    pub fn draft_was_discarded(&self, session_id: &str) -> bool {
-        let discarded = match self.discarded_drafts.lock() {
+    pub fn mark_input_cache_discarded(&self, cache_key: &str) {
+        let mut discarded = match self.discarded_input_caches.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
-        discarded.contains(session_id)
+        discarded.insert(cache_key.to_string());
     }
 
-    pub fn draft_revision_was_delivered(&self, session_id: &str, revision: u64) -> bool {
-        let delivered = match self.delivered_draft_revisions.lock() {
+    pub fn input_cache_was_discarded(&self, cache_key: &str) -> bool {
+        let discarded = match self.discarded_input_caches.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        discarded.contains(cache_key)
+    }
+
+    pub fn input_revision_was_delivered(&self, cache_key: &str, revision: u64) -> bool {
+        let delivered = match self.delivered_input_revisions.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         delivered
-            .get(session_id)
+            .get(cache_key)
             .is_some_and(|current| revision <= *current)
     }
 
-    pub fn mark_draft_revision_delivered(&self, session_id: &str, revision: u64) {
-        let mut delivered = match self.delivered_draft_revisions.lock() {
+    pub fn mark_input_revision_delivered(&self, cache_key: &str, revision: u64) {
+        let mut delivered = match self.delivered_input_revisions.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         delivered
-            .entry(session_id.to_string())
+            .entry(cache_key.to_string())
             .and_modify(|current| *current = (*current).max(revision))
             .or_insert(revision);
     }
 
-    /// 冻结一版已归档草稿用于发送。返回被更新 revision 替换的旧租约路径。
-    pub fn register_draft_send_claim(
+    /// 冻结一版已归档输入用于发送。返回被更新 revision 替换的旧租约路径。
+    pub fn register_input_send_claim(
         &self,
         session_id: &str,
         revision: u64,
         attachment_paths: Vec<String>,
     ) -> Result<Vec<String>, String> {
-        let mut claims = match self.draft_send_claims.lock() {
+        let mut claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
         if let Some(existing) = claims.get(session_id) {
             if existing.revision > revision {
-                return Err("该草稿已有更新版本正在准备发送".to_string());
+                return Err("输入框已有更新版本正在准备发送".to_string());
             }
             if existing.revision == revision {
                 if existing.attachment_paths == attachment_paths {
                     return Ok(Vec::new());
                 }
-                return Err("同一草稿版本的附件快照不一致".to_string());
+                return Err("同一输入版本的附件快照不一致".to_string());
             }
         }
         let replaced = claims
             .insert(
                 session_id.to_string(),
-                DraftSendClaim {
+                InputSendClaim {
                     revision,
                     attachment_paths,
                 },
@@ -822,8 +694,8 @@ impl TiangongApp {
         Ok(replaced)
     }
 
-    pub fn has_draft_send_claim(&self, session_id: &str, revision: u64) -> bool {
-        let claims = match self.draft_send_claims.lock() {
+    pub fn has_input_send_claim(&self, session_id: &str, revision: u64) -> bool {
+        let claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
@@ -832,8 +704,8 @@ impl TiangongApp {
             .is_some_and(|claim| claim.revision == revision)
     }
 
-    pub fn release_draft_send_claim(&self, session_id: &str, revision: u64) -> Vec<String> {
-        let mut claims = match self.draft_send_claims.lock() {
+    pub fn release_input_send_claim(&self, session_id: &str, revision: u64) -> Vec<String> {
+        let mut claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
@@ -849,8 +721,8 @@ impl TiangongApp {
         Vec::new()
     }
 
-    pub fn release_any_draft_send_claim(&self, session_id: &str) -> Vec<String> {
-        let mut claims = match self.draft_send_claims.lock() {
+    pub fn release_any_input_send_claim(&self, session_id: &str) -> Vec<String> {
+        let mut claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
@@ -860,8 +732,8 @@ impl TiangongApp {
             .unwrap_or_default()
     }
 
-    pub fn claimed_draft_attachment_paths(&self) -> HashSet<String> {
-        let claims = match self.draft_send_claims.lock() {
+    pub fn claimed_input_attachment_paths(&self) -> HashSet<String> {
+        let claims = match self.input_send_claims.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
@@ -871,16 +743,16 @@ impl TiangongApp {
             .collect()
     }
 
-    pub fn draft_update_lock(&self, session_id: &str) -> std::sync::Arc<AsyncMutex<()>> {
-        let mut locks = match self.draft_update_locks.lock() {
+    pub fn input_cache_update_lock(&self, cache_key: &str) -> std::sync::Arc<AsyncMutex<()>> {
+        let mut locks = match self.input_cache_update_locks.lock() {
             Ok(guard) => guard,
             Err(err) => {
-                warn!(error = %err, "draft_update_locks 锁已污染，尝试恢复");
+                warn!(error = %err, "input_cache_update_locks 锁已污染，尝试恢复");
                 err.into_inner()
             }
         };
         locks
-            .entry(session_id.to_string())
+            .entry(cache_key.to_string())
             .or_insert_with(|| std::sync::Arc::new(AsyncMutex::new(())))
             .clone()
     }
@@ -898,26 +770,33 @@ impl TiangongApp {
     }
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
-        let base = self.config.snapshot();
         // config registry 是唯一真相源（issue #245 整改方案）。
         // 不再从 app-state 反向同步到 registry——数据流单向：
         // tiangong-config → CoreConfig → CoreManager → Core
-        let (template, session_configs) = self
-            .with_state_read(|core_state| {
-                let template = core_state.build_core_config_for_session_from_base(&base, "");
-                let session_configs = core_state
-                    .session_metadata()
-                    .iter()
-                    .map(|metadata| {
-                        (
-                            metadata.id.clone(),
-                            core_state.build_core_config_for_session_from_base(&base, &metadata.id),
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
-                Ok((template, session_configs))
-            })
+        let (app_config, agent_config) = self
+            .with_state_read(|state| Ok((state.config.clone(), state.agent_config.clone())))
             .await?;
+        let mut template = app_config.to_core_config();
+        template.trust_mode = agent_config.default_trust_mode;
+        template.default_trust_mode = agent_config.default_trust_mode;
+        template.reasoning_effort = agent_config.reasoning_effort.clone();
+        let session_configs = self
+            .core_manager
+            .list_session_metadata()
+            .iter()
+            .map(|metadata| {
+                let mut config = template.clone();
+                config.trust_mode = metadata.trust_mode;
+                config.reasoning_effort = metadata
+                    .reasoning_effort
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|effort| !effort.is_empty())
+                    .unwrap_or(&agent_config.reasoning_effort)
+                    .to_string();
+                (metadata.id.clone(), config)
+            })
+            .collect::<HashMap<_, _>>();
         // 总是热更存活 Core 的配置(replace_config + set_trust_mode)。
         // 能力集合变化时,存活 Core 的插件列表不变(构造时固定),
         // 但 endpoint/trust 等配置会热更——这是期望行为。
@@ -954,23 +833,64 @@ impl TiangongApp {
     pub(crate) async fn ensure_core(
         &self,
         session_id: &str,
-        session: tiangong_core::session::Session,
+        workspace_dir: Option<String>,
+        initial_trust_mode: Option<tiangong_types::TrustMode>,
+        initial_reasoning_effort: Option<String>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
-        let base = self.config.snapshot();
-        let session_config = {
-            let core_state = self.state.lock().await;
-            core_state.build_core_config_for_session_from_base(&base, session_id)
-        };
+        let (app_config, agent_config, default_workspace_dir) = self
+            .with_state_read(|state| {
+                Ok((
+                    state.config.clone(),
+                    state.agent_config.clone(),
+                    state.workspace_dir.clone(),
+                ))
+            })
+            .await
+            .unwrap_or_default();
+        let mut session_config = app_config.to_core_config();
+        session_config.default_trust_mode = agent_config.default_trust_mode;
+        let metadata = self
+            .core_manager
+            .list_session_metadata()
+            .into_iter()
+            .find(|metadata| metadata.id == session_id);
+        let workspace_dir = metadata
+            .as_ref()
+            .map(|metadata| metadata.cwd.trim())
+            .filter(|cwd| !cwd.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| workspace_dir.filter(|cwd| !cwd.trim().is_empty()))
+            .unwrap_or(default_workspace_dir);
+        if let Some(metadata) = metadata {
+            session_config.trust_mode = metadata.trust_mode;
+            session_config.reasoning_effort = metadata
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .unwrap_or(&agent_config.reasoning_effort)
+                .to_string();
+        } else {
+            session_config.trust_mode =
+                initial_trust_mode.unwrap_or(agent_config.default_trust_mode);
+            session_config.reasoning_effort = initial_reasoning_effort
+                .filter(|effort| !effort.trim().is_empty())
+                .unwrap_or(agent_config.reasoning_effort);
+        }
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
-        let plugins = self.desktop_factory.build_plugins().await;
+        let plugins = self.desktop_factory.build_plugins(app_config.models).await;
         let ensured = self
             .core_manager
-            .ensure_core(session_id, session_config, stream_tx, plugins)
+            .ensure_core(
+                session_id,
+                session_config,
+                workspace_dir,
+                stream_tx,
+                plugins,
+            )
             .await
             .expect("ensure_core 不应失败");
-        // session 参数的 trust_mode 仅供既有 Core 刷新(ensure_core 内已用 config.trust_mode)。
-        let _ = session;
         EnsuredCore {
             session_id: ensured.session_id,
             is_new: ensured.is_new,
@@ -1072,6 +992,7 @@ impl TiangongApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn same_session_core_creation_uses_one_serial_boundary() {
@@ -1129,6 +1050,7 @@ mod tests {
             .stream_tx(event_tx)
             .plugins(Vec::new())
             .storage_root(storage_root.path())
+            .workspace_dir(storage_root.path().to_string_lossy())
             .trust_mode(session.trust_mode)
             .build();
         assert!(core.is_stopped(), "新 Core 当前没有活跃 turn");

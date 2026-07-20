@@ -2,15 +2,24 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
-use tiangong_app_state::app_state::TiangongState;
-
 use crate::args::{PromptArgs, PromptSubcommand};
 
+/// 读取当前自定义 Prompt（issue #245：真相源归 tiangong-config registry）。
+fn current_custom_prompt() -> String {
+    tiangong_config::registry::config().custom_system_prompt
+}
+
+/// 更新自定义 Prompt：写盘成功后同步内存 registry（空串等价于清除）。
+fn set_custom_prompt(content: String) -> Result<()> {
+    let mut config = tiangong_config::registry::config();
+    config.custom_system_prompt = content;
+    tiangong_config::registry::update(config)
+}
+
 pub(crate) fn run_prompt_command(args: PromptArgs) -> Result<()> {
-    let mut state = TiangongState::load_or_default();
     match args.command {
         PromptSubcommand::Show => {
-            let prompt = state.custom_system_prompt();
+            let prompt = current_custom_prompt();
             if prompt.trim().is_empty() {
                 println!("（未设置自定义 Prompt）");
             } else {
@@ -29,21 +38,21 @@ pub(crate) fn run_prompt_command(args: PromptArgs) -> Result<()> {
                 }
             };
             let char_count = content.chars().count();
-            state.set_custom_system_prompt(content)?;
+            set_custom_prompt(content)?;
             println!("自定义 Prompt 已保存（{char_count} 字）");
         }
         PromptSubcommand::Edit => {
-            let content = edit_via_editor(state.custom_system_prompt().to_string())?;
+            let content = edit_via_editor(current_custom_prompt())?;
             let char_count = content.chars().count();
-            state.set_custom_system_prompt(content)?;
+            set_custom_prompt(content)?;
             println!("自定义 Prompt 已保存（{char_count} 字）");
         }
         PromptSubcommand::Clear => {
-            state.set_custom_system_prompt(String::new())?;
+            set_custom_prompt(String::new())?;
             println!("自定义 Prompt 已清空");
         }
         PromptSubcommand::Path => {
-            let path = state.custom_prompt_path();
+            let path = tiangong_config::io::custom_prompt_path();
             println!("{}", path.display());
         }
     }

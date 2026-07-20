@@ -12,7 +12,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use silent::Scheduler;
 use silent::prelude::*;
-use tiangong_app_state::app_state::TiangongState;
 use tiangong_core::permission::TrustMode;
 use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
@@ -30,23 +29,27 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
         .build()?;
     let _runtime_guard = runtime.enter();
 
-    // 初始化 config 内存单例（从磁盘加载一次）。
-    tiangong_config::registry::init();
-    let mut app_config = tiangong_config::registry::config();
-    app_config.trust_mode = TrustMode::FullTrust;
-    let core_config = app_config.to_core_config();
-
-    let config = tiangong_core::core_config::CoreConfigProvider::new(core_config);
-
     tracing::info!("正在初始化应用状态...");
-    let state: SharedState = Arc::new(Mutex::new(TiangongState::load_or_default()));
-    {
-        let mut guard = state.blocking_lock();
-        let _ = guard.set_trust_mode(TrustMode::FullTrust);
-    }
+    let mut app_state = tiangong_app_state::app_state::TiangongState::new();
+    let storage_root = app_state.config.storage_root.clone();
+    app_state.config.trust_mode = TrustMode::FullTrust;
+    let core_manager = app_state.core_manager.clone();
+    core_manager
+        .config()
+        .replace(app_state.config.to_core_config());
+    app_state.workspace_dir = std::env::current_dir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    app_state.agent_config.trust_mode = TrustMode::FullTrust;
+    let state: SharedState = Arc::new(Mutex::new(app_state));
 
     let event_bus = Arc::new(EventBus::default());
-    let app = Arc::new(ServerAppContext::new(state, config, event_bus.clone()));
+    let app = Arc::new(ServerAppContext::new(
+        state,
+        core_manager,
+        event_bus.clone(),
+        storage_root,
+    ));
 
     tracing::info!("构建路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);

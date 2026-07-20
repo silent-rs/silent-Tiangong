@@ -1,6 +1,6 @@
 import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, useCallback } from 'react';
 import type { SetStateAction } from 'react';
-import { selectCurrentDraftKey, selectCurrentInputDraft, useStore } from '@/store/useStore';
+import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
 import { Textarea } from './ui/textarea';
 import { Button } from './ui/button';
 import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
@@ -45,13 +45,13 @@ const SLASH_COMMANDS: MentionCandidate[] = [
 ];
 
 export function MessageInput() {
-  const draftKey = useStore(selectCurrentDraftKey);
-  const inputDraft = useStore(selectCurrentInputDraft);
-  const inputContent = inputDraft.text;
-  const attachments = inputDraft.attachments;
-  const isSending = inputDraft.is_sending;
-  const setDraftText = useStore((state) => state.setDraftText);
-  const setDraftAttachments = useStore((state) => state.setDraftAttachments);
+  const cacheKey = useStore(selectCurrentInputCacheKey);
+  const inputCache = useStore(selectCurrentInputCache);
+  const inputContent = inputCache.text;
+  const attachments = inputCache.attachments;
+  const isSending = inputCache.is_sending;
+  const setInputCacheText = useStore((state) => state.setInputCacheText);
+  const setInputCacheAttachments = useStore((state) => state.setInputCacheAttachments);
   const sendMessage = useStore((state) => state.sendMessage);
   const appendMessage = useStore((state) => state.appendMessage);
   const cancelTurn = useStore((state) => state.cancelTurn);
@@ -59,7 +59,7 @@ export function MessageInput() {
   const endContextManagement = useStore((state) => state.endContextManagement);
   const runStatus = useStore((state) => state.runStatus);
   const runSummary = useStore((state) => state.runSummary);
-  const isDraft = useStore((state) => state.isDraft);
+  const isNewConversation = useStore((state) => state.isNewConversation);
   const activeSessionId = useStore((state) => state.activeSessionId);
   const currentSessionRunStatus = useStore((state) => (
     state.activeSessionId ? state.sessionRunStatuses[state.activeSessionId] : undefined
@@ -93,17 +93,17 @@ export function MessageInput() {
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   const setInputContent = useCallback((content: string) => {
-    if (draftKey) setDraftText(draftKey, content);
-  }, [draftKey, setDraftText]);
+    if (cacheKey) setInputCacheText(cacheKey, content);
+  }, [cacheKey, setInputCacheText]);
 
   const setAttachments = useCallback((update: SetStateAction<Attachment[]>) => {
-    if (!draftKey) return;
-    const current = useStore.getState().inputDrafts[draftKey]?.attachments ?? [];
+    if (!cacheKey) return;
+    const current = useStore.getState().inputCaches[cacheKey]?.attachments ?? [];
     const next = typeof update === 'function' ? update(current) : update;
-    setDraftAttachments(draftKey, next);
-  }, [draftKey, setDraftAttachments]);
+    setInputCacheAttachments(cacheKey, next);
+  }, [cacheKey, setInputCacheAttachments]);
 
-  const currentRunStatus = isDraft
+  const currentRunStatus = isNewConversation
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const selectedAgent = selectedAgentTab
@@ -165,14 +165,14 @@ export function MessageInput() {
   }, []);
 
   // 当前会话是否空闲
-  const currentSessionStatus = isDraft
+  const currentSessionStatus = isNewConversation
     ? 'idle'
     : currentSessionRunStatus || runStatus;
   const isIdle = currentSessionStatus === 'idle';
   const canSend = !isSending
-    && !!draftKey
+    && !!cacheKey
     && (inputContent.trim().length > 0 || attachments.length > 0);
-  const isTextDropTargetActive = !voiceMode && !!draftKey;
+  const isTextDropTargetActive = !voiceMode && !!cacheKey;
 
   // 推理计时器：仅在执行态（非 idle）运行，实时累计本轮已用时长，
   // 显示在「执行状态」指示器（Circle + runSummary）左侧；回到 idle 归零。
@@ -560,36 +560,36 @@ export function MessageInput() {
     if (!canSend) return;
     setMentionOpen(false);
 
-    // 在任何异步调用前固定目标与完整草稿快照，后续切换会话不改变投递目标。
-    const targetDraftKey = draftKey;
-    if (!targetDraftKey) return;
-    const draftSnapshot = {
-      ...inputDraft,
-      attachments: inputDraft.attachments.map((attachment) => ({ ...attachment })),
+    // 在任何异步调用前固定目标与完整输入快照，后续切换会话不改变投递目标。
+    const targetCacheKey = cacheKey;
+    if (!targetCacheKey) return;
+    const inputSnapshot = {
+      ...inputCache,
+      attachments: inputCache.attachments.map((attachment) => ({ ...attachment })),
     };
 
     // slash command 拦截
-    const trimmed = draftSnapshot.text.trim();
+    const trimmed = inputSnapshot.text.trim();
     if (await executeSlashCommand(trimmed)) {
       return;
     }
-    const content = draftSnapshot.text.trim()
-      || (draftSnapshot.attachments.length > 0 ? '请处理这些附件。' : draftSnapshot.text);
+    const content = inputSnapshot.text.trim()
+      || (inputSnapshot.attachments.length > 0 ? '请处理这些附件。' : inputSnapshot.text);
     if (isIdle) {
       await sendMessage(
-        targetDraftKey,
+        targetCacheKey,
         content,
-        draftSnapshot.attachments,
-        draftSnapshot.revision,
+        inputSnapshot.attachments,
+        inputSnapshot.revision,
         trustMode,
       );
     } else {
       // 执行中：追加消息到正在执行的 turn
       const appended = await appendMessage(
-        targetDraftKey,
+        targetCacheKey,
         content,
-        draftSnapshot.attachments,
-        draftSnapshot.revision,
+        inputSnapshot.attachments,
+        inputSnapshot.revision,
       );
       if (!appended) {
         console.warn('当前会话没有正在执行的任务，追加消息未发送');
@@ -653,13 +653,13 @@ export function MessageInput() {
   const stopVoiceAndSend = useCallback(async () => {
     if (!isRecordingRef.current) return;
     isRecordingRef.current = false;
-    const targetDraftKey = draftKey;
-    if (!targetDraftKey) {
+    const targetCacheKey = cacheKey;
+    if (!targetCacheKey) {
       recording.cancelRecording();
       return;
     }
-    const targetDraft = useStore.getState().inputDrafts[targetDraftKey];
-    if (!targetDraft) {
+    const targetCache = useStore.getState().inputCaches[targetCacheKey];
+    if (!targetCache) {
       recording.cancelRecording();
       return;
     }
@@ -692,7 +692,7 @@ export function MessageInput() {
         // 优先用 API 返回的时长，否则用前端录音计时
         const audioDuration = result.duration || voiceDuration;
 
-        await sendMessage(targetDraftKey, text, [], targetDraft.revision, trustMode);
+        await sendMessage(targetCacheKey, text, [], targetCache.revision, trustMode);
 
         // 轮询等待消息出现后，通过内容匹配关联语音
         const tryAssociate = (retries: number) => {
@@ -718,7 +718,7 @@ export function MessageInput() {
     } finally {
       recording.setState("idle");
     }
-  }, [draftKey, recording, sendMessage, trustMode]);
+  }, [cacheKey, recording, sendMessage, trustMode]);
 
   const cancelVoiceRecording = useCallback(() => {
     if (!isRecordingRef.current) return;
@@ -992,7 +992,7 @@ export function MessageInput() {
                   setTimeout(() => { isComposingRef.current = false; }, 0);
                 }}
                 onBlur={() => setTimeout(() => setMentionOpen(false), 150)}
-                disabled={!draftKey}
+                disabled={!cacheKey}
                 placeholder={
                   isIdle
                     ? agents.length > 0
@@ -1011,7 +1011,7 @@ export function MessageInput() {
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 <Button
                   onClick={handleAttachFiles}
-                  disabled={!draftKey}
+                  disabled={!cacheKey}
                   size="icon"
                   variant="ghost"
                   className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground"

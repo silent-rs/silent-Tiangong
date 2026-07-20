@@ -9658,20 +9658,11 @@ dependencies = [
 name = "tiangong-app-state"
 version = "0.12.2"
 dependencies = [
- "anyhow",
- "chrono",
- "scru128",
  "serde",
- "serde_json",
- "tempfile",
  "tiangong-config",
  "tiangong-core",
  "tiangong-core-manager",
- "tiangong-llm",
  "tiangong-media-archive",
- "tiangong-types",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]
@@ -9681,6 +9672,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "ratatui",
+ "scru128",
  "termimad",
  "tiangong-app-state",
  "tiangong-config",

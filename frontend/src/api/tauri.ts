@@ -15,12 +15,6 @@ export interface Session {
   cwd: string;
 }
 
-export interface DraftSessionCreation {
-  session: Session;
-  activation_epoch: number;
-  previous_active_session_id: string;
-}
-
 export type TabKind = 'browser' | 'terminal';
 
 export interface TabState {
@@ -152,7 +146,7 @@ export interface RawAttachment {
   mime_type?: string;
 }
 
-export interface SessionInputDraft {
+export interface InputCache {
   text: string;
   attachments: RawAttachment[];
   is_sending: boolean;
@@ -228,7 +222,6 @@ export interface RunSnapshot {
   token_stats?: TokenStats;
   current_plan?: TaskPlan;
   messages: Message[];
-  input_draft: string;
   pending_session_ids: string[];
   approval_request_id?: string;
 }
@@ -526,27 +519,6 @@ export const api = {
   setSessionTabs: (sessionId: string, tabs: TabState[], activeTabId: string | null): Promise<void> =>
     invoke('set_session_tabs', { sessionId, tabs, activeTabId }),
 
-  createSession: (): Promise<Session> =>
-    invoke('create_session'),
-
-  createSessionForDraft: (
-    cwd: string,
-    trustMode: string,
-    reasoningEffort: string,
-  ): Promise<DraftSessionCreation> =>
-    invoke('create_session_for_draft', { cwd, trustMode, reasoningEffort }),
-
-  activateDraftSession: (
-    sessionId: string,
-    expectedEpoch: number,
-    expectedActiveSessionId: string,
-  ): Promise<boolean> =>
-    invoke('activate_draft_session', {
-      sessionId,
-      expectedEpoch,
-      expectedActiveSessionId,
-    }),
-
   switchSession: (sessionId: string): Promise<void> =>
     invoke('switch_session', { sessionId }),
 
@@ -573,8 +545,19 @@ export const api = {
     content: string,
     attachments: RawAttachment[],
     revision: number,
+    cwd?: string,
+    trustMode?: string,
+    reasoningEffort?: string,
   ): Promise<void> =>
-    invoke('send_message', { sessionId, content, attachments, revision }),
+    invoke('send_message', {
+      sessionId,
+      content,
+      attachments,
+      revision,
+      cwd,
+      trustMode,
+      reasoningEffort,
+    }),
 
   readAttachmentAsDataUrl: (path: string, maxBase64Bytes?: number): Promise<AttachmentDataUrl> =>
     invoke('read_attachment_as_data_url', { path, maxBase64Bytes }),
@@ -643,24 +626,21 @@ export const api = {
   getRunSnapshot: (): Promise<RunSnapshot> =>
     invoke('get_run_snapshot'),
 
-  newDraftId: (): Promise<string> =>
-    invoke('new_draft_id'),
+  newSessionId: (): Promise<string> =>
+    invoke('new_session_id'),
 
-  migrateInputDraft: (fromSessionId: string, toSessionId: string): Promise<SessionInputDraft> =>
-    invoke('migrate_input_draft', { fromSessionId, toSessionId }),
+  removeInputCache: (cacheKey: string): Promise<void> =>
+    invoke('remove_input_cache', { cacheKey }),
 
-  removeInputDraft: (sessionId: string): Promise<void> =>
-    invoke('remove_input_draft', { sessionId }),
+  getInputCache: (cacheKey: string): Promise<InputCache> =>
+    invoke('get_input_cache', { cacheKey }),
 
-  getInputDraft: (sessionId: string): Promise<SessionInputDraft> =>
-    invoke('get_input_draft', { sessionId }),
-
-  setInputDraft: (
-    sessionId: string,
-    draft: SessionInputDraft,
+  setInputCache: (
+    cacheKey: string,
+    cache: InputCache,
     claimRevision?: number,
-  ): Promise<SessionInputDraft> =>
-    invoke('set_input_draft', { sessionId, draft, claimRevision }),
+  ): Promise<InputCache> =>
+    invoke('set_input_cache', { cacheKey, cache, claimRevision }),
 
   getSessionCwd: (): Promise<string> =>
     invoke('get_session_cwd'),
@@ -1073,28 +1053,9 @@ export const api = {
   browserGlobalHistoryDelete: (url: string): Promise<void> =>
     invoke('plugin:browser|browser_global_history_delete', { url }),
 
-  browserAttachSession: (
-    draftSessionId: string,
-    persistentSessionId: string,
-  ): Promise<void> =>
-    invoke('plugin:browser|browser_attach_session', {
-      draftSessionId,
-      persistentSessionId,
-    }),
-
   // 终端面板（通过 plugin:terminal，按对话 session 路由）
   terminalEnsureSession: (sessionId: string, cwd: string): Promise<boolean> =>
     invoke('plugin:terminal|terminal_ensure_session', { sessionId, cwd }),
-
-  // 把草稿态临时 id 的 PTY 迁移到真实 session_id（草稿态转正时调用）
-  terminalAttachSession: (
-    draftSessionId: string,
-    persistentSessionId: string,
-  ): Promise<void> =>
-    invoke('plugin:terminal|terminal_attach_session', {
-      draftSessionId,
-      persistentSessionId,
-    }),
 
   terminalSessionSendInput: (sessionId: string, input: string): Promise<void> =>
     invoke('plugin:terminal|terminal_session_send_input', { sessionId, input }),

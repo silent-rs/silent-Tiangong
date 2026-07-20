@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque, hash_map::Entry};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -6,28 +6,25 @@ use std::thread;
 use crate::api::SharedState;
 use crate::remote::event::{EventBus, TiangongEvent};
 use anyhow::{Result, anyhow};
-use tiangong_core::agent_input::{AgentInput, AgentInputKind};
-use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::permission::TrustMode;
-use tiangong_core::session::{Message, MessageRole, MessageToolCall, Session, now_text};
+use tiangong_core::session::{MessageRole, Session};
 use tiangong_media_archive::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
 };
 use tiangong_types::{
     ContentBlock, MediaAsset, MediaKind, MessageContent, OutgoingMessage, StreamEvent,
-    stable_content_blocks,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Clone)]
 pub struct ServerCoreManager {
     state: SharedState,
-    config: CoreConfigProvider,
+    core_manager: tiangong_app_state::app_state::CoreManager,
     event_bus: Arc<EventBus>,
     /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
     /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
     mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
-    cores: Arc<Mutex<HashMap<String, tiangong_core::core::TiangongCore>>>,
     /// 同一会话的 Core 创建、消息投递和删除共用这一把锁。
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
@@ -43,16 +40,15 @@ pub struct ServerCoreManager {
 impl ServerCoreManager {
     pub fn new(
         state: SharedState,
-        config: CoreConfigProvider,
+        core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     ) -> Self {
         Self {
             state,
-            config,
+            core_manager,
             event_bus,
             mcp_plugin,
-            cores: Arc::new(Mutex::new(HashMap::new())),
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
@@ -65,17 +61,16 @@ impl ServerCoreManager {
     /// 从 App State 刷新全局模板，并按 session 为每个 Core 替换独立配置快照。
     pub async fn sync_config_from_state(&self) {
         let _config_guard = self.config_update_lock.lock().await;
-        let base = self.config.snapshot();
         let (template, session_configs) = {
             let state = self.state.lock().await;
-            let mut template = state.build_core_config_for_session_from_base(&base, "");
+            let mut template = state.config.to_core_config();
             template.trust_mode = TrustMode::FullTrust;
             let session_configs = state
-                .session_metadata()
+                .core_manager
+                .list_session_metadata()
                 .iter()
                 .map(|metadata| {
-                    let mut config =
-                        state.build_core_config_for_session_from_base(&base, &metadata.id);
+                    let mut config = state.config.to_core_config();
                     config.trust_mode = TrustMode::FullTrust;
                     (metadata.id.clone(), config)
                 })
@@ -83,21 +78,7 @@ impl ServerCoreManager {
             (template, session_configs)
         };
 
-        let cores = match self.cores.lock() {
-            Ok(guard) => guard,
-            Err(error) => {
-                tracing::warn!(error = %error, "会话 Core 锁已损坏，恢复后更新配置");
-                error.into_inner()
-            }
-        };
-        self.config.replace(template);
-        for (session_id, core) in cores.iter() {
-            if let Some(config) = session_configs.get(session_id)
-                && let Err(error) = core.replace_config(config.clone())
-            {
-                tracing::warn!(session_id, error = %error, "会话 Core 配置更新失败");
-            }
-        }
+        self.core_manager.sync_config(template, &session_configs);
     }
 
     fn session_operation_lock(&self, session_id: &str) -> Arc<AsyncMutex<()>> {
@@ -170,6 +151,12 @@ impl ServerCoreManager {
         let _wait_guard = wait_lock.lock().await;
         let session_lock = self.session_operation_lock(&requested_session_id);
         let session_guard = session_lock.lock().await;
+        let session_existed = self
+            .state
+            .lock()
+            .await
+            .core_manager
+            .session_exists(&requested_session_id);
         let (session_id, capabilities) = self.ensure_core_locked(&requested_session_id).await?;
 
         let msg_id = message_id.unwrap_or_else(|| scru128::new().to_string());
@@ -186,6 +173,15 @@ impl ServerCoreManager {
             cleanup_created_attachment_paths(&created_paths).ok();
             tracker.cancel_turn(turn_id);
             return Err(error);
+        }
+        if !session_existed {
+            let mut state = self.state.lock().await;
+            if state.active_session_id.trim().is_empty() {
+                state.active_session_id = session_id.clone();
+            }
+            drop(state);
+            self.event_bus
+                .publish(TiangongEvent::SessionCreated(session_id.clone()));
         }
         // 消息已入队；完整 turn 可能持续较久，释放锁让 DELETE 可以取消 Core。
         drop(session_guard);
@@ -229,31 +225,11 @@ impl ServerCoreManager {
         let session_lock = self.session_operation_lock(&session_id);
         let _session_guard = session_lock.lock().await;
 
-        let core = self
-            .cores
-            .lock()
-            .map_err(|error| anyhow!("会话 Core 锁已损坏：{error}"))?
-            .remove(&session_id);
-        if let Some(core) = core {
-            if let Err(error) = core.deliver(AgentInputKind::cancel()) {
-                tracing::warn!(session_id, error = %error, "删除会话前触发 Core 取消失败");
-            }
-            let joined_session_id = session_id.clone();
-            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    // worker 已完成 join；即使它以 panic 结束，也不再有后台写入者。
-                    tracing::warn!(
-                        session_id = joined_session_id,
-                        error = %error,
-                        "删除会话前关闭 Core 失败"
-                    );
-                }
-                Err(error) => {
-                    return Err(anyhow!("删除会话前等待 Core 关闭失败：{error}"));
-                }
-            }
-        }
+        let existed = self.core_manager.session_exists(&session_id);
+        self.core_manager
+            .delete_session(&session_id)
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         self.core_attachment_capabilities
             .lock()
@@ -268,11 +244,13 @@ impl ServerCoreManager {
             .map_err(|error| anyhow!("远程会话映射锁已损坏：{error}"))?
             .retain(|_, mapped_session_id| mapped_session_id != &session_id);
 
-        let mut state = self.state.lock().await;
-        if !state.session_metadata().iter().any(|m| m.id == session_id) {
+        if !existed {
             return Ok(false);
         }
-        state.delete_session_by_id(&session_id)?;
+        let mut state = self.state.lock().await;
+        if state.active_session_id == session_id {
+            state.active_session_id.clear();
+        }
         Ok(true)
     }
 
@@ -284,7 +262,7 @@ impl ServerCoreManager {
         capabilities: AttachmentCapabilitySnapshot,
     ) -> Result<(AttachmentTransaction, Vec<ContentBlock>)> {
         let raw = media.into_iter().map(raw_attachment_from_media).collect();
-        let media_root = tiangong_app_state::app_state::storage_root().join("media");
+        let media_root = self.state.lock().await.config.storage_root.join("media");
         tokio::task::spawn_blocking(move || {
             prepare_user_message_blocking(media_root, raw, message_id, content, capabilities)
         })
@@ -299,20 +277,13 @@ impl ServerCoreManager {
         message_id: &str,
         prepared: Vec<ContentBlock>,
     ) -> Result<()> {
-        let cores = self
-            .cores
-            .lock()
-            .map_err(|error| anyhow!("会话 Core 锁已损坏：{error}"))?;
-        let core = cores
-            .get(session_id)
-            .ok_or_else(|| anyhow!("会话 core 不存在：{session_id}"))?;
-        core.deliver(
-            tiangong_core::agent_input::AgentInputKind::prepared_with_id(
-                message_id.to_string(),
-                prepared,
-            ),
-        )
-        .map_err(|error| anyhow!("消息投递失败：{error}"))
+        self.core_manager
+            .deliver_to_core_if_live(
+                session_id,
+                AgentInputKind::prepared_with_id(message_id.to_string(), prepared),
+            )
+            .then_some(())
+            .ok_or_else(|| anyhow!("消息投递失败：会话 Core 不存在或已关闭"))
     }
 
     /// 调用方必须持有目标 session 的 `session_operation_lock`。
@@ -321,30 +292,8 @@ impl ServerCoreManager {
         requested_session_id: &str,
     ) -> Result<(String, AttachmentCapabilitySnapshot)> {
         let session_id = normalize_session_id(requested_session_id)?;
-        {
-            let state = self.state.lock().await;
-            if !state.session_metadata().iter().any(|m| m.id == session_id) {
-                return Err(anyhow!("会话不存在：{session_id}"));
-            }
-        }
 
-        // 先检查是否已有可用 Core；事件流已关闭的僵尸实例必须先移除再重建。
-        let has_live_core = {
-            let mut cores = self.cores.lock().unwrap();
-            match cores.get(&session_id) {
-                Some(core) if !core.is_stopped() => true,
-                Some(_) => {
-                    cores.remove(&session_id);
-                    self.core_attachment_capabilities
-                        .lock()
-                        .unwrap()
-                        .remove(&session_id);
-                    false
-                }
-                None => false,
-            }
-        };
-        if has_live_core {
+        if self.core_manager.has_live_core(&session_id) {
             let capabilities = self
                 .core_attachment_capabilities
                 .lock()
@@ -359,7 +308,7 @@ impl ServerCoreManager {
 
         // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
-            self.config.generation(),
+            self.core_manager.config().generation(),
             tiangong_memory::ProcessType::Server,
         )
         .await;
@@ -368,22 +317,7 @@ impl ServerCoreManager {
 
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
         // 这里同时防御未来新增的未加锁入口。
-        let has_live_core = {
-            let mut cores = self.cores.lock().unwrap();
-            match cores.get(&session_id) {
-                Some(core) if !core.is_stopped() => true,
-                Some(_) => {
-                    cores.remove(&session_id);
-                    self.core_attachment_capabilities
-                        .lock()
-                        .unwrap()
-                        .remove(&session_id);
-                    false
-                }
-                None => false,
-            }
-        };
-        if has_live_core {
+        if self.core_manager.has_live_core(&session_id) {
             let capabilities = self
                 .core_attachment_capabilities
                 .lock()
@@ -394,140 +328,141 @@ impl ServerCoreManager {
             return Ok((session_id, capabilities));
         }
 
-        // 删除或其他状态变化若绕过了会话锁，禁止使用 await 前的旧快照复活 Core。
-        let base = self.config.snapshot();
-        let mut session_config = {
+        let (mut session_config, models, storage_root, workspace_dir) = {
             let state = self.state.lock().await;
-            if !state.session_metadata().iter().any(|m| m.id == session_id) {
-                return Err(anyhow!("会话不存在：{session_id}"));
-            }
-            state.build_core_config_for_session_from_base(&base, &session_id)
+            let workspace_dir = state
+                .core_manager
+                .list_session_metadata()
+                .into_iter()
+                .find(|metadata| metadata.id == session_id)
+                .map(|metadata| metadata.cwd)
+                .filter(|cwd| !cwd.trim().is_empty())
+                .unwrap_or_else(|| state.workspace_dir.clone());
+            (
+                state.config.to_core_config(),
+                state.config.models.clone(),
+                state.config.storage_root.clone(),
+                workspace_dir,
+            )
         };
         session_config.trust_mode = TrustMode::FullTrust;
 
-        let models = tiangong_config::registry::models();
         let attachment_capabilities = attachment_capability_snapshot(&models);
-        let storage_root = tiangong_app_state::app_state::storage_root();
-        let core = tiangong_core::core::TiangongCore::builder()
-            .session_id(session_id.clone())
-            .config(isolated_core_config_provider(&session_config))
-            .trust_mode(session_config.trust_mode)
-            .storage_root(storage_root.clone())
-            .stream_tx(stream_tx)
-            .plugins({
-                // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-                // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
-                // 看到的能力与该 Core 实际注册插件一致。
-                use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-                let resolve_ep = |cap: ModelCapability| {
-                    models
-                        .resolve_for_capability(cap)
-                        .map(ModelEndpoint::from_resolved)
-                };
-                let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
-                let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-                let tts_endpoint = resolve_ep(ModelCapability::Tts);
-                let stt_endpoint = resolve_ep(ModelCapability::Stt);
-                let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
-                    && !models.chat_is_multimodal()
-                {
-                    resolve_ep(ModelCapability::Multimodal)
-                } else {
-                    None
-                };
-                // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-                let mut plugins = tiangong_plugin_prompt::default_plugins();
-                plugins.extend(tiangong_plugin_fs::default_plugins());
-                plugins.extend(tiangong_plugin_index::default_plugins());
-                if let Some(ep) = image_endpoint.clone() {
-                    plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                }
-                if let Some(ep) = video_endpoint.clone() {
-                    plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
-                if let Some(ep) = tts_endpoint.clone() {
-                    plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                }
-                if let Some(ep) = stt_endpoint.clone() {
-                    plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                }
-                plugins.extend(tiangong_plugin_memory::default_plugins(
-                    memory_handle.clone(),
-                ));
-                plugins.extend(tiangong_plugin_fetch::default_plugins());
-                plugins.extend(tiangong_plugin_command::default_plugins());
-                plugins.extend(tiangong_plugin_scheduler::default_plugins());
-                plugins.extend(tiangong_plugin_task::default_plugins());
-                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                    plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
-                // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
-                // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
-                plugins.extend(tiangong_plugin_skill::default_plugins());
-                // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
-                // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
-                //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
-                plugins.push(self.mcp_plugin.clone());
-                // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-                // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
-                let child_plugin_factory: Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
-                    Arc::new({
-                        let storage_root = storage_root.clone();
-                        move || {
-                            let mut child_plugins = tiangong_plugin_prompt::default_plugins();
-                            child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                            child_plugins.extend(tiangong_plugin_index::default_plugins());
-                            if let Some(ep) = image_endpoint.clone() {
-                                child_plugins
-                                    .push(tiangong_plugin_generate_image::build_plugin(ep));
-                            }
-                            if let Some(ep) = video_endpoint.clone() {
-                                child_plugins
-                                    .push(tiangong_plugin_generate_video::build_plugin(ep));
-                            }
-                            if let Some(ep) = tts_endpoint.clone() {
-                                child_plugins
-                                    .push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                            }
-                            if let Some(ep) = stt_endpoint.clone() {
-                                child_plugins
-                                    .push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                            }
-                            child_plugins.extend(tiangong_plugin_memory::default_plugins(
-                                memory_handle.clone(),
-                            ));
-                            child_plugins.extend(tiangong_plugin_fetch::default_plugins());
-                            child_plugins.extend(tiangong_plugin_command::default_plugins());
-                            child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
-                            child_plugins.extend(tiangong_plugin_task::default_plugins());
-                            if let Some(client) =
-                                multimodal_endpoint.clone().map(SingleProviderClient::new)
-                            {
-                                child_plugins
-                                    .push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                            }
-                            child_plugins.extend(tiangong_plugin_skill::default_plugins());
-                            child_plugins.push(Arc::new(
-                                tiangong_plugin_mcp::McpPlugin::with_storage_root(
-                                    storage_root.clone(),
-                                ),
-                            ));
-                            child_plugins
+        let plugins = {
+            // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
+            // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
+            // 看到的能力与该 Core 实际注册插件一致。
+            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+            let resolve_ep = |cap: ModelCapability| {
+                models
+                    .resolve_for_capability(cap)
+                    .map(ModelEndpoint::from_resolved)
+            };
+            let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+            let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+            let tts_endpoint = resolve_ep(ModelCapability::Tts);
+            let stt_endpoint = resolve_ep(ModelCapability::Stt);
+            let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
+                && !models.chat_is_multimodal()
+            {
+                resolve_ep(ModelCapability::Multimodal)
+            } else {
+                None
+            };
+            // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
+            let mut plugins = tiangong_plugin_prompt::default_plugins();
+            plugins.extend(tiangong_plugin_fs::default_plugins());
+            plugins.extend(tiangong_plugin_index::default_plugins());
+            if let Some(ep) = image_endpoint.clone() {
+                plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+            }
+            if let Some(ep) = video_endpoint.clone() {
+                plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+            }
+            if let Some(ep) = tts_endpoint.clone() {
+                plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+            }
+            if let Some(ep) = stt_endpoint.clone() {
+                plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+            }
+            plugins.extend(tiangong_plugin_memory::default_plugins(
+                memory_handle.clone(),
+            ));
+            plugins.extend(tiangong_plugin_fetch::default_plugins());
+            plugins.extend(tiangong_plugin_command::default_plugins());
+            plugins.extend(tiangong_plugin_scheduler::default_plugins());
+            plugins.extend(tiangong_plugin_task::default_plugins());
+            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+            }
+            // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
+            // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
+            plugins.extend(tiangong_plugin_skill::default_plugins());
+            // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
+            // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
+            //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
+            plugins.push(self.mcp_plugin.clone());
+            // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
+            // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
+            let child_plugin_factory: Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
+                Arc::new({
+                    let storage_root = storage_root.clone();
+                    move || {
+                        let mut child_plugins = tiangong_plugin_prompt::default_plugins();
+                        child_plugins.extend(tiangong_plugin_fs::default_plugins());
+                        child_plugins.extend(tiangong_plugin_index::default_plugins());
+                        if let Some(ep) = image_endpoint.clone() {
+                            child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                         }
-                    });
-                plugins.extend(tiangong_plugin_agent_team::default_plugins(
-                    storage_root.clone(),
-                    child_plugin_factory,
-                ));
-                plugins
-            })
-            .build();
-        core.set_trust_mode(TrustMode::FullTrust);
-        let actual_session_id = core.session_id().to_string();
-        let installed =
-            self.install_core_if_absent(&actual_session_id, core, attachment_capabilities)?;
+                        if let Some(ep) = video_endpoint.clone() {
+                            child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                        }
+                        if let Some(ep) = tts_endpoint.clone() {
+                            child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                        }
+                        if let Some(ep) = stt_endpoint.clone() {
+                            child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                        }
+                        child_plugins.extend(tiangong_plugin_memory::default_plugins(
+                            memory_handle.clone(),
+                        ));
+                        child_plugins.extend(tiangong_plugin_fetch::default_plugins());
+                        child_plugins.extend(tiangong_plugin_command::default_plugins());
+                        child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
+                        child_plugins.extend(tiangong_plugin_task::default_plugins());
+                        if let Some(client) =
+                            multimodal_endpoint.clone().map(SingleProviderClient::new)
+                        {
+                            child_plugins
+                                .push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                        }
+                        child_plugins.extend(tiangong_plugin_skill::default_plugins());
+                        child_plugins.push(Arc::new(
+                            tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+                        ));
+                        child_plugins
+                    }
+                });
+            plugins.extend(tiangong_plugin_agent_team::default_plugins(
+                storage_root.clone(),
+                child_plugin_factory,
+            ));
+            plugins
+        };
+        let ensured = self
+            .core_manager
+            .ensure_core(
+                &session_id,
+                session_config,
+                workspace_dir,
+                stream_tx,
+                plugins,
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let actual_session_id = ensured.session_id;
 
-        if !installed {
+        if !ensured.is_new {
             let capabilities = self
                 .core_attachment_capabilities
                 .lock()
@@ -538,33 +473,15 @@ impl ServerCoreManager {
             return Ok((actual_session_id, capabilities));
         }
 
+        self.core_attachment_capabilities
+            .lock()
+            .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
+            .insert(actual_session_id.clone(), attachment_capabilities);
+
         let tracker = self.tracker_for(&actual_session_id);
         self.spawn_stream_forwarder(actual_session_id.clone(), stream_rx, tracker);
 
         Ok((actual_session_id, attachment_capabilities))
-    }
-
-    fn install_core_if_absent(
-        &self,
-        session_id: &str,
-        core: tiangong_core::core::TiangongCore,
-        attachment_capabilities: AttachmentCapabilitySnapshot,
-    ) -> Result<bool> {
-        let mut cores = self
-            .cores
-            .lock()
-            .map_err(|error| anyhow!("会话 Core 锁已损坏：{error}"))?;
-        match cores.entry(session_id.to_string()) {
-            Entry::Occupied(_) => Ok(false),
-            Entry::Vacant(entry) => {
-                self.core_attachment_capabilities
-                    .lock()
-                    .map_err(|error| anyhow!("附件能力快照锁已损坏：{error}"))?
-                    .insert(session_id.to_string(), attachment_capabilities);
-                entry.insert(core);
-                Ok(true)
-            }
-        }
     }
 
     async fn resolve_connector_session_id(
@@ -575,7 +492,7 @@ impl ServerCoreManager {
         let channel_id = channel_id.trim();
         if channel_id.is_empty() {
             let state = self.state.lock().await;
-            return Ok(state.active_session_id().to_string());
+            return Ok(state.active_session_id.as_str().to_string());
         }
 
         let key = remote_session_key(connector, channel_id);
@@ -585,25 +502,15 @@ impl ServerCoreManager {
 
         let title = remote_session_title(connector, channel_id);
         let session_id = {
-            let mut state = self.state.lock().await;
-            if state.session_metadata().iter().any(|m| m.id == channel_id) {
+            let state = self.state.lock().await;
+            let sessions = state.core_manager.list_session_metadata();
+            if sessions.iter().any(|metadata| metadata.id == channel_id) {
                 channel_id.to_string()
-            } else if let Some(metadata) = state
-                .session_metadata()
-                .iter()
-                .find(|metadata| metadata.title == title)
+            } else if let Some(metadata) = sessions.iter().find(|metadata| metadata.title == title)
             {
                 metadata.id.clone()
             } else {
-                let mut session =
-                    Session::new_isolated(title, &tiangong_app_state::app_state::storage_root());
-                session.trust_mode = TrustMode::FullTrust;
-                let session_id = session.id.clone();
-                state.add_session(session);
-                state.persist_session(&session_id)?;
-                self.event_bus
-                    .publish(TiangongEvent::SessionCreated(session_id.clone()));
-                session_id
+                scru128::new().to_string()
             }
         };
 
@@ -620,13 +527,11 @@ impl ServerCoreManager {
         stream_rx: mpsc::Receiver<StreamEvent>,
         tracker: Arc<ExecutionTracker>,
     ) {
-        let state = self.state.clone();
         let event_bus = self.event_bus.clone();
         thread::spawn(move || {
             for event in stream_rx {
-                sync_stream_event_to_state(&state, &event_bus, &session_id, &event);
-                // 终态先完成 Core 权威会话重载，再唤醒等待者；否则等待线程可能读到
-                // 尚未提交的流式镜像。
+                sync_stream_event_to_state(&event_bus, &session_id, &event);
+                // 先发布终态事件，再唤醒本次调用的等待者。
                 tracker.observe_event(&event);
             }
             tracker.fail_all("Core 事件流已关闭");
@@ -643,10 +548,8 @@ impl ServerCoreManager {
 
     async fn last_assistant_outgoing(&self, session_id: &str) -> (OutgoingMessage, bool) {
         // 消息遍历需完整 Session;从磁盘 load(issue #245:真相源归磁盘)。
-        let Ok(session) = tiangong_core::session::Session::load_from_storage(
-            &tiangong_config::io::storage_root(),
-            session_id,
-        ) else {
+        let core_manager = self.state.lock().await.core_manager.clone();
+        let Ok(session) = core_manager.load_session(session_id) else {
             return (text_outgoing("处理完成"), false);
         };
         assistant_outgoing_after_last_user(&session)
@@ -804,10 +707,6 @@ fn normalize_session_id(session_id: &str) -> Result<String> {
         return Err(anyhow!("会话 ID 不能为空"));
     }
     Ok(session_id.to_string())
-}
-
-fn isolated_core_config_provider(config: &CoreConfig) -> CoreConfigProvider {
-    CoreConfigProvider::new(config.clone())
 }
 
 fn prepare_user_message_blocking(
@@ -1018,13 +917,7 @@ fn remove_turn_state(state: &mut ExecutionTrackerState, turn_id: u64) {
     state.outcomes.remove(&turn_id);
 }
 
-fn sync_stream_event_to_state(
-    state: &SharedState,
-    event_bus: &Arc<EventBus>,
-    session_id: &str,
-    event: &StreamEvent,
-) {
-    let mut state = state.blocking_lock();
+fn sync_stream_event_to_state(event_bus: &Arc<EventBus>, session_id: &str, event: &StreamEvent) {
     let completion_event = match event {
         StreamEvent::Done { .. } => Some(true),
         StreamEvent::Error { .. } => Some(false),
@@ -1032,315 +925,11 @@ fn sync_stream_event_to_state(
     };
 
     if let Some(success) = completion_event {
-        // Core 只会在最终会话状态落盘后发送终态。此时整会话重载，保留宿主累计的
-        // token 指标并覆盖流式 reducer 生成的临时/近似消息。
-        if let Err(error) = state.reload_session_from_disk(session_id) {
-            tracing::warn!(%error, %session_id, "终态重载 Core 会话失败");
-        }
-        let _ = state.persist_app_only();
-        drop(state);
         event_bus.publish(TiangongEvent::TurnCompleted {
             session_id: session_id.to_string(),
             success,
         });
-        return;
     }
-
-    let Some(session) = state.sessions_mut().iter_mut().find(|s| s.id == session_id) else {
-        return;
-    };
-
-    match event {
-        StreamEvent::UserMessage {
-            message_id,
-            content,
-            content_blocks,
-            media,
-            model_excluded,
-        } => {
-            apply_user_message_event(
-                session,
-                message_id,
-                content,
-                content_blocks,
-                media,
-                *model_excluded,
-            );
-        }
-        StreamEvent::SessionMessageUpsert {
-            message,
-            deferred_tool_injections,
-        } => {
-            if let Some(existing) = session
-                .messages
-                .iter_mut()
-                .find(|existing| existing.id == message.id)
-            {
-                *existing = message.clone();
-            } else {
-                session.messages.push(message.clone());
-            }
-            if let Some(injections) = deferred_tool_injections {
-                session.deferred_tool_injections = injections.clone();
-            }
-        }
-        StreamEvent::DeferredToolInjectionsChanged { injections } => {
-            session.deferred_tool_injections = injections.clone();
-        }
-        StreamEvent::Delta {
-            message_id,
-            content,
-        }
-        | StreamEvent::ReactText {
-            message_id,
-            content,
-        }
-        | StreamEvent::SummaryText {
-            message_id,
-            content,
-        } => append_assistant_delta(session, message_id, content),
-        StreamEvent::PhaseChanged { .. } => {}
-        StreamEvent::Reasoning {
-            message_id,
-            content,
-        } => append_assistant_reasoning(session, message_id, content),
-        StreamEvent::ToolCalls {
-            message_id, calls, ..
-        } => {
-            finalize_assistant_tool_calls(session, message_id, calls);
-        }
-        StreamEvent::ToolStart { .. } => {
-            // 工具开始不再写 System 摘要——避免运行记录污染系统规则
-        }
-        StreamEvent::ToolResult {
-            name,
-            tool_call_id,
-            ok,
-            output,
-            full_output,
-            duration_ms: _,
-        } => {
-            let persisted_output = full_output.as_deref().unwrap_or(output);
-
-            append_tool_result_message(
-                session,
-                tool_call_id.as_deref(),
-                name,
-                persisted_output.to_string(),
-                !*ok,
-            );
-        }
-        StreamEvent::TokenUsage {
-            usage,
-            current_tokens,
-            compression_threshold_tokens,
-            context_limit_tokens,
-            agent_id,
-            ..
-        } => {
-            if usage.total_tokens > 0 {
-                session.token_usage.accumulate(usage);
-            }
-            if let Some(current_tokens) = current_tokens {
-                if let Some(aid) = agent_id {
-                    session.active_agent_id = Some(aid.clone());
-                    session.active_agent_current_tokens =
-                        *current_tokens.max(&session.active_agent_current_tokens);
-                } else {
-                    session.current_tokens = (*current_tokens).max(session.current_tokens);
-                }
-            }
-            if let Some(compression_threshold_tokens) = compression_threshold_tokens {
-                session.compression_threshold_tokens = *compression_threshold_tokens;
-            }
-            if let Some(context_limit_tokens) = context_limit_tokens {
-                session.context_limit_tokens = *context_limit_tokens;
-            }
-        }
-        StreamEvent::ApprovalNeeded { .. } => {}
-        StreamEvent::Done { .. } | StreamEvent::Error { .. } => {
-            unreachable!("终态已在会话借用前处理")
-        }
-        StreamEvent::Retry { .. } => {}
-        _ => {}
-    }
-    drop(state);
-}
-
-fn apply_user_message_event(
-    session: &mut Session,
-    message_id: &str,
-    content: &str,
-    content_blocks: &[tiangong_types::ContentBlock],
-    media: &[MediaAsset],
-    model_excluded: bool,
-) -> bool {
-    let existing = session
-        .messages
-        .iter()
-        .position(|message| message.id == message_id && message.role == MessageRole::User)
-        .map(|index| session.messages.remove(index));
-    let prepared = if !content_blocks.is_empty() {
-        stable_content_blocks(content_blocks)
-    } else {
-        // 兼容旧 Core/历史入口；这里的 media 已由入口归档为稳定本地引用。
-        let mut blocks = vec![tiangong_types::ContentBlock::text(content.to_string())];
-        blocks.extend(media.iter().map(MediaAsset::to_content_block));
-        stable_content_blocks(&blocks)
-    };
-    if let Some(mut message) = existing {
-        // 旧 Core 只会重发文本/media 为空的状态事件；此时保留宿主已经同步的
-        // 稳定内容块，只更新可见性并把消息移动到当前轮次末尾。
-        if !content_blocks.is_empty()
-            || !media.is_empty()
-            || message.content.is_empty()
-            || message.text_content() != content
-        {
-            message.content = prepared;
-        }
-        message.model_excluded = model_excluded;
-        session.messages.push(message);
-    } else {
-        session.append_prepared_user_message_with_id(message_id.to_string(), prepared);
-        session.set_message_model_excluded(message_id, model_excluded);
-    }
-    true
-}
-
-fn append_assistant_delta(session: &mut Session, message_id: &str, content: &str) {
-    if content.trim().is_empty()
-        && !session
-            .messages
-            .iter()
-            .any(|message| message.id == message_id)
-    {
-        return;
-    }
-    ensure_assistant_message(session, message_id);
-    if let Some(message) = session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == message_id)
-    {
-        if message.text_content().trim().is_empty() && content.trim().is_empty() {
-            return;
-        }
-        match message.content.last_mut() {
-            Some(tiangong_types::ContentBlock::Text { text }) => text.push_str(content),
-            _ => message
-                .content
-                .push(tiangong_types::ContentBlock::text(content.to_string())),
-        }
-    }
-}
-
-fn append_assistant_reasoning(session: &mut Session, message_id: &str, content: &str) {
-    ensure_assistant_message(session, message_id);
-    if let Some(message) = session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == message_id)
-    {
-        message.reasoning_content.push_str(content);
-    }
-}
-
-fn cleanup_latest_assistant_before_tool_calls(session: &mut Session) {
-    let Some(index) = session
-        .messages
-        .iter()
-        .rposition(|message| message.role == MessageRole::Assistant)
-    else {
-        return;
-    };
-
-    let message = &mut session.messages[index];
-    if !message.text_content().trim().is_empty() {
-        return;
-    }
-    message.content.clear();
-    if message.reasoning_content.trim().is_empty() && !message.has_media() {
-        session.messages.remove(index);
-    }
-}
-
-fn finalize_assistant_tool_calls(
-    session: &mut Session,
-    message_id: &str,
-    calls: &[tiangong_types::StreamToolCall],
-) {
-    if calls.is_empty() {
-        cleanup_latest_assistant_before_tool_calls(session);
-        return;
-    }
-    ensure_assistant_message(session, message_id);
-    if let Some(message) = session
-        .messages
-        .iter_mut()
-        .find(|message| message.id == message_id)
-    {
-        message.tool_calls = calls
-            .iter()
-            .map(|call| MessageToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-            })
-            .collect();
-    }
-}
-
-fn append_tool_result_message(
-    session: &mut Session,
-    tool_call_id: Option<&str>,
-    tool_name: &str,
-    content: String,
-    is_error: bool,
-) {
-    let Some(tool_call_id) = tool_call_id else {
-        return;
-    };
-    let current_assistant_index = session.messages.iter().rposition(|message| {
-        message.role == MessageRole::Assistant
-            && message
-                .tool_calls
-                .iter()
-                .any(|call| call.id == tool_call_id)
-    });
-    let current_result = current_assistant_index.and_then(|assistant_index| {
-        session.messages[assistant_index + 1..]
-            .iter()
-            .take_while(|message| message.role == MessageRole::Tool)
-            .position(|message| message.tool_call_id.as_deref() == Some(tool_call_id))
-            .map(|offset| assistant_index + 1 + offset)
-    });
-    if let Some(message) = current_result.and_then(|index| session.messages.get_mut(index)) {
-        message.content = vec![tiangong_types::ContentBlock::text(content)];
-        message.tool_name = Some(tool_name.to_string());
-        message.tool_result_is_error = is_error;
-        session.updated_at = now_text();
-        return;
-    }
-    let message = Message::tool_result(tool_call_id, tool_name, content, is_error);
-    session.messages.push(message);
-    session.updated_at = now_text();
-}
-
-fn ensure_assistant_message(session: &mut Session, message_id: &str) {
-    if session
-        .messages
-        .iter()
-        .any(|message| message.id == message_id)
-    {
-        return;
-    }
-
-    session.append_message_with_id(
-        message_id.to_string(),
-        MessageRole::Assistant,
-        String::new(),
-        String::new(),
-    );
 }
 
 #[cfg(test)]
@@ -1385,8 +974,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    use tiangong_core::core::{Plugin, TiangongCore};
-    use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+    use tiangong_core::core_config::CoreConfig;
     use tiangong_types::{ContentBlock, StoredAsset};
 
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
@@ -1394,41 +982,27 @@ mod tests {
     fn isolated_test_manager(
         root: &Path,
     ) -> (Arc<ServerCoreManager>, Session, PathBuf, SharedState) {
-        let mut state = tiangong_app_state::app_state::TiangongState::load_or_default();
-        let session = state.active_session().cloned().unwrap();
-        state.persist_session(&session.id).unwrap();
-        let session_path = state
-            .services
-            .repository
-            .paths()
-            .sessions_dir_path
+        let mut state = tiangong_app_state::app_state::TiangongState::new();
+        let storage_root = state.config.storage_root.clone();
+        // 构造一个隔离 Session 并直接落盘，作为测试基准会话。
+        let mut session = Session::new_isolated("测试会话", &storage_root);
+        session.bind_storage_root(storage_root.clone());
+        session.try_persist_to_disk().unwrap();
+        state.active_session_id = session.id.clone();
+        let core_manager = state.core_manager.clone();
+        let session_path = storage_root
+            .join("sessions")
             .join(format!("{}.json", session.id));
         let state = Arc::new(AsyncMutex::new(state));
         let manager = Arc::new(ServerCoreManager::new(
             state.clone(),
-            CoreConfigProvider::new(CoreConfig::default()),
+            core_manager,
             Arc::new(EventBus::default()),
             Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
                 root.join("mcp"),
             )),
         ));
         (manager, session, session_path, state)
-    }
-
-    fn test_core(
-        session: Session,
-        storage_root: &Path,
-        plugins: Vec<Arc<dyn Plugin>>,
-    ) -> TiangongCore {
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
-        TiangongCore::builder()
-            .config(CoreConfigProvider::new(CoreConfig::default()))
-            .session_id(session.id)
-            .stream_tx(event_tx)
-            .plugins(plugins)
-            .storage_root(storage_root)
-            .trust_mode(session.trust_mode)
-            .build()
     }
 
     fn image_asset() -> StoredAsset {
@@ -1440,24 +1014,6 @@ mod tests {
             size: 4,
             kind: MediaKind::Image,
         }
-    }
-
-    #[test]
-    fn isolated_server_core_config_providers_do_not_share_updates() {
-        let config = CoreConfig {
-            context_limit: 100,
-            ..CoreConfig::default()
-        };
-        let first = isolated_core_config_provider(&config);
-        let second = isolated_core_config_provider(&config);
-        let first_snapshot = first.snapshot();
-        let second_snapshot = second.snapshot();
-        assert!(!Arc::ptr_eq(&first_snapshot, &second_snapshot));
-
-        first.update(|config| config.context_limit = 200);
-        assert_eq!(first.snapshot().context_limit, 200);
-        assert_eq!(second.snapshot().context_limit, 100);
-        assert_eq!(second.generation(), 1);
     }
 
     #[test]
@@ -1481,28 +1037,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn terminal_state_sync_reloads_core_metadata_without_rewriting_session_file() {
+    async fn terminal_state_sync_does_not_rewrite_session_file() {
         let _storage_guard = STORAGE_TEST_LOCK.lock().await;
         let root = tempfile::tempdir().unwrap();
         let _home_guard = TestHomeGuard::new(&root.path().join("home"));
         let (_manager, session, session_path, state) = isolated_test_manager(root.path());
-        let authoritative_title = session.title.clone();
         let authoritative_session = std::fs::read(&session_path).unwrap();
 
-        state
-            .lock()
-            .await
-            .sessions_mut()
-            .iter_mut()
-            .find(|candidate| candidate.id == session.id)
-            .expect("测试会话应存在")
-            .title = "宿主内存标题".to_string();
-
-        let state_for_sync = state.clone();
         let session_id = session.id.clone();
         tokio::task::spawn_blocking(move || {
             sync_stream_event_to_state(
-                &state_for_sync,
                 &Arc::new(EventBus::default()),
                 &session_id,
                 &StreamEvent::Done { usage: None },
@@ -1511,17 +1055,12 @@ mod tests {
         .await
         .expect("终态同步不应 panic");
 
+        // session.json 应保持 Core 写入的原始内容，未被宿主重写。
         assert_eq!(std::fs::read(&session_path).unwrap(), authoritative_session);
+        // 终态事件不改变本次运行中的活动会话。
         assert_eq!(
-            state
-                .lock()
-                .await
-                .sessions()
-                .iter()
-                .find(|candidate| candidate.id == session.id)
-                .expect("终态同步后会话镜像应存在")
-                .title,
-            authoritative_title
+            state.lock().await.active_session_id.as_str(),
+            session.id.as_str()
         );
     }
 
@@ -1531,8 +1070,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let _home_guard = TestHomeGuard::new(&root.path().join("home"));
         let (manager, session, _session_path, _state) = isolated_test_manager(root.path());
-        let first_core = test_core(session.clone(), root.path(), Vec::new());
-        let second_core = test_core(session.clone(), root.path(), Vec::new());
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
 
         let first_task = {
@@ -1543,11 +1080,18 @@ mod tests {
                 barrier.wait().await;
                 let lock = manager.session_operation_lock(&session_id);
                 let _guard = lock.lock().await;
-                manager.install_core_if_absent(
-                    &session_id,
-                    first_core,
-                    AttachmentCapabilitySnapshot::default(),
-                )
+                let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+                manager
+                    .core_manager
+                    .ensure_core(
+                        &session_id,
+                        CoreConfig::default(),
+                        String::new(),
+                        stream_tx,
+                        Vec::new(),
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
             })
         };
         let second_task = {
@@ -1558,24 +1102,30 @@ mod tests {
                 barrier.wait().await;
                 let lock = manager.session_operation_lock(&session_id);
                 let _guard = lock.lock().await;
-                manager.install_core_if_absent(
-                    &session_id,
-                    second_core,
-                    AttachmentCapabilitySnapshot::default(),
-                )
+                let (stream_tx, _stream_rx) = std::sync::mpsc::channel();
+                manager
+                    .core_manager
+                    .ensure_core(
+                        &session_id,
+                        CoreConfig::default(),
+                        String::new(),
+                        stream_tx,
+                        Vec::new(),
+                    )
+                    .await
+                    .map(|ensured| ensured.is_new)
             })
         };
         barrier.wait().await;
         let first_installed = first_task.await.unwrap().unwrap();
         let second_installed = second_task.await.unwrap().unwrap();
         assert_ne!(first_installed, second_installed);
-        assert_eq!(manager.cores.lock().unwrap().len(), 1);
+        assert_eq!(manager.core_manager.registry().len(), 1);
 
         // 唯一存活的 Core 必属于胜出方，且其 session_id 与预期一致。
         let stored_session_id = manager
-            .cores
-            .lock()
-            .unwrap()
+            .core_manager
+            .registry()
             .get(&session.id)
             .map(|core| core.session_id().to_string());
         assert_eq!(stored_session_id.as_deref(), Some(session.id.as_str()));
@@ -1748,112 +1298,5 @@ mod tests {
         assert!(!second_is_direct);
         assert!(matches!(first.content, MessageContent::Text(ref text) if text == "first reply"));
         assert!(matches!(second.content, MessageContent::Text(ref text) if text == "second reply"));
-    }
-
-    #[test]
-    fn user_message_event_preserves_exact_stable_content_blocks() {
-        let mut session = Session::new("server-state");
-        let content_blocks = vec![
-            ContentBlock::Text {
-                text: "event text".to_string(),
-            },
-            ContentBlock::AssetReference {
-                asset: image_asset(),
-            },
-            ContentBlock::ModelInstruction {
-                text: "model-only attachment guidance".to_string(),
-            },
-        ];
-
-        assert!(apply_user_message_event(
-            &mut session,
-            "message-server",
-            "event text",
-            &content_blocks,
-            &[],
-            true,
-        ));
-        let message = session.messages.last().unwrap();
-        assert_eq!(message.text_content(), "event text");
-        assert_eq!(message.content, content_blocks);
-        assert!(message.model_excluded);
-
-        assert!(apply_user_message_event(
-            &mut session,
-            "message-server",
-            "event text",
-            &[],
-            &[],
-            false,
-        ));
-        assert!(!session.messages.last().unwrap().model_excluded);
-        let json = serde_json::to_string(&session).unwrap();
-        assert!(json.contains("\"type\":\"asset_reference\""));
-        assert!(json.contains("model-only attachment guidance"));
-    }
-
-    #[test]
-    fn tool_result_updates_only_the_latest_matching_call_batch() {
-        let mut session = Session::new("reused-tool-id");
-        let mut first = Message::new(MessageRole::Assistant, String::new());
-        first.tool_calls = vec![MessageToolCall {
-            id: "reused".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({}),
-        }];
-        session.messages.push(first);
-        append_tool_result_message(
-            &mut session,
-            Some("reused"),
-            "read_file",
-            "old-result".to_string(),
-            false,
-        );
-        session.append_message(MessageRole::User, "next");
-        let mut second = Message::new(MessageRole::Assistant, String::new());
-        second.tool_calls = vec![MessageToolCall {
-            id: "reused".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({}),
-        }];
-        session.messages.push(second);
-
-        append_tool_result_message(
-            &mut session,
-            Some("reused"),
-            "read_file",
-            "new-result".to_string(),
-            false,
-        );
-        let result_indices = session
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| message.tool_call_id.as_deref() == Some("reused"))
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        assert_eq!(result_indices.len(), 2);
-        assert_eq!(
-            session.messages[result_indices[0]].text_content(),
-            "old-result"
-        );
-        assert_eq!(
-            session.messages[result_indices[1]].text_content(),
-            "new-result"
-        );
-
-        let len = session.messages.len();
-        append_tool_result_message(
-            &mut session,
-            Some("reused"),
-            "read_file",
-            "new-result-updated".to_string(),
-            false,
-        );
-        assert_eq!(session.messages.len(), len);
-        assert_eq!(
-            session.messages[result_indices[1]].text_content(),
-            "new-result-updated"
-        );
     }
 }

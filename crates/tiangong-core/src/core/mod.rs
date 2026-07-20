@@ -43,6 +43,9 @@ pub struct TiangongCore {
     /// 存储根目录(turn task 从此加载/保存 session)。
     #[builder(setter(into))]
     storage_root: std::path::PathBuf,
+    /// 新对话创建后固定使用的工作目录。
+    #[builder(setter(into))]
+    workspace_dir: String,
     /// 事件输出通道(会话级,跨 turn;clone 给每个 turn task 的 forwarder)。
     stream_tx: Sender<StreamEvent>,
     /// 进程内插件(会话级,跨 turn)。
@@ -96,10 +99,46 @@ impl TiangongCore {
     }
 
     fn load_session(&self) -> Result<Session, CoreError> {
-        Session::load_from_storage(&self.storage_root, &self.session_id).map_err(|error| {
-            tracing::warn!(%error, session_id = %self.session_id, "加载 Session 失败");
-            CoreError::WorkerStopped
-        })
+        match Session::load_from_storage(&self.storage_root, &self.session_id) {
+            Ok(session) => Ok(session),
+            Err(error)
+                if !self
+                    .storage_root
+                    .join("sessions")
+                    .join(format!("{}.json", self.session_id))
+                    .exists() =>
+            {
+                let config = self.config.snapshot();
+                let mut session = Session::new("新对话");
+                session.id = self.session_id.clone();
+                session.trust_mode = *self
+                    .trust_mode
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                session.reasoning_effort = Some(config.reasoning_effort.clone());
+                session.cwd = self.workspace_dir.clone();
+                session.cwd_mode = crate::session::SessionCwdMode::Custom;
+                session.bind_storage_root(self.storage_root.clone());
+                session.try_persist_to_disk().map_err(|persist_error| {
+                    tracing::warn!(
+                        error = %persist_error,
+                        session_id = %self.session_id,
+                        "创建 Session 失败"
+                    );
+                    CoreError::WorkerStopped
+                })?;
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    load_error = %error,
+                    "首次加载创建 Session"
+                );
+                Ok(session)
+            }
+            Err(error) => {
+                tracing::warn!(%error, session_id = %self.session_id, "加载 Session 失败");
+                Err(CoreError::WorkerStopped)
+            }
+        }
     }
 
     /// 加载当前 Session，并根据 Core 当前配置构建本轮执行上下文。
@@ -319,6 +358,7 @@ mod shared_runtime_tests {
                     .config(config.clone())
                     .trust_mode(session.trust_mode)
                     .storage_root(root.path())
+                    .workspace_dir(root.path().to_string_lossy())
                     .stream_tx(event_tx)
                     .plugins(vec![])
                     .build()

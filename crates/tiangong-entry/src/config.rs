@@ -23,7 +23,6 @@ pub(crate) fn run_config_command(args: ConfigArgs) -> Result<()> {
 fn print_paths() {
     let root = default_tiangong_dir();
     println!("配置目录：    {}", root.display());
-    println!("主配置：      {}", root.join("app.json").display());
     println!("模型配置：    {}", root.join("models.json").display());
     println!("MCP 配置：    {}", root.join("mcp.json").display());
     println!("Server 配置： {}", root.join("server.json").display());

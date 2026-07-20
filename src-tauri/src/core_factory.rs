@@ -35,7 +35,10 @@ impl DesktopCoreFactory {
     /// 调用方（`TiangongApp`）在 `ensure_core` 前调用本方法，把返回的 plugins
     /// 作为参数传给 `CoreManager::ensure_core`。Core 的实际 builder 构造由
     /// CoreManager 内部完成，host 不再直接 build TiangongCore。
-    pub async fn build_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+    pub async fn build_plugins(
+        &self,
+        models: tiangong_llm::models_config::ModelsConfig,
+    ) -> Vec<Arc<dyn Plugin>> {
         use tracing::warn;
 
         let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
@@ -72,7 +75,6 @@ impl DesktopCoreFactory {
         plugins.push(tiangong_plugin_index::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-        let models = tiangong_config::registry::models();
         let resolve_ep = |cap: ModelCapability| {
             models
                 .resolve_for_capability(cap)
