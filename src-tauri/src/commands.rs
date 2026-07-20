@@ -1394,7 +1394,7 @@ pub(crate) async fn restore_failed_user_message_state(
                 core_state.remove_pending_message_for(session_id, message_id);
                 core_state.persist_session_and_app(session_id)
             } else {
-                Err(anyhow::anyhow!("目标会话已不存在：{session_id}").into())
+                Err(anyhow::anyhow!("目标会话已不存在：{session_id}"))
             }
         })
         .await
