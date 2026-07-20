@@ -615,6 +615,7 @@ struct UserMessageDeliveryRequest {
 
 /// 发送消息并执行
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_message(
     session_id: String,
     content: String,
@@ -1072,10 +1073,9 @@ pub(crate) fn start_stream_consumer(
                         ))
                     }));
                 // 标题输入的单次磁盘读取不持有 TiangongState 锁，不影响会话切换。
-                let title_task = title_provider.ok().flatten().and_then(|provider| {
+                let title_task =
                     crate::session_ops::title_generation_input(&app_state.core_manager, &final_sid)
-                        .map(|input| (input, provider))
-                });
+                        .zip(title_provider.ok().flatten());
 
                 if let Some(message_id) = completed_remote_message_id {
                     rt.block_on(crate::embedded_server::complete_remote_turn_from_stream(
@@ -1520,7 +1520,7 @@ pub async fn get_trust_mode(
         .with_state_read(|core_state| {
             let target_id = session_id
                 .as_deref()
-                .unwrap_or_else(|| core_state.active_session_id.as_str());
+                .unwrap_or(core_state.active_session_id.as_str());
             let mode = core_state
                 .core_manager
                 .list_session_metadata()

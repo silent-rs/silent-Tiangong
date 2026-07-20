@@ -174,7 +174,7 @@ fn select_model(state: &mut TiangongState, model: &str) -> Result<()> {
     let config = tiangong_config::registry::update_models(&state.config, models)?;
     state.config = config;
     let resolved = current_chat_model(state);
-    if !state.model_list.iter().any(|m| *m == resolved) {
+    if !state.model_list.contains(&resolved) {
         state.model_list.insert(0, resolved);
     }
     Ok(())

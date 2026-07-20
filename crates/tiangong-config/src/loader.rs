@@ -138,7 +138,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         workspace_dir,
         server,
         connectors,
-        ..Default::default()
     }
 }
 
