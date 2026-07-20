@@ -57,10 +57,9 @@ pub fn models() -> tiangong_llm::models_config::ModelsConfig {
 /// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
 ///
 /// 处理顺序：
-/// 1. 算 context_limit
-/// 2. 写 models.json 到磁盘
-/// 3. 写盘成功后更新内存
-/// 4. 返回 Result
+/// 1. 写 models.json 到磁盘
+/// 2. 写盘成功后更新内存
+/// 3. 返回 Result
 ///
 /// `current` 是应用状态持有的当前配置，确保其余字段和实际存储目录不会被兼容
 /// 副本中的旧值覆盖。写盘失败时两份运行期配置都不变。
@@ -70,20 +69,10 @@ pub fn update_models(
 ) -> anyhow::Result<TiangongConfig> {
     let mut next = current.clone();
     let dir = next.storage_root.clone();
-    let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
-    let override_ctx = new_models
-        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
-        .and_then(|r| r.context_window);
-    let context_limit = if llm.chat.model.is_empty() {
-        tiangong_core::core_config::default_context_limit()
-    } else {
-        crate::io::resolve_context_limit_with_override(&dir, &llm.chat.model, override_ctx)
-    };
     // 先写盘——失败则内存不变。
     crate::io::save_models_config_at(&dir, &new_models)?;
     // 写盘成功，更新内存。
     next.models = new_models;
-    next.context_limit = context_limit;
     if let Ok(mut guard) = config_cell().write() {
         *guard = Some(next.clone());
     }

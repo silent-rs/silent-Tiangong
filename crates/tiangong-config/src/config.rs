@@ -175,9 +175,6 @@ pub struct TiangongConfig {
     pub default_trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
     pub custom_system_prompt: String,
-    /// context window 上限（加载时按 chat model 从 context_windows.json 解析，
-    /// 避免转换阶段再找目录——见 load_tiangong_config_from_dir）
-    pub context_limit: usize,
 
     // ===== 应用层配置 =====
     /// 默认工作目录
@@ -196,7 +193,6 @@ impl Default for TiangongConfig {
             skills: SkillsConfig::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
-            context_limit: 0,
             workspace_dir: crate::loader::default_workspace_dir(),
             server: ServerConfig::default(),
             connectors: Vec::new(),
@@ -210,12 +206,21 @@ impl TiangongConfig {
     /// 将 ModelsConfig（3 层）解析为 LlmConfig（扁平端点）。
     /// 自定义 Prompt 来自加载时读取的 custom-prompt.md（见 load_tiangong_config_from_dir）。
     pub fn to_core_config(&self) -> CoreConfig {
-        // context_limit == 0（Default 或未解析）时兜底为默认值
-        let context_limit = if self.context_limit == 0 {
-            tiangong_core::core_config::default_context_limit()
-        } else {
-            self.context_limit
-        };
+        use tiangong_llm::models_config::RoutingSlot;
+
+        let context_limit = self
+            .models
+            .routing
+            .get(&RoutingSlot::Chat)
+            .filter(|chat| !chat.model.trim().is_empty())
+            .map(|chat| {
+                crate::io::resolve_context_limit_with_override(
+                    &self.storage_root,
+                    &chat.model,
+                    chat.context_window,
+                )
+            })
+            .unwrap_or_else(tiangong_core::core_config::default_context_limit);
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
             trust_mode: self.default_trust_mode,
@@ -344,6 +349,37 @@ mod tests {
         let config = TiangongConfig::default();
         let core = config.to_core_config();
         assert!(core.custom_system_prompt.is_empty());
+    }
+
+    #[test]
+    fn to_core_config_uses_chat_context_window() {
+        use tiangong_llm::model::ProviderProtocol;
+        use tiangong_llm::models_config::{
+            ModelCapability, ModelEntry, ProviderConfig, RoutingSlot,
+        };
+
+        let mut config = TiangongConfig::default();
+        config.models.providers.insert(
+            "provider".to_string(),
+            ProviderConfig {
+                base_url: "https://example.com".to_string(),
+                api_key: "key".to_string(),
+                timeout_ms: 60_000,
+                protocol: ProviderProtocol::OpenAiChatCompletions,
+            },
+        );
+        config.models.routing.insert(
+            RoutingSlot::Chat,
+            ModelEntry {
+                provider: "provider".to_string(),
+                model: "chat-model".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+                options: serde_json::json!({}),
+                context_window: Some(131_072),
+            },
+        );
+
+        assert_eq!(config.to_core_config().context_limit, 131_072);
     }
 
     #[test]
