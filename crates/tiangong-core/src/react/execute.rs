@@ -1088,7 +1088,7 @@ pub(super) async fn execute_turn(
                         let response = match response_result {
                             Ok(response) => response,
                             Err(error) => {
-                                let error_message = error.to_string();
+                                let error_message = format!("{error:#}");
                                 let should_compress = error_message.contains("context_window_exceeded")
                                     || error_message.contains("context_length_exceeded")
                                     || (error_message.contains("content_blocks=0")
@@ -1096,15 +1096,13 @@ pub(super) async fn execute_turn(
                                 if should_compress {
                                     tracing::warn!("检测到上下文超限，尝试强制压缩");
                                     let previous_summary_up_to = ctx.session.summary_up_to;
-                                    active_compression = Some(ActiveCompression::start(
+                                    active_compression = Some(ActiveCompression::start_forced(
                                         ctx,
                                         &context_organizer,
-                                        context_limit,
                                         CompressionContinuation::ContextRetry {
                                             previous_summary_up_to,
                                             error_message,
                                         },
-                                        true,
                                     ));
                                     state.next_step = NextStep::Waiting;
                                 } else {
@@ -1149,7 +1147,6 @@ pub(super) async fn execute_turn(
                                         disposition,
                                         request_injection_generation,
                                     },
-                                    false,
                                 ));
                                 state.next_step = NextStep::Waiting;
                             } else {
@@ -1276,7 +1273,6 @@ pub(super) async fn execute_turn(
                                     decision,
                                     request_injection_generation,
                                 },
-                                false,
                             ));
                             state.next_step = NextStep::Waiting;
                         } else {
@@ -1409,7 +1405,6 @@ pub(super) async fn execute_turn(
                         &context_organizer,
                         observed_tokens,
                         CompressionContinuation::ToolBatch,
-                        false,
                     ));
                     state.next_step = NextStep::Waiting;
                 } else {
@@ -1654,7 +1649,7 @@ mod tests {
     use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::prompt::SystemPromptConfig;
-    use crate::session::{MessageRole, Session};
+    use crate::session::{Message, MessageRole, MessageToolCall, Session};
     use crate::tool::ToolResult;
     use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
     use crate::turn_context::TurnContext;
@@ -2108,6 +2103,76 @@ mod tests {
                 .to_string()
                 .contains("不得超过 9999 tokens")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
+        let server = MockServer::start().await;
+        mount_request_error(&server, "context_window_exceeded").await;
+        mount_request_error(&server, "context_window_exceeded").await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n继续处理最近工具结果\n[[SUMMARY]]\n较早历史摘要",
+            "stop",
+            100,
+            20,
+            None,
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(10, 5)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::Assistant, "较早回答");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![MessageToolCall {
+            id: "latest-call".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "latest.txt"}),
+        }];
+        harness.ctx.session.messages.push(assistant);
+        harness.ctx.session.messages.push(Message::tool_result(
+            "latest-call",
+            "read_file",
+            "recent-tool-output",
+            false,
+        ));
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "强制压缩后应重试成功，实际结果：{:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 135);
+        assert_eq!(harness.ctx.session.summary_up_to, 2);
+        let context = harness.ctx.session.context();
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+        assert!(context.iter().any(|message| {
+            message.tool_call_id.as_deref() == Some("latest-call")
+                && message.text_content() == "recent-tool-output"
+        }));
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 4);
+        let first_body = String::from_utf8_lossy(&requests[0].body);
+        let compression_body = String::from_utf8_lossy(&requests[2].body);
+        let retry_body = String::from_utf8_lossy(&requests[3].body);
+        assert!(first_body.contains("recent-tool-output"));
+        assert!(!compression_body.contains("recent-tool-output"));
+        assert!(compression_body.contains("较早回答"));
+        assert!(retry_body.contains("recent-tool-output"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

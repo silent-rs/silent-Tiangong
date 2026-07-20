@@ -2,7 +2,7 @@ use crate::model::{ModelRequest, SingleProviderClient, StopReason, TokenUsage};
 use crate::session::{Message, MessagePhase, MessageRole, Session};
 
 /// 判断消息是否为可压缩的有效消息。
-fn is_compressible(message: &Message) -> bool {
+pub(crate) fn is_compressible(message: &Message) -> bool {
     !message.model_excluded
         && message.role != MessageRole::System
         && message.phase != MessagePhase::CompressedResume
@@ -65,14 +65,15 @@ impl ContextCompressor {
             .any(is_compressible)
     }
 
-    /// 压缩当前摘要边界后的全部有效消息。
+    /// 压缩当前摘要边界到 `split_point` 之间的有效消息。
     pub async fn compress(
         self,
+        split_point: usize,
         max_output_tokens: u32,
         include_current_task: bool,
     ) -> std::result::Result<CompressionUpdate, CompressionError> {
         let previous_summary_up_to = self.session.summary_up_to;
-        let split_point = self.session.messages.len();
+        let split_point = split_point.min(self.session.messages.len());
         if split_point <= previous_summary_up_to {
             return Err(CompressionError::new(format!(
                 "无可压缩消息：summary_up_to({previous_summary_up_to}) 已到达末尾({split_point})"
@@ -134,7 +135,11 @@ impl ContextCompressor {
         context.extend(
             session.messages[start..split_point]
                 .iter()
-                .filter(|message| is_compressible(message))
+                .filter(|message| {
+                    is_compressible(message)
+                        || (!message.model_excluded
+                            && message.phase == MessagePhase::CompressedResume)
+                })
                 .cloned(),
         );
         context.push(Message::new(
@@ -290,6 +295,22 @@ mod tests {
 
         assert!(instruction.contains("系统提示中已经包含此前对话摘要"));
         assert!(!instruction.contains("不应重复出现的旧摘要正文"));
+    }
+
+    #[test]
+    fn summary_request_keeps_the_previous_resume_as_user_anchor() {
+        let mut session = Session::new("test");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
+        let mut resume = user("上一轮续接状态");
+        resume.phase = MessagePhase::CompressedResume;
+        session.messages = vec![resume, assistant("后续交互")];
+
+        let request = ContextCompressor::summary_request(&session, 2, 10_000, true);
+
+        assert_eq!(request.context[1].role, MessageRole::User);
+        assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
+        assert_eq!(request.context[1].text_content(), "上一轮续接状态");
+        assert_eq!(request.context[2].text_content(), "后续交互");
     }
 
     #[test]

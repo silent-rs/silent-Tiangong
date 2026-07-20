@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::context::compressor::{
-    CompressionError, CompressionUpdate, ContextCompressor, mark_compact_boundary,
+    CompressionError, CompressionUpdate, ContextCompressor, is_compressible, mark_compact_boundary,
 };
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
@@ -31,22 +31,36 @@ impl<C> ActiveCompression<C> {
         organizer: &ContextOrganizer,
         observed_tokens: usize,
         continuation: C,
-        force_target_budget: bool,
     ) -> Self {
         notify_started(ctx);
-        let budget_tokens = if force_target_budget {
-            0
-        } else {
-            observed_tokens
-        };
         Self {
             task: start_task(
                 ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
                 organizer,
-                budget_tokens,
+                observed_tokens,
                 true,
+                Some(ctx.session.messages.len()),
             ),
             observed_tokens,
+            continuation,
+        }
+    }
+
+    pub(super) fn start_forced(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        continuation: C,
+    ) -> Self {
+        notify_started(ctx);
+        Self {
+            task: start_task(
+                ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
+                organizer,
+                0,
+                true,
+                forced_compression_split_point(&ctx.session),
+            ),
+            observed_tokens: ctx.context_limit,
             continuation,
         }
     }
@@ -105,7 +119,13 @@ pub(crate) async fn run_manual_context_compression(
         notify_result(&ctx, ContextCompressAction::Noop);
         return;
     }
-    let mut task = start_task(compressor, &organizer, observed_tokens, false);
+    let mut task = start_task(
+        compressor,
+        &organizer,
+        observed_tokens,
+        false,
+        Some(ctx.session.messages.len()),
+    );
 
     let wait_for_cancel = async {
         loop {
@@ -139,6 +159,38 @@ pub(super) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     }
 }
 
+fn forced_compression_split_point(session: &Session) -> Option<usize> {
+    let start = session.summary_up_to.min(session.messages.len());
+    let last_visible = (start..session.messages.len()).rev().find(|&index| {
+        let message = &session.messages[index];
+        !message.model_excluded && message.role != MessageRole::System
+    })?;
+    let last_message = &session.messages[last_visible];
+    let recent_start = if last_message.role == MessageRole::Tool {
+        last_message
+            .tool_call_id
+            .as_deref()
+            .and_then(|tool_call_id| {
+                (start..last_visible).rev().find(|&index| {
+                    let message = &session.messages[index];
+                    message.role == MessageRole::Assistant
+                        && message
+                            .tool_calls
+                            .iter()
+                            .any(|call| call.id == tool_call_id)
+                })
+            })
+            .unwrap_or(last_visible)
+    } else {
+        last_visible
+    };
+
+    session.messages[start..recent_start]
+        .iter()
+        .any(is_compressible)
+        .then_some(recent_start)
+}
+
 fn build_compression_resume_message(current_task: &str) -> Message {
     let mut message = Message::new(MessageRole::User, "");
     message.content = vec![ContentBlock::model_instruction(format!(
@@ -153,14 +205,18 @@ fn start_task(
     organizer: &ContextOrganizer,
     observed_tokens: usize,
     include_current_task: bool,
+    split_point: Option<usize>,
 ) -> CompressionTask {
     let output_budget = organizer.compression_output_budget(observed_tokens);
     tokio::spawn(async move {
+        let split_point = split_point.ok_or_else(|| {
+            CompressionError::new("上下文已超限，但没有可与最近交互分离的较早历史，无法强制压缩")
+        })?;
         let output_budget = output_budget.ok_or_else(|| {
             CompressionError::new("上下文剩余空间不足 2048 tokens，无法生成有效摘要")
         })?;
         compressor
-            .compress(output_budget, include_current_task)
+            .compress(split_point, output_budget, include_current_task)
             .await
     })
 }
@@ -347,6 +403,7 @@ mod tests {
     use crate::model::SingleProviderClient;
     use crate::observe::Observer;
     use crate::permission::TrustMode;
+    use crate::session::MessageToolCall;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
 
     fn test_context(mut session: Session) -> (TurnContext, tempfile::TempDir) {
@@ -421,6 +478,44 @@ mod tests {
         };
 
         assert_eq!(observed_total_tokens(&usage), 1020);
+    }
+
+    #[test]
+    fn forced_compression_keeps_the_latest_complete_tool_batch() {
+        let mut session = Session::new("test");
+        session.append_message(MessageRole::User, "较早问题");
+        session.append_message(MessageRole::Assistant, "较早回答");
+
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![MessageToolCall {
+            id: "latest-call".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "latest.txt"}),
+        }];
+        session.messages.push(assistant);
+        session.messages.push(Message::tool_result(
+            "latest-call",
+            "read_file",
+            "最近工具结果",
+            false,
+        ));
+        let mut hidden = Message::new(MessageRole::System, "仅前端可见状态");
+        hidden.model_excluded = true;
+        session.messages.push(hidden);
+
+        assert_eq!(forced_compression_split_point(&session), Some(2));
+    }
+
+    #[test]
+    fn forced_compression_requires_history_before_the_latest_interaction() {
+        let mut session = Session::new("test");
+        session.append_message(MessageRole::User, "当前问题");
+        assert_eq!(forced_compression_split_point(&session), None);
+
+        session
+            .messages
+            .insert(0, Message::new(MessageRole::User, "较早问题"));
+        assert_eq!(forced_compression_split_point(&session), Some(1));
     }
 
     #[test]
