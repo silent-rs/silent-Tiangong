@@ -899,15 +899,11 @@ impl TiangongApp {
 
     pub async fn sync_core_config_from_state(&self) -> Result<(), String> {
         let base = self.config.snapshot();
-        // old_sig 从 registry 旧值算（set_models 之前），new_sig 从 app-state 新值算。
-        let old_sig =
-            tiangong_config::registry::plugin_set_signature(&tiangong_config::registry::models());
-        let (template, session_configs, new_sig) = self
+        // config registry 是唯一真相源（issue #245 整改方案）。
+        // 不再从 app-state 反向同步到 registry——数据流单向：
+        // tiangong-config → CoreConfig → CoreManager → Core
+        let (template, session_configs) = self
             .with_state_read(|core_state| {
-                let new_models = core_state.models_config().clone();
-                let new_sig = tiangong_config::registry::plugin_set_signature(&new_models);
-                // 同步 app-state 的最新 models 到 config 内存单例。
-                tiangong_config::registry::set_models(new_models);
                 let template = core_state.build_core_config_for_session_from_base(&base, "");
                 let session_configs = core_state
                     .session_metadata()
@@ -919,20 +915,13 @@ impl TiangongApp {
                         )
                     })
                     .collect::<HashMap<_, _>>();
-                Ok((template, session_configs, new_sig))
+                Ok((template, session_configs))
             })
             .await?;
-        let plugin_set_changed = old_sig != new_sig;
-        // 这份 provider 只作全局模板和新 Core 构造辅助，不承载任一会话的
-        // trust/reasoning 覆盖。已存在 Core 使用各自独立的 provider。
-        // 能力集合变化时，存活 Core 的插件列表无法热更（构造时固定）。
-        // 存活 Core 继续用旧插件直到自然停止；下次 ensure_core 新建时用最新插件。
-        // 仅 endpoint/trust/reasoning 变化时，按 session 热更存活 Core 的配置。
-        if !plugin_set_changed {
-            self.core_manager.sync_config(template, &session_configs);
-        } else {
-            self.config.replace(template);
-        }
+        // 总是热更存活 Core 的配置(replace_config + set_trust_mode)。
+        // 能力集合变化时,存活 Core 的插件列表不变(构造时固定),
+        // 但 endpoint/trust 等配置会热更——这是期望行为。
+        self.core_manager.sync_config(template, &session_configs);
         Ok(())
     }
 

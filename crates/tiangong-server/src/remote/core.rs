@@ -68,8 +68,6 @@ impl ServerCoreManager {
         let base = self.config.snapshot();
         let (template, session_configs) = {
             let state = self.state.lock().await;
-            tiangong_config::registry::set_models(state.models_config().clone());
-
             let mut template = state.build_core_config_for_session_from_base(&base, "");
             template.trust_mode = TrustMode::FullTrust;
             let session_configs = state

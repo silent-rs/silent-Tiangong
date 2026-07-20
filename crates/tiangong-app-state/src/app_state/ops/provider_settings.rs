@@ -22,10 +22,10 @@ impl TiangongState {
         if api_model.is_empty() {
             return Err(anyhow!("API_MODEL 不能为空"));
         }
-        // 经 registry 更新(含落盘 models.json),issue #245:不再 app-state 缓存。
         let mut models = tiangong_config::registry::models();
         models.update_chat_model(api_model.to_string());
-        tiangong_config::registry::set_models(models);
+        // 可靠保存：先写盘成功再更新内存（issue #245 整改方案）。
+        tiangong_config::registry::update_models(models)?;
         self.store.provider.model_list = normalize_model_list(
             self.store.provider.model_list.clone(),
             &self.current_model(),
@@ -57,7 +57,8 @@ impl TiangongState {
         if need_fill_default && let Some(first) = self.store.provider.model_list.first().cloned() {
             let mut models = tiangong_config::registry::models();
             models.update_chat_model(first);
-            tiangong_config::registry::set_models(models);
+            // 可靠保存：先写盘成功再更新内存。
+            tiangong_config::registry::update_models(models)?;
         }
         self.store.provider.model_list = normalize_model_list(
             self.store.provider.model_list.clone(),
@@ -67,12 +68,12 @@ impl TiangongState {
         Ok(self.store.provider.model_list.len())
     }
 
-    /// 更新版 ModelsConfig 并经 registry 落盘(issue #245:不再 app-state 缓存)。
+    /// 更新版 ModelsConfig，可靠保存到 models.json（issue #245 整改方案）。
     pub fn save_models_config(
         &mut self,
         new_config: tiangong_llm::models_config::ModelsConfig,
     ) -> Result<()> {
-        tiangong_config::registry::set_models(new_config);
+        tiangong_config::registry::update_models(new_config)?;
         self.replace_run_snapshot(
             RunStatus::Idle,
             format!("模型供应商已更新：{}", self.provider_label()),

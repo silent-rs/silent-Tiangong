@@ -1,13 +1,13 @@
 //! 配置内存单例
 //!
 //! 进程级持有一份可变的 [`TiangongConfig`]，所有读取都从内存取（不每次读盘）。
-//! 配置变化时经 [`update`] 改内存并落盘。
+//! 配置变化时经 [`update_models`] 可靠落盘并更新内存。
 //!
 //! ## 生命周期
 //!
 //! - 启动：入口层调 [`init`] 从磁盘加载到内存
 //! - 读取：[`models`] / [`config`] 从内存取最新值
-//! - 变更：[`update`] 改内存 + 落盘，调用方负责通知 core/plugin 刷新
+//! - 变更：[`update_models`] 先写盘成功再更新内存，返回 Result
 
 use std::sync::{OnceLock, RwLock};
 
@@ -49,20 +49,51 @@ pub fn models() -> tiangong_llm::models_config::ModelsConfig {
     config().models
 }
 
+/// 可靠更新模型配置：先写盘成功再更新内存（issue #245 整改方案）。
+///
+/// 处理顺序：
+/// 1. 算 context_limit
+/// 2. 写 models.json 到磁盘
+/// 3. 写盘成功后更新内存
+/// 4. 返回 Result
+///
+/// 写盘失败时内存不变，错误返回给调用方。
+pub fn update_models(new_models: tiangong_llm::models_config::ModelsConfig) -> anyhow::Result<()> {
+    let dir = crate::io::storage_root();
+    let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
+    let override_ctx = new_models
+        .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
+        .and_then(|r| r.context_window);
+    let context_limit = if llm.chat.model.is_empty() {
+        tiangong_core::core_config::default_context_limit()
+    } else {
+        crate::io::resolve_context_limit_with_override(&dir, &llm.chat.model, override_ctx)
+    };
+    // 先写盘——失败则内存不变。
+    crate::io::save_models_config_at(&dir, &new_models)?;
+    // 写盘成功，更新内存。
+    if let Ok(mut guard) = config_cell().write()
+        && let Some(cfg) = guard.as_mut()
+    {
+        cfg.models = new_models;
+        cfg.context_limit = context_limit;
+    }
+    Ok(())
+}
+
 /// 更新内存配置并落盘。调用方负责通知 core/plugin 刷新。
-pub fn update(new_config: TiangongConfig) {
-    new_config.save_to_disk();
+pub fn update(new_config: TiangongConfig) -> anyhow::Result<()> {
+    new_config.save_to_disk()?;
     if let Ok(mut guard) = config_cell().write() {
         *guard = Some(new_config);
     }
+    Ok(())
 }
 
-/// 仅更新内存（不落盘），供内部同步使用（如 app-state 改了 models 后同步到单例）。
-/// 同步按新 chat model 重新解析 context_limit。
-pub fn set_models(new_models: tiangong_llm::models_config::ModelsConfig) {
+/// 仅更新内存中的模型配置（不落盘）。仅供内部同步使用。
+pub(crate) fn set_models_in_memory(new_models: tiangong_llm::models_config::ModelsConfig) {
     let dir = crate::io::storage_root();
     let llm = tiangong_core::core_config::LlmConfig::from_models_config(&new_models);
-    // 取 Chat 路由模型的 context_window override（仅 Chat/Multimodal 模型适用）
     let override_ctx = new_models
         .resolve_slot(tiangong_core::models_config::RoutingSlot::Chat)
         .and_then(|r| r.context_window);
@@ -80,15 +111,16 @@ pub fn set_models(new_models: tiangong_llm::models_config::ModelsConfig) {
 }
 
 impl TiangongConfig {
-    /// 落盘到默认存储目录。
-    pub fn save_to_disk(&self) {
+    /// 落盘到默认存储目录（issue #245：不再吞错误）。
+    pub fn save_to_disk(&self) -> anyhow::Result<()> {
         let dir = crate::io::storage_root();
-        let _ = crate::io::save_models_config_at(&dir, &self.models);
+        crate::io::save_models_config_at(&dir, &self.models)?;
         if self.custom_system_prompt.trim().is_empty() {
-            let _ = crate::io::clear_custom_prompt();
+            crate::io::clear_custom_prompt()?;
         } else {
-            let _ = crate::io::save_custom_prompt(&self.custom_system_prompt);
+            crate::io::save_custom_prompt(&self.custom_system_prompt)?;
         }
+        Ok(())
     }
 }
 
