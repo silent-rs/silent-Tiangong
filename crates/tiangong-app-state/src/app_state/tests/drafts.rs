@@ -119,8 +119,7 @@ fn sending_state_is_returned_at_runtime_but_persisted_as_idle() -> Result<()> {
         state.begin_session_send(&session_id, 9)?;
         assert!(state.session_input_draft(&session_id).is_sending);
 
-        let app_json =
-            std::fs::read_to_string(&state.services.repository.paths().app_storage_path)?;
+        let app_json = std::fs::read_to_string(&state.repository.paths().app_storage_path)?;
         let value: serde_json::Value = serde_json::from_str(&app_json)?;
         assert_eq!(
             value["input_drafts"][&session_id]["is_sending"],

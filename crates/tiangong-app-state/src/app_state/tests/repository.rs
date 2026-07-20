@@ -9,11 +9,11 @@ use super::common::with_isolated_state;
 #[ignore = "Phase 4: 扩展能力配置已脱离 agent_config，持久化契约由各自 plugin 自治"]
 fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result<()> {
     with_isolated_state("tiangong-repository-roundtrip", |paths, state| {
-        state.store.provider.model_list = vec!["glm-test".to_string(), "glm-4.7".to_string()];
+        state.model_list = vec!["glm-test".to_string(), "glm-4.7".to_string()];
 
         let session = Session::new("第二会话");
-        state.store.session.active_session_id = session.id.clone();
-        state.store.session.sessions.push(session.clone());
+        state.active_session_id = session.id.clone();
+        state.sessions.push(session.clone());
 
         state.persist_to_disk()?;
 
@@ -24,7 +24,7 @@ fn repository_persist_to_disk_round_trips_split_configs_and_sessions() -> Result
             .expect("应能从磁盘回读状态");
 
         assert_eq!(loaded.active_session_id, session.id);
-        assert_eq!(loaded.sessions.len(), state.store.session.sessions.len());
+        assert_eq!(loaded.sessions.len(), state.sessions.len());
         assert_eq!(
             loaded.model_list.first().map(String::as_str),
             Some("glm-test")
@@ -140,7 +140,7 @@ fn terminal_mirror_sync_and_app_only_persist_never_rewrite_session() -> Result<(
         host_session.trust_mode = tiangong_core::permission::TrustMode::FullTrust;
         host_session.reasoning_effort = Some("low".to_string());
         assert!(state.reload_session_from_disk(&session_id)?);
-        state.store.session.input_drafts.insert(
+        state.input_drafts.insert(
             session_id.clone(),
             SessionInputDraft {
                 text: "终态后仍需保存的应用草稿".to_string(),
@@ -224,7 +224,7 @@ fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Resu
                 }
             }
 
-            state.store.session.sessions.clear();
+            state.sessions.clear();
 
             let mut older = Session::new("较早会话");
             older.created_at = "2026-04-22 09:00:00.000000".to_string();
@@ -234,8 +234,8 @@ fn load_from_disk_prefers_most_recent_session_when_app_storage_missing() -> Resu
             newer.created_at = "2026-04-23 10:00:00.000000".to_string();
             newer.updated_at = "2026-04-23 10:20:00.000000".to_string();
 
-            state.store.session.active_session_id = older.id.clone();
-            state.store.session.sessions = vec![older.clone(), newer.clone()];
+            state.active_session_id = older.id.clone();
+            state.sessions = vec![older.clone(), newer.clone()];
             state.persist_to_disk()?;
 
             fs::remove_file(paths.fake_home.join(".tiangong").join("app.json"))?;
@@ -266,7 +266,7 @@ fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -
                 }
             }
 
-            state.store.session.sessions.clear();
+            state.sessions.clear();
 
             let mut older = Session::new("较早会话");
             older.created_at = "2026-04-22 09:00:00.000000".to_string();
@@ -276,8 +276,8 @@ fn load_from_disk_prefers_most_recent_session_when_active_session_is_invalid() -
             newer.created_at = "2026-04-23 10:00:00.000000".to_string();
             newer.updated_at = "2026-04-23 10:20:00.000000".to_string();
 
-            state.store.session.sessions = vec![older, newer.clone()];
-            state.store.session.active_session_id = newer.id.clone();
+            state.sessions = vec![older, newer.clone()];
+            state.active_session_id = newer.id.clone();
             state.persist_to_disk()?;
 
             let app_path = paths.fake_home.join(".tiangong").join("app.json");
@@ -313,7 +313,7 @@ fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()>
                 }
             }
 
-            state.store.session.sessions.clear();
+            state.sessions.clear();
 
             let mut parent = Session::new("主会话");
             parent.updated_at = "2026-04-30 09:00:00.000000".to_string();
@@ -322,8 +322,8 @@ fn load_from_disk_filters_child_sessions_from_session_list_state() -> Result<()>
             child.parent_session_id = Some(parent.id.clone());
             child.updated_at = "2026-04-30 09:10:00.000000".to_string();
 
-            state.store.session.active_session_id = child.id.clone();
-            state.store.session.sessions = vec![parent.clone(), child];
+            state.active_session_id = child.id.clone();
+            state.sessions = vec![parent.clone(), child];
             state.persist_to_disk()?;
 
             let loaded = state
@@ -356,10 +356,10 @@ fn persist_strips_legacy_external_config_fields_and_keeps_runtime_fields() -> Re
 
     with_isolated_state("tiangong-persist-strip-external-config", |paths, state| {
         // 1. 设置非默认的 agent runtime 字段，确保后续能验证它们被保留。
-        state.store.agent.agent_config.trust_mode = TrustMode::Supervised;
-        state.store.agent.agent_config.default_trust_mode = TrustMode::Supervised;
-        state.store.agent.agent_config.custom_system_prompt = "runtime-prompt-marker".to_string();
-        state.store.agent.agent_config.reasoning_effort = "high".to_string();
+        state.agent_config.trust_mode = TrustMode::Supervised;
+        state.agent_config.default_trust_mode = TrustMode::Supervised;
+        state.agent_config.custom_system_prompt = "runtime-prompt-marker".to_string();
+        state.agent_config.reasoning_effort = "high".to_string();
 
         state.persist_to_disk()?;
 
@@ -388,7 +388,7 @@ fn persist_strips_legacy_external_config_fields_and_keeps_runtime_fields() -> Re
         assert_eq!(loaded_config.reasoning_effort, "high");
 
         // 4. 把加载的配置应用回内存 state，再持久化（模拟正常 load → persist 周期）。
-        state.store.agent.agent_config = loaded_config.clone();
+        state.agent_config = loaded_config.clone();
         state.persist_to_disk()?;
 
         // 5. 回归断言：新 app.json 的 agent_config 不含 mcp，runtime 字段仍在。

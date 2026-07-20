@@ -1,17 +1,5 @@
-mod agent;
-mod provider;
 mod runtime;
 mod session;
 
-pub use agent::AgentState;
-pub use provider::ProviderState;
-pub use runtime::{PendingTurnStub, RuntimeState};
-pub use session::{SessionInputDraft, SessionState};
-
-#[derive(Debug)]
-pub struct AppStore {
-    pub session: SessionState,
-    pub provider: ProviderState,
-    pub agent: AgentState,
-    pub runtime: RuntimeState,
-}
+pub use runtime::PendingTurnStub;
+pub use session::SessionInputDraft;

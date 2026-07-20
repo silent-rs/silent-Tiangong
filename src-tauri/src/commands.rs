@@ -1313,19 +1313,18 @@ async fn send_message_inner(
             if core_state.has_pending_turn_for(&session_id)
                 && core_state.active_session_id() == session_id
             {
-                core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
-                core_state.store.runtime.run.summary = "正在处理".to_string();
-                core_state.store.runtime.run.last_session_id = Some(session_id.clone());
+                core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                core_state.run.summary = "正在处理".to_string();
+                core_state.run.last_session_id = Some(session_id.clone());
                 if let Some(session) = core_state
                     .sessions()
                     .iter()
                     .find(|session| session.id == session_id)
                 {
                     let usage = session.total_usage();
-                    core_state.store.runtime.run.last_usage =
-                        (usage.total_tokens > 0).then_some(usage);
+                    core_state.run.last_usage = (usage.total_tokens > 0).then_some(usage);
                 }
-                core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+                core_state.run.updated_at = tiangong_core::session::now_text();
             }
             core_state.finish_session_send(&session_id, revision, true)
         })
@@ -1745,36 +1744,32 @@ pub(crate) fn start_stream_consumer(
                 // RunStatus/usage 更新
                 match &event {
                     StreamEvent::UserMessage { .. } => {
-                        core_state.store.runtime.run.status =
-                            tiangong_core::runtime::RunStatus::Executing;
-                        core_state.store.runtime.run.summary = "正在处理".to_string();
-                        core_state.store.runtime.run.last_session_id = Some(sid.clone());
-                        core_state.store.runtime.run.updated_at =
-                            tiangong_core::session::now_text();
+                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                        core_state.run.summary = "正在处理".to_string();
+                        core_state.run.last_session_id = Some(sid.clone());
+                        core_state.run.updated_at = tiangong_core::session::now_text();
                     }
                     StreamEvent::ApprovalNeeded {
                         ref request_id,
                         ref tool_name,
                         ref args_summary,
                     } => {
-                        core_state.store.runtime.run.status =
-                            tiangong_core::runtime::RunStatus::WaitingApproval;
-                        core_state.store.runtime.run.summary = if args_summary.is_empty() {
+                        core_state.run.status = tiangong_core::runtime::RunStatus::WaitingApproval;
+                        core_state.run.summary = if args_summary.is_empty() {
                             format!("工具 {tool_name} 需要确认")
                         } else {
                             format!("{tool_name}: {args_summary}")
                         };
-                        core_state.store.runtime.run.approval_request_id = Some(request_id.clone());
+                        core_state.run.approval_request_id = Some(request_id.clone());
                     }
                     StreamEvent::ToolStart {
                         name,
                         ref args_summary,
                     } => {
                         // 审批通过后恢复执行状态
-                        core_state.store.runtime.run.status =
-                            tiangong_core::runtime::RunStatus::Executing;
-                        core_state.store.runtime.run.approval_request_id = None;
-                        core_state.store.runtime.run.summary = if args_summary.is_empty() {
+                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                        core_state.run.approval_request_id = None;
+                        core_state.run.summary = if args_summary.is_empty() {
                             format!("正在执行：{name}")
                         } else {
                             format!("正在执行：{name} {args_summary}")
@@ -1782,17 +1777,15 @@ pub(crate) fn start_stream_consumer(
                     }
                     StreamEvent::ToolResult { name, ok, .. } => {
                         let s = if *ok { "✓" } else { "✗" };
-                        core_state.store.runtime.run.summary = format!("{s} {name}");
+                        core_state.run.summary = format!("{s} {name}");
                     }
                     StreamEvent::ToolCalls { names, .. } => {
-                        core_state.store.runtime.run.summary =
-                            format!("正在执行：{}", names.join(", "));
+                        core_state.run.summary = format!("正在执行：{}", names.join(", "));
                     }
                     StreamEvent::TokenUsage { .. } => {
                         if let Some(session) = core_state.sessions().iter().find(|s| s.id == sid) {
                             let total = session.total_usage();
-                            core_state.store.runtime.run.last_usage =
-                                (total.total_tokens > 0).then_some(total);
+                            core_state.run.last_usage = (total.total_tokens > 0).then_some(total);
                         }
                     }
                     StreamEvent::Done { .. } => {
@@ -1800,12 +1793,10 @@ pub(crate) fn start_stream_consumer(
                             &event,
                             core_state.has_pending_turn_for(&sid),
                         ) {
-                            core_state.store.runtime.run.status =
-                                tiangong_core::runtime::RunStatus::Executing;
-                            core_state.store.runtime.run.summary = "正在处理".to_string();
-                            core_state.store.runtime.run.last_session_id = Some(sid.clone());
-                            core_state.store.runtime.run.updated_at =
-                                tiangong_core::session::now_text();
+                            core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                            core_state.run.summary = "正在处理".to_string();
+                            core_state.run.last_session_id = Some(sid.clone());
+                            core_state.run.updated_at = tiangong_core::session::now_text();
                         } else {
                             core_state.report_run_idle(format!(
                                 "模型供应商：{}",
@@ -1816,12 +1807,10 @@ pub(crate) fn start_stream_consumer(
                     }
                     StreamEvent::Error { ref message } => {
                         if core_state.has_pending_turn_for(&sid) {
-                            core_state.store.runtime.run.status =
-                                tiangong_core::runtime::RunStatus::Executing;
-                            core_state.store.runtime.run.summary = "正在处理下一条消息".to_string();
-                            core_state.store.runtime.run.last_session_id = Some(sid.clone());
-                            core_state.store.runtime.run.updated_at =
-                                tiangong_core::session::now_text();
+                            core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                            core_state.run.summary = "正在处理下一条消息".to_string();
+                            core_state.run.last_session_id = Some(sid.clone());
+                            core_state.run.updated_at = tiangong_core::session::now_text();
                         } else {
                             core_state.report_run_idle(format!("执行失败：{message}"));
                             core_state.clear_pending_turn_for(&sid);
@@ -1832,69 +1821,63 @@ pub(crate) fn start_stream_consumer(
                         max_attempts,
                         ..
                     } => {
-                        core_state.store.runtime.run.summary =
-                            format!("重试中 ({attempt}/{max_attempts})...");
+                        core_state.run.summary = format!("重试中 ({attempt}/{max_attempts})...");
                     }
                     StreamEvent::Reasoning { .. } => {
-                        core_state.store.runtime.run.summary = "正在思考...".to_string();
+                        core_state.run.summary = "正在思考...".to_string();
                     }
                     StreamEvent::Delta { .. }
                     | StreamEvent::ReactText { .. }
                     | StreamEvent::SummaryText { .. } => {
-                        core_state.store.runtime.run.summary = "正在回复...".to_string();
+                        core_state.run.summary = "正在回复...".to_string();
                     }
                     StreamEvent::PhaseChanged { phase, .. } => {
                         // 工具执行完毕后 core 发出 PhaseChanged(analyzing)，
                         // 标志进入下一轮 LLM 推理。及时更新 summary 避免前端
                         // 状态卡在刚完成的工具名上（如 "✓ run_shell"）。
                         if phase == "analyzing" {
-                            core_state.store.runtime.run.summary = "正在思考...".to_string();
+                            core_state.run.summary = "正在思考...".to_string();
                         }
                     }
                     StreamEvent::MemoryRecallStart { .. } => {
-                        core_state.store.runtime.run.summary = "正在检索记忆...".to_string();
+                        core_state.run.summary = "正在检索记忆...".to_string();
                     }
                     StreamEvent::MemoryRecallProgress { ref phase } => {
-                        core_state.store.runtime.run.summary = format!("正在检索记忆: {phase}");
+                        core_state.run.summary = format!("正在检索记忆: {phase}");
                     }
                     StreamEvent::MemoryRecallDone { hit_count, .. } => {
                         if *hit_count > 0 {
-                            core_state.store.runtime.run.summary =
-                                format!("记忆检索完成，命中 {hit_count} 条");
+                            core_state.run.summary = format!("记忆检索完成，命中 {hit_count} 条");
                         } else {
-                            core_state.store.runtime.run.summary =
-                                "记忆检索完成，无相关记忆".to_string();
+                            core_state.run.summary = "记忆检索完成，无相关记忆".to_string();
                         }
                     }
                     StreamEvent::AgentCreated { ref label, .. } => {
-                        core_state.store.runtime.run.summary = format!("Agent {label} 已加入团队");
+                        core_state.run.summary = format!("Agent {label} 已加入团队");
                     }
                     StreamEvent::AgentStatusChanged {
                         ref label,
                         ref status,
                         ..
                     } => {
-                        core_state.store.runtime.run.summary = format!("Agent {label}: {status}");
+                        core_state.run.summary = format!("Agent {label}: {status}");
                     }
                     StreamEvent::AgentNotification {
                         ref agent_label, ..
                     } => {
-                        core_state.store.runtime.run.summary =
-                            format!("Agent {agent_label} 发送了通知");
+                        core_state.run.summary = format!("Agent {agent_label} 发送了通知");
                     }
                     StreamEvent::AgentMessage {
                         ref from_agent_label,
                         ref to_agent_label,
                         ..
                     } => {
-                        core_state.store.runtime.run.summary =
-                            format!("{from_agent_label} → {to_agent_label}");
+                        core_state.run.summary = format!("{from_agent_label} → {to_agent_label}");
                     }
                     StreamEvent::AgentOutput {
                         ref agent_label, ..
                     } => {
-                        core_state.store.runtime.run.summary =
-                            format!("Agent {agent_label} 输出已更新");
+                        core_state.run.summary = format!("Agent {agent_label} 输出已更新");
                     }
                     StreamEvent::FileLockChanged {
                         ref path,
@@ -1902,38 +1885,34 @@ pub(crate) fn start_stream_consumer(
                         ref holder_agent_label,
                         ..
                     } => {
-                        core_state.store.runtime.run.summary = format!(
+                        core_state.run.summary = format!(
                             "文件锁 {action}: {path} ({})",
                             holder_agent_label.as_deref().unwrap_or("未知")
                         );
                     }
                     StreamEvent::ContextCompressing { .. } => {
-                        core_state.store.runtime.run.status =
-                            tiangong_core::runtime::RunStatus::Executing;
-                        core_state.store.runtime.run.summary = "正在压缩早期上下文...".to_string();
-                        core_state.store.runtime.run.last_session_id = Some(sid.clone());
-                        core_state.store.runtime.run.updated_at =
-                            tiangong_core::session::now_text();
+                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                        core_state.run.summary = "正在压缩早期上下文...".to_string();
+                        core_state.run.last_session_id = Some(sid.clone());
+                        core_state.run.updated_at = tiangong_core::session::now_text();
                     }
                     StreamEvent::ContextCompressed { ref action, .. } => {
                         let text = format!("上下文{}", action.display_text());
                         if core_state.has_pending_turn_for(&sid) {
-                            core_state.store.runtime.run.summary = text;
+                            core_state.run.summary = text;
                         } else {
                             core_state.report_run_idle(text);
                         }
                     }
                     StreamEvent::IndexStatus { ref phase, count } => match phase.as_str() {
                         "scanning" => {
-                            core_state.store.runtime.run.summary =
-                                "正在建立工作区索引...".to_string();
+                            core_state.run.summary = "正在建立工作区索引...".to_string();
                         }
                         "done" => {
-                            core_state.store.runtime.run.summary =
-                                format!("索引扫描完成: {count} 个文件");
+                            core_state.run.summary = format!("索引扫描完成: {count} 个文件");
                         }
                         "error" => {
-                            core_state.store.runtime.run.summary = "索引扫描失败".to_string();
+                            core_state.run.summary = "索引扫描失败".to_string();
                         }
                         _ => {}
                     },
@@ -2264,10 +2243,10 @@ pub async fn edit_and_resend(
             if core_state.has_pending_turn_for(&session_id)
                 && core_state.active_session_id() == session_id
             {
-                core_state.store.runtime.run.status = tiangong_core::runtime::RunStatus::Executing;
-                core_state.store.runtime.run.summary = "正在重新发送编辑后的消息".to_string();
-                core_state.store.runtime.run.last_session_id = Some(session_id.clone());
-                core_state.store.runtime.run.updated_at = tiangong_core::session::now_text();
+                core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
+                core_state.run.summary = "正在重新发送编辑后的消息".to_string();
+                core_state.run.last_session_id = Some(session_id.clone());
+                core_state.run.updated_at = tiangong_core::session::now_text();
             }
             Ok(())
         })
@@ -3362,7 +3341,7 @@ pub(crate) async fn cleanup_unreferenced_draft_attachments(
     let mut referenced = state
         .with_state_read(|core_state| {
             let mut paths = claimed_paths;
-            for draft in core_state.store.session.input_drafts.values() {
+            for draft in core_state.input_drafts.values() {
                 paths.extend(draft.attachments.iter().map(|item| item.source.clone()));
             }
             Ok(paths)
