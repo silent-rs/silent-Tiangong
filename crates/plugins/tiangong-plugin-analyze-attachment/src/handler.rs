@@ -124,10 +124,9 @@ impl AnalyzeAttachmentPlugin {
 
         // 构造附件解析请求上下文（owned）。
         let source_text = source.text_content();
-        let session_title = session.title.clone();
         let mut attachment_context = vec![
             Message::new(
-                MessageRole::User,
+                MessageRole::System,
                 "你是附件解析助手。只根据随消息提供的附件内容和解析要求回答，输出可供主模型直接使用的简洁中文结果。".to_string(),
             ),
             Message::new(
@@ -151,12 +150,12 @@ impl AnalyzeAttachmentPlugin {
         attachment_context.push(user_message);
 
         let req = ModelRequest {
-            session_title: format!("{session_title} · attachment-analysis"),
             user_input: String::new(),
             context: attachment_context,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         };
 
         let feedback_tx = self.feedback_tx();

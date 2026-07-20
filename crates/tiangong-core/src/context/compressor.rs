@@ -1,359 +1,247 @@
-use std::collections::HashSet;
+use crate::model::{ModelRequest, SingleProviderClient, StopReason, TokenUsage};
+use crate::session::{Message, MessagePhase, MessageRole, Session};
 
-use anyhow::Result;
-
-use crate::model::{ModelClient, ModelRequest, SingleProviderClient, TokenUsage};
-use crate::session::{ContentBlock, Message, MessagePhase, MessageRole, Session, now_text};
-
-/// 上下文压缩器
-///
-/// 采用滚动摘要策略：保留最近 N 轮完整对话，对更早的消息（含旧摘要）
-/// 折叠为新摘要。摘要持久化到 Session，支持无限对话延伸。
-pub struct ContextCompressor {
-    keep_recent_turns: usize,
+/// 判断消息是否为可压缩的有效消息。
+pub(crate) fn is_compressible(message: &Message) -> bool {
+    !message.model_excluded
+        && message.role != MessageRole::System
+        && message.phase != MessagePhase::CompressedResume
 }
 
-#[derive(Debug, Clone, Default)]
+/// 使用 Session 和客户端快照生成上下文摘要，不负责任务调度、持久化或通知。
+pub struct ContextCompressor {
+    session: Session,
+    client: SingleProviderClient,
+}
+
+#[derive(Debug, Clone)]
 pub struct CompressionUpdate {
-    pub compressed: bool,
+    pub summary: String,
+    pub current_task: Option<String>,
+    pub usage: TokenUsage,
+    pub previous_summary_up_to: usize,
+    pub summary_up_to: usize,
+    pub boundary_message_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompressionError {
+    pub message: String,
     pub usage: TokenUsage,
 }
 
-impl Default for ContextCompressor {
-    fn default() -> Self {
+impl CompressionError {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
-            keep_recent_turns: 6,
+            message: message.into(),
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn with_usage(message: impl Into<String>, usage: TokenUsage) -> Self {
+        Self {
+            message: message.into(),
+            usage,
         }
     }
 }
 
+impl std::fmt::Display for CompressionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CompressionError {}
+
 impl ContextCompressor {
-    pub fn new(keep_recent_turns: usize) -> Self {
-        Self { keep_recent_turns }
+    pub fn new(session: Session, client: SingleProviderClient) -> Self {
+        Self { session, client }
     }
 
-    pub fn update_summary_with_usage(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> Result<CompressionUpdate> {
-        let split_point = self.find_split_point(&session.messages);
-        self.update_summary_at_with_usage(session, client, split_point)
+    pub fn has_pending_messages(&self) -> bool {
+        self.session.messages[self.session.summary_up_to..]
+            .iter()
+            .any(is_compressible)
     }
 
-    pub(crate) fn update_summary_at_with_usage(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
+    /// 压缩当前摘要边界到 `split_point` 之间的有效消息。
+    pub async fn compress(
+        self,
         split_point: usize,
-    ) -> Result<CompressionUpdate> {
-        let split_point = split_point.min(session.messages.len());
-        if split_point <= session.summary_up_to {
-            return Ok(CompressionUpdate::default());
+        max_output_tokens: u32,
+        include_current_task: bool,
+    ) -> std::result::Result<CompressionUpdate, CompressionError> {
+        let previous_summary_up_to = self.session.summary_up_to;
+        let split_point = split_point.min(self.session.messages.len());
+        if split_point <= previous_summary_up_to {
+            return Err(CompressionError::new(format!(
+                "无可压缩消息：summary_up_to({previous_summary_up_to}) 已到达末尾({split_point})"
+            )));
+        }
+        if !self.session.messages[previous_summary_up_to..split_point]
+            .iter()
+            .any(is_compressible)
+        {
+            return Err(CompressionError::new(format!(
+                "待压缩范围 [{previous_summary_up_to}..{split_point}] 内无有效消息"
+            )));
         }
 
-        let messages_count = session.messages[session.summary_up_to..split_point]
-            .iter()
-            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-            .count();
-
-        if messages_count == 0 {
-            return Ok(CompressionUpdate::default());
-        }
-
-        let (summary, usage) = self.fold_summary(session, split_point, client)?;
-
-        tracing::info!(
-            old_summary_up_to = session.summary_up_to,
-            new_summary_up_to = split_point,
-            messages_count,
-            summary_len = summary.len(),
-            "滚动摘要已更新"
-        );
-
-        session.context_summary = Some(summary);
-        session.summary_up_to = split_point;
-        mark_compact_boundary(&mut session.messages, split_point);
-        Ok(CompressionUpdate {
-            compressed: true,
-            usage,
-        })
-    }
-
-    pub async fn update_summary_with_usage_async(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-    ) -> Result<CompressionUpdate> {
-        let split_point = self.find_split_point(&session.messages);
-        self.update_summary_at_with_usage_async(session, client, split_point, None)
-            .await
-    }
-
-    pub(crate) async fn update_summary_from_context_async(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-        messages_to_compress: Vec<Message>,
-    ) -> Result<CompressionUpdate> {
-        let compressed_ids = messages_to_compress
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect::<HashSet<_>>();
-        let split_point = session.messages[session.summary_up_to..]
-            .iter()
-            .position(|message| {
-                message.role == MessageRole::User
-                    && !message.model_excluded
-                    && !compressed_ids.contains(message.id.as_str())
-            })
-            .map(|index| session.summary_up_to + index)
-            .unwrap_or(session.messages.len());
-
-        self.update_summary_at_with_usage_async(
-            session,
-            client,
+        let boundary_message_id = self.session.messages[split_point - 1].id.clone();
+        let request = Self::summary_request(
+            &self.session,
             split_point,
-            Some(messages_to_compress),
-        )
-        .await
-    }
-
-    pub(crate) async fn update_summary_at_with_usage_async(
-        &self,
-        session: &mut Session,
-        client: &SingleProviderClient,
-        split_point: usize,
-        compression_context: Option<Vec<Message>>,
-    ) -> Result<CompressionUpdate> {
-        let split_point = split_point.min(session.messages.len());
-        if split_point <= session.summary_up_to {
-            return Ok(CompressionUpdate::default());
+            max_output_tokens,
+            include_current_task,
+        );
+        let response = self
+            .client
+            .complete_async(&request)
+            .await
+            .map_err(|error| CompressionError::new(error.to_string()))?;
+        let usage = response.usage.clone();
+        if response.stop_reason == Some(StopReason::MaxTokens) {
+            return Err(CompressionError::with_usage(
+                "上下文压缩输出达到最大 token 限制，拒绝提交截断摘要",
+                usage,
+            ));
         }
-        let messages_count = session.messages[session.summary_up_to..split_point]
-            .iter()
-            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-            .count();
-        if messages_count == 0 {
-            return Ok(CompressionUpdate::default());
-        }
+        let (summary, current_task) = Self::parse_output(&response.text, include_current_task)
+            .map_err(|error| CompressionError::with_usage(error, usage.clone()))?;
 
-        let (summary, usage) = self
-            .fold_summary_async(session, split_point, compression_context, client)
-            .await?;
-        session.context_summary = Some(summary);
-        session.summary_up_to = split_point;
-        mark_compact_boundary(&mut session.messages, split_point);
         Ok(CompressionUpdate {
-            compressed: true,
+            summary,
+            current_task,
             usage,
+            previous_summary_up_to,
+            summary_up_to: split_point,
+            boundary_message_id,
         })
-    }
-
-    /// 构建发送给 LLM 的上下文消息列表
-    pub fn build_context(&self, session: &Session) -> Vec<Message> {
-        let split_point = if session.summary_up_to > 0 {
-            session.summary_up_to
-        } else {
-            0
-        };
-        session.messages[split_point..]
-            .iter()
-            .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-            .cloned()
-            .collect()
-    }
-
-    /// 查找分割点：保留最近 N 轮对话（一轮 = 一次 user 消息及其后续消息）
-    pub(crate) fn find_split_point(&self, messages: &[Message]) -> usize {
-        let mut turn_count = 0;
-        let mut split_point = messages.len();
-
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if msg.role == MessageRole::User && !msg.model_excluded {
-                turn_count += 1;
-                if turn_count >= self.keep_recent_turns {
-                    split_point = i;
-                    break;
-                }
-            }
-        }
-
-        if split_point == messages.len() {
-            return 0;
-        }
-        split_point
-    }
-
-    /// 折叠摘要：取得边界内上下文，并在末尾追加内部压缩要求。
-    fn fold_summary(
-        &self,
-        session: &Session,
-        split_point: usize,
-        client: &SingleProviderClient,
-    ) -> Result<(String, TokenUsage)> {
-        let req = Self::summary_request(session, split_point, None);
-        let resp = client.complete(&req)?;
-        Ok((resp.text, resp.usage))
-    }
-
-    async fn fold_summary_async(
-        &self,
-        session: &Session,
-        split_point: usize,
-        compression_context: Option<Vec<Message>>,
-        client: &SingleProviderClient,
-    ) -> Result<(String, TokenUsage)> {
-        let req = Self::summary_request(session, split_point, compression_context);
-        let resp = client.complete_async(&req).await?;
-        Ok((resp.text, resp.usage))
     }
 
     fn summary_request(
         session: &Session,
         split_point: usize,
-        compression_context: Option<Vec<Message>>,
+        max_output_tokens: u32,
+        include_current_task: bool,
     ) -> ModelRequest {
-        let mut context = compression_context.unwrap_or_else(|| {
-            let split_point = split_point.min(session.messages.len());
-            let start = session.summary_up_to.min(split_point);
+        let split_point = split_point.min(session.messages.len());
+        let start = session.summary_up_to.min(split_point);
+        let mut context = Vec::with_capacity((split_point - start) + 2);
+        if let Some(system) = session.system_prompt_message.as_ref() {
+            context.push(system.clone());
+        }
+        context.extend(
             session.messages[start..split_point]
                 .iter()
-                .filter(|message| !message.model_excluded && message.role != MessageRole::System)
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        let mut instruction = String::from(
-            "请将以上对话历史压缩为简洁摘要。保留关键信息、决策结论和重要数据，去除冗余的中间过程和重复内容。不要回答用户，只输出摘要正文。",
+                .filter(|message| {
+                    is_compressible(message)
+                        || (!message.model_excluded
+                            && message.phase == MessagePhase::CompressedResume)
+                })
+                .cloned(),
         );
-        if let Some(summary) = session
-            .context_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-        {
-            instruction.push_str(&format!("\n\n[已有摘要]\n{summary}"));
-        }
-        context.push(Message::new(MessageRole::User, instruction));
+        context.push(Message::new(
+            MessageRole::User,
+            Self::compress_instruction(session, max_output_tokens, include_current_task),
+        ));
+
         ModelRequest {
-            session_title: session.title.clone(),
             user_input: String::new(),
             context,
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: Some(max_output_tokens),
         }
     }
-}
 
-/// 压缩 ReAct 循环内的 loop_messages
-///
-/// 当循环内消息过多时，对早期轮次的工具调用和结果进行摘要，
-/// 保留最近 N 轮的完整信息。
-pub fn compress_loop_messages(
-    loop_messages: &[Message],
-    keep_recent: usize,
-    client: &SingleProviderClient,
-) -> Result<Vec<Message>> {
-    // 按 Assistant + Tool/System 配对分组为"轮次"
-    let mut rounds: Vec<(usize, usize)> = Vec::new();
-    let mut i = 0;
-    while i < loop_messages.len() {
-        let start = i;
-        if i < loop_messages.len() && loop_messages[i].role == MessageRole::Assistant {
-            i += 1;
-        }
-        while i < loop_messages.len()
-            && matches!(
-                loop_messages[i].role,
-                MessageRole::System | MessageRole::Tool
+    fn compress_instruction(
+        session: &Session,
+        max_output_tokens: u32,
+        include_current_task: bool,
+    ) -> String {
+        let existing_summary = session
+            .context_summary
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|summary| !summary.is_empty());
+        let merge_hint = if existing_summary {
+            "系统提示中已经包含此前对话摘要，请将它与以上新增对话合并；不要重复引用原摘要。\n"
+        } else {
+            ""
+        };
+
+        if include_current_task {
+            format!(
+                "请压缩以上对话历史。{merge_hint}\
+                 总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
+                 保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
+                 不要回答用户，严格按以下顺序输出：\n\n\
+                 [[CURRENT_TASK]]\n\
+                 用户最近提问：<原文摘录>\n\
+                 已完成：<已得到的关键结果>\n\
+                 进行中：<当前事项，若无则填“无”>\n\
+                 下一步：<下一步动作，若无则填“无”>\n\n\
+                 [[SUMMARY]]\n\
+                 <合并后的历史摘要>"
             )
-        {
-            i += 1;
-        }
-        if i > start {
-            rounds.push((start, i));
         } else {
-            i += 1;
+            format!(
+                "请压缩以上对话历史。{merge_hint}\
+                 总输出不得超过 {max_output_tokens} tokens，请在达到预算前主动结束。\n\
+                 保留关键事实、决策、路径、错误和重要结果，删除重复内容、过程性描述和无效工具输出。\n\
+                 不要回答用户，严格按以下格式输出：\n\n\
+                 [[SUMMARY]]\n\
+                 <合并后的历史摘要>"
+            )
         }
     }
 
-    if rounds.len() <= keep_recent {
-        return Ok(loop_messages.to_vec());
-    }
-
-    let compress_rounds = rounds.len() - keep_recent;
-    let compress_end = rounds[compress_rounds - 1].1;
-    let early_messages = &loop_messages[..compress_end];
-    let recent_messages = &loop_messages[compress_end..];
-
-    let mut text = String::new();
-    for msg in early_messages {
-        let label = match msg.role {
-            MessageRole::Assistant => "Agent",
-            MessageRole::System => "工具结果",
-            MessageRole::User => "用户",
-            MessageRole::Tool => "工具结果",
-        };
-        let content_text = msg.text_content();
-        let content = if content_text.chars().count() > 1000 {
-            let truncated: String = content_text.chars().take(1000).collect();
-            format!("{truncated}...(已截断)")
-        } else {
-            content_text.clone()
-        };
-        text.push_str(&format!("[{label}]: {content}\n"));
-    }
-
-    let prompt = format!(
-        "请将以下 Agent 执行过程压缩为简洁摘要。要求：\n\
-         1. 保留每个工具调用的名称和关键结果\n\
-         2. 保留成功/失败状态\n\
-         3. 保留发现的重要信息\n\
-         4. 去除工具输出的原始数据细节\n\
-         5. 直接输出摘要，不要前缀说明\n\n\
-         执行过程：\n{text}"
-    );
-
-    let req = ModelRequest {
-        session_title: String::new(),
-        user_input: prompt,
-        context: Vec::new(),
-        thinking: None,
-        reasoning_effort: None,
-        thinking_disabled: false,
-    };
-
-    let summary = match client.complete(&req) {
-        Ok(resp) => resp.text,
-        Err(err) => {
-            tracing::warn!("循环内消息摘要失败，保留原始消息：{err}");
-            return Ok(loop_messages.to_vec());
+    fn parse_output(
+        text: &str,
+        include_current_task: bool,
+    ) -> std::result::Result<(String, Option<String>), String> {
+        const TASK_MARKER: &str = "[[CURRENT_TASK]]";
+        const SUMMARY_MARKER: &str = "[[SUMMARY]]";
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("上下文压缩返回空内容，拒绝推进摘要边界".to_string());
         }
-    };
 
-    let mut result = vec![Message {
-        id: scru128::new().to_string(),
-        role: MessageRole::Tool,
-        content: vec![ContentBlock::text(format!(
-            "[前 {compress_rounds} 轮执行摘要]\n{summary}"
-        ))],
-        reasoning_content: String::new(),
-        reasoning_signature: None,
-        worker_id: None,
-        elapsed_ms: None,
-        turn_status: None,
-        tool_calls: Vec::new(),
-        tool_call_id: None,
-        tool_name: Some("loop_summary".to_string()),
-        tool_result_is_error: false,
-        compact: true,
-        model_excluded: false,
-        phase: MessagePhase::Normal,
-        created_at: now_text(),
-    }];
-    result.extend_from_slice(recent_messages);
-    Ok(result)
+        if include_current_task {
+            let task_start = text
+                .find(TASK_MARKER)
+                .ok_or_else(|| "上下文压缩缺少 CURRENT_TASK 段落".to_string())?;
+            let summary_start = text
+                .find(SUMMARY_MARKER)
+                .ok_or_else(|| "上下文压缩缺少 SUMMARY 段落".to_string())?;
+            if task_start >= summary_start {
+                return Err(
+                    "上下文压缩段落顺序错误：CURRENT_TASK 必须位于 SUMMARY 之前".to_string()
+                );
+            }
+            let task = text[task_start + TASK_MARKER.len()..summary_start].trim();
+            let summary = text[summary_start + SUMMARY_MARKER.len()..].trim();
+            if task.is_empty() {
+                return Err("上下文压缩返回空 CURRENT_TASK，拒绝推进摘要边界".to_string());
+            }
+            if summary.is_empty() {
+                return Err("上下文压缩返回空摘要，拒绝推进摘要边界".to_string());
+            }
+            return Ok((summary.to_string(), Some(task.to_string())));
+        }
+
+        let summary = text
+            .split_once(SUMMARY_MARKER)
+            .map_or(text, |(_, summary)| summary)
+            .trim();
+        if summary.is_empty() {
+            return Err("上下文压缩返回空摘要，拒绝推进摘要边界".to_string());
+        }
+        Ok((summary.to_string(), None))
+    }
 }
 
 pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
@@ -365,5 +253,94 @@ pub fn mark_compact_boundary(messages: &mut [Message], split_point: usize) {
         .and_then(|index| messages.get_mut(index))
     {
         boundary.compact = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(text: &str) -> Message {
+        Message::new(MessageRole::User, text)
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::new(MessageRole::Assistant, text)
+    }
+
+    #[test]
+    fn summary_request_keeps_full_body_and_sets_budget() {
+        let mut session = Session::new("test");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
+        session.messages = vec![user("你好"), assistant("你好，有什么可以帮你？")];
+
+        let request = ContextCompressor::summary_request(&session, 2, 10_000, true);
+
+        assert_eq!(request.max_output_tokens, Some(10_000));
+        assert_eq!(request.context.len(), 4);
+        assert_eq!(request.context[0].role, MessageRole::System);
+        assert_eq!(request.context[1].text_content(), "你好");
+        assert_eq!(request.context[2].text_content(), "你好，有什么可以帮你？");
+        let instruction = request.context[3].text_content();
+        assert!(instruction.contains("不得超过 10000 tokens"));
+        assert!(instruction.find("[[CURRENT_TASK]]") < instruction.find("[[SUMMARY]]"));
+    }
+
+    #[test]
+    fn prompt_references_existing_summary_without_duplicating_it() {
+        let mut session = Session::new("test");
+        session.context_summary = Some("不应重复出现的旧摘要正文".to_string());
+
+        let instruction = ContextCompressor::compress_instruction(&session, 50_000, true);
+
+        assert!(instruction.contains("系统提示中已经包含此前对话摘要"));
+        assert!(!instruction.contains("不应重复出现的旧摘要正文"));
+    }
+
+    #[test]
+    fn summary_request_keeps_the_previous_resume_as_user_anchor() {
+        let mut session = Session::new("test");
+        session.system_prompt_message = Some(Message::new(MessageRole::System, "系统提示"));
+        let mut resume = user("上一轮续接状态");
+        resume.phase = MessagePhase::CompressedResume;
+        session.messages = vec![resume, assistant("后续交互")];
+
+        let request = ContextCompressor::summary_request(&session, 2, 10_000, true);
+
+        assert_eq!(request.context[1].role, MessageRole::User);
+        assert_eq!(request.context[1].phase, MessagePhase::CompressedResume);
+        assert_eq!(request.context[1].text_content(), "上一轮续接状态");
+        assert_eq!(request.context[2].text_content(), "后续交互");
+    }
+
+    #[test]
+    fn parses_task_before_summary() {
+        let text = "[[CURRENT_TASK]]\n用户最近提问：X\n下一步：Y\n\n[[SUMMARY]]\n历史摘要";
+
+        let (summary, task) = ContextCompressor::parse_output(text, true).unwrap();
+
+        assert_eq!(summary, "历史摘要");
+        assert_eq!(task.as_deref(), Some("用户最近提问：X\n下一步：Y"));
+    }
+
+    #[test]
+    fn rejects_empty_or_incomplete_output() {
+        assert!(ContextCompressor::parse_output("", true).is_err());
+        assert!(ContextCompressor::parse_output("[[SUMMARY]]\n摘要", true).is_err());
+        assert!(ContextCompressor::parse_output("[[CURRENT_TASK]]\n任务", true).is_err());
+        assert!(
+            ContextCompressor::parse_output("[[CURRENT_TASK]]\n\n[[SUMMARY]]\n摘要", true).is_err()
+        );
+        assert!(
+            ContextCompressor::parse_output("[[CURRENT_TASK]]\n任务\n[[SUMMARY]]", true).is_err()
+        );
+    }
+
+    #[test]
+    fn manual_output_accepts_plain_non_empty_summary() {
+        let (summary, task) = ContextCompressor::parse_output("普通摘要", false).unwrap();
+
+        assert_eq!(summary, "普通摘要");
+        assert!(task.is_none());
     }
 }

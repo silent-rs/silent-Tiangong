@@ -1,4 +1,4 @@
-import type { ContentBlock } from "@/api/tauri";
+import type { ContentBlock, MessagePhase } from "@/api/tauri";
 
 export interface MessageItem {
   id: string;
@@ -19,7 +19,7 @@ export interface MessageItem {
   tool_result_is_error?: boolean;
   compact?: boolean;
   model_excluded?: boolean;
-  phase?: "normal" | "react" | "summary";
+  phase?: MessagePhase;
   created_at: string;
   /** 该用户消息所属轮次的执行时长（毫秒）。仅用户消息携带。 */
   elapsed_ms?: number;

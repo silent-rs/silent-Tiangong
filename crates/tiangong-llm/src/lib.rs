@@ -36,5 +36,6 @@ pub use request::ReasoningEffort;
 pub use rerank::{
     RerankEndpointConfig, RerankProvider, RerankRequest, RerankResponse, RerankResult,
 };
+pub use response::StopReason;
 pub use text::{LlmEndpointConfig, complete_text, complete_text_with_usage};
 pub use usage::TokenUsageData;

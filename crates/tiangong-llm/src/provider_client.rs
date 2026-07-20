@@ -53,17 +53,27 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
 
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
-    pub session_title: String,
     pub user_input: String,
     pub context: Vec<Message>,
     pub thinking: Option<ThinkingConfig>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub thinking_disabled: bool,
+    /// 该请求允许的最大输出 token 数。
+    ///
+    /// `None` 时由 llm 层用默认上限（`MAX_TOKENS_MAIN`）。压缩等空间敏感请求
+    /// 应显式设置：按 `context_limit - 预估 prompt_tokens` 计算，留出足够
+    /// 摘要输出空间，避免 provider 因 `prompt + max_tokens > limit` 报错。
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ModelRequest {
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.thinking = Some(ThinkingConfig { budget_tokens });
+        self
+    }
+
+    pub fn with_max_output_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_output_tokens = Some(max_tokens);
         self
     }
 }
@@ -73,6 +83,7 @@ pub struct ModelResponse {
     pub text: String,
     pub reasoning_content: String,
     pub reasoning_signature: Option<String>,
+    pub stop_reason: Option<StopReason>,
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
 }
@@ -176,12 +187,14 @@ impl SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
+        let request = build_provider_request(req, model, max_tokens, &[], None)?;
         let response = provider.complete(request).await.map_err(map_llm_error)?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
+            stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
         })
@@ -708,6 +721,7 @@ impl SingleProviderClient {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
+            stop_reason: None,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
         })
@@ -833,12 +847,14 @@ impl ModelClient for SingleProviderClient {
             return Err(anyhow!("API_MODEL 不能为空，无法发起模型请求"));
         }
         let provider = self.build_provider_dispatch(timeout_ms)?;
-        let request = build_provider_request(req, model, MAX_TOKENS_MAIN, &[], None)?;
+        let max_tokens = req.max_output_tokens.unwrap_or(MAX_TOKENS_MAIN);
+        let request = build_provider_request(req, model, max_tokens, &[], None)?;
         let response = self.block_on_llm(provider.complete(request))?;
         Ok(ModelResponse {
             text: collect_provider_text(&response).trim().to_string(),
             reasoning_content: response.reasoning_content.unwrap_or_default(),
             reasoning_signature: None,
+            stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
         })
@@ -957,35 +973,15 @@ fn build_provider_request(
     })
 }
 
-const SYSTEM_IDENTITY: &str = "你是天工智能助手，一个功能丰富的个人 AI 中枢。你可以回答问题、处理文件、执行命令、生成多媒体内容，也可以通过工具和技能完成各种复杂任务。";
-
-const SYSTEM_RULES: &str = "规则：\
-1. 对话时自然友好，回复内容完整有用。闲聊和问候时正常交流，简单介绍自己的能力。\
-2. 需要文件操作、代码搜索、命令执行等实际操作时，调用对应的工具。\
-3. 每次工具调用后会收到执行结果，根据结果决定下一步：继续调用工具或给出最终回复。\
-4. 执行工具任务时语言简洁高效，不要说\"让我查看\"之类的过渡语，直接给出结果。\
-5. 不要在回复中包含工具调用的原始痕迹（如 ok=、exit_code= 等元数据）。\
-6. 回复使用 Markdown 格式：代码和命令用代码块包裹，使用标题、列表等结构化排版。\
-7. 工具调用失败时必须如实告知用户失败原因，绝对不能虚构成功结果。\
-8. 命令执行默认使用 run_shell 或 run_command，并根据工具结果继续推进。\
-9. 只有用户明确要求后台、不阻塞、并行、持续运行、启动服务/监听，或需要管理已有后台任务时，才使用 spawn_task / wait_tasks。";
-
 fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessage>)> {
     let mut messages = Vec::new();
-    let mut system_texts = vec![
-        SYSTEM_IDENTITY.to_string(),
-        SYSTEM_RULES.to_string(),
-        format!("当前会话：{}", req.session_title),
-    ];
-    let mut has_context_system = false;
+    // System prompt 必须由 core 显式注入（session.system_prompt_message）。
+    // 这里不再保留 fallback 常量：context 缺 System 视为调用方错误，fail-fast。
+    let mut system_texts: Vec<String> = Vec::new();
     for msg in &req.context {
         if msg.role == MessageRole::System {
             let text = msg.text_content().trim().to_string();
             if !text.is_empty() {
-                if !has_context_system {
-                    system_texts.clear();
-                    has_context_system = true;
-                }
                 system_texts.push(text);
             }
             continue;
@@ -993,6 +989,12 @@ fn build_provider_messages(req: &ModelRequest) -> Result<(String, Vec<ChatMessag
         if let Some(message) = provider_message_from_session(msg)? {
             messages.push(message);
         }
+    }
+
+    if system_texts.is_empty() {
+        anyhow::bail!(
+            "build_provider_messages: context 缺少 System 消息。system prompt 应由 core 显式注入（session.system_prompt_message）。"
+        );
     }
 
     // 跳过消息列表开头的非 User 消息（summary_up_to 截断可能导致以 Assistant/Tool 开头）
@@ -1350,6 +1352,7 @@ fn convert_provider_response_to_function_response(
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: collect_provider_reasoning_signature(&response),
+        stop_reason: response.stop_reason,
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
     })
@@ -1568,6 +1571,7 @@ async fn consume_provider_stream_events_async(
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
+        stop_reason: None,
         usage: usage.into(),
         tool_calls,
     })
@@ -1613,6 +1617,7 @@ fn consume_provider_stream(
         text: response.text,
         reasoning_content: response.reasoning_content,
         reasoning_signature: response.reasoning_signature,
+        stop_reason: response.stop_reason,
         usage: response.usage,
         tool_calls: response.tool_calls,
     })
@@ -1768,6 +1773,44 @@ mod tests {
             content: LlmToolResultContent::Text(format!("result-{id}")),
             is_error: false,
         })
+    }
+
+    #[test]
+    fn build_provider_messages_fails_without_system_message() {
+        // context 无 System 消息时必须 fail-fast，
+        // 防止调用方遗漏 system prompt 注入。
+        let user_msg = Message {
+            id: "u".to_string(),
+            role: MessageRole::User,
+            content: vec![ContentBlock::text("你好")],
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            worker_id: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_result_is_error: false,
+            compact: false,
+            model_excluded: false,
+            phase: MessagePhase::Normal,
+            created_at: String::new(),
+            elapsed_ms: None,
+            turn_status: None,
+        };
+        let req = ModelRequest {
+            user_input: String::new(),
+            context: vec![user_msg],
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        };
+
+        let err = build_provider_messages(&req).unwrap_err();
+        assert!(
+            err.to_string().contains("System"),
+            "错误信息应指出缺少 System 消息，实际：{err}"
+        );
     }
 
     #[test]
@@ -2133,12 +2176,12 @@ mod tests {
         };
 
         let req = ModelRequest {
-            session_title: "测试".to_string(),
             user_input: String::new(),
             context: vec![system_msg, user_msg],
             thinking: None,
             reasoning_effort: None,
             thinking_disabled: false,
+            max_output_tokens: None,
         };
 
         let (system, messages) = build_provider_messages(&req).unwrap();

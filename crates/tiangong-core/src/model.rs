@@ -5,6 +5,7 @@
 //! client 直接消费扁平的 [`tiangong_llm::ModelEndpoint`]。
 
 pub use tiangong_llm::ProviderProtocol;
+pub use tiangong_llm::StopReason;
 pub use tiangong_llm::provider_client::{
     ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
     OnRetryCallback, SingleProviderClient,

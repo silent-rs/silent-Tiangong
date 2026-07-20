@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::context::compressor::{CompressionUpdate, ContextCompressor, mark_compact_boundary};
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
@@ -20,20 +19,19 @@ use crate::model::{
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
-    build_thinking_config, emit_token_usage, observed_total_tokens, persist_error,
-    rebuild_system_prompt, select_client_for_request,
+    build_thinking_config, emit_token_usage, persist_error, rebuild_system_prompt,
+    select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
-use crate::session::{Message, MessagePhase, MessageRole, Session};
+use crate::session::{Message, MessagePhase, MessageRole};
 use crate::stream_throttle::{StreamTextKind, ThrottledStreamSink};
 use crate::tool::ToolResult;
 use crate::turn_context::TurnContext;
-use tiangong_types::{
-    DeferredToolInjection, StreamEvent, StreamToolCall, stream::ContextCompressAction,
-};
+use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
+use super::compression::{ActiveCompression, observed_total_tokens};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
 use super::summary::{
@@ -451,6 +449,24 @@ fn append_failure_recovery_prompt(
     ctx.session.persist_to_disk();
 }
 
+/// 压缩完成后待执行的后续动作。
+enum CompressionContinuation {
+    ReactText {
+        pending_msg_id: String,
+        disposition: ReactTextDisposition,
+        request_injection_generation: u64,
+    },
+    ToolBatch,
+    Summary {
+        decision: SummaryDecision,
+        request_injection_generation: u64,
+    },
+    ContextRetry {
+        previous_summary_up_to: usize,
+        error_message: String,
+    },
+}
+
 enum NextStep {
     StartReact,
     DriveTools,
@@ -559,42 +575,15 @@ enum ReactTextDisposition {
     EnterSummary,
 }
 
-enum CompressionContinuation {
-    ReactText {
-        pending_msg_id: String,
-        disposition: ReactTextDisposition,
-        request_injection_generation: u64,
-    },
-    ToolBatch,
-    Summary {
-        decision: SummaryDecision,
-        request_injection_generation: u64,
-    },
-    ContextRetry {
-        previous_summary_up_to: usize,
-        error_message: String,
-    },
-}
-
-type CompressionTaskOutput = (Session, anyhow::Result<CompressionUpdate>);
-
-struct ActiveCompression {
-    task: tokio::task::JoinHandle<CompressionTaskOutput>,
-    observed_usage: TokenUsage,
-    previous_summary_up_to: usize,
-    total_messages: usize,
-    continuation: CompressionContinuation,
-}
-
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
     ModelRequest {
-        session_title: ctx.session.title.clone(),
         user_input: String::new(),
         context: ctx.session.context(),
         thinking,
         reasoning_effort,
         thinking_disabled,
+        max_output_tokens: None,
     }
 }
 
@@ -725,111 +714,6 @@ fn start_tool_execution(
     running_tools.insert(task.id(), RunningToolCall { tool, started_at });
 }
 
-fn start_context_compression(
-    ctx: &TurnContext,
-    observed_usage: TokenUsage,
-    continuation: CompressionContinuation,
-) -> ActiveCompression {
-    let previous_summary_up_to = ctx.session.summary_up_to;
-    let total_messages = ctx.session.messages.len();
-    let _ = ctx.stream_tx.send(StreamEvent::ContextCompressing {
-        summary_up_to: previous_summary_up_to,
-        total_messages,
-    });
-    let mut session = ctx.session.clone();
-    let client = ctx.client.clone();
-    let task = tokio::spawn(async move {
-        let result = ContextCompressor::new(6)
-            .update_summary_with_usage_async(&mut session, &client)
-            .await;
-        (session, result)
-    });
-    ActiveCompression {
-        task,
-        observed_usage,
-        previous_summary_up_to,
-        total_messages,
-        continuation,
-    }
-}
-
-fn apply_context_compression(
-    ctx: &mut TurnContext,
-    active: ActiveCompression,
-    result: Result<CompressionTaskOutput, tokio::task::JoinError>,
-) -> CompressionContinuation {
-    let ActiveCompression {
-        observed_usage,
-        previous_summary_up_to,
-        total_messages,
-        continuation,
-        ..
-    } = active;
-    let result = match result {
-        Ok((session, result)) => result.map(|update| (session, update)),
-        Err(error) => Err(anyhow::anyhow!(error.to_string())),
-    };
-
-    match result {
-        Ok((session, update)) if update.compressed => {
-            ctx.session.context_summary = session.context_summary;
-            ctx.session.summary_up_to = session.summary_up_to;
-            mark_compact_boundary(&mut ctx.session.messages, ctx.session.summary_up_to);
-            let remaining = ctx
-                .session
-                .messages
-                .len()
-                .saturating_sub(ctx.session.summary_up_to);
-            let current_tokens = (observed_total_tokens(&observed_usage) as f64
-                * (remaining as f64 / total_messages.max(1) as f64))
-                as usize;
-            ctx.session.current_tokens = current_tokens;
-            ctx.session.token_usage.accumulate(&update.usage);
-            rebuild_system_prompt(ctx);
-            if let Err(error) = ctx.session.try_persist_to_disk() {
-                tracing::warn!(%error, session_id = %ctx.session.id, "上下文压缩落盘失败");
-                return continuation;
-            }
-            emit_token_usage(
-                &ctx.stream_tx,
-                &update.usage,
-                Some(current_tokens),
-                ctx.context_limit,
-                "context_summary",
-                None,
-            );
-            let _ = ctx.stream_tx.send(StreamEvent::ContextCompressed {
-                action: ContextCompressAction::Auto,
-                summary_up_to: ctx.session.summary_up_to,
-                remaining_messages: remaining,
-            });
-            tracing::info!(
-                session_id = %ctx.session.id,
-                observed_tokens = observed_total_tokens(&observed_usage),
-                old_summary_up_to = previous_summary_up_to,
-                summary_up_to = ctx.session.summary_up_to,
-                "上下文摘要已更新"
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(
-                session_id = %ctx.session.id,
-                error = %error,
-                "上下文压缩失败，继续使用原始上下文"
-            );
-        }
-    }
-
-    continuation
-}
-
-fn needs_context_compression(ctx: &TurnContext, usage: &TokenUsage) -> bool {
-    ContextOrganizer::new(ctx.context_limit)
-        .with_threshold(0.95)
-        .needs_compression(observed_total_tokens(usage))
-}
-
 fn finish_react_text(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
@@ -914,29 +798,30 @@ fn finish_summary(
 
 /// 执行一个完整的对话轮次。
 ///
-/// `cmd_rx` 只在这一处消费。模型 chunk、工具结果和上下文压缩结果与命令进入同一个
-/// `tokio::select!`，因此任何异步阶段运行期间都能立即响应取消和运行态反馈。
+/// `cmd_rx` 只在这一处消费。模型、工具和压缩任务与命令进入同一个
+/// `tokio::select!`，因此所有异步阶段都能及时响应取消和运行态反馈。
 pub(super) async fn execute_turn(
     ctx: &mut TurnContext,
     cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
 ) -> TurnExecutionResult {
     let stream_tx = ctx.stream_tx.clone();
     let context_limit = ctx.context_limit;
+    let context_organizer = ContextOrganizer::new(context_limit);
     let plugins = ctx.plugins.clone();
     let request_tools = ctx.tools.clone();
     let mut trust_mode = ctx.trust_mode;
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new();
     let mut active_llm: Option<ActiveLlm> = None;
+    let mut active_compression: Option<ActiveCompression<CompressionContinuation>> = None;
     let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
     let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
-    let mut active_compression: Option<ActiveCompression> = None;
     let mut pending_approval: Option<PendingApproval> = None;
 
     let result = 'agent_loop: loop {
         let can_advance = active_llm.is_none()
-            && tool_tasks.is_empty()
             && active_compression.is_none()
+            && tool_tasks.is_empty()
             && pending_approval.is_none()
             && !matches!(state.next_step, NextStep::Waiting);
 
@@ -1011,7 +896,7 @@ pub(super) async fn execute_turn(
                     }
 
                     if let Some(active) = active_compression.take() {
-                        abort_and_join(active.task).await;
+                        active.cancel(ctx).await;
                     }
 
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
@@ -1090,6 +975,68 @@ pub(super) async fn execute_turn(
                 ),
             },
 
+            compression_result = async {
+                let active = active_compression
+                    .as_mut()
+                    .expect("压缩分支只在任务活跃时启用");
+                active.wait().await
+            }, if active_compression.is_some() => {
+                let active = active_compression
+                    .take()
+                    .expect("完成的压缩任务必须存在运行记录");
+                let continuation = active.complete(
+                    ctx,
+                    &mut state.accumulated_usage,
+                    compression_result,
+                );
+
+                match continuation {
+                    CompressionContinuation::ReactText {
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    } => finish_react_text(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ToolBatch => {
+                        state.next_step = NextStep::DriveTools;
+                    }
+                    CompressionContinuation::Summary {
+                        decision,
+                        request_injection_generation,
+                    } => finish_summary(
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        decision,
+                        request_injection_generation,
+                    ),
+                    CompressionContinuation::ContextRetry {
+                        previous_summary_up_to,
+                        error_message,
+                    } => {
+                        injections.commit(ctx);
+                        if ctx.session.summary_up_to > previous_summary_up_to {
+                            state.next_step = NextStep::StartReact;
+                        } else {
+                            persist_error(
+                                ctx,
+                                format!("ReAct 循环请求失败：{error_message}"),
+                            );
+                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                                state.accumulated_usage.clone(),
+                                error_message,
+                            ));
+                        }
+                    }
+                }
+            }
+
             // 模型任务把流式内容写入此通道；通道关闭表示完整响应已经可以收取。
             chunk = async {
                 active_llm
@@ -1141,7 +1088,7 @@ pub(super) async fn execute_turn(
                         let response = match response_result {
                             Ok(response) => response,
                             Err(error) => {
-                                let error_message = error.to_string();
+                                let error_message = format!("{error:#}");
                                 let should_compress = error_message.contains("context_window_exceeded")
                                     || error_message.contains("context_length_exceeded")
                                     || (error_message.contains("content_blocks=0")
@@ -1149,16 +1096,9 @@ pub(super) async fn execute_turn(
                                 if should_compress {
                                     tracing::warn!("检测到上下文超限，尝试强制压缩");
                                     let previous_summary_up_to = ctx.session.summary_up_to;
-                                    let forced_usage = TokenUsage {
-                                        prompt_tokens: context_limit,
-                                        completion_tokens: 0,
-                                        total_tokens: context_limit,
-                                        prompt_cache_hit_tokens: None,
-                                        prompt_cache_miss_tokens: None,
-                                    };
-                                    active_compression = Some(start_context_compression(
+                                    active_compression = Some(ActiveCompression::start_forced(
                                         ctx,
-                                        forced_usage,
+                                        &context_organizer,
                                         CompressionContinuation::ContextRetry {
                                             previous_summary_up_to,
                                             error_message,
@@ -1196,10 +1136,12 @@ pub(super) async fn execute_turn(
                                 &response,
                                 &state,
                             );
-                            if needs_context_compression(ctx, &response.usage) {
-                                active_compression = Some(start_context_compression(
+                            let observed_tokens = observed_total_tokens(&response.usage);
+                            if context_organizer.needs_compression(observed_tokens) {
+                                active_compression = Some(ActiveCompression::start(
                                     ctx,
-                                    response.usage,
+                                    &context_organizer,
+                                    observed_tokens,
                                     CompressionContinuation::ReactText {
                                         pending_msg_id,
                                         disposition,
@@ -1321,10 +1263,12 @@ pub(super) async fn execute_turn(
                             emit_session_message_upsert(ctx, &pending_msg_id);
                         }
 
-                        if needs_context_compression(ctx, &usage) {
-                            active_compression = Some(start_context_compression(
+                        let observed_tokens = observed_total_tokens(&usage);
+                        if context_organizer.needs_compression(observed_tokens) {
+                            active_compression = Some(ActiveCompression::start(
                                 ctx,
-                                usage,
+                                &context_organizer,
+                                observed_tokens,
                                 CompressionContinuation::Summary {
                                     decision,
                                     request_injection_generation,
@@ -1454,11 +1398,12 @@ pub(super) async fn execute_turn(
                     continue 'agent_loop;
                 }
 
-                let usage = batch.response_usage.clone();
-                if needs_context_compression(ctx, &usage) {
-                    active_compression = Some(start_context_compression(
+                let observed_tokens = observed_total_tokens(&batch.response_usage);
+                if context_organizer.needs_compression(observed_tokens) {
+                    active_compression = Some(ActiveCompression::start(
                         ctx,
-                        usage,
+                        &context_organizer,
+                        observed_tokens,
                         CompressionContinuation::ToolBatch,
                     ));
                     state.next_step = NextStep::Waiting;
@@ -1467,62 +1412,7 @@ pub(super) async fn execute_turn(
                 }
             }
 
-            // 自动压缩也在同一循环中等待，避免压缩请求期间失去取消响应。
-            compression_result = async {
-                (&mut active_compression
-                    .as_mut()
-                    .expect("压缩分支只在任务活跃时启用")
-                    .task)
-                    .await
-            }, if active_compression.is_some() =>
-            {
-                let active = active_compression.take().expect("压缩状态必须存在");
-                let continuation = apply_context_compression(ctx, active, compression_result);
-                match continuation {
-                    CompressionContinuation::ReactText {
-                        pending_msg_id,
-                        disposition,
-                        request_injection_generation,
-                    } => finish_react_text(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        pending_msg_id,
-                        disposition,
-                        request_injection_generation,
-                    ),
-                    CompressionContinuation::ToolBatch => {
-                        state.next_step = NextStep::DriveTools;
-                    }
-                    CompressionContinuation::Summary {
-                        decision,
-                        request_injection_generation,
-                    } => finish_summary(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        decision,
-                        request_injection_generation,
-                    ),
-                    CompressionContinuation::ContextRetry {
-                        previous_summary_up_to,
-                        error_message,
-                    } => {
-                        injections.commit(ctx);
-                        if ctx.session.summary_up_to > previous_summary_up_to {
-                            state.next_step = NextStep::StartReact;
-                        } else {
-                            persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
-                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                state.accumulated_usage.clone(),
-                                error_message,
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // 无异步阶段活跃时推进一次状态；命令分支 biased 在前，会先排空已到达命令。
+            // 状态推进分支：命令分支 biased 在前，会先排空已到达命令，再推进 next_step。
             _ = std::future::ready(()), if can_advance => {
                 let next_step = std::mem::replace(&mut state.next_step, NextStep::Waiting);
                 match next_step {
@@ -1759,7 +1649,7 @@ mod tests {
     use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::prompt::SystemPromptConfig;
-    use crate::session::{MessageRole, Session};
+    use crate::session::{Message, MessageRole, MessageToolCall, Session};
     use crate::tool::ToolResult;
     use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
     use crate::turn_context::TurnContext;
@@ -1769,7 +1659,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
-    use tiangong_types::{StreamEvent, TokenUsage};
+    use tiangong_types::{StreamEvent, TokenUsage, stream::ContextCompressAction};
     use tokio::sync::{Barrier, Notify};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1845,6 +1735,42 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200).set_body_raw(sse_body(&chunks), "text/event-stream"),
             )
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_completion(
+        server: &MockServer,
+        content: &str,
+        finish_reason: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        delay: Option<Duration>,
+    ) {
+        let body = serde_json::json!({
+            "id": "chatcmpl-compression",
+            "object": "chat.completion",
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        });
+        let mut response = ResponseTemplate::new(200).set_body_json(body);
+        if let Some(delay) = delay {
+            response = response.set_delay(delay);
+        }
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(response)
             .up_to_n_times(1)
             .mount(server)
             .await;
@@ -2096,6 +2022,340 @@ mod tests {
                 .try_iter()
                 .any(|event| matches!(event, StreamEvent::DeferredToolInjectionsChanged { .. }))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compression_persists_model_visible_resume_after_system_prompt() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
+        )
+        .await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n当前任务已完成\n[[SUMMARY]]\n历史摘要",
+            "stop",
+            100,
+            20,
+            None,
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(result.usage.total_tokens, 186_025);
+        assert_eq!(
+            harness.ctx.session.context_summary.as_deref(),
+            Some("历史摘要")
+        );
+        let resume = &harness.ctx.session.messages[harness.ctx.session.summary_up_to];
+        assert_eq!(resume.role, MessageRole::User);
+        assert_eq!(resume.phase, crate::session::MessagePhase::CompressedResume);
+        assert!(!resume.model_excluded);
+        assert!(matches!(
+            &resume.content[0],
+            crate::session::ContentBlock::ModelInstruction { text }
+                if text.contains("当前任务已完成")
+        ));
+
+        let context = harness.ctx.session.context();
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(context[1].id, resume.id);
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+
+        let persisted = Session::load_from_storage(
+            harness
+                .ctx
+                .session
+                .bound_storage_root()
+                .expect("测试会话应绑定存储目录"),
+            &harness.ctx.session.id,
+        )
+        .expect("压缩结果应持久化");
+        assert_eq!(
+            persisted.messages[persisted.summary_up_to].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提出新问题");
+        let context = harness.ctx.session.context();
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+        assert_eq!(context[2].text_content(), "继续提出新问题");
+
+        let requests = server.received_requests().await.unwrap();
+        let compression_body: serde_json::Value =
+            serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(compression_body["max_tokens"], serde_json::json!(9_999));
+        assert!(
+            compression_body["messages"]
+                .to_string()
+                .contains("不得超过 9999 tokens")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forced_compression_folds_older_history_and_keeps_latest_tool_batch() {
+        let server = MockServer::start().await;
+        mount_request_error(&server, "context_window_exceeded").await;
+        mount_request_error(&server, "context_window_exceeded").await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n继续处理最近工具结果\n[[SUMMARY]]\n较早历史摘要",
+            "stop",
+            100,
+            20,
+            None,
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(10, 5)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::Assistant, "较早回答");
+        let mut assistant = Message::new(MessageRole::Assistant, "");
+        assistant.tool_calls = vec![MessageToolCall {
+            id: "latest-call".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "latest.txt"}),
+        }];
+        harness.ctx.session.messages.push(assistant);
+        harness.ctx.session.messages.push(Message::tool_result(
+            "latest-call",
+            "read_file",
+            "recent-tool-output",
+            false,
+        ));
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "强制压缩后应重试成功，实际结果：{:?}",
+            result.outcome
+        );
+        assert_eq!(result.usage.total_tokens, 135);
+        assert_eq!(harness.ctx.session.summary_up_to, 2);
+        let context = harness.ctx.session.context();
+        assert_eq!(context[0].role, MessageRole::System);
+        assert_eq!(
+            context[1].phase,
+            crate::session::MessagePhase::CompressedResume
+        );
+        assert!(context.iter().any(|message| {
+            message.tool_call_id.as_deref() == Some("latest-call")
+                && message.text_content() == "recent-tool-output"
+        }));
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 4);
+        let first_body = String::from_utf8_lossy(&requests[0].body);
+        let compression_body = String::from_utf8_lossy(&requests[2].body);
+        let retry_body = String::from_utf8_lossy(&requests[3].body);
+        assert!(first_body.contains("recent-tool-output"));
+        assert!(!compression_body.contains("recent-tool-output"));
+        assert!(compression_body.contains("较早回答"));
+        assert!(retry_body.contains("recent-tool-output"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn truncated_compression_does_not_advance_summary_boundary() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
+        )
+        .await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n当前任务已完成\n[[SUMMARY]]\n截断摘要",
+            "length",
+            100,
+            20,
+            None,
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(result.usage.total_tokens, 186_025);
+        assert_eq!(harness.ctx.session.summary_up_to, 0);
+        assert!(harness.ctx.session.context_summary.is_none());
+        assert!(harness.stream_rx.try_iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Failed,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistence_failure_keeps_original_compression_state() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
+        )
+        .await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n当前任务已完成\n[[SUMMARY]]\n历史摘要",
+            "stop",
+            100,
+            20,
+            None,
+        )
+        .await;
+
+        let invalid_root = tempfile::tempdir().unwrap();
+        let blocking_file = invalid_root.path().join("not-a-directory");
+        std::fs::write(&blocking_file, "blocked").unwrap();
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        harness.ctx.session.bind_storage_root(blocking_file);
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(harness.ctx.session.summary_up_to, 0);
+        assert!(harness.ctx.session.context_summary.is_none());
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Failed,
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Auto,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_interrupts_active_context_compression() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
+        )
+        .await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n当前任务已完成\n[[SUMMARY]]\n历史摘要",
+            "stop",
+            100,
+            20,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+        } = harness;
+        let cancel_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("等待压缩开始事件超时");
+                if matches!(event, StreamEvent::ContextCompressing { .. }) {
+                    cmd_tx.send(Command::Cancel).unwrap();
+                    break stream_rx;
+                }
+            }
+        });
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), execute_turn(&mut ctx, &mut cmd_rx))
+                .await
+                .expect("取消压缩后 turn 应及时结束");
+        let stream_rx = cancel_task.await.unwrap();
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Cancelled));
+        assert_eq!(ctx.session.summary_up_to, 0);
+        assert!(stream_rx.try_iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Cancelled,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_interrupts_manual_context_compression() {
+        let server = MockServer::start().await;
+        mount_completion(
+            &server,
+            "[[SUMMARY]]\n历史摘要",
+            "stop",
+            100,
+            20,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            ctx,
+            stream_rx,
+            cmd_tx,
+            cmd_rx,
+        } = harness;
+        let cancel_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("等待手动压缩开始事件超时");
+                if matches!(event, StreamEvent::ContextCompressing { .. }) {
+                    cmd_tx.send(Command::Cancel).unwrap();
+                    break stream_rx;
+                }
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx),
+        )
+        .await
+        .expect("取消手动压缩后任务应及时结束");
+        let stream_rx = cancel_task.await.unwrap();
+
+        assert!(stream_rx.try_iter().any(|event| matches!(
+            event,
+            StreamEvent::ContextCompressed {
+                action: ContextCompressAction::Cancelled,
+                ..
+            }
+        )));
     }
 
     /// 发送 `Command::Cancel` 应中断执行并返回 `Cancelled`(覆盖本次重构的

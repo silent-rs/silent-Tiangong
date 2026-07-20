@@ -57,7 +57,7 @@ export interface TerminalTabListResponse {
 }
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
-export type MessagePhase = 'normal' | 'react' | 'summary';
+export type MessagePhase = 'normal' | 'react' | 'summary' | 'compressedresume';
 
 /** 单个对话轮次的最终执行状态（持久化在用户消息上，历史会话同样可见）。 */
 export type TurnStatus = 'success' | 'failed' | 'cancelled';
