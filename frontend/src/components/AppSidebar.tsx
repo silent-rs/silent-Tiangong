@@ -139,35 +139,42 @@ export function AppSidebar() {
     const isRunning = !!sessionRunStatuses[session.id];
     const isActive = !isNewConversation && activeSessionId === session.id;
     return (
-      <button
+      <div
         key={session.id}
-        className={`w-full text-left px-3 py-1.5 rounded-md text-sm flex items-center gap-2 group transition-colors ${
+        className={`w-full px-3 py-1.5 rounded-md text-sm flex items-center gap-2 group transition-colors ${
           isActive
             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
         }`}
-        onClick={() => {
-          if (session.id !== activeSessionId || isNewConversation) {
-            switchSession(session.id);
-          }
-        }}
       >
-        <span className="flex-1 truncate">{session.title || '新对话'}</span>
-        {isRunning && (
-          <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
-        )}
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          onClick={() => {
+            if (session.id !== activeSessionId || isNewConversation) {
+              switchSession(session.id);
+            }
+          }}
+        >
+          <span className="flex-1 truncate">{session.title || '新对话'}</span>
+          {isRunning && (
+            <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
+          )}
+        </button>
         {isActive && (
           <button
+            type="button"
             className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={() => {
               setShowDeleteConfirm(true);
             }}
+            aria-label="删除对话"
+            title="删除对话"
           >
             <Trash2 className="w-3 h-3" />
           </button>
         )}
-      </button>
+      </div>
     );
   };
 

@@ -2,13 +2,15 @@ import { create } from 'zustand';
 import { api, textContent } from '../api/tauri';
 import type {
   ContentBlock,
+  LoadedSession,
   McpServer,
   Message,
   RawAttachment,
-  RunSnapshot,
+  SessionStreamEvent,
   Session,
   InputCache,
   Skill,
+  StreamEvent,
   TaskPlan,
   TokenStats,
 } from '../api/tauri';
@@ -28,6 +30,36 @@ import {
 let switchRequestVersion = 0;
 let newConversationRequestVersion = 0;
 const inputCacheSyncRequestVersions = new Map<string, number>();
+let switchCommitQueue: Promise<void> = Promise.resolve();
+
+interface SessionViewCache {
+  hydrated: boolean;
+  messages: Message[];
+  runStatus: string;
+  runSummary: string;
+  approvalRequestId: string | null;
+  tokenStats: TokenStats | null;
+  lastUsage: AppState['lastUsage'];
+  lastDurationMs: number | null;
+  streamingMessageId: string | null;
+  streamingContent: string;
+  streamingReasoningContent: string;
+  currentPlan: TaskPlan | undefined;
+  cwd: string;
+  reasoningEffort: string;
+}
+
+const sessionViewCaches = new Map<string, SessionViewCache>();
+
+function commitSessionSwitch(sessionId: string, requestVersion: number): Promise<boolean> {
+  const commit = switchCommitQueue.then(async () => {
+    if (requestVersion !== switchRequestVersion) return false;
+    await api.switchSession(sessionId);
+    return requestVersion === switchRequestVersion;
+  });
+  switchCommitQueue = commit.then(() => undefined, () => undefined);
+  return commit;
+}
 
 interface InputCacheSyncQueue {
   pending: InputCache | null;
@@ -147,26 +179,6 @@ function isAgentSystemMessage(message: Message): boolean {
   return text.startsWith('[Agent]') || text.startsWith('[文件锁]');
 }
 
-function shouldRefreshAgentsFromSnapshot(
-  oldMessages: Message[],
-  newMessages: Message[],
-): boolean {
-  if (oldMessages.length !== newMessages.length) {
-    return true;
-  }
-  for (let i = 0; i < newMessages.length; i += 1) {
-    const oldMessage = oldMessages[i];
-    const newMessage = newMessages[i];
-    if (oldMessage === newMessage) {
-      continue;
-    }
-    if (isAgentSystemMessage(oldMessage) || isAgentSystemMessage(newMessage)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function sameJsonValue(left: unknown, right: unknown): boolean {
   if (left === right) return true;
   if (left == null || right == null) return left == right;
@@ -192,23 +204,551 @@ function sameMessage(left: Message, right: Message): boolean {
     && left.turn_status === right.turn_status;
 }
 
-function mergeSnapshotMessages(oldMessages: Message[], newMessages: Message[]): Message[] {
-  if (oldMessages.length === 0 || newMessages.length === 0) {
-    return newMessages;
+function mergeLoadedWithStreamMessages(
+  loadedMessages: Message[],
+  streamMessages: Message[],
+): Message[] {
+  if (streamMessages.length === 0) return loadedMessages;
+  const streamById = new Map(streamMessages.map((message) => [message.id, message]));
+  const loadedIds = new Set(loadedMessages.map((message) => message.id));
+  const merged = loadedMessages.map((loaded) => {
+    const streamed = streamById.get(loaded.id);
+    if (!streamed) return loaded;
+    const loadedText = textContent(loaded);
+    const streamedText = textContent(streamed);
+    return {
+      ...loaded,
+      content: streamedText.length >= loadedText.length ? streamed.content : loaded.content,
+      reasoning_content: streamed.reasoning_content.length >= loaded.reasoning_content.length
+        ? streamed.reasoning_content
+        : loaded.reasoning_content,
+      tool_calls: streamed.tool_calls?.length ? streamed.tool_calls : loaded.tool_calls,
+      phase: streamed.phase || loaded.phase,
+    };
+  });
+  for (const streamed of streamMessages) {
+    if (!loadedIds.has(streamed.id)) merged.push(streamed);
+  }
+  return merged;
+}
+
+function upsertStreamMessage(messages: Message[], message: Message): Message[] {
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index < 0) return [...messages, message];
+  if (sameMessage(messages[index], message)) return messages;
+  const next = [...messages];
+  next[index] = message;
+  return next;
+}
+
+function updateAssistantMessage(
+  messages: Message[],
+  messageId: string,
+  update: (message: Message) => Message,
+): Message[] {
+  const index = messages.findIndex((message) => message.id === messageId);
+  const current: Message = index >= 0 ? messages[index] : {
+    id: messageId,
+    role: 'assistant',
+    content: [],
+    reasoning_content: '',
+    phase: 'normal',
+    created_at: new Date().toISOString(),
+  };
+  const nextMessage = update(current);
+  if (index < 0) return [...messages, nextMessage];
+  const next = [...messages];
+  next[index] = nextMessage;
+  return next;
+}
+
+function appendAssistantText(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.message_id || event.content == null) return messages;
+  return updateAssistantMessage(messages, event.message_id, (message) => {
+    const content = Array.isArray(message.content) ? [...message.content] : [];
+    const last = content[content.length - 1];
+    if (last?.type === 'text') {
+      content[content.length - 1] = { ...last, text: `${last.text}${event.content}` };
+    } else if (event.content) {
+      content.push({ type: 'text', text: event.content });
+    }
+    const phase = event.type === 'react_text'
+      ? 'react'
+      : event.type === 'summary_text'
+        ? 'summary'
+        : message.phase;
+    return { ...message, content, phase };
+  });
+}
+
+function appendAssistantReasoning(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.message_id || event.content == null) return messages;
+  return updateAssistantMessage(messages, event.message_id, (message) => ({
+    ...message,
+    reasoning_content: `${message.reasoning_content || ''}${event.content}`,
+  }));
+}
+
+function applyUserMessage(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.message_id) return messages;
+  const blocks = event.content_blocks && event.content_blocks.length > 0
+    ? event.content_blocks
+    : [
+        ...(event.content ? [{ type: 'text' as const, text: event.content }] : []),
+        ...(event.media || []).map((media) => ({
+          type: 'media' as const,
+          kind: media.kind,
+          url: media.url,
+          mime_type: media.mime_type,
+          title: media.title,
+        })),
+      ];
+  const existingIndex = messages.findIndex((message) => message.id === event.message_id);
+  const existing = existingIndex >= 0 ? messages[existingIndex] : undefined;
+  const turnBase = existingIndex >= 0 ? messages.slice(0, existingIndex + 1) : messages;
+  return upsertStreamMessage(turnBase, {
+    id: event.message_id,
+    role: 'user',
+    content: blocks,
+    reasoning_content: '',
+    model_excluded: event.model_excluded || false,
+    created_at: existing?.created_at || new Date().toISOString(),
+  });
+}
+
+function applyToolCalls(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.message_id) return messages;
+  return updateAssistantMessage(messages, event.message_id, (message) => ({
+    ...message,
+    tool_calls: event.calls || [],
+    phase: 'react',
+  }));
+}
+
+function applyToolResult(messages: Message[], event: StreamEvent): Message[] {
+  const toolCallId = event.tool_call_id || undefined;
+  const existingIndex = toolCallId
+    ? messages.findIndex((message) => message.role === 'tool' && message.tool_call_id === toolCallId)
+    : -1;
+  const id = existingIndex >= 0
+    ? messages[existingIndex].id
+    : `stream-tool-result:${toolCallId || `${event.name || 'tool'}:${messages.length}`}`;
+  const message: Message = {
+    id,
+    role: 'tool',
+    content: [{ type: 'text', text: event.output || '' }],
+    reasoning_content: '',
+    tool_call_id: toolCallId,
+    tool_name: event.name,
+    tool_result_is_error: event.ok === false,
+    phase: 'react',
+    created_at: existingIndex >= 0
+      ? messages[existingIndex].created_at
+      : new Date().toISOString(),
+  };
+  if (existingIndex < 0) return [...messages, message];
+  const next = [...messages];
+  next[existingIndex] = message;
+  return next;
+}
+
+function applyAgentOutput(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.agent_id || !event.agent_role || !event.agent_label || !event.messages) {
+    return messages;
+  }
+  const workerId = `agent:${event.agent_role}:${event.agent_id}`;
+  let next = messages;
+  const headerId = `agent:${event.agent_id}:header`;
+  if (!next.some((message) => message.id === headerId && message.worker_id === workerId)) {
+    next = [...next, {
+      id: headerId,
+      role: 'system',
+      content: [{ type: 'text', text: `Worker: ${event.agent_label} (@${event.agent_role})` }],
+      reasoning_content: '',
+      worker_id: workerId,
+      model_excluded: true,
+      created_at: new Date().toISOString(),
+    }];
+  }
+  for (const message of event.messages) {
+    const role = message.role === 'tool' || message.role === 'system' ? 'system' : message.role;
+    const workerMessage = { ...message, role, worker_id: workerId, model_excluded: true } as Message;
+    const index = next.findIndex((item) => item.id === message.id && item.worker_id === workerId);
+    if (index < 0) {
+      next = [...next, workerMessage];
+    } else {
+      const updated = [...next];
+      updated[index] = workerMessage;
+      next = updated;
+    }
+  }
+  return next;
+}
+
+function applyAgentLifecycle(messages: Message[], event: StreamEvent): Message[] {
+  if (!event.agent_id || !event.label) return messages;
+  const isCreated = event.type === 'agent_created';
+  const id = isCreated ? `agent-created:${event.agent_id}` : `agent-status:${event.agent_id}`;
+  const text = isCreated
+    ? `[Agent] ${event.label} (${event.role || ''}) 已加入团队 id=${event.agent_id}`
+    : `[Agent] ${event.label} 状态变更: ${event.status || ''} id=${event.agent_id}`;
+  return upsertStreamMessage(messages, {
+    id,
+    role: 'system',
+    content: [{ type: 'text', text }],
+    reasoning_content: '',
+    model_excluded: true,
+    created_at: new Date().toISOString(),
+  });
+}
+
+function updateLatestUserTurn(
+  messages: Message[],
+  status: 'success' | 'failed' | 'cancelled',
+  elapsedMs: number | null,
+): Message[] {
+  let index = -1;
+  for (let candidate = messages.length - 1; candidate >= 0; candidate -= 1) {
+    if (messages[candidate].role === 'user') {
+      index = candidate;
+      break;
+    }
+  }
+  if (index < 0) return messages;
+  const next = [...messages];
+  next[index] = {
+    ...next[index],
+    turn_status: status,
+    elapsed_ms: elapsedMs ?? next[index].elapsed_ms,
+  };
+  return next;
+}
+
+function applyTokenUsage(stats: TokenStats | null, event: StreamEvent): TokenStats | null {
+  if (!event.usage) return stats;
+  const usage = event.usage;
+  const total = usage.total_tokens || usage.prompt_tokens + usage.completion_tokens;
+  const next: TokenStats = stats ? {
+    ...stats,
+    agent_current_tokens: { ...stats.agent_current_tokens },
+    agent_token_usage: { ...stats.agent_token_usage },
+  } : {
+    current_tokens: 0,
+    compression_threshold_tokens: event.compression_threshold_tokens || 0,
+    context_limit_tokens: event.context_limit_tokens || 0,
+    total_prompt_tokens: 0,
+    total_completion_tokens: 0,
+    total_tokens: 0,
+    active_agent_current_tokens: 0,
+    active_agent_id: null,
+    agent_current_tokens: {},
+    agent_token_usage: {},
+  };
+  next.total_prompt_tokens += usage.prompt_tokens;
+  next.total_completion_tokens += usage.completion_tokens;
+  next.total_tokens += total;
+  if (event.compression_threshold_tokens != null) {
+    next.compression_threshold_tokens = event.compression_threshold_tokens;
+  }
+  if (event.context_limit_tokens != null) {
+    next.context_limit_tokens = event.context_limit_tokens;
+  }
+  if (event.agent_id) {
+    const previous = next.agent_token_usage[event.agent_id] || {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
+    next.agent_token_usage[event.agent_id] = {
+      prompt_tokens: previous.prompt_tokens + usage.prompt_tokens,
+      completion_tokens: previous.completion_tokens + usage.completion_tokens,
+      total_tokens: previous.total_tokens + total,
+    };
+    next.active_agent_id = event.agent_id;
+    if (event.current_tokens != null) {
+      next.active_agent_current_tokens = event.current_tokens;
+      next.agent_current_tokens[event.agent_id] = event.current_tokens;
+    }
+  } else if (event.current_tokens != null) {
+    next.current_tokens = event.current_tokens;
+  }
+  return next;
+}
+
+function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
+  return {
+    hydrated: false,
+    messages: [],
+    runStatus,
+    runSummary: runStatus === 'idle' ? '' : '正在处理',
+    approvalRequestId: null,
+    tokenStats: null,
+    lastUsage: null,
+    lastDurationMs: null,
+    streamingMessageId: null,
+    streamingContent: '',
+    streamingReasoningContent: '',
+    currentPlan: undefined,
+    cwd: '',
+    reasoningEffort: 'medium',
+  };
+}
+
+function sessionViewCacheFromState(state: AppState): SessionViewCache {
+  return {
+    hydrated: !!state.activeSessionId,
+    messages: state.messages,
+    runStatus: state.runStatus,
+    runSummary: state.runSummary,
+    approvalRequestId: state.approvalRequestId,
+    tokenStats: state.tokenStats,
+    lastUsage: state.lastUsage,
+    lastDurationMs: state.lastDurationMs,
+    streamingMessageId: state.streamingMessageId,
+    streamingContent: state.streamingContent,
+    streamingReasoningContent: state.streamingReasoningContent,
+    currentPlan: state.currentPlan,
+    cwd: state.sessionCwd,
+    reasoningEffort: state.reasoningEffort,
+  };
+}
+
+function hydrateSessionViewCache(
+  current: SessionViewCache,
+  loaded: LoadedSession,
+): SessionViewCache {
+  const messages = mergeLoadedWithStreamMessages(loaded.messages, current.messages);
+  const cacheHasNewerUsage = !!current.tokenStats
+    && current.tokenStats.total_tokens >= loaded.token_stats.total_tokens;
+  return {
+    ...current,
+    hydrated: true,
+    messages,
+    tokenStats: cacheHasNewerUsage && current.tokenStats
+      ? current.tokenStats
+      : loaded.token_stats,
+    lastUsage: cacheHasNewerUsage
+      ? current.lastUsage ?? loaded.last_usage ?? null
+      : loaded.last_usage ?? current.lastUsage,
+    lastDurationMs: current.lastDurationMs ?? loaded.last_duration_ms ?? null,
+    currentPlan: loaded.current_plan,
+    cwd: loaded.cwd,
+    reasoningEffort: loaded.reasoning_effort,
+  };
+}
+
+function applyEventToSessionView(
+  current: SessionViewCache,
+  event: StreamEvent,
+): SessionViewCache {
+  let messages = current.messages;
+  let runStatus = current.runStatus;
+  let runSummary = current.runSummary;
+  let approvalRequestId = current.approvalRequestId;
+  let tokenStats = current.tokenStats;
+  let lastUsage = current.lastUsage;
+  let lastDurationMs = current.lastDurationMs;
+  let streamingMessageId = current.streamingMessageId;
+  let streamingContent = current.streamingContent;
+  let streamingReasoningContent = current.streamingReasoningContent;
+  let currentPlan = current.currentPlan;
+
+  if (event.type !== 'done' && event.type !== 'error' && runStatus === 'idle') {
+    runStatus = 'executing';
   }
 
-  const oldById = new Map(oldMessages.map((message) => [message.id, message]));
-  let changed = oldMessages.length !== newMessages.length;
-  const merged = newMessages.map((message) => {
-    const old = oldById.get(message.id);
-    if (old && sameMessage(old, message)) {
-      return old;
+  switch (event.type) {
+    case 'user_message':
+      messages = applyUserMessage(messages, event);
+      runStatus = 'executing';
+      runSummary = '正在处理';
+      approvalRequestId = null;
+      currentPlan = undefined;
+      break;
+    case 'delta':
+    case 'react_text':
+    case 'summary_text':
+      messages = appendAssistantText(messages, event);
+      streamingMessageId = event.message_id || null;
+      if (streamingMessageId) {
+        const message = messages.find((item) => item.id === streamingMessageId);
+        streamingContent = message ? textContent(message) : streamingContent;
+        streamingReasoningContent = message?.reasoning_content || '';
+      }
+      runStatus = 'executing';
+      runSummary = '正在回复...';
+      break;
+    case 'reasoning':
+      messages = appendAssistantReasoning(messages, event);
+      streamingMessageId = event.message_id || null;
+      if (streamingMessageId) {
+        const message = messages.find((item) => item.id === streamingMessageId);
+        streamingContent = message ? textContent(message) : streamingContent;
+        streamingReasoningContent = message?.reasoning_content || '';
+      }
+      runStatus = 'executing';
+      runSummary = '正在思考...';
+      break;
+    case 'session_message_upsert':
+      if (event.message && typeof event.message !== 'string') {
+        messages = upsertStreamMessage(messages, event.message);
+        if (streamingMessageId === event.message.id) {
+          streamingContent = textContent(event.message);
+          streamingReasoningContent = event.message.reasoning_content || '';
+        }
+      }
+      break;
+    case 'tool_calls':
+      messages = applyToolCalls(messages, event);
+      streamingMessageId = null;
+      streamingContent = '';
+      streamingReasoningContent = '';
+      runStatus = 'executing';
+      runSummary = `正在执行：${(event.names || []).join(', ')}`;
+      break;
+    case 'tool_start':
+      runStatus = 'executing';
+      approvalRequestId = null;
+      runSummary = event.args_summary
+        ? `正在执行：${event.name || ''} ${event.args_summary}`
+        : `正在执行：${event.name || ''}`;
+      break;
+    case 'tool_result':
+      messages = applyToolResult(messages, event);
+      runSummary = `${event.ok === false ? '失败' : '完成'} ${event.name || ''}`.trim();
+      break;
+    case 'token_usage':
+      tokenStats = applyTokenUsage(tokenStats, event);
+      if (tokenStats) {
+        lastUsage = {
+          prompt_tokens: tokenStats.total_prompt_tokens,
+          completion_tokens: tokenStats.total_completion_tokens,
+          total_tokens: tokenStats.total_tokens,
+        };
+      }
+      break;
+    case 'approval_needed':
+      runStatus = 'waiting_approval';
+      approvalRequestId = event.request_id || null;
+      runSummary = event.args_summary
+        ? `${event.tool_name || ''}: ${event.args_summary}`
+        : `工具 ${event.tool_name || ''} 需要确认`;
+      break;
+    case 'retry':
+      runStatus = 'executing';
+      runSummary = `重试中 (${event.attempt || 0}/${event.max_attempts || 0})...`;
+      break;
+    case 'phase_changed':
+      if (event.phase === 'analyzing') runSummary = '正在思考...';
+      else if (event.phase === 'summary') runSummary = '正在整理回复...';
+      break;
+    case 'agent_created':
+    case 'agent_status_changed':
+      messages = applyAgentLifecycle(messages, event);
+      runSummary = event.type === 'agent_created'
+        ? `Agent ${event.label || ''} 已加入团队`
+        : `Agent ${event.label || ''}: ${event.status || ''}`;
+      break;
+    case 'agent_output':
+      messages = applyAgentOutput(messages, event);
+      runSummary = `Agent ${event.agent_label || ''} 输出已更新`;
+      break;
+    case 'memory_recall_start':
+      runSummary = '正在检索记忆...';
+      break;
+    case 'memory_recall_progress':
+      runSummary = `正在检索记忆: ${event.phase || ''}`;
+      break;
+    case 'memory_recall_done':
+      runSummary = event.hit_count
+        ? `记忆检索完成，命中 ${event.hit_count} 条`
+        : '记忆检索完成，无相关记忆';
+      break;
+    case 'context_compressing':
+      runStatus = 'executing';
+      runSummary = '正在压缩早期上下文...';
+      break;
+    case 'context_compressed':
+      runSummary = `上下文${event.action === 'clear'
+        ? '清理'
+        : event.action === 'failed'
+          ? '失败'
+          : '压缩'}`;
+      if (tokenStats && (event.action === 'clear' || event.action === 'compress')) {
+        tokenStats = {
+          ...tokenStats,
+          current_tokens: 0,
+          active_agent_current_tokens: 0,
+          agent_current_tokens: {},
+        };
+      }
+      if (event.summary_up_to != null
+        && ['clear', 'compress', 'auto'].includes(event.action || '')) {
+        messages = messages.map((message, index) => ({
+          ...message,
+          compact: index < event.summary_up_to!,
+        }));
+      }
+      break;
+    case 'turn_elapsed':
+      if (event.seconds != null) lastDurationMs = event.seconds * 1000;
+      break;
+    case 'index_status':
+      runSummary = event.phase === 'scanning'
+        ? '正在建立工作区索引...'
+        : event.phase === 'done'
+          ? `索引扫描完成: ${event.count || 0} 个文件`
+          : event.phase === 'error'
+            ? '索引扫描失败'
+            : runSummary;
+      break;
+    case 'done':
+      messages = updateLatestUserTurn(messages, 'success', lastDurationMs);
+      if (!lastUsage && event.usage) lastUsage = event.usage;
+      runStatus = 'idle';
+      runSummary = '';
+      approvalRequestId = null;
+      currentPlan = undefined;
+      streamingMessageId = null;
+      streamingContent = '';
+      streamingReasoningContent = '';
+      break;
+    case 'error': {
+      const errorMessage = typeof event.message === 'string' ? event.message : '';
+      messages = updateLatestUserTurn(
+        messages,
+        errorMessage === '已取消' ? 'cancelled' : 'failed',
+        lastDurationMs,
+      );
+      runStatus = 'idle';
+      runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
+      approvalRequestId = null;
+      currentPlan = undefined;
+      streamingMessageId = null;
+      streamingContent = '';
+      streamingReasoningContent = '';
+      break;
     }
-    changed = true;
-    return message;
-  });
+    default:
+      break;
+  }
 
-  return changed ? merged : oldMessages;
+  return {
+    messages,
+    runStatus,
+    runSummary,
+    approvalRequestId,
+    tokenStats,
+    lastUsage,
+    lastDurationMs,
+    streamingMessageId,
+    streamingContent,
+    streamingReasoningContent,
+    currentPlan,
+    cwd: current.cwd,
+    reasoningEffort: current.reasoningEffort,
+    hydrated: current.hydrated,
+  };
 }
 
 function stripLeadingAgentMention(content: string, agents: AgentInfo[]): string {
@@ -336,7 +876,7 @@ export interface AppState {
   endContextManagement: () => void;
 
   // 内部方法
-  updateFromSnapshot: (snapshot: RunSnapshot) => void;
+  applyStreamEvents: (events: SessionStreamEvent[]) => void;
 }
 
 export function selectCurrentInputCacheKey(state: AppState): string | null {
@@ -380,6 +920,8 @@ export const useStore = create<AppState>((set, get) => ({
     const updated = { ...reasoningEffortPerSession, [key]: effort };
     set({ reasoningEffort: effort, reasoningEffortPerSession: updated });
     if (activeSessionId) {
+      const cache = sessionViewCaches.get(activeSessionId);
+      if (cache) sessionViewCaches.set(activeSessionId, { ...cache, reasoningEffort: effort });
       api.setReasoningEffort(effort, activeSessionId).catch(console.error);
     }
   },
@@ -522,44 +1064,66 @@ export const useStore = create<AppState>((set, get) => ({
     newConversationRequestVersion += 1;
     const requestVersion = ++switchRequestVersion;
     try {
-      await api.switchSession(id);
-      const [snapshot, cwd, storedCache, sessionEffort] = await Promise.all([
-        api.getRunSnapshot(),
-        api.getSessionCwd(),
-        api.getInputCache(id),
-        api.getReasoningEffort(id),
+      const initialState = get();
+      const existingCache = sessionViewCaches.get(id);
+      const [loaded, storedCache] = await Promise.all([
+        existingCache?.hydrated ? Promise.resolve(null) : api.loadSession(id),
+        initialState.inputCaches[id] ? Promise.resolve(null) : api.getInputCache(id),
       ]);
       if (requestVersion !== switchRequestVersion) return;
-      set((state) => ({
-        isNewConversation: false,
-        activeSessionId: id,
-        newConversationId: null,
-        inputCaches: {
-          ...state.inputCaches,
-          [id]: state.inputCaches[id]?.revision > storedCache.revision
-            ? state.inputCaches[id]
-            : cloneInputCache(storedCache),
-        },
-        messages: snapshot.messages,
-        runStatus: snapshot.status,
-        runSummary: snapshot.summary || '',
-        lastDurationMs: snapshot.last_duration_ms ?? null,
-        lastUsage: snapshot.last_usage ?? null,
-        tokenStats: snapshot.token_stats ?? null,
-        approvalRequestId: snapshot.approval_request_id || null,
-        currentPlan: snapshot.current_plan,
-        sessionCwd: cwd,
-        streamingMessageId: null,
-        streamingContent: '',
-        streamingReasoningContent: '',
-        agents: parseAgentsFromMessages(snapshot.messages),
-        selectedAgentTab: null,
-        reasoningEffort: sessionEffort,
-        reasoningEffortPerSession: {
-          ...state.reasoningEffortPerSession,
-          [id]: sessionEffort,
-        },
-      }));
+      if (!await commitSessionSwitch(id, requestVersion)) return;
+      set((state) => {
+        let cache = sessionViewCaches.get(id) || existingCache
+          || emptySessionViewCache(state.sessionRunStatuses[id]);
+        if (loaded) cache = hydrateSessionViewCache(cache, loaded);
+
+        const knownRunStatus = state.sessionRunStatuses[id];
+        cache = {
+          ...cache,
+          runStatus: knownRunStatus
+            ? cache.runStatus === 'waiting_approval' ? 'waiting_approval' : knownRunStatus
+            : 'idle',
+          runSummary: knownRunStatus ? cache.runSummary || '正在处理' : '',
+          approvalRequestId: knownRunStatus ? cache.approvalRequestId : null,
+        };
+        sessionViewCaches.set(id, cache);
+        const keepsStreamingMessage = !!cache.streamingMessageId
+          && cache.messages.some((message) => message.id === cache.streamingMessageId);
+        return {
+          isNewConversation: false,
+          activeSessionId: id,
+          newConversationId: null,
+          inputCaches: {
+            ...state.inputCaches,
+            ...(storedCache ? {
+              [id]: state.inputCaches[id]?.revision > storedCache.revision
+                ? state.inputCaches[id]
+                : cloneInputCache(storedCache),
+            } : {}),
+          },
+          messages: cache.messages,
+          runStatus: cache.runStatus,
+          runSummary: cache.runSummary,
+          lastDurationMs: cache.lastDurationMs,
+          lastUsage: cache.lastUsage,
+          tokenStats: cache.tokenStats,
+          approvalRequestId: cache.approvalRequestId,
+          currentPlan: cache.currentPlan,
+          sessionCwd: cache.cwd,
+          streamingMessageId: keepsStreamingMessage ? cache.streamingMessageId : null,
+          streamingContent: keepsStreamingMessage ? cache.streamingContent : '',
+          streamingReasoningContent: keepsStreamingMessage
+            ? cache.streamingReasoningContent
+            : '',
+          agents: parseAgentsFromMessages(cache.messages),
+          selectedAgentTab: null,
+          reasoningEffort: cache.reasoningEffort,
+          reasoningEffortPerSession: {
+            ...state.reasoningEffortPerSession,
+            [id]: cache.reasoningEffort,
+          },
+        };
+      });
     } catch (error) {
       console.error('切换会话失败:', error);
     }
@@ -568,33 +1132,26 @@ export const useStore = create<AppState>((set, get) => ({
   // 删除当前会话
   deleteSession: async () => {
     try {
+      const deletedSessionId = get().activeSessionId;
       await api.deleteSession();
-      const [sessions, snapshot] = await Promise.all([api.getSessions(), api.getRunSnapshot()]);
-      const nextSessionId = snapshot.last_session_id ?? sessions[0]?.id ?? null;
-      const nextCache = nextSessionId ? await api.getInputCache(nextSessionId) : null;
-      const reservedSessionId = nextSessionId ? null : await api.newSessionId();
+      if (deletedSessionId) {
+        sessionViewCaches.delete(deletedSessionId);
+        discardInputCacheSyncQueue(deletedSessionId);
+      }
+      const sessions = await api.getSessions();
+      set((state) => {
+        const inputCaches = { ...state.inputCaches };
+        const sessionRunStatuses = { ...state.sessionRunStatuses };
+        if (deletedSessionId) {
+          delete inputCaches[deletedSessionId];
+          delete sessionRunStatuses[deletedSessionId];
+        }
+        return { sessions, inputCaches, sessionRunStatuses };
+      });
 
-      set((state) => ({
-        sessions,
-        isNewConversation: !nextSessionId,
-        activeSessionId: nextSessionId,
-        newConversationId: reservedSessionId,
-        inputCaches: nextSessionId && nextCache
-          ? { ...state.inputCaches, [nextSessionId]: cloneInputCache(nextCache) }
-          : reservedSessionId
-            ? { ...state.inputCaches, [reservedSessionId]: emptyInputCache() }
-            : state.inputCaches,
-        messages: snapshot.messages,
-        runStatus: snapshot.status,
-        runSummary: snapshot.summary || '',
-        lastDurationMs: snapshot.last_duration_ms ?? null,
-        lastUsage: snapshot.last_usage ?? null,
-        tokenStats: snapshot.token_stats ?? null,
-        approvalRequestId: snapshot.approval_request_id || null,
-        sessionCwd: nextSessionId ? state.sessionCwd : state.workspaceDir,
-        agents: parseAgentsFromMessages(snapshot.messages),
-        selectedAgentTab: null,
-      }));
+      const nextSessionId = sessions[0]?.id;
+      if (nextSessionId) await get().switchSession(nextSessionId);
+      else await get().startNewConversation();
     } catch (error) {
       console.error('删除会话失败:', error);
     }
@@ -604,43 +1161,41 @@ export const useStore = create<AppState>((set, get) => ({
   deleteSessionsByCwd: async (cwd: string) => {
     try {
       // 删除前记录是否正在编辑新对话；删除分组不应打断当前输入。
-      const wasNewConversation = get().isNewConversation;
+      const before = get();
+      const wasNewConversation = before.isNewConversation;
+      const previousActiveSessionId = before.activeSessionId;
+      const deletedIds = before.sessions
+        .filter((session) => session.cwd === cwd)
+        .map((session) => session.id);
       await api.deleteSessionsByCwd(cwd);
       const sessions = await api.getSessions();
 
+      for (const sessionId of deletedIds) {
+        sessionViewCaches.delete(sessionId);
+        discardInputCacheSyncQueue(sessionId);
+      }
+      set((state) => {
+        const inputCaches = { ...state.inputCaches };
+        const sessionRunStatuses = { ...state.sessionRunStatuses };
+        for (const sessionId of deletedIds) {
+          delete inputCaches[sessionId];
+          delete sessionRunStatuses[sessionId];
+        }
+        return { sessions, inputCaches, sessionRunStatuses };
+      });
+
       if (wasNewConversation) {
         // 新对话：仅刷新会话列表，保持当前输入不变。
-        set({ sessions });
         return;
       }
 
-      // 已有对话：跟随后端活跃会话快照。
-      const [snapshot, sessionCwd] = await Promise.all([api.getRunSnapshot(), api.getSessionCwd()]);
-      const nextSessionId = snapshot.last_session_id ?? sessions[0]?.id ?? null;
-      const nextCache = nextSessionId ? await api.getInputCache(nextSessionId) : null;
-      const reservedSessionId = nextSessionId ? null : await api.newSessionId();
-
-      set((state) => ({
-        sessions,
-        isNewConversation: !nextSessionId,
-        activeSessionId: nextSessionId,
-        newConversationId: reservedSessionId,
-        inputCaches: nextSessionId && nextCache
-          ? { ...state.inputCaches, [nextSessionId]: cloneInputCache(nextCache) }
-          : reservedSessionId
-            ? { ...state.inputCaches, [reservedSessionId]: emptyInputCache() }
-            : state.inputCaches,
-        messages: snapshot.messages,
-        runStatus: snapshot.status,
-        runSummary: snapshot.summary || '',
-        lastDurationMs: snapshot.last_duration_ms ?? null,
-        lastUsage: snapshot.last_usage ?? null,
-        tokenStats: snapshot.token_stats ?? null,
-        approvalRequestId: snapshot.approval_request_id || null,
-        sessionCwd: nextSessionId ? sessionCwd : state.workspaceDir,
-        agents: parseAgentsFromMessages(snapshot.messages),
-        selectedAgentTab: null,
-      }));
+      if (previousActiveSessionId
+        && sessions.some((session) => session.id === previousActiveSessionId)) {
+        return;
+      }
+      const nextSessionId = sessions[0]?.id;
+      if (nextSessionId) await get().switchSession(nextSessionId);
+      else await get().startNewConversation();
     } catch (error) {
       console.error('删除 workspace 会话失败:', error);
     }
@@ -989,9 +1544,13 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       const cancelled = await api.cancelTurn();
       if (cancelled) {
-        // 立即获取最新快照确保状态一致（避免轮询线程的旧快照覆盖）
-        const snapshot = await api.getRunSnapshot();
         const cacheKey = selectCurrentInputCacheKey(get());
+        if (cacheKey) {
+          const cache = sessionViewCaches.get(cacheKey);
+          if (cache && cache.runStatus !== 'idle') {
+            sessionViewCaches.set(cacheKey, { ...cache, runSummary: '正在取消...' });
+          }
+        }
         let settledCache: InputCache | undefined;
         set((state) => {
           const inputCaches = cacheKey
@@ -999,19 +1558,13 @@ export const useStore = create<AppState>((set, get) => ({
             : state.inputCaches;
           settledCache = cacheKey ? inputCaches[cacheKey] : undefined;
           return {
-            runStatus: 'idle',
+            runSummary: state.runStatus === 'idle' ? state.runSummary : '正在取消...',
             inputCaches,
-            messages: snapshot.messages,
-            currentPlan: snapshot.current_plan,
-            lastUsage: snapshot.last_usage ?? null,
-            tokenStats: snapshot.token_stats ?? null,
           };
         });
         if (cacheKey && settledCache) {
           syncInputCacheInBackground(get().syncInputCache(cacheKey, settledCache));
         }
-        // 刷新会话列表
-        api.getSessions().then((sessions) => set({ sessions })).catch(console.error);
       }
       return cancelled;
     } catch (error) {
@@ -1064,6 +1617,8 @@ export const useStore = create<AppState>((set, get) => ({
       const { isNewConversation, activeSessionId } = get();
       if (!isNewConversation && activeSessionId) {
         await api.setSessionCwd(activeSessionId, cwd);
+        const cache = sessionViewCaches.get(activeSessionId);
+        if (cache) sessionViewCaches.set(activeSessionId, { ...cache, cwd });
       }
       set({ sessionCwd: cwd });
     } catch (error) {
@@ -1113,7 +1668,19 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   beginContextManagement: (summary: string) => {
-    const { activeSessionId } = get();
+    const state = get();
+    const { activeSessionId } = state;
+    if (activeSessionId) {
+      const cache = sessionViewCaches.get(activeSessionId) || sessionViewCacheFromState(state);
+      sessionViewCaches.set(activeSessionId, {
+        ...cache,
+        runStatus: 'executing',
+        runSummary: summary,
+        streamingMessageId: null,
+        streamingContent: '',
+        streamingReasoningContent: '',
+      });
+    }
     set((state) => ({
       runStatus: 'executing',
       runSummary: summary,
@@ -1128,6 +1695,16 @@ export const useStore = create<AppState>((set, get) => ({
 
   endContextManagement: () => {
     const { activeSessionId, runSummary } = get();
+    if (activeSessionId) {
+      const cache = sessionViewCaches.get(activeSessionId);
+      if (cache) {
+        sessionViewCaches.set(activeSessionId, {
+          ...cache,
+          runStatus: 'idle',
+          runSummary: runSummary.includes('上下文') ? runSummary : '',
+        });
+      }
+    }
     set((state) => {
       const nextStatuses = { ...state.sessionRunStatuses };
       if (activeSessionId) {
@@ -1141,159 +1718,70 @@ export const useStore = create<AppState>((set, get) => ({
     });
   },
 
-  // 从快照更新状态
-  updateFromSnapshot: (snapshot: RunSnapshot) => {
-    const { activeSessionId, isNewConversation, sessionRunStatuses: prevStatuses } = get();
-    const pendingIds = snapshot.pending_session_ids || [];
+  applyStreamEvents: (events) => {
+    if (events.length === 0) return;
+    const state = get();
+    const previousStatuses = state.sessionRunStatuses;
+    const currentSessionId = state.activeSessionId || state.newConversationId;
+    const sessionRunStatuses = { ...previousStatuses };
+    let currentCache: SessionViewCache | null = null;
+    let refreshCurrentAgents = false;
 
-    // 基于 pending_session_ids 构建新的运行状态表
-    const newStatuses: Record<string, string> = {};
-    for (const sid of pendingIds) {
-      // 如果全局 last_session_id 匹配，用精确状态；否则标记为 executing
-      if (snapshot.last_session_id === sid) {
-        newStatuses[sid] = snapshot.status !== 'idle' ? snapshot.status : 'executing';
-      } else {
-        newStatuses[sid] = prevStatuses[sid] || 'executing';
+    for (const envelope of events) {
+      const sessionId = envelope.session_id;
+      const event = envelope.event;
+      const targetsCurrent = !!currentSessionId && sessionId === currentSessionId;
+      const initial = sessionViewCaches.get(sessionId)
+        || (targetsCurrent
+          ? sessionViewCacheFromState(state)
+          : emptySessionViewCache(sessionRunStatuses[sessionId]));
+      const next = applyEventToSessionView(initial, event);
+      sessionViewCaches.set(sessionId, next);
+
+      if (next.runStatus === 'idle') delete sessionRunStatuses[sessionId];
+      else sessionRunStatuses[sessionId] = next.runStatus;
+
+      if (targetsCurrent) {
+        currentCache = next;
+        refreshCurrentAgents = refreshCurrentAgents
+          || event.type === 'agent_created'
+          || event.type === 'agent_status_changed'
+          || event.type === 'agent_output'
+          || (event.type === 'session_message_upsert'
+            && !!event.message
+            && typeof event.message !== 'string'
+            && isAgentSystemMessage(event.message));
       }
     }
 
+    set({
+      ...(currentCache ? {
+        messages: currentCache.messages,
+        runStatus: currentCache.runStatus,
+        runSummary: currentCache.runSummary,
+        lastDurationMs: currentCache.lastDurationMs,
+        lastUsage: currentCache.lastUsage,
+        tokenStats: currentCache.tokenStats,
+        approvalRequestId: currentCache.approvalRequestId,
+        streamingMessageId: currentCache.streamingMessageId,
+        streamingContent: currentCache.streamingContent,
+        streamingReasoningContent: currentCache.streamingReasoningContent,
+        currentPlan: currentCache.currentPlan,
+        agents: refreshCurrentAgents
+          ? parseAgentsFromMessages(currentCache.messages)
+          : state.agents,
+      } : {}),
+      sessionRunStatuses,
+    });
+
+    const nextState = get();
     const appIsForeground = document.visibilityState === 'visible' && document.hasFocus();
-
-    // 检测刚完成的后台会话并发送通知。
-    // 后台包含两类场景：非当前查看会话完成，或当前会话在应用失焦/隐藏时完成。
-    for (const sid of Object.keys(prevStatuses)) {
-      if (!newStatuses[sid] && (sid !== activeSessionId || !appIsForeground)) {
-        // 该会话刚从运行中变为完成
-        const session = get().sessions.find(s => s.id === sid);
-        const title = session?.title || '对话';
-        notifyBackgroundSessionCompleted(title, sid).catch(console.warn);
+    for (const sessionId of Object.keys(previousStatuses)) {
+      if (!nextState.sessionRunStatuses[sessionId]
+        && (sessionId !== nextState.activeSessionId || !appIsForeground)) {
+        const session = nextState.sessions.find((item) => item.id === sessionId);
+        notifyBackgroundSessionCompleted(session?.title || '对话', sessionId).catch(console.warn);
       }
-    }
-
-    set({ sessionRunStatuses: newStatuses });
-
-    // 只有快照明确属于当前会话时才采用其精确状态；后台会话的迟到快照
-    // 只能通过 pending_session_ids 影响自己的状态，不能覆盖当前会话。
-    const currentState = get();
-    const prevStatus = currentState.runStatus;
-    const prevSending = selectCurrentIsSending(currentState);
-    const snapshotTargetsActive = !!activeSessionId
-      && snapshot.last_session_id === activeSessionId;
-    const derivedActiveStatus = activeSessionId ? newStatuses[activeSessionId] : undefined;
-    const nextStatus = isNewConversation
-      ? 'idle'
-      : snapshotTargetsActive
-        ? snapshot.status
-        : derivedActiveStatus ?? 'idle';
-    const snapshotApprovalRequestId = (snapshot as any).approval_request_id
-      || (snapshot as any).approvalRequestId
-      || null;
-    const nextSummary = snapshotTargetsActive
-      ? snapshot.summary || ''
-      : derivedActiveStatus
-        ? currentState.runSummary
-        : '';
-    const nextApprovalRequestId = snapshotTargetsActive
-      ? snapshotApprovalRequestId
-      : derivedActiveStatus
-        ? currentState.approvalRequestId
-        : null;
-    const isContextManagementSnapshot = nextSummary.includes('上下文')
-      || nextSummary.includes('正在压缩');
-    // 防止取消后被旧快照覆盖
-    const effectiveStatus = snapshotTargetsActive && (
-      prevStatus === 'idle'
-      && !prevSending
-      && nextStatus !== 'idle'
-      && nextStatus !== 'waiting_approval'
-      && !nextApprovalRequestId
-      && !isContextManagementSnapshot
-    )
-      ? 'idle'
-      : nextStatus;
-    set({
-      runStatus: effectiveStatus,
-      runSummary: nextSummary,
-      lastDurationMs: snapshotTargetsActive
-        ? snapshot.last_duration_ms ?? null
-        : currentState.lastDurationMs,
-      lastUsage: snapshotTargetsActive
-        ? snapshot.last_usage ?? null
-        : currentState.lastUsage,
-      tokenStats: snapshotTargetsActive
-        ? snapshot.token_stats ?? null
-        : currentState.tokenStats,
-      approvalRequestId: nextApprovalRequestId,
-    });
-
-    // 新对话尚无 Session，或快照不属于当前会话时，不更新消息/流式内容。
-    if (isNewConversation || (snapshot.last_session_id && snapshot.last_session_id !== activeSessionId)) {
-      return;
-    }
-
-    const { messages: oldMessages, streamingMessageId: oldStreamingId } = get();
-    const newMessages = mergeSnapshotMessages(oldMessages, snapshot.messages);
-    const shouldRefreshAgents = shouldRefreshAgentsFromSnapshot(oldMessages, newMessages);
-
-    // 检测最后一条消息是否是新的或内容在更新
-    let streamingId: string | null = null;
-    let streamingContent = '';
-    let streamingReasoningContent = '';
-
-    if (newMessages.length > 0) {
-      // 找最后一条 assistant 消息（不一定是数组最后一条，可能后面还有系统消息）
-      let lastAssistant = null;
-      for (let i = newMessages.length - 1; i >= 0; i--) {
-        if (newMessages[i].role === 'assistant' && !newMessages[i].worker_id) {
-          lastAssistant = newMessages[i];
-          break;
-        }
-      }
-
-      if (lastAssistant) {
-        const oldAssistant = oldMessages.find(m => m.id === lastAssistant!.id);
-        const hasRenderableMedia = !!lastAssistant.media && lastAssistant.media.length > 0;
-
-        // 新出现的 assistant 消息、正文增长或 thinking 增长都属于流式更新。
-        const isNew = !oldAssistant;
-        const oldText = oldAssistant ? textContent(oldAssistant) : '';
-        const newText = textContent(lastAssistant);
-        const isContentGrowing = oldAssistant &&
-          oldText !== newText &&
-          newText.length > oldText.length;
-        const isReasoningGrowing = oldAssistant &&
-          oldAssistant.reasoning_content !== lastAssistant.reasoning_content &&
-          lastAssistant.reasoning_content.length > oldAssistant.reasoning_content.length;
-
-        if ((isNew || isContentGrowing || isReasoningGrowing) && !hasRenderableMedia) {
-          streamingId = lastAssistant.id;
-          streamingContent = textContent(lastAssistant);
-          streamingReasoningContent = lastAssistant.reasoning_content;
-        }
-      }
-    }
-
-    // 如果没有流式消息，清空状态
-    if (!streamingId && oldStreamingId) {
-      streamingId = null;
-      streamingContent = '';
-      streamingReasoningContent = '';
-    }
-
-    set({
-      messages: newMessages,
-      currentPlan: snapshot.current_plan,
-      streamingMessageId: streamingId,
-      streamingContent,
-      streamingReasoningContent,
-      agents: shouldRefreshAgents ? parseAgentsFromMessages(newMessages) : get().agents,
-    });
-
-    // 状态变为 idle 时刷新会话列表（更新 message_count、标题等）
-    if (effectiveStatus === 'idle' && prevStatus !== 'idle') {
-      api.getSessions().then((sessions) => {
-        set({ sessions });
-      }).catch(console.error);
     }
   },
 }));

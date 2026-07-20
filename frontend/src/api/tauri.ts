@@ -15,6 +15,17 @@ export interface Session {
   cwd: string;
 }
 
+export interface LoadedSession {
+  id: string;
+  messages: Message[];
+  token_stats: TokenStats;
+  current_plan?: TaskPlan;
+  last_duration_ms?: number;
+  last_usage?: TokenUsage;
+  cwd: string;
+  reasoning_effort: string;
+}
+
 export type TabKind = 'browser' | 'terminal';
 
 export interface TabState {
@@ -50,14 +61,6 @@ export type MessagePhase = 'normal' | 'react' | 'summary';
 
 /** 单个对话轮次的最终执行状态（持久化在用户消息上，历史会话同样可见）。 */
 export type TurnStatus = 'success' | 'failed' | 'cancelled';
-export type RunStatus =
-  | 'idle'
-  | 'planning'
-  | 'executing'
-  | 'waiting_approval'
-  | 'completed'
-  | 'failed';
-
 export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
@@ -194,6 +197,56 @@ export interface Message {
   turn_status?: TurnStatus;
 }
 
+/** Core 经 Desktop 按会话转发的单个流事件。 */
+export interface StreamEvent {
+  type: string;
+  message_id?: string;
+  content?: string;
+  content_blocks?: ContentBlock[];
+  media?: MediaAsset[];
+  model_excluded?: boolean;
+  message?: Message | string;
+  name?: string;
+  names?: string[];
+  calls?: { id: string; name: string; arguments?: unknown }[];
+  tool_call_id?: string | null;
+  ok?: boolean;
+  output?: string;
+  duration_ms?: number | null;
+  usage?: TokenUsage | null;
+  current_tokens?: number | null;
+  compression_threshold_tokens?: number | null;
+  context_limit_tokens?: number | null;
+  source?: string;
+  agent_id?: string | null;
+  agent_role?: string;
+  role?: string;
+  agent_label?: string;
+  messages?: Message[];
+  request_id?: string;
+  tool_name?: string;
+  args_summary?: string;
+  attempt?: number;
+  max_attempts?: number;
+  phase?: string;
+  seconds?: number;
+  strategy?: string;
+  hit_count?: number;
+  label?: string;
+  status?: string;
+  action?: string;
+  summary_up_to?: number;
+  remaining_messages?: number;
+  count?: number;
+  holder_agent_label?: string | null;
+  path?: string;
+}
+
+export interface SessionStreamEvent {
+  session_id: string;
+  event: StreamEvent;
+}
+
 /** 提取消息的纯文本内容，兼容旧格式 content 为字符串的情况 */
 export function textContent(msg: Message): string {
   const content = msg.content;
@@ -211,19 +264,6 @@ export function hasMediaBlocks(msg: Message): boolean {
   return content.some((b) =>
     b.type === 'media' || b.type === 'asset_reference' || b.type === 'image'
   );
-}
-
-export interface RunSnapshot {
-  status: RunStatus;
-  summary?: string;
-  last_session_id?: string;
-  last_duration_ms?: number;
-  last_usage?: TokenUsage;
-  token_stats?: TokenStats;
-  current_plan?: TaskPlan;
-  messages: Message[];
-  pending_session_ids: string[];
-  approval_request_id?: string;
 }
 
 export interface TaskPlan {
@@ -522,6 +562,9 @@ export const api = {
   switchSession: (sessionId: string): Promise<void> =>
     invoke('switch_session', { sessionId }),
 
+  loadSession: (sessionId: string): Promise<LoadedSession> =>
+    invoke('load_session', { sessionId }),
+
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
 
@@ -623,9 +666,6 @@ export const api = {
   getProviderBalance: (providerName: string): Promise<ProviderBalance> =>
     invoke('get_provider_balance', { providerName }),
 
-  getRunSnapshot: (): Promise<RunSnapshot> =>
-    invoke('get_run_snapshot'),
-
   newSessionId: (): Promise<string> =>
     invoke('new_session_id'),
 
@@ -641,9 +681,6 @@ export const api = {
     claimRevision?: number,
   ): Promise<InputCache> =>
     invoke('set_input_cache', { cacheKey, cache, claimRevision }),
-
-  getSessionCwd: (): Promise<string> =>
-    invoke('get_session_cwd'),
 
   setSessionCwd: (sessionId: string, cwd: string): Promise<void> =>
     invoke('set_session_cwd', { sessionId, cwd }),
@@ -867,8 +904,8 @@ export const api = {
   // ----------------------------------------------------------------
   // 事件监听
   // ----------------------------------------------------------------
-  onRunSnapshot: (callback: (snapshot: RunSnapshot) => void) =>
-    listen<RunSnapshot>('run_snapshot', (event) => callback(event.payload)),
+  onStreamEvent: (callback: (event: SessionStreamEvent) => void) =>
+    listen<SessionStreamEvent>('stream_event', (event) => callback(event.payload)),
 
   // ----------------------------------------------------------------
   // 定时任务管理
@@ -1120,11 +1157,13 @@ export const api = {
     sessionId: string,
     tabId: string,
     title?: string | null,
+    cwd?: string | null,
   ): Promise<void> =>
     invoke('plugin:terminal|terminal_tab_restore', {
       sessionId,
       tabId,
       title: title ?? null,
+      cwd: cwd ?? null,
     }),
 
   terminalTabSwitch: (sessionId: string, tabId: string): Promise<void> =>

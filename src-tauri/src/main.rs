@@ -364,7 +364,6 @@ fn run_gui() {
                         active_tab_id: None,
                         feedback: None,
                     }),
-                    refresh_frontend: false,
                 });
             });
 
@@ -474,7 +473,6 @@ fn run_gui() {
                                 active_tab_id,
                                 feedback: Some(feedback),
                             }),
-                            refresh_frontend: false,
                         })
                         .is_ok();
                     info!(
@@ -503,7 +501,6 @@ fn run_gui() {
                 let _ = tx3.send(tiangong_app::ToolInjection {
                     session_id: data["session_id"].as_str().map(|s| s.to_string()),
                     tool: Box::new(TerminalUserInput { command }),
-                    refresh_frontend: true,
                 });
             });
 
@@ -529,6 +526,7 @@ fn run_gui() {
             tiangong_app::commands::get_session_tabs,
             tiangong_app::commands::set_session_tabs,
             tiangong_app::commands::switch_session,
+            tiangong_app::commands::load_session,
             tiangong_app::commands::delete_session,
             tiangong_app::commands::delete_sessions_by_cwd,
             tiangong_app::commands::update_session_title,
@@ -541,12 +539,10 @@ fn run_gui() {
             tiangong_app::commands::cancel_agent,
             tiangong_app::commands::get_background_tasks,
             tiangong_app::commands::cancel_background_task,
-            tiangong_app::commands::get_run_snapshot,
             tiangong_app::commands::get_input_cache,
             tiangong_app::commands::set_input_cache,
             tiangong_app::commands::new_session_id,
             tiangong_app::commands::remove_input_cache,
-            tiangong_app::commands::get_session_cwd,
             tiangong_app::commands::get_workspace_dir,
             tiangong_app::commands::set_session_cwd,
             tiangong_app::commands::set_workspace_dir,

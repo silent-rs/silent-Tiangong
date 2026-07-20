@@ -21,7 +21,7 @@ pub struct TiangongApp {
     pub state: std::sync::Arc<AsyncMutex<tiangong_app_state::app_state::TiangongState>>,
     /// 子 Agent 的过程消息仅供桌面端视图展示，不能进入父 Session 权威状态。
     ///
-    /// 按父 Session 保存；构建 RunSnapshot 时合并到消息副本。这样 Core 重建、
+    /// 按父 Session 保存；加载会话视图时合并到消息副本。这样 Core 重建、
     /// 编辑重发和 Session 持久化永远不会读到这些临时 worker 消息。
     agent_worker_views: Mutex<HashMap<String, Vec<tiangong_types::Message>>>,
     /// 覆盖单个会话从附件准备到 Core 持久化确认的完整串行区间。
@@ -83,8 +83,6 @@ pub struct ToolInjection {
     pub session_id: Option<String>,
     /// 注入的工具数据。
     pub tool: Box<dyn tiangong_core::agent_input::ToolInput>,
-    /// 注入后是否需要刷新前端（emit run_snapshot）。
-    pub refresh_frontend: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -368,7 +366,7 @@ impl TiangongApp {
     /// 启动工具消息注入消费者任务（main.rs setup 阶段调用一次）。
     ///
     /// 循环接收插件 push 的 `ToolInjection`，统一处理注入到 session。
-    /// 注入逻辑与 [`Self::inject_tool`] 相同，但支持指定 session_id 和前端刷新。
+    /// 注入逻辑与 [`Self::inject_tool`] 相同，但支持指定 session_id。
     pub fn start_tool_injection_consumer(&self, app_handle: tauri::AppHandle) {
         let rx = {
             let mut guard = self.tool_injection_rx.lock().unwrap();

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use tiangong_core::agent_config::AgentConfig;
-use tiangong_core::runtime::RunSnapshot;
 
 mod store;
 
@@ -17,7 +16,6 @@ pub struct TiangongState {
     pub input_caches: HashMap<String, InputCache>,
     pub model_list: Vec<String>,
     pub agent_config: AgentConfig,
-    pub run: RunSnapshot,
     pub pending_turns: HashMap<String, PendingTurnStub>,
     pub core_manager: CoreManager,
 }
@@ -44,7 +42,6 @@ impl TiangongState {
             input_caches: HashMap::new(),
             model_list: Vec::new(),
             agent_config,
-            run: RunSnapshot::default(),
             pending_turns: HashMap::new(),
             core_manager,
         }

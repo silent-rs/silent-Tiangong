@@ -160,9 +160,10 @@ pub async fn terminal_tab_restore(
     session_id: String,
     tab_id: String,
     title: Option<String>,
+    cwd: Option<String>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    state.registry.tab_restore(&session_id, &tab_id, title)
+    state.registry.tab_restore(&session_id, &tab_id, title, cwd)
 }
 
 #[tauri::command]

@@ -18,9 +18,6 @@ pub(crate) fn remove_session_state(
             .map(|metadata| metadata.id)
             .unwrap_or_default();
     }
-    if state.run.last_session_id.as_deref() == Some(session_id) {
-        state.run = Default::default();
-    }
 }
 
 pub(crate) fn remove_failed_message(
@@ -132,13 +129,6 @@ pub(crate) fn update_reasoning_effort(
         .try_persist_to_disk()
         .map_err(|error| anyhow!("保存会话思考强度失败：{error}"))?;
     Ok(previous)
-}
-
-pub(crate) fn active_session_cwd(state: &TiangongState, manager: &CoreManager) -> String {
-    manager
-        .load_session(&state.active_session_id)
-        .map(|session| session.cwd)
-        .unwrap_or_default()
 }
 
 pub(crate) fn update_session_cwd(

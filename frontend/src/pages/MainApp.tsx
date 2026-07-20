@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
-import { api, type RunSnapshot, type TabKind, type TabState, type TerminalTabInfo } from '@/api/tauri';
+import {
+  api,
+  type SessionStreamEvent,
+  type TabKind,
+  type TabState,
+  type TerminalTabInfo,
+} from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
@@ -98,7 +104,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
 }
 
 export function MainApp() {
-  const { loadSessions, updateFromSnapshot } = useStore();
+  const { applyStreamEvents, loadSessions } = useStore();
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
@@ -114,8 +120,8 @@ export function MainApp() {
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
-  const latestSnapshotRef = useRef<RunSnapshot | null>(null);
-  const snapshotTimerRef = useRef<number | null>(null);
+  const streamEventQueueRef = useRef<SessionStreamEvent[]>([]);
+  const streamEventTimerRef = useRef<number | null>(null);
   const savedWindowWidthRef = useRef<number | null>(null);
   const workspaceExpandedForBrowserRef = useRef(false);
   const preferredSidebarOpenRef = useRef(true);
@@ -319,28 +325,21 @@ export function MainApp() {
 
     loadSessions();
 
-    const flushSnapshot = () => {
-      snapshotTimerRef.current = null;
-      const snapshot = latestSnapshotRef.current;
-      latestSnapshotRef.current = null;
-      if (snapshot) {
-        updateFromSnapshot(snapshot);
-      }
+    const flushStreamEvents = () => {
+      streamEventTimerRef.current = null;
+      const events = streamEventQueueRef.current;
+      streamEventQueueRef.current = [];
+      applyStreamEvents(events);
     };
 
-    const scheduleSnapshotUpdate = (snapshot: RunSnapshot) => {
-      latestSnapshotRef.current = snapshot;
-      if (snapshotTimerRef.current !== null) {
-        return;
-      }
-      snapshotTimerRef.current = window.setTimeout(flushSnapshot, 16);
+    const scheduleStreamEvent = (event: SessionStreamEvent) => {
+      streamEventQueueRef.current.push(event);
+      if (streamEventTimerRef.current !== null) return;
+      streamEventTimerRef.current = window.setTimeout(flushStreamEvents, 16);
     };
 
     const setupListener = async () => {
-      const unlisten = await api.onRunSnapshot((snapshot) => {
-        scheduleSnapshotUpdate(snapshot);
-      });
-      unlistenRef.current = unlisten;
+      const unlistenStream = await api.onStreamEvent(scheduleStreamEvent);
 
       const { listen } = await import('@tauri-apps/api/event');
       const unlistenSessions = await listen('sessions_updated', () => {
@@ -420,9 +419,8 @@ export function MainApp() {
         }
       });
 
-      const prevUnlisten = unlistenRef.current;
       unlistenRef.current = () => {
-        prevUnlisten?.();
+        unlistenStream();
         unlistenSessions();
         unlistenOpenSession();
         unlistenBrowserOpen();
@@ -433,9 +431,12 @@ export function MainApp() {
 
     setupListener();
 
-    Promise.all([api.getWorkspaceDir(), api.getSessionCwd()])
-      .then(([workspaceDir, sessionCwd]) => {
-        useStore.setState({ workspaceDir, sessionCwd });
+    api.getWorkspaceDir()
+      .then((workspaceDir) => {
+        useStore.setState((state) => ({
+          workspaceDir,
+          sessionCwd: state.activeSessionId ? state.sessionCwd : state.sessionCwd || workspaceDir,
+        }));
       })
       .catch(console.error);
 
@@ -457,15 +458,17 @@ export function MainApp() {
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 
     return () => {
-      if (snapshotTimerRef.current !== null) {
-        window.clearTimeout(snapshotTimerRef.current);
-        snapshotTimerRef.current = null;
+      if (streamEventTimerRef.current !== null) {
+        window.clearTimeout(streamEventTimerRef.current);
+        streamEventTimerRef.current = null;
       }
+      streamEventQueueRef.current = [];
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
   }, [
     setSidebarOpenByLayout,
+    applyStreamEvents,
     openWorkspacePanel,
     closeWorkspacePanel,
     lockResize,

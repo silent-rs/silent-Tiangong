@@ -2,8 +2,6 @@ use std::collections::HashSet;
 
 use anyhow::{anyhow, Result};
 use tiangong_app_state::app_state::{InputCache, PendingTurnStub, TiangongState};
-use tiangong_core::runtime::{RunSnapshot, RunStatus};
-use tiangong_core::session::now_text;
 
 pub(crate) fn input_cache(state: &TiangongState, key: &str) -> InputCache {
     state.input_caches.get(key).cloned().unwrap_or_default()
@@ -64,10 +62,6 @@ pub(crate) fn has_pending_turn(state: &TiangongState, session_id: &str) -> bool 
     state.pending_turns.contains_key(session_id)
 }
 
-pub(crate) fn pending_session_ids(state: &TiangongState) -> Vec<String> {
-    state.pending_turns.keys().cloned().collect()
-}
-
 pub(crate) fn mark_pending_message(state: &mut TiangongState, session_id: &str, message_id: &str) {
     state
         .pending_turns
@@ -126,23 +120,6 @@ pub(crate) fn remove_pending_message(
 
 pub(crate) fn clear_pending_turn(state: &mut TiangongState, session_id: &str) {
     state.pending_turns.remove(session_id);
-}
-
-pub(crate) fn report_run_idle(state: &mut TiangongState, summary: impl Into<String>) {
-    state.run = RunSnapshot {
-        status: RunStatus::Idle,
-        summary: summary.into(),
-        last_session_id: state.run.last_session_id.clone(),
-        last_task_id: state.run.last_task_id.clone(),
-        last_duration_ms: state.run.last_duration_ms,
-        last_result: state.run.last_result.clone(),
-        last_plan: state.run.last_plan.clone(),
-        last_tool_result: state.run.last_tool_result.clone(),
-        last_error: None,
-        last_usage: state.run.last_usage.clone(),
-        updated_at: now_text(),
-        approval_request_id: None,
-    };
 }
 
 fn pending_turn(session_id: String) -> PendingTurnStub {

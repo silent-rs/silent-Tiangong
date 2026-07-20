@@ -116,5 +116,6 @@
 - [x] `TiangongState` 启动时加载完整配置并据此创建 `CoreManager`，Desktop / CLI / Server 共用该实例
 - [x] 新对话只预留最终 Session ID 和输入缓存，首次向 Core 投递消息时才创建并保存 Session
 - [x] 将默认信任模式、默认工作目录和自定义 Prompt 纳入配置，并兼容旧 `app.json`
+- [x] 修复 Desktop 运行中卡顿与流式输出、模型派生令牌阈值归零、终端 Tab 恢复目录错误
 - [ ] app-state 的 `RuntimeEngine` 替换为轻量配置结构体
 - [ ] `Command::Message` / `AgentInputKind::Message` 双层映射合并

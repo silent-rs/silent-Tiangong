@@ -245,103 +245,6 @@ fn has_capability_in_state(
     core_state.config.models.has_capability(capability)
 }
 
-fn provider_label(core_state: &tiangong_app_state::app_state::TiangongState) -> String {
-    let endpoint = core_state
-        .config
-        .models
-        .resolve_slot(tiangong_llm::models_config::RoutingSlot::Chat)
-        .map(tiangong_llm::ModelEndpoint::from_resolved)
-        .unwrap_or_default();
-    format!(
-        "{} @ {} · {}ms",
-        endpoint.model, endpoint.base_url, endpoint.timeout_ms
-    )
-}
-
-// ============================================================================
-// 辅助函数：构建完整的 RunSnapshot
-// ============================================================================
-
-pub fn build_full_snapshot_with_status(
-    app_state: &TiangongApp,
-    core_state: &tiangong_app_state::app_state::TiangongState,
-    is_executing: bool,
-) -> RunSnapshotView {
-    let sid = core_state.active_session_id.as_str();
-    let agent_worker_messages = app_state.agent_worker_view_messages(sid);
-    build_session_snapshot(
-        app_state,
-        core_state,
-        sid,
-        is_executing,
-        &agent_worker_messages,
-    )
-}
-
-fn active_session_is_executing(core_state: &tiangong_app_state::app_state::TiangongState) -> bool {
-    let active_id = core_state.active_session_id.as_str();
-    let snapshot = &core_state.run;
-    crate::state_ops::has_pending_turn(core_state, active_id)
-        || (snapshot.last_session_id.as_deref() == Some(active_id)
-            && snapshot.status != tiangong_types::RunStatus::Idle)
-}
-
-fn build_session_snapshot(
-    app_state: &TiangongApp,
-    core_state: &tiangong_app_state::app_state::TiangongState,
-    session_id: &str,
-    is_session_executing: bool,
-    agent_worker_messages: &[tiangong_types::Message],
-) -> RunSnapshotView {
-    let core_snapshot = &core_state.run;
-    let selected_session = app_state.core_manager.load_session(session_id).ok();
-
-    let mut messages: Vec<tiangong_types::Message> = selected_session
-        .as_ref()
-        .map(|session| session.messages.clone())
-        .unwrap_or_default();
-    merge_agent_worker_messages(&mut messages, agent_worker_messages);
-
-    let current_plan = selected_session
-        .as_ref()
-        .map(|session| session.task_plans.to_vec())
-        .unwrap_or_default()
-        .first()
-        .map(TaskPlan::from_session_task_plan);
-
-    let pending_session_ids = crate::state_ops::pending_session_ids(core_state);
-
-    let mut snapshot = RunSnapshotView::from_core_with_session(
-        core_snapshot,
-        messages,
-        current_plan,
-        pending_session_ids,
-        selected_session
-            .as_ref()
-            .map(TokenStatsView::from_session)
-            .unwrap_or_default(),
-    );
-    snapshot.last_usage = selected_session.as_ref().and_then(|session| {
-        let usage = session.total_usage();
-        (usage.total_tokens > 0).then_some(usage)
-    });
-
-    // 按 session 独立判断状态
-    if is_session_executing {
-        // 该 session 有活跃的 TiangongCore
-        if snapshot.last_session_id.as_deref() != Some(session_id) {
-            snapshot.status = tiangong_types::RunStatus::Executing;
-            snapshot.summary = "正在处理".to_string();
-        }
-    } else {
-        // 该 session 没有活跃 core → idle
-        snapshot.status = tiangong_types::RunStatus::Idle;
-        snapshot.current_plan = None;
-    }
-
-    snapshot
-}
-
 // ============================================================================
 // 会话管理
 // ============================================================================
@@ -355,17 +258,17 @@ pub struct SessionTabsView {
 /// 获取所有会话列表
 #[tauri::command]
 pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionListItem>, String> {
-    state
-        .with_state_read(|core_state| {
-            Ok(core_state
-                .core_manager
-                .list_session_metadata()
-                .iter()
-                .filter(|metadata| metadata.parent_session_id.is_none())
-                .map(SessionListItem::from_metadata)
-                .collect())
-        })
-        .await
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        manager
+            .list_session_metadata()
+            .iter()
+            .filter(|metadata| metadata.parent_session_id.is_none())
+            .map(SessionListItem::from_metadata)
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("等待会话列表加载失败：{error}"))
 }
 
 /// 获取指定会话的统一工作区 Tab 元数据
@@ -374,75 +277,74 @@ pub async fn get_session_tabs(
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<SessionTabsView, String> {
-    state
-        .with_state_read(|core_state| {
-            if !core_state
-                .core_manager.list_session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
-                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-            }
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<SessionTabsView> {
+        if !manager.session_exists(&session_id) {
+            return Err(anyhow::anyhow!("会话不存在：{session_id}"));
+        }
 
-            let browser =
-                tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id)?;
-            let browser_active = browser.active_tab_id.clone();
-            let browser_tabs: Vec<_> = browser
-                .tabs
-                .iter()
-                .map(|tab| TabState {
-                    id: tab.id.clone(),
-                    kind: TabKind::Browser,
-                    title: tab.title.clone(),
-                    url: tab.url.clone(),
-                    created_at: String::new(),
-                })
-                .collect();
-            let terminal = tiangong_plugin_terminal::session_store::TerminalSessionStore::load_or_migrate_legacy(&session_id)?;
-            let terminal_active = terminal.active_tab_id.clone();
-            let terminal_tabs: Vec<_> = terminal
-                .tabs
-                .into_iter()
-                .map(|tab| TabState {
-                    id: tab.id,
-                    kind: TabKind::Terminal,
-                    title: tab.title,
-                    url: String::new(),
-                    created_at: tab.created_at,
-                })
-                .collect();
-            let available = terminal_tabs
-                .into_iter()
-                .chain(browser_tabs)
-                .collect::<Vec<_>>();
-            let layout = crate::workspace_tabs::load_layout(&session_id);
-            let fallback_active = browser_active
-                .map(|id| WorkspaceTabRef {
-                    kind: TabKind::Browser,
-                    id,
-                })
-                .into_iter()
-                .chain(terminal_active.map(|id| WorkspaceTabRef {
-                    kind: TabKind::Terminal,
-                    id,
-                }))
-                .collect::<Vec<_>>();
-            let (tabs, active_tab_id) =
-                crate::workspace_tabs::reconcile_tabs(available, layout, &fallback_active);
-            if let Err(error) = crate::workspace_tabs::save_layout(
-                &session_id,
-                &tabs,
-                active_tab_id.as_deref(),
-            ) {
-                warn!(%error, session_id, "清理工作区标签页布局失败");
-            }
-
-            Ok(SessionTabsView {
-                tabs,
-                active_tab_id,
+        let browser =
+            tiangong_plugin_browser::session_store::BrowserSessionStore::load(&session_id)?;
+        let browser_active = browser.active_tab_id.clone();
+        let browser_tabs: Vec<_> = browser
+            .tabs
+            .iter()
+            .map(|tab| TabState {
+                id: tab.id.clone(),
+                kind: TabKind::Browser,
+                title: tab.title.clone(),
+                url: tab.url.clone(),
+                created_at: String::new(),
             })
+            .collect();
+        let terminal =
+            tiangong_plugin_terminal::session_store::TerminalSessionStore::load_or_migrate_legacy(
+                &session_id,
+            )?;
+        let terminal_active = terminal.active_tab_id.clone();
+        let terminal_tabs: Vec<_> = terminal
+            .tabs
+            .into_iter()
+            .map(|tab| TabState {
+                id: tab.id,
+                kind: TabKind::Terminal,
+                title: tab.title,
+                url: String::new(),
+                created_at: tab.created_at,
+            })
+            .collect();
+        let available = terminal_tabs
+            .into_iter()
+            .chain(browser_tabs)
+            .collect::<Vec<_>>();
+        let layout = crate::workspace_tabs::load_layout(&session_id);
+        let fallback_active = browser_active
+            .map(|id| WorkspaceTabRef {
+                kind: TabKind::Browser,
+                id,
+            })
+            .into_iter()
+            .chain(terminal_active.map(|id| WorkspaceTabRef {
+                kind: TabKind::Terminal,
+                id,
+            }))
+            .collect::<Vec<_>>();
+        let (tabs, active_tab_id) =
+            crate::workspace_tabs::reconcile_tabs(available, layout, &fallback_active);
+        if let Err(error) =
+            crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
+        {
+            warn!(%error, session_id, "清理工作区标签页布局失败");
+        }
+
+        Ok(SessionTabsView {
+            tabs,
+            active_tab_id,
         })
-        .await
+    })
+    .await
+    .map_err(|error| format!("等待会话标签页加载失败：{error}"))?
+    .map_err(|error| error.to_string())
 }
 
 /// 写入指定会话的统一工作区 Tab 元数据
@@ -453,30 +355,37 @@ pub async fn set_session_tabs(
     active_tab_id: Option<String>,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
-    state
-        .with_state_read(|core_state| {
-            if !core_state
-                .core_manager
-                .list_session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
-                return Err(anyhow::anyhow!("会话不存在：{session_id}"));
-            }
-
-            crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
-        })
-        .await
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        if !manager.session_exists(&session_id) {
+            return Err(anyhow::anyhow!("会话不存在：{session_id}"));
+        }
+        crate::workspace_tabs::save_layout(&session_id, &tabs, active_tab_id.as_deref())
+    })
+    .await
+    .map_err(|error| format!("等待会话标签页保存失败：{error}"))?
+    .map_err(|error| error.to_string())
 }
 
 /// 切换到指定会话
 #[tauri::command]
 pub async fn switch_session(
+    app: AppHandle,
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     if !state.inner().core_manager.session_exists(&session_id) {
         return Err(format!("会话不存在：{session_id}"));
+    }
+
+    if !state.core_manager.has_live_core(&session_id) {
+        let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
+        let ensured = state
+            .ensure_core(&session_id, None, None, None, stream_tx)
+            .await;
+        if ensured.is_new {
+            start_stream_consumer(app, ensured.session_id, stream_rx);
+        }
     }
 
     state
@@ -487,6 +396,37 @@ pub async fn switch_session(
         .await?;
 
     Ok(())
+}
+
+/// 从 Session 真相源加载指定会话的界面数据。
+#[tauri::command]
+pub async fn load_session(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<crate::view::LoadedSessionView, String> {
+    let config = state.core_manager.config().snapshot();
+    let context_limit = if config.context_limit == 0 {
+        tiangong_core::core_config::default_context_limit()
+    } else {
+        config.context_limit
+    };
+    let default_reasoning_effort = config.reasoning_effort.clone();
+    let manager = state.core_manager.clone();
+    let session_id_for_load = session_id.clone();
+    let session = tokio::task::spawn_blocking(move || manager.load_session(&session_id_for_load))
+        .await
+        .map_err(|error| format!("等待会话加载失败：{error}"))??;
+
+    let mut view = crate::view::LoadedSessionView::from_session(
+        &session,
+        context_limit,
+        &default_reasoning_effort,
+    );
+    merge_agent_worker_messages(
+        &mut view.messages,
+        &state.agent_worker_view_messages(&session_id),
+    );
+    Ok(view)
 }
 
 /// 删除当前会话
@@ -914,18 +854,6 @@ async fn send_message_inner(
     state.mark_input_revision_delivered(&session_id, revision);
     let finish_result = state
         .with_state(|core_state| {
-            if crate::state_ops::has_pending_turn(core_state, &session_id)
-                && core_state.active_session_id.as_str() == session_id
-            {
-                core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                core_state.run.summary = "正在处理".to_string();
-                core_state.run.last_session_id = Some(session_id.clone());
-                if let Ok(session) = state.core_manager.load_session(&session_id) {
-                    let usage = session.total_usage();
-                    core_state.run.last_usage = (usage.total_tokens > 0).then_some(usage);
-                }
-                core_state.run.updated_at = tiangong_core::session::now_text();
-            }
             let cache =
                 crate::state_ops::finish_input_send(core_state, &session_id, revision, true)?;
             Ok(cache)
@@ -1017,7 +945,21 @@ pub(crate) async fn attachment_capability_snapshot(
         .await
 }
 
-/// 消费 StreamEvent：emit 给前端 + 更新 RunStatus + Done 时同步 session
+fn emit_session_stream_event(
+    app: &AppHandle,
+    session_id: &str,
+    event: &tiangong_types::StreamEvent,
+) {
+    let _ = app.emit(
+        "stream_event",
+        &tiangong_types::SessionEvent {
+            session_id: session_id.to_string(),
+            event: event.clone(),
+        },
+    );
+}
+
+/// 消费 StreamEvent：按会话转发给前端，并维护消息投递边界。
 pub(crate) fn start_stream_consumer(
     app: AppHandle,
     session_id: String,
@@ -1031,7 +973,7 @@ pub(crate) fn start_stream_consumer(
             let app_state = app.state::<TiangongApp>();
             if matches!(&session_event, StreamEvent::TurnElapsed { .. }) {
                 if app_state.core_manager.has_live_core(&session_id) {
-                    let _ = app.emit("stream_event", &session_event);
+                    emit_session_stream_event(&app, &session_id, &session_event);
                 }
                 continue;
             }
@@ -1047,9 +989,9 @@ pub(crate) fn start_stream_consumer(
                 &session_event,
                 StreamEvent::Done { .. } | StreamEvent::Error { .. }
             );
-            // 普通流事件立即转发；终态必须等 Core 权威会话重载完成后再对外发布。
+            // 普通流事件立即转发；终态等运行状态收尾后再对外发布。
             if !terminal_event {
-                let _ = app.emit("stream_event", &session_event);
+                emit_session_stream_event(&app, &session_id, &session_event);
             }
 
             let sid = session_id.clone();
@@ -1072,214 +1014,21 @@ pub(crate) fn start_stream_consumer(
                 );
             }
 
-            // 更新 session + RunStatus/usage
-            let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
-                let accepted_message_id = match &event {
-                    StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
-                    _ => None,
-                };
-                if let Some(message_id) = accepted_message_id {
-                    crate::state_ops::accept_pending_message(core_state, &sid, &message_id);
-                }
-                if is_done || is_error {
-                    crate::state_ops::complete_accepted_turn(core_state, &sid);
-                }
-                // RunStatus/usage 更新
-                match &event {
-                    StreamEvent::UserMessage { .. } => {
-                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                        core_state.run.summary = "正在处理".to_string();
-                        core_state.run.last_session_id = Some(sid.clone());
-                        core_state.run.updated_at = tiangong_core::session::now_text();
+            // App 只维护投递边界；正文、Thinking、工具和计时事件不触碰应用状态锁。
+            let accepted_message_id = match &event {
+                StreamEvent::UserMessage { message_id, .. } => Some(message_id.clone()),
+                _ => None,
+            };
+            if accepted_message_id.is_some() || is_done || is_error {
+                let _ = rt.block_on(app.state::<TiangongApp>().with_state(|core_state| {
+                    if let Some(message_id) = accepted_message_id {
+                        crate::state_ops::accept_pending_message(core_state, &sid, &message_id);
                     }
-                    StreamEvent::ApprovalNeeded {
-                        ref request_id,
-                        ref tool_name,
-                        ref args_summary,
-                    } => {
-                        core_state.run.status = tiangong_core::runtime::RunStatus::WaitingApproval;
-                        core_state.run.summary = if args_summary.is_empty() {
-                            format!("工具 {tool_name} 需要确认")
-                        } else {
-                            format!("{tool_name}: {args_summary}")
-                        };
-                        core_state.run.approval_request_id = Some(request_id.clone());
+                    if is_done || is_error {
+                        crate::state_ops::complete_accepted_turn(core_state, &sid);
                     }
-                    StreamEvent::ToolStart {
-                        name,
-                        ref args_summary,
-                    } => {
-                        // 审批通过后恢复执行状态
-                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                        core_state.run.approval_request_id = None;
-                        core_state.run.summary = if args_summary.is_empty() {
-                            format!("正在执行：{name}")
-                        } else {
-                            format!("正在执行：{name} {args_summary}")
-                        };
-                    }
-                    StreamEvent::ToolResult { name, ok, .. } => {
-                        let s = if *ok { "✓" } else { "✗" };
-                        core_state.run.summary = format!("{s} {name}");
-                    }
-                    StreamEvent::ToolCalls { names, .. } => {
-                        core_state.run.summary = format!("正在执行：{}", names.join(", "));
-                    }
-                    StreamEvent::TokenUsage { .. } => {
-                        if let Ok(session) = app_state.core_manager.load_session(&sid) {
-                            let total = session.total_usage();
-                            core_state.run.last_usage = (total.total_tokens > 0).then_some(total);
-                        }
-                    }
-                    StreamEvent::Done { .. } => {
-                        if done_event_keeps_turn_running(
-                            &event,
-                            crate::state_ops::has_pending_turn(core_state, &sid),
-                        ) {
-                            core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                            core_state.run.summary = "正在处理".to_string();
-                            core_state.run.last_session_id = Some(sid.clone());
-                            core_state.run.updated_at = tiangong_core::session::now_text();
-                        } else {
-                            crate::state_ops::report_run_idle(
-                                core_state,
-                                format!("模型供应商：{}", provider_label(core_state)),
-                            );
-                            crate::state_ops::clear_pending_turn(core_state, &sid);
-                        }
-                    }
-                    StreamEvent::Error { ref message } => {
-                        if crate::state_ops::has_pending_turn(core_state, &sid) {
-                            core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                            core_state.run.summary = "正在处理下一条消息".to_string();
-                            core_state.run.last_session_id = Some(sid.clone());
-                            core_state.run.updated_at = tiangong_core::session::now_text();
-                        } else {
-                            crate::state_ops::report_run_idle(
-                                core_state,
-                                format!("执行失败：{message}"),
-                            );
-                            crate::state_ops::clear_pending_turn(core_state, &sid);
-                        }
-                    }
-                    StreamEvent::Retry {
-                        attempt,
-                        max_attempts,
-                        ..
-                    } => {
-                        core_state.run.summary = format!("重试中 ({attempt}/{max_attempts})...");
-                    }
-                    StreamEvent::Reasoning { .. } => {
-                        core_state.run.summary = "正在思考...".to_string();
-                    }
-                    StreamEvent::Delta { .. }
-                    | StreamEvent::ReactText { .. }
-                    | StreamEvent::SummaryText { .. } => {
-                        core_state.run.summary = "正在回复...".to_string();
-                    }
-                    StreamEvent::PhaseChanged { phase, .. } => {
-                        // 工具执行完毕后 core 发出 PhaseChanged(analyzing)，
-                        // 标志进入下一轮 LLM 推理。及时更新 summary 避免前端
-                        // 状态卡在刚完成的工具名上（如 "✓ run_shell"）。
-                        if phase == "analyzing" {
-                            core_state.run.summary = "正在思考...".to_string();
-                        }
-                    }
-                    StreamEvent::MemoryRecallStart { .. } => {
-                        core_state.run.summary = "正在检索记忆...".to_string();
-                    }
-                    StreamEvent::MemoryRecallProgress { ref phase } => {
-                        core_state.run.summary = format!("正在检索记忆: {phase}");
-                    }
-                    StreamEvent::MemoryRecallDone { hit_count, .. } => {
-                        if *hit_count > 0 {
-                            core_state.run.summary = format!("记忆检索完成，命中 {hit_count} 条");
-                        } else {
-                            core_state.run.summary = "记忆检索完成，无相关记忆".to_string();
-                        }
-                    }
-                    StreamEvent::AgentCreated { ref label, .. } => {
-                        core_state.run.summary = format!("Agent {label} 已加入团队");
-                    }
-                    StreamEvent::AgentStatusChanged {
-                        ref label,
-                        ref status,
-                        ..
-                    } => {
-                        core_state.run.summary = format!("Agent {label}: {status}");
-                    }
-                    StreamEvent::AgentNotification {
-                        ref agent_label, ..
-                    } => {
-                        core_state.run.summary = format!("Agent {agent_label} 发送了通知");
-                    }
-                    StreamEvent::AgentMessage {
-                        ref from_agent_label,
-                        ref to_agent_label,
-                        ..
-                    } => {
-                        core_state.run.summary = format!("{from_agent_label} → {to_agent_label}");
-                    }
-                    StreamEvent::AgentOutput {
-                        ref agent_label, ..
-                    } => {
-                        core_state.run.summary = format!("Agent {agent_label} 输出已更新");
-                    }
-                    StreamEvent::FileLockChanged {
-                        ref path,
-                        ref action,
-                        ref holder_agent_label,
-                        ..
-                    } => {
-                        core_state.run.summary = format!(
-                            "文件锁 {action}: {path} ({})",
-                            holder_agent_label.as_deref().unwrap_or("未知")
-                        );
-                    }
-                    StreamEvent::ContextCompressing { .. } => {
-                        core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                        core_state.run.summary = "正在压缩早期上下文...".to_string();
-                        core_state.run.last_session_id = Some(sid.clone());
-                        core_state.run.updated_at = tiangong_core::session::now_text();
-                    }
-                    StreamEvent::ContextCompressed { ref action, .. } => {
-                        let text = format!("上下文{}", action.display_text());
-                        if crate::state_ops::has_pending_turn(core_state, &sid) {
-                            core_state.run.summary = text;
-                        } else {
-                            crate::state_ops::report_run_idle(core_state, text);
-                        }
-                    }
-                    StreamEvent::IndexStatus { ref phase, count } => match phase.as_str() {
-                        "scanning" => {
-                            core_state.run.summary = "正在建立工作区索引...".to_string();
-                        }
-                        "done" => {
-                            core_state.run.summary = format!("索引扫描完成: {count} 个文件");
-                        }
-                        "error" => {
-                            core_state.run.summary = "索引扫描失败".to_string();
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                Ok(())
-            }));
-
-            // 终态会在权威重载后发布最终快照；避免先暴露临时 reducer 镜像。
-            if !is_done && !is_error {
-                if let Ok(snapshot) =
-                    rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
-                        Ok(build_full_snapshot_with_status(
-                            app_state.inner(),
-                            core_state,
-                            active_session_is_executing(core_state),
-                        ))
-                    }))
-                {
-                    let _ = app.emit("run_snapshot", &snapshot);
-                }
+                    Ok(())
+                }));
             }
 
             if let StreamEvent::ApprovalNeeded {
@@ -1301,31 +1050,17 @@ pub(crate) fn start_stream_consumer(
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
-                let title_task =
+                let title_provider =
                     rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
-                        let still_running = done_event_keeps_turn_running(
+                        if done_event_keeps_turn_running(
                             &event,
                             crate::state_ops::has_pending_turn(core_state, &final_sid),
-                        );
-                        let snapshot = build_full_snapshot_with_status(
-                            app_state.inner(),
-                            core_state,
-                            active_session_is_executing(core_state),
-                        );
-                        let _ = app.emit("run_snapshot", &snapshot);
-                        let _ = app.emit("sessions_updated", &());
-
-                        if still_running {
+                        ) {
                             return Ok(None);
                         }
-
-                        // 检查是否需要生成标题
-                        if let Some(input) = crate::session_ops::title_generation_input(
-                            &app_state.core_manager,
-                            &final_sid,
-                        ) {
-                            let models = &core_state.config.models;
-                            let provider_config = models
+                        let models = &core_state.config.models;
+                        Ok(Some(
+                            models
                                 .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
                                 .or_else(|| {
                                     models.resolve_slot(
@@ -1333,11 +1068,14 @@ pub(crate) fn start_stream_consumer(
                                     )
                                 })
                                 .map(tiangong_llm::ModelEndpoint::from_resolved)
-                                .unwrap_or_default();
-                            return Ok(Some((input, provider_config)));
-                        }
-                        Ok(None)
+                                .unwrap_or_default(),
+                        ))
                     }));
+                // 标题输入的单次磁盘读取不持有 TiangongState 锁，不影响会话切换。
+                let title_task = title_provider.ok().flatten().and_then(|provider| {
+                    crate::session_ops::title_generation_input(&app_state.core_manager, &final_sid)
+                        .map(|input| (input, provider))
+                });
 
                 if let Some(message_id) = completed_remote_message_id {
                     rt.block_on(crate::embedded_server::complete_remote_turn_from_stream(
@@ -1347,10 +1085,11 @@ pub(crate) fn start_stream_consumer(
                     ));
                 }
 
-                let _ = app.emit("stream_event", &event);
+                emit_session_stream_event(&app, &final_sid, &event);
+                let _ = app.emit("sessions_updated", &());
 
                 // 异步生成标题（不阻塞消费线程）
-                if let Ok(Some((input, provider_config))) = title_task {
+                if let Some((input, provider_config)) = title_task {
                     let app_for_title = app.clone();
                     let sid_for_title = final_sid.clone();
                     let rt2 = rt.clone();
@@ -1384,16 +1123,7 @@ pub(crate) fn start_stream_consumer(
                                 {
                                     return;
                                 }
-                                let _ = rt2.block_on(app_state.with_state_read(|core_state| {
-                                    let snapshot = build_full_snapshot_with_status(
-                                        app_state.inner(),
-                                        core_state,
-                                        active_session_is_executing(core_state),
-                                    );
-                                    let _ = app_for_title.emit("run_snapshot", &snapshot);
-                                    let _ = app_for_title.emit("sessions_updated", &());
-                                    Ok(())
-                                }));
+                                let _ = app_for_title.emit("sessions_updated", &());
                             }
                         }
                     });
@@ -1410,22 +1140,13 @@ pub(crate) fn start_stream_consumer(
         if !app_state.core_manager.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 crate::state_ops::clear_pending_turn(core_state, &session_id);
-                crate::state_ops::report_run_idle(
-                    core_state,
-                    "执行已中断：Core 事件流已关闭".to_string(),
-                );
-                let snapshot = build_full_snapshot_with_status(
-                    app_state.inner(),
-                    core_state,
-                    active_session_is_executing(core_state),
-                );
-                let _ = app.emit("run_snapshot", &snapshot);
                 let _ = app.emit("sessions_updated", &());
                 Ok(())
             }));
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");
-            let _ = app.emit(
-                "stream_event",
+            emit_session_stream_event(
+                &app,
+                &session_id,
                 &tiangong_types::StreamEvent::Error {
                     message: "Core 事件流已关闭".to_string(),
                 },
@@ -1585,19 +1306,6 @@ pub async fn edit_and_resend(
         raw_attachments_for_paths(replaced_attachment_candidates),
     )
     .await;
-    let _ = state
-        .with_state(|core_state| {
-            if crate::state_ops::has_pending_turn(core_state, &session_id)
-                && core_state.active_session_id.as_str() == session_id
-            {
-                core_state.run.status = tiangong_core::runtime::RunStatus::Executing;
-                core_state.run.summary = "正在重新发送编辑后的消息".to_string();
-                core_state.run.last_session_id = Some(session_id.clone());
-                core_state.run.updated_at = tiangong_core::session::now_text();
-            }
-            Ok(())
-        })
-        .await;
     if ensured.is_new {
         start_stream_consumer(app, sid, stream_rx);
     }
@@ -2418,20 +2126,6 @@ pub async fn get_mention_candidates(
     Ok(candidates)
 }
 
-/// 获取运行状态快照
-#[tauri::command]
-pub async fn get_run_snapshot(state: State<'_, TiangongApp>) -> Result<RunSnapshotView, String> {
-    state
-        .with_state_read(|core_state| {
-            Ok(build_full_snapshot_with_status(
-                state.inner(),
-                core_state,
-                active_session_is_executing(core_state),
-            ))
-        })
-        .await
-}
-
 /// 获取输入框缓存。
 #[tauri::command]
 pub async fn get_input_cache(
@@ -2678,19 +2372,6 @@ pub async fn remove_input_cache(
     state.mark_input_cache_discarded(&cache_key);
     cleanup_unreferenced_input_attachments(state.inner(), attachments).await;
     Ok(())
-}
-
-/// 获取活动会话的工作目录
-#[tauri::command]
-pub async fn get_session_cwd(state: State<'_, TiangongApp>) -> Result<String, String> {
-    state
-        .with_state_read(|core_state| {
-            Ok(crate::session_ops::active_session_cwd(
-                core_state,
-                &state.core_manager,
-            ))
-        })
-        .await
 }
 
 /// 获取 Desktop 工作空间目录

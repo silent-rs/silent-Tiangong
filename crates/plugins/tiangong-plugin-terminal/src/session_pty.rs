@@ -551,12 +551,14 @@ impl SessionPtyRegistry {
         session_id: &str,
         tab_id: &str,
         title: Option<String>,
+        cwd: Option<String>,
     ) -> Result<(), String> {
         if session_id.trim().is_empty() || tab_id.trim().is_empty() {
             return Err("终端 Tab 恢复失败：session_id 或 tab_id 为空".to_string());
         }
         let terminal_id = terminal_instance_id(session_id, tab_id);
-        if !self.ensure_with_title(&terminal_id, "", title, false) {
+        let cwd = cwd.unwrap_or_default();
+        if !self.ensure_with_title(&terminal_id, &cwd, title, false) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
