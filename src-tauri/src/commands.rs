@@ -1276,26 +1276,7 @@ async fn send_message_inner(
         }
     };
 
-    let prepared_for_state = tiangong_types::stable_content_blocks(&prepared);
-    let state_prepare = state
-        .with_state(|core_state| {
-            core_state.append_prepared_user_message_for_turn(
-                &session_id,
-                &user_message_id,
-                prepared_for_state,
-            )
-        })
-        .await;
-    let session_snapshot = match state_prepare {
-        Ok(value) => value,
-        Err(error) => {
-            abort_session_send(state, &session_id, revision, true).await;
-            return Err(error);
-        }
-    };
-
-    // App 稳定消息已成功落盘，附件所有权从临时事务转移给该消息。
-    // 后续 future 即使被取消也不会因 Drop 删掉已被稳定状态引用的文件。
+    // 附件所有权从临时事务转移给该消息。
     let created_paths = transaction
         .newly_created_paths()
         .iter()
@@ -1303,8 +1284,13 @@ async fn send_message_inner(
         .collect::<Vec<_>>();
     transaction.commit();
 
-    // 获取或创建 TiangongCore
+    // 获取或创建 TiangongCore(Core 的 deliver 负责 load session + 追加消息 +
+    // persist,host 不再预写——issue #245 整改方案)。
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
+    let session_snapshot = state
+        .core_manager
+        .load_session(&session_id)
+        .map_err(|error| format!("加载会话失败：{error}"))?;
     let ensured = state
         .ensure_core(&session_id, session_snapshot, stream_tx)
         .await;

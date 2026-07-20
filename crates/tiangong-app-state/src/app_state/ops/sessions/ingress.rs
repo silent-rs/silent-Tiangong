@@ -135,80 +135,45 @@ impl TiangongState {
     /// 调用方必须保证此刻该会话没有活跃 turn（worker 不在写盘）。
     /// 返回 (编辑前的原始 session, 用于 ensure_core 的 runtime_session)。
     /// 原始 session 供调用方清理被截断消息引用的附件。
+    /// 编辑重发：从磁盘 load session → 编辑消息 + 截断 → persist
+    /// （issue #245：不经内存 Vec<Session>，简化无回滚）。
     pub fn edit_prepared_user_message_for_turn(
         &mut self,
         session_id: &str,
         message_id: &str,
         prepared: Vec<tiangong_types::ContentBlock>,
     ) -> Result<(Session, Session)> {
-        let index = self
-            .store
-            .session
-            .sessions
-            .iter()
-            .position(|s| s.id == session_id)
-            .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
         if self.has_pending_turn_for(session_id) {
             return Err(anyhow!("目标会话正在执行，暂时不能编辑重发"));
         }
-        let original_session = self.store.session.sessions[index].clone();
-        let session = &mut self.store.session.sessions[index];
+        let storage_root = crate::app_state::repository::storage_root();
+        let mut session = Session::load_from_storage(&storage_root, session_id)
+            .map_err(|error| anyhow!("加载会话失败：{error}"))?;
+        let original = session.clone();
         if !session.update_prepared_user_message(message_id, prepared) {
             return Err(anyhow!("消息不存在：{message_id}"));
         }
         session.truncate_after_message(message_id);
         session.updated_at = now_text();
-        let mut runtime_session = self.store.session.sessions[index].clone();
-        if runtime_session.cwd.trim().is_empty() {
-            runtime_session.cwd = self.store.session.workspace_dir.clone();
-        }
+        session
+            .try_persist_to_disk()
+            .map_err(|error| anyhow!("编辑持久化失败：{error}"))?;
         self.mark_pending_message_for(session_id, message_id);
-        if let Err(error) = self.persist_session_and_app(session_id) {
-            self.store.session.sessions[index] = original_session.clone();
-            self.remove_pending_message_for(session_id, message_id);
-            let rollback_error = self.persist_session_and_app(session_id).err();
-            return Err(match rollback_error {
-                Some(rollback_error) => {
-                    anyhow!("编辑状态持久化失败：{error}；恢复原状态也失败：{rollback_error}")
-                }
-                None => anyhow!("编辑状态持久化失败：{error}"),
-            });
+        if session.cwd.trim().is_empty() {
+            session.cwd = self.store.session.workspace_dir.clone();
         }
-        self.resync_session_metadata();
-        Ok((original_session, runtime_session))
+        Ok((original, session))
     }
 
-    /// 把指定会话整体回滚到给定 session（编辑投递失败恢复用）。
-    ///
-    /// 收敛 `restore_edited_session` 对 `sessions_mut()` 的整体覆盖操纵
-    /// （issue #245）。pending 标记与持久化由调用方负责。
-    pub fn restore_session_snapshot(&mut self, session_id: &str, snapshot: Session) {
-        if let Some(session) = self
-            .store
-            .session
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            *session = snapshot;
-        }
-        self.resync_session_metadata();
+    /// 把指定会话整体写回磁盘（编辑投递失败恢复用，issue #245）。
+    pub fn restore_session_snapshot(&mut self, _session_id: &str, snapshot: Session) {
+        let _ = snapshot.try_persist_to_disk();
     }
 
-    /// 移除指定会话中某条用户消息（投递失败回滚用），并修正 summary_up_to
-    /// 与 updated_at（issue #245：收敛 `restore_failed_user_message_state`
-    /// 对 `sessions_mut()` 的直接操纵）。
-    ///
-    /// 仅在无活跃 turn 时调用（Core 投递失败、尚未启动 worker 的回滚路径）。
-    /// 不存在该消息时静默跳过。pending 标记与持久化由调用方负责。
+    /// 从磁盘 load session → 移除指定消息 → persist（投递失败回滚，issue #245）。
     pub fn remove_message_for_failed_turn(&mut self, session_id: &str, message_id: &str) {
-        let Some(session) = self
-            .store
-            .session
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        else {
+        let storage_root = crate::app_state::repository::storage_root();
+        let Ok(mut session) = Session::load_from_storage(&storage_root, session_id) else {
             return;
         };
         if let Some(index) = session
@@ -219,52 +184,33 @@ impl TiangongState {
             session.messages.remove(index);
             session.summary_up_to = session.summary_up_to.min(session.messages.len());
             session.updated_at = now_text();
+            let _ = session.try_persist_to_disk();
         }
     }
 
-    /// 把已准备好的用户消息内容块追加到指定会话，并在持久化失败时回滚
-    /// 到追加前的状态（issue #245：收敛 send_message_inner 的事务，避免
-    /// 调用方直接经 `sessions_mut()` 操纵内存 Session）。
-    ///
-    /// 调用方必须保证此刻该会话没有活跃 turn（worker 不在写盘）——通常由
-    /// `session_send_lock` + `has_pending_turn_for` 守卫。本方法内部完成：
-    /// 1. 追加消息 + 更新 updated_at + 标记 pending
-    /// 2. 持久化；失败则恢复内存 Session、移除 pending 标记、重新持久化并报错
+    /// 从磁盘 load session → 追加用户消息 → persist（issue #245：不经内存 Vec<Session>）。
     /// 3. 成功后返回用于 ensure_core 的 runtime_session（cwd 回填 workspace_dir）
+    /// 从磁盘 load session → 追加用户消息 → persist（issue #245：不经内存 Vec<Session>）。
+    ///
+    /// 简化设计：persist 失败直接返回错误，磁盘保持旧值（无需内存回滚）。
     pub fn append_prepared_user_message_for_turn(
         &mut self,
         session_id: &str,
         message_id: &str,
         prepared: Vec<tiangong_types::ContentBlock>,
     ) -> Result<Session> {
-        let index = self
-            .store
-            .session
-            .sessions
-            .iter()
-            .position(|s| s.id == session_id)
-            .ok_or_else(|| anyhow!("目标会话不存在：{session_id}"))?;
-        let original_session = self.store.session.sessions[index].clone();
-        self.store.session.sessions[index]
-            .append_prepared_user_message_with_id(message_id.to_string(), prepared);
-        self.store.session.sessions[index].updated_at = now_text();
+        let storage_root = crate::app_state::repository::storage_root();
+        let mut session = Session::load_from_storage(&storage_root, session_id)
+            .map_err(|error| anyhow!("加载会话失败：{error}"))?;
+        session.append_prepared_user_message_with_id(message_id.to_string(), prepared);
+        session.updated_at = now_text();
+        session
+            .try_persist_to_disk()
+            .map_err(|error| anyhow!("消息持久化失败：{error}"))?;
         self.mark_pending_message_for(session_id, message_id);
-        if let Err(error) = self.persist_session_and_app(session_id) {
-            self.store.session.sessions[index] = original_session;
-            self.remove_pending_message_for(session_id, message_id);
-            let rollback_error = self.persist_session_and_app(session_id).err();
-            return Err(match rollback_error {
-                Some(rollback_error) => {
-                    anyhow!("消息状态持久化失败：{error}；恢复原状态也失败：{rollback_error}")
-                }
-                None => anyhow!("消息状态持久化失败：{error}"),
-            });
+        if session.cwd.trim().is_empty() {
+            session.cwd = self.store.session.workspace_dir.clone();
         }
-        self.resync_session_metadata();
-        let mut runtime_session = self.store.session.sessions[index].clone();
-        if runtime_session.cwd.trim().is_empty() {
-            runtime_session.cwd = self.store.session.workspace_dir.clone();
-        }
-        Ok(runtime_session)
+        Ok(session)
     }
 }
