@@ -32,7 +32,7 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     tracing::info!("正在初始化应用状态...");
     let mut app_state = tiangong_app_state::app_state::TiangongState::new();
     let storage_root = app_state.config.storage_root.clone();
-    app_state.config.trust_mode = TrustMode::FullTrust;
+    app_state.config.default_trust_mode = TrustMode::FullTrust;
     let core_manager = app_state.core_manager.clone();
     core_manager
         .config()

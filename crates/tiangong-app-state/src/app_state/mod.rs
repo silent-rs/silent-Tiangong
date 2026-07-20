@@ -38,9 +38,9 @@ impl TiangongState {
             reasoning_effort: core_config.reasoning_effort,
         };
         Self {
+            workspace_dir: config.workspace_dir.clone(),
             config,
             active_session_id: String::new(),
-            workspace_dir: String::new(),
             input_caches: HashMap::new(),
             model_list: Vec::new(),
             agent_config,

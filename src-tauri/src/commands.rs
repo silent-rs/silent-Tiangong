@@ -1819,7 +1819,7 @@ pub async fn get_trust_mode(
                 .iter()
                 .find(|m| m.id == target_id)
                 .map(|m| m.trust_mode)
-                .unwrap_or(core_state.agent_config.default_trust_mode);
+                .unwrap_or(core_state.config.default_trust_mode);
             Ok(serde_json::to_value(mode)
                 .unwrap_or_default()
                 .as_str()
@@ -1890,7 +1890,7 @@ async fn rollback_session_trust_mode(
 pub async fn get_default_trust_mode(state: State<'_, TiangongApp>) -> Result<String, String> {
     state
         .with_state_read(|core_state| {
-            let mode = core_state.agent_config.default_trust_mode;
+            let mode = core_state.config.default_trust_mode;
             Ok(serde_json::to_value(mode)
                 .unwrap_or_default()
                 .as_str()
@@ -1909,8 +1909,14 @@ pub async fn set_default_trust_mode(
         serde_json::from_value(serde_json::Value::String(mode))
             .map_err(|e| format!("无效的默认信任模式: {e}"))?;
 
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    config.default_trust_mode = trust_mode;
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
     state
         .with_state(|core_state| {
+            core_state.config = config;
             core_state.agent_config.default_trust_mode = trust_mode;
             Ok(())
         })
@@ -2706,8 +2712,14 @@ pub async fn set_workspace_dir(
     if !path.is_dir() {
         return Err(format!("路径不存在或不是目录：{workspace_dir}"));
     }
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.clone()))
+        .await?;
+    config.workspace_dir = workspace_dir.clone();
+    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
     state
         .with_state(|core_state| {
+            core_state.config = config;
             crate::session_ops::update_workspace_dir(
                 core_state,
                 &state.core_manager,

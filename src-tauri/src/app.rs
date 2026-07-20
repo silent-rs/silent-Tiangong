@@ -161,13 +161,10 @@ impl TiangongApp {
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
         let (scheduled_message_tx, scheduled_message_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let mut core_state = tiangong_app_state::app_state::TiangongState::new();
+        let core_state = tiangong_app_state::app_state::TiangongState::new();
         let config = core_state.core_manager.config().clone();
         let storage_root = core_state.config.storage_root.clone();
         let core_manager = core_state.core_manager.clone();
-        core_state.workspace_dir = std::env::current_dir()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default();
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
         let scheduler_context =
             std::sync::Arc::new(crate::scheduler::DesktopSchedulerContext::new(
@@ -777,8 +774,8 @@ impl TiangongApp {
             .with_state_read(|state| Ok((state.config.clone(), state.agent_config.clone())))
             .await?;
         let mut template = app_config.to_core_config();
-        template.trust_mode = agent_config.default_trust_mode;
-        template.default_trust_mode = agent_config.default_trust_mode;
+        template.trust_mode = app_config.default_trust_mode;
+        template.default_trust_mode = app_config.default_trust_mode;
         template.reasoning_effort = agent_config.reasoning_effort.clone();
         let session_configs = self
             .core_manager
@@ -849,7 +846,7 @@ impl TiangongApp {
             .await
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
-        session_config.default_trust_mode = agent_config.default_trust_mode;
+        session_config.default_trust_mode = app_config.default_trust_mode;
         let metadata = self
             .core_manager
             .list_session_metadata()
@@ -872,8 +869,7 @@ impl TiangongApp {
                 .unwrap_or(&agent_config.reasoning_effort)
                 .to_string();
         } else {
-            session_config.trust_mode =
-                initial_trust_mode.unwrap_or(agent_config.default_trust_mode);
+            session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
             session_config.reasoning_effort = initial_reasoning_effort
                 .filter(|effort| !effort.trim().is_empty())
                 .unwrap_or(agent_config.reasoning_effort);

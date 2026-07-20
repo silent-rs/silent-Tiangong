@@ -110,6 +110,7 @@ impl TiangongConfig {
         } else {
             crate::io::save_custom_prompt_at(&prompt_path, &self.custom_system_prompt)?;
         }
+        crate::io::save_app_config_at(dir, self.default_trust_mode, &self.workspace_dir)?;
         Ok(())
     }
 }

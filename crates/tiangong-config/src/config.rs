@@ -171,8 +171,8 @@ pub struct TiangongConfig {
     pub models: ModelsConfig,
     /// Skill 配置
     pub skills: SkillsConfig,
-    /// 权限信任模式
-    pub trust_mode: TrustMode,
+    /// 新对话默认权限信任模式
+    pub default_trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
     pub custom_system_prompt: String,
     /// context window 上限（加载时按 chat model 从 context_windows.json 解析，
@@ -180,6 +180,8 @@ pub struct TiangongConfig {
     pub context_limit: usize,
 
     // ===== 应用层配置 =====
+    /// 默认工作目录
+    pub workspace_dir: String,
     /// Server 配置
     pub server: ServerConfig,
     /// Connector 配置列表
@@ -192,9 +194,10 @@ impl Default for TiangongConfig {
             storage_root: crate::loader::default_tiangong_dir(),
             models: ModelsConfig::default(),
             skills: SkillsConfig::default(),
-            trust_mode: TrustMode::default(),
+            default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             context_limit: 0,
+            workspace_dir: crate::loader::default_workspace_dir(),
             server: ServerConfig::default(),
             connectors: Vec::new(),
         }
@@ -215,8 +218,8 @@ impl TiangongConfig {
         };
         CoreConfig {
             llm: tiangong_core::core_config::LlmConfig::from_models_config(&self.models),
-            trust_mode: self.trust_mode,
-            default_trust_mode: self.trust_mode,
+            trust_mode: self.default_trust_mode,
+            default_trust_mode: self.default_trust_mode,
             custom_system_prompt: self.custom_system_prompt.clone(),
             reasoning_effort: "medium".to_string(),
             context_limit,

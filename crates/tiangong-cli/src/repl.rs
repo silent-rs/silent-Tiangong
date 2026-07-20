@@ -47,7 +47,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             config.generation(),
             tiangong_memory::ProcessType::Cli,
         ));
-    let default_trust_mode = trust_mode.unwrap_or(tiangong_core::permission::TrustMode::FullTrust);
+    let default_trust_mode = trust_mode.unwrap_or(state.config.default_trust_mode);
     let mut reader = InputReader::new();
 
     output::welcome();
