@@ -4,7 +4,7 @@
 //! JSON（`call.arguments`）按 key 取参，绕开旧的「位置参数数组」模式。
 //!
 //! 路径解析使用 core 暴露的 `*_with_base` 变体，显式传入由 core 注入的会话工作目录，
-//! 不依赖 thread-local SESSION_CWD。
+//! 不依赖任何隐式全局状态。
 
 use std::fs;
 use std::path::Path;

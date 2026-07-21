@@ -5,6 +5,7 @@
 //! `(server, tool)` 目标。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -143,14 +144,22 @@ pub async fn execute_mcp_tool_call(
     call: &ToolCall,
     target: &McpFunctionTarget,
     mcp_config: &McpConfig,
+    workspace: Option<PathBuf>,
 ) -> Result<ToolResult> {
-    execute_mcp_tool_call_with_args(target, normalize_mcp_call_arguments(call), mcp_config).await
+    execute_mcp_tool_call_with_args(
+        target,
+        normalize_mcp_call_arguments(call),
+        mcp_config,
+        workspace,
+    )
+    .await
 }
 
 pub async fn execute_mcp_tool_call_with_args(
     target: &McpFunctionTarget,
     args: Value,
     mcp_config: &McpConfig,
+    workspace: Option<PathBuf>,
 ) -> Result<ToolResult> {
     let started = Instant::now();
     let server = find_mcp_server(mcp_config, &target.server_name).ok_or_else(|| {
@@ -160,7 +169,7 @@ pub async fn execute_mcp_tool_call_with_args(
             target.tool_name
         )
     })?;
-    let client = LocalMcpClient;
+    let client = LocalMcpClient { workspace };
     match client
         .call_tool(
             server,

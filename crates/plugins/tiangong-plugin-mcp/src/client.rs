@@ -3,6 +3,7 @@
 //! 原属 `tiangong-core::mcp::client`，MCP 管理插件化后整块迁入本 crate。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
@@ -22,7 +23,6 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::config::{McpServerConfig, ResolvedMcpTransport};
-use tiangong_toolkit::session_workspace_root;
 use tiangong_types::process::configure_tokio_no_window;
 
 const MAX_LIST_PAGES: usize = 8;
@@ -152,7 +152,14 @@ pub fn get_cached_server_version(name: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct LocalMcpClient;
+pub struct LocalMcpClient {
+    /// 工具执行时携带的会话工作目录，供 stdio MCP 子进程设置 `current_dir`。
+    ///
+    /// 由 `McpPlugin.workspace`（经 core 的 `set_workspace` 注入）在工具执行入口
+    /// 快照后传入。capability 探测等无会话上下文的路径用 [`Default`]（`None`），
+    /// 子进程自然继承宿主 cwd。
+    pub workspace: Option<PathBuf>,
+}
 
 impl McpClient for LocalMcpClient {
     async fn list_tools(
@@ -184,7 +191,7 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
-        list_tools_via_rmcp(server, timeout_ms).await
+        list_tools_via_rmcp(server, timeout_ms, self.workspace.clone()).await
     }
 
     async fn list_resources(
@@ -213,7 +220,7 @@ impl McpClient for LocalMcpClient {
                 .collect());
         }
 
-        list_resources_via_rmcp(server, timeout_ms).await
+        list_resources_via_rmcp(server, timeout_ms, self.workspace.clone()).await
     }
 
     async fn read_resource(
@@ -245,6 +252,7 @@ impl McpClient for LocalMcpClient {
             timeout_ms,
             "resources/read",
             Some(json!({ "uri": resource.uri })),
+            self.workspace.clone(),
         )
         .await?;
         Ok(parse_read_resource_result(&result))
@@ -275,6 +283,7 @@ impl McpClient for LocalMcpClient {
                 "name": tool_name,
                 "arguments": arguments,
             })),
+            self.workspace.clone(),
         )
         .await?;
         parse_call_tool_result(&result)
@@ -285,6 +294,7 @@ impl McpClient for LocalMcpClient {
 async fn list_resources_via_rmcp(
     server: &McpServerConfig,
     timeout_ms: u64,
+    workspace: Option<PathBuf>,
 ) -> Result<Vec<McpResourceMeta>> {
     let mut resources = Vec::new();
     let mut seen = HashSet::new();
@@ -292,7 +302,14 @@ async fn list_resources_via_rmcp(
 
     for _ in 0..MAX_LIST_PAGES {
         let params = cursor.as_ref().map(|cursor| json!({ "cursor": cursor }));
-        let result = run_mcp_request(server, timeout_ms, "resources/list", params).await?;
+        let result = run_mcp_request(
+            server,
+            timeout_ms,
+            "resources/list",
+            params,
+            workspace.clone(),
+        )
+        .await?;
         let (page, next_cursor) = parse_resource_page(&server.name, &result);
         for resource in page {
             if seen.insert(resource.uri.clone()) {
@@ -322,6 +339,7 @@ async fn list_resources_via_rmcp(
 async fn list_tools_via_rmcp(
     server: &McpServerConfig,
     timeout_ms: u64,
+    workspace: Option<PathBuf>,
 ) -> Result<Vec<McpToolMeta>> {
     let mut tools = Vec::new();
     let mut seen = HashSet::new();
@@ -329,7 +347,8 @@ async fn list_tools_via_rmcp(
 
     for _ in 0..MAX_LIST_PAGES {
         let params = cursor.as_ref().map(|cursor| json!({ "cursor": cursor }));
-        let result = run_mcp_request(server, timeout_ms, "tools/list", params).await?;
+        let result =
+            run_mcp_request(server, timeout_ms, "tools/list", params, workspace.clone()).await?;
         let (page, next_cursor) = parse_tool_page(&server.name, &result);
         for tool in page {
             if seen.insert(tool.name.clone()) {
@@ -361,6 +380,7 @@ async fn run_mcp_request(
     timeout_ms: u64,
     method: &str,
     params: Option<Value>,
+    workspace: Option<PathBuf>,
 ) -> Result<Value> {
     match server.resolved_transport() {
         ResolvedMcpTransport::Metadata => {
@@ -380,7 +400,7 @@ async fn run_mcp_request(
 
     let result = timeout(
         Duration::from_millis(timeout_ms),
-        run_mcp_request_async(server, method, params),
+        run_mcp_request_async(server, method, params, workspace),
     )
     .await;
 
@@ -405,10 +425,13 @@ async fn run_mcp_request_async(
     server: &McpServerConfig,
     method: &str,
     params: Option<Value>,
+    workspace: Option<PathBuf>,
 ) -> Result<Value> {
     match server.resolved_transport() {
         ResolvedMcpTransport::Http => run_http_mcp_request_async(server, method, params).await,
-        ResolvedMcpTransport::Stdio => run_stdio_mcp_request_async(server, method, params).await,
+        ResolvedMcpTransport::Stdio => {
+            run_stdio_mcp_request_async(server, method, params, workspace).await
+        }
         ResolvedMcpTransport::Metadata => {
             Err(anyhow!("MCP server 未配置可连接传输：{}", server.name))
         }
@@ -419,6 +442,7 @@ async fn run_stdio_mcp_request_async(
     server: &McpServerConfig,
     method: &str,
     params: Option<Value>,
+    workspace: Option<PathBuf>,
 ) -> Result<Value> {
     let command = server.command_text();
     let args_desc = if server.args.is_empty() {
@@ -430,9 +454,10 @@ async fn run_stdio_mcp_request_async(
         TokioChildProcess::builder(Command::new(command).configure(|cmd| {
             configure_tokio_no_window(cmd);
             cmd.args(&server.args);
-            // stdio MCP 跟随当前会话工作目录（与 run_command 一致）；能力探测等无会话上下文
-            // 的路径下此值为 None，子进程自然继承宿主进程 cwd。
-            if let Some(cwd) = session_workspace_root() {
+            // stdio MCP 跟随当前会话工作目录（与 run_command 一致）。workspace 由
+            // 工具执行入口从 McpPlugin 注入；capability 探测等无会话上下文的路径
+            // 传 None，子进程自然继承宿主进程 cwd。
+            if let Some(cwd) = workspace.as_deref() {
                 cmd.current_dir(cwd);
             }
             for (key, value) in &server.env {

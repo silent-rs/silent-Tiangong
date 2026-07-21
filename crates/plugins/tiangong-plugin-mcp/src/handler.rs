@@ -28,11 +28,14 @@ impl McpPlugin {
     ) -> Option<Pin<Box<dyn Future<Output = ToolResult> + Send>>> {
         let config = self.config_snapshot();
         let targets = self.targets_snapshot();
+        // 快照当前会话工作目录（由 core 的 set_workspace 注入），随调用传入
+        // stdio MCP 子进程。RwLock 只在此处短暂读取，不持有跨 await。
+        let workspace = self.workspace.read().ok().and_then(|guard| guard.clone());
 
         let target = targets.get(&call.name)?.clone();
         let call = call.clone();
         Some(Box::pin(async move {
-            match execute_mcp_tool_call(&call, &target, &config).await {
+            match execute_mcp_tool_call(&call, &target, &config, workspace).await {
                 Ok(result) => result,
                 Err(err) => ToolResult {
                     ok: false,
