@@ -758,10 +758,9 @@ async fn send_message_inner(
         return Err("该版本输入已成功发送，已拒绝重复投递".to_string());
     }
 
-    if let Err(error) = state.sync_core_config_from_state().await {
-        abort_session_send(state, &session_id, revision, false).await;
-        return Err(error);
-    }
+    // 注：发送消息不改变任何配置（trust_mode/reasoning_effort/model 由用户在设置页
+    // 手动变更，那些路径自行调用 sync_core_config_from_state）。ensure_core 内部对既有
+    // Core 已做 replace_config（ensure.rs），无需在此全量加载所有 session metadata。
     if let Err(error) = state
         .with_state(|core_state| {
             crate::state_ops::begin_input_send(core_state, &session_id, revision)
@@ -1194,7 +1193,8 @@ pub async fn edit_and_resend(
     if has_pending_turn {
         return Err("目标会话正在执行，暂时不能编辑重发".to_string());
     }
-    state.sync_core_config_from_state().await?;
+    // 注：编辑重发不改变配置；ensure_core 内部对既有 Core 已做 replace_config，
+    // 无需在此全量加载所有 session metadata（与 send_message 同理）。
 
     // 第一遍只读校验发生在任何附件 IO 之前。
     state
@@ -1395,7 +1395,8 @@ async fn run_context_slash_command(
 ) -> Result<bool, String> {
     use std::sync::mpsc;
 
-    state.sync_core_config_from_state().await?;
+    // 注：compress/reset 不改变配置；ensure_core 内部对既有 Core 已做 replace_config，
+    // 无需在此全量加载所有 session metadata（与 send_message 同理）。
     loop {
         let expected_session_id = state
             .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))

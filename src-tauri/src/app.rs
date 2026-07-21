@@ -845,33 +845,17 @@ impl TiangongApp {
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
         session_config.default_trust_mode = app_config.default_trust_mode;
-        let metadata = self
-            .core_manager
-            .list_session_metadata()
-            .into_iter()
-            .find(|metadata| metadata.id == session_id);
-        let workspace_dir = metadata
-            .as_ref()
-            .map(|metadata| metadata.cwd.trim())
-            .filter(|cwd| !cwd.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| workspace_dir.filter(|cwd| !cwd.trim().is_empty()))
+        // trust_mode / reasoning_effort / cwd 都由 Core 从磁盘 session 真相源自行读取
+        // （core/mod.rs:load_session / build_turn_context）。host 这里只用调用方传入的
+        // 初始值（全新对话首次创建时由前端提供），不再全量加载所有 session metadata。
+        // 详见 ensure.rs:41 注释“cwd 由磁盘真相源维护，无需投递”。
+        let workspace_dir = workspace_dir
+            .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or(default_workspace_dir);
-        if let Some(metadata) = metadata {
-            session_config.trust_mode = metadata.trust_mode;
-            session_config.reasoning_effort = metadata
-                .reasoning_effort
-                .as_deref()
-                .map(str::trim)
-                .filter(|effort| !effort.is_empty())
-                .unwrap_or(&agent_config.reasoning_effort)
-                .to_string();
-        } else {
-            session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
-            session_config.reasoning_effort = initial_reasoning_effort
-                .filter(|effort| !effort.trim().is_empty())
-                .unwrap_or(agent_config.reasoning_effort);
-        }
+        session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
+        session_config.reasoning_effort = initial_reasoning_effort
+            .filter(|effort| !effort.trim().is_empty())
+            .unwrap_or(agent_config.reasoning_effort);
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         let plugins = self.desktop_factory.build_plugins(app_config.models).await;
         let ensured = self
