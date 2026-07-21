@@ -10,7 +10,6 @@ use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 
-use crate::child_runtime::ChildPluginFactory;
 use crate::constants::{PLUGIN_ID, TOOL_CREATE_AGENT, TOOL_DISMISS_AGENT};
 use crate::coordinator::Coordinator;
 use crate::tools::{error_result, root_tool_specs};
@@ -21,7 +20,10 @@ pub struct AgentTeamPlugin {
 }
 
 impl AgentTeamPlugin {
-    pub fn new(storage_root: PathBuf, child_plugins: Arc<dyn ChildPluginFactory>) -> Self {
+    pub fn new(
+        storage_root: PathBuf,
+        child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
+    ) -> Self {
         Self {
             coordinator: Coordinator::new(storage_root, child_plugins),
             feedback: RwLock::new(None),
@@ -80,12 +82,15 @@ impl ToolOverrideHandler for AgentTeamPlugin {
 impl PromptSectionProvider for AgentTeamPlugin {
     fn prompt_sections(&self) -> Vec<String> {
         vec![format!(
-            "团队协作能力（可选）：\n\
-             - create_agent 创建由独立 TiangongCore 承载的成员，最多 8 个；成员使用与当前 Core 相同的插件能力。\n\
-             - send_message 会投递到目标子 Core，并等待其外部 Done/Error 终态后返回。\n\
-             - 用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message；Core 本身不解析或改写 @ 消息。\n\
-             - 子 Agent 向 main 只能异步报告；同级等待只允许沿创建顺序向后。\n\
-             - 子 Agent 修改文件前必须加锁，命令必须前台、有限时。\n{}",
+            "团队协作能力（默认不创建子 Agent）：\n\
+             - create_agent 会启动一个全新的独立成员，它必须跑完自己的整轮后才能返回结果，开销显著。\n\
+             - **默认不要主动 create_agent**：单轮即可完成的任务一律自己处理。仅在用户明确要求并行、\n\
+               多角色协作或分工（显式提出“建团队 / 分派任务 / 并行处理”，或用 @role 提及尚未创建的成员）\n\
+               时才调用 create_agent，最多 8 个成员，成员拥有与你相同的工具能力。\n\
+             - send_message 向指定成员发送消息，并等待其跑完整轮后返回；发给 main 时仅投递、不等待。\n\
+             - 用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message；不要解析或改写 @ 消息。\n\
+             - 子 Agent 只能向 main 异步报告；同级之间的等待只允许沿创建顺序向后。\n\
+             - 子 Agent 修改文件前必须加锁，执行命令时必须前台运行并设置有限超时。\n{}",
             self.coordinator.roster_prompt()
         )]
     }
@@ -154,8 +159,8 @@ mod tests {
     use tiangong_core::session::Session;
     use tiangong_types::{ContentBlock, MessagePhase, MessageRole, StreamEvent};
 
+    use crate::build_plugin;
     use crate::test_support::storage_test_guard;
-    use crate::{build_plugin, ChildPluginFactory};
 
     struct ParentChildSseServer {
         base_url: String,
@@ -398,7 +403,8 @@ mod tests {
         parent_session.trust_mode = TrustMode::FullTrust;
         parent_session.bind_storage_root(storage.path());
         parent_session.try_persist_to_disk().unwrap();
-        let child_factory: Arc<dyn ChildPluginFactory> = Arc::new(Vec::<Arc<dyn Plugin>>::new);
+        let child_factory: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync> =
+            Arc::new(Vec::<Arc<dyn Plugin>>::new);
         let plugin = build_plugin(storage.path().to_path_buf(), child_factory);
         let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
         let parent_core = TiangongCore::builder()

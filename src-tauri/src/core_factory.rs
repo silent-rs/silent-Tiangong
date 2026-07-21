@@ -113,57 +113,53 @@ impl DesktopCoreFactory {
         plugins.push(self.skill_plugin.clone());
         plugins.push(self.mcp_plugin.clone());
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
-        let child_plugin_factory: Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
-            Arc::new({
-                let app_handle = app_handle.clone();
-                let storage_root = storage_root.clone();
-                move || {
-                    let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-                    child_plugins.extend(tiangong_plugin_prompt::default_plugins());
-                    if browser_available {
-                        if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
-                            child_plugins.push(browser);
-                        }
+        let child_plugin_factory = Arc::new({
+            let app_handle = app_handle.clone();
+            let storage_root = storage_root.clone();
+            move || {
+                let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
+                child_plugins.extend(tiangong_plugin_prompt::default_plugins());
+                if browser_available {
+                    if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
+                        child_plugins.push(browser);
                     }
-                    if terminal_available {
-                        if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle)
-                        {
-                            child_plugins.push(terminal);
-                        }
-                    }
-                    child_plugins.push(tiangong_plugin_fs::build_plugin());
-                    child_plugins.push(tiangong_plugin_index::build_plugin());
-                    if let Some(ep) = image_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                    }
-                    if let Some(ep) = video_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                    }
-                    if let Some(ep) = tts_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                    }
-                    if let Some(ep) = stt_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                    }
-                    child_plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
-                    child_plugins.push(tiangong_plugin_scheduler::build_plugin());
-                    child_plugins.push(tiangong_plugin_task::build_plugin());
-                    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new)
-                    {
-                        child_plugins
-                            .push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                    }
-                    child_plugins.push(Arc::new(
-                        tiangong_plugin_skill::SkillPlugin::with_storage_root(
-                            storage_root.join("skills"),
-                        ),
-                    ));
-                    child_plugins.push(Arc::new(
-                        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-                    ));
-                    child_plugins
                 }
-            });
+                if terminal_available {
+                    if let Some(terminal) = tiangong_plugin_terminal::build_plugin(&app_handle) {
+                        child_plugins.push(terminal);
+                    }
+                }
+                child_plugins.push(tiangong_plugin_fs::build_plugin());
+                child_plugins.push(tiangong_plugin_index::build_plugin());
+                if let Some(ep) = image_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+                }
+                if let Some(ep) = video_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+                }
+                if let Some(ep) = tts_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+                }
+                if let Some(ep) = stt_endpoint.clone() {
+                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+                }
+                child_plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
+                child_plugins.push(tiangong_plugin_scheduler::build_plugin());
+                child_plugins.push(tiangong_plugin_task::build_plugin());
+                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+                }
+                child_plugins.push(Arc::new(
+                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
+                        storage_root.join("skills"),
+                    ),
+                ));
+                child_plugins.push(Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
+                    storage_root.clone(),
+                )));
+                child_plugins
+            }
+        });
         plugins.push(tiangong_plugin_agent_team::build_plugin(
             storage_root.clone(),
             child_plugin_factory,

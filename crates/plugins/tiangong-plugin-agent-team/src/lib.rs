@@ -13,7 +13,6 @@ mod state;
 mod tools;
 
 pub use adapter::AgentTeamPlugin;
-pub use child_runtime::ChildPluginFactory;
 pub use constants::*;
 pub use state::{AgentDescriptor, AgentStatus, FileLock, FileLockManager};
 
@@ -27,7 +26,7 @@ use crate::coordinator::Coordinator;
 /// 构造一个父 Core 使用的 Agent Team 插件。
 pub fn build_plugin(
     storage_root: PathBuf,
-    child_plugins: Arc<dyn ChildPluginFactory>,
+    child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
 ) -> Arc<dyn Plugin> {
     Arc::new(AgentTeamPlugin::new(storage_root, child_plugins))
 }
@@ -35,7 +34,7 @@ pub fn build_plugin(
 /// 返回默认插件集合。
 pub fn default_plugins(
     storage_root: PathBuf,
-    child_plugins: Arc<dyn ChildPluginFactory>,
+    child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
 ) -> Vec<Arc<dyn Plugin>> {
     vec![build_plugin(storage_root, child_plugins)]
 }

@@ -11,7 +11,7 @@ pub(crate) fn root_tool_specs() -> Vec<ToolSpec> {
         [
             ToolSpec {
                 name: TOOL_CREATE_AGENT.to_string(),
-                description: "创建一个由独立 TiangongCore 承载的团队成员。".to_string(),
+                description: "创建一个新的团队成员，它将独立完成自己的一整轮任务后再返回结果。仅在用户明确要求并行、多角色协作或分工时调用；单轮可完成的任务请直接处理，不要创建子 Agent。".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

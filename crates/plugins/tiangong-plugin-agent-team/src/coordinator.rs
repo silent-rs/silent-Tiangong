@@ -16,7 +16,7 @@ use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 use tiangong_types::{ContentBlock, StreamEvent};
 
-use crate::child_runtime::{child_config, ChildPluginFactory, ChildRuntime, SharedFeedback};
+use crate::child_runtime::{child_config, ChildRuntime, SharedFeedback};
 use crate::constants::*;
 use crate::manifest::{
     child_root, normalize_role, team_root, validate_role_identifier, AgentRecord, TeamManifest,
@@ -33,7 +33,7 @@ fn active_teams() -> &'static Mutex<HashMap<String, Weak<Coordinator>>> {
 
 pub(crate) struct Coordinator {
     storage_root: PathBuf,
-    child_plugins: Arc<dyn ChildPluginFactory>,
+    child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
     manifest: Mutex<Option<TeamManifest>>,
     runtimes: Mutex<HashMap<String, Arc<ChildRuntime>>>,
     file_locks: Mutex<FileLockManager>,
@@ -95,7 +95,7 @@ impl PendingDismissal {
 impl Coordinator {
     pub(crate) fn new(
         storage_root: PathBuf,
-        child_plugins: Arc<dyn ChildPluginFactory>,
+        child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self {
             storage_root,
@@ -707,7 +707,7 @@ impl Coordinator {
     fn fresh_child_plugins(&self) -> Vec<Arc<dyn Plugin>> {
         // 子 Agent 与主 Agent 使用同一套插件工厂，直接获得独立但同构的插件实例。
         // ChildRuntime::start 会再剥离团队插件并注入团队客户端，这里无需额外过滤。
-        self.child_plugins.create_plugins()
+        (self.child_plugins)()
     }
 
     fn runtime(&self, agent_id: &str) -> Option<Arc<ChildRuntime>> {
@@ -1137,7 +1137,7 @@ fn validate_path_segment(value: &str, label: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn empty_factory() -> Arc<dyn ChildPluginFactory> {
+    fn empty_factory() -> Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync> {
         Arc::new(Vec::<Arc<dyn Plugin>>::new)
     }
 
