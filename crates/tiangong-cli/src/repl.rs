@@ -545,8 +545,13 @@ impl ResponseState {
                 action,
                 ..
             } => {
-                let holder = holder_agent_label.as_deref().unwrap_or("unknown");
-                output::status(&format!("文件锁 {action}: {} (by {holder})", path));
+                // 进程级文件锁不绑定 Agent，holder 通常为空；仅在确有持有者时显示。
+                match holder_agent_label.as_deref() {
+                    Some(holder) => {
+                        output::status(&format!("文件锁 {action}: {} (by {holder})", path))
+                    }
+                    None => output::status(&format!("文件锁 {action}: {}", path)),
+                }
             }
 
             StreamEvent::ContextCompressing {

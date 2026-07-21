@@ -81,24 +81,6 @@ pub(crate) fn child_tool_specs() -> Vec<ToolSpec> {
                 "required": ["content"]
             }),
         },
-        ToolSpec {
-            name: TOOL_LOCK_FILE.to_string(),
-            description: "获取文件或目录编辑锁；Sub Agent 写入前必须调用。".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
-            }),
-        },
-        ToolSpec {
-            name: TOOL_UNLOCK_FILE.to_string(),
-            description: "释放当前 Agent 持有的文件或目录编辑锁。".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"]
-            }),
-        },
     ]
 }
 

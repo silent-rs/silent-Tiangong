@@ -90,7 +90,7 @@ impl PromptSectionProvider for AgentTeamPlugin {
              - send_message 向指定成员发送消息，并等待其跑完整轮后返回；发给 main 时仅投递、不等待。\n\
              - 用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message；不要解析或改写 @ 消息。\n\
              - 子 Agent 只能向 main 异步报告；同级之间的等待只允许沿创建顺序向后。\n\
-             - 子 Agent 修改文件前必须加锁，执行命令时必须前台运行并设置有限超时。\n{}",
+             - 执行命令时必须前台运行并设置有限超时。\n{}",
             self.coordinator.roster_prompt()
         )]
     }

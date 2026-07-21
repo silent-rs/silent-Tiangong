@@ -14,7 +14,7 @@ mod tools;
 
 pub use adapter::AgentTeamPlugin;
 pub use constants::*;
-pub use state::{AgentDescriptor, AgentStatus, FileLock, FileLockManager};
+pub use state::{AgentDescriptor, AgentStatus};
 
 use std::path::PathBuf;
 use std::sync::Arc;

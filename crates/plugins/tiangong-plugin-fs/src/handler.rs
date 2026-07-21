@@ -17,6 +17,7 @@ use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
 use tiangong_toolkit as shared;
 
+use crate::file_lock::{FileLockTable, canonicalize_for_lock};
 use crate::plugin::FsPlugin;
 
 /// 工具名常量。
@@ -54,6 +55,79 @@ impl FsPlugin {
             _ => return None,
         };
         Some(result)
+    }
+
+    /// 写工具分发入口：对目标路径自动加锁/解锁后再执行原 handler。
+    ///
+    /// 锁由进程级共享的 [`FileLockTable`](crate::file_lock::FileLockTable) 持有，
+    /// 语义是「文件只要已有锁即拒绝后续写入」——不区分调用方，防止并发写
+    /// 同一文件互相覆盖。加锁是「全有或全无」：`apply_patch` 涉及多个文件时，
+    /// 任一被占用则本次操作全部不加锁。锁在 handler 返回后立即释放，无论
+    /// 成功或失败；过期锁在下次加锁时静默清理。
+    pub(crate) fn dispatch_with_lock(&self, call: &ToolCall) -> Option<ToolResult> {
+        let paths = match self.collect_write_targets(call) {
+            Ok(paths) => paths,
+            Err(error) => return Some(tool_error(&call.name, error)),
+        };
+        if paths.is_empty() {
+            // 无可加锁目标（理论上不会发生），直接放行。
+            return self.dispatch(call);
+        }
+
+        let now = chrono::Local::now().naive_local();
+        let operation_id = match FileLockTable::acquire(&paths, &now) {
+            Ok(id) => id,
+            Err(error) => return Some(tool_error(&call.name, anyhow!(error))),
+        };
+        for path in &paths {
+            self.emit_file_lock_event(path, "locked");
+        }
+
+        let result = self.dispatch(call);
+
+        // 无论成功/失败都释放本次操作取得的锁。release 内部靠 operation_id
+        // 校验：若某路径已被新操作接管（旧操作超时后），不会误删，也不会
+        // 出现在 released 里——只对真正释放的路径发 unlocked 事件。
+        let released = FileLockTable::release(&paths, &operation_id);
+        for path in &released {
+            self.emit_file_lock_event(path, "unlocked");
+        }
+        result
+    }
+
+    /// 枚举写工具的目标路径，并规范化为锁表可用的稳定 key。
+    ///
+    /// 规范化使用 [`canonicalize_for_lock`](crate::file_lock::canonicalize_for_lock)：
+    /// 已存在路径直接 canonicalize（解析软链接），不存在路径向上找最近的已存在
+    /// 父目录再拼回，确保软链接与真实路径归一为同一 key。
+    fn collect_write_targets(&self, call: &ToolCall) -> Result<Vec<std::path::PathBuf>> {
+        let base = self.base()?;
+        match call.name.as_str() {
+            TOOL_WRITE_FILE | TOOL_REPLACE_IN_FILE => {
+                let raw = call
+                    .arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("缺少 path 参数"))?;
+                let resolved = self.resolve_write_path(raw, &base)?;
+                Ok(vec![canonicalize_for_lock(&resolved)])
+            }
+            TOOL_APPLY_PATCH => {
+                let patch = call
+                    .arguments
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("apply_patch 缺少 patch 参数"))?;
+                let workdir_raw = call.arguments.get("workdir").and_then(Value::as_str);
+                let effective_cwd = shared::resolve_effective_cwd_with(workdir_raw, &base)?;
+                let targets = enumerate_patch_targets(patch, &effective_cwd)?;
+                Ok(targets
+                    .into_iter()
+                    .map(|p| canonicalize_for_lock(&p))
+                    .collect())
+            }
+            _ => Ok(Vec::new()),
+        }
     }
 
     // ── list_dir ────────────────────────────────────────────────
@@ -605,7 +679,13 @@ impl ToolOverrideHandler for FsPlugin {
         _session: &mut tiangong_core::session::Session,
         _actor_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<ToolResult>> + Send>> {
-        let result = self.dispatch(call);
+        // 写工具自动加锁/解锁；读工具直接分发。锁不区分调用方，actor_id 不参与。
+        let result = match call.name.as_str() {
+            TOOL_WRITE_FILE | TOOL_REPLACE_IN_FILE | TOOL_APPLY_PATCH => {
+                self.dispatch_with_lock(call)
+            }
+            _ => self.dispatch(call),
+        };
         Box::pin(async move { result })
     }
 }
@@ -869,6 +949,53 @@ fn split_unified_diff_sections(patch: &str) -> Result<Vec<String>> {
     Ok(sections)
 }
 
+/// 枚举 patch 涉及的所有目标路径（写前加锁用）。
+///
+/// - add：目标 = modified
+/// - delete：目标 = original
+/// - update / move：目标 = original + modified（move 涉及删旧建新两个路径）
+fn enumerate_patch_targets(patch: &str, effective_cwd: &Path) -> Result<Vec<std::path::PathBuf>> {
+    use diffy::Patch;
+
+    let sections = split_unified_diff_sections(patch)?;
+    let mut targets = Vec::new();
+    for section in &sections {
+        let parsed =
+            Patch::from_str(section).map_err(|err| anyhow!("解析 unified diff 失败：{err}"))?;
+        let original = normalize_diff_filename(parsed.original().unwrap_or_default())?;
+        let modified = normalize_diff_filename(parsed.modified().unwrap_or_default())?;
+
+        let is_add = original == "/dev/null" && modified != "/dev/null";
+        let is_delete = modified == "/dev/null" && original != "/dev/null";
+
+        if is_add {
+            targets.push(shared::resolve_write_path_from_base(
+                &modified,
+                effective_cwd,
+            )?);
+        } else if is_delete {
+            targets.push(shared::resolve_write_path_from_base(
+                &original,
+                effective_cwd,
+            )?);
+        } else {
+            targets.push(shared::resolve_write_path_from_base(
+                &original,
+                effective_cwd,
+            )?);
+            if original != modified {
+                targets.push(shared::resolve_write_path_from_base(
+                    &modified,
+                    effective_cwd,
+                )?);
+            }
+        }
+    }
+    Ok(targets)
+}
+
+// 锁 key 规范化见 file_lock::canonicalize_for_lock（处理软链接与不存在路径）。
+
 fn normalize_diff_filename(raw: &str) -> Result<String> {
     let path = raw.trim();
     if path.is_empty() {
@@ -1005,5 +1132,152 @@ mod tests {
                 .dispatch(&make_call("not_an_fs_tool", json!({})))
                 .is_none()
         );
+    }
+
+    // ── 自动加锁/解锁（走 dispatch_with_lock 路径） ────────────────
+    //
+    // 注：锁表是进程级全局共享的，测试间会相互影响。每个测试用唯一文件名，
+    // 并在持有锁后显式 release，避免残留影响其他测试。
+
+    #[test]
+    fn write_file_acquires_and_releases_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+
+        // 经 handle 路径触发 dispatch_with_lock。
+        let r = plugin
+            .dispatch_with_lock(&make_call(
+                TOOL_WRITE_FILE,
+                json!({ "path": "acquire_release.txt", "content": "hello" }),
+            ))
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+
+        // 写完成后锁应被释放——同一插件实例下一次写同一文件不应被拒。
+        let r = plugin
+            .dispatch_with_lock(&make_call(
+                TOOL_WRITE_FILE,
+                json!({ "path": "acquire_release.txt", "content": "world" }),
+            ))
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("acquire_release.txt")).unwrap(),
+            "world"
+        );
+    }
+
+    #[test]
+    fn apply_patch_locks_all_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        // 先准备一个待更新的文件。
+        std::fs::write(dir.path().join("patch_old.txt"), "y\n").unwrap();
+
+        // 多文件 patch：add patch_new.txt + update patch_old.txt。
+        let patch = "\
+--- /dev/null
++++ patch_new.txt
+@@ -0,0 +1 @@
++x
+--- a/patch_old.txt
++++ b/patch_old.txt
+@@ -1 +1 @@
+-y
++z
+";
+        let r = plugin
+            .dispatch_with_lock(&make_call(TOOL_APPLY_PATCH, json!({ "patch": patch })))
+            .unwrap();
+        assert!(r.ok, "{}", r.summary);
+        assert!(dir.path().join("patch_new.txt").exists());
+    }
+
+    #[test]
+    fn cross_instance_write_same_file_is_mutually_exclusive() {
+        // 模拟主 Agent 与子 Agent 各持一个 FsPlugin 实例，写同一文件应互斥。
+        // 锁表是进程级共享的，所以只需验证：任一处持锁后，另一实例写同一路径被拒。
+        let dir = tempfile::TempDir::new().unwrap();
+        let child = make_plugin(&dir);
+        let target = dir.path().join("cross_instance.txt");
+        std::fs::write(&target, "orig").unwrap();
+
+        // 手工 acquire 模拟另一处持锁（可能是主 Agent 实例或其他进程内调用方）。
+        let key = canonicalize_for_lock(&target);
+        let now = chrono::Local::now().naive_local();
+        let op = FileLockTable::acquire(std::slice::from_ref(&key), &now).unwrap();
+
+        // 子 Agent 实例写同一路径应被锁拒绝。
+        let r = child
+            .dispatch_with_lock(&make_call(
+                TOOL_REPLACE_IN_FILE,
+                json!({ "path": "cross_instance.txt", "old": "orig", "new": "new" }),
+            ))
+            .unwrap();
+        assert!(!r.ok);
+        assert!(r.summary.contains("正被其他写操作占用"), "{}", r.summary);
+        // 原文件未被改写。
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "orig");
+
+        FileLockTable::release(&[key], &op);
+    }
+
+    #[test]
+    fn same_agent_concurrent_write_is_mutually_exclusive() {
+        // 锁不区分调用方：同一「Agent」连续两次写同一文件，第二次也应被拒。
+        let dir = tempfile::TempDir::new().unwrap();
+        let plugin = make_plugin(&dir);
+        let target = dir.path().join("same_agent.txt");
+        std::fs::write(&target, "orig").unwrap();
+
+        let key = canonicalize_for_lock(&target);
+        let now = chrono::Local::now().naive_local();
+        let op = FileLockTable::acquire(std::slice::from_ref(&key), &now).unwrap();
+
+        // 同一插件实例写同一路径也应被锁拒绝（工具调用级互斥）。
+        let r = plugin
+            .dispatch_with_lock(&make_call(
+                TOOL_REPLACE_IN_FILE,
+                json!({ "path": "same_agent.txt", "old": "orig", "new": "new" }),
+            ))
+            .unwrap();
+        assert!(!r.ok);
+        assert!(r.summary.contains("正被其他写操作占用"), "{}", r.summary);
+
+        FileLockTable::release(&[key], &op);
+    }
+
+    #[test]
+    fn symlink_path_unifies_with_real_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("real_target.txt");
+        std::fs::write(&real, "orig").unwrap();
+        let link = dir.path().join("sym_link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        let link = real.clone(); // 非 unix 无法测软链接，退化为同路径。
+
+        let plugin = make_plugin(&dir);
+        // 先锁住真实路径。
+        let real_key = canonicalize_for_lock(&real);
+        let now = chrono::Local::now().naive_local();
+        let op = FileLockTable::acquire(std::slice::from_ref(&real_key), &now).unwrap();
+
+        // 通过软链接路径写应被拒（归一为同一 key）。
+        // 注意：replace_in_file 的 path 参数是相对 workspace 的，这里用绝对链接路径。
+        let r = plugin
+            .dispatch_with_lock(&make_call(
+                TOOL_REPLACE_IN_FILE,
+                json!({
+                    "path": link.to_string_lossy(),
+                    "old": "orig",
+                    "new": "new"
+                }),
+            ))
+            .unwrap();
+        assert!(!r.ok, "通过软链接写应被真实路径的锁拒绝：{}", r.summary);
+
+        FileLockTable::release(&[real_key], &op);
     }
 }

@@ -9965,6 +9965,7 @@ dependencies = [
  "tempfile",
  "tiangong-core",
  "tiangong-toolkit",
+ "tiangong-types",
  "tokio",
 ]
 
