@@ -122,6 +122,11 @@ export function MainApp() {
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const streamEventQueueRef = useRef<SessionStreamEvent[]>([]);
   const streamEventTimerRef = useRef<number | null>(null);
+  // sessions_updated 在一次 done 后会被连续 emit 多次（done/标题生成/Core 退役），
+  // 用尾沿去抖合并刷新，并在刷新期间收到新事件时串行补跑一次。
+  const sessionsRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionsRefreshInFlightRef = useRef(false);
+  const sessionsRefreshDirtyRef = useRef(false);
   const savedWindowWidthRef = useRef<number | null>(null);
   const workspaceExpandedForBrowserRef = useRef(false);
   const preferredSidebarOpenRef = useRef(true);
@@ -342,8 +347,38 @@ export function MainApp() {
       const unlistenStream = await api.onStreamEvent(scheduleStreamEvent);
 
       const { listen } = await import('@tauri-apps/api/event');
+      // 尾沿去抖 + in-flight 串行化 + dirty rerun。
+      // - 每次事件都重置 120ms 计时器，等事件静默后再刷新；
+      // - 刷新进行中来的事件标记 dirty，settle 后 rerun 一次，避免并发读取。
+      // 刷新失败时由 store 保留旧列表，后续事件会再次触发收敛。
+      const runProtectiveRefresh = async () => {
+        if (sessionsRefreshInFlightRef.current) {
+          sessionsRefreshDirtyRef.current = true;
+          return;
+        }
+        sessionsRefreshInFlightRef.current = true;
+        sessionsRefreshDirtyRef.current = false;
+        try {
+          await loadSessions({ protective: true });
+        } finally {
+          sessionsRefreshInFlightRef.current = false;
+          if (sessionsRefreshDirtyRef.current) {
+            sessionsRefreshDirtyRef.current = false;
+            runProtectiveRefresh();
+          }
+        }
+      };
+      const scheduleSessionsRefresh = () => {
+        if (sessionsRefreshTimerRef.current !== null) {
+          clearTimeout(sessionsRefreshTimerRef.current);
+        }
+        sessionsRefreshTimerRef.current = setTimeout(() => {
+          sessionsRefreshTimerRef.current = null;
+          runProtectiveRefresh();
+        }, 120);
+      };
       const unlistenSessions = await listen('sessions_updated', () => {
-        loadSessions();
+        scheduleSessionsRefresh();
       });
       const unlistenOpenSession = await listen<string>('desktop_notification_open_session', (event) => {
         const sessionId = event.payload;
@@ -463,6 +498,10 @@ export function MainApp() {
         streamEventTimerRef.current = null;
       }
       streamEventQueueRef.current = [];
+      if (sessionsRefreshTimerRef.current !== null) {
+        clearTimeout(sessionsRefreshTimerRef.current);
+        sessionsRefreshTimerRef.current = null;
+      }
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
       unlistenRef.current?.();
     };
