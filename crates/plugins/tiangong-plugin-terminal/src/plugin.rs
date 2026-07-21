@@ -101,7 +101,8 @@ impl ToolOverrideHandler for TerminalPlugin {
             call,
             session.parent_session_id.is_some(),
             workspace.as_deref(),
-        );
+        )
+        .or_else(|| fill_default_cwd(call, workspace.as_deref()));
         ToolOverrideHandler::handle(
             &self.override_handler,
             normalized.as_ref().unwrap_or(call),
@@ -124,6 +125,34 @@ fn normalize_nested_terminal_call(
         normalized.arguments["cwd"] = serde_json::Value::String(workspace.display().to_string());
         normalized
     })
+}
+
+/// 主对话 `run_command`/`run_shell` 的 cwd 兜底。
+///
+/// LLM 未显式传 `cwd` 时，用 core 经 `set_workspace` 注入的会话工作目录填充，
+/// 使 [`crate::handler::validate_terminal_command`] 的路径越界校验和 PTY 执行
+/// 都落在会话 workspace 上，而非进程 cwd（Tauri 主进程启动目录）。
+///
+/// 仅当 call 未携带有效 `cwd` 时生效；LLM 显式传值时不覆盖。
+/// 子 session 走 [`normalize_nested_terminal_call`] 的强制覆盖语义，不会走到这里。
+fn fill_default_cwd(call: &ToolCall, workspace: Option<&std::path::Path>) -> Option<ToolCall> {
+    if !matches!(call.name.as_str(), "run_command" | "run_shell") {
+        return None;
+    }
+    let workspace = workspace?;
+    let already_has_cwd = call
+        .arguments
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if already_has_cwd {
+        return None;
+    }
+    let mut filled = call.clone();
+    filled.arguments["cwd"] = serde_json::Value::String(workspace.display().to_string());
+    Some(filled)
 }
 
 impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
@@ -204,5 +233,57 @@ mod tests {
 
         assert_eq!(normalized.arguments["cwd"], "/workspace");
         assert!(normalize_nested_terminal_call(&call, false, None).is_none());
+    }
+
+    #[test]
+    fn fill_default_cwd_fills_when_missing() {
+        let call = ToolCall {
+            id: "call".to_string(),
+            name: "run_command".to_string(),
+            arguments: serde_json::json!({ "cmd": "ls" }),
+        };
+
+        let filled = fill_default_cwd(&call, Some(std::path::Path::new("/workspace"))).unwrap();
+        assert_eq!(filled.arguments["cwd"], "/workspace");
+    }
+
+    #[test]
+    fn fill_default_cwd_does_not_override_explicit_cwd() {
+        let call = ToolCall {
+            id: "call".to_string(),
+            name: "run_command".to_string(),
+            arguments: serde_json::json!({ "cmd": "ls", "cwd": "/explicit" }),
+        };
+
+        assert_eq!(
+            fill_default_cwd(&call, Some(std::path::Path::new("/workspace"))),
+            None,
+            "LLM 显式传 cwd 时不应覆盖"
+        );
+    }
+
+    #[test]
+    fn fill_default_cwd_noop_without_workspace() {
+        let call = ToolCall {
+            id: "call".to_string(),
+            name: "run_command".to_string(),
+            arguments: serde_json::json!({ "cmd": "ls" }),
+        };
+
+        assert_eq!(fill_default_cwd(&call, None), None);
+    }
+
+    #[test]
+    fn fill_default_cwd_ignores_unrelated_tools() {
+        let call = ToolCall {
+            id: "call".to_string(),
+            name: "terminal_send".to_string(),
+            arguments: serde_json::json!({ "text": "hello" }),
+        };
+
+        assert_eq!(
+            fill_default_cwd(&call, Some(std::path::Path::new("/workspace"))),
+            None
+        );
     }
 }
