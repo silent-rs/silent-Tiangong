@@ -217,46 +217,43 @@ fn build_cli_plugins(
     plugins.push(skill_plugin.clone());
     plugins.push(mcp_plugin.clone());
 
-    let child_plugin_factory: std::sync::Arc<dyn tiangong_plugin_agent_team::ChildPluginFactory> =
-        std::sync::Arc::new({
-            let storage_root = storage_root.clone();
-            move || {
-                let mut child_plugins = tiangong_plugin_prompt::default_plugins();
-                child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                child_plugins.extend(tiangong_plugin_index::default_plugins());
-                if let Some(ep) = image_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                }
-                if let Some(ep) = video_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
-                if let Some(ep) = tts_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                }
-                if let Some(ep) = stt_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                }
-                child_plugins.extend(tiangong_plugin_memory::default_plugins(
-                    memory_handle.clone(),
-                ));
-                child_plugins.extend(tiangong_plugin_fetch::default_plugins());
-                child_plugins.extend(tiangong_plugin_command::default_plugins());
-                child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
-                child_plugins.extend(tiangong_plugin_task::default_plugins());
-                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
-                child_plugins.push(std::sync::Arc::new(
-                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
-                        storage_root.join("skills"),
-                    ),
-                ));
-                child_plugins.push(std::sync::Arc::new(
-                    tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-                ));
-                child_plugins
+    let child_plugin_factory = std::sync::Arc::new({
+        let storage_root = storage_root.clone();
+        move || {
+            let mut child_plugins = tiangong_plugin_prompt::default_plugins();
+            child_plugins.extend(tiangong_plugin_fs::default_plugins());
+            child_plugins.extend(tiangong_plugin_index::default_plugins());
+            if let Some(ep) = image_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }
-        });
+            if let Some(ep) = video_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+            }
+            if let Some(ep) = tts_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
+            }
+            if let Some(ep) = stt_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+            }
+            child_plugins.extend(tiangong_plugin_memory::default_plugins(
+                memory_handle.clone(),
+            ));
+            child_plugins.extend(tiangong_plugin_fetch::default_plugins());
+            child_plugins.extend(tiangong_plugin_command::default_plugins());
+            child_plugins.extend(tiangong_plugin_scheduler::default_plugins());
+            child_plugins.extend(tiangong_plugin_task::default_plugins());
+            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+            }
+            child_plugins.push(std::sync::Arc::new(
+                tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
+            ));
+            child_plugins.push(std::sync::Arc::new(
+                tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
+            ));
+            child_plugins
+        }
+    });
     plugins.extend(tiangong_plugin_agent_team::default_plugins(
         storage_root,
         child_plugin_factory,

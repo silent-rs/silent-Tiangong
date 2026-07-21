@@ -14,20 +14,6 @@ use tiangong_types::{ContentBlock, StreamEvent, TokenUsage, TurnStatus};
 use crate::constants::{CHILD_PLUGIN_ID, PLUGIN_ID};
 use crate::state::AgentDescriptor;
 
-/// 每次为一个子 Core 创建全新的插件 facade。
-pub trait ChildPluginFactory: Send + Sync {
-    fn create_plugins(&self) -> Vec<Arc<dyn Plugin>>;
-}
-
-impl<F> ChildPluginFactory for F
-where
-    F: Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync,
-{
-    fn create_plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        self()
-    }
-}
-
 pub(crate) type SharedFeedback = Arc<RwLock<Option<PluginFeedbackTx>>>;
 
 #[derive(Debug, Clone)]
