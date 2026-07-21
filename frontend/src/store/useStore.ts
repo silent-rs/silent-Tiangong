@@ -31,6 +31,11 @@ let switchRequestVersion = 0;
 let newConversationRequestVersion = 0;
 const inputCacheSyncRequestVersions = new Map<string, number>();
 let switchCommitQueue: Promise<void> = Promise.resolve();
+// loadSessions 的请求版本：旧请求晚到时放弃写入，避免覆盖较新的权威结果。
+let loadSessionsRequestVersion = 0;
+// 普通刷新的 in-flight 计数：任一普通请求未结束时保持 loading，
+// protective 刷新不参与计数，避免它提前清除普通刷新持有的 loading。
+let ordinaryLoadInFlight = 0;
 
 interface SessionViewCache {
   hydrated: boolean;
@@ -826,7 +831,11 @@ export interface AppState {
   setPendingSettingsTab: (tab: string | null) => void;
 
   // 操作
-  loadSessions: () => Promise<void>;
+  // options.protective=true 用于 sessions_updated 触发的刷新：
+  // - 不参与 loading 引用计数（避免侧栏闪「加载中」，也不清除普通刷新持有的 loading）；
+  // - 旧请求晚到时放弃写入；active 不在权威列表时执行完整的会话切换或新对话初始化。
+  // 前端在 getSessions 失败时保留旧列表，避免瞬时请求错误清空侧栏。
+  loadSessions: (options?: { protective?: boolean }) => Promise<void>;
   startNewConversation: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
@@ -964,16 +973,52 @@ export const useStore = create<AppState>((set, get) => ({
   selectedAgentTab: null,
 
   // 加载会话列表
-  loadSessions: async () => {
-    set({ isLoadingSessions: true });
+  loadSessions: async (options?: { protective?: boolean }) => {
+    const isProtective = options?.protective === true;
+    // 普通刷新用引用计数维护 loading：任一普通请求未结束都保持 loading；
+    // protective 刷新（sessions_updated 触发）不参与计数，避免侧栏闪「加载中」，
+    // 也避免它提前清除普通刷新持有的 loading。
+    if (!isProtective) {
+      ordinaryLoadInFlight += 1;
+      if (ordinaryLoadInFlight === 1) {
+        set({ isLoadingSessions: true });
+      }
+    }
+    const requestVersion = ++loadSessionsRequestVersion;
+    const finishOrdinary = () => {
+      if (!isProtective) {
+        ordinaryLoadInFlight -= 1;
+        if (ordinaryLoadInFlight === 0) {
+          set({ isLoadingSessions: false });
+        }
+      }
+    };
     try {
       const sessions = await api.getSessions();
-      const { activeSessionId, isNewConversation } = get();
-      let newConversationId = get().newConversationId;
-      if (!activeSessionId && isNewConversation && !newConversationId) {
-        const requestVersion = ++newConversationRequestVersion;
+      // 旧请求晚到时放弃写入，避免覆盖较新的权威结果。
+      if (requestVersion !== loadSessionsRequestVersion) {
+        finishOrdinary();
+        return;
+      }
+      const prev = get();
+      const activeSessionId = prev.activeSessionId;
+      const activeSessionInvalid = !!activeSessionId
+        && !sessions.some((session) => session.id === activeSessionId);
+      let newConversationId = prev.newConversationId;
+      // 普通加载时为尚未初始化的新对话预生成 ID。active 失效由下方完整迁移处理。
+      if (
+        !isProtective &&
+        !activeSessionId &&
+        prev.isNewConversation &&
+        !newConversationId
+      ) {
+        const idRequestVersion = ++newConversationRequestVersion;
         const generatedId = await api.newSessionId();
-        newConversationId = requestVersion === newConversationRequestVersion
+        if (requestVersion !== loadSessionsRequestVersion) {
+          finishOrdinary();
+          return;
+        }
+        newConversationId = idRequestVersion === newConversationRequestVersion
           ? generatedId
           : get().newConversationId;
       }
@@ -982,10 +1027,9 @@ export const useStore = create<AppState>((set, get) => ({
         : null;
       set((state) => ({
         sessions,
-        isLoadingSessions: false,
-        isNewConversation: state.activeSessionId ? state.isNewConversation : true,
+        isLoadingSessions: ordinaryLoadInFlight === 0 ? false : state.isLoadingSessions,
         newConversationId,
-        sessionCwd: state.activeSessionId ? state.sessionCwd : state.workspaceDir,
+        sessionCwd: activeSessionId ? state.sessionCwd : state.workspaceDir,
         inputCaches: newConversationId && initialCache
           ? { ...state.inputCaches, [newConversationId]: initialCache }
           : state.inputCaches,
@@ -994,13 +1038,22 @@ export const useStore = create<AppState>((set, get) => ({
         syncInputCacheInBackground(get().syncInputCache(newConversationId, initialCache));
       }
 
-      // 从后端恢复思考强度设置
-      api.getReasoningEffort().then((effort) => {
-        set({ reasoningEffort: effort });
-      }).catch(console.error);
+      if (activeSessionInvalid) {
+        const nextSessionId = sessions[0]?.id;
+        if (nextSessionId) await get().switchSession(nextSessionId);
+        else await get().startNewConversation();
+      } else {
+        // 从后端恢复思考强度设置
+        api.getReasoningEffort().then((effort) => {
+          set({ reasoningEffort: effort });
+        }).catch(console.error);
+      }
+      finishOrdinary();
+      return;
     } catch (error) {
       console.error('加载会话失败:', error);
-      set({ isLoadingSessions: false });
+      finishOrdinary();
+      return;
     }
   },
 
@@ -1150,9 +1203,9 @@ export const useStore = create<AppState>((set, get) => ({
         return { sessions, inputCaches, sessionRunStatuses };
       });
 
-      const nextSessionId = sessions[0]?.id;
-      if (nextSessionId) await get().switchSession(nextSessionId);
-      else await get().startNewConversation();
+      // 删除任意会话后统一进入新对话态，而不是切到剩余列表的第一个——
+      // 用户主动删除通常意味着想开启新的上下文。
+      await get().startNewConversation();
     } catch (error) {
       console.error('删除会话失败:', error);
     }
