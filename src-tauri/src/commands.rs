@@ -758,10 +758,9 @@ async fn send_message_inner(
         return Err("该版本输入已成功发送，已拒绝重复投递".to_string());
     }
 
-    if let Err(error) = state.sync_core_config_from_state().await {
-        abort_session_send(state, &session_id, revision, false).await;
-        return Err(error);
-    }
+    // 注：发送消息不改变任何配置（trust_mode/reasoning_effort/model 由用户在设置页
+    // 手动变更，那些路径自行调用 sync_core_config_from_state）。ensure_core 内部对既有
+    // Core 已做 replace_config（ensure.rs），无需在此全量加载所有 session metadata。
     if let Err(error) = state
         .with_state(|core_state| {
             crate::state_ops::begin_input_send(core_state, &session_id, revision)
