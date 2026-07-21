@@ -21,7 +21,7 @@ use crate::constants::*;
 use crate::manifest::{
     child_root, normalize_role, team_root, validate_role_identifier, AgentRecord, TeamManifest,
 };
-use crate::state::{AgentDescriptor, AgentStatus, FileLockManager};
+use crate::state::{AgentDescriptor, AgentStatus};
 use crate::tools::{child_tool_specs, error_result, ok_result};
 
 const AGENT_DESCRIPTOR_MARKER: &str = "tiangong-agent-descriptor:";
@@ -36,7 +36,6 @@ pub(crate) struct Coordinator {
     child_plugins: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync>,
     manifest: Mutex<Option<TeamManifest>>,
     runtimes: Mutex<HashMap<String, Arc<ChildRuntime>>>,
-    file_locks: Mutex<FileLockManager>,
     base_config: RwLock<CoreConfig>,
     workspace: RwLock<Option<PathBuf>>,
     feedback: SharedFeedback,
@@ -102,7 +101,6 @@ impl Coordinator {
             child_plugins,
             manifest: Mutex::new(None),
             runtimes: Mutex::new(HashMap::new()),
-            file_locks: Mutex::new(FileLockManager::new()),
             base_config: RwLock::new(CoreConfig::default()),
             workspace: RwLock::new(None),
             feedback: Arc::new(RwLock::new(None)),
@@ -304,8 +302,6 @@ impl Coordinator {
             TOOL_SEND_MESSAGE => self.send_message(&call, &actor_id, feedback).await,
             TOOL_BROADCAST_MESSAGE => self.broadcast(&call, &actor_id, feedback).await,
             TOOL_NOTIFY_USER => self.notify_user(&call, &actor_id),
-            TOOL_LOCK_FILE => self.lock_file(&call, &actor_id),
-            TOOL_UNLOCK_FILE => self.unlock_file(&call, &actor_id),
             _ => error_result(&call.name, "未注册的 Agent Team 工具"),
         }
     }
@@ -498,74 +494,6 @@ impl Coordinator {
         )
     }
 
-    fn lock_file(&self, call: &ToolCall, actor_id: &str) -> ToolResult {
-        if self.is_parent_actor(actor_id) {
-            return error_result(TOOL_LOCK_FILE, "Main Agent 不需要使用团队文件锁");
-        }
-        let path = match self.resolve_lock_path(argument_str(call, "path")) {
-            Ok(path) => path,
-            Err(error) => return error_result(TOOL_LOCK_FILE, error),
-        };
-        let now = chrono::Local::now().naive_local();
-        let mut locks = match self.file_locks.lock() {
-            Ok(locks) => locks,
-            Err(_) => return error_result(TOOL_LOCK_FILE, "文件锁状态锁定失败"),
-        };
-        if let Err(error) = locks.try_lock(&path, actor_id, &now) {
-            return error_result(TOOL_LOCK_FILE, error);
-        }
-        self.emit(StreamEvent::FileLockChanged {
-            path: path.display().to_string(),
-            holder_agent_id: Some(actor_id.to_string()),
-            holder_agent_label: self.descriptor(actor_id).map(|descriptor| descriptor.label),
-            action: "locked".to_string(),
-        });
-        ok_result(
-            TOOL_LOCK_FILE,
-            "文件锁已获取",
-            format!("已锁定 {}", path.display()),
-            vec![path.display().to_string()],
-        )
-    }
-
-    fn unlock_file(&self, call: &ToolCall, actor_id: &str) -> ToolResult {
-        let path = match self.resolve_lock_path(argument_str(call, "path")) {
-            Ok(path) => path,
-            Err(error) => return error_result(TOOL_UNLOCK_FILE, error),
-        };
-        let mut locks = match self.file_locks.lock() {
-            Ok(locks) => locks,
-            Err(_) => return error_result(TOOL_UNLOCK_FILE, "文件锁状态锁定失败"),
-        };
-        let holder_agent_id = locks.holder(&path).map(str::to_string);
-        let result = if self.is_parent_actor(actor_id) {
-            locks.force_unlock(&path);
-            Ok(())
-        } else {
-            locks.unlock(&path, actor_id)
-        };
-        if let Err(error) = result {
-            return error_result(TOOL_UNLOCK_FILE, error);
-        }
-        drop(locks);
-        let holder_agent_label = holder_agent_id
-            .as_deref()
-            .and_then(|holder| self.descriptor(holder))
-            .map(|descriptor| descriptor.label);
-        self.emit(StreamEvent::FileLockChanged {
-            path: path.display().to_string(),
-            holder_agent_id,
-            holder_agent_label,
-            action: "unlocked".to_string(),
-        });
-        ok_result(
-            TOOL_UNLOCK_FILE,
-            "文件锁已释放",
-            format!("已解锁 {}", path.display()),
-            vec![path.display().to_string()],
-        )
-    }
-
     pub(crate) fn prepare_dismiss_agent(
         &self,
         call: &ToolCall,
@@ -597,7 +525,6 @@ impl Coordinator {
             }
             return Err(error);
         }
-        self.release_agent_locks(&record.descriptor);
         let status_message = append_agent_status_message(parent, &record.descriptor, "terminated");
         self.emit(StreamEvent::SessionMessageUpsert {
             message: status_message,
@@ -782,18 +709,6 @@ impl Coordinator {
         Ok(())
     }
 
-    fn resolve_lock_path(&self, raw: &str) -> Result<PathBuf, String> {
-        let workspace = self
-            .workspace
-            .read()
-            .map_err(|_| "工作目录状态锁定失败".to_string())?
-            .clone()
-            .ok_or_else(|| "当前会话没有可用工作目录".to_string())?;
-        let path = tiangong_toolkit::resolve_write_path_from_base(raw, &workspace)
-            .map_err(|error| format!("文件路径无效：{error}"))?;
-        Ok(path.canonicalize().unwrap_or(path))
-    }
-
     fn mark_terminated(&self, agent_id: &str) -> Result<(), String> {
         let mut manifest = self
             .manifest
@@ -811,22 +726,6 @@ impl Coordinator {
             return Err(error);
         }
         Ok(())
-    }
-
-    fn release_agent_locks(&self, descriptor: &AgentDescriptor) {
-        let released = self
-            .file_locks
-            .lock()
-            .map(|mut locks| locks.release_all(&descriptor.agent_id))
-            .unwrap_or_default();
-        for path in released {
-            self.emit(StreamEvent::FileLockChanged {
-                path,
-                holder_agent_id: Some(descriptor.agent_id.clone()),
-                holder_agent_label: Some(descriptor.label.clone()),
-                action: "unlocked".to_string(),
-            });
-        }
     }
 
     fn feedback(&self) -> Option<PluginFeedbackTx> {
@@ -930,7 +829,7 @@ impl ToolOverrideHandler for ChildTeamClientPlugin {
 impl PromptSectionProvider for ChildTeamClientPlugin {
     fn prompt_sections(&self) -> Vec<String> {
         vec![
-            "团队协作：可用 send_message、broadcast_message、notify_user、lock_file、unlock_file。用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。默认在父会话工作区中工作，不得读写或执行工作区外部的资源；修改工作区文件前必须先加锁。"
+            "团队协作：可用 send_message、broadcast_message、notify_user。用户输入中的 @role 应调用 send_message，@all 应调用 broadcast_message。向 main 的消息只能异步发送；等待同级 Agent 时系统会拒绝可能形成循环的边。默认在父会话工作区中工作，不得读写或执行工作区外部的资源；文件写入由系统自动加锁/解锁，无需关心并发互斥。"
                 .to_string(),
         ]
     }

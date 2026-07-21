@@ -11,6 +11,7 @@
 //! 与 browser/terminal 不同，fs 不依赖 Tauri 句柄，可在 GUI / CLI / Server
 //! 全入口无条件启用。
 
+mod file_lock;
 pub mod handler;
 pub mod plugin;
 

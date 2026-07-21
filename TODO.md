@@ -1,3 +1,39 @@
+# #255 文件锁迁入 fs 插件 TODO
+
+## 已完成
+
+- [x] 删除 agent-team 插件的 `state/file_lock.rs`、`FileLockManager` 字段、`lock_file`/`unlock_file`/`release_agent_locks`/`resolve_lock_path` 方法、`TOOL_LOCK_FILE`/`TOOL_UNLOCK_FILE` 常量与 ToolSpec、提示词中的加锁描述。
+- [x] fs 插件接管文件锁（第一版，实例字段）。
+- [x] 按评审反馈重构为进程级共享锁表。
+
+### 进程级共享锁表（重构）
+
+- [x] `file_lock.rs` 改为进程内全局锁表（`OnceLock<Mutex<HashMap<PathBuf, LockRecord>>>`），以规范化绝对路径为 key。
+- [x] 锁记录只保存 `acquired_at` 与 `operation_id`（scru128），不再保存 Agent 身份。
+- [x] 加锁语义改为「文件只要已有锁即拒绝后续写入」，不区分是否同一 Agent。
+- [x] `operation_id` 用于解锁校验：旧操作超时后新操作取得锁，旧操作结束时不得误删新操作的锁。
+- [x] 软链接路径归一：对不存在的新文件，向上找最近的已存在父目录 `canonicalize` 后再拼剩余路径，避免软链接产生两个锁标识。
+- [x] `apply_patch` 先收集、去重全部目标文件，再一次性检查锁定；任一文件被占用则全部不加锁（全有或全无）。
+- [x] 正常完成或失败后释放本次操作取得的锁；过期记录在下次加锁时静默清理。
+- [x] `FileLockChanged` 事件只发送路径及「锁定/解锁」动作，`holder_agent_id`/`holder_agent_label` 保持为空。
+- [x] 移除 `FsPlugin` 实例内的 `file_locks` 字段，改为调用全局锁表。
+- [x] 测试覆盖：两 fs 插件实例写同一文件互斥、同一 Agent 并发写入互斥、软链接路径归一、过期后重新加锁、旧操作结束后不误删新操作的锁。
+- [x] `cargo fmt --all`、`cargo check --workspace`、`cargo clippy`（`-D warnings`）、相关测试全部通过。
+
+## 完成标准
+
+- `lock_file`/`unlock_file` 工具及提示词从 agent-team 插件移除；`FileLock`/`FileLockManager` 迁至 fs 插件。
+- fs 插件三个写工具自动加锁/解锁，对模型透明（无新工具暴露）。
+- 同进程内任意两个 fs 插件实例（主 Agent 与子 Agent）写同一文件互斥。
+- 过期锁（默认 300s）在下次加锁时静默清理，新操作可重新取得锁。
+- 旧操作结束后不会误删新操作取得的锁（靠 `operation_id` 校验）。
+- 软链接路径不会产生两个不同的锁标识。
+- `cargo fmt -- --check`、`cargo check --workspace`、`cargo clippy --workspace --all-targets --tests --benches -- -D warnings`、相关测试全部通过。
+
+## 非目标
+
+- 多进程同时打开同一工作区的互斥（需系统级文件锁，改动范围明显扩大，留作后续独立 issue）。
+
 # #241 上下文压缩闭环调整 TODO
 
 ## 已完成
