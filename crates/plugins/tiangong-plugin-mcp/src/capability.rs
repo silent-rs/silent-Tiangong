@@ -399,7 +399,8 @@ fn persist_mcp_capabilities_cache(
 }
 
 fn probe_server_capability(server: &McpServerConfig, timeout_ms: u64) -> McpServerCapability {
-    let client = LocalMcpClient;
+    // capability 探测无会话上下文，workspace=None：子进程继承宿主 cwd。
+    let client = LocalMcpClient::default();
     let server_name = server.name.clone();
     let server_transport = server.resolved_transport();
     let server = server.clone();

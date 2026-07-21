@@ -4,13 +4,11 @@
 //! 作为路径沙箱安全基础设施，供 core 与各进程内插件 crate（fs / command / fetch /
 //! index / terminal）共用，避免重复实现安全逻辑。
 //!
-//! 路径解析相关 helper 提供两套 API：
-//! - 隐式 thread-local 版本（`resolve_workspace_path` 等）：依赖 `SESSION_CWD`，
-//!   供 core 沿用旧行为；
-//! - 显式注入版本（`*_with_base`）：接收 `base: &Path` 参数，供插件 handler 使用，
-//!   无需关心调用方是否设置了 thread-local CWD。
+//! 会话工作目录的注入采用显式传递：core 在 `prepare_plugins` 阶段把 `Session.cwd`
+//! 经各插件的 `set_workspace` 注入；stdio MCP 子进程等需要 cwd 的执行路径由
+//! 插件沿调用链显式携带（见 `LocalMcpClient.workspace`），不依赖 thread-local。
+//! [`workspace_root`] 仅作无显式 base 时的回退，读进程 cwd。
 
-use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -22,34 +20,13 @@ use anyhow::{Context, Result, anyhow};
 
 use tiangong_types::process::configure_no_window;
 
-thread_local! {
-    /// 当前执行的会话工作目录，由 RuntimeEngine 在执行前设置
-    static SESSION_CWD: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// 设置当前线程的会话工作目录
-pub fn set_session_cwd(cwd: Option<PathBuf>) {
-    SESSION_CWD.with(|cell| *cell.borrow_mut() = cwd);
-}
-
-pub fn workspace_root() -> Result<PathBuf> {
-    // 优先使用会话级工作目录，回退到进程工作目录
-    SESSION_CWD.with(|cell| {
-        if let Some(ref cwd) = *cell.borrow()
-            && cwd.is_dir()
-        {
-            return Ok(cwd.clone());
-        }
-        std::env::current_dir().context("读取当前工作目录失败")
-    })
-}
-
-/// 读取当前线程的会话工作目录，供需要跟随会话 workspace 的子系统（如 stdio MCP 子进程）使用。
+/// 读取进程当前工作目录，供无显式 base 注入的回退路径使用。
 ///
-/// 仅当线程已通过 [`set_session_cwd`] 设置过有效目录时返回 `Some`；否则返回 `None`，
-/// 由调用方自行决定回退策略（典型做法是不设置 `current_dir`，让子进程继承宿主 cwd）。
-pub fn session_workspace_root() -> Option<PathBuf> {
-    SESSION_CWD.with(|cell| cell.borrow().as_ref().filter(|cwd| cwd.is_dir()).cloned())
+/// 历史上这里曾优先读取 thread-local `SESSION_CWD`，但该机制在 Core 重构
+/// （`fe5b026c`）后不再有注入方；会话工作目录改由插件显式注入，此函数仅作
+/// 进程 cwd 兜底。
+pub fn workspace_root() -> Result<PathBuf> {
+    std::env::current_dir().context("读取当前工作目录失败")
 }
 
 /// 应用自管存储根目录：`~/.tiangong/`。
