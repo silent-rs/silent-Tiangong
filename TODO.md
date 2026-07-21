@@ -25,7 +25,7 @@
 - `lock_file`/`unlock_file` 工具及提示词从 agent-team 插件移除；`FileLock`/`FileLockManager` 迁至 fs 插件。
 - fs 插件三个写工具自动加锁/解锁，对模型透明（无新工具暴露）。
 - 同进程内任意两个 fs 插件实例（主 Agent 与子 Agent）写同一文件互斥。
-- 过期锁（默认 300s）在下次加锁时静默清理，新操作可重新取得锁。
+- 过期锁（默认 30s 兜底）在下次加锁时静默清理，新操作可重新取得锁。
 - 旧操作结束后不会误删新操作取得的锁（靠 `operation_id` 校验）。
 - 软链接路径不会产生两个不同的锁标识。
 - `cargo fmt -- --check`、`cargo check --workspace`、`cargo clippy --workspace --all-targets --tests --benches -- -D warnings`、相关测试全部通过。

@@ -86,9 +86,10 @@ impl FsPlugin {
         let result = self.dispatch(call);
 
         // 无论成功/失败都释放本次操作取得的锁。release 内部靠 operation_id
-        // 校验，旧操作超时后不会误删新操作取得的锁。
-        FileLockTable::release(&paths, &operation_id);
-        for path in &paths {
+        // 校验：若某路径已被新操作接管（旧操作超时后），不会误删，也不会
+        // 出现在 released 里——只对真正释放的路径发 unlocked 事件。
+        let released = FileLockTable::release(&paths, &operation_id);
+        for path in &released {
             self.emit_file_lock_event(path, "unlocked");
         }
         result

@@ -27,7 +27,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// 锁租约（秒）：超过该时长未被释放的锁视为过期，下次加锁时静默清理。
-pub(crate) const FILE_LOCK_LEASE_SECS: i64 = 300;
+///
+/// 正常写工具调用会在毫秒级完成并立即解锁，此值仅作**异常兜底**——写入过程
+/// 卡死或中断未正常释放时，最多占用该时长后可被其他操作抢占。不设得过短
+/// （如 5s）是为避免大文件、批量修改或慢速磁盘上的正常操作超过租约导致
+/// 锁提前失效。
+pub(crate) const FILE_LOCK_LEASE_SECS: i64 = 30;
 
 /// 单条锁记录：只保存获取时间与本次操作的唯一编号。
 #[derive(Debug, Clone)]
@@ -85,22 +90,26 @@ impl FileLockTable {
         Ok(operation_id)
     }
 
-    /// 释放一组路径上由 `operation_id` 取得的锁。
+    /// 释放一组路径上由 `operation_id` 取得的锁，返回实际被释放的路径列表。
     ///
     /// 仅删除 `operation_id` 匹配的记录——若某路径已被新操作接管（旧操作
-    /// 超时后），则该记录的 `operation_id` 不同，不会被误删。holder 不匹配
-    /// 等异常静默忽略（租约兜底）。
-    pub(crate) fn release(paths: &[PathBuf], operation_id: &str) {
+    /// 超时后），则该记录的 `operation_id` 不同，不会被误删，也不会出现在
+    /// 返回值里。调用方应只对返回的路径发送 `unlocked` 事件，避免「锁仍在
+    /// 却上报已解锁」的误导。
+    pub(crate) fn release(paths: &[PathBuf], operation_id: &str) -> Vec<PathBuf> {
         let Ok(mut table) = Self::shared().lock() else {
-            return;
+            return Vec::new();
         };
+        let mut released = Vec::new();
         for path in dedup_paths(paths) {
             if let Some(record) = table.get(&path)
                 && record.operation_id == operation_id
             {
                 table.remove(&path);
+                released.push(path);
             }
         }
+        released
     }
 }
 
@@ -139,12 +148,14 @@ fn is_expired(locked_at: &chrono::NaiveDateTime, now: &chrono::NaiveDateTime) ->
 /// - 不存在的路径（如 `apply_patch` 的 add 分支）：向上查找最近的已存在父
 ///   目录 `canonicalize`，再拼回剩余的不存在部分。这样通过软链接访问与
 ///   通过真实路径访问会得到同一个 key，避免重复加锁。
+/// - 最后统一消除 `.` / `..` 分量，防止 `new/../a.txt` 与 `a.txt` 指向同一
+///   文件却得到两个不同的 key（绕过锁）。
 ///
-/// `canonicalize` 完全失败时（连父目录都不存在）回退原路径。
+/// `canonicalize` 完全失败时（连父目录都不存在）回退原路径（再消除 `..`）。
 pub(crate) fn canonicalize_for_lock(path: &Path) -> PathBuf {
-    // 已存在：直接 canonicalize。
+    // 已存在：直接 canonicalize（已解析软链接与 ..）。
     if path.exists() {
-        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        return path.canonicalize().unwrap_or_else(|_| normalize_dots(path));
     }
 
     // 不存在：向上找最近的已存在祖先。
@@ -155,15 +166,49 @@ pub(crate) fn canonicalize_for_lock(path: &Path) -> PathBuf {
         existing = ancestor.parent();
     }
     let Some(ancestor) = existing else {
-        return path.to_path_buf();
+        // 连父目录都不存在：回退原路径并至少消除 .. 。
+        return normalize_dots(path);
     };
     let canonical_ancestor = match ancestor.canonicalize() {
         Ok(c) => c,
-        Err(_) => return path.to_path_buf(),
+        Err(_) => return normalize_dots(path),
     };
-    // 拼回剩余的不存在部分。
+    // 拼回剩余的不存在部分，再消除拼回过程中残留的 .. 。
     let remaining = path.strip_prefix(ancestor).unwrap_or(path);
-    canonical_ancestor.join(remaining)
+    normalize_dots(&canonical_ancestor.join(remaining))
+}
+
+/// 手动消除路径中的 `.` 与 `..` 分量（不触碰文件系统）。
+///
+/// `Path::canonicalize` 会解析软链接，但对不存在的路径无法使用；本函数仅做
+/// 纯词法规范化，确保 `a/../b` 与 `b` 得到相同的锁 key。栈顶为根或 `..` 时
+/// 不再弹出（避免 `/..` 塌缩成 `/` 语义错误）。
+fn normalize_dots(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    fn is_poppable(result: &Path) -> bool {
+        // 栈顶必须是正常分量：既非路径根（Normal 之前的前缀），也非已保留的 ..。
+        result
+            .components()
+            .next_back()
+            .is_some_and(|last| matches!(last, Component::Normal(_)))
+    }
+
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if is_poppable(&result) {
+                    result.pop();
+                } else {
+                    result.push("..");
+                }
+            }
+            Component::CurDir => {}
+            c => result.push(c.as_os_str()),
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -225,14 +270,14 @@ mod tests {
 
         let op_old = FileLockTable::acquire(std::slice::from_ref(&path), &now).unwrap();
 
-        // 未过期时仍被占用。
+        // 未过期时（<30s）仍被占用。
         assert!(
-            FileLockTable::acquire(std::slice::from_ref(&path), &(now + Duration::seconds(100)))
+            FileLockTable::acquire(std::slice::from_ref(&path), &(now + Duration::seconds(10)))
                 .is_err()
         );
 
-        // 过期后（>300s）新操作可取得锁。
-        let later = now + Duration::seconds(301);
+        // 过期后（>30s）新操作可取得锁。
+        let later = now + Duration::seconds(31);
         let op_new = FileLockTable::acquire(std::slice::from_ref(&path), &later).unwrap();
 
         // 旧操作结束后不应误删新操作的锁。
@@ -288,5 +333,75 @@ mod tests {
         let err = FileLockTable::acquire(std::slice::from_ref(&path), &now).unwrap_err();
         assert!(err.contains("正被其他写操作占用"));
         FileLockTable::release(std::slice::from_ref(&path), &op);
+    }
+
+    #[test]
+    fn canonicalize_collapses_dotdot_to_prevent_lock_bypass() {
+        // P1 回归：指向同一文件的 `a.txt` 与 `new/../a.txt` 必须归一为同一锁 key，
+        // 否则第二次写会绕过第一次的锁。
+        let dir = tempfile::TempDir::new().unwrap();
+        // 父目录存在、文件不存在的场景（join 分支）。
+        let direct = dir.path().join("a.txt");
+        let via_dotdot = dir.path().join("new").join("..").join("a.txt");
+
+        let key_direct = canonicalize_for_lock(&direct);
+        let key_dotdot = canonicalize_for_lock(&via_dotdot);
+        assert_eq!(
+            key_direct, key_dotdot,
+            "`a.txt` 与 `new/../a.txt` 应归一为同一锁 key（direct={key_direct:?}, dotdot={key_dotdot:?}）"
+        );
+
+        // 实际加锁互斥验证：锁住 direct 后，经 dotdot 路径再次加锁应被拒。
+        let now = instant();
+        FileLockTable::release(std::slice::from_ref(&key_direct), "stale");
+        let op = FileLockTable::acquire(std::slice::from_ref(&key_direct), &now).unwrap();
+        let err = FileLockTable::acquire(std::slice::from_ref(&key_dotdot), &now).unwrap_err();
+        assert!(err.contains("正被其他写操作占用"));
+        FileLockTable::release(std::slice::from_ref(&key_direct), &op);
+    }
+
+    #[test]
+    fn release_returns_only_actually_released_paths() {
+        // P2 回归：旧操作超时后新操作接管，旧操作 release 时不应报告已释放。
+        let now = instant();
+        let path = PathBuf::from("/tmp/fs-lock-test-release-return.txt");
+        FileLockTable::release(std::slice::from_ref(&path), "stale");
+
+        let op_old = FileLockTable::acquire(std::slice::from_ref(&path), &now).unwrap();
+
+        // 过期后（>30s）新操作接管。
+        let later = now + Duration::seconds(31);
+        let op_new = FileLockTable::acquire(std::slice::from_ref(&path), &later).unwrap();
+
+        // 旧操作 release：路径已被新操作接管，不应出现在返回值里。
+        let released = FileLockTable::release(std::slice::from_ref(&path), &op_old);
+        assert!(
+            released.is_empty(),
+            "旧操作不应释放已被新操作接管的锁，却返回 {released:?}"
+        );
+
+        // 新操作 release：应正常返回该路径。
+        let released = FileLockTable::release(std::slice::from_ref(&path), &op_new);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0], path);
+    }
+
+    #[test]
+    fn release_skips_unknown_operation_id() {
+        // operation_id 不匹配（从未加锁或已被释放）时返回空。
+        let now = instant();
+        let path = PathBuf::from("/tmp/fs-lock-test-release-unknown.txt");
+        FileLockTable::release(std::slice::from_ref(&path), "stale");
+
+        // 未加锁直接 release 一个随机 id。
+        let released = FileLockTable::release(std::slice::from_ref(&path), "never-acquired");
+        assert!(released.is_empty());
+
+        // 已释放后再用同一个 id release 也应返回空。
+        let op = FileLockTable::acquire(std::slice::from_ref(&path), &now).unwrap();
+        let released = FileLockTable::release(std::slice::from_ref(&path), &op);
+        assert_eq!(released.len(), 1);
+        let released_again = FileLockTable::release(std::slice::from_ref(&path), &op);
+        assert!(released_again.is_empty());
     }
 }
