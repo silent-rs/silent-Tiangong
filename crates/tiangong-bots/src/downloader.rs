@@ -2,14 +2,13 @@
 //!
 //! 端点复用 `tiangong-entry::update` 的 GitHub + 阿里云 OSS 双端点 fallback。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::BotId;
 use crate::manifest::{BOTS_INDEX_ENDPOINTS, BotManifest, BotsIndex};
-use crate::paths::{self, bot_artifact_path};
+use crate::paths;
 
 /// 下载进度回调：`(已下载字节数, 总字节数)`。
 pub type ProgressFn = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
@@ -60,15 +59,13 @@ impl Downloader {
         Ok(index)
     }
 
-    /// 按 manifest 下载当前平台的制品，校验 SHA256 后落到 `bot_artifact_path(id)`。
-    ///
-    /// `dest_id` 是 bot 实例 id（用于确定落盘目录）。返回制品路径。
-    pub async fn install_artifact(
+    /// 按 manifest 下载当前平台的制品到指定临时路径并校验 SHA256。
+    pub async fn download_artifact_to(
         &self,
         manifest: &BotManifest,
-        dest_id: &BotId,
+        dest: &Path,
         progress: Option<ProgressFn>,
-    ) -> Result<PathBuf> {
+    ) -> Result<()> {
         let artifact = manifest.current_artifact().ok_or_else(|| {
             anyhow!(
                 "制品 {} 无当前平台 {} 的构建",
@@ -76,27 +73,23 @@ impl Downloader {
                 crate::manifest::current_platform_key()
             )
         })?;
-        paths::reject_symlink(&paths::bot_runtime_dir(dest_id), "Bot 实例目录")?;
-        std::fs::create_dir_all(paths::bot_runtime_dir(dest_id))
-            .with_context(|| format!("创建 Bot 实例目录失败：{dest_id}"))?;
-        paths::ensure_executable_paths_safe(dest_id)?;
-        let dest = bot_artifact_path(dest_id);
-        self.download_and_verify(&artifact.url, &artifact.checksum, &dest, progress)
+        self.download_and_verify(&artifact.url, &artifact.checksum, dest, progress)
             .await?;
-        // 赋予可执行权限（Unix）。
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&dest) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o755);
-                let _ = std::fs::set_permissions(&dest, perms);
-            }
+            let mut perms = std::fs::metadata(dest)
+                .with_context(|| format!("读取制品权限失败：{}", dest.display()))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(dest, perms)
+                .with_context(|| format!("设置制品执行权限失败：{}", dest.display()))?;
         }
-        Ok(dest)
+        Ok(())
     }
 
-    /// 下载单个文件到 `dest`，流式写入并校验 checksum（格式 `sha256:<hex>`）。
+    /// 下载单个文件到不存在的 `dest`，流式写入并校验 checksum（格式 `sha256:<hex>`）。
     pub async fn download_and_verify(
         &self,
         url: &str,
@@ -112,63 +105,64 @@ impl Downloader {
                 .with_context(|| format!("创建制品目录失败：{}", parent.display()))?;
             paths::reject_symlink(parent, "Bot 实例目录")?;
         }
-        paths::reject_symlink(dest, "Bot 制品")?;
-        let tmp = dest.with_extension(format!("downloading-{}", scru128::new()));
-        paths::reject_symlink(&tmp, "Bot 下载临时文件")?;
+        paths::reject_symlink(dest, "Bot 下载临时文件")?;
 
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .with_context(|| format!("请求制品失败：{url}"))?;
-        if !resp.status().is_success() {
-            bail!("制品下载响应非 2xx：{} {url}", resp.status());
-        }
-        let total = resp.content_length();
-
-        use futures_util::StreamExt;
-        let mut stream = resp.bytes_stream();
-        let mut hasher = Sha256::new();
-        let mut downloaded: u64 = 0;
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-                .with_context(|| format!("创建临时文件失败：{}", tmp.display()))?;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.context("读取制品分片失败")?;
-                hasher.update(&chunk);
-                file.write_all(&chunk)
-                    .with_context(|| format!("写入临时文件失败：{}", tmp.display()))?;
-                downloaded += chunk.len() as u64;
-                if let Some(ref cb) = progress {
-                    cb(downloaded, total.unwrap_or(downloaded));
-                }
+        let mut created = false;
+        let result: Result<()> = async {
+            let resp = self
+                .http
+                .get(url)
+                .send()
+                .await
+                .with_context(|| format!("请求制品失败：{url}"))?;
+            if !resp.status().is_success() {
+                bail!("制品下载响应非 2xx：{} {url}", resp.status());
             }
-            file.sync_data().ok();
-        }
+            let total = resp.content_length();
 
-        let actual = hasher.finalize();
-        if actual.as_slice() != expected {
-            let _ = std::fs::remove_file(&tmp);
-            bail!(
-                "制品 SHA256 校验失败：期望 {}，实际 {}",
-                hex::encode(expected),
-                hex::encode(actual)
-            );
-        }
+            use futures_util::StreamExt;
+            let mut stream = resp.bytes_stream();
+            let mut hasher = Sha256::new();
+            let mut downloaded: u64 = 0;
+            {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dest)
+                    .with_context(|| format!("创建临时文件失败：{}", dest.display()))?;
+                created = true;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.context("读取制品分片失败")?;
+                    hasher.update(&chunk);
+                    file.write_all(&chunk)
+                        .with_context(|| format!("写入临时文件失败：{}", dest.display()))?;
+                    downloaded += chunk.len() as u64;
+                    if let Some(ref cb) = progress {
+                        cb(downloaded, total.unwrap_or(downloaded));
+                    }
+                }
+                file.sync_all()
+                    .with_context(|| format!("同步临时文件失败：{}", dest.display()))?;
+            }
 
-        if let Some(parent) = dest.parent() {
-            paths::reject_symlink(parent, "Bot 实例目录")?;
+            let actual = hasher.finalize();
+            if actual.as_slice() != expected {
+                bail!(
+                    "制品 SHA256 校验失败：期望 {}，实际 {}",
+                    hex::encode(expected),
+                    hex::encode(actual)
+                );
+            }
+            Ok(())
         }
-        paths::reject_symlink(dest, "Bot 制品")?;
-        paths::reject_symlink(&tmp, "Bot 下载临时文件")?;
-        std::fs::rename(&tmp, dest)
-            .with_context(|| format!("重命名制品失败：{} -> {}", tmp.display(), dest.display()))?;
-        tracing::info!("制品下载完成：{}", dest.display());
+        .await;
+
+        if result.is_err() && created {
+            let _ = std::fs::remove_file(dest);
+        }
+        result?;
+        tracing::info!("制品下载并校验完成：{}", dest.display());
         Ok(())
     }
 }
@@ -272,5 +266,37 @@ mod tests {
 
         assert!(error.to_string().contains("符号链接"));
         assert_eq!(std::fs::read(target).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn download_never_overwrites_existing_destination() {
+        let server = MockServer::start().await;
+        let payload = b"new artifact";
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let checksum = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        Mock::given(method("GET"))
+            .and(path("/artifact"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bot");
+        std::fs::write(&dest, b"old artifact").unwrap();
+        let err = Downloader::new()
+            .unwrap()
+            .download_and_verify(
+                &format!("{}/artifact", server.uri()),
+                &checksum,
+                &dest,
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("创建临时文件失败"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old artifact");
     }
 }

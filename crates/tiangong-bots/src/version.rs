@@ -34,16 +34,19 @@ pub fn write_installed_version(id: &BotId, manifest: &BotManifest) -> anyhow::Re
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("创建版本记录目录失败：{} {e}", parent.display()))?;
     }
+    let content = installed_version_json(manifest)?;
+    std::fs::write(&path, content)
+        .map_err(|e| anyhow::anyhow!("写入版本记录失败：{} {e}", path.display()))?;
+    Ok(())
+}
+
+pub(crate) fn installed_version_json(manifest: &BotManifest) -> anyhow::Result<String> {
     let record = InstalledVersion {
         artifact_id: manifest.id.clone(),
         version: manifest.version.clone(),
         installed_at: chrono::Local::now().naive_local().to_string(),
     };
-    let content = serde_json::to_string_pretty(&record)
-        .map_err(|e| anyhow::anyhow!("序列化版本记录失败：{e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| anyhow::anyhow!("写入版本记录失败：{} {e}", path.display()))?;
-    Ok(())
+    serde_json::to_string_pretty(&record).map_err(|e| anyhow::anyhow!("序列化版本记录失败：{e}"))
 }
 
 /// 对比线上版本与本地已安装版本。
