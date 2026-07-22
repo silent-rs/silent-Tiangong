@@ -29,27 +29,18 @@ pub fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// 从路径加载 bots 配置；文件不存在或解析失败时返回默认配置（不报错）。
-pub fn load_bots_config(path: &Path) -> BotsConfig {
+/// 从路径加载 bots 配置；文件不存在时返回默认配置。
+///
+/// 已有配置无法读取、解析或包含非法 Bot ID 时返回明确错误，避免程序在
+/// 空配置上继续运行并覆盖原文件。
+pub fn load_bots_config(path: &Path) -> Result<BotsConfig> {
     if !path.exists() {
-        return BotsConfig::default();
+        return Ok(BotsConfig::default());
     }
-    match std::fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|err| {
-            tracing::warn!(
-                "bots 配置解析失败，回退为默认配置（原文件保留）：path={} error={err}",
-                path.display()
-            );
-            BotsConfig::default()
-        }),
-        Err(err) => {
-            tracing::warn!(
-                "读取 bots 配置失败，回退为默认配置：path={} error={err}",
-                path.display()
-            );
-            BotsConfig::default()
-        }
-    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("读取 bots 配置失败：{}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("bots 配置无效，请修正后重试：{}", path.display()))
 }
 
 /// 序列化并原子写入 bots 配置。

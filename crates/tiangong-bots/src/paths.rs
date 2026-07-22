@@ -2,7 +2,11 @@
 //!
 //! plugin 自行计算 `~/.tiangong/bots/` 下的路径，不依赖 core 的 app_state。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+use crate::BotId;
 
 /// 用户主目录（兼容 HOME / USERPROFILE / HOMEDRIVE+HOMEPATH）。
 fn user_home_dir() -> Option<PathBuf> {
@@ -42,22 +46,22 @@ pub fn default_bots_config_path() -> PathBuf {
 }
 
 /// 单个 bot 的运行时目录：`~/.tiangong/bots/<id>/`（制品、PID、日志）。
-pub fn bot_runtime_dir(id: &str) -> PathBuf {
-    default_bots_dir().join(id)
+pub fn bot_runtime_dir(id: &BotId) -> PathBuf {
+    default_bots_dir().join(id.as_str())
 }
 
 /// bot 制品路径：`~/.tiangong/bots/<id>/bot`（Windows 下为 `bot.exe`）。
-pub fn bot_artifact_path(id: &str) -> PathBuf {
+pub fn bot_artifact_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join(if cfg!(windows) { "bot.exe" } else { "bot" })
 }
 
 /// bot PID 文件路径：`~/.tiangong/bots/<id>/bot.pid`。
-pub fn bot_pid_path(id: &str) -> PathBuf {
+pub fn bot_pid_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join("bot.pid")
 }
 
 /// bot 日志文件路径：`~/.tiangong/bots/<id>/bot.log`。
-pub fn bot_log_path(id: &str) -> PathBuf {
+pub fn bot_log_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join("bot.log")
 }
 
@@ -65,18 +69,36 @@ pub fn bot_log_path(id: &str) -> PathBuf {
 ///
 /// 由 `bot --describe` 上报后写入，作为表单渲染、必填校验、环境变量注入的
 /// 单一真相来源（对齐 `requirements.md` 的"外部适配程序"方针）。
-pub fn bot_schema_path(id: &str) -> PathBuf {
+pub fn bot_schema_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join("schema.json")
 }
 
 /// bot 已安装版本记录路径：`~/.tiangong/bots/<id>/version.json`。
 ///
 /// install/upgrade 成功后写入，用于检查更新时对比线上版本。
-pub fn bot_version_path(id: &str) -> PathBuf {
+pub fn bot_version_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join("version.json")
 }
 
 /// 审计日志路径：`~/.tiangong/audit.jsonl`（与 core 的 observe 对齐）。
 pub fn audit_log_path() -> PathBuf {
     storage_root().join("audit.jsonl")
+}
+
+/// 拒绝现有符号链接，避免 Bot 路径被替换到运行目录之外。
+pub(crate) fn reject_symlink(path: &Path, label: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("拒绝使用符号链接作为 {label}：{}", path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("检查 {label} 失败：{}", path.display())),
+    }
+}
+
+/// 检查 Bot 目录及其可执行制品没有被符号链接替换。
+pub(crate) fn ensure_executable_paths_safe(id: &BotId) -> Result<()> {
+    reject_symlink(&bot_runtime_dir(id), "Bot 实例目录")?;
+    reject_symlink(&bot_artifact_path(id), "Bot 制品")
 }

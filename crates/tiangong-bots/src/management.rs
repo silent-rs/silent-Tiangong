@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::BotId;
 use crate::config::{
     BotConfig, BotsConfig, ConfigFieldSchema, RegisterBotRequest, UpdateBotRequest,
 };
@@ -24,23 +25,23 @@ pub struct BotStore {
 
 impl BotStore {
     /// 用应用层注入的存储根目录（`~/.tiangong/`）构造。
-    pub fn with_storage_root(root: PathBuf) -> Self {
+    pub fn with_storage_root(root: PathBuf) -> Result<Self> {
         let config_path = root.join("bots").join("bots.json");
         Self::with_config_path(config_path)
     }
 
     /// 用默认路径（`~/.tiangong/bots/bots.json`）构造。
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         Self::with_config_path(crate::paths::default_bots_config_path())
     }
 
     /// 用显式配置路径构造（主要供测试）。
-    pub fn with_config_path(config_path: PathBuf) -> Self {
-        let config = load_bots_config(&config_path);
-        Self {
+    pub fn with_config_path(config_path: PathBuf) -> Result<Self> {
+        let config = load_bots_config(&config_path)?;
+        Ok(Self {
             config_path,
             config: std::sync::RwLock::new(config),
-        }
+        })
     }
 
     /// 配置文件路径。
@@ -62,8 +63,11 @@ impl BotStore {
     }
 
     /// 按 id 取单个 bot。
-    pub fn get(&self, id: &str) -> Option<BotConfig> {
-        self.snapshot().bots.into_iter().find(|b| b.id == id)
+    pub fn get(&self, id: &BotId) -> Option<BotConfig> {
+        self.snapshot()
+            .bots
+            .into_iter()
+            .find(|bot| bot.id.as_str() == id.as_str())
     }
 
     /// 注册新 bot。
@@ -73,10 +77,7 @@ impl BotStore {
     /// （见 [`crate::runtime`] 的 describe 协议），注册时未必已安装制品。
     /// 必填字段校验在 [`crate::runtime::BotRuntime::start`] 启动时进行。
     pub fn register(&self, request: RegisterBotRequest) -> Result<BotConfig> {
-        let id = request.id.trim().to_string();
-        if id.is_empty() {
-            return Err(anyhow!("bot 名称不能为空"));
-        }
+        let id = BotId::try_from(request.id)?;
 
         let mut next = self.snapshot();
         if next.bots.iter().any(|b| b.id == id) {
@@ -95,7 +96,7 @@ impl BotStore {
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.register",
-            &id,
+            id.as_str(),
             &format!("bot 已注册：{id}"),
             true,
         ));
@@ -103,13 +104,13 @@ impl BotStore {
     }
 
     /// 更新已有 bot（id 主键不变，就地更新 config）。
-    pub fn update(&self, id: &str, request: UpdateBotRequest) -> Result<BotConfig> {
+    pub fn update(&self, id: &BotId, request: UpdateBotRequest) -> Result<BotConfig> {
         let mut next = self.snapshot();
 
         let idx = next
             .bots
             .iter()
-            .position(|b| b.id == id)
+            .position(|bot| bot.id.as_str() == id.as_str())
             .ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
 
         let bot = &mut next.bots[idx];
@@ -118,7 +119,7 @@ impl BotStore {
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.update",
-            id,
+            id.as_str(),
             &format!("bot 已更新：{id}"),
             true,
         ));
@@ -126,25 +127,30 @@ impl BotStore {
     }
 
     /// 删除 bot。
-    pub fn remove(&self, id: &str) -> Result<()> {
+    pub fn remove(&self, id: &BotId) -> Result<()> {
         let mut next = self.snapshot();
         let prev_len = next.bots.len();
-        next.bots.retain(|b| b.id != id);
+        next.bots.retain(|bot| bot.id.as_str() != id.as_str());
         if next.bots.len() == prev_len {
             return Err(anyhow!("bot 不存在：{id}"));
         }
         self.apply(next)?;
-        append_audit_log(&AuditEntry::new("bots.remove", id, "bot 已删除", true));
+        append_audit_log(&AuditEntry::new(
+            "bots.remove",
+            id.as_str(),
+            "bot 已删除",
+            true,
+        ));
         Ok(())
     }
 
     /// 切换 bot 启用状态。
-    pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<BotConfig> {
+    pub fn set_enabled(&self, id: &BotId, enabled: bool) -> Result<BotConfig> {
         let mut next = self.snapshot();
         let bot = next
             .bots
             .iter_mut()
-            .find(|b| b.id == id)
+            .find(|bot| bot.id.as_str() == id.as_str())
             .ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
         bot.enabled = enabled;
         bot.updated_at = chrono::Local::now().naive_local().to_string();
@@ -152,7 +158,7 @@ impl BotStore {
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.toggle",
-            id,
+            id.as_str(),
             &format!("bot {bot_name} 已{}", if enabled { "启用" } else { "禁用" }),
             true,
         ));
@@ -173,7 +179,7 @@ impl BotStore {
 
 impl Default for BotStore {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("加载默认 Bot 配置失败，请修正 bots.json")
     }
 }
 
@@ -214,7 +220,7 @@ mod tests {
 
     fn test_store() -> (TempDir, BotStore) {
         let dir = TempDir::new().unwrap();
-        let store = BotStore::with_config_path(dir.path().join("bots.json"));
+        let store = BotStore::with_config_path(dir.path().join("bots.json")).unwrap();
         (dir, store)
     }
 
@@ -229,15 +235,15 @@ mod tests {
     fn register_and_get() {
         let (_dir, store) = test_store();
         let req = RegisterBotRequest {
-            id: "我的飞书".into(),
+            id: "feishu".into(),
             artifact_id: "feishu".into(),
             config: feishu_config("cli_x", "secret"),
             enabled: true,
         };
         let bot = store.register(req).unwrap();
-        assert_eq!(bot.id, "我的飞书");
+        assert_eq!(bot.id.as_str(), "feishu");
         assert_eq!(store.list().len(), 1);
-        assert_eq!(store.get(&bot.id).unwrap().id, "我的飞书");
+        assert_eq!(store.get(&bot.id).unwrap().id.as_str(), "feishu");
     }
 
     #[test]
@@ -340,7 +346,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("bots.json");
         {
-            let store = BotStore::with_config_path(path.clone());
+            let store = BotStore::with_config_path(path.clone()).unwrap();
             store
                 .register(RegisterBotRequest {
                     id: "a".into(),
@@ -350,8 +356,23 @@ mod tests {
                 })
                 .unwrap();
         }
-        let reloaded = BotStore::with_config_path(path);
+        let reloaded = BotStore::with_config_path(path).unwrap();
         assert_eq!(reloaded.list().len(), 1);
-        assert_eq!(reloaded.list()[0].id, "a");
+        assert_eq!(reloaded.list()[0].id.as_str(), "a");
+    }
+
+    #[test]
+    fn invalid_id_in_existing_config_is_reported() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bots.json");
+        std::fs::write(
+            &path,
+            r#"{"bots":[{"id":"../feishu","artifact_id":"feishu","enabled":false,"config":{},"created_at":"now","updated_at":"now"}]}"#,
+        )
+        .unwrap();
+
+        let error = BotStore::with_config_path(path).err().unwrap();
+        assert!(error.to_string().contains("bots 配置无效"));
+        assert!(format!("{error:#}").contains("Bot ID 非法"));
     }
 }

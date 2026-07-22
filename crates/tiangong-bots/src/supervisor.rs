@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::logger::BotLogger;
+use crate::{BotId, paths};
 
 /// 单次崩溃重启后等待的最小/最大退避。
 const MIN_BACKOFF: Duration = Duration::from_secs(2);
@@ -64,11 +65,12 @@ impl SupervisedBot {
 ///
 /// `bot_id` 用于确定日志路径（`~/.tiangong/bots/<bot_id>/bot.log`）。
 /// `artifact_path` 是制品可执行文件路径；`env` 是注入的环境变量（凭证等）。
-pub fn spawn_supervised(
-    bot_id: &str,
+pub(crate) fn spawn_supervised(
+    bot_id: &BotId,
     artifact_path: PathBuf,
     env: BTreeMap<String, String>,
 ) -> Result<SupervisedBot> {
+    paths::ensure_executable_paths_safe(bot_id)?;
     if !artifact_path.exists() {
         return Err(anyhow::anyhow!(
             "bot 制品不存在：{}",
@@ -76,7 +78,7 @@ pub fn spawn_supervised(
         ));
     }
 
-    let logger = Arc::new(BotLogger::new(crate::paths::bot_log_path(bot_id)));
+    let logger = Arc::new(BotLogger::new(paths::bot_log_path(bot_id)));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
     let logger_for_task = logger.clone();
@@ -180,6 +182,10 @@ async fn supervise_loop(
 
 /// spawn 单个 bot 子进程，stdout/stderr pipe 用于日志捕获。
 fn spawn_child(artifact_path: &PathBuf, env: &BTreeMap<String, String>) -> Result<Child> {
+    if let Some(runtime_dir) = artifact_path.parent() {
+        paths::reject_symlink(runtime_dir, "Bot 实例目录")?;
+    }
+    paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
     tiangong_types::process::configure_tokio_no_window(&mut cmd);
     cmd.stdin(Stdio::null())

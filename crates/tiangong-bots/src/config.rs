@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::BotId;
+
 /// 配置字段类型。
 ///
 /// [`FieldType::Barcode`] 声明 bot 支持扫码配置，前端渲染二维码并轮询
@@ -58,7 +60,7 @@ pub struct ConfigFieldSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotConfig {
     /// bot 实例名称（同时作为主键和目录名，如 `"feishu"`）。
-    pub id: String,
+    pub id: BotId,
     /// 制品 id（标识 bot 平台，如 `"feishu"`，来自 bots-index.json 的 manifest）。
     pub artifact_id: String,
     /// 是否启用（启用的 bot 在主程序启动时自动拉起）。

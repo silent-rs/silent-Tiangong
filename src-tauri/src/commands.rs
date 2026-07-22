@@ -2640,6 +2640,10 @@ pub async fn set_mcp_server_enabled(
 // 移动端控制（bot）管理
 // ============================================================================
 
+fn validate_bot_id(id: String) -> Result<tiangong_bots::BotId, String> {
+    tiangong_bots::BotId::try_from(id).map_err(|error| error.to_string())
+}
+
 /// 获取已注册的 bot 列表
 #[tauri::command]
 pub async fn bot_list(
@@ -2654,6 +2658,7 @@ pub async fn bot_health(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotHealth, String> {
+    let id = validate_bot_id(id)?;
     Ok(state.bot_runtime.health(&id).await)
 }
 
@@ -2663,6 +2668,7 @@ pub async fn bot_log(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotLog, String> {
+    let id = validate_bot_id(id)?;
     if state.bot_store.get(&id).is_none() {
         return Err(format!("bot 不存在：{id}"));
     }
@@ -2679,6 +2685,7 @@ pub async fn bot_config_schema(
     artifact_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_bots::ConfigFieldSchema>, String> {
+    let bot_id = bot_id.map(validate_bot_id).transpose()?;
     // 1) 优先读已安装 bot 的缓存 schema（权威来源）。
     if let Some(id) = &bot_id {
         if let Some(schema) = tiangong_bots::cached_schema(id) {
@@ -2711,6 +2718,7 @@ pub async fn bot_provision_begin(
     bot_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::QrSession, String> {
+    let bot_id = validate_bot_id(bot_id)?;
     state
         .bot_runtime
         .provision_begin(&bot_id)
@@ -2725,6 +2733,7 @@ pub async fn bot_provision_poll(
     session: tiangong_bots::QrSession,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::ProvisionStatus, String> {
+    let bot_id = validate_bot_id(bot_id)?;
     state
         .bot_runtime
         .provision_poll(&bot_id, &session)
@@ -2767,6 +2776,7 @@ pub async fn bot_register(
     request: tiangong_bots::RegisterBotRequest,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotConfig, String> {
+    tiangong_bots::BotId::try_from(request.id.as_str()).map_err(|error| error.to_string())?;
     state.bot_store.register(request).map_err(|e| e.to_string())
 }
 
@@ -2777,6 +2787,7 @@ pub async fn bot_update(
     request: tiangong_bots::UpdateBotRequest,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotConfig, String> {
+    let id = validate_bot_id(id)?;
     state
         .bot_store
         .update(&id, request)
@@ -2786,6 +2797,7 @@ pub async fn bot_update(
 /// 删除 bot（若运行中则先停止）
 #[tauri::command]
 pub async fn bot_remove(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let id = validate_bot_id(id)?;
     // 先停止运行中的 bot（忽略未运行的错误）
     let _ = state.bot_runtime.stop(&id).await;
     state.bot_store.remove(&id).map_err(|e| e.to_string())?;
@@ -2800,6 +2812,7 @@ pub async fn bot_install(
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
+    let dest_bot_id = validate_bot_id(dest_bot_id)?;
     let index = state
         .bot_runtime
         .fetch_index()
@@ -2835,6 +2848,7 @@ pub async fn bot_install(
 /// bot 需要通过 server 的 /api/v1/messages 收发消息。
 #[tauri::command]
 pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let id = validate_bot_id(id)?;
     let bot = state
         .bot_store
         .get(&id)
@@ -2890,6 +2904,7 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
 /// 停止指定 bot 实例
 #[tauri::command]
 pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let id = validate_bot_id(id)?;
     state
         .bot_runtime
         .stop(&id)
@@ -2926,6 +2941,7 @@ pub async fn bot_upgrade(
     app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
+    let bot_id = validate_bot_id(bot_id)?;
     // 先查 bot 配置拿 artifact_id。
     let bot = state
         .bot_store
