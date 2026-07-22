@@ -2637,7 +2637,7 @@ pub async fn set_mcp_server_enabled(
 }
 
 // ============================================================================
-// 通讯网关（bot）管理
+// 移动端控制（bot）管理
 // ============================================================================
 
 /// 获取已注册的 bot 列表
@@ -2804,6 +2804,62 @@ pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<Strin
         .await
         .map_err(|e| e.to_string())?;
     Ok("bot 已停止".to_string())
+}
+
+/// 检查某制品是否有线上更新。
+///
+/// 返回 `Some(manifest)` 表示有更新（含版本号供前端展示），`None` 表示已是最新。
+#[tauri::command]
+pub async fn bot_check_update(
+    artifact_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Option<tiangong_bots::BotManifest>, String> {
+    state
+        .bot_runtime
+        .check_update(&artifact_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 升级 bot 制品（停止运行中的 bot → 下载新版本 → 写 version）。
+///
+/// 升级后需用户手动重新启动。
+#[tauri::command]
+pub async fn bot_upgrade(
+    bot_id: String,
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<String, String> {
+    // 先查 bot 配置拿 artifact_id。
+    let bot = state
+        .bot_store
+        .get(&bot_id)
+        .ok_or_else(|| format!("bot 不存在：{bot_id}"))?;
+    let artifact_id = bot.artifact_id.clone();
+
+    // 拉取线上 manifest。
+    let manifest = state
+        .bot_runtime
+        .check_update(&artifact_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "已是最新版本".to_string())?;
+
+    let progress: tiangong_bots::ProgressFn = std::sync::Arc::new({
+        let app = app.clone();
+        move |downloaded, content_len| {
+            let _ = app.emit(
+                "bot_upgrade_progress",
+                serde_json::json!({ "downloaded": downloaded, "total": content_len }),
+            );
+        }
+    });
+    state
+        .bot_runtime
+        .upgrade(&bot_id, manifest, Some(progress))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("升级完成，请重新启动 bot".to_string())
 }
 
 // ============================================================================

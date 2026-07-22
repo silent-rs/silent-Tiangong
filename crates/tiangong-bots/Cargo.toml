@@ -27,6 +27,7 @@ chrono = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
+semver = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

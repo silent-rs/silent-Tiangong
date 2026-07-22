@@ -69,6 +69,13 @@ pub fn bot_schema_path(id: &str) -> PathBuf {
     bot_runtime_dir(id).join("schema.json")
 }
 
+/// bot 已安装版本记录路径：`~/.tiangong/bots/<id>/version.json`。
+///
+/// install/upgrade 成功后写入，用于检查更新时对比线上版本。
+pub fn bot_version_path(id: &str) -> PathBuf {
+    bot_runtime_dir(id).join("version.json")
+}
+
 /// 审计日志路径：`~/.tiangong/audit.jsonl`（与 core 的 observe 对齐）。
 pub fn audit_log_path() -> PathBuf {
     storage_root().join("audit.jsonl")

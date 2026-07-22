@@ -1,4 +1,4 @@
-//! 天工通讯网关框架——bot 制品下载、进程监督与配置管理。
+//! 天工移动端控制框架——bot 制品下载、进程监督与配置管理。
 //!
 //! 设计参见 issue #250 与 `docs/rfc/0004` 的"外部适配程序"方针
 //! （`requirements.md` 明确不在天工内部实现 Connector 机制，bot 作为独立
@@ -22,6 +22,7 @@ pub mod paths;
 pub mod provision;
 pub mod store;
 pub mod supervisor;
+pub mod version;
 
 pub use config::{
     BotConfig, BotsConfig, ConfigFieldSchema, FieldType, RegisterBotRequest, UpdateBotRequest,

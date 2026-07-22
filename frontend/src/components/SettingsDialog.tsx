@@ -165,7 +165,7 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 <TabsTrigger value="bots" className="w-full justify-start px-3 py-2">
                   <BotIcon className="w-4 h-4 mr-2" />
-                  通讯网关
+                  移动端控制
                 </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />

@@ -51,7 +51,7 @@ pub struct TiangongApp {
     /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
     /// set_enabled/probe/health）。
     pub mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
-    /// bot 通讯网关配置存储（读写 `~/.tiangong/bots/bots.json`）。
+    /// bot 移动端控制配置存储（读写 `~/.tiangong/bots/bots.json`）。
     pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
     /// bot 运行时——制品下载、进程监督与启停。
     pub bot_runtime: std::sync::Arc<tiangong_bots::BotRuntime>,

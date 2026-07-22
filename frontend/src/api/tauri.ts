@@ -833,6 +833,12 @@ export const api = {
   botStop: (id: string): Promise<string> =>
     invoke('bot_stop', { id }),
 
+  botCheckUpdate: (artifactId: string): Promise<BotManifest | null> =>
+    invoke('bot_check_update', { artifactId }),
+
+  botUpgrade: (botId: string): Promise<string> =>
+    invoke('bot_upgrade', { botId }),
+
   // ----------------------------------------------------------------
   // Skill 管理
   // ----------------------------------------------------------------

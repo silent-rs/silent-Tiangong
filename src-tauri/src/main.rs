@@ -641,6 +641,8 @@ fn run_gui() {
             tiangong_app::commands::bot_install,
             tiangong_app::commands::bot_start,
             tiangong_app::commands::bot_stop,
+            tiangong_app::commands::bot_check_update,
+            tiangong_app::commands::bot_upgrade,
             tiangong_app::commands::resolve_model_context_window,
         ])
         .plugin(tiangong_plugin_browser::init())

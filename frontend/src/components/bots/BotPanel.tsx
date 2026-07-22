@@ -10,7 +10,7 @@ import { Badge } from '../ui/badge';
 import { Card, CardContent } from '../ui/card';
 import { Switch } from '../ui/switch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { Plus, Trash2, RefreshCw, Play, Square, Download, Bot as BotIcon } from 'lucide-react';
+import { Plus, Trash2, RefreshCw, Play, Square, Download, Bot as BotIcon, ArrowUpCircle } from 'lucide-react';
 import { useToast } from '../Toast';
 import { BotFormDialog } from './BotFormDialog';
 
@@ -31,6 +31,8 @@ export function BotPanel() {
 
   // 安装中状态：botId → boolean
   const [installing, setInstalling] = useState<Record<string, boolean>>({});
+  // 检查更新中状态：botId → boolean
+  const [checking, setChecking] = useState<Record<string, boolean>>({});
 
   const load = async () => {
     setIsLoading(true);
@@ -95,6 +97,25 @@ export function BotPanel() {
     }
   };
 
+  const handleCheckUpdate = async (bot: BotConfig) => {
+    setChecking((prev) => ({ ...prev, [bot.id]: true }));
+    try {
+      const manifest = await api.botCheckUpdate(bot.artifact_id);
+      if (!manifest) {
+        showSuccess('已是最新', `bot "${bot.id}" 已是最新版本`);
+        return;
+      }
+      if (!confirm(`发现新版本 ${manifest.version}，是否升级？升级会先停止 bot。`)) return;
+      await api.botUpgrade(bot.id);
+      showSuccess('升级完成', `bot "${bot.id}" 已升级到 ${manifest.version}，请重新启动`);
+      load();
+    } catch (err) {
+      showError('检查更新失败', String(err));
+    } finally {
+      setChecking((prev) => ({ ...prev, [bot.id]: false }));
+    }
+  };
+
   const handleStart = async (bot: BotConfig) => {
     try {
       await api.botStart(bot.id);
@@ -143,7 +164,7 @@ export function BotPanel() {
   return (
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-medium">通讯网关</h3>
+        <h3 className="text-lg font-medium">移动端控制</h3>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={refreshAvailable}>
             <RefreshCw className="w-4 h-4 mr-2" />
@@ -194,6 +215,17 @@ export function BotPanel() {
                       title="下载制品"
                     >
                       <Download className="w-4 h-4" />
+                    </Button>
+                  )}
+                  {isInstalled(bot.id) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleCheckUpdate(bot)}
+                      disabled={checking[bot.id]}
+                      title="检查更新"
+                    >
+                      <ArrowUpCircle className="w-4 h-4" />
                     </Button>
                   )}
                   {healthMap[bot.id] === 'running' ? (

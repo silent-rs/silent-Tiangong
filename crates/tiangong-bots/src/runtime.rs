@@ -60,7 +60,8 @@ impl BotRuntime {
 
     /// 安装（下载 + 校验）某制品到 bot 实例目录。
     ///
-    /// 安装成功后自动调用 `bot --describe` 获取并缓存 config schema。
+    /// 安装成功后自动调用 `bot --describe` 获取并缓存 config schema，
+    /// 并写入版本记录（version.json）。
     pub async fn install(
         &self,
         manifest: BotManifest,
@@ -72,12 +73,55 @@ impl BotRuntime {
             .downloader
             .install_artifact(&manifest, dest_id, progress)
             .await?;
-        self.manifests.lock().await.insert(artifact_id, manifest);
+        self.manifests
+            .lock()
+            .await
+            .insert(artifact_id, manifest.clone());
         // 获取并缓存 schema（失败仅警告，不阻断安装）。
         if let Err(err) = describe_and_cache(&path, dest_id).await {
             tracing::warn!("获取 bot schema 失败（{}）：{err}", path.display());
         }
+        // 写入版本记录（失败仅警告）。
+        if let Err(err) = crate::version::write_installed_version(dest_id, &manifest) {
+            tracing::warn!("写入 bot 版本记录失败：{err}");
+        }
         Ok(path)
+    }
+
+    /// 检查某制品是否有线上更新。
+    ///
+    /// 拉取 bots-index，对比线上版本与本地已安装版本。
+    /// 返回 `Some(manifest)` 表示有更新，`None` 表示已是最新。
+    pub async fn check_update(&self, artifact_id: &str) -> Result<Option<BotManifest>> {
+        let index = self.downloader.fetch_index().await?;
+        let manifest = index
+            .bots
+            .into_iter()
+            .find(|m| m.id == artifact_id)
+            .ok_or_else(|| anyhow!("bots-index 中未找到制品：{artifact_id}"))?;
+        // 查找本地已安装版本：遍历 bots 目录，找 artifact_id 匹配的 version.json。
+        let local = find_local_version(artifact_id);
+        if crate::version::has_update(local.as_ref(), &manifest.version) {
+            Ok(Some(manifest))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 升级 bot 制品（停止运行中的 bot → 下载新版本 → 写 version）。
+    ///
+    /// 升级后不自动重启——用户手动点启动。
+    pub async fn upgrade(
+        &self,
+        bot_id: &str,
+        manifest: BotManifest,
+        progress: Option<ProgressFn>,
+    ) -> Result<()> {
+        // 先停止运行中的 bot（忽略未运行的错误）。
+        let _ = self.stop(bot_id).await;
+        // 下载安装（复用 install 逻辑，含 schema 缓存 + version 写入）。
+        self.install(manifest, bot_id, progress).await?;
+        Ok(())
     }
 
     /// 拉取远端 bots-index.json。
@@ -266,6 +310,24 @@ pub fn cached_schema(bot_id: &str) -> Option<Vec<ConfigFieldSchema>> {
     }
     let content = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&content).ok()
+}
+
+/// 在 `~/.tiangong/bots/` 下查找指定 artifact_id 的已安装版本。
+///
+/// 一个 artifact_id 可能对应多个 bot 实例（如两个 feishu bot），
+/// 返回找到的第一个。用于 `check_update` 时对比本地版本。
+fn find_local_version(artifact_id: &str) -> Option<crate::version::InstalledVersion> {
+    let bots_dir = paths::default_bots_dir();
+    let entries = std::fs::read_dir(&bots_dir).ok()?;
+    for entry in entries.flatten() {
+        let version = crate::version::read_installed_version(entry.file_name().to_str()?);
+        if let Some(ref v) = version
+            && v.artifact_id == artifact_id
+        {
+            return version;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
