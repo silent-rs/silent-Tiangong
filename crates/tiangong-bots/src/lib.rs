@@ -11,7 +11,7 @@
 //! - [`downloader`]：制品下载 + SHA256 校验。
 //! - [`supervisor`]：进程 spawn + 崩溃重启 + PID + 日志 tail。
 //! - [`runtime`]：按 bot 实例启停的运行时表。
-//! - [`provision`]：扫码授权 trait（首期 stub）。
+//! - [`provision`]：调用 bot 制品的通用扫码配置协议。
 
 pub mod config;
 pub mod downloader;
@@ -28,9 +28,10 @@ pub use config::{
     BotConfig, BotsConfig, ConfigFieldSchema, FieldType, RegisterBotRequest, UpdateBotRequest,
 };
 pub use downloader::{Downloader, ProgressFn};
+pub use logger::{BotLog, read_log_tail};
 pub use management::BotStore;
 pub use manifest::{BotArtifact, BotManifest, BotsIndex, current_platform_key};
-pub use provision::{BotProvisioner, ProvisionStatus, QrSession, provisioner_for};
+pub use provision::{ProvisionStatus, QrSession};
 pub use runtime::{
     BotHealth, BotRuntime, LocalArtifact, bot_env, cached_schema, describe_and_cache,
 };

@@ -8,10 +8,19 @@ import {
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { Card, CardContent } from '../ui/card';
-import { Switch } from '../ui/switch';
-import { Trash2, RefreshCw, Play, Square, Settings as SettingsIcon, Bot as BotIcon, ArrowUpCircle } from 'lucide-react';
+import {
+  ArrowUpCircle,
+  Bot as BotIcon,
+  FileText,
+  Play,
+  RefreshCw,
+  Settings as SettingsIcon,
+  Square,
+  Trash2,
+} from 'lucide-react';
 import { useToast } from '../Toast';
 import { BotFormDialog } from './BotFormDialog';
+import { BotLogDialog } from './BotLogDialog';
 
 /** 列表条目——本地制品 + 可选的已配置 BotConfig。 */
 interface BotEntry {
@@ -32,6 +41,7 @@ export function BotPanel() {
   // bot 非空 → 编辑已有配置；bot 为空 → 配置未配置的本地制品。
   const [formArtifact, setFormArtifact] = useState<LocalArtifact | null>(null);
   const [formBot, setFormBot] = useState<BotConfig | null>(null);
+  const [logBotId, setLogBotId] = useState<string | null>(null);
 
   // 检查更新中状态。
   const [checking, setChecking] = useState<Record<string, boolean>>({});
@@ -84,16 +94,6 @@ export function BotPanel() {
   useEffect(() => {
     load();
   }, []);
-
-  const handleToggleEnabled = async (bot: BotConfig, enabled: boolean) => {
-    try {
-      await api.botSetEnabled(bot.id, enabled);
-      showSuccess('状态更新', `bot 已${enabled ? '启用' : '禁用'}`);
-      load();
-    } catch (err) {
-      showError('操作失败', String(err));
-    }
-  };
 
   const handleCheckUpdate = async (bot: BotConfig) => {
     setChecking((prev) => ({ ...prev, [bot.id]: true }));
@@ -185,10 +185,10 @@ export function BotPanel() {
             const isRunning = bot && healthMap[bot.id] === 'running';
             return (
               <Card key={entry.local.id}>
-                <CardContent className="flex items-center gap-3 py-3">
+                <CardContent className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2 py-3 sm:grid-cols-[auto_minmax(0,1fr)_auto]">
                   <BotIcon className="w-5 h-5 text-muted-foreground shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium truncate">{entry.local.id}</span>
                       <Badge variant="outline">{entry.local.artifact_id}</Badge>
                       {entry.local.version && (
@@ -200,7 +200,7 @@ export function BotPanel() {
                       {bot ? `创建于 ${bot.created_at}` : '本地制品，尚未配置'}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="col-span-2 flex shrink-0 items-center justify-end gap-1 sm:col-span-1">
                     {/* 未配置 → 配置按钮 */}
                     {!bot && (
                       <Button
@@ -213,26 +213,30 @@ export function BotPanel() {
                         配置
                       </Button>
                     )}
-                    {/* 已配置 → 启停 + 检查更新 + 开关 + 删除 */}
+                    {/* 已配置 → 启停 + 检查更新 + 配置 + 删除 */}
                     {bot && (
                       <>
                         {isRunning ? (
                           <Button
-                            size="sm"
+                            size="icon"
                             variant="ghost"
+                            className="h-5 w-5 rounded-none p-0 text-red-500 hover:bg-transparent hover:text-red-400"
                             onClick={() => handleStop(bot)}
                             title="停止"
+                            aria-label="停止并取消自动运行"
                           >
-                            <Square className="w-4 h-4" />
+                            <Square className="!h-5 !w-5 fill-current" />
                           </Button>
                         ) : (
                           <Button
-                            size="sm"
+                            size="icon"
                             variant="ghost"
+                            className="h-5 w-5 rounded-none p-0 text-emerald-500 hover:bg-transparent hover:text-emerald-400"
                             onClick={() => handleStart(bot)}
                             title="启动"
+                            aria-label="启动并设为自动运行"
                           >
-                            <Play className="w-4 h-4" />
+                            <Play className="!h-5 !w-5 fill-current" />
                           </Button>
                         )}
                         <Button
@@ -244,10 +248,15 @@ export function BotPanel() {
                         >
                           <ArrowUpCircle className="w-4 h-4" />
                         </Button>
-                        <Switch
-                          checked={bot.enabled}
-                          onCheckedChange={(c) => handleToggleEnabled(bot, c)}
-                        />
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setLogBotId(bot.id)}
+                          title="查看日志"
+                          aria-label={`查看 ${bot.id} 日志`}
+                        >
+                          <FileText className="w-4 h-4" />
+                        </Button>
                         <Button
                           size="sm"
                           variant="ghost"
@@ -288,6 +297,8 @@ export function BotPanel() {
           onSaved={load}
         />
       )}
+
+      {logBotId && <BotLogDialog botId={logBotId} onClose={() => setLogBotId(null)} />}
     </div>
   );
 }

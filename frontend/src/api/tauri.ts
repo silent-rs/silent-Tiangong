@@ -416,6 +416,24 @@ export interface LocalArtifact {
   config_schema: ConfigFieldSchema[];
 }
 
+export interface QrSession {
+  qr_url: string;
+  expires_at: number;
+  interval: number;
+  state: unknown;
+}
+
+export interface BotLog {
+  content: string;
+  truncated: boolean;
+}
+
+export type ProvisionStatus =
+  | { status: 'pending'; retry_after?: number }
+  | { status: 'success' }
+  | { status: 'expired' }
+  | { status: 'error'; message: string };
+
 export type BotHealth =
   | 'running'
   | 'stopped'
@@ -813,8 +831,17 @@ export const api = {
   botHealth: (id: string): Promise<BotHealth> =>
     invoke('bot_health', { id }),
 
+  botLog: (id: string): Promise<BotLog> =>
+    invoke('bot_log', { id }),
+
   botConfigSchema: (artifactId: string, botId?: string): Promise<ConfigFieldSchema[]> =>
     invoke('bot_config_schema', { artifactId, botId: botId ?? null }),
+
+  botProvisionBegin: (botId: string): Promise<QrSession> =>
+    invoke('bot_provision_begin', { botId }),
+
+  botProvisionPoll: (botId: string, session: QrSession): Promise<ProvisionStatus> =>
+    invoke('bot_provision_poll', { botId, session }),
 
   botAvailable: (): Promise<BotsIndex> =>
     invoke('bot_available'),
@@ -830,9 +857,6 @@ export const api = {
 
   botRemove: (id: string): Promise<string> =>
     invoke('bot_remove', { id }),
-
-  botSetEnabled: (id: string, enabled: boolean): Promise<BotConfig> =>
-    invoke('bot_set_enabled', { id, enabled }),
 
   botInstall: (artifactId: string, destBotId: string): Promise<string> =>
     invoke('bot_install', { artifactId, destBotId }),

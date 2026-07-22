@@ -6,7 +6,8 @@
 //! - 内存只保留最近 [`ERROR_SUMMARY_BYTES`] 的 stderr 摘要供健康状态展示。
 //! - 写日志失败不导致 bot 退出，仅在主程序 `tracing::warn` 中报告。
 
-use std::io::Write;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,6 +21,48 @@ const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// 保留的轮转文件数量（不含当前 bot.log）。
 const LOG_KEEP_ROTATED: usize = 3;
+
+/// 桌面端单次查看日志时最多返回的字节数。
+const LOG_VIEW_BYTES: u64 = 256 * 1024;
+
+/// 桌面端展示的 bot 日志内容。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BotLog {
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// 读取当前 bot.log 的最近内容。日志不存在时返回空内容。
+pub fn read_log_tail(id: &str) -> std::io::Result<BotLog> {
+    let path = crate::paths::bot_log_path(id);
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BotLog {
+                content: String::new(),
+                truncated: false,
+            });
+        }
+        Err(err) => return Err(err),
+    };
+
+    let len = file.metadata()?.len();
+    let truncated = len > LOG_VIEW_BYTES;
+    if truncated {
+        file.seek(SeekFrom::Start(len - LOG_VIEW_BYTES))?;
+    }
+
+    let mut bytes = Vec::with_capacity(len.min(LOG_VIEW_BYTES) as usize);
+    file.read_to_end(&mut bytes)?;
+    if truncated && let Some(line_end) = bytes.iter().position(|byte| *byte == b'\n') {
+        bytes.drain(..=line_end);
+    }
+
+    Ok(BotLog {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    })
+}
 
 /// 日志来源标签。
 #[derive(Clone, Copy)]

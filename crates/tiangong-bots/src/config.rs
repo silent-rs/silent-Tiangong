@@ -3,9 +3,9 @@
 //! 主程序不感知具体平台：所有 bot 用 `artifact_id`（制品 id 字符串，如
 //! `"feishu"`）标识，加新平台只需发新 bot 制品 + 更新 bots-index.json。
 //!
-//! [`FieldType::Barcode`] 是通用扫码能力：任何 bot 可声明某个字段为 barcode
-//! 类型，前端统一渲染二维码 + 轮询完成状态 + 回填凭证（首期按 Secret 走通，
-//! 扫码渲染与协议由 [`crate::provision`] 提供，后续迭代补齐）。
+//! [`FieldType::Barcode`] 是通用扫码能力：任何 bot 可声明一个 barcode
+//! 类型的操作入口，前端统一渲染二维码和轮询状态；扫码所得配置由 bot
+//! 自行处理，主程序不读取。
 
 use std::collections::BTreeMap;
 
@@ -14,8 +14,8 @@ use serde_json::Value;
 
 /// 配置字段类型。
 ///
-/// [`FieldType::Barcode`] 声明该字段需要通过扫码授权获取（如飞书的
-/// app_id/app_secret），前端渲染二维码并轮询 [`crate::provision`] 状态。
+/// [`FieldType::Barcode`] 声明 bot 支持扫码配置，前端渲染二维码并轮询
+/// [`crate::provision`] 状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FieldType {
@@ -25,7 +25,7 @@ pub enum FieldType {
     Secret,
     /// 布尔开关。
     Boolean,
-    /// 扫码字段（通用扫码能力，首期前端按 Secret 输入框回退）。
+    /// 扫码配置入口（不作为普通配置值保存）。
     Barcode,
     /// 下拉选择。
     Select { options: Vec<String> },

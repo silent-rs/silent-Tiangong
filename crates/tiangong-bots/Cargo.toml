@@ -24,7 +24,6 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 scru128 = { workspace = true }
 chrono = { workspace = true }
-async-trait = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
 semver = { workspace = true }

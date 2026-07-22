@@ -5,7 +5,7 @@
 //!
 //! **加字段时只需修改本文件 + 对应 main.rs 的环境变量读取**，主程序零改动。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// `--describe` 输出的完整 schema JSON。
 pub fn describe_output() -> Value {
@@ -14,19 +14,27 @@ pub fn describe_output() -> Value {
         "artifact_id": "feishu",
         "config_schema": [
             {
+                "key": "provision",
+                "label": "飞书扫码授权",
+                "field_type": { "kind": "barcode" },
+                "required": false,
+                "help": "扫码所得凭证由飞书 bot 自行保存"
+            },
+            {
                 "key": "app_id",
                 "label": "App ID",
-                "field_type": { "kind": "barcode" },
-                "required": true,
+                "field_type": { "kind": "secret" },
+                "required": false,
                 "env": "TIANGONG_BOT_FEISHU_APP_ID",
-                "help": "飞书应用凭证，可通过扫码创建应用自动获取"
+                "help": "可选，仅用于手工配置已有飞书应用"
             },
             {
                 "key": "app_secret",
                 "label": "App Secret",
-                "field_type": { "kind": "barcode" },
-                "required": true,
-                "env": "TIANGONG_BOT_FEISHU_APP_SECRET"
+                "field_type": { "kind": "secret" },
+                "required": false,
+                "env": "TIANGONG_BOT_FEISHU_APP_SECRET",
+                "help": "可选，仅用于手工配置已有飞书应用"
             }
         ]
     })

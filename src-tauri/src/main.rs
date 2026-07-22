@@ -523,11 +523,10 @@ fn run_gui() {
                         "TIANGONG_URL".into(),
                         format!("http://{host}:{}", server_config.port),
                     );
-                    if let Some(ref token) = server_config.auth_token {
-                        if !token.is_empty() {
-                            extra_env.insert("TIANGONG_TOKEN".into(), token.clone());
-                        }
-                    }
+                    extra_env.insert(
+                        "TIANGONG_TOKEN".into(),
+                        server_config.auth_token.clone().unwrap_or_default(),
+                    );
                     bot_runtime.start_enabled(&extra_env).await;
                 });
             }
@@ -645,13 +644,15 @@ fn run_gui() {
             tiangong_app::commands::webhook_list_runs,
             tiangong_app::commands::bot_list,
             tiangong_app::commands::bot_health,
+            tiangong_app::commands::bot_log,
             tiangong_app::commands::bot_config_schema,
+            tiangong_app::commands::bot_provision_begin,
+            tiangong_app::commands::bot_provision_poll,
             tiangong_app::commands::bot_available,
             tiangong_app::commands::bot_scan_local,
             tiangong_app::commands::bot_register,
             tiangong_app::commands::bot_update,
             tiangong_app::commands::bot_remove,
-            tiangong_app::commands::bot_set_enabled,
             tiangong_app::commands::bot_install,
             tiangong_app::commands::bot_start,
             tiangong_app::commands::bot_stop,

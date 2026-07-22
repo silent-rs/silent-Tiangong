@@ -6,7 +6,7 @@
 
 - bot 是**独立进程**，不是主程序的编译期依赖（主程序不引入各平台 SDK）。
 - bot 通过 HTTP 与天工通信：收到 IM 消息后 POST 到天工本地 embedded server 的 `/api/v1/messages`。
-- 凭证由主程序通过环境变量注入（spawn 时传入）。
+- 平台凭证可由 bot 的扫码流程自行保存；手工配置的凭证仍可由主程序通过环境变量注入。
 - 主程序负责：制品下载（SHA256 校验）→ spawn → 崩溃重启 → 日志捕获。
 
 ## 目录结构
@@ -21,7 +21,7 @@ bots/
 ## 新增一个 bot
 
 1. 在 `bots/` 下新建目录，Cargo.toml 声明 `[[bin]]` + 空 `[workspace]` 表（避免被主 workspace 收编）。
-2. 实现消息接收逻辑，把 IM 消息 POST 到 `TIANGONG_URL/api/v1/messages`（凭证从环境变量读）。
+2. 实现消息接收逻辑，把 IM 消息 POST 到 `TIANGONG_URL/api/v1/messages`。
 3. 处理 SIGTERM/SIGINT 优雅退出（主程序 stop 时发送）。
 4. 日志输出到 stderr（主程序捕获 tail 用于诊断）。
 5. 在 `crates/tiangong-bots/src/config.rs` 的 `BotType` 枚举追加变体 + `config_schema()`。
@@ -44,11 +44,11 @@ GitHub Release 作为产物归档（人可查、CI 可用）。格式见 `crates
 
 ## 凭证注入约定
 
-主程序 spawn bot 时按 `BotType` 注入对应环境变量：
+主程序 spawn bot 时按 schema 注入手工配置的环境变量，并始终自动注入天工连接信息：
 
 | 平台   | 环境变量                                                                 |
 | ------ | ------------------------------------------------------------------------ |
-| feishu | `TIANGONG_BOT_FEISHU_APP_ID` / `TIANGONG_BOT_FEISHU_APP_SECRET`          |
+| feishu | `TIANGONG_BOT_FEISHU_APP_ID` / `TIANGONG_BOT_FEISHU_APP_SECRET`（仅手工配置） |
 | 通用   | `TIANGONG_URL`（embedded server 地址）/ `TIANGONG_TOKEN`（认证 token）   |
 
 约定见 `crates/tiangong-bots/src/runtime.rs::bot_env`。

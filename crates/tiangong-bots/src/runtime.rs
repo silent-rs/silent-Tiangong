@@ -151,6 +151,20 @@ impl BotRuntime {
         self.downloader.fetch_index().await
     }
 
+    /// 调用指定 bot 制品创建扫码配置会话。
+    pub async fn provision_begin(&self, bot_id: &str) -> Result<crate::QrSession> {
+        crate::provision::begin(&paths::bot_artifact_path(bot_id)).await
+    }
+
+    /// 调用指定 bot 制品轮询扫码配置状态。
+    pub async fn provision_poll(
+        &self,
+        bot_id: &str,
+        session: &crate::QrSession,
+    ) -> Result<crate::ProvisionStatus> {
+        crate::provision::poll(&paths::bot_artifact_path(bot_id), session).await
+    }
+
     /// 启动指定 bot 实例（需制品已安装）。
     ///
     /// 启动时按缓存的 schema（`bot --describe` 上报）校验必填字段，

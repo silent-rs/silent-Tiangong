@@ -2657,6 +2657,18 @@ pub async fn bot_health(
     Ok(state.bot_runtime.health(&id).await)
 }
 
+/// 获取指定 bot 当前日志文件的最近内容。
+#[tauri::command]
+pub async fn bot_log(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotLog, String> {
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    tiangong_bots::read_log_tail(&id).map_err(|err| format!("读取 bot 日志失败：{err}"))
+}
+
 /// 获取 bot 的配置字段 schema（供前端动态渲染表单）。
 ///
 /// schema 权威来源是 bot 二进制 `--describe` 上报（缓存在 ~/.tiangong/bots/<id>/schema.json）。
@@ -2691,6 +2703,33 @@ pub async fn bot_config_schema(
         }
         Err(e) => Err(format!("获取 schema 失败（线上不可达且本地无匹配）：{e}")),
     }
+}
+
+/// 为支持扫码配置的 bot 创建授权会话。
+#[tauri::command]
+pub async fn bot_provision_begin(
+    bot_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::QrSession, String> {
+    state
+        .bot_runtime
+        .provision_begin(&bot_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 轮询 bot 扫码授权状态。
+#[tauri::command]
+pub async fn bot_provision_poll(
+    bot_id: String,
+    session: tiangong_bots::QrSession,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::ProvisionStatus, String> {
+    state
+        .bot_runtime
+        .provision_poll(&bot_id, &session)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// 拉取远端 bots-index.json（可安装的 bot 列表）。
@@ -2751,19 +2790,6 @@ pub async fn bot_remove(id: String, state: State<'_, TiangongApp>) -> Result<Str
     let _ = state.bot_runtime.stop(&id).await;
     state.bot_store.remove(&id).map_err(|e| e.to_string())?;
     Ok("bot 已删除".to_string())
-}
-
-/// 切换 bot 启用状态
-#[tauri::command]
-pub async fn bot_set_enabled(
-    id: String,
-    enabled: bool,
-    state: State<'_, TiangongApp>,
-) -> Result<tiangong_bots::BotConfig, String> {
-    state
-        .bot_store
-        .set_enabled(&id, enabled)
-        .map_err(|e| e.to_string())
 }
 
 /// 下载某制品到指定 bot 实例目录
@@ -2844,16 +2870,19 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
         "TIANGONG_URL".into(),
         format!("http://{host}:{}", server_config.port),
     );
-    if let Some(ref token) = server_config.auth_token {
-        if !token.is_empty() {
-            extra_env.insert("TIANGONG_TOKEN".into(), token.clone());
-        }
-    }
+    extra_env.insert(
+        "TIANGONG_TOKEN".into(),
+        server_config.auth_token.clone().unwrap_or_default(),
+    );
 
     state
         .bot_runtime
         .start(&bot, &extra_env)
         .await
+        .map_err(|e| e.to_string())?;
+    state
+        .bot_store
+        .set_enabled(&id, true)
         .map_err(|e| e.to_string())?;
     Ok(format!("bot 已启动：{}", bot.id))
 }
@@ -2865,6 +2894,10 @@ pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<Strin
         .bot_runtime
         .stop(&id)
         .await
+        .map_err(|e| e.to_string())?;
+    state
+        .bot_store
+        .set_enabled(&id, false)
         .map_err(|e| e.to_string())?;
     Ok("bot 已停止".to_string())
 }

@@ -20,6 +20,7 @@ use tokio::signal;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
+mod provision;
 mod schema;
 
 // ── 数据结构 ──────────────────────────────────────────────────
@@ -162,12 +163,26 @@ struct MediaAsset {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // --describe：输出 config schema 到 stdout 后退出（主程序据此渲染表单、
-    // 校验必填、注入环境变量）。需在任何初始化前处理。
-    if std::env::args().any(|a| a == "--describe") {
-        let output = schema::describe_output();
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
+    // 管理命令必须在日志和常驻运行初始化前处理，stdout 只输出协议 JSON。
+    match std::env::args().nth(1).as_deref() {
+        Some("--describe") => {
+            println!("{}", serde_json::to_string(&schema::describe_output())?);
+            return Ok(());
+        }
+        Some("--provision-begin") => {
+            install_rustls_provider()?;
+            println!("{}", serde_json::to_string(&provision::begin().await?)?);
+            return Ok(());
+        }
+        Some("--provision-poll") => {
+            install_rustls_provider()?;
+            println!(
+                "{}",
+                serde_json::to_string(&provision::poll_from_stdin().await?)?
+            );
+            return Ok(());
+        }
+        _ => {}
     }
 
     // 初始化日志（输出到 stderr，主程序捕获 tail）
@@ -177,14 +192,11 @@ async fn main() -> Result<()> {
         .init();
 
     // 安装 rustls 加密后端
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|e| anyhow!("安装 rustls provider 失败: {e:?}"))?;
+    install_rustls_provider()?;
 
-    let app_id = std::env::var("TIANGONG_BOT_FEISHU_APP_ID")
-        .context("缺少环境变量 TIANGONG_BOT_FEISHU_APP_ID")?;
-    let app_secret = std::env::var("TIANGONG_BOT_FEISHU_APP_SECRET")
-        .context("缺少环境变量 TIANGONG_BOT_FEISHU_APP_SECRET")?;
+    let credentials = provision::load_credentials()?;
+    let app_id = credentials.app_id;
+    let app_secret = credentials.app_secret;
     let tiangong_url = std::env::var("TIANGONG_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     let tiangong_token = std::env::var("TIANGONG_TOKEN")
@@ -254,6 +266,12 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn install_rustls_provider() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|e| anyhow!("安装 rustls provider 失败: {e:?}"))
 }
 
 // ── 事件处理器 ────────────────────────────────────────────────
