@@ -98,14 +98,14 @@ impl BotRuntime {
             entries.remove(&config.id);
         }
         if entries.contains_key(&config.id) {
-            return Err(anyhow!("bot 已在运行：{}", config.name));
+            return Err(anyhow!("bot 已在运行：{}", config.id));
         }
 
         let artifact = paths::bot_artifact_path(&config.id);
         if !artifact.exists() {
             return Err(anyhow!(
                 "bot 制品未安装，请先安装：{}（{}）",
-                config.name,
+                config.id,
                 artifact.display()
             ));
         }
@@ -173,10 +173,10 @@ impl BotRuntime {
         for bot in bots.iter().filter(|b| b.enabled) {
             if paths::bot_artifact_path(&bot.id).exists() {
                 if let Err(err) = self.start(bot).await {
-                    tracing::warn!("启动 bot {} 失败：{err}", bot.name);
+                    tracing::warn!("启动 bot {} 失败：{err}", bot.id);
                 }
             } else {
-                tracing::info!("bot {} 已启用但制品未安装，跳过自动启动", bot.name);
+                tracing::info!("bot {} 已启用但制品未安装，跳过自动启动", bot.id);
             }
         }
     }
@@ -315,8 +315,7 @@ mod tests {
             serde_json::json!("http://127.0.0.1:9090"),
         );
         BotConfig {
-            id: "bot_1".into(),
-            name: "test".into(),
+            id: "test".into(),
             artifact_id: "feishu".into(),
             enabled: true,
             config,
@@ -348,8 +347,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("app_id".into(), serde_json::json!("cli_test"));
         let bot = BotConfig {
-            id: "bot_2".into(),
-            name: "partial".into(),
+            id: "partial".into(),
             artifact_id: "feishu".into(),
             enabled: false,
             config,
@@ -377,8 +375,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("display_only".into(), serde_json::json!("value"));
         let bot = BotConfig {
-            id: "bot_3".into(),
-            name: "t".into(),
+            id: "t".into(),
             artifact_id: "feishu".into(),
             enabled: false,
             config,

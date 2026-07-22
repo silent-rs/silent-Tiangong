@@ -2792,7 +2792,7 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
         .start(&bot)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(format!("bot 已启动：{}", bot.name))
+    Ok(format!("bot 已启动：{}", bot.id))
 }
 
 /// 停止指定 bot 实例

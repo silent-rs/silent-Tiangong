@@ -57,10 +57,8 @@ pub struct ConfigFieldSchema {
 /// 单个 bot 实例的配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotConfig {
-    /// bot 实例 id（scru128）。
+    /// bot 实例名称（同时作为主键和目录名，如 `"feishu"`）。
     pub id: String,
-    /// 用户自定义名称。
-    pub name: String,
     /// 制品 id（标识 bot 平台，如 `"feishu"`，来自 bots-index.json 的 manifest）。
     pub artifact_id: String,
     /// 是否启用（启用的 bot 在主程序启动时自动拉起）。
@@ -76,11 +74,6 @@ pub struct BotConfig {
 }
 
 impl BotConfig {
-    /// 生成新 id。
-    pub fn new_id() -> String {
-        scru128::new().to_string()
-    }
-
     /// 从 config map 读取字符串字段。
     pub fn config_string(&self, key: &str) -> Option<String> {
         self.config
@@ -99,9 +92,11 @@ pub struct BotsConfig {
 }
 
 /// 注册 bot 的请求参数（前端表单提交）。
+/// 注册 bot 的请求参数（前端表单提交）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegisterBotRequest {
-    pub name: String,
+    /// bot 实例名称（同时作为主键和目录名）。
+    pub id: String,
     /// 制品 id（标识 bot 平台）。
     pub artifact_id: String,
     #[serde(default)]
@@ -110,10 +105,9 @@ pub struct RegisterBotRequest {
     pub enabled: bool,
 }
 
-/// 更新 bot 的请求参数（id 主键不变，就地更新其余字段）。
+/// 更新 bot 的请求参数（id 主键不变，就地更新配置）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBotRequest {
-    pub name: String,
     #[serde(default)]
     pub config: BTreeMap<String, Value>,
 }

@@ -371,7 +371,6 @@ export interface ConfigFieldSchema {
 
 export interface BotConfig {
   id: string;
-  name: string;
   artifact_id: string;
   enabled: boolean;
   config: Record<string, unknown>;
@@ -380,14 +379,13 @@ export interface BotConfig {
 }
 
 export interface RegisterBotRequest {
-  name: string;
+  id: string;
   artifact_id: string;
   config?: Record<string, unknown>;
   enabled?: boolean;
 }
 
 export interface UpdateBotRequest {
-  name: string;
   config?: Record<string, unknown>;
 }
 

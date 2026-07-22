@@ -68,75 +68,58 @@ impl BotStore {
 
     /// 注册新 bot。
     ///
+    /// id（= 名称）作为主键，同时决定运行时目录 `~/.tiangong/bots/<id>/`。
     /// 注意：此处不做 config 字段校验——schema 由 bot 二进制运行时上报
     /// （见 [`crate::runtime`] 的 describe 协议），注册时未必已安装制品。
     /// 必填字段校验在 [`crate::runtime::BotRuntime::start`] 启动时进行。
     pub fn register(&self, request: RegisterBotRequest) -> Result<BotConfig> {
-        let name = request.name.trim().to_string();
-        if name.is_empty() {
+        let id = request.id.trim().to_string();
+        if id.is_empty() {
             return Err(anyhow!("bot 名称不能为空"));
         }
 
         let mut next = self.snapshot();
+        if next.bots.iter().any(|b| b.id == id) {
+            return Err(anyhow!("bot 已存在：{id}"));
+        }
         let now = chrono::Local::now().naive_local().to_string();
         let bot = BotConfig {
-            id: BotConfig::new_id(),
-            name,
+            id: id.clone(),
             artifact_id: request.artifact_id,
             enabled: request.enabled,
             config: request.config,
             created_at: now.clone(),
             updated_at: now,
         };
-
-        if next.bots.iter().any(|b| b.name == bot.name) {
-            return Err(anyhow!("bot 已存在：{}", bot.name));
-        }
-        let bot_id = bot.id.clone();
-        let bot_name = bot.name.clone();
         next.bots.push(bot);
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.register",
-            &bot_id,
-            &format!("bot 已注册：{bot_name}"),
+            &id,
+            &format!("bot 已注册：{id}"),
             true,
         ));
-        // apply 成功后重新读取返回完整 bot（含持久化后的状态）。
-        self.get(&bot_id).context("刚注册的 bot 丢失，数据不一致")
+        self.get(&id).context("刚注册的 bot 丢失，数据不一致")
     }
 
-    /// 更新已有 bot（id 主键不变，就地更新 name/config）。
+    /// 更新已有 bot（id 主键不变，就地更新 config）。
     pub fn update(&self, id: &str, request: UpdateBotRequest) -> Result<BotConfig> {
-        let name = request.name.trim().to_string();
-        if name.is_empty() {
-            return Err(anyhow!("bot 名称不能为空"));
-        }
-
         let mut next = self.snapshot();
 
-        // 先定位索引，避免与后续可变借用交叉。
         let idx = next
             .bots
             .iter()
             .position(|b| b.id == id)
             .ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
 
-        // 名称唯一性校验（排除自身）。
-        if next.bots.iter().any(|b| b.id != id && b.name == name) {
-            return Err(anyhow!("bot 名称已存在：{name}"));
-        }
-
         let bot = &mut next.bots[idx];
-        bot.name = name;
         bot.config = request.config;
         bot.updated_at = chrono::Local::now().naive_local().to_string();
-        let bot_name = bot.name.clone();
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.update",
             id,
-            &format!("bot 已更新：{bot_name}"),
+            &format!("bot 已更新：{id}"),
             true,
         ));
         self.get(id).context("刚更新的 bot 丢失，数据不一致")
@@ -165,7 +148,7 @@ impl BotStore {
             .ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
         bot.enabled = enabled;
         bot.updated_at = chrono::Local::now().naive_local().to_string();
-        let bot_name = bot.name.clone();
+        let bot_name = bot.id.clone();
         self.apply(next)?;
         append_audit_log(&AuditEntry::new(
             "bots.toggle",
@@ -246,22 +229,22 @@ mod tests {
     fn register_and_get() {
         let (_dir, store) = test_store();
         let req = RegisterBotRequest {
-            name: "我的飞书".into(),
+            id: "我的飞书".into(),
             artifact_id: "feishu".into(),
             config: feishu_config("cli_x", "secret"),
             enabled: true,
         };
         let bot = store.register(req).unwrap();
-        assert_eq!(bot.name, "我的飞书");
+        assert_eq!(bot.id, "我的飞书");
         assert_eq!(store.list().len(), 1);
-        assert_eq!(store.get(&bot.id).unwrap().name, "我的飞书");
+        assert_eq!(store.get(&bot.id).unwrap().id, "我的飞书");
     }
 
     #[test]
-    fn duplicate_name_rejected() {
+    fn duplicate_id_rejected() {
         let (_dir, store) = test_store();
-        let req = |name: &str| RegisterBotRequest {
-            name: name.into(),
+        let req = |id: &str| RegisterBotRequest {
+            id: id.into(),
             artifact_id: "feishu".into(),
             config: feishu_config("cli_x", "secret"),
             enabled: true,
@@ -303,7 +286,7 @@ mod tests {
         let (_dir, store) = test_store();
         let bot = store
             .register(RegisterBotRequest {
-                name: "a".into(),
+                id: "a".into(),
                 artifact_id: "feishu".into(),
                 config: feishu_config("cli_x", "secret"),
                 enabled: true,
@@ -313,13 +296,11 @@ mod tests {
             .update(
                 &bot.id,
                 UpdateBotRequest {
-                    name: "b".into(),
                     config: feishu_config("cli_y", "secret2"),
                 },
             )
             .unwrap();
         assert_eq!(updated.id, bot.id);
-        assert_eq!(updated.name, "b");
         assert_eq!(updated.config_string("app_id").unwrap(), "cli_y");
     }
 
@@ -328,7 +309,7 @@ mod tests {
         let (_dir, store) = test_store();
         let bot = store
             .register(RegisterBotRequest {
-                name: "a".into(),
+                id: "a".into(),
                 artifact_id: "feishu".into(),
                 config: feishu_config("cli_x", "secret"),
                 enabled: true,
@@ -344,7 +325,7 @@ mod tests {
         let (_dir, store) = test_store();
         let bot = store
             .register(RegisterBotRequest {
-                name: "a".into(),
+                id: "a".into(),
                 artifact_id: "feishu".into(),
                 config: feishu_config("cli_x", "secret"),
                 enabled: true,
@@ -362,7 +343,7 @@ mod tests {
             let store = BotStore::with_config_path(path.clone());
             store
                 .register(RegisterBotRequest {
-                    name: "a".into(),
+                    id: "a".into(),
                     artifact_id: "feishu".into(),
                     config: feishu_config("cli_x", "secret"),
                     enabled: true,
@@ -371,6 +352,6 @@ mod tests {
         }
         let reloaded = BotStore::with_config_path(path);
         assert_eq!(reloaded.list().len(), 1);
-        assert_eq!(reloaded.list()[0].name, "a");
+        assert_eq!(reloaded.list()[0].id, "a");
     }
 }

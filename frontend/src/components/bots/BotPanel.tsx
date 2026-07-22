@@ -86,7 +86,7 @@ export function BotPanel() {
         return;
       }
       await api.botInstall(manifest.id, bot.id);
-      showSuccess('安装完成', `bot "${bot.name}" 制品已安装`);
+      showSuccess('安装完成', `bot "${bot.id}" 制品已安装`);
       load();
     } catch (err) {
       showError('安装失败', String(err));
@@ -98,7 +98,7 @@ export function BotPanel() {
   const handleStart = async (bot: BotConfig) => {
     try {
       await api.botStart(bot.id);
-      showSuccess('已启动', `bot "${bot.name}" 已启动`);
+      showSuccess('已启动', `bot "${bot.id}" 已启动`);
       load();
     } catch (err) {
       showError('启动失败', String(err));
@@ -108,7 +108,7 @@ export function BotPanel() {
   const handleStop = async (bot: BotConfig) => {
     try {
       await api.botStop(bot.id);
-      showSuccess('已停止', `bot "${bot.name}" 已停止`);
+      showSuccess('已停止', `bot "${bot.id}" 已停止`);
       load();
     } catch (err) {
       showError('停止失败', String(err));
@@ -116,10 +116,10 @@ export function BotPanel() {
   };
 
   const handleRemove = async (bot: BotConfig) => {
-    if (!confirm(`确定删除 bot "${bot.name}"？`)) return;
+    if (!confirm(`确定删除 bot "${bot.id}"？`)) return;
     try {
       await api.botRemove(bot.id);
-      showSuccess('已删除', `bot "${bot.name}" 已删除`);
+      showSuccess('已删除', `bot "${bot.id}" 已删除`);
       load();
     } catch (err) {
       showError('删除失败', String(err));
@@ -176,7 +176,7 @@ export function BotPanel() {
                 <BotIcon className="w-5 h-5 text-muted-foreground shrink-0" />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium truncate">{bot.name}</span>
+                    <span className="font-medium truncate">{bot.id}</span>
                     <Badge variant="outline">{bot.artifact_id}</Badge>
                     {healthBadge(bot.id)}
                   </div>

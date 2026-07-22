@@ -34,7 +34,7 @@ export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
   const { showSuccess, showError } = useToast();
 
   const [schema, setSchema] = useState<ConfigFieldSchema[]>([]);
-  const [name, setName] = useState(bot?.name ?? '');
+  const [id, setId] = useState(bot?.id ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [enabled, setEnabled] = useState(bot?.enabled ?? false);
   const [saving, setSaving] = useState(false);
@@ -70,7 +70,7 @@ export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
   }, [artifactId, bot]);
 
   const handleSave = async () => {
-    if (!name.trim()) {
+    if (!isEdit && !id.trim()) {
       showError('名称不能为空', '请填写 bot 名称');
       return;
     }
@@ -85,16 +85,16 @@ export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
         }
       }
       if (isEdit && bot) {
-        await api.botUpdate(bot.id, { name: name.trim(), config });
-        showSuccess('已更新', `bot "${name}" 配置已更新`);
+        await api.botUpdate(bot.id, { config });
+        showSuccess('已更新', `bot "${bot.id}" 配置已更新`);
       } else {
         const created = await api.botRegister({
-          name: name.trim(),
+          id: id.trim(),
           artifact_id: artifactId,
           config,
           enabled,
         });
-        showSuccess('已注册', `bot "${created.name}" 已注册`);
+        showSuccess('已注册', `bot "${created.id}" 已注册`);
       }
       onSaved();
       onClose();
@@ -114,12 +114,19 @@ export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
         </DialogHeader>
         <div className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label>名称</Label>
+            <Label>
+              名称
+              {!isEdit && <span className="text-destructive ml-1">*</span>}
+            </Label>
             <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如：我的飞书机器人"
+              value={id}
+              onChange={(e) => setId(e.target.value)}
+              placeholder="例如：feishu"
+              disabled={isEdit}
             />
+            {isEdit && (
+              <p className="text-xs text-muted-foreground">名称即主键，创建后不可修改</p>
+            )}
           </div>
 
           {schema.map((field) => (
@@ -148,7 +155,7 @@ export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
             <Button variant="outline" onClick={onClose}>
               取消
             </Button>
-            <Button onClick={handleSave} disabled={saving || !name.trim()}>
+            <Button onClick={handleSave} disabled={saving || (!isEdit && !id.trim())}>
               {saving ? '保存中...' : isEdit ? '更新' : '创建'}
             </Button>
           </div>
