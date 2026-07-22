@@ -2840,66 +2840,89 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
         .get(&id)
         .ok_or_else(|| format!("bot 不存在：{id}"))?;
 
-    // 确保 embedded server 已运行（bot 依赖它收发消息）。
-    let server_config = state
-        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
-        .await?;
-    if !state.is_embedded_server_running() && !server_health_check(&server_config) {
-        tracing::info!("bot 启动前自动启用 embedded server");
-        state.start_embedded_server(
-            &server_config.host,
-            server_config.port,
-            server_config.auth_token.clone(),
-        )?;
-        if let Err(err) = wait_for_server_health(&server_config) {
-            let _ = state.stop_embedded_server();
-            return Err(format!(
-                "启动 embedded server 失败（bot 无法收发消息）：{err}"
-            ));
-        }
-        // 持久化 enabled 标记，重启后自动拉起。
-        let mut config = server_config.clone();
-        config.enabled = true;
-        let _ = save_server_config_to_state(state.inner(), config).await;
-    }
-
-    // 从 ServerConfig 构造注入 bot 的环境变量（tiangong_url/tiangong_token）。
-    let host = connect_host(&server_config.host);
-    let mut extra_env = std::collections::BTreeMap::new();
-    extra_env.insert(
-        "TIANGONG_URL".into(),
-        format!("http://{host}:{}", server_config.port),
-    );
-    extra_env.insert(
-        "TIANGONG_TOKEN".into(),
-        server_config.auth_token.clone().unwrap_or_default(),
-    );
+    let server_config = ensure_server_running_for_bots(state.inner()).await?;
+    let extra_env = bot_server_env(&server_config);
 
     state
         .bot_runtime
         .start(&bot, &extra_env)
         .await
         .map_err(|e| e.to_string())?;
-    state
-        .bot_store
-        .set_enabled(&id, true)
-        .map_err(|e| e.to_string())?;
+    save_started_bot_state(state.bot_store.as_ref(), &id, || async {
+        state
+            .bot_runtime
+            .stop(&id)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await?;
     Ok(format!("bot 已启动：{}", bot.id))
 }
 
 /// 停止指定 bot 实例
 #[tauri::command]
 pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
-    state
-        .bot_runtime
-        .stop(&id)
-        .await
-        .map_err(|e| e.to_string())?;
-    state
-        .bot_store
-        .set_enabled(&id, false)
-        .map_err(|e| e.to_string())?;
+    stop_bot_with_state(state.bot_store.as_ref(), &id, || async {
+        state
+            .bot_runtime
+            .stop(&id)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await?;
     Ok("bot 已停止".to_string())
+}
+
+async fn save_started_bot_state<F, Fut>(
+    store: &tiangong_bots::BotStore,
+    id: &str,
+    rollback_stop: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    if let Err(save_error) = store.set_enabled(id, true) {
+        return match rollback_stop().await {
+            Ok(()) => Err(format!(
+                "保存自动运行状态失败，已撤销本次启动：{save_error}"
+            )),
+            Err(stop_error) => Err(format!(
+                "保存自动运行状态失败，且 bot 未能停止；请立即检查运行状态：保存错误={save_error}，停止错误={stop_error}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+async fn stop_bot_with_state<F, Fut>(
+    store: &tiangong_bots::BotStore,
+    id: &str,
+    stop: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let original = store.get(id).ok_or_else(|| format!("bot 不存在：{id}"))?;
+    store
+        .set_enabled(id, false)
+        .map_err(|error| format!("取消自动运行失败，bot 未停止：{error}"))?;
+
+    if let Err(stop_error) = stop().await {
+        if !original.enabled {
+            return Err(format!("停止 bot 失败，自动运行状态仍为关闭：{stop_error}"));
+        }
+        return match store.set_enabled(id, true) {
+            Ok(_) => Err(format!(
+                "停止 bot 失败，已恢复自动运行状态：{stop_error}"
+            )),
+            Err(restore_error) => Err(format!(
+                "停止 bot 失败，且自动运行状态恢复失败；请立即检查运行状态：停止错误={stop_error}，恢复错误={restore_error}"
+            )),
+        };
+    }
+    Ok(())
 }
 
 /// 检查某制品是否有线上更新。
@@ -2932,6 +2955,15 @@ pub async fn bot_upgrade(
         .get(&bot_id)
         .ok_or_else(|| format!("bot 不存在：{bot_id}"))?;
     let artifact_id = bot.artifact_id.clone();
+    let was_running = state.bot_runtime.is_running(&bot_id).await;
+    let restart_env = if was_running {
+        let server_config = state
+            .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+            .await?;
+        Some(bot_server_env(&server_config))
+    } else {
+        None
+    };
 
     // 拉取线上 manifest。
     let manifest = state
@@ -2951,10 +2983,54 @@ pub async fn bot_upgrade(
         }
     });
     state
+        .bot_store
+        .set_enabled(&bot_id, false)
+        .map_err(|error| format!("升级前取消自动运行失败，未开始升级：{error}"))?;
+
+    let upgrade_result = state
         .bot_runtime
         .upgrade(&bot_id, manifest, Some(progress))
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+    if let Err(upgrade_error) = upgrade_result {
+        let mut recovery = Vec::new();
+        let is_running = state.bot_runtime.is_running(&bot_id).await;
+        if was_running && !is_running {
+            match state
+                .bot_runtime
+                .start(
+                    &bot,
+                    restart_env
+                        .as_ref()
+                        .expect("运行中的 bot 必须准备恢复环境变量"),
+                )
+                .await
+            {
+                Ok(()) => recovery.push("原运行状态已恢复".to_string()),
+                Err(error) => recovery.push(format!("恢复运行失败：{error}")),
+            }
+        } else if !was_running && is_running {
+            match state.bot_runtime.stop(&bot_id).await {
+                Ok(()) => recovery.push("原停止状态已恢复".to_string()),
+                Err(error) => recovery.push(format!("恢复停止状态失败：{error}")),
+            }
+        } else {
+            recovery.push("运行状态无需恢复".to_string());
+        }
+
+        if bot.enabled {
+            match state.bot_store.set_enabled(&bot_id, true) {
+                Ok(_) => recovery.push("自动运行状态已恢复".to_string()),
+                Err(error) => recovery.push(format!("恢复自动运行状态失败：{error}")),
+            }
+        } else {
+            recovery.push("自动运行状态仍为关闭".to_string());
+        }
+
+        return Err(format!(
+            "升级失败：{upgrade_error}；恢复结果：{}",
+            recovery.join("；")
+        ));
+    }
     Ok("升级完成，请重新启动 bot".to_string())
 }
 
@@ -3171,7 +3247,7 @@ pub async fn start_server(state: State<'_, TiangongApp>) -> Result<String, Strin
     state.start_embedded_server(&config.host, config.port, config.auth_token.clone())?;
 
     // 等待健康检查通过
-    if let Err(err) = wait_for_server_health(&config) {
+    if let Err(err) = wait_for_server_health(&config).await {
         let _ = state.stop_embedded_server();
         return Err(err);
     }
@@ -3245,6 +3321,61 @@ async fn save_server_config_to_state(
         .await
 }
 
+pub async fn ensure_server_running_for_bots(
+    state: &TiangongApp,
+) -> Result<tiangong_server::config::ServerConfig, String> {
+    let mut config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
+    if server_health_check(&config) {
+        return Ok(config);
+    }
+
+    let started_here = if state.is_embedded_server_running() {
+        false
+    } else {
+        tracing::info!("bot 启动前自动启用 embedded server");
+        state.start_embedded_server(&config.host, config.port, config.auth_token.clone())?;
+        true
+    };
+
+    if let Err(error) = wait_for_server_health(&config).await {
+        if started_here {
+            let _ = state.stop_embedded_server();
+        }
+        return Err(format!(
+            "启动 embedded server 失败（bot 无法收发消息）：{error}"
+        ));
+    }
+
+    if !config.enabled {
+        config.enabled = true;
+        if let Err(error) = save_server_config_to_state(state, config.clone()).await {
+            if started_here {
+                let _ = state.stop_embedded_server();
+            }
+            return Err(format!("保存 Server 自动运行状态失败：{error}"));
+        }
+    }
+    Ok(config)
+}
+
+pub fn bot_server_env(
+    config: &tiangong_server::config::ServerConfig,
+) -> std::collections::BTreeMap<String, String> {
+    let host = connect_host(&config.host);
+    let mut extra_env = std::collections::BTreeMap::new();
+    extra_env.insert(
+        "TIANGONG_URL".into(),
+        format!("http://{host}:{}", config.port),
+    );
+    extra_env.insert(
+        "TIANGONG_TOKEN".into(),
+        config.auth_token.clone().unwrap_or_default(),
+    );
+    extra_env
+}
+
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
 pub fn is_server_running(config: &tiangong_server::config::ServerConfig) -> bool {
     if server_health_check(config) {
@@ -3301,12 +3432,14 @@ fn cleanup_dead_server_pid() {
     }
 }
 
-fn wait_for_server_health(config: &tiangong_server::config::ServerConfig) -> Result<(), String> {
+async fn wait_for_server_health(
+    config: &tiangong_server::config::ServerConfig,
+) -> Result<(), String> {
     for _ in 0..30 {
         if server_health_check(config) {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Err("Server 已启动但健康检查未通过".to_string())
 }
@@ -3964,7 +4097,7 @@ mod tests {
 
     use super::{
         cancel_after_session_send_boundary, done_event_keeps_turn_running,
-        merge_agent_worker_messages,
+        merge_agent_worker_messages, save_started_bot_state, stop_bot_with_state,
     };
 
     #[tokio::test]
@@ -4080,6 +4213,61 @@ mod tests {
                 && message.text_content() == "tester"
         }));
         assert!(workers.iter().any(|message| message.id == "next"));
+    }
+
+    fn bot_store(enabled: bool) -> (tempfile::TempDir, tiangong_bots::BotStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config").join("bots.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let config = tiangong_bots::BotsConfig {
+            bots: vec![tiangong_bots::BotConfig {
+                id: "feishu".into(),
+                artifact_id: "feishu".into(),
+                config: std::collections::BTreeMap::new(),
+                enabled,
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            }],
+        };
+        std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+        let store = tiangong_bots::BotStore::with_config_path(config_path);
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn failed_start_state_write_triggers_stop_rollback() {
+        let (dir, store) = bot_store(false);
+        let config_dir = dir.path().join("config");
+        std::fs::remove_file(config_dir.join("bots.json")).unwrap();
+        std::fs::remove_dir(&config_dir).unwrap();
+        std::fs::write(&config_dir, b"blocks directory creation").unwrap();
+        let rollback_called = Arc::new(AtomicBool::new(false));
+        let rollback_called_in_task = rollback_called.clone();
+
+        let error = save_started_bot_state(&store, "feishu", || async move {
+            rollback_called_in_task.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("已撤销本次启动"));
+        assert!(rollback_called.load(Ordering::Acquire));
+        assert!(!store.get("feishu").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_restores_original_enabled_state() {
+        let (_dir, store) = bot_store(true);
+
+        let error = stop_bot_with_state(&store, "feishu", || async {
+            Err("simulated stop failure".to_string())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("已恢复自动运行状态"));
+        assert!(store.get("feishu").unwrap().enabled);
     }
 }
 

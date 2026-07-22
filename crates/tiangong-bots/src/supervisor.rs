@@ -39,13 +39,14 @@ impl SupervisedBot {
     }
 
     /// 请求停止并等待监督循环退出。
-    pub async fn stop(mut self) {
+    pub async fn stop(mut self) -> Result<()> {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
         if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
+            handle.await.context("等待 bot 监督任务停止失败")?;
         }
+        Ok(())
     }
 
     /// 监督任务是否已经结束（bot 退出且未重启，或被 stop）。

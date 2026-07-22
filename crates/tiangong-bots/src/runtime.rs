@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -52,6 +53,53 @@ struct RuntimeEntry {
     supervised: SupervisedBot,
 }
 
+#[derive(Clone)]
+struct ArtifactFiles {
+    artifact: PathBuf,
+    schema: PathBuf,
+    version: PathBuf,
+}
+
+impl ArtifactFiles {
+    fn for_bot(id: &str) -> Self {
+        Self {
+            artifact: paths::bot_artifact_path(id),
+            schema: paths::bot_schema_path(id),
+            version: paths::bot_version_path(id),
+        }
+    }
+
+    fn transaction_files(&self, purpose: &str, transaction_id: &str) -> Self {
+        Self {
+            artifact: transaction_path(&self.artifact, purpose, transaction_id),
+            schema: transaction_path(&self.schema, purpose, transaction_id),
+            version: transaction_path(&self.version, purpose, transaction_id),
+        }
+    }
+
+    fn all(&self) -> [&Path; 3] {
+        [&self.artifact, &self.schema, &self.version]
+    }
+}
+
+struct StagedFiles {
+    files: ArtifactFiles,
+}
+
+impl Drop for StagedFiles {
+    fn drop(&mut self) {
+        for path in self.files.all() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+struct FileReplacement {
+    target: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+}
+
 /// bot 运行时表。
 pub struct BotRuntime {
     store: Arc<BotStore>,
@@ -82,23 +130,55 @@ impl BotRuntime {
         progress: Option<ProgressFn>,
     ) -> Result<PathBuf> {
         let artifact_id = manifest.id.clone();
-        let path = self
-            .downloader
-            .install_artifact(&manifest, dest_id, progress)
+        let files = ArtifactFiles::for_bot(dest_id);
+        self.install_to_files(&manifest, &files, progress).await?;
+        self.manifests.lock().await.insert(artifact_id, manifest);
+        Ok(files.artifact)
+    }
+
+    async fn install_to_files(
+        &self,
+        manifest: &BotManifest,
+        files: &ArtifactFiles,
+        progress: Option<ProgressFn>,
+    ) -> Result<()> {
+        let transaction_id = scru128::new().to_string();
+        let staged = files.transaction_files("download", &transaction_id);
+        let backups = files.transaction_files("backup", &transaction_id);
+        let _staged_cleanup = StagedFiles {
+            files: staged.clone(),
+        };
+
+        self.downloader
+            .download_artifact_to(manifest, &staged.artifact, progress)
             .await?;
-        self.manifests
-            .lock()
-            .await
-            .insert(artifact_id, manifest.clone());
-        // 获取并缓存 schema（失败仅警告，不阻断安装）。
-        if let Err(err) = describe_and_cache(&path, dest_id).await {
-            tracing::warn!("获取 bot schema 失败（{}）：{err}", path.display());
-        }
-        // 写入版本记录（失败仅警告）。
-        if let Err(err) = crate::version::write_installed_version(dest_id, &manifest) {
-            tracing::warn!("写入 bot 版本记录失败：{err}");
-        }
-        Ok(path)
+        let description = describe_artifact(&staged.artifact).await?;
+        validate_description(&description, manifest)?;
+
+        let schema_content = serde_json::to_string_pretty(&description.config_schema)
+            .context("序列化 bot schema 失败")?;
+        write_new_file(&staged.schema, &schema_content)?;
+        let version_content = crate::version::installed_version_json(manifest)?;
+        write_new_file(&staged.version, &version_content)?;
+
+        let replacements = [
+            FileReplacement {
+                target: files.artifact.clone(),
+                staged: staged.artifact.clone(),
+                backup: backups.artifact,
+            },
+            FileReplacement {
+                target: files.schema.clone(),
+                staged: staged.schema.clone(),
+                backup: backups.schema,
+            },
+            FileReplacement {
+                target: files.version.clone(),
+                staged: staged.version.clone(),
+                backup: backups.version,
+            },
+        ];
+        replace_files(&replacements)
     }
 
     /// 扫描本地已安装的制品（`~/.tiangong/bots/*/`）。
@@ -139,8 +219,7 @@ impl BotRuntime {
         manifest: BotManifest,
         progress: Option<ProgressFn>,
     ) -> Result<()> {
-        // 先停止运行中的 bot（忽略未运行的错误）。
-        let _ = self.stop(bot_id).await;
+        self.stop(bot_id).await?;
         // 下载安装（复用 install 逻辑，含 schema 缓存 + version 写入）。
         self.install(manifest, bot_id, progress).await?;
         Ok(())
@@ -211,13 +290,11 @@ impl BotRuntime {
 
     /// 停止指定 bot 实例。
     pub async fn stop(&self, id: &str) -> Result<()> {
-        let mut entries = self.entries.lock().await;
-        if let Some(entry) = entries.remove(id) {
-            entry.supervised.stop().await;
-            Ok(())
-        } else {
-            Err(anyhow!("bot 未在运行：{id}"))
+        let entry = self.entries.lock().await.remove(id);
+        if let Some(entry) = entry {
+            entry.supervised.stop().await?;
         }
+        Ok(())
     }
 
     /// 停止所有运行中的 bot。
@@ -226,7 +303,22 @@ impl BotRuntime {
         let drained: Vec<(String, RuntimeEntry)> = entries.drain().collect();
         drop(entries);
         for (_, entry) in drained {
-            entry.supervised.stop().await;
+            if let Err(err) = entry.supervised.stop().await {
+                tracing::warn!("停止 bot 监督任务失败：{err}");
+            }
+        }
+    }
+
+    /// 查询 bot 是否正在由运行时监督；已结束条目会被清理。
+    pub async fn is_running(&self, id: &str) -> bool {
+        let mut entries = self.entries.lock().await;
+        match entries.get(id) {
+            Some(entry) if !entry.supervised.is_finished() => true,
+            Some(_) => {
+                entries.remove(id);
+                false
+            }
+            None => false,
         }
     }
 
@@ -235,17 +327,7 @@ impl BotRuntime {
     /// 若 bot 正常退出（监督任务结束），自动从运行表移除并返回 Stopped，
     /// 避免 health 长期误报 Running。
     pub async fn health(&self, id: &str) -> BotHealth {
-        let mut entries = self.entries.lock().await;
-        let running = match entries.get(id) {
-            Some(entry) if !entry.supervised.is_finished() => true,
-            Some(_) => {
-                // 监督任务已结束（bot 退出），清理运行表条目。
-                entries.remove(id);
-                false
-            }
-            None => false,
-        };
-        drop(entries);
+        let running = self.is_running(id).await;
         if running {
             BotHealth::Running
         } else if paths::bot_artifact_path(id).exists() {
@@ -290,11 +372,8 @@ pub fn bot_env(config: &BotConfig, schema: &[ConfigFieldSchema]) -> BTreeMap<Str
 #[derive(Debug, Deserialize)]
 struct DescribeOutput {
     /// schema 格式版本。
-    #[allow(dead_code)]
     schema_version: u32,
     /// 制品 id（标识 bot 平台，与 manifest 的 id 一致）。
-    #[allow(dead_code)]
-    #[serde(default)]
     artifact_id: String,
     /// 配置字段 schema。
     config_schema: Vec<ConfigFieldSchema>,
@@ -308,6 +387,17 @@ pub async fn describe_and_cache(
     artifact_path: &Path,
     bot_id: &str,
 ) -> Result<Vec<ConfigFieldSchema>> {
+    let parsed = describe_artifact(artifact_path).await?;
+
+    let schema_path = paths::bot_schema_path(bot_id);
+    let content =
+        serde_json::to_string_pretty(&parsed.config_schema).context("序列化 bot schema 失败")?;
+    crate::store::atomic_write(&schema_path, &content)
+        .with_context(|| format!("写入 schema 缓存失败：{}", schema_path.display()))?;
+    Ok(parsed.config_schema)
+}
+
+async fn describe_artifact(artifact_path: &Path) -> Result<DescribeOutput> {
     use tokio::process::Command;
     let mut cmd = Command::new(artifact_path);
     cmd.arg("--describe");
@@ -325,24 +415,137 @@ pub async fn describe_and_cache(
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: DescribeOutput = serde_json::from_str(&stdout).with_context(|| {
+    serde_json::from_str(&stdout).with_context(|| {
         format!(
             "解析 bot --describe 输出失败：{}",
             stdout.chars().take(512).collect::<String>()
         )
-    })?;
+    })
+}
 
-    // 缓存到 schema.json。
-    let schema_path = paths::bot_schema_path(bot_id);
-    if let Some(parent) = schema_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("创建 schema 缓存目录失败：{}", parent.display()))?;
+fn validate_description(description: &DescribeOutput, manifest: &BotManifest) -> Result<()> {
+    if description.schema_version != 1 {
+        bail!(
+            "bot --describe schema_version 不受支持：{}",
+            description.schema_version
+        );
     }
-    let content =
-        serde_json::to_string_pretty(&parsed.config_schema).context("序列化 bot schema 失败")?;
-    std::fs::write(&schema_path, content)
-        .with_context(|| format!("写入 schema 缓存失败：{}", schema_path.display()))?;
-    Ok(parsed.config_schema)
+    if description.artifact_id != manifest.id {
+        bail!(
+            "bot --describe artifact_id 与清单不一致：期望 {}，实际 {}",
+            manifest.id,
+            description.artifact_id
+        );
+    }
+    Ok(())
+}
+
+fn transaction_path(target: &Path, purpose: &str, transaction_id: &str) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{purpose}-{transaction_id}-{file_name}"))
+}
+
+fn write_new_file(path: &Path, content: &str) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("创建升级临时文件失败：{}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("写入升级临时文件失败：{}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("同步升级临时文件失败：{}", path.display()))?;
+    Ok(())
+}
+
+fn replace_files(replacements: &[FileReplacement]) -> Result<()> {
+    for replacement in replacements {
+        if replacement.backup.exists() {
+            bail!("升级备份文件已存在：{}", replacement.backup.display());
+        }
+    }
+
+    let mut backed_up = vec![false; replacements.len()];
+    for (index, replacement) in replacements.iter().enumerate() {
+        if replacement.target.exists() {
+            if let Err(error) = std::fs::rename(&replacement.target, &replacement.backup) {
+                let recovery_errors = rollback_files(replacements, &backed_up, 0);
+                return Err(replacement_error(
+                    format!(
+                        "备份旧文件失败：{} -> {}：{error}",
+                        replacement.target.display(),
+                        replacement.backup.display()
+                    ),
+                    recovery_errors,
+                ));
+            }
+            backed_up[index] = true;
+        }
+    }
+
+    for (installed, replacement) in replacements.iter().enumerate() {
+        if let Err(error) = std::fs::rename(&replacement.staged, &replacement.target) {
+            let recovery_errors = rollback_files(replacements, &backed_up, installed);
+            return Err(replacement_error(
+                format!(
+                    "替换新文件失败：{} -> {}：{error}",
+                    replacement.staged.display(),
+                    replacement.target.display()
+                ),
+                recovery_errors,
+            ));
+        }
+    }
+
+    for (replacement, had_original) in replacements.iter().zip(backed_up) {
+        if had_original && let Err(error) = std::fs::remove_file(&replacement.backup) {
+            tracing::warn!(
+                "清理 bot 升级备份失败：{} error={error}",
+                replacement.backup.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn rollback_files(
+    replacements: &[FileReplacement],
+    backed_up: &[bool],
+    installed: usize,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for replacement in replacements[..installed].iter().rev() {
+        if replacement.target.exists()
+            && let Err(error) = std::fs::remove_file(&replacement.target)
+        {
+            errors.push(format!(
+                "移除新文件 {} 失败：{error}",
+                replacement.target.display()
+            ));
+        }
+    }
+    for (replacement, had_original) in replacements.iter().zip(backed_up).rev() {
+        if *had_original
+            && let Err(error) = std::fs::rename(&replacement.backup, &replacement.target)
+        {
+            errors.push(format!(
+                "恢复旧文件 {} 失败：{error}",
+                replacement.target.display()
+            ));
+        }
+    }
+    errors
+}
+
+fn replacement_error(error: String, recovery_errors: Vec<String>) -> anyhow::Error {
+    if recovery_errors.is_empty() {
+        anyhow!("{error}；旧制品已恢复")
+    } else {
+        anyhow!("{error}；旧制品恢复失败：{}", recovery_errors.join("；"))
+    }
 }
 
 /// 读取缓存的 schema（`bot --describe` 上报的结果）。
@@ -425,7 +628,11 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
 mod tests {
     use super::*;
     use crate::config::FieldType;
+    use crate::manifest::{BotArtifact, current_platform_key};
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn feishu_schema() -> Vec<ConfigFieldSchema> {
         vec![
@@ -537,5 +744,183 @@ mod tests {
         };
         let env = bot_env(&bot, &schema);
         assert!(env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_is_idempotent_when_bot_is_not_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(BotStore::with_config_path(dir.path().join("bots.json")));
+        let runtime = BotRuntime::new(store).unwrap();
+
+        runtime.stop("stopped").await.unwrap();
+        runtime.stop("stopped").await.unwrap();
+    }
+
+    #[test]
+    fn replacement_failure_restores_all_old_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ArtifactFiles {
+            artifact: dir.path().join("bot"),
+            schema: dir.path().join("schema.json"),
+            version: dir.path().join("version.json"),
+        };
+        for (path, content) in files.all().into_iter().zip([
+            b"old artifact".as_slice(),
+            b"old schema".as_slice(),
+            b"old version".as_slice(),
+        ]) {
+            std::fs::write(path, content).unwrap();
+        }
+
+        let staged = files.transaction_files("download", "test");
+        let backups = files.transaction_files("backup", "test");
+        let _staged_cleanup = StagedFiles {
+            files: staged.clone(),
+        };
+        std::fs::write(&staged.artifact, b"new artifact").unwrap();
+        std::fs::write(&staged.version, b"new version").unwrap();
+        let replacements = [
+            FileReplacement {
+                target: files.artifact.clone(),
+                staged: staged.artifact,
+                backup: backups.artifact.clone(),
+            },
+            FileReplacement {
+                target: files.schema.clone(),
+                staged: staged.schema,
+                backup: backups.schema.clone(),
+            },
+            FileReplacement {
+                target: files.version.clone(),
+                staged: staged.version,
+                backup: backups.version.clone(),
+            },
+        ];
+
+        let error = replace_files(&replacements).unwrap_err();
+        assert!(format!("{error}").contains("旧制品已恢复"));
+        assert_eq!(std::fs::read(&files.artifact).unwrap(), b"old artifact");
+        assert_eq!(std::fs::read(&files.schema).unwrap(), b"old schema");
+        assert_eq!(std::fs::read(&files.version).unwrap(), b"old version");
+        assert!(backups.all().into_iter().all(|path| !path.exists()));
+    }
+
+    #[test]
+    fn successful_replacement_updates_all_files_and_removes_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = ArtifactFiles {
+            artifact: dir.path().join("bot"),
+            schema: dir.path().join("schema.json"),
+            version: dir.path().join("version.json"),
+        };
+        let staged = files.transaction_files("download", "success");
+        let backups = files.transaction_files("backup", "success");
+        for (path, content) in files.all().into_iter().zip([
+            b"old artifact".as_slice(),
+            b"old schema".as_slice(),
+            b"old version".as_slice(),
+        ]) {
+            std::fs::write(path, content).unwrap();
+        }
+        for (path, content) in staged.all().into_iter().zip([
+            b"new artifact".as_slice(),
+            b"new schema".as_slice(),
+            b"new version".as_slice(),
+        ]) {
+            std::fs::write(path, content).unwrap();
+        }
+        let replacements = [
+            FileReplacement {
+                target: files.artifact.clone(),
+                staged: staged.artifact,
+                backup: backups.artifact.clone(),
+            },
+            FileReplacement {
+                target: files.schema.clone(),
+                staged: staged.schema,
+                backup: backups.schema.clone(),
+            },
+            FileReplacement {
+                target: files.version.clone(),
+                staged: staged.version,
+                backup: backups.version.clone(),
+            },
+        ];
+
+        replace_files(&replacements).unwrap();
+
+        assert_eq!(std::fs::read(&files.artifact).unwrap(), b"new artifact");
+        assert_eq!(std::fs::read(&files.schema).unwrap(), b"new schema");
+        assert_eq!(std::fs::read(&files.version).unwrap(), b"new version");
+        assert!(backups.all().into_iter().all(|path| !path.exists()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_new_artifact_keeps_existing_installation() {
+        let server = MockServer::start().await;
+        let payload = br###"#!/bin/sh
+printf '%s\n' '{"schema_version":1,"artifact_id":"other","config_schema":[]}'
+"###;
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let checksum = format!("sha256:{}", hex::encode(hasher.finalize()));
+        Mock::given(method("GET"))
+            .and(path("/artifact"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("bot-files");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let files = ArtifactFiles {
+            artifact: install_dir.join("bot"),
+            schema: install_dir.join("schema.json"),
+            version: install_dir.join("version.json"),
+        };
+        for (path, content) in files.all().into_iter().zip([
+            b"old artifact".as_slice(),
+            b"old schema".as_slice(),
+            b"old version".as_slice(),
+        ]) {
+            std::fs::write(path, content).unwrap();
+        }
+
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            current_platform_key(),
+            BotArtifact {
+                url: format!("{}/artifact", server.uri()),
+                checksum,
+            },
+        );
+        let manifest = BotManifest {
+            id: "feishu".into(),
+            name: "Feishu".into(),
+            version: "2.0.0".into(),
+            description: String::new(),
+            config_schema: Vec::new(),
+            platforms,
+            min_app_version: None,
+        };
+        let store = Arc::new(BotStore::with_config_path(dir.path().join("bots.json")));
+        let runtime = BotRuntime::new(store).unwrap();
+
+        let error = runtime
+            .install_to_files(&manifest, &files, None)
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("artifact_id 与清单不一致"));
+        assert_eq!(std::fs::read(&files.artifact).unwrap(), b"old artifact");
+        assert_eq!(std::fs::read(&files.schema).unwrap(), b"old schema");
+        assert_eq!(std::fs::read(&files.version).unwrap(), b"old version");
+        let leftovers = std::fs::read_dir(&install_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "残留事务文件：{leftovers:?}");
     }
 }
