@@ -2832,14 +2832,27 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
             ));
         }
         // 持久化 enabled 标记，重启后自动拉起。
-        let mut config = server_config;
+        let mut config = server_config.clone();
         config.enabled = true;
         let _ = save_server_config_to_state(state.inner(), config).await;
     }
 
+    // 从 ServerConfig 构造注入 bot 的环境变量（tiangong_url/tiangong_token）。
+    let host = connect_host(&server_config.host);
+    let mut extra_env = std::collections::BTreeMap::new();
+    extra_env.insert(
+        "TIANGONG_URL".into(),
+        format!("http://{host}:{}", server_config.port),
+    );
+    if let Some(ref token) = server_config.auth_token {
+        if !token.is_empty() {
+            extra_env.insert("TIANGONG_TOKEN".into(), token.clone());
+        }
+    }
+
     state
         .bot_runtime
-        .start(&bot)
+        .start(&bot, &extra_env)
         .await
         .map_err(|e| e.to_string())?;
     Ok(format!("bot 已启动：{}", bot.id))
@@ -3304,7 +3317,7 @@ fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
     response.starts_with("HTTP/") && response.contains(" 200 ") && response.contains("status")
 }
 
-fn connect_host(host: &str) -> String {
+pub fn connect_host(host: &str) -> String {
     match host.trim() {
         "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
         value => value.to_string(),

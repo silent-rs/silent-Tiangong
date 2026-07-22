@@ -154,8 +154,14 @@ impl BotRuntime {
     /// 启动指定 bot 实例（需制品已安装）。
     ///
     /// 启动时按缓存的 schema（`bot --describe` 上报）校验必填字段，
-    /// 并按 schema 的 `env` 映射注入环境变量。
-    pub async fn start(&self, config: &BotConfig) -> Result<()> {
+    /// 并按 schema 的 `env` 映射注入环境变量。`extra_env` 提供主程序注入的
+    /// 额外环境变量（如 `TIANGONG_URL`/`TIANGONG_TOKEN`，由 ServerConfig 推导），
+    /// 覆盖同名 schema 映射。
+    pub async fn start(
+        &self,
+        config: &BotConfig,
+        extra_env: &BTreeMap<String, String>,
+    ) -> Result<()> {
         let mut entries = self.entries.lock().await;
         // 清理已结束的残留条目，避免误报"已在运行"。
         if let Some(entry) = entries.get(&config.id)
@@ -180,7 +186,9 @@ impl BotRuntime {
         let schema = cached_schema(&config.id).unwrap_or_default();
         crate::management::validate_bot_config_fields(&schema, &config.config)?;
 
-        let env = bot_env(config, &schema);
+        let mut env = bot_env(config, &schema);
+        // 主程序注入的额外环境变量覆盖 schema 映射（优先级更高）。
+        env.extend(extra_env.clone());
         let supervised = crate::supervisor::spawn_supervised(&config.id, artifact, env)
             .context("启动 bot 进程失败")?;
         entries.insert(config.id.clone(), RuntimeEntry { supervised });
@@ -234,11 +242,13 @@ impl BotRuntime {
     }
 
     /// 启动所有 enabled 且已安装制品的 bot（主程序启动时调用）。
-    pub async fn start_enabled(&self) {
+    ///
+    /// `extra_env` 为注入所有 bot 的额外环境变量（如 TIANGONG_URL/TIANGONG_TOKEN）。
+    pub async fn start_enabled(&self, extra_env: &BTreeMap<String, String>) {
         let bots = self.store.list();
         for bot in bots.iter().filter(|b| b.enabled) {
             if paths::bot_artifact_path(&bot.id).exists() {
-                if let Err(err) = self.start(bot).await {
+                if let Err(err) = self.start(bot, extra_env).await {
                     tracing::warn!("启动 bot {} 失败：{err}", bot.id);
                 }
             } else {

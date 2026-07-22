@@ -27,23 +27,6 @@ pub fn describe_output() -> Value {
                 "field_type": { "kind": "barcode" },
                 "required": true,
                 "env": "TIANGONG_BOT_FEISHU_APP_SECRET"
-            },
-            {
-                "key": "tiangong_url",
-                "label": "天工服务地址",
-                "field_type": { "kind": "string" },
-                "required": false,
-                "env": "TIANGONG_URL",
-                "default": "http://127.0.0.1:8080",
-                "help": "embedded server 地址，默认本机"
-            },
-            {
-                "key": "tiangong_token",
-                "label": "天工认证 Token",
-                "field_type": { "kind": "secret" },
-                "required": false,
-                "env": "TIANGONG_TOKEN",
-                "help": "embedded server 配置了认证 token 时填写"
             }
         ]
     })

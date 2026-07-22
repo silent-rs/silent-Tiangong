@@ -515,7 +515,20 @@ fn run_gui() {
             {
                 let bot_runtime = state.bot_runtime.clone();
                 tauri::async_runtime::spawn(async move {
-                    bot_runtime.start_enabled().await;
+                    // 从磁盘读 ServerConfig 构造注入 bot 的环境变量。
+                    let server_config = tiangong_config::load_server_config();
+                    let host = tiangong_app::commands::connect_host(&server_config.host);
+                    let mut extra_env = std::collections::BTreeMap::new();
+                    extra_env.insert(
+                        "TIANGONG_URL".into(),
+                        format!("http://{host}:{}", server_config.port),
+                    );
+                    if let Some(ref token) = server_config.auth_token {
+                        if !token.is_empty() {
+                            extra_env.insert("TIANGONG_TOKEN".into(), token.clone());
+                        }
+                    }
+                    bot_runtime.start_enabled(&extra_env).await;
                 });
             }
 
