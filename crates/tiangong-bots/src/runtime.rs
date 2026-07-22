@@ -115,8 +115,8 @@ impl BotRuntime {
         crate::management::validate_bot_config_fields(&schema, &config.config)?;
 
         let env = bot_env(config, &schema);
-        let supervised =
-            crate::supervisor::spawn_supervised(artifact, env).context("启动 bot 进程失败")?;
+        let supervised = crate::supervisor::spawn_supervised(&config.id, artifact, env)
+            .context("启动 bot 进程失败")?;
         entries.insert(config.id.clone(), RuntimeEntry { supervised });
         Ok(())
     }

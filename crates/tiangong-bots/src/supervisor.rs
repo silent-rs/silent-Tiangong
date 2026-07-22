@@ -1,22 +1,20 @@
-//! bot 进程监督——spawn 子进程、捕获 stderr tail、崩溃自动重启。
+//! bot 进程监督——spawn 子进程、stdout/stderr 写入日志文件、崩溃自动重启。
 //!
-//! 借鉴 `tiangong-plugin-mcp/src/client.rs:452-474` 的 stderr 捕获模式与
-//! `tiangong-server/src/daemon.rs` 的 PID 管理思路。bot 子进程的凭证通过
-//! 环境变量注入（见各 bot 制品文档，飞书用 `TIANGONG_BOT_FEISHU_*`）。
+//! bot 的 stdout/stderr 合并写入 `~/.tiangong/bots/<id>/bot.log`（每行标注
+//! 来源与时间），内存只保留最近 8KB 的 stderr 错误摘要供健康状态展示。
+//! 详见 [`crate::logger`]。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-/// stderr tail 缓冲上限（字节），对齐 MCP client 的 8KB。
-const STDERR_TAIL_BYTES: usize = 8 * 1024;
+use crate::logger::BotLogger;
 
 /// 单次崩溃重启后等待的最小/最大退避。
 const MIN_BACKOFF: Duration = Duration::from_secs(2);
@@ -28,14 +26,16 @@ pub struct SupervisedBot {
     stop_tx: Option<oneshot::Sender<()>>,
     /// 监督循环 task。
     handle: Option<JoinHandle<()>>,
-    /// stderr tail（最近 STDERR_TAIL_BYTES 字节）。
-    stderr_tail: Arc<Mutex<String>>,
+    /// 日志写入器（供外部读取错误摘要）。
+    logger: Arc<BotLogger>,
 }
 
+use std::sync::Arc;
+
 impl SupervisedBot {
-    /// 取最近的 stderr tail（诊断用）。
-    pub async fn stderr_tail(&self) -> String {
-        self.stderr_tail.lock().await.clone()
+    /// 取最近的错误摘要（stderr，供健康状态展示）。
+    pub async fn error_summary(&self) -> String {
+        self.logger.error_summary().await
     }
 
     /// 请求停止并等待监督循环退出。
@@ -62,8 +62,10 @@ impl SupervisedBot {
 
 /// spawn 一个 bot 子进程并启动监督循环（崩溃自动重启）。
 ///
+/// `bot_id` 用于确定日志路径（`~/.tiangong/bots/<bot_id>/bot.log`）。
 /// `artifact_path` 是制品可执行文件路径；`env` 是注入的环境变量（凭证等）。
 pub fn spawn_supervised(
+    bot_id: &str,
     artifact_path: PathBuf,
     env: BTreeMap<String, String>,
 ) -> Result<SupervisedBot> {
@@ -74,16 +76,16 @@ pub fn spawn_supervised(
         ));
     }
 
-    let stderr_tail = Arc::new(Mutex::new(String::new()));
+    let logger = Arc::new(BotLogger::new(crate::paths::bot_log_path(bot_id)));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
-    let tail_for_task = stderr_tail.clone();
-    let handle = tokio::spawn(supervise_loop(artifact_path, env, tail_for_task, stop_rx));
+    let logger_for_task = logger.clone();
+    let handle = tokio::spawn(supervise_loop(artifact_path, env, logger_for_task, stop_rx));
 
     Ok(SupervisedBot {
         stop_tx: Some(stop_tx),
         handle: Some(handle),
-        stderr_tail,
+        logger,
     })
 }
 
@@ -91,7 +93,7 @@ pub fn spawn_supervised(
 async fn supervise_loop(
     artifact_path: PathBuf,
     env: BTreeMap<String, String>,
-    stderr_tail: Arc<Mutex<String>>,
+    logger: Arc<BotLogger>,
     mut stop_rx: oneshot::Receiver<()>,
 ) {
     let mut backoff = MIN_BACKOFF;
@@ -125,20 +127,22 @@ async fn supervise_loop(
             let _ = std::fs::write(&pid_path, pid.to_string());
         }
 
-        // 立即 take stdout/stderr 并 spawn 持续消费 task——必须在 wait() 之前，
+        // 立即 take stdout/stderr 交给 BotLogger 消费——必须在 wait() 之前，
         // 否则子进程写满管道缓冲区（默认 64KB）后会阻塞，导致 wait() 死锁。
-        let stdout_task = spawn_stream_drain(child.stdout.take());
-        let stderr_task = spawn_stream_tail(child.stderr.take(), stderr_tail.clone());
+        use crate::logger::StreamKind;
+        let stdout_task = logger
+            .clone()
+            .consume_stream(child.stdout.take(), StreamKind::Stdout);
+        let stderr_task = logger
+            .clone()
+            .consume_stream(child.stderr.take(), StreamKind::Stderr);
 
         // 等待子进程退出或停止信号。
         tokio::select! {
             status = child.wait() => {
-                // 等管道 drain task 读完后取最终 tail。
+                // 等管道消费 task 读完。
                 let _ = stdout_task.await;
-                let final_tail = stderr_task.await.unwrap_or_default();
-                if !final_tail.is_empty() {
-                    *stderr_tail.lock().await = final_tail;
-                }
+                let _ = stderr_task.await;
                 match status {
                     Ok(s) if s.success() => {
                         tracing::info!("bot 正常退出：{}", artifact_path.display());
@@ -156,11 +160,8 @@ async fn supervise_loop(
                 tracing::info!("收到停止信号，终止 bot：{}", artifact_path.display());
                 let _ = child.kill().await;
                 let _ = child.wait().await;
-                // 取最终 tail 用于诊断。
-                let final_tail = stderr_task.await.unwrap_or_default();
-                if !final_tail.is_empty() {
-                    *stderr_tail.lock().await = final_tail;
-                }
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
                 break;
             }
         }
@@ -177,7 +178,7 @@ async fn supervise_loop(
     let _ = std::fs::remove_file(artifact_pid_path(&artifact_path));
 }
 
-/// spawn 单个 bot 子进程，stderr pipe 用于 tail 捕获。
+/// spawn 单个 bot 子进程，stdout/stderr pipe 用于日志捕获。
 fn spawn_child(artifact_path: &PathBuf, env: &BTreeMap<String, String>) -> Result<Child> {
     let mut cmd = Command::new(artifact_path);
     tiangong_types::process::configure_tokio_no_window(&mut cmd);
@@ -192,65 +193,6 @@ fn spawn_child(artifact_path: &PathBuf, env: &BTreeMap<String, String>) -> Resul
         .spawn()
         .with_context(|| format!("spawn bot 失败：{}", artifact_path.display()))?;
     Ok(child)
-}
-
-/// 持续读取 stdout 并丢弃（仅消费流，防止管道写满阻塞子进程）。
-///
-/// 返回 JoinHandle，读完后（EOF/错误）task 结束。
-fn spawn_stream_drain(stream: Option<tokio::process::ChildStdout>) -> tokio::task::JoinHandle<()> {
-    let Some(stream) = stream else {
-        return tokio::spawn(async {});
-    };
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut reader = stream;
-        let mut buf = vec![0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    })
-}
-
-/// 持续读取 stderr 并保留最后 STDERR_TAIL_BYTES 字节到 tail 缓冲。
-///
-/// 返回 JoinHandle，读完后返回最终 tail 文本。
-fn spawn_stream_tail(
-    stream: Option<tokio::process::ChildStderr>,
-    tail: Arc<Mutex<String>>,
-) -> tokio::task::JoinHandle<String> {
-    let Some(stream) = stream else {
-        return tokio::spawn(async { String::new() });
-    };
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut reader = stream;
-        let mut buf = vec![0u8; 4096];
-        let mut collected: Vec<u8> = Vec::new();
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    collected.extend_from_slice(&buf[..n]);
-                    // 实时更新 tail，避免只在结束时才写入。
-                    let snap = if collected.len() > STDERR_TAIL_BYTES {
-                        String::from_utf8_lossy(&collected[collected.len() - STDERR_TAIL_BYTES..])
-                            .to_string()
-                    } else {
-                        String::from_utf8_lossy(&collected).to_string()
-                    };
-                    *tail.lock().await = snap;
-                }
-            }
-        }
-        // 最终 tail。
-        if collected.len() > STDERR_TAIL_BYTES {
-            collected = collected.split_off(collected.len() - STDERR_TAIL_BYTES);
-        }
-        String::from_utf8_lossy(&collected).to_string()
-    })
 }
 
 /// 等待 `delay` 或停止信号；返回 true 表示收到停止信号。

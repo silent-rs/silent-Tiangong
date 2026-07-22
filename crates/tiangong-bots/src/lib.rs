@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod downloader;
+pub mod logger;
 pub mod management;
 pub mod manifest;
 pub mod paths;

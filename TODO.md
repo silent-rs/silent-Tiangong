@@ -1,3 +1,34 @@
+# #250 通讯网关 Bot 日志策略 TODO
+
+## 已完成
+
+### 日志文件持久化
+
+- [x] stdout、stderr 合并写入 `~/.tiangong/bots/<bot-id>/bot.log`，每行标注来源（stdout/stderr）与时间戳。
+- [x] 崩溃重启后继续追加（不覆盖已有日志），便于追溯完整运行历史。
+- [x] 内存只保留最近 8KB 错误摘要（stderr 优先）供健康状态展示。
+- [x] 写日志文件失败不导致 bot 退出，但在主程序日志（`tracing::warn`）中报告。
+
+### 日志轮转
+
+- [x] 单个 bot.log 达到大小上限（默认 10MB）时轮转，重命名为 `bot.log.1`。
+- [x] 保留最近 N 个轮转文件（默认 3 个），超出数量的最旧文件删除。
+- [x] 轮转发生在写入侧，对 bot 子进程透明（bot 只管写 stdout/stderr）。
+
+## 完成标准
+
+- `~/.tiangong/bots/<id>/bot.log` 包含 stdout+stderr 合并日志，每行可辨来源与时间。
+- 长时间运行的 bot 日志文件不会无限增长（轮转生效）。
+- 崩溃重启后日志追加而非覆盖。
+- `health()` 展示的错误摘要来自内存 8KB 摘要，不读取完整日志文件。
+- 写日志失败时 bot 继续运行，主程序日志有告警。
+- `cargo fmt --all`、`cargo clippy -p tiangong-bots --tests -- -D warnings`、相关测试通过。
+
+## 非目标
+
+- 日志按级别过滤（bot 日志是自由文本，不做结构化解析）。
+- 远程日志收集 / 日志查询 UI（后续独立 issue）。
+
 # #255 文件锁迁入 fs 插件 TODO
 
 ## 已完成
