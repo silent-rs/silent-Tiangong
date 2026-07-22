@@ -335,10 +335,8 @@ async fn download_url(url: &str) -> Result<Vec<u8>> {
 }
 
 fn extract_media(msg: &IncomingMessage) -> Vec<MediaAsset> {
-    let mut media = msg.media.clone();
-    if media.is_empty() {
-        media = content_to_media(&msg.content);
-    }
+    let mut media = content_to_media(&msg.content);
+    media.extend(msg.media.clone());
     media
 }
 
@@ -373,5 +371,65 @@ fn content_to_media(content: &MessageContent) -> Vec<MediaAsset> {
             capability: None,
         }],
         MessageContent::Text(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_types::RemoteRole;
+
+    fn image(url: &str) -> MediaAsset {
+        MediaAsset {
+            kind: MediaKind::Image,
+            url: url.to_string(),
+            mime_type: None,
+            title: None,
+            capability: Some("multimodal".to_string()),
+        }
+    }
+
+    #[test]
+    fn extract_media_keeps_content_image_before_additional_media() {
+        let message = IncomingMessage {
+            id: "message".to_string(),
+            connector: "feishu-bot".to_string(),
+            channel_id: "chat".to_string(),
+            sender_id: "sender".to_string(),
+            sender_role: RemoteRole::Controller,
+            content: MessageContent::Image {
+                url: "first".to_string(),
+                caption: None,
+            },
+            media: vec![image("second"), image("third")],
+            reply_to: None,
+            timestamp: "now".to_string(),
+        };
+
+        let media = extract_media(&message);
+        assert_eq!(media.len(), 3);
+        assert_eq!(media[0].url, "first");
+        assert_eq!(media[1].url, "second");
+        assert_eq!(media[2].url, "third");
+    }
+
+    #[test]
+    fn extract_media_does_not_duplicate_text_message_media() {
+        let message = IncomingMessage {
+            id: "message".to_string(),
+            connector: "feishu-bot".to_string(),
+            channel_id: "chat".to_string(),
+            sender_id: "sender".to_string(),
+            sender_role: RemoteRole::Controller,
+            content: MessageContent::Text("正文".to_string()),
+            media: vec![image("first"), image("second")],
+            reply_to: None,
+            timestamp: "now".to_string(),
+        };
+
+        let media = extract_media(&message);
+        assert_eq!(media.len(), 2);
+        assert_eq!(media[0].url, "first");
+        assert_eq!(media[1].url, "second");
     }
 }

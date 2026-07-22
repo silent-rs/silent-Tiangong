@@ -9,15 +9,16 @@
 //! - `TIANGONG_URL`（默认 `http://127.0.0.1:8080`）
 //! - `TIANGONG_TOKEN`（可选，embedded server 认证 token）
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use openlark_client::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient};
 use openlark_client::CoreConfig as Config;
+use openlark_client::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient};
 use serde::{Deserialize, Serialize};
 use tokio::signal;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::EnvFilter;
 
 mod provision;
@@ -34,6 +35,37 @@ struct BotState {
     tiangong_url: String,
     /// 天工 server 认证 token（可选）
     tiangong_token: Option<String>,
+    recent_messages: Mutex<RecentMessages>,
+}
+
+const RECENT_MESSAGE_LIMIT: usize = 1024;
+
+#[derive(Default)]
+struct RecentMessages {
+    keys: VecDeque<(String, String)>,
+}
+
+impl RecentMessages {
+    fn claim(&mut self, channel_id: &str, message_id: &str) -> bool {
+        if self
+            .keys
+            .iter()
+            .any(|(channel, message)| channel == channel_id && message == message_id)
+        {
+            return false;
+        }
+        self.keys
+            .push_back((channel_id.to_string(), message_id.to_string()));
+        if self.keys.len() > RECENT_MESSAGE_LIMIT {
+            self.keys.pop_front();
+        }
+        true
+    }
+
+    fn release(&mut self, channel_id: &str, message_id: &str) {
+        self.keys
+            .retain(|(channel, message)| channel != channel_id || message != message_id);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +101,12 @@ struct EventSenderId {
 struct EventMessage {
     #[serde(rename = "chatId", alias = "chat_id")]
     chat_id: String,
-    #[serde(rename = "messageType", alias = "message_type", alias = "msg_type", default)]
+    #[serde(
+        rename = "messageType",
+        alias = "message_type",
+        alias = "msg_type",
+        default
+    )]
     msg_type: String,
     #[serde(default)]
     content: String,
@@ -145,6 +182,25 @@ impl ApiMessageContent {
             _ => String::new(),
         }
     }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text { text } => text.trim().is_empty(),
+            Self::Image { url, .. } => url.trim().is_empty(),
+            Self::File { url, name } => url.trim().is_empty() || name.trim().is_empty(),
+            Self::Audio { url, .. } | Self::Video { url, .. } => url.trim().is_empty(),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Image { .. } => "image",
+            Self::File { .. } => "file",
+            Self::Audio { .. } => "audio",
+            Self::Video { .. } => "video",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +213,30 @@ struct MediaAsset {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     capability: Option<String>,
+}
+
+impl MediaAsset {
+    fn image(url: String) -> Self {
+        Self {
+            kind: "image".to_string(),
+            url,
+            mime_type: None,
+            title: None,
+            capability: Some("multimodal".to_string()),
+        }
+    }
+}
+
+struct ParsedMessage {
+    content: ApiMessageContent,
+    media: Vec<MediaAsset>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MessageHandling {
+    Forwarded,
+    ReplyFailed,
+    Ignored,
 }
 
 // ── 入口 ──────────────────────────────────────────────────────
@@ -197,8 +277,8 @@ async fn main() -> Result<()> {
     let credentials = provision::load_credentials()?;
     let app_id = credentials.app_id;
     let app_secret = credentials.app_secret;
-    let tiangong_url = std::env::var("TIANGONG_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let tiangong_url =
+        std::env::var("TIANGONG_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     let tiangong_token = std::env::var("TIANGONG_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
@@ -215,6 +295,7 @@ async fn main() -> Result<()> {
         access_token: RwLock::new(None),
         tiangong_url,
         tiangong_token,
+        recent_messages: Mutex::new(RecentMessages::default()),
     });
 
     // 注册事件处理器
@@ -247,10 +328,10 @@ async fn main() -> Result<()> {
     // 等待终止信号（SIGTERM/SIGINT/Ctrl+C），主程序 stop 时发送
     #[cfg(unix)]
     {
-        let mut term =
-            signal::unix::signal(signal::unix::SignalKind::terminate()).context("注册 SIGTERM 处理失败")?;
-        let mut int =
-            signal::unix::signal(signal::unix::SignalKind::interrupt()).context("注册 SIGINT 处理失败")?;
+        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .context("注册 SIGTERM 处理失败")?;
+        let mut int = signal::unix::signal(signal::unix::SignalKind::interrupt())
+            .context("注册 SIGINT 处理失败")?;
         tokio::select! {
             _ = term.recv() => tracing::info!("收到 SIGTERM，正在退出..."),
             _ = int.recv() => tracing::info!("收到 SIGINT，正在退出..."),
@@ -328,6 +409,17 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
         tracing::warn!("msg_type 为空，原始事件数据:\n{raw}");
     }
 
+    if let Some(message_id) = message_id.as_deref()
+        && !state
+            .recent_messages
+            .lock()
+            .await
+            .claim(chat_id, message_id)
+    {
+        tracing::info!("忽略重复飞书消息 chat_id={chat_id} message_id={message_id}");
+        return Ok(());
+    }
+
     // 给用户消息添加已接收标记
     let mut salute_reaction_id = String::new();
     if let Some(ref msg_id) = message_id {
@@ -337,102 +429,148 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
         }
     }
 
-    let mut extra_media: Vec<MediaAsset> = Vec::new();
+    let handling = process_user_message(
+        state,
+        &envelope.event.message,
+        chat_id,
+        &sender_id,
+        &message_id,
+    )
+    .await;
 
-    // 解析消息内容 → ApiMessageContent
-    let content = match msg_type.as_str() {
+    let retryable_failure = handling.is_err();
+    if let Err(error) = &handling {
+        tracing::error!("飞书消息处理失败: {error}");
+        if let Err(reply_error) =
+            send_reply(state, chat_id, "抱歉，处理消息时出现了错误，请稍后重试。").await
+        {
+            tracing::warn!("发送失败提示失败: {reply_error}");
+        }
+    }
+
+    finish_message_reaction(
+        state,
+        message_id.as_deref(),
+        &salute_reaction_id,
+        matches!(&handling, Ok(MessageHandling::Forwarded)),
+    )
+    .await;
+
+    if retryable_failure && let Some(message_id) = message_id.as_deref() {
+        state
+            .recent_messages
+            .lock()
+            .await
+            .release(chat_id, message_id);
+    }
+
+    handling.map(|_| ())
+}
+
+async fn process_user_message(
+    state: &Arc<BotState>,
+    message: &EventMessage,
+    chat_id: &str,
+    sender_id: &str,
+    message_id: &Option<String>,
+) -> Result<MessageHandling> {
+    let parsed = match message.msg_type.as_str() {
         "text" => {
-            let text = extract_text_from_message(&envelope.event.message.content)?;
-            ApiMessageContent::Text { text }
+            let text = extract_text_from_message(&message.content)?;
+            ParsedMessage {
+                content: ApiMessageContent::Text { text },
+                media: Vec::new(),
+            }
         }
         "image" => {
-            let image_key = extract_image_key(&envelope.event.message.content)?;
+            let image_key = extract_image_key(&message.content)?;
             tracing::info!("收到图片消息 image_key={image_key}");
-            let image_url = download_image_as_data_uri(state, &message_id, &image_key).await?;
-            ApiMessageContent::Image {
-                url: image_url,
-                caption: None,
+            let image_url = download_image_as_data_uri(state, message_id, &image_key).await?;
+            ParsedMessage {
+                content: ApiMessageContent::Image {
+                    url: image_url,
+                    caption: None,
+                },
+                media: Vec::new(),
             }
         }
         "post" => {
             tracing::info!(
                 "开始解析 post 消息 content={}",
-                truncate_str(&envelope.event.message.content, 200)
+                truncate_str(&message.content, 200)
             );
-            let (text, images) = extract_post_with_images(
-                &envelope.event.message.content,
-                state,
-                &message_id,
-            )
-            .await?;
+            let (text, images, failed_images) =
+                extract_post_with_images(&message.content, state, message_id).await?;
             tracing::info!(
-                "post 解析完成 text={} images={}",
+                "post 解析完成 text={} images={} failed_images={failed_images}",
                 truncate_str(&text, 100),
                 images.len()
             );
-            if images.is_empty() {
-                ApiMessageContent::Text { text }
-            } else if text.is_empty() {
-                // 只有图片没有文字，发送第一张图片
-                ApiMessageContent::Image {
-                    url: images.into_iter().next().unwrap(),
-                    caption: None,
-                }
-            } else {
-                // 有文字也有图片，文本放在 content，图片放在 media
-                extra_media = images
-                    .into_iter()
-                    .map(|url| MediaAsset {
-                        kind: "image".to_string(),
-                        url,
-                        mime_type: None,
-                        title: None,
-                        capability: Some("multimodal".to_string()),
-                    })
-                    .collect();
-                ApiMessageContent::Text { text }
+            if text.trim().is_empty() && images.is_empty() && failed_images > 0 {
+                return Err(anyhow!("post 消息中的图片全部下载失败"));
             }
+            compose_post_message(text, images)
         }
         _ => {
-            tracing::warn!("不支持的消息类型: {msg_type}");
-            return Ok(());
+            tracing::warn!("不支持的消息类型: {}", message.msg_type);
+            return Ok(MessageHandling::Ignored);
         }
     };
 
-    let text = content.text();
-    if text.is_empty() {
-        return Ok(());
+    if parsed.content.is_empty() {
+        tracing::info!("忽略空消息 msg_type={}", message.msg_type);
+        return Ok(MessageHandling::Ignored);
     }
 
-    tracing::info!("转发到天工 chat_id={chat_id} text={}", truncate_str(&text, 100));
+    tracing::info!(
+        "转发到天工 chat_id={chat_id} content_type={} media={}",
+        parsed.content.kind(),
+        parsed.media.len()
+    );
 
-    // 转发到天工 server
-    match forward_to_tiangong(state, chat_id, &sender_id, &message_id, content, extra_media).await {
+    match forward_to_tiangong(
+        state,
+        chat_id,
+        sender_id,
+        message_id,
+        parsed.content,
+        parsed.media,
+    )
+    .await
+    {
         Ok(reply) => {
             tracing::info!("天工回复 chat_id={chat_id} len={}", reply.len());
-            if let Err(e) = send_reply(state, chat_id, &reply).await {
-                tracing::error!("发送回复失败: {e}");
+            match send_reply(state, chat_id, &reply).await {
+                Ok(()) => Ok(MessageHandling::Forwarded),
+                Err(error) => {
+                    tracing::error!("发送飞书回复失败: {error}");
+                    Ok(MessageHandling::ReplyFailed)
+                }
             }
         }
-        Err(e) => {
-            tracing::error!("天工调用失败: {e}");
-            let _ = send_reply(state, chat_id, "抱歉，处理消息时出现了错误，请稍后重试。").await;
+        Err(error) => {
+            tracing::error!("天工调用失败: {error}");
+            Err(error)
         }
     }
+}
 
-    // 处理完成，切换标记：移除接收标记，添加完成标记
-    if let Some(ref msg_id) = message_id {
+async fn finish_message_reaction(
+    state: &Arc<BotState>,
+    message_id: Option<&str>,
+    salute_reaction_id: &str,
+    completed: bool,
+) {
+    if let Some(message_id) = message_id {
         if !salute_reaction_id.is_empty()
-            && let Err(e) = remove_reaction(state, msg_id, &salute_reaction_id).await
+            && let Err(error) = remove_reaction(state, message_id, salute_reaction_id).await
         {
-            tracing::warn!("移除接收标记失败: {e}");
+            tracing::warn!("移除接收标记失败: {error}");
         }
-        if let Err(e) = add_reaction(state, msg_id, "OK").await {
-            tracing::warn!("添加完成标记失败: {e}");
+        if completed && let Err(error) = add_reaction(state, message_id, "OK").await {
+            tracing::warn!("添加完成标记失败: {error}");
         }
     }
-
-    Ok(())
 }
 
 // ── 消息解析 ──────────────────────────────────────────────────
@@ -460,17 +598,44 @@ fn extract_image_key(content: &str) -> Result<String> {
     Ok(key.to_string())
 }
 
+fn compose_post_message(text: String, images: Vec<String>) -> ParsedMessage {
+    if images.is_empty() {
+        return ParsedMessage {
+            content: ApiMessageContent::Text { text },
+            media: Vec::new(),
+        };
+    }
+
+    if text.trim().is_empty() {
+        let mut images = images.into_iter();
+        let first_image = images.next().expect("已确认富文本至少包含一张图片");
+        return ParsedMessage {
+            content: ApiMessageContent::Image {
+                url: first_image,
+                caption: None,
+            },
+            media: images.map(MediaAsset::image).collect(),
+        };
+    }
+
+    ParsedMessage {
+        content: ApiMessageContent::Text { text },
+        media: images.into_iter().map(MediaAsset::image).collect(),
+    }
+}
+
 /// 解析 post 类型消息，提取文本和图片（图片下载为 data URI）
 async fn extract_post_with_images(
     content: &str,
     state: &Arc<BotState>,
     message_id: &Option<String>,
-) -> Result<(String, Vec<String>)> {
+) -> Result<(String, Vec<String>, usize)> {
     let value: serde_json::Value =
         serde_json::from_str(content).map_err(|e| anyhow!("解析 post 消息失败: {e}"))?;
 
     let mut text_parts = Vec::new();
     let mut images = Vec::new();
+    let mut failed_images = 0;
 
     // 飞书 post 有两种格式：
     // 1. 扁平格式: {"title":"","content":[[...]]}
@@ -521,6 +686,7 @@ async fn extract_post_with_images(
                             match download_image_as_data_uri(state, message_id, key).await {
                                 Ok(url) => images.push(url),
                                 Err(e) => {
+                                    failed_images += 1;
                                     tracing::warn!("下载图片失败 key={key}: {e}");
                                 }
                             }
@@ -532,7 +698,7 @@ async fn extract_post_with_images(
         }
     }
 
-    Ok((text_parts.join(""), images))
+    Ok((text_parts.join(""), images, failed_images))
 }
 
 // ── 图片下载 ──────────────────────────────────────────────────
@@ -558,25 +724,10 @@ async fn download_image_as_data_uri(
         .await
         .map_err(|e| anyhow!("下载图片请求失败: {e}"))?;
 
-    let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
-    tracing::debug!("图片下载响应 status={status} content_type={content_type}");
-
-    if !status.is_success() {
-        let error_body = resp.text().await.unwrap_or_default();
-        tracing::warn!("图片下载失败 status={status} body={error_body}");
-        return Ok("data:image/jpeg;base64,".to_string());
-    }
-
-    if status.as_u16() == 401 {
+    let resp = if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         // token 过期，刷新重试
         let new_token = refresh_token(state).await?;
-        let retry = state
+        state
             .http
             .get(format!(
                 "https://open.feishu.cn/open-apis/im/v1/messages/{msg_id}/resources/{image_key}"
@@ -585,24 +736,45 @@ async fn download_image_as_data_uri(
             .bearer_auth(&new_token)
             .send()
             .await
-            .map_err(|e| anyhow!("重试下载图片失败: {e}"))?;
-        let bytes = retry
-            .bytes()
-            .await
-            .map_err(|e| anyhow!("读取图片数据失败: {e}"))?;
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-        return Ok(format!("data:image/jpeg;base64,{b64}"));
+            .map_err(|e| anyhow!("重试下载图片失败: {e}"))?
+    } else {
+        resp
+    };
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .filter(|value| value.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string();
+    tracing::debug!("图片下载响应 status={status} content_type={content_type}");
+
+    if !status.is_success() {
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "图片下载失败 status={status} body={}",
+            truncate_str(&error_body, 512)
+        ));
     }
 
     let bytes = resp
         .bytes()
         .await
         .map_err(|e| anyhow!("读取图片数据失败: {e}"))?;
+    if bytes.is_empty() {
+        return Err(anyhow!("图片下载结果为空 image_key={image_key}"));
+    }
 
-    tracing::info!("图片下载完成 image_key={image_key} size={}KB", bytes.len() / 1024);
+    tracing::info!(
+        "图片下载完成 image_key={image_key} size={}KB",
+        bytes.len() / 1024
+    );
 
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-    Ok(format!("data:image/jpeg;base64,{b64}"))
+    Ok(format!("data:{content_type};base64,{b64}"))
 }
 
 // ── 天工 Server 调用 ──────────────────────────────────────────
@@ -814,11 +986,7 @@ async fn add_reaction(state: &Arc<BotState>, message_id: &str, emoji: &str) -> R
     Ok(reaction_id)
 }
 
-async fn remove_reaction(
-    state: &Arc<BotState>,
-    message_id: &str,
-    reaction_id: &str,
-) -> Result<()> {
+async fn remove_reaction(state: &Arc<BotState>, message_id: &str, reaction_id: &str) -> Result<()> {
     if reaction_id.is_empty() {
         return Ok(());
     }
@@ -851,10 +1019,115 @@ async fn remove_reaction(
 
 // ── 工具函数 ──────────────────────────────────────────────────
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
+fn truncate_str(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
     } else {
-        format!("{}...", &s[..max_len])
+        prefix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_from(parsed: ParsedMessage) -> ConnectorRequest {
+        ConnectorRequest {
+            connector: "feishu-bot".to_string(),
+            channel_id: "chat".to_string(),
+            sender_id: "sender".to_string(),
+            message_id: Some("message".to_string()),
+            message: None,
+            content: Some(parsed.content),
+            media: parsed.media,
+        }
+    }
+
+    #[test]
+    fn content_validity_depends_on_its_resource() {
+        assert!(ApiMessageContent::Text { text: "  ".into() }.is_empty());
+        assert!(
+            ApiMessageContent::Image {
+                url: String::new(),
+                caption: None,
+            }
+            .is_empty()
+        );
+        assert!(
+            ApiMessageContent::File {
+                url: "data:file".into(),
+                name: String::new(),
+            }
+            .is_empty()
+        );
+        assert!(
+            !ApiMessageContent::Image {
+                url: "data:image/png;base64,AA==".into(),
+                caption: None,
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn single_image_is_sent_as_structured_content() {
+        let parsed = ParsedMessage {
+            content: ApiMessageContent::Image {
+                url: "data:image/png;base64,first".into(),
+                caption: None,
+            },
+            media: Vec::new(),
+        };
+        let value = serde_json::to_value(request_from(parsed)).unwrap();
+
+        assert_eq!(value["content"]["type"], "image");
+        assert_eq!(value["content"]["url"], "data:image/png;base64,first");
+        assert!(value.get("media").is_none());
+    }
+
+    #[test]
+    fn image_only_post_keeps_every_image_in_order() {
+        let parsed = compose_post_message(
+            String::new(),
+            vec!["first".into(), "second".into(), "third".into()],
+        );
+        let value = serde_json::to_value(request_from(parsed)).unwrap();
+
+        assert_eq!(value["content"]["type"], "image");
+        assert_eq!(value["content"]["url"], "first");
+        assert_eq!(value["media"].as_array().unwrap().len(), 2);
+        assert_eq!(value["media"][0]["url"], "second");
+        assert_eq!(value["media"][1]["url"], "third");
+    }
+
+    #[test]
+    fn text_and_images_post_keeps_text_and_every_image() {
+        let parsed = compose_post_message("正文".into(), vec!["first".into(), "second".into()]);
+        let value = serde_json::to_value(request_from(parsed)).unwrap();
+
+        assert_eq!(value["content"]["type"], "text");
+        assert_eq!(value["content"]["text"], "正文");
+        assert_eq!(value["media"].as_array().unwrap().len(), 2);
+        assert_eq!(value["media"][0]["url"], "first");
+        assert_eq!(value["media"][1]["url"], "second");
+    }
+
+    #[test]
+    fn unicode_log_truncation_does_not_split_characters() {
+        assert_eq!(truncate_str("飞书图片消息", 4), "飞书图片...");
+        assert_eq!(truncate_str("飞书", 4), "飞书");
+    }
+
+    #[test]
+    fn duplicate_message_claim_is_scoped_by_channel_and_releasable() {
+        let mut messages = RecentMessages::default();
+        assert!(messages.claim("chat-a", "message-1"));
+        assert!(!messages.claim("chat-a", "message-1"));
+        assert!(messages.claim("chat-b", "message-1"));
+
+        messages.release("chat-a", "message-1");
+        assert!(messages.claim("chat-a", "message-1"));
     }
 }
