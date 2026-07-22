@@ -514,6 +514,22 @@ fn run_gui() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
 
+            #[cfg(debug_assertions)]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match tokio::signal::ctrl_c().await {
+                        Ok(()) => {
+                            info!("收到 Ctrl+C，正在正常退出天工");
+                            app_handle.exit(0);
+                        }
+                        Err(error) => {
+                            warn!(%error, "监听 Ctrl+C 失败");
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
