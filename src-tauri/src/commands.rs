@@ -2637,6 +2637,176 @@ pub async fn set_mcp_server_enabled(
 }
 
 // ============================================================================
+// 通讯网关（bot）管理
+// ============================================================================
+
+/// 获取已注册的 bot 列表
+#[tauri::command]
+pub async fn bot_list(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_bots::BotConfig>, String> {
+    Ok(state.bot_store.list())
+}
+
+/// 获取指定 bot 的健康状态
+#[tauri::command]
+pub async fn bot_health(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotHealth, String> {
+    Ok(state.bot_runtime.health(&id).await)
+}
+
+/// 获取 bot 的配置字段 schema（供前端动态渲染表单）。
+///
+/// schema 权威来源是 bot 二进制 `--describe` 上报（缓存在 ~/.tiangong/bots/<id>/schema.json）。
+/// 优先读缓存；若该 bot 实例尚未安装制品，从 bots-index.json 的预览 schema 读取。
+#[tauri::command]
+pub async fn bot_config_schema(
+    bot_id: Option<String>,
+    artifact_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_bots::ConfigFieldSchema>, String> {
+    // 1) 优先读已安装 bot 的缓存 schema（权威来源）。
+    if let Some(id) = &bot_id {
+        if let Some(schema) = tiangong_bots::cached_schema(id) {
+            return Ok(schema);
+        }
+    }
+    // 2) 回退到 bots-index.json 的预览 schema（安装前展示）。
+    let index = state
+        .bot_runtime
+        .fetch_index()
+        .await
+        .map_err(|e| e.to_string())?;
+    let manifest = index
+        .bots
+        .into_iter()
+        .find(|m| m.id == artifact_id)
+        .ok_or_else(|| format!("bots-index 中未找到制品：{artifact_id}"))?;
+    Ok(manifest.config_schema)
+}
+
+/// 拉取远端 bots-index.json（可安装的 bot 列表）
+#[tauri::command]
+pub async fn bot_available(
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotsIndex, String> {
+    state
+        .bot_runtime
+        .fetch_index()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 注册新 bot（不启动；需先 `bot_install` 下载制品再 `bot_start`）
+#[tauri::command]
+pub async fn bot_register(
+    request: tiangong_bots::RegisterBotRequest,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotConfig, String> {
+    state.bot_store.register(request).map_err(|e| e.to_string())
+}
+
+/// 更新已有 bot（id 主键不变）
+#[tauri::command]
+pub async fn bot_update(
+    id: String,
+    request: tiangong_bots::UpdateBotRequest,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotConfig, String> {
+    state
+        .bot_store
+        .update(&id, request)
+        .map_err(|e| e.to_string())
+}
+
+/// 删除 bot（若运行中则先停止）
+#[tauri::command]
+pub async fn bot_remove(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    // 先停止运行中的 bot（忽略未运行的错误）
+    let _ = state.bot_runtime.stop(&id).await;
+    state.bot_store.remove(&id).map_err(|e| e.to_string())?;
+    Ok("bot 已删除".to_string())
+}
+
+/// 切换 bot 启用状态
+#[tauri::command]
+pub async fn bot_set_enabled(
+    id: String,
+    enabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::BotConfig, String> {
+    state
+        .bot_store
+        .set_enabled(&id, enabled)
+        .map_err(|e| e.to_string())
+}
+
+/// 下载某制品到指定 bot 实例目录
+#[tauri::command]
+pub async fn bot_install(
+    artifact_id: String,
+    dest_bot_id: String,
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<String, String> {
+    let index = state
+        .bot_runtime
+        .fetch_index()
+        .await
+        .map_err(|e| e.to_string())?;
+    let manifest = index
+        .bots
+        .into_iter()
+        .find(|m| m.id == artifact_id)
+        .ok_or_else(|| format!("bots-index 中未找到制品：{artifact_id}"))?;
+    let progress: tiangong_bots::ProgressFn = std::sync::Arc::new({
+        let app = app.clone();
+        let total = manifest.current_artifact().map(|_| 0u64).unwrap_or(0);
+        let _ = total;
+        move |downloaded, content_len| {
+            let _ = app.emit(
+                "bot_install_progress",
+                serde_json::json!({ "downloaded": downloaded, "total": content_len }),
+            );
+        }
+    });
+    state
+        .bot_runtime
+        .install(manifest, &dest_bot_id, Some(progress))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("制品安装完成".to_string())
+}
+
+/// 启动指定 bot 实例（需制品已安装）
+#[tauri::command]
+pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let bot = state
+        .bot_store
+        .get(&id)
+        .ok_or_else(|| format!("bot 不存在：{id}"))?;
+    state
+        .bot_runtime
+        .start(&bot)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(format!("bot 已启动：{}", bot.name))
+}
+
+/// 停止指定 bot 实例
+#[tauri::command]
+pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    state
+        .bot_runtime
+        .stop(&id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok("bot 已停止".to_string())
+}
+
+// ============================================================================
 // Skill 管理
 // ============================================================================
 

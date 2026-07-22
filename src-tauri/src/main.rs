@@ -511,6 +511,14 @@ fn run_gui() {
                 silent::Scheduler::schedule(silent::SCHEDULER.clone()).await;
             });
 
+            // 启动所有 enabled 且已安装制品的 bot
+            {
+                let bot_runtime = state.bot_runtime.clone();
+                tauri::async_runtime::spawn(async move {
+                    bot_runtime.start_enabled().await;
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -622,6 +630,17 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
+            tiangong_app::commands::bot_list,
+            tiangong_app::commands::bot_health,
+            tiangong_app::commands::bot_config_schema,
+            tiangong_app::commands::bot_available,
+            tiangong_app::commands::bot_register,
+            tiangong_app::commands::bot_update,
+            tiangong_app::commands::bot_remove,
+            tiangong_app::commands::bot_set_enabled,
+            tiangong_app::commands::bot_install,
+            tiangong_app::commands::bot_start,
+            tiangong_app::commands::bot_stop,
             tiangong_app::commands::resolve_model_context_window,
         ])
         .plugin(tiangong_plugin_browser::init())
@@ -640,12 +659,22 @@ fn run_gui() {
         .build(generate_tauri_context())
         .expect("error while building tauri application")
         .run(|handle, event| {
+            // 应用退出前停止所有 bot 子进程，避免孤儿进程。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
+                    let runtime = app_state.bot_runtime.clone();
+                    // 阻塞当前线程等待 bot 停止，防止主进程先退出留下孤儿。
+                    tauri::async_runtime::block_on(async move {
+                        runtime.stop_all().await;
+                    });
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(handle);
             }
             #[cfg(not(target_os = "macos"))]
-            let _ = (handle, event);
+            let _ = handle;
         });
 
     drop(_guard);

@@ -351,6 +351,72 @@ export interface McpHealthStatus {
   server_version?: string;
 }
 
+// --- 通讯网关（bot）类型 ---
+
+export type FieldType =
+  | { kind: 'string' }
+  | { kind: 'secret' }
+  | { kind: 'boolean' }
+  | { kind: 'barcode' }
+  | { kind: 'select'; options: string[] };
+
+export interface ConfigFieldSchema {
+  key: string;
+  label: string;
+  field_type: FieldType;
+  required: boolean;
+  default?: unknown;
+  help?: string;
+}
+
+export interface BotConfig {
+  id: string;
+  name: string;
+  artifact_id: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RegisterBotRequest {
+  name: string;
+  artifact_id: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateBotRequest {
+  name: string;
+  config?: Record<string, unknown>;
+}
+
+export interface BotArtifact {
+  url: string;
+  checksum: string;
+}
+
+export interface BotManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  config_schema: ConfigFieldSchema[];
+  platforms: Record<string, BotArtifact>;
+  min_app_version?: string;
+}
+
+export interface BotsIndex {
+  version: number;
+  bots: BotManifest[];
+}
+
+export type BotHealth =
+  | 'running'
+  | 'stopped'
+  | 'missing_artifact'
+  | { error: { message: string } };
+
 export interface ServerConfig {
   host: string;
   port: number;
@@ -732,6 +798,42 @@ export const api = {
 
   setMcpServerEnabled: (name: string, enabled: boolean): Promise<string> =>
     invoke('set_mcp_server_enabled', { name, enabled }),
+
+  // ----------------------------------------------------------------
+  // 通讯网关（bot）管理
+  // ----------------------------------------------------------------
+  botList: (): Promise<BotConfig[]> =>
+    invoke('bot_list'),
+
+  botHealth: (id: string): Promise<BotHealth> =>
+    invoke('bot_health', { id }),
+
+  botConfigSchema: (artifactId: string, botId?: string): Promise<ConfigFieldSchema[]> =>
+    invoke('bot_config_schema', { artifactId, botId: botId ?? null }),
+
+  botAvailable: (): Promise<BotsIndex> =>
+    invoke('bot_available'),
+
+  botRegister: (request: RegisterBotRequest): Promise<BotConfig> =>
+    invoke('bot_register', { request }),
+
+  botUpdate: (id: string, request: UpdateBotRequest): Promise<BotConfig> =>
+    invoke('bot_update', { id, request }),
+
+  botRemove: (id: string): Promise<string> =>
+    invoke('bot_remove', { id }),
+
+  botSetEnabled: (id: string, enabled: boolean): Promise<BotConfig> =>
+    invoke('bot_set_enabled', { id, enabled }),
+
+  botInstall: (artifactId: string, destBotId: string): Promise<string> =>
+    invoke('bot_install', { artifactId, destBotId }),
+
+  botStart: (id: string): Promise<string> =>
+    invoke('bot_start', { id }),
+
+  botStop: (id: string): Promise<string> =>
+    invoke('bot_stop', { id }),
 
   // ----------------------------------------------------------------
   // Skill 管理

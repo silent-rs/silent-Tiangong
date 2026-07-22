@@ -51,6 +51,10 @@ pub struct TiangongApp {
     /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
     /// set_enabled/probe/health）。
     pub mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
+    /// bot 通讯网关配置存储（读写 `~/.tiangong/bots/bots.json`）。
+    pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
+    /// bot 运行时——制品下载、进程监督与启停。
+    pub bot_runtime: std::sync::Arc<tiangong_bots::BotRuntime>,
     /// 内嵌 HTTP 的等待者按稳定用户消息 ID 绑定。终态由唯一的桌面流消费者完成，
     /// 不能按“当前最后一轮”唤醒，否则同会话排队消息会串答。
     remote_turn_waiters: Mutex<HashMap<(String, String), Vec<RemoteTurnWaiter>>>,
@@ -177,6 +181,12 @@ impl TiangongApp {
         let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root.clone(),
         ));
+        let bot_store = std::sync::Arc::new(tiangong_bots::BotStore::with_storage_root(
+            storage_root.clone(),
+        ));
+        let bot_runtime = std::sync::Arc::new(
+            tiangong_bots::BotRuntime::new(bot_store.clone()).expect("构造 bot runtime 失败"),
+        );
         let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
             skill_plugin: skill_plugin.clone(),
@@ -197,6 +207,8 @@ impl TiangongApp {
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
             skill_plugin,
             mcp_plugin,
+            bot_store,
+            bot_runtime,
             remote_turn_waiters: Mutex::new(HashMap::new()),
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),

@@ -9620,6 +9620,7 @@ dependencies = [
  "tauri-runtime-wry",
  "tempfile",
  "tiangong-app-state",
+ "tiangong-bots",
  "tiangong-cli",
  "tiangong-config",
  "tiangong-core",
@@ -9663,6 +9664,27 @@ dependencies = [
  "tiangong-core",
  "tiangong-core-manager",
  "tiangong-media-archive",
+]
+
+[[package]]
+name = "tiangong-bots"
+version = "0.12.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "hex",
+ "reqwest 0.13.4",
+ "scru128",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tiangong-types",
+ "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]

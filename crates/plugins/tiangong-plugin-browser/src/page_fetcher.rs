@@ -307,11 +307,19 @@ impl PageFetcher for BrowserPageFetcher {
 /// 浏览器工具覆盖处理器（web_fetch / web_form_extract / web_form_fill / web_click / web_query_dom / web_locate_element）
 pub struct BrowserToolOverride {
     fetcher: Arc<dyn PageFetcher>,
+    /// web_fetch 执行锁——串行化对 WebView 的并发导航，规避 wry
+    /// `url_from_webview` 在 WebView 导航中 `URL()` 返回 nil 导致的 panic
+    /// （wry 0.54.3 / 0.55.1 均未修，参见上游 issue）。并发 web_fetch
+    /// 调用按 FIFO 等待，而非并行操作同一 WebView。
+    fetch_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl BrowserToolOverride {
     pub fn new(fetcher: Arc<dyn PageFetcher>) -> Self {
-        Self { fetcher }
+        Self {
+            fetcher,
+            fetch_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -407,6 +415,7 @@ impl BrowserToolOverride {
 
     fn handle_web_fetch(
         fetcher: &Arc<dyn PageFetcher>,
+        fetch_lock: &Arc<tokio::sync::Mutex<()>>,
         call: &tiangong_core::model::ToolCall,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
@@ -438,7 +447,11 @@ impl BrowserToolOverride {
             .unwrap_or(12000) as usize;
 
         let fetcher = fetcher.clone();
+        let fetch_lock = fetch_lock.clone();
         Box::pin(async move {
+            // 串行化 web_fetch：并发调用等待前一个完成后再操作 WebView，
+            // 规避 wry 在 WebView 导航中 URL() 返回 nil 的 panic。
+            let _guard = fetch_lock.lock().await;
             let result = match fetcher.fetch_page(&url, max_chars).await {
                 Some(r) => r,
                 None => {
@@ -907,7 +920,7 @@ impl tiangong_core::tool_override::ToolOverrideHandler for BrowserToolOverride {
         Box<dyn std::future::Future<Output = Option<tiangong_core::tool::ToolResult>> + Send>,
     > {
         match call.name.as_str() {
-            "web_fetch" => Self::handle_web_fetch(&self.fetcher, call),
+            "web_fetch" => Self::handle_web_fetch(&self.fetcher, &self.fetch_lock, call),
             "web_form_extract" => Self::handle_web_form_extract(&self.fetcher),
             "web_form_fill" => Self::handle_web_form_fill(&self.fetcher, call),
             "web_click" => Self::handle_web_click(&self.fetcher, call),
