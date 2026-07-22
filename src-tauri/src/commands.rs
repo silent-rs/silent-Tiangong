@@ -2803,13 +2803,40 @@ pub async fn bot_install(
     Ok("制品安装完成".to_string())
 }
 
-/// 启动指定 bot 实例（需制品已安装）
+/// 启动指定 bot 实例（需制品已安装）。
+///
+/// 启动 bot 前自动确保 embedded server 已运行（未运行则启动），
+/// bot 需要通过 server 的 /api/v1/messages 收发消息。
 #[tauri::command]
 pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
     let bot = state
         .bot_store
         .get(&id)
         .ok_or_else(|| format!("bot 不存在：{id}"))?;
+
+    // 确保 embedded server 已运行（bot 依赖它收发消息）。
+    let server_config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await?;
+    if !state.is_embedded_server_running() && !server_health_check(&server_config) {
+        tracing::info!("bot 启动前自动启用 embedded server");
+        state.start_embedded_server(
+            &server_config.host,
+            server_config.port,
+            server_config.auth_token.clone(),
+        )?;
+        if let Err(err) = wait_for_server_health(&server_config) {
+            let _ = state.stop_embedded_server();
+            return Err(format!(
+                "启动 embedded server 失败（bot 无法收发消息）：{err}"
+            ));
+        }
+        // 持久化 enabled 标记，重启后自动拉起。
+        let mut config = server_config;
+        config.enabled = true;
+        let _ = save_server_config_to_state(state.inner(), config).await;
+    }
+
     state
         .bot_runtime
         .start(&bot)

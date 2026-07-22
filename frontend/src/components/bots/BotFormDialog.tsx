@@ -19,6 +19,8 @@ interface Props {
   bot: BotConfig | null;
   /** 制品 id（标识 bot 平台） */
   artifactId: string;
+  /** 建议的 bot 名称（通常为本地制品目录名），新增时预填 */
+  suggestedId?: string;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -29,12 +31,12 @@ interface Props {
  * 根据 [`api.botConfigSchema`] 返回的字段定义动态渲染输入控件。
  * barcode 字段首期按 secret 输入框回退（扫码渲染逻辑预留，见 FieldType.barcode）。
  */
-export function BotFormDialog({ bot, artifactId, onClose, onSaved }: Props) {
+export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }: Props) {
   const isEdit = !!bot;
   const { showSuccess, showError } = useToast();
 
   const [schema, setSchema] = useState<ConfigFieldSchema[]>([]);
-  const [id, setId] = useState(bot?.id ?? '');
+  const [id, setId] = useState(bot?.id ?? suggestedId ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [enabled, setEnabled] = useState(bot?.enabled ?? false);
   const [saving, setSaving] = useState(false);
