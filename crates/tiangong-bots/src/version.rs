@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::BotId;
 use crate::manifest::BotManifest;
 use crate::paths;
 
@@ -17,7 +18,7 @@ pub struct InstalledVersion {
 }
 
 /// 读取已安装版本记录；文件不存在或解析失败返回 `None`。
-pub fn read_installed_version(id: &str) -> Option<InstalledVersion> {
+pub fn read_installed_version(id: &BotId) -> Option<InstalledVersion> {
     let path = paths::bot_version_path(id);
     if !path.exists() {
         return None;
@@ -27,7 +28,7 @@ pub fn read_installed_version(id: &str) -> Option<InstalledVersion> {
 }
 
 /// 写入已安装版本记录（install/upgrade 成功后调用）。
-pub fn write_installed_version(id: &str, manifest: &BotManifest) -> anyhow::Result<()> {
+pub fn write_installed_version(id: &BotId, manifest: &BotManifest) -> anyhow::Result<()> {
     let path = paths::bot_version_path(id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

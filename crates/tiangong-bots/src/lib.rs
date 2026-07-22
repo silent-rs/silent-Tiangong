@@ -15,11 +15,12 @@
 
 pub mod config;
 pub mod downloader;
+mod id;
 pub mod logger;
 pub mod management;
 pub mod manifest;
 pub mod paths;
-pub mod provision;
+mod provision;
 pub mod store;
 pub mod supervisor;
 pub mod version;
@@ -28,6 +29,7 @@ pub use config::{
     BotConfig, BotsConfig, ConfigFieldSchema, FieldType, RegisterBotRequest, UpdateBotRequest,
 };
 pub use downloader::{Downloader, ProgressFn};
+pub use id::{BotId, InvalidBotId};
 pub use logger::{BotLog, read_log_tail};
 pub use management::BotStore;
 pub use manifest::{BotArtifact, BotManifest, BotsIndex, current_platform_key};

@@ -6,13 +6,14 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use crate::BotId;
 use crate::config::{BotConfig, ConfigFieldSchema};
 use crate::downloader::{Downloader, ProgressFn};
 use crate::management::BotStore;
@@ -56,7 +57,7 @@ struct RuntimeEntry {
 pub struct BotRuntime {
     store: Arc<BotStore>,
     downloader: Downloader,
-    entries: Mutex<HashMap<String, RuntimeEntry>>,
+    entries: Mutex<HashMap<BotId, RuntimeEntry>>,
     /// 制品 manifest 缓存（artifact_id → manifest），由安装时填入。
     manifests: Mutex<HashMap<String, BotManifest>>,
 }
@@ -78,7 +79,7 @@ impl BotRuntime {
     pub async fn install(
         &self,
         manifest: BotManifest,
-        dest_id: &str,
+        dest_id: &BotId,
         progress: Option<ProgressFn>,
     ) -> Result<PathBuf> {
         let artifact_id = manifest.id.clone();
@@ -91,7 +92,7 @@ impl BotRuntime {
             .await
             .insert(artifact_id, manifest.clone());
         // 获取并缓存 schema（失败仅警告，不阻断安装）。
-        if let Err(err) = describe_and_cache(&path, dest_id).await {
+        if let Err(err) = describe_and_cache(dest_id).await {
             tracing::warn!("获取 bot schema 失败（{}）：{err}", path.display());
         }
         // 写入版本记录（失败仅警告）。
@@ -135,7 +136,7 @@ impl BotRuntime {
     /// 升级后不自动重启——用户手动点启动。
     pub async fn upgrade(
         &self,
-        bot_id: &str,
+        bot_id: &BotId,
         manifest: BotManifest,
         progress: Option<ProgressFn>,
     ) -> Result<()> {
@@ -152,16 +153,18 @@ impl BotRuntime {
     }
 
     /// 调用指定 bot 制品创建扫码配置会话。
-    pub async fn provision_begin(&self, bot_id: &str) -> Result<crate::QrSession> {
+    pub async fn provision_begin(&self, bot_id: &BotId) -> Result<crate::QrSession> {
+        paths::ensure_executable_paths_safe(bot_id)?;
         crate::provision::begin(&paths::bot_artifact_path(bot_id)).await
     }
 
     /// 调用指定 bot 制品轮询扫码配置状态。
     pub async fn provision_poll(
         &self,
-        bot_id: &str,
+        bot_id: &BotId,
         session: &crate::QrSession,
     ) -> Result<crate::ProvisionStatus> {
+        paths::ensure_executable_paths_safe(bot_id)?;
         crate::provision::poll(&paths::bot_artifact_path(bot_id), session).await
     }
 
@@ -210,7 +213,7 @@ impl BotRuntime {
     }
 
     /// 停止指定 bot 实例。
-    pub async fn stop(&self, id: &str) -> Result<()> {
+    pub async fn stop(&self, id: &BotId) -> Result<()> {
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.remove(id) {
             entry.supervised.stop().await;
@@ -223,7 +226,7 @@ impl BotRuntime {
     /// 停止所有运行中的 bot。
     pub async fn stop_all(&self) {
         let mut entries = self.entries.lock().await;
-        let drained: Vec<(String, RuntimeEntry)> = entries.drain().collect();
+        let drained: Vec<(BotId, RuntimeEntry)> = entries.drain().collect();
         drop(entries);
         for (_, entry) in drained {
             entry.supervised.stop().await;
@@ -234,7 +237,7 @@ impl BotRuntime {
     ///
     /// 若 bot 正常退出（监督任务结束），自动从运行表移除并返回 Stopped，
     /// 避免 health 长期误报 Running。
-    pub async fn health(&self, id: &str) -> BotHealth {
+    pub async fn health(&self, id: &BotId) -> BotHealth {
         let mut entries = self.entries.lock().await;
         let running = match entries.get(id) {
             Some(entry) if !entry.supervised.is_finished() => true,
@@ -304,12 +307,11 @@ struct DescribeOutput {
 ///
 /// bot 二进制收到 `--describe` 参数后，输出 schema JSON 到 stdout 并退出。
 /// 主程序在 [`BotRuntime::install`] 成功后调用此函数缓存 schema。
-pub async fn describe_and_cache(
-    artifact_path: &Path,
-    bot_id: &str,
-) -> Result<Vec<ConfigFieldSchema>> {
+pub async fn describe_and_cache(bot_id: &BotId) -> Result<Vec<ConfigFieldSchema>> {
     use tokio::process::Command;
-    let mut cmd = Command::new(artifact_path);
+    paths::ensure_executable_paths_safe(bot_id)?;
+    let artifact_path = paths::bot_artifact_path(bot_id);
+    let mut cmd = Command::new(&artifact_path);
     cmd.arg("--describe");
     tiangong_types::process::configure_tokio_no_window(&mut cmd);
     let output = cmd
@@ -349,7 +351,7 @@ pub async fn describe_and_cache(
 ///
 /// 用于表单渲染、必填校验、环境变量注入。返回 `None` 表示尚未安装制品
 /// 或尚未执行 describe。
-pub fn cached_schema(bot_id: &str) -> Option<Vec<ConfigFieldSchema>> {
+pub fn cached_schema(bot_id: &BotId) -> Option<Vec<ConfigFieldSchema>> {
     let path = paths::bot_schema_path(bot_id);
     if !path.exists() {
         return None;
@@ -366,7 +368,10 @@ fn find_local_version(artifact_id: &str) -> Option<crate::version::InstalledVers
     let bots_dir = paths::default_bots_dir();
     let entries = std::fs::read_dir(&bots_dir).ok()?;
     for entry in entries.flatten() {
-        let version = crate::version::read_installed_version(entry.file_name().to_str()?);
+        let Some(id) = local_directory_id(&entry) else {
+            continue;
+        };
+        let version = crate::version::read_installed_version(&id);
         if let Some(ref v) = version
             && v.artifact_id == artifact_id
         {
@@ -385,18 +390,22 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
     };
     let mut artifacts = Vec::new();
     for entry in entries.flatten() {
-        let dir_name = match entry.file_name().to_str() {
-            Some(s) => s.to_string(),
+        let bot_id = match local_directory_id(&entry) {
+            Some(id) => id,
             None => continue,
         };
-        let bot_binary = paths::bot_artifact_path(&dir_name);
+        if let Err(error) = paths::ensure_executable_paths_safe(&bot_id) {
+            tracing::warn!("跳过不安全的 Bot 本地目录：{error}");
+            continue;
+        }
+        let bot_binary = paths::bot_artifact_path(&bot_id);
         if !bot_binary.exists() {
             continue;
         }
         // 读取 schema 缓存。
-        let schema = cached_schema(&dir_name).unwrap_or_default();
+        let schema = cached_schema(&bot_id).unwrap_or_default();
         // 读取版本记录（推断 artifact_id）。
-        let version_info = crate::version::read_installed_version(&dir_name);
+        let version_info = crate::version::read_installed_version(&bot_id);
         let artifact_id = version_info
             .as_ref()
             .map(|v| v.artifact_id.clone())
@@ -404,21 +413,57 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
             .or_else(|| {
                 // describe 缓存的 schema.json 只有数组，不含 artifact_id；
                 // 回退到目录名。
-                Some(dir_name.clone())
+                Some(bot_id.as_str().to_string())
             })
-            .unwrap_or_else(|| dir_name.clone());
+            .unwrap_or_else(|| bot_id.as_str().to_string());
         let version = version_info
             .as_ref()
             .map(|v| v.version.clone())
             .unwrap_or_default();
         artifacts.push(LocalArtifact {
-            id: dir_name,
+            id: bot_id.as_str().to_string(),
             artifact_id,
             version,
             config_schema: schema,
         });
     }
     artifacts
+}
+
+fn local_directory_id(entry: &std::fs::DirEntry) -> Option<BotId> {
+    let file_type = match entry.file_type() {
+        Ok(file_type) => file_type,
+        Err(error) => {
+            tracing::warn!(
+                "读取 Bot 本地目录类型失败：{} error={error}",
+                entry.path().display()
+            );
+            return None;
+        }
+    };
+    if file_type.is_symlink() {
+        tracing::warn!("跳过符号链接 Bot 本地目录：{}", entry.path().display());
+        return None;
+    }
+    if !file_type.is_dir() {
+        return None;
+    }
+
+    let file_name = entry.file_name();
+    let Some(raw_id) = file_name.to_str() else {
+        tracing::warn!(
+            "跳过名称不是 UTF-8 的 Bot 本地目录：{}",
+            entry.path().display()
+        );
+        return None;
+    };
+    match BotId::try_from(raw_id) {
+        Ok(id) => Some(id),
+        Err(error) => {
+            tracing::warn!("跳过非法 Bot 本地目录：{error}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -468,7 +513,7 @@ mod tests {
             serde_json::json!("http://127.0.0.1:9090"),
         );
         BotConfig {
-            id: "test".into(),
+            id: BotId::try_from("test").unwrap(),
             artifact_id: "feishu".into(),
             enabled: true,
             config,
@@ -500,7 +545,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("app_id".into(), serde_json::json!("cli_test"));
         let bot = BotConfig {
-            id: "partial".into(),
+            id: BotId::try_from("partial").unwrap(),
             artifact_id: "feishu".into(),
             enabled: false,
             config,
@@ -528,7 +573,7 @@ mod tests {
         let mut config = BTreeMap::new();
         config.insert("display_only".into(), serde_json::json!("value"));
         let bot = BotConfig {
-            id: "t".into(),
+            id: BotId::try_from("t").unwrap(),
             artifact_id: "feishu".into(),
             enabled: false,
             config,
@@ -537,5 +582,41 @@ mod tests {
         };
         let env = bot_env(&bot, &schema);
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn local_directory_filter_skips_invalid_ids() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("feishu")).unwrap();
+        std::fs::create_dir(root.path().join("1feishu")).unwrap();
+        std::fs::create_dir(root.path().join("feishu-bot")).unwrap();
+        std::fs::create_dir(root.path().join("con")).unwrap();
+
+        let mut accepted = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| local_directory_id(&entry))
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        accepted.sort();
+        assert_eq!(accepted, vec!["feishu"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_directory_filter_skips_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, root.path().join("feishu")).unwrap();
+        let entry = std::fs::read_dir(root.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.file_name() == "feishu")
+            .unwrap();
+
+        assert!(local_directory_id(&entry).is_none());
     }
 }
