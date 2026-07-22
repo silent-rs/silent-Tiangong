@@ -64,6 +64,10 @@ async fn invoke<T>(artifact_path: &Path, command: &str, input: Option<Vec<u8>>) 
 where
     T: DeserializeOwned,
 {
+    if let Some(runtime_dir) = artifact_path.parent() {
+        crate::paths::reject_symlink(runtime_dir, "Bot 实例目录")?;
+    }
+    crate::paths::reject_symlink(artifact_path, "Bot 制品")?;
     if !artifact_path.exists() {
         bail!("bot 制品不存在：{}", artifact_path.display());
     }
@@ -85,6 +89,10 @@ where
 }
 
 async fn execute(artifact_path: &Path, command: &str, input: Option<Vec<u8>>) -> Result<Output> {
+    if let Some(runtime_dir) = artifact_path.parent() {
+        crate::paths::reject_symlink(runtime_dir, "Bot 实例目录")?;
+    }
+    crate::paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut process = Command::new(artifact_path);
     process
         .arg(command)

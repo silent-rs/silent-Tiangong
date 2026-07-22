@@ -181,9 +181,11 @@ impl TiangongApp {
         let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root.clone(),
         ));
-        let bot_store = std::sync::Arc::new(tiangong_bots::BotStore::with_storage_root(
-            storage_root.clone(),
-        ));
+        let bot_store = std::sync::Arc::new(
+            tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
+                |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
+            ),
+        );
         let bot_runtime = std::sync::Arc::new(
             tiangong_bots::BotRuntime::new(bot_store.clone()).expect("构造 bot runtime 失败"),
         );

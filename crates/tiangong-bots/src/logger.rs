@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::BotId;
+
 /// 内存错误摘要缓冲上限（字节）。
 const ERROR_SUMMARY_BYTES: usize = 8 * 1024;
 
@@ -33,7 +35,7 @@ pub struct BotLog {
 }
 
 /// 读取当前 bot.log 的最近内容。日志不存在时返回空内容。
-pub fn read_log_tail(id: &str) -> std::io::Result<BotLog> {
+pub fn read_log_tail(id: &BotId) -> std::io::Result<BotLog> {
     let path = crate::paths::bot_log_path(id);
     let mut file = match File::open(path) {
         Ok(file) => file,
