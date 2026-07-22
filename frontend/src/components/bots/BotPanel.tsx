@@ -4,6 +4,7 @@ import {
   type BotConfig,
   type BotHealth,
   type BotManifest,
+  type LocalArtifact,
 } from '../../api/tauri';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -20,6 +21,7 @@ export function BotPanel() {
   const [bots, setBots] = useState<BotConfig[]>([]);
   const [healthMap, setHealthMap] = useState<Record<string, BotHealth>>({});
   const [available, setAvailable] = useState<BotManifest[]>([]);
+  const [localArtifacts, setLocalArtifacts] = useState<LocalArtifact[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
   // 新增表单：先选制品，再打开 BotFormDialog。
@@ -61,7 +63,28 @@ export function BotPanel() {
     } catch (err) {
       console.warn('拉取可安装 bot 列表失败:', err);
     }
+    // 同时扫描本地已安装的制品（不依赖线上 index）。
+    try {
+      const local = await api.botScanLocal();
+      setLocalArtifacts(local);
+    } catch (err) {
+      console.warn('扫描本地 bot 制品失败:', err);
+    }
   };
+
+  // 合并本地 + 线上的可选制品（去重，本地优先）。
+  const pickableArtifacts = (() => {
+    const map = new Map<string, { id: string; name: string; source: 'local' | 'remote' }>();
+    for (const a of localArtifacts) {
+      map.set(a.artifact_id, { id: a.artifact_id, name: a.id, source: 'local' });
+    }
+    for (const m of available) {
+      if (!map.has(m.id)) {
+        map.set(m.id, { id: m.id, name: m.name, source: 'remote' });
+      }
+    }
+    return Array.from(map.values());
+  })();
 
   useEffect(() => {
     load();
@@ -170,17 +193,22 @@ export function BotPanel() {
             <RefreshCw className="w-4 h-4 mr-2" />
             刷新
           </Button>
-          <Button size="sm" onClick={() => setPickOpen(true)} disabled={available.length === 0}>
+          <Button
+            size="sm"
+            onClick={() => setPickOpen(true)}
+            disabled={pickableArtifacts.length === 0}
+          >
             <Plus className="w-4 h-4 mr-2" />
             添加
           </Button>
         </div>
       </div>
 
-      {available.length === 0 && (
+      {pickableArtifacts.length === 0 && (
         <Card>
           <CardContent className="text-sm text-muted-foreground py-3">
-            暂无可安装的 bot 制品。发布包含 bots-index.json 的 Release 后可在此添加。
+            暂无可用 bot 制品。请先将 bot 二进制放入 ~/.tiangong/bots/&lt;名称&gt;/，
+            或发布包含 bots-index.json 的 Release。
           </CardContent>
         </Card>
       )}
@@ -274,18 +302,21 @@ export function BotPanel() {
             <DialogTitle>选择平台</DialogTitle>
           </DialogHeader>
           <div className="space-y-2 py-2">
-            {available.map((m) => (
+            {pickableArtifacts.map((a) => (
               <Button
-                key={m.id}
+                key={a.id}
                 variant="outline"
                 className="w-full justify-start"
                 onClick={() => {
-                  setPickedArtifactId(m.id);
+                  setPickedArtifactId(a.id);
                   setPickOpen(false);
                 }}
               >
-                <span className="font-medium">{m.name}</span>
-                <span className="text-xs text-muted-foreground ml-2">{m.id}</span>
+                <span className="font-medium">{a.name}</span>
+                <span className="text-xs text-muted-foreground ml-2">{a.id}</span>
+                {a.source === 'local' && (
+                  <Badge variant="secondary" className="ml-auto">本地</Badge>
+                )}
               </Button>
             ))}
           </div>

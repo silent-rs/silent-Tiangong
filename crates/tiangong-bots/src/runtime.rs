@@ -34,6 +34,19 @@ pub enum BotHealth {
     Error { message: String },
 }
 
+/// 本地已安装的制品（扫描 `~/.tiangong/bots/*/` 发现）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LocalArtifact {
+    /// 目录名（即 bot 实例 id/名称）。
+    pub id: String,
+    /// 制品 id（来自 version.json 或 schema.json 的推断）。
+    pub artifact_id: String,
+    /// 已安装版本（来自 version.json，未知则为空）。
+    pub version: String,
+    /// config schema（来自 schema.json 缓存）。
+    pub config_schema: Vec<ConfigFieldSchema>,
+}
+
 /// 被运行时管理的 bot 条目。
 struct RuntimeEntry {
     supervised: SupervisedBot,
@@ -86,6 +99,15 @@ impl BotRuntime {
             tracing::warn!("写入 bot 版本记录失败：{err}");
         }
         Ok(path)
+    }
+
+    /// 扫描本地已安装的制品（`~/.tiangong/bots/*/`）。
+    ///
+    /// 找出有 bot 二进制 + schema.json 的目录，返回本地制品列表。
+    /// 不依赖线上 bots-index——即使未发布 index，本地已放置的制品也能
+    /// 被 UI 发现并注册。
+    pub fn scan_local_artifacts(&self) -> Vec<LocalArtifact> {
+        scan_local_artifacts_impl()
     }
 
     /// 检查某制品是否有线上更新。
@@ -328,6 +350,51 @@ fn find_local_version(artifact_id: &str) -> Option<crate::version::InstalledVers
         }
     }
     None
+}
+
+/// 扫描 `~/.tiangong/bots/*/`，返回有 bot 二进制 + schema.json 的本地制品。
+fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
+    let bots_dir = paths::default_bots_dir();
+    let entries = match std::fs::read_dir(&bots_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut artifacts = Vec::new();
+    for entry in entries.flatten() {
+        let dir_name = match entry.file_name().to_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let bot_binary = paths::bot_artifact_path(&dir_name);
+        if !bot_binary.exists() {
+            continue;
+        }
+        // 读取 schema 缓存。
+        let schema = cached_schema(&dir_name).unwrap_or_default();
+        // 读取版本记录（推断 artifact_id）。
+        let version_info = crate::version::read_installed_version(&dir_name);
+        let artifact_id = version_info
+            .as_ref()
+            .map(|v| v.artifact_id.clone())
+            // 无 version.json 时，回退用 schema 的 artifact_id 或目录名。
+            .or_else(|| {
+                // describe 缓存的 schema.json 只有数组，不含 artifact_id；
+                // 回退到目录名。
+                Some(dir_name.clone())
+            })
+            .unwrap_or_else(|| dir_name.clone());
+        let version = version_info
+            .as_ref()
+            .map(|v| v.version.clone())
+            .unwrap_or_default();
+        artifacts.push(LocalArtifact {
+            id: dir_name,
+            artifact_id,
+            version,
+            config_schema: schema,
+        });
+    }
+    artifacts
 }
 
 #[cfg(test)]

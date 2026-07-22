@@ -409,6 +409,13 @@ export interface BotsIndex {
   bots: BotManifest[];
 }
 
+export interface LocalArtifact {
+  id: string;
+  artifact_id: string;
+  version: string;
+  config_schema: ConfigFieldSchema[];
+}
+
 export type BotHealth =
   | 'running'
   | 'stopped'
@@ -811,6 +818,9 @@ export const api = {
 
   botAvailable: (): Promise<BotsIndex> =>
     invoke('bot_available'),
+
+  botScanLocal: (): Promise<LocalArtifact[]> =>
+    invoke('bot_scan_local'),
 
   botRegister: (request: RegisterBotRequest): Promise<BotConfig> =>
     invoke('bot_register', { request }),

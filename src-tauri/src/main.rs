@@ -634,6 +634,7 @@ fn run_gui() {
             tiangong_app::commands::bot_health,
             tiangong_app::commands::bot_config_schema,
             tiangong_app::commands::bot_available,
+            tiangong_app::commands::bot_scan_local,
             tiangong_app::commands::bot_register,
             tiangong_app::commands::bot_update,
             tiangong_app::commands::bot_remove,

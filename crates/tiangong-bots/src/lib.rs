@@ -31,7 +31,9 @@ pub use downloader::{Downloader, ProgressFn};
 pub use management::BotStore;
 pub use manifest::{BotArtifact, BotManifest, BotsIndex, current_platform_key};
 pub use provision::{BotProvisioner, ProvisionStatus, QrSession, provisioner_for};
-pub use runtime::{BotHealth, BotRuntime, bot_env, cached_schema, describe_and_cache};
+pub use runtime::{
+    BotHealth, BotRuntime, LocalArtifact, bot_env, cached_schema, describe_and_cache,
+};
 pub use store::{AuditEntry, append_audit_log, atomic_write, load_bots_config, write_bots_config};
 pub use supervisor::SupervisedBot;
 

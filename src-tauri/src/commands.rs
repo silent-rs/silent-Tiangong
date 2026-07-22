@@ -2673,30 +2673,53 @@ pub async fn bot_config_schema(
             return Ok(schema);
         }
     }
-    // 2) 回退到 bots-index.json 的预览 schema（安装前展示）。
-    let index = state
-        .bot_runtime
-        .fetch_index()
-        .await
-        .map_err(|e| e.to_string())?;
-    let manifest = index
-        .bots
-        .into_iter()
-        .find(|m| m.id == artifact_id)
-        .ok_or_else(|| format!("bots-index 中未找到制品：{artifact_id}"))?;
-    Ok(manifest.config_schema)
+    // 2) 扫描本地制品找匹配 artifact_id 的 schema。
+    for local in state.bot_runtime.scan_local_artifacts() {
+        if local.artifact_id == artifact_id {
+            return Ok(local.config_schema);
+        }
+    }
+    // 3) 回退到 bots-index.json 的预览 schema（安装前展示）。
+    match state.bot_runtime.fetch_index().await {
+        Ok(index) => {
+            let manifest = index
+                .bots
+                .into_iter()
+                .find(|m| m.id == artifact_id)
+                .ok_or_else(|| format!("未找到制品：{artifact_id}"))?;
+            Ok(manifest.config_schema)
+        }
+        Err(e) => Err(format!("获取 schema 失败（线上不可达且本地无匹配）：{e}")),
+    }
 }
 
-/// 拉取远端 bots-index.json（可安装的 bot 列表）
+/// 拉取远端 bots-index.json（可安装的 bot 列表）。
+///
+/// 线上不可达时返回空列表（不报错），调用方应回退到本地扫描。
 #[tauri::command]
 pub async fn bot_available(
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotsIndex, String> {
-    state
-        .bot_runtime
-        .fetch_index()
-        .await
-        .map_err(|e| e.to_string())
+    match state.bot_runtime.fetch_index().await {
+        Ok(index) => Ok(index),
+        Err(err) => {
+            tracing::warn!("拉取 bots-index 失败，返回空列表：{err}");
+            Ok(tiangong_bots::BotsIndex {
+                version: 1,
+                bots: vec![],
+            })
+        }
+    }
+}
+
+/// 扫描本地已安装的制品（`~/.tiangong/bots/*/`）。
+///
+/// 不依赖线上 bots-index——本地已放置的 bot 二进制 + schema.json 即可被发现。
+#[tauri::command]
+pub async fn bot_scan_local(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_bots::LocalArtifact>, String> {
+    Ok(state.bot_runtime.scan_local_artifacts())
 }
 
 /// 注册新 bot（不启动；需先 `bot_install` 下载制品再 `bot_start`）
