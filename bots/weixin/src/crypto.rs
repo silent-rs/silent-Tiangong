@@ -3,10 +3,33 @@
 //! 微信 iLink 协议的图片/文件经 CDN 传输时使用 AES-128-ECB 加密。
 //! 密钥随媒体元数据下发（base64 编码），解密后得到原始文件字节。
 
-use aes::cipher::{BlockDecryptMut, KeyInit, block_padding::Pkcs7};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, block_padding::Pkcs7};
 use anyhow::{Context, Result, anyhow};
 
 type Aes128EcbDec = ecb::Decryptor<aes::Aes128>;
+type Aes128EcbEnc = ecb::Encryptor<aes::Aes128>;
+
+/// 使用 iLink CDN 所需的 AES-128-ECB + PKCS7 加密文件内容。
+pub fn encrypt_media(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    if key.len() != 16 {
+        return Err(anyhow!(
+            "iLink 媒体密钥长度应为 16 字节（AES-128），实际 {}",
+            key.len()
+        ));
+    }
+    let capacity = plaintext
+        .len()
+        .checked_add(16)
+        .ok_or_else(|| anyhow!("待上传文件过大"))?;
+    let mut buf = vec![0; capacity];
+    buf[..plaintext.len()].copy_from_slice(plaintext);
+    let encryptor =
+        Aes128EcbEnc::new_from_slice(key).map_err(|e| anyhow!("构建 AES 加密器失败: {e:?}"))?;
+    let ciphertext = encryptor
+        .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+        .map_err(|e| anyhow!("AES-ECB 加密失败: {e:?}"))?;
+    Ok(ciphertext.to_vec())
+}
 
 /// 用 iLink `media.aes_key` 解密媒体。
 ///
@@ -105,6 +128,11 @@ mod tests {
         let encoded_hex = base64::engine::general_purpose::STANDARD.encode(key_hex);
         let decrypted =
             decrypt_media_base64(&encoded_hex, &ciphertext).expect("base64 十六进制密钥解密应成功");
+        assert_eq!(decrypted, plaintext);
+
+        let ciphertext = encrypt_media(&key_bytes, plaintext).expect("加密应成功");
+        let decrypted =
+            decrypt_media_hex(&hex::encode(key_bytes), &ciphertext).expect("新增加密链路应可解密");
         assert_eq!(decrypted, plaintext);
     }
 

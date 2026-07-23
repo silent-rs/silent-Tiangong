@@ -1,9 +1,11 @@
 //! 腾讯微信 iLink Bot HTTP API 客户端。
 
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
+use rand::RngCore;
 use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -14,6 +16,8 @@ const MEDIA_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(40);
 const QR_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(35);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const UPLOAD_MAX_RETRIES: usize = 3;
 pub const DEFAULT_QR_POLL_INTERVAL: u64 = 1;
 pub const DEFAULT_QR_EXPIRES_IN: i64 = 300;
 const BOT_TYPE: u32 = 3;
@@ -378,7 +382,60 @@ struct OutboundMessage {
 struct OutboundItem {
     #[serde(rename = "type")]
     kind: i64,
-    text_item: TextItem,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text_item: Option<TextItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_item: Option<OutboundImageItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_item: Option<OutboundFileItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct OutboundCdnMedia {
+    encrypt_query_param: String,
+    aes_key: String,
+    encrypt_type: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct OutboundImageItem {
+    media: OutboundCdnMedia,
+    mid_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct OutboundFileItem {
+    media: OutboundCdnMedia,
+    file_name: String,
+    len: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GetUploadUrlRequest {
+    filekey: String,
+    media_type: i64,
+    to_user_id: String,
+    rawsize: usize,
+    rawfilemd5: String,
+    filesize: usize,
+    no_need_thumb: bool,
+    aeskey: String,
+    base_info: BaseInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetUploadUrlResponse {
+    #[serde(default)]
+    upload_param: Option<String>,
+    #[serde(default)]
+    upload_full_url: Option<String>,
+}
+
+struct UploadedFile {
+    download_param: String,
+    aes_key_hex: String,
+    plaintext_size: usize,
+    ciphertext_size: usize,
 }
 
 pub async fn send_message(
@@ -389,6 +446,94 @@ pub async fn send_message(
     context_token: &str,
     text: &str,
 ) -> Result<()> {
+    send_outbound_item(
+        client,
+        base_url,
+        bot_token,
+        to_user_id,
+        context_token,
+        OutboundItem {
+            kind: 1,
+            text_item: Some(TextItem {
+                text: text.to_string(),
+            }),
+            image_item: None,
+            file_item: None,
+        },
+    )
+    .await
+}
+
+/// 上传本地文件并发送到微信。图片使用图片消息，其余类型使用文件附件消息。
+pub async fn send_local_file(
+    client: &Client,
+    base_url: &str,
+    bot_token: &str,
+    to_user_id: &str,
+    context_token: &str,
+    path: &Path,
+    caption: &str,
+) -> Result<()> {
+    let is_image = is_image_path(path);
+    let media_type = if is_image { 1 } else { 3 };
+    let uploaded =
+        upload_local_file(client, base_url, bot_token, to_user_id, path, media_type).await?;
+
+    if !caption.trim().is_empty() {
+        send_message(
+            client,
+            base_url,
+            bot_token,
+            to_user_id,
+            context_token,
+            caption,
+        )
+        .await?;
+    }
+
+    let media = OutboundCdnMedia {
+        encrypt_query_param: uploaded.download_param,
+        // 腾讯公开实现发送十六进制密钥文本的 base64，入站解密同时兼容该格式。
+        aes_key: base64::engine::general_purpose::STANDARD.encode(uploaded.aes_key_hex.as_bytes()),
+        encrypt_type: 1,
+    };
+    let item = if is_image {
+        OutboundItem {
+            kind: 2,
+            text_item: None,
+            image_item: Some(OutboundImageItem {
+                media,
+                mid_size: uploaded.ciphertext_size,
+            }),
+            file_item: None,
+        }
+    } else {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        OutboundItem {
+            kind: 4,
+            text_item: None,
+            image_item: None,
+            file_item: Some(OutboundFileItem {
+                media,
+                file_name,
+                len: uploaded.plaintext_size.to_string(),
+            }),
+        }
+    };
+    send_outbound_item(client, base_url, bot_token, to_user_id, context_token, item).await
+}
+
+async fn send_outbound_item(
+    client: &Client,
+    base_url: &str,
+    bot_token: &str,
+    to_user_id: &str,
+    context_token: &str,
+    item: OutboundItem,
+) -> Result<()> {
     let url = api_url(base_url, "ilink/bot/sendmessage")?;
     let request = SendMessageRequest {
         msg: OutboundMessage {
@@ -398,12 +543,7 @@ pub async fn send_message(
             message_type: 2,
             message_state: 2,
             context_token: context_token.to_string(),
-            item_list: vec![OutboundItem {
-                kind: 1,
-                text_item: TextItem {
-                    text: text.to_string(),
-                },
-            }],
+            item_list: vec![item],
         },
         base_info: base_info(),
     };
@@ -418,6 +558,139 @@ pub async fn send_message(
         .context("发送微信消息请求失败")?;
     let body = parse_body(response).await?;
     check_ret(&body, "sendmessage")
+}
+
+async fn upload_local_file(
+    client: &Client,
+    base_url: &str,
+    bot_token: &str,
+    to_user_id: &str,
+    path: &Path,
+    media_type: i64,
+) -> Result<UploadedFile> {
+    let plaintext = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("读取待发送文件失败: {}", path.display()))?;
+    let plaintext_size = plaintext.len();
+    let rawfilemd5 = format!("{:x}", md5::compute(&plaintext));
+
+    let mut file_key = [0u8; 16];
+    let mut aes_key = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut file_key);
+    rand::rngs::OsRng.fill_bytes(&mut aes_key);
+    let filekey = hex::encode(file_key);
+    let aes_key_hex = hex::encode(aes_key);
+    let ciphertext = crate::crypto::encrypt_media(&aes_key, &plaintext)?;
+    let ciphertext_size = ciphertext.len();
+
+    let response = client
+        .post(api_url(base_url, "ilink/bot/getuploadurl")?)
+        .headers(build_headers(Some(bot_token))?)
+        .json(&GetUploadUrlRequest {
+            filekey: filekey.clone(),
+            media_type,
+            to_user_id: to_user_id.to_string(),
+            rawsize: plaintext_size,
+            rawfilemd5,
+            filesize: ciphertext_size,
+            no_need_thumb: true,
+            aeskey: aes_key_hex.clone(),
+            base_info: base_info(),
+        })
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .context("申请微信文件上传地址失败")?;
+    let body = parse_body(response).await?;
+    check_ret(&body, "getuploadurl")?;
+    let upload: GetUploadUrlResponse = serde_json::from_value(body.clone())
+        .with_context(|| format!("解析微信文件上传地址失败: {}", truncate_json(&body)))?;
+    let upload_url = resolve_upload_url(upload, &filekey)?;
+    let download_param = upload_ciphertext(client, upload_url, &ciphertext).await?;
+
+    Ok(UploadedFile {
+        download_param,
+        aes_key_hex,
+        plaintext_size,
+        ciphertext_size,
+    })
+}
+
+fn resolve_upload_url(upload: GetUploadUrlResponse, filekey: &str) -> Result<Url> {
+    if let Some(full_url) = upload
+        .upload_full_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        let url = Url::parse(full_url).context("解析微信文件上传地址失败")?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("微信文件上传地址协议无效");
+        }
+        return Ok(url);
+    }
+
+    let upload_param = upload
+        .upload_param
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("微信文件上传响应缺少上传地址")?;
+    let mut url = Url::parse(&format!("{MEDIA_CDN_BASE_URL}/upload"))
+        .context("解析微信媒体 CDN 上传地址失败")?;
+    url.query_pairs_mut()
+        .append_pair("encrypted_query_param", upload_param)
+        .append_pair("filekey", filekey);
+    Ok(url)
+}
+
+async fn upload_ciphertext(client: &Client, url: Url, ciphertext: &[u8]) -> Result<String> {
+    let mut last_error = None;
+    for attempt in 1..=UPLOAD_MAX_RETRIES {
+        let result = client
+            .post(url.clone())
+            .header("content-type", "application/octet-stream")
+            .body(ciphertext.to_vec())
+            .timeout(UPLOAD_TIMEOUT)
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => {
+                let parameter = response
+                    .headers()
+                    .get("x-encrypted-param")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .context("微信 CDN 上传响应缺少下载参数")?;
+                return Ok(parameter.to_string());
+            }
+            Ok(response) if response.status().is_client_error() => {
+                bail!("微信 CDN 上传被拒绝: HTTP {}", response.status());
+            }
+            Ok(response) => {
+                last_error = Some(anyhow!("微信 CDN 上传失败: HTTP {}", response.status()));
+            }
+            Err(error) => {
+                last_error = Some(anyhow!(error).context("微信 CDN 上传请求失败"));
+            }
+        }
+        if attempt < UPLOAD_MAX_RETRIES {
+            tracing::warn!("微信 CDN 上传失败，正在进行第 {} 次重试", attempt + 1);
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("微信 CDN 上传失败")))
+}
+
+fn is_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif"
+    )
 }
 
 pub async fn get_updates(
@@ -658,5 +931,51 @@ mod tests {
         assert!(normalize_base_url(ILINK_BASE_URL).is_ok());
         assert!(normalize_base_url("http://127.0.0.1").is_err());
         assert!(normalize_base_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn outbound_image_uses_current_ilink_media_shape() {
+        let item = OutboundItem {
+            kind: 2,
+            text_item: None,
+            image_item: Some(OutboundImageItem {
+                media: OutboundCdnMedia {
+                    encrypt_query_param: "download-param".into(),
+                    aes_key: "YWVzLWtleQ==".into(),
+                    encrypt_type: 1,
+                },
+                mid_size: 32,
+            }),
+            file_item: None,
+        };
+        let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["type"], 2);
+        assert_eq!(
+            value["image_item"]["media"]["encrypt_query_param"],
+            "download-param"
+        );
+        assert_eq!(value["image_item"]["media"]["encrypt_type"], 1);
+        assert_eq!(value["image_item"]["mid_size"], 32);
+        assert!(value.get("text_item").is_none());
+    }
+
+    #[test]
+    fn upload_url_fallback_preserves_signed_parameter() {
+        let url = resolve_upload_url(
+            GetUploadUrlResponse {
+                upload_param: Some("a&b=c".into()),
+                upload_full_url: None,
+            },
+            "file-key",
+        )
+        .unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            query.get("encrypted_query_param").map(|v| v.as_ref()),
+            Some("a&b=c")
+        );
+        assert_eq!(query.get("filekey").map(|v| v.as_ref()), Some("file-key"));
     }
 }

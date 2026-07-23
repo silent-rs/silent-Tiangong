@@ -61,6 +61,11 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         })?;
 
     let content = ApiMessageContent::from(outgoing.content);
+    let attachments = outgoing
+        .attachments
+        .into_iter()
+        .map(ApiMessageContent::from)
+        .collect();
     let message = content.text();
     Ok(Response::json(&ConnectorMessageResponse {
         session_id,
@@ -69,6 +74,7 @@ pub async fn post_message(mut req: Request) -> Result<Response> {
         reply_to: outgoing.reply_to,
         message,
         content,
+        attachments,
     }))
 }
 

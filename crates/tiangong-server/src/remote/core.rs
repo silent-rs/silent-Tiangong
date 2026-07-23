@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -610,7 +611,8 @@ pub fn assistant_outgoing_after_user(
     let mut texts = Vec::new();
     let mut media_items = Vec::new();
     for message in selected {
-        let text = message.text_content();
+        let (text, referenced_files) =
+            extract_local_files_from_text(session, &message.text_content());
         if !text.trim().is_empty() {
             if has_direct_agent_reply {
                 texts.push(text);
@@ -619,6 +621,7 @@ pub fn assistant_outgoing_after_user(
                 texts.push(text);
             }
         }
+        media_items.extend(referenced_files);
         for block in &message.content {
             match block {
                 tiangong_types::ContentBlock::Media {
@@ -651,6 +654,8 @@ pub fn assistant_outgoing_after_user(
         }
     }
     let latest_text = texts.join("\n\n");
+    let mut seen_urls = HashSet::new();
+    media_items.retain(|media| seen_urls.insert(media.url.clone()));
 
     if !media_items.is_empty() {
         return (
@@ -664,6 +669,242 @@ pub fn assistant_outgoing_after_user(
     } else {
         (text_outgoing(latest_text), has_direct_agent_reply)
     }
+}
+
+/// 把最终回复中的本地 Markdown / 纯文本路径转换为结构化附件。
+///
+/// 只允许当前会话工作区与天工媒体目录；路径会先 canonicalize，因此通过符号链接
+/// 指向允许目录之外的文件也不会被返回给外部 Bot。
+fn extract_local_files_from_text(session: &Session, text: &str) -> (String, Vec<MediaAsset>) {
+    let roots = trusted_outgoing_roots(session);
+    if roots.is_empty() || text.trim().is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+
+    let (text, mut media) = extract_markdown_local_files(text, &roots);
+    let (text, plain_media) = extract_plain_local_files(&text, &roots);
+    media.extend(plain_media);
+    (text.trim().to_string(), media)
+}
+
+fn trusted_outgoing_roots(session: &Session) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(storage_root) = session.bound_storage_root() {
+        candidates.push(storage_root.join("media"));
+    }
+    if !session.cwd.trim().is_empty() {
+        candidates.push(PathBuf::from(session.cwd.trim()));
+    }
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir() && seen.insert(path.clone()))
+        .collect()
+}
+
+fn extract_markdown_local_files(text: &str, roots: &[PathBuf]) -> (String, Vec<MediaAsset>) {
+    let mut output = String::with_capacity(text.len());
+    let mut media = Vec::new();
+    let mut copied_until = 0;
+    let mut search_from = 0;
+
+    while let Some(open_offset) = text[search_from..].find('[') {
+        let open = search_from + open_offset;
+        let label_start = open + 1;
+        let Some(label_end_offset) = text[label_start..].find(']') else {
+            search_from = label_start;
+            continue;
+        };
+        let label_end = label_start + label_end_offset;
+        if text.as_bytes().get(label_end + 1) != Some(&b'(') {
+            search_from = label_end + 1;
+            continue;
+        }
+        let target_start = label_end + 2;
+        let Some(target_end_offset) = text[target_start..].find(')') else {
+            break;
+        };
+        let target_end = target_start + target_end_offset;
+        let reference_end = target_end + 1;
+        let is_image = open > 0 && text.as_bytes()[open - 1] == b'!';
+        let reference_start = if is_image { open - 1 } else { open };
+        let label = text[label_start..label_end].trim();
+        let target = normalize_local_target(&text[target_start..target_end]);
+
+        let Some(target) = target.filter(|target| target.is_absolute()) else {
+            search_from = reference_end;
+            continue;
+        };
+
+        output.push_str(&text[copied_until..reference_start]);
+        if !is_image {
+            output.push_str(label);
+        }
+        if let Some(asset) = trusted_media_asset(&target, label, is_image, roots) {
+            media.push(asset);
+        }
+        copied_until = reference_end;
+        search_from = reference_end;
+    }
+
+    output.push_str(&text[copied_until..]);
+    (output, media)
+}
+
+fn extract_plain_local_files(text: &str, roots: &[PathBuf]) -> (String, Vec<MediaAsset>) {
+    let markers = roots
+        .iter()
+        .filter_map(|root| root.to_str())
+        .filter(|root| !root.is_empty())
+        .collect::<Vec<_>>();
+    if markers.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut media = Vec::new();
+    let mut copied_until = 0;
+    let mut search_from = 0;
+
+    while search_from < text.len() {
+        let next = markers
+            .iter()
+            .filter_map(|marker| {
+                text[search_from..]
+                    .find(marker)
+                    .map(|offset| (search_from + offset, *marker))
+            })
+            .min_by_key(|(position, _)| *position);
+        let Some((start, marker)) = next else {
+            break;
+        };
+
+        let path_tail_start = start + marker.len();
+        let end = text[path_tail_start..]
+            .char_indices()
+            .find_map(|(offset, ch)| {
+                is_plain_path_terminator(ch).then_some(path_tail_start + offset)
+            })
+            .unwrap_or(text.len());
+        let candidate = text[start..end].trim_end_matches(is_trailing_path_punctuation);
+        let candidate_end = start + candidate.len();
+
+        if let Some(asset) = trusted_media_asset(Path::new(candidate), "", false, roots) {
+            output.push_str(&text[copied_until..start]);
+            output.push_str(asset.title.as_deref().unwrap_or("文件"));
+            media.push(asset);
+            copied_until = candidate_end;
+            search_from = candidate_end;
+        } else {
+            search_from = path_tail_start.max(start + 1);
+        }
+    }
+
+    output.push_str(&text[copied_until..]);
+    (output, media)
+}
+
+fn normalize_local_target(target: &str) -> Option<PathBuf> {
+    let mut target = target.trim();
+    if target.starts_with('<') && target.ends_with('>') && target.len() >= 2 {
+        target = &target[1..target.len() - 1];
+    }
+    if let Some(path) = target.strip_prefix("file://") {
+        target = path;
+    }
+    (!target.is_empty()).then(|| PathBuf::from(target))
+}
+
+fn trusted_media_asset(
+    path: &Path,
+    label: &str,
+    force_image: bool,
+    roots: &[PathBuf],
+) -> Option<MediaAsset> {
+    let path = std::fs::canonicalize(path).ok()?;
+    if !path.is_file() || !roots.iter().any(|root| path.starts_with(root)) {
+        return None;
+    }
+
+    let fallback_title = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "文件".to_string());
+    let title = if label.trim().is_empty() {
+        fallback_title
+    } else {
+        label.trim().to_string()
+    };
+    let kind = if force_image {
+        MediaKind::Image
+    } else {
+        media_kind_for_path(&path)
+    };
+    Some(MediaAsset {
+        kind,
+        url: path.to_string_lossy().to_string(),
+        mime_type: mime_type_for_path(&path).map(str::to_string),
+        title: Some(title),
+        capability: None,
+    })
+}
+
+fn media_kind_for_path(path: &Path) -> MediaKind {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "avif" => MediaKind::Image,
+        "mp4" | "mov" | "webm" | "m4v" => MediaKind::Video,
+        "mp3" | "wav" | "m4a" | "ogg" | "flac" | "aac" => MediaKind::Audio,
+        _ => MediaKind::File,
+    }
+}
+
+fn mime_type_for_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "avif" => Some("image/avif"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "webm" => Some("video/webm"),
+        "mp3" => Some("audio/mpeg"),
+        "wav" => Some("audio/wav"),
+        "m4a" => Some("audio/mp4"),
+        "ogg" => Some("audio/ogg"),
+        "flac" => Some("audio/flac"),
+        "aac" => Some("audio/aac"),
+        "pdf" => Some("application/pdf"),
+        "txt" | "md" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+fn is_plain_path_terminator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ')' | ']' | '}' | '>' | '`' | '\'' | '"' | '，' | '。' | '；' | '！' | '？' | '、'
+        )
+}
+
+fn is_trailing_path_punctuation(ch: char) -> bool {
+    matches!(ch, '.' | ',' | ';' | ':' | '，' | '。' | '；' | '：')
 }
 
 fn raw_attachment_from_media(asset: MediaAsset) -> RawAttachment {
@@ -798,6 +1039,17 @@ fn text_outgoing(text: impl Into<String>) -> OutgoingMessage {
 fn media_outgoing(media: Vec<MediaAsset>, caption: String) -> OutgoingMessage {
     let mut media = media.into_iter();
     let first = media.next().expect("media_outgoing 至少需要一个媒体项");
+    if !caption.trim().is_empty() && matches!(first.kind, MediaKind::File | MediaKind::Audio) {
+        let attachments = std::iter::once(first)
+            .chain(media)
+            .map(|media| media_content(media, None))
+            .collect();
+        return OutgoingMessage {
+            content: MessageContent::Text(caption),
+            attachments,
+            reply_to: None,
+        };
+    }
     let content = media_content(first, (!caption.trim().is_empty()).then_some(caption));
     let attachments = media
         .map(|media| media_content(media, None))
@@ -1325,5 +1577,91 @@ mod tests {
         assert!(!second_is_direct);
         assert!(matches!(first.content, MessageContent::Text(ref text) if text == "first reply"));
         assert!(matches!(second.content, MessageContent::Text(ref text) if text == "second reply"));
+    }
+
+    #[test]
+    fn outgoing_converts_media_and_workspace_paths_but_rejects_other_files() {
+        let root = tempfile::tempdir().unwrap();
+        let media_dir = root.path().join("media/images");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let image = media_dir.join("generated.jpg");
+        let report = workspace.join("report.txt");
+        let secret = root.path().join("secret.txt");
+        std::fs::write(&image, b"image").unwrap();
+        std::fs::write(&report, b"report").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let mut session = Session::new("local-files").with_storage_root(root.path());
+        session.cwd = workspace.to_string_lossy().to_string();
+        session.append_prepared_user_message_with_id(
+            "user-local-files".to_string(),
+            vec![ContentBlock::text("生成文件")],
+        );
+        session.append_message(
+            MessageRole::Assistant,
+            format!(
+                "## 已完成\n\n![生成图片]({})\n\n[报告]({})\n\n[机密]({})",
+                image.display(),
+                report.display(),
+                secret.display()
+            ),
+        );
+
+        let (outgoing, is_direct) = assistant_outgoing_after_user(&session, "user-local-files");
+        assert!(!is_direct);
+        let image_path = std::fs::canonicalize(image).unwrap();
+        match outgoing.content {
+            MessageContent::Image { url, caption } => {
+                assert_eq!(Path::new(&url), image_path);
+                let caption = caption.unwrap();
+                assert!(caption.contains("已完成"));
+                assert!(caption.contains("报告"));
+                assert!(caption.contains("机密"));
+                assert!(!caption.contains(root.path().to_string_lossy().as_ref()));
+            }
+            other => panic!("expected image outgoing, got {other:?}"),
+        }
+        assert_eq!(outgoing.attachments.len(), 1);
+        let report_path = std::fs::canonicalize(report).unwrap();
+        assert!(matches!(
+            &outgoing.attachments[0],
+            MessageContent::File { url, name }
+                if Path::new(url) == report_path && name == "报告"
+        ));
+    }
+
+    #[test]
+    fn outgoing_keeps_text_before_a_workspace_file() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let report = workspace.join("report.pdf");
+        std::fs::write(&report, b"report").unwrap();
+
+        let mut session = Session::new("workspace-file").with_storage_root(root.path());
+        session.cwd = workspace.to_string_lossy().to_string();
+        session.append_prepared_user_message_with_id(
+            "user-workspace-file".to_string(),
+            vec![ContentBlock::text("生成报告")],
+        );
+        session.append_message(
+            MessageRole::Assistant,
+            format!("报告已经生成：\n\n[下载报告]({})", report.display()),
+        );
+
+        let (outgoing, _) = assistant_outgoing_after_user(&session, "user-workspace-file");
+        assert!(matches!(
+            outgoing.content,
+            MessageContent::Text(ref text)
+                if text.contains("报告已经生成") && text.contains("下载报告")
+        ));
+        assert!(matches!(
+            &outgoing.attachments[0],
+            MessageContent::File { url, name }
+                if Path::new(url) == std::fs::canonicalize(report).unwrap()
+                    && name == "下载报告"
+        ));
     }
 }

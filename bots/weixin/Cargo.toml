@@ -25,6 +25,7 @@ base64 = "0.22"
 rand = "0.8"
 scru128 = "4"
 hex = "0.4"
+md5 = "0.8"
 # iLink 媒体加解密使用 AES-128-ECB
 aes = "0.8"
 ecb = "0.1"

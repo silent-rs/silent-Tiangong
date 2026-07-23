@@ -4,6 +4,7 @@
 //! 再把天工返回的文本回复发送回微信。
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,6 +83,8 @@ struct ConnectorResponse {
     session_id: String,
     message: String,
     content: ApiMessageContent,
+    #[serde(default)]
+    attachments: Vec<ApiMessageContent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +144,16 @@ impl ApiMessageContent {
             Self::Video { .. } => "video",
         }
     }
+
+    fn local_file_url(&self) -> Option<&str> {
+        match self {
+            Self::Image { url, .. }
+            | Self::File { url, .. }
+            | Self::Audio { url, .. }
+            | Self::Video { url, .. } => Some(url),
+            Self::Text { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +188,11 @@ struct DownloadedImage {
 struct ParsedMessage {
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
+}
+
+struct BotReply {
+    text: String,
+    files: Vec<PathBuf>,
 }
 
 // -- 入口 -------------------------------------------------------
@@ -432,14 +450,42 @@ async fn handle_message(
         parsed.media,
     )
     .await?;
-    if !reply.trim().is_empty() {
+    send_reply(state, sender_id, context_token, reply).await
+}
+
+async fn send_reply(
+    state: &BotState,
+    to_user_id: &str,
+    context_token: &str,
+    reply: BotReply,
+) -> Result<()> {
+    if reply.files.is_empty() {
+        if reply.text.trim().is_empty() {
+            return Ok(());
+        }
         ilink::send_message(
             &state.http,
             &state.api_base_url,
             &state.bot_token,
-            sender_id,
+            to_user_id,
             context_token,
-            &reply,
+            &reply.text,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    for (index, path) in reply.files.iter().enumerate() {
+        let caption = if index == 0 { reply.text.as_str() } else { "" };
+        tracing::info!("向微信发送本地文件: {}", path.display());
+        ilink::send_local_file(
+            &state.http,
+            &state.api_base_url,
+            &state.bot_token,
+            to_user_id,
+            context_token,
+            path,
+            caption,
         )
         .await?;
     }
@@ -513,7 +559,7 @@ async fn forward_to_tiangong(
     message_id: Option<&str>,
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
-) -> Result<String> {
+) -> Result<BotReply> {
     let url = format!(
         "{}/api/v1/messages",
         state.tiangong_url.trim_end_matches('/')
@@ -544,12 +590,33 @@ async fn forward_to_tiangong(
     }
 
     let body: ConnectorResponse = response.json().await.context("解析天工响应失败")?;
-    let reply = body.content.text();
-    if reply.trim().is_empty() {
-        Ok(body.message)
-    } else {
-        Ok(reply)
+    Ok(reply_from_connector_response(body))
+}
+
+fn reply_from_connector_response(body: ConnectorResponse) -> BotReply {
+    let text = {
+        let content_text = body.content.text();
+        if content_text.trim().is_empty() {
+            body.message
+        } else {
+            content_text
+        }
+    };
+    let mut files = Vec::new();
+    for content in std::iter::once(&body.content).chain(body.attachments.iter()) {
+        let Some(url) = content.local_file_url() else {
+            continue;
+        };
+        let path = PathBuf::from(url.strip_prefix("file://").unwrap_or(url));
+        if !path.is_absolute() {
+            tracing::warn!("忽略非本地文件形式的天工附件: {url}");
+            continue;
+        }
+        if !files.iter().any(|existing| existing == &path) {
+            files.push(path);
+        }
     }
+    BotReply { text, files }
 }
 
 #[cfg(test)]
@@ -624,6 +691,31 @@ mod tests {
         assert_eq!(
             detect_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
             "image/webp"
+        );
+    }
+
+    #[test]
+    fn connector_response_keeps_caption_and_all_local_files() {
+        let reply = reply_from_connector_response(ConnectorResponse {
+            session_id: "session-1".into(),
+            message: "图片已生成".into(),
+            content: ApiMessageContent::Image {
+                url: "/tmp/image.jpg".into(),
+                caption: Some("图片已生成".into()),
+            },
+            attachments: vec![ApiMessageContent::File {
+                url: "/tmp/report.txt".into(),
+                name: "report.txt".into(),
+            }],
+        });
+
+        assert_eq!(reply.text, "图片已生成");
+        assert_eq!(
+            reply.files,
+            vec![
+                PathBuf::from("/tmp/image.jpg"),
+                PathBuf::from("/tmp/report.txt")
+            ]
         );
     }
 }
