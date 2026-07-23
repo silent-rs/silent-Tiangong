@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::RwLock;
 
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
@@ -57,7 +57,7 @@ impl AccessTokenCache {
     /// 强制刷新 access_token。
     pub async fn refresh(&self) -> Result<String> {
         let response = fetch_token(&self.http, &self.app_id, &self.app_secret).await?;
-        let expires_in = Duration::from_secs(response.expires_in.max(1) as u64);
+        let expires_in = Duration::from_secs(response.expires_in.max(1));
         let expires_at = SystemTime::now() + expires_in.saturating_sub(EXPIRY_MARGIN);
 
         let token = response.access_token;
@@ -80,7 +80,27 @@ struct TokenRequest {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    expires_in: i64,
+    #[serde(deserialize_with = "deserialize_expires_in")]
+    expires_in: u64,
+}
+
+fn deserialize_expires_in<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ExpiresIn {
+        Number(u64),
+        String(String),
+    }
+
+    match ExpiresIn::deserialize(deserializer)? {
+        ExpiresIn::Number(value) => Ok(value),
+        ExpiresIn::String(value) => value
+            .parse::<u64>()
+            .map_err(|_| serde::de::Error::custom("expires_in 不是有效的非负整数")),
+    }
 }
 
 async fn fetch_token(http: &Client, app_id: &str, app_secret: &str) -> Result<TokenResponse> {
@@ -101,28 +121,10 @@ async fn fetch_token(http: &Client, app_id: &str, app_secret: &str) -> Result<To
         .await
         .context("读取 QQ access_token 响应失败")?;
     if !status.is_success() {
-        return Err(anyhow!(
-            "QQ access_token 请求失败（HTTP {status}）: {}",
-            truncate(&String::from_utf8_lossy(&bytes), 256)
-        ));
+        return Err(anyhow!("QQ access_token 请求失败（HTTP {status}）"));
     }
 
-    serde_json::from_slice::<TokenResponse>(&bytes).with_context(|| {
-        format!(
-            "解析 QQ access_token 响应失败: {}",
-            truncate(&String::from_utf8_lossy(&bytes), 256)
-        )
-    })
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let prefix = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        format!("{prefix}...")
-    } else {
-        prefix
-    }
+    serde_json::from_slice::<TokenResponse>(&bytes).context("解析 QQ access_token 响应失败")
 }
 
 /// 判断给定 expires_in（秒）是否在提前量内会被视为过期（用于测试与诊断）。
@@ -145,11 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn token_response_parses_normal_shape() {
-        let raw = br#"{"access_token":"abc","expires_in":7200}"#;
-        let parsed: TokenResponse = serde_json::from_slice(raw).unwrap();
-        assert_eq!(parsed.access_token, "abc");
-        assert_eq!(parsed.expires_in, 7200);
+    fn token_response_accepts_number_and_string_expiry() {
+        for raw in [
+            r#"{"access_token":"abc","expires_in":7200}"#,
+            r#"{"access_token":"abc","expires_in":"7200"}"#,
+        ] {
+            let parsed: TokenResponse = serde_json::from_str(raw).unwrap();
+            assert_eq!(parsed.access_token, "abc");
+            assert_eq!(parsed.expires_in, 7200);
+        }
     }
 
     #[test]
