@@ -552,6 +552,7 @@ struct Payload {
     s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     t: Option<String>,
+    #[serde(default)]
     d: Value,
 }
 
@@ -602,6 +603,13 @@ mod tests {
         let value = serde_json::to_value(Payload::heartbeat(None)).unwrap();
         assert_eq!(value["op"], 1);
         assert_eq!(value["d"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn heartbeat_ack_without_data_is_parsed() {
+        let payload: Payload = serde_json::from_str(r#"{"op":11}"#).unwrap();
+        assert_eq!(payload.op, Op::HeartbeatAck);
+        assert_eq!(payload.d, Value::Null);
     }
 
     #[test]
