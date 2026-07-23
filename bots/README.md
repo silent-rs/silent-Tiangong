@@ -63,8 +63,46 @@ bots/
 4. 在第三方自己的 HTTPS 地址发布独立 `bots-index.json`；索引中的 `id` 必须与 `--describe` 的 `artifact_id` 一致、全局唯一，并符合小写字母和数字组成、总长 1～64 位的规则。
 5. 向 `bots/index-catalog.json` 提交该索引地址。目录合并并发布后，天工会自动发现该 Bot；后续版本只需更新第三方自己的索引，不需要再次修改天工或发布主程序。
 
+### 独立索引示例
+
+第三方索引至少包含一个 Bot 和一个平台制品。平台键使用 `darwin-aarch64`、`darwin-x86_64`、`linux-aarch64`、`linux-x86_64`、`windows-aarch64` 或 `windows-x86_64`。
+
+```json
+{
+  "version": 1,
+  "bots": [
+    {
+      "id": "examplebot",
+      "name": "Example Bot",
+      "version": "0.1.0",
+      "description": "Example 平台连接器",
+      "config_schema": [],
+      "platforms": {
+        "linux-x86_64": {
+          "url": "https://example.com/releases/0.1.0/examplebot-linux-x86_64",
+          "checksum": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      },
+      "min_app_version": "0.12.3"
+    }
+  ]
+}
+```
+
+### 贡献到官方目录
+
+第三方只需要贡献索引地址，不需要把 Bot 源码或二进制提交到天工仓库：
+
+1. 在自己的仓库或网站发布 Bot、SHA-256 和独立索引，并确保索引可以通过公网 HTTPS 直接读取。
+2. Fork 天工仓库，在 `bots/index-catalog.json` 的 `indexes` 数组末尾添加自己的索引 URL，不修改或重排已有地址。
+3. 提交 PR，并在说明中提供 Bot 源码地址、许可证、支持平台、需要的外部权限及一次实际运行结果。
+4. `Publish Bots Catalog / Validate bots catalog` 会检查目录格式、索引可访问性、Bot ID 冲突、版本格式、HTTPS 制品地址和 SHA-256 格式。
+5. 审核通过并合并后，发布任务自动更新 OSS 上的 `bots-index/catalog.json`。以后发布新版本只更新第三方自己的索引，不再提交目录 PR。
+
+PR 校验任务不读取 OSS 密钥，也不会上传文件；只有主分支更新或维护者手工触发时才执行发布。
+
 官方目录中的第三方 Bot 需要经过代码与制品来源审核。允许用户自行添加未经审核索引源属于另一项安全边界更大的功能，不在当前发布流程内。
-多个索引声明相同 `id` 时按目录顺序保留第一项，后续同名项不会覆盖已有 Bot；官方索引应排在第三方索引之前。
+目录 CI 会拒绝重复的索引地址和 Bot ID，第三方不能使用已有官方 Bot 的 ID。
 
 ## 凭证注入约定
 
