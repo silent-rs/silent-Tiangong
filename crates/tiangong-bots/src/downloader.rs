@@ -1,5 +1,6 @@
 //! bot 制品下载器——合并独立 bot 索引、下载平台制品、SHA256 校验。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -34,32 +35,41 @@ impl Downloader {
             .map(|endpoint| async move { (endpoint, self.fetch_index_from(endpoint).await) });
         let results = futures_util::future::join_all(requests).await;
 
-        let mut merged: Option<BotsIndex> = None;
+        let mut version: Option<u32> = None;
+        let mut bots = Vec::new();
+        let mut seen_ids = HashSet::new();
         let mut last_err: Option<anyhow::Error> = None;
         for (endpoint, result) in results {
             match result {
-                Ok(index) => match &mut merged {
-                    Some(current) => {
-                        if current.version != index.version {
+                Ok(index) => {
+                    if let Some(current_version) = version {
+                        if current_version != index.version {
                             tracing::warn!(
                                 "忽略 bot 索引格式版本差异（{endpoint}）：期望 {}，实际 {}",
-                                current.version,
+                                current_version,
                                 index.version
                             );
                         }
-                        current.bots.extend(index.bots);
+                    } else {
+                        version = Some(index.version);
                     }
-                    None => merged = Some(index),
-                },
+                    for bot in index.bots {
+                        if seen_ids.insert(bot.id.clone()) {
+                            bots.push(bot);
+                        } else {
+                            tracing::warn!("忽略 bot 索引中的重复 id（{endpoint}）：{}", bot.id);
+                        }
+                    }
+                }
                 Err(err) => {
                     tracing::warn!("拉取 bots-index 失败（{endpoint}）：{err}");
                     last_err = Some(err);
                 }
             }
         }
-        if let Some(mut index) = merged {
-            index.bots.sort_by(|left, right| left.id.cmp(&right.id));
-            return Ok(index);
+        if let Some(version) = version {
+            bots.sort_by(|left, right| left.id.cmp(&right.id));
+            return Ok(BotsIndex { version, bots });
         }
 
         Err(last_err.unwrap_or_else(|| anyhow!("无可用 bot 索引端点")))

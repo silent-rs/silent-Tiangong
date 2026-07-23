@@ -53,6 +53,19 @@ bots/
 4. `upload-to-oss` job 上传该 bot 制品到 `bots/bot-<bot-id>-v0.1.0/`，并把索引上传到 `bots-index/<bot-id>.json`。
 5. 新增或下线 bot 时修改 `bots/index-catalog.json`；合并到主分支后，目录发布流程会更新 `bots-index/catalog.json`。
 
+## 第三方 Bot 接入
+
+第三方 Bot 的源码和发布流程可以完全放在自己的仓库中，也不限制实现语言。接入时需要满足以下约定：
+
+1. 提供 Windows、macOS 和 Linux 对应平台的独立可执行文件及 SHA-256。
+2. 可执行文件支持 `--describe`，输出天工可识别的配置 schema；需要扫码时可选支持 `--provision-begin` 和 `--provision-poll`。
+3. 正常运行时读取天工注入的 `TIANGONG_URL`、`TIANGONG_TOKEN` 及 schema 声明的配置环境变量，并通过 Server API 收发消息。
+4. 在第三方自己的 HTTPS 地址发布独立 `bots-index.json`；索引中的 `id` 必须与 `--describe` 的 `artifact_id` 一致、全局唯一，并符合小写字母和数字组成、总长 1～64 位的规则。
+5. 向 `bots/index-catalog.json` 提交该索引地址。目录合并并发布后，天工会自动发现该 Bot；后续版本只需更新第三方自己的索引，不需要再次修改天工或发布主程序。
+
+官方目录中的第三方 Bot 需要经过代码与制品来源审核。允许用户自行添加未经审核索引源属于另一项安全边界更大的功能，不在当前发布流程内。
+多个索引声明相同 `id` 时按目录顺序保留第一项，后续同名项不会覆盖已有 Bot；官方索引应排在第三方索引之前。
+
 ## 凭证注入约定
 
 主程序 spawn bot 时按 schema 注入手工配置的环境变量，并始终自动注入天工连接信息：
