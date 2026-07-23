@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{BOTS_INDEX_ENDPOINTS, BotManifest, BotsIndex};
+use crate::manifest::{BOTS_INDEX_CATALOG_ENDPOINT, BotManifest, BotsIndex, BotsIndexCatalog};
 use crate::paths;
 
 /// 下载进度回调：`(已下载字节数, 总字节数)`。
@@ -27,9 +27,10 @@ impl Downloader {
 
     /// 并行拉取各 bot 的独立索引，返回所有成功结果的合集。
     pub async fn fetch_index(&self) -> Result<BotsIndex> {
-        let requests = BOTS_INDEX_ENDPOINTS
+        let catalog = self.fetch_index_catalog().await?;
+        let requests = catalog
+            .indexes
             .iter()
-            .copied()
             .map(|endpoint| async move { (endpoint, self.fetch_index_from(endpoint).await) });
         let results = futures_util::future::join_all(requests).await;
 
@@ -62,6 +63,30 @@ impl Downloader {
         }
 
         Err(last_err.unwrap_or_else(|| anyhow!("无可用 bot 索引端点")))
+    }
+
+    async fn fetch_index_catalog(&self) -> Result<BotsIndexCatalog> {
+        let endpoint = BOTS_INDEX_CATALOG_ENDPOINT;
+        let resp = self
+            .http
+            .get(endpoint)
+            .send()
+            .await
+            .with_context(|| format!("请求 bot 索引目录失败：{endpoint}"))?;
+        if !resp.status().is_success() {
+            bail!("bot 索引目录响应非 2xx：{} {endpoint}", resp.status());
+        }
+        let catalog: BotsIndexCatalog = resp
+            .json()
+            .await
+            .with_context(|| format!("解析 bot 索引目录失败：{endpoint}"))?;
+        if catalog.version != 1 {
+            bail!("不支持的 bot 索引目录版本：{}", catalog.version);
+        }
+        if catalog.indexes.is_empty() {
+            bail!("bot 索引目录不含任何索引：{endpoint}");
+        }
+        Ok(catalog)
     }
 
     async fn fetch_index_from(&self, endpoint: &str) -> Result<BotsIndex> {

@@ -41,7 +41,8 @@ bots/
 - tag 约定：`bot-<bot-id>-v<version>`，如 `bot-feishu-v0.1.0`、`bot-weixin-v0.1.0`、`bot-qq-v0.1.0`。
 - 新增 bot 时复制一个已有的 workflow，把 bot id、名称、描述改为新 bot 即可。
 - 每个 bot 在 OSS 使用独立索引对象：`bots-index/<bot-id>.json`。发布流程只写自己的对象，不读取或覆盖其他 bot 的索引。
-- 主程序从 `crates/tiangong-bots/src/manifest.rs` 声明的端点读取并合并索引；新增 bot 时需要同时补充该端点。
+- `bots-index/catalog.json` 是索引目录，只列出各独立索引地址；主程序固定读取这一个目录，再读取并合并其中的索引。
+- 索引目录的源码是 `bots/index-catalog.json`，由 `.github/workflows/publish-bots-catalog.yml` 独立发布。新增或下线 bot 时只更新目录，不需要发布主程序。
 - GitHub Release 作为产物归档（人可查、CI 可用），每个 Release 只附带本 bot 的 `bots-index.json`。
 
 ### 发版流程
@@ -50,6 +51,7 @@ bots/
 2. CI 交叉编译该 bot 的 4 平台制品 → 上传到对应 Release。
 3. `generate-bots-index` job 汇总该 bot 各平台 SHA256，生成只包含当前 bot 的索引并附到 Release。
 4. `upload-to-oss` job 上传该 bot 制品到 `bots/bot-<bot-id>-v0.1.0/`，并把索引上传到 `bots-index/<bot-id>.json`。
+5. 新增或下线 bot 时修改 `bots/index-catalog.json`；合并到主分支后，目录发布流程会更新 `bots-index/catalog.json`。
 
 ## 凭证注入约定
 

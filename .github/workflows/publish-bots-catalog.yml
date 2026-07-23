@@ -1,0 +1,64 @@
+name: Publish Bots Catalog
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "bots/index-catalog.json"
+      - ".github/workflows/publish-bots-catalog.yml"
+
+concurrency:
+  group: publish-bots-catalog
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    name: Publish catalog to Aliyun OSS
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate catalog
+        run: |
+          jq -e '
+            .version == 1 and
+            (.indexes | type == "array" and length > 0) and
+            all(.indexes[]; type == "string" and startswith("https://"))
+          ' bots/index-catalog.json >/dev/null
+
+      - name: Install ossutil
+        run: |
+          curl --connect-timeout 10 --max-time 120 -fsSL \
+            https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip \
+            -o /tmp/ossutil.zip
+          unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+          sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+
+      - name: Configure ossutil
+        run: |
+          ossutil config \
+            -e oss-cn-hangzhou.aliyuncs.com \
+            -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
+            -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: Upload catalog
+        run: |
+          ossutil cp bots/index-catalog.json \
+            oss://silent-tiangong/bots-index/catalog.json -f
+
+      - name: Verify published catalog
+        run: |
+          curl --connect-timeout 10 --max-time 30 -fsSL \
+            https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/catalog.json \
+            -o /tmp/published-bots-catalog.json
+          cmp bots/index-catalog.json /tmp/published-bots-catalog.json

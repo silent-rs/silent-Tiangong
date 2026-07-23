@@ -1,7 +1,7 @@
 //! bot 制品清单（`bots-index.json`）模型与平台标识。
 //!
 //! bot 与主程序独立发版，每个 bot 在阿里云 OSS 保存自己的索引对象。
-//! 主程序启动时合并所有可用索引，以渲染“可安装 bot 列表”。
+//! 主程序从目录文件发现这些对象并合并所有可用索引，以渲染“可安装 bot 列表”。
 
 use std::collections::BTreeMap;
 
@@ -9,12 +9,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigFieldSchema;
 
-/// 各 bot 的独立索引端点。
-pub const BOTS_INDEX_ENDPOINTS: &[&str] = &[
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/feishu.json",
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/weixin.json",
-    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/qq.json",
-];
+/// bot 索引目录端点。
+pub const BOTS_INDEX_CATALOG_ENDPOINT: &str =
+    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/catalog.json";
+
+/// bot 索引目录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotsIndexCatalog {
+    /// 目录格式版本。
+    pub version: u32,
+    /// 各 bot 独立索引的完整 URL。
+    pub indexes: Vec<String>,
+}
 
 /// bots-index.json 顶层结构。
 #[derive(Debug, Clone, Serialize, Deserialize)]
