@@ -429,6 +429,11 @@ export interface BotLog {
   truncated: boolean;
 }
 
+export interface BotTransferProgress {
+  downloaded: number;
+  total: number;
+}
+
 export type ProvisionStatus =
   | { status: 'pending'; retry_after?: number }
   | { status: 'success' }
@@ -861,6 +866,9 @@ export const api = {
 
   botInstall: (artifactId: string, destBotId: string): Promise<string> =>
     invoke('bot_install', { artifactId, destBotId }),
+
+  onBotInstallProgress: (callback: (progress: BotTransferProgress) => void) =>
+    listen<BotTransferProgress>('bot_install_progress', (event) => callback(event.payload)),
 
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),

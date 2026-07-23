@@ -2762,21 +2762,16 @@ pub async fn bot_provision_poll(
 
 /// 拉取远端 bots-index.json（可安装的 bot 列表）。
 ///
-/// 线上不可达时返回空列表（不报错），调用方应回退到本地扫描。
+/// 线上不可达时返回明确错误；前端仍会独立加载并展示本地制品。
 #[tauri::command]
 pub async fn bot_available(
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotsIndex, String> {
-    match state.bot_runtime.fetch_index().await {
-        Ok(index) => Ok(index),
-        Err(err) => {
-            tracing::warn!("拉取 bots-index 失败，返回空列表：{err}");
-            Ok(tiangong_bots::BotsIndex {
-                version: 1,
-                bots: vec![],
-            })
-        }
-    }
+    state
+        .bot_runtime
+        .fetch_index()
+        .await
+        .map_err(|err| format!("加载线上 Bot 目录失败：{err}"))
 }
 
 /// 扫描本地已安装的制品（`~/.tiangong/bots/*/`）。
