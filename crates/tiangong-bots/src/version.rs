@@ -11,6 +11,9 @@ use crate::paths;
 pub struct InstalledVersion {
     /// 制品 id。
     pub artifact_id: String,
+    /// 制品展示名称。
+    #[serde(default)]
+    pub name: String,
     /// 语义化版本。
     pub version: String,
     /// 安装时间。
@@ -43,6 +46,7 @@ pub fn write_installed_version(id: &BotId, manifest: &BotManifest) -> anyhow::Re
 pub(crate) fn installed_version_json(manifest: &BotManifest) -> anyhow::Result<String> {
     let record = InstalledVersion {
         artifact_id: manifest.id.clone(),
+        name: manifest.name.clone(),
         version: manifest.version.clone(),
         installed_at: chrono::Local::now().naive_local().to_string(),
     };
@@ -90,6 +94,7 @@ mod tests {
     fn has_update_logic() {
         let installed = InstalledVersion {
             artifact_id: "feishu".into(),
+            name: "飞书 Bot".into(),
             version: "0.1.0".into(),
             installed_at: "now".into(),
         };

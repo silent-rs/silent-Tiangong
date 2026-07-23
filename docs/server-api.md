@@ -146,9 +146,16 @@ POST /api/v1/messages
   "channel_id": "oc_xxxxxx",
   "reply_to": "回复的消息 ID",
   "message": "AI 回复文本",
-  "content": { "type": "text", "text": "AI 回复文本" }
+  "content": { "type": "text", "text": "AI 回复文本" },
+  "attachments": [
+    { "type": "image", "url": "/path/to/generated-image.png", "caption": null }
+  ]
 }
 ```
+
+`content` 是回复的首项，`attachments` 是同一回复中的其余附件；没有附件时省略
+`attachments`。回复引用天工媒体目录或当前会话工作区内的本地文件时，Server 会
+移除正文中的本机路径，并把文件放入上述结构化字段。
 
 ### 消息内容类型
 

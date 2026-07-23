@@ -2794,14 +2794,14 @@ pub async fn bot_update(
         .map_err(|e| e.to_string())
 }
 
-/// 删除 bot（若运行中则先停止）
+/// 删除 bot 配置（若运行中则先停止），保留已安装制品和运行目录。
 #[tauri::command]
 pub async fn bot_remove(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
     let id = validate_bot_id(id)?;
     // 先停止运行中的 bot（忽略未运行的错误）
     let _ = state.bot_runtime.stop(&id).await;
     state.bot_store.remove(&id).map_err(|e| e.to_string())?;
-    Ok("bot 已删除".to_string())
+    Ok("bot 配置已删除，已安装程序保留".to_string())
 }
 
 /// 下载某制品到指定 bot 实例目录

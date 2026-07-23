@@ -53,6 +53,8 @@ pub struct ConnectorMessageResponse {
     pub reply_to: Option<String>,
     pub message: String,
     pub content: ApiMessageContent,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ApiMessageContent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +88,10 @@ impl ApiMessageContent {
     pub fn text(&self) -> String {
         match self {
             Self::Text { text } => text.clone(),
-            _ => String::new(),
+            Self::Image { caption, .. } | Self::Video { caption, .. } => {
+                caption.clone().unwrap_or_default()
+            }
+            Self::File { .. } | Self::Audio { .. } => String::new(),
         }
     }
 }

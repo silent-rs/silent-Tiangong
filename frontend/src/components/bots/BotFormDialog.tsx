@@ -26,7 +26,9 @@ interface Props {
   bot: BotConfig | null;
   /** 制品 id（标识 bot 平台） */
   artifactId: string;
-  /** 建议的 bot 名称（通常为本地制品目录名），新增时预填 */
+  /** 制品展示名称 */
+  artifactName: string;
+  /** 建议的 bot ID（通常为本地制品目录名），新增时预填 */
   suggestedId?: string;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
@@ -46,7 +48,14 @@ type ProvisionState =
  * 根据 [`api.botConfigSchema`] 返回的字段定义动态渲染输入控件，并为
  * barcode 字段提供统一扫码授权入口。
  */
-export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }: Props) {
+export function BotFormDialog({
+  bot,
+  artifactId,
+  artifactName,
+  suggestedId,
+  onClose,
+  onSaved,
+}: Props) {
   const isEdit = !!bot;
   const { showSuccess, showError } = useToast();
 
@@ -132,7 +141,7 @@ export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }
           await api.botUpdate(bot.id, { config });
           showSuccess(
             isProvision ? '扫码配置完成' : '已更新',
-            `bot "${bot.id}" 配置已更新`,
+            `“${artifactName}”配置已更新`,
           );
         } else {
           const created = await api.botRegister({
@@ -142,7 +151,7 @@ export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }
           });
           showSuccess(
             isProvision ? '扫码配置完成' : '已注册',
-            `bot "${created.id}" 已注册`,
+            `“${artifactName || created.id}”已配置`,
           );
         }
         await onSaved();
@@ -261,7 +270,7 @@ export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }
           {!scanMode && (
             <div className="space-y-1.5">
               <Label>
-                名称
+                Bot ID
                 {!isEdit && <span className="text-destructive ml-1">*</span>}
               </Label>
               <Input
@@ -271,7 +280,7 @@ export function BotFormDialog({ bot, artifactId, suggestedId, onClose, onSaved }
                 disabled={isEdit}
               />
               {isEdit && (
-                <p className="text-xs text-muted-foreground">名称即主键，创建后不可修改</p>
+                <p className="text-xs text-muted-foreground">创建后不可修改</p>
               )}
             </div>
           )}

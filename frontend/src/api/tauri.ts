@@ -411,6 +411,7 @@ export interface BotsIndex {
 
 export interface LocalArtifact {
   id: string;
+  name: string;
   artifact_id: string;
   version: string;
   config_schema: ConfigFieldSchema[];
