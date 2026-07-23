@@ -2686,16 +2686,35 @@ pub async fn bot_config_schema(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<tiangong_bots::ConfigFieldSchema>, String> {
     let bot_id = bot_id.map(validate_bot_id).transpose()?;
-    // 1) 优先读已安装 bot 的缓存 schema（权威来源）。
+    let local_artifacts = state.bot_runtime.scan_local_artifacts();
+
+    // 1) 本地自有 bot 没有版本记录，每次打开配置时重新读取 --describe。
     if let Some(id) = &bot_id {
+        if local_artifacts
+            .iter()
+            .any(|local| local.id == id.as_str() && local.version.is_empty())
+        {
+            return tiangong_bots::describe_and_cache(id)
+                .await
+                .map_err(|err| format!("读取本地 Bot 配置失败：{err}"));
+        }
+        // 线上安装的 bot 优先使用安装时验证并缓存的 schema。
         if let Some(schema) = tiangong_bots::cached_schema(id) {
             return Ok(schema);
         }
     }
-    // 2) 扫描本地制品找匹配 artifact_id 的 schema。
-    for local in state.bot_runtime.scan_local_artifacts() {
+    // 2) 扫描本地制品；没有缓存时直接调用本地 bot --describe。
+    for local in local_artifacts {
         if local.artifact_id == artifact_id {
-            return Ok(local.config_schema);
+            let local_id = validate_bot_id(local.id)?;
+            if !local.version.is_empty() {
+                if let Some(schema) = tiangong_bots::cached_schema(&local_id) {
+                    return Ok(schema);
+                }
+            }
+            return tiangong_bots::describe_and_cache(&local_id)
+                .await
+                .map_err(|err| format!("读取本地 Bot 配置失败：{err}"));
         }
     }
     // 3) 回退到 bots-index.json 的预览 schema（安装前展示）。

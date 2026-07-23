@@ -401,11 +401,12 @@ struct DescribeOutput {
 /// 调用 `bot --describe` 获取 schema 并缓存到 `schema.json`。
 ///
 /// bot 二进制收到 `--describe` 参数后，输出 schema JSON 到 stdout 并退出。
-/// 主程序在 [`BotRuntime::install`] 成功后调用此函数缓存 schema。
+/// 用于没有远端清单和版本记录的本地 bot；其 `artifact_id` 必须与目录 ID 一致。
 pub async fn describe_and_cache(bot_id: &BotId) -> Result<Vec<ConfigFieldSchema>> {
     paths::ensure_executable_paths_safe(bot_id)?;
     let artifact_path = paths::bot_artifact_path(bot_id);
     let parsed = describe_artifact(&artifact_path).await?;
+    validate_local_description(&parsed, bot_id)?;
 
     let schema_path = paths::bot_schema_path(bot_id);
     let content =
@@ -413,6 +414,23 @@ pub async fn describe_and_cache(bot_id: &BotId) -> Result<Vec<ConfigFieldSchema>
     crate::store::atomic_write(&schema_path, &content)
         .with_context(|| format!("写入 schema 缓存失败：{}", schema_path.display()))?;
     Ok(parsed.config_schema)
+}
+
+fn validate_local_description(description: &DescribeOutput, bot_id: &BotId) -> Result<()> {
+    if description.schema_version != 1 {
+        bail!(
+            "bot --describe schema_version 不受支持：{}",
+            description.schema_version
+        );
+    }
+    if description.artifact_id != bot_id.as_str() {
+        bail!(
+            "本地 bot --describe artifact_id 与目录名不一致：期望 {}，实际 {}",
+            bot_id,
+            description.artifact_id
+        );
+    }
+    Ok(())
 }
 
 async fn describe_artifact(artifact_path: &Path) -> Result<DescribeOutput> {
