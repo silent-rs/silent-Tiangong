@@ -40,17 +40,16 @@ bots/
 - 每个 bot 对应一个 workflow：`.github/workflows/release-<bot-id>.yml`（如 `release-feishu.yml`、`release-weixin.yml`、`release-qq.yml`）。
 - tag 约定：`bot-<bot-id>-v<version>`，如 `bot-feishu-v0.1.0`、`bot-weixin-v0.1.0`、`bot-qq-v0.1.0`。
 - 新增 bot 时复制一个已有的 workflow，把 bot id、名称、描述改为新 bot 即可。
-- `bots-index.json` 采用 **merge 式更新**：发版时从 OSS 拉取现有 index，替换/新增当前 bot 条目，保留其他 bot 条目不变。
-- `bots-index.json` 以**阿里云 OSS 根目录为权威源**（`silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json`），
-  因为 GitHub 的 `releases/latest` 指向主程序 tag，无法用于解析 bot 的最新版本。
-  GitHub Release 作为产物归档（人可查、CI 可用）。格式见 `crates/tiangong-bots/src/manifest.rs`。
+- 每个 bot 在 OSS 使用独立索引对象：`bots-index/<bot-id>.json`。发布流程只写自己的对象，不读取或覆盖其他 bot 的索引。
+- 主程序从 `crates/tiangong-bots/src/manifest.rs` 声明的端点读取并合并索引；新增 bot 时需要同时补充该端点。
+- GitHub Release 作为产物归档（人可查、CI 可用），每个 Release 只附带本 bot 的 `bots-index.json`。
 
 ### 发版流程
 
 1. 推送 `bot-<bot-id>-v0.1.0` tag（如 `bot-weixin-v0.1.0`），或 Actions 页面手动触发对应 bot 的 workflow 并输入 tag。
 2. CI 交叉编译该 bot 的 4 平台制品 → 上传到对应 Release。
-3. `generate-bots-index` job 汇总该 bot 各平台 SHA256 → 从 OSS 拉取现有 index → merge 当前 bot 条目 → 附到 Release。
-4. `upload-to-oss` job 上传该 bot 制品到 `bots/bot-<bot-id>-v0.1.0/` + 更新后的 `bots-index.json` 到 OSS 根。
+3. `generate-bots-index` job 汇总该 bot 各平台 SHA256，生成只包含当前 bot 的索引并附到 Release。
+4. `upload-to-oss` job 上传该 bot 制品到 `bots/bot-<bot-id>-v0.1.0/`，并把索引上传到 `bots-index/<bot-id>.json`。
 
 ## 凭证注入约定
 

@@ -1,9 +1,7 @@
 //! bot 制品清单（`bots-index.json`）模型与平台标识。
 //!
-//! bot 与主程序**独立发版**（tag 前缀 `bots-v*`，见 `.github/workflows/release-bots.yml`），
-//! 因此 GitHub 的 `releases/latest`（指向主程序 tag）无法用于解析 bot index。
-//! `bots-index.json` 以**阿里云 OSS 根目录为权威源**，主程序启动时拉取以渲染
-//! "可安装 bot 列表"。
+//! bot 与主程序独立发版，每个 bot 在阿里云 OSS 保存自己的索引对象。
+//! 主程序启动时合并所有可用索引，以渲染“可安装 bot 列表”。
 
 use std::collections::BTreeMap;
 
@@ -11,12 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ConfigFieldSchema;
 
-/// bots-index.json 端点。
-///
-/// 以 OSS 根目录为权威源（bot 独立发版，GitHub latest 机制不可用）。
-/// OSS 不可达时回退到 OSS 的 HTTPS 根路径（同一源，仅作为重试）。
-pub const BOTS_INDEX_ENDPOINTS: &[&str] =
-    &["https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json"];
+/// 各 bot 的独立索引端点。
+pub const BOTS_INDEX_ENDPOINTS: &[&str] = &[
+    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/feishu.json",
+    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/weixin.json",
+    "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index/qq.json",
+];
 
 /// bots-index.json 顶层结构。
 #[derive(Debug, Clone, Serialize, Deserialize)]

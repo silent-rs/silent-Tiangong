@@ -1,6 +1,4 @@
-//! bot 制品下载器——拉取 bots-index.json、下载平台制品、SHA256 校验。
-//!
-//! 端点复用 `tiangong-entry::update` 的 GitHub + 阿里云 OSS 双端点 fallback。
+//! bot 制品下载器——合并独立 bot 索引、下载平台制品、SHA256 校验。
 
 use std::path::Path;
 
@@ -27,19 +25,43 @@ impl Downloader {
         Ok(Self { http })
     }
 
-    /// 拉取 bots-index.json（双端点 fallback）。
+    /// 并行拉取各 bot 的独立索引，返回所有成功结果的合集。
     pub async fn fetch_index(&self) -> Result<BotsIndex> {
+        let requests = BOTS_INDEX_ENDPOINTS
+            .iter()
+            .copied()
+            .map(|endpoint| async move { (endpoint, self.fetch_index_from(endpoint).await) });
+        let results = futures_util::future::join_all(requests).await;
+
+        let mut merged: Option<BotsIndex> = None;
         let mut last_err: Option<anyhow::Error> = None;
-        for endpoint in BOTS_INDEX_ENDPOINTS {
-            match self.fetch_index_from(endpoint).await {
-                Ok(index) => return Ok(index),
+        for (endpoint, result) in results {
+            match result {
+                Ok(index) => match &mut merged {
+                    Some(current) => {
+                        if current.version != index.version {
+                            tracing::warn!(
+                                "忽略 bot 索引格式版本差异（{endpoint}）：期望 {}，实际 {}",
+                                current.version,
+                                index.version
+                            );
+                        }
+                        current.bots.extend(index.bots);
+                    }
+                    None => merged = Some(index),
+                },
                 Err(err) => {
                     tracing::warn!("拉取 bots-index 失败（{endpoint}）：{err}");
                     last_err = Some(err);
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("无可用 bots-index 端点")))
+        if let Some(mut index) = merged {
+            index.bots.sort_by(|left, right| left.id.cmp(&right.id));
+            return Ok(index);
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("无可用 bot 索引端点")))
     }
 
     async fn fetch_index_from(&self, endpoint: &str) -> Result<BotsIndex> {
@@ -56,6 +78,9 @@ impl Downloader {
             .json()
             .await
             .with_context(|| format!("解析 bots-index 失败：{endpoint}"))?;
+        if index.bots.is_empty() {
+            bail!("bots-index 不含任何 bot：{endpoint}");
+        }
         Ok(index)
     }
 
