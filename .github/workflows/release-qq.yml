@@ -4,8 +4,8 @@ name: Release QQ Bot
 #
 # - tag 约定：bot-qq-v<version>（如 bot-qq-v0.1.0）
 # - 制品挂在独立的 GitHub Release（bot-qq-v*）
-# - bots-index.json 采用 merge 式更新：只替换/新增 QQ 条目，保留其他 bot 不变
-# - OSS 根目录的 bots-index.json 为权威源
+# - Release 附带只包含 QQ 条目的 bots-index.json
+# - OSS 使用 bots-index/qq.json，发布时不读写其他 bot 的索引
 
 on:
   workflow_dispatch:
@@ -82,7 +82,7 @@ jobs:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
-          - platform: macos-13
+          - platform: macos-15-intel
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -156,37 +156,24 @@ jobs:
             ${{ runner.temp }}/tiangong-bot-qq-*
 
   generate-bots-index:
-    name: Update bots-index.json
+    name: Generate bots-index.json
     needs: [resolve, publish-bot]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download current bots-index.json from OSS
-        id: current
-        continue-on-error: true
-        run: |
-          mkdir -p artifacts
-          curl -fsSL -o artifacts/bots-index.json \
-            "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json" || true
-          if [[ -f artifacts/bots-index.json ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo '{"version":1,"bots":[]}' > artifacts/bots-index.json
-          fi
-
       - name: Download bot artifacts + checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          mkdir -p artifacts
           cd artifacts
           gh release download "${{ needs.resolve.outputs.tag }}" --repo "${{ github.repository }}" \
             --pattern "tiangong-bot-qq-*" \
             --clobber
 
-      - name: Build merged bots-index.json
+      - name: Build bots-index.json
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
           TAG: ${{ needs.resolve.outputs.tag }}
@@ -194,7 +181,14 @@ jobs:
           oss_base="https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots/${TAG}"
           bot_id="qq"
 
-          read_sha() { cat "artifacts/$1.sha256" 2>/dev/null || echo ""; }
+          read_sha() {
+            local checksum_file="artifacts/$1.sha256"
+            if [[ ! -s "$checksum_file" ]]; then
+              echo "::error::缺少校验文件：$checksum_file" >&2
+              exit 1
+            fi
+            tr -d '\r\n' < "$checksum_file"
+          }
 
           darwin_aarch64_sha=$(read_sha tiangong-bot-${bot_id}-aarch64-apple-darwin)
           darwin_x86_64_sha=$(read_sha tiangong-bot-${bot_id}-x86_64-apple-darwin)
@@ -235,13 +229,10 @@ jobs:
               min_app_version: $min_app_version
             }')
 
-          # Merge：从现有 index 中移除同 id 条目，追加当前条目
-          jq --argjson entry "$current_entry" --arg id "$bot_id" \
-            '.bots = ((.bots // []) | map(select(.id != $id))) + [$entry]' \
-            artifacts/bots-index.json > artifacts/bots-index.json.new
-          mv artifacts/bots-index.json.new artifacts/bots-index.json
+          jq -n --argjson entry "$current_entry" \
+            '{version: 1, bots: [$entry]}' > artifacts/bots-index.json
 
-          echo "--- merged bots-index.json ---"
+          echo "--- bots-index.json ---"
           cat artifacts/bots-index.json
 
       - name: Attach bots-index.json to Release
@@ -297,8 +288,8 @@ jobs:
             fi
           done
 
-      - name: Upload bots-index.json (root)
+      - name: Upload bot index
         working-directory: oss-upload
         run: |
-          echo "Uploading bots-index.json to OSS root"
-          ossutil cp bots-index.json "oss://silent-tiangong/bots-index.json" -f
+          echo "Uploading bots-index.json to OSS: bots-index/${BOT_ID}.json"
+          ossutil cp bots-index.json "oss://silent-tiangong/bots-index/${BOT_ID}.json" -f

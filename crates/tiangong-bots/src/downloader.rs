@@ -1,13 +1,12 @@
-//! bot 制品下载器——拉取 bots-index.json、下载平台制品、SHA256 校验。
-//!
-//! 端点复用 `tiangong-entry::update` 的 GitHub + 阿里云 OSS 双端点 fallback。
+//! bot 制品下载器——合并独立 bot 索引、下载平台制品、SHA256 校验。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{BOTS_INDEX_ENDPOINTS, BotManifest, BotsIndex};
+use crate::manifest::{BOTS_INDEX_CATALOG_ENDPOINT, BotManifest, BotsIndex, BotsIndexCatalog};
 use crate::paths;
 
 /// 下载进度回调：`(已下载字节数, 总字节数)`。
@@ -27,19 +26,77 @@ impl Downloader {
         Ok(Self { http })
     }
 
-    /// 拉取 bots-index.json（双端点 fallback）。
+    /// 并行拉取各 bot 的独立索引，返回所有成功结果的合集。
     pub async fn fetch_index(&self) -> Result<BotsIndex> {
+        let catalog = self.fetch_index_catalog().await?;
+        let requests = catalog
+            .indexes
+            .iter()
+            .map(|endpoint| async move { (endpoint, self.fetch_index_from(endpoint).await) });
+        let results = futures_util::future::join_all(requests).await;
+
+        let mut version: Option<u32> = None;
+        let mut bots = Vec::new();
+        let mut seen_ids = HashSet::new();
         let mut last_err: Option<anyhow::Error> = None;
-        for endpoint in BOTS_INDEX_ENDPOINTS {
-            match self.fetch_index_from(endpoint).await {
-                Ok(index) => return Ok(index),
+        for (endpoint, result) in results {
+            match result {
+                Ok(index) => {
+                    if let Some(current_version) = version {
+                        if current_version != index.version {
+                            tracing::warn!(
+                                "忽略 bot 索引格式版本差异（{endpoint}）：期望 {}，实际 {}",
+                                current_version,
+                                index.version
+                            );
+                        }
+                    } else {
+                        version = Some(index.version);
+                    }
+                    for bot in index.bots {
+                        if seen_ids.insert(bot.id.clone()) {
+                            bots.push(bot);
+                        } else {
+                            tracing::warn!("忽略 bot 索引中的重复 id（{endpoint}）：{}", bot.id);
+                        }
+                    }
+                }
                 Err(err) => {
                     tracing::warn!("拉取 bots-index 失败（{endpoint}）：{err}");
                     last_err = Some(err);
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("无可用 bots-index 端点")))
+        if let Some(version) = version {
+            bots.sort_by(|left, right| left.id.cmp(&right.id));
+            return Ok(BotsIndex { version, bots });
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("无可用 bot 索引端点")))
+    }
+
+    async fn fetch_index_catalog(&self) -> Result<BotsIndexCatalog> {
+        let endpoint = BOTS_INDEX_CATALOG_ENDPOINT;
+        let resp = self
+            .http
+            .get(endpoint)
+            .send()
+            .await
+            .with_context(|| format!("请求 bot 索引目录失败：{endpoint}"))?;
+        if !resp.status().is_success() {
+            bail!("bot 索引目录响应非 2xx：{} {endpoint}", resp.status());
+        }
+        let catalog: BotsIndexCatalog = resp
+            .json()
+            .await
+            .with_context(|| format!("解析 bot 索引目录失败：{endpoint}"))?;
+        if catalog.version != 1 {
+            bail!("不支持的 bot 索引目录版本：{}", catalog.version);
+        }
+        if catalog.indexes.is_empty() {
+            bail!("bot 索引目录不含任何索引：{endpoint}");
+        }
+        Ok(catalog)
     }
 
     async fn fetch_index_from(&self, endpoint: &str) -> Result<BotsIndex> {
@@ -56,6 +113,9 @@ impl Downloader {
             .json()
             .await
             .with_context(|| format!("解析 bots-index 失败：{endpoint}"))?;
+        if index.bots.is_empty() {
+            bail!("bots-index 不含任何 bot：{endpoint}");
+        }
         Ok(index)
     }
 
