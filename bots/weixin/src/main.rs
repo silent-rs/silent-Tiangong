@@ -1,0 +1,629 @@
+//! 天工微信 bot 制品。
+//!
+//! 通过腾讯 iLink 长轮询接收微信消息，转发到天工的统一 Connector API，
+//! 再把天工返回的文本回复发送回微信。
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use tokio::signal;
+use tokio::sync::{Mutex, RwLock};
+use tracing_subscriber::EnvFilter;
+
+mod crypto;
+mod ilink;
+mod provision;
+mod schema;
+
+const POLL_ERROR_BACKOFF: Duration = Duration::from_secs(5);
+const RECENT_MESSAGE_LIMIT: usize = 1024;
+
+struct BotState {
+    http: Client,
+    bot_token: String,
+    api_base_url: String,
+    tiangong_url: String,
+    tiangong_token: Option<String>,
+    cursor: RwLock<String>,
+    recent_messages: Mutex<RecentMessages>,
+}
+
+#[derive(Default)]
+struct RecentMessages {
+    keys: VecDeque<String>,
+}
+
+impl RecentMessages {
+    fn claim(&mut self, channel_id: &str, message_id: &str) -> bool {
+        if channel_id.is_empty() || message_id.is_empty() {
+            return false;
+        }
+        let key = format!("{channel_id}:{message_id}");
+        if self.keys.iter().any(|existing| existing == &key) {
+            return false;
+        }
+        self.keys.push_back(key);
+        if self.keys.len() > RECENT_MESSAGE_LIMIT {
+            self.keys.pop_front();
+        }
+        true
+    }
+
+    fn release(&mut self, channel_id: &str, message_id: &str) {
+        let key = format!("{channel_id}:{message_id}");
+        self.keys.retain(|existing| existing != &key);
+    }
+}
+
+// -- 天工 Server API -------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct ConnectorRequest {
+    connector: String,
+    channel_id: String,
+    sender_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ApiMessageContent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    media: Vec<MediaAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectorResponse {
+    #[allow(dead_code)]
+    session_id: String,
+    message: String,
+    content: ApiMessageContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ApiMessageContent {
+    Text {
+        text: String,
+    },
+    Image {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+    },
+    File {
+        url: String,
+        name: String,
+    },
+    Audio {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<u32>,
+    },
+    Video {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+    },
+}
+
+impl ApiMessageContent {
+    fn text(&self) -> String {
+        match self {
+            Self::Text { text } => text.clone(),
+            Self::Image { caption, .. } | Self::Video { caption, .. } => {
+                caption.clone().unwrap_or_default()
+            }
+            Self::File { .. } | Self::Audio { .. } => String::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text { text } => text.trim().is_empty(),
+            Self::Image { url, .. }
+            | Self::File { url, .. }
+            | Self::Audio { url, .. }
+            | Self::Video { url, .. } => url.trim().is_empty(),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::Image { .. } => "image",
+            Self::File { .. } => "file",
+            Self::Audio { .. } => "audio",
+            Self::Video { .. } => "video",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MediaAsset {
+    kind: String,
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capability: Option<String>,
+}
+
+impl MediaAsset {
+    fn image(url: String, mime_type: String) -> Self {
+        Self {
+            kind: "image".to_string(),
+            url,
+            mime_type: Some(mime_type),
+            title: None,
+            capability: Some("multimodal".to_string()),
+        }
+    }
+}
+
+struct DownloadedImage {
+    url: String,
+    mime_type: String,
+}
+
+struct ParsedMessage {
+    content: ApiMessageContent,
+    media: Vec<MediaAsset>,
+}
+
+// -- 入口 -------------------------------------------------------
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("--describe") => {
+            println!("{}", serde_json::to_string(&schema::describe_output())?);
+            return Ok(());
+        }
+        Some("--provision-begin") => {
+            println!("{}", serde_json::to_string(&provision::begin().await?)?);
+            return Ok(());
+        }
+        Some("--provision-poll") => {
+            println!(
+                "{}",
+                serde_json::to_string(&provision::poll_from_stdin().await?)?
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
+        .with_writer(std::io::stderr)
+        .init();
+
+    let credentials = provision::load_credentials()?;
+    let tiangong_url =
+        std::env::var("TIANGONG_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let tiangong_token = std::env::var("TIANGONG_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+
+    let state = Arc::new(BotState {
+        http: Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("构建 HTTP 客户端失败")?,
+        bot_token: credentials.bot_token,
+        api_base_url: credentials
+            .base_url
+            .unwrap_or_else(|| ilink::ILINK_BASE_URL.to_string()),
+        tiangong_url,
+        tiangong_token,
+        cursor: RwLock::new(String::new()),
+        recent_messages: Mutex::new(RecentMessages::default()),
+    });
+
+    tracing::info!("微信机器人启动中...");
+    tracing::info!("天工服务地址: {}", state.tiangong_url);
+    if let Err(error) =
+        ilink::notify_start(&state.http, &state.api_base_url, &state.bot_token).await
+    {
+        tracing::warn!("通知微信机器人启动失败，将继续运行: {error}");
+    }
+
+    let mut poll_handle = tokio::spawn({
+        let state = state.clone();
+        async move {
+            if let Err(error) = run_poll_loop(&state).await {
+                tracing::error!("微信长轮询循环退出: {error}");
+            }
+        }
+    });
+
+    let poll_finished: bool;
+    #[cfg(unix)]
+    {
+        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .context("注册 SIGTERM 处理失败")?;
+        let mut int = signal::unix::signal(signal::unix::SignalKind::interrupt())
+            .context("注册 SIGINT 处理失败")?;
+        poll_finished = tokio::select! {
+            _ = term.recv() => {
+                tracing::info!("收到 SIGTERM，正在退出...");
+                false
+            },
+            _ = int.recv() => {
+                tracing::info!("收到 SIGINT，正在退出...");
+                false
+            },
+            _ = &mut poll_handle => {
+                tracing::info!("长轮询循环已结束");
+                true
+            },
+        };
+    }
+    #[cfg(not(unix))]
+    {
+        poll_finished = tokio::select! {
+            result = signal::ctrl_c() => {
+                result.context("等待 Ctrl+C 失败")?;
+                tracing::info!("收到 Ctrl+C，正在退出...");
+                false
+            },
+            _ = &mut poll_handle => {
+                tracing::info!("长轮询循环已结束");
+                true
+            },
+        };
+    }
+
+    if !poll_finished {
+        poll_handle.abort();
+        let _ = poll_handle.await;
+    }
+    if let Err(error) = ilink::notify_stop(&state.http, &state.api_base_url, &state.bot_token).await
+    {
+        tracing::warn!("通知微信机器人停止失败: {error}");
+    }
+    Ok(())
+}
+
+// -- 长轮询 -----------------------------------------------------
+
+async fn run_poll_loop(state: &Arc<BotState>) -> Result<()> {
+    tracing::info!("正在连接 iLink 长轮询...");
+
+    loop {
+        let cursor = state.cursor.read().await.clone();
+        let updates =
+            match ilink::get_updates(&state.http, &state.api_base_url, &state.bot_token, &cursor)
+                .await
+            {
+                Ok(updates) => updates,
+                Err(error) => {
+                    tracing::warn!(
+                        "iLink 长轮询出错，{} 秒后重试: {error}",
+                        POLL_ERROR_BACKOFF.as_secs()
+                    );
+                    tokio::time::sleep(POLL_ERROR_BACKOFF).await;
+                    continue;
+                }
+            };
+
+        if let Some(timeout) = updates.longpolling_timeout_ms {
+            tracing::debug!("iLink 建议长轮询超时: {timeout}ms");
+        }
+
+        let mut batch_failed = false;
+        for message in &updates.msgs {
+            let message_id = message.stable_message_id();
+            let channel_id = stable_channel_id(message);
+            if let Some(message_id) = message_id.as_deref()
+                && !state
+                    .recent_messages
+                    .lock()
+                    .await
+                    .claim(channel_id, message_id)
+            {
+                tracing::debug!("忽略重复微信消息 message_id={message_id}");
+                continue;
+            }
+
+            if let Err(error) = handle_message(state, message, message_id.as_deref()).await {
+                tracing::error!("处理微信消息失败: {error}");
+                if let Some(message_id) = message_id.as_deref() {
+                    state
+                        .recent_messages
+                        .lock()
+                        .await
+                        .release(channel_id, message_id);
+                }
+                batch_failed = true;
+            }
+        }
+
+        if batch_failed {
+            tokio::time::sleep(POLL_ERROR_BACKOFF).await;
+            continue;
+        }
+        if let Some(new_cursor) = updates
+            .get_updates_buf
+            .as_deref()
+            .filter(|cursor| !cursor.is_empty())
+        {
+            *state.cursor.write().await = new_cursor.to_string();
+        }
+    }
+}
+
+// -- 消息处理 ---------------------------------------------------
+
+async fn handle_message(
+    state: &Arc<BotState>,
+    message: &ilink::WeixinMessage,
+    message_id: Option<&str>,
+) -> Result<()> {
+    if !message.is_from_user() {
+        return Ok(());
+    }
+
+    let sender_id = message.from_user_id.trim();
+    if sender_id.is_empty() {
+        tracing::warn!("微信消息缺少发送者，跳过");
+        return Ok(());
+    }
+    let context_token = message.context_token.trim();
+    if context_token.is_empty() {
+        tracing::warn!("微信消息缺少 context_token，无法回复，跳过");
+        return Ok(());
+    }
+    let channel_id = stable_channel_id(message);
+
+    let text = message.text_content();
+    let mut images = Vec::new();
+    for image in message.images() {
+        images.push(download_image(state, image).await?);
+    }
+
+    let parsed = if !text.trim().is_empty() {
+        ParsedMessage {
+            content: ApiMessageContent::Text { text },
+            media: images
+                .into_iter()
+                .map(|image| MediaAsset::image(image.url, image.mime_type))
+                .collect(),
+        }
+    } else {
+        let mut images = images.into_iter();
+        let Some(first) = images.next() else {
+            tracing::debug!("微信消息没有可处理的文本或图片，跳过");
+            return Ok(());
+        };
+        ParsedMessage {
+            content: ApiMessageContent::Image {
+                url: first.url,
+                caption: None,
+            },
+            media: images
+                .map(|image| MediaAsset::image(image.url, image.mime_type))
+                .collect(),
+        }
+    };
+
+    if parsed.content.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(
+        "转发微信消息 sender={sender_id} content_type={} images={}",
+        parsed.content.kind(),
+        parsed.media.len()
+    );
+
+    let reply = forward_to_tiangong(
+        state,
+        channel_id,
+        sender_id,
+        message_id,
+        parsed.content,
+        parsed.media,
+    )
+    .await?;
+    if !reply.trim().is_empty() {
+        ilink::send_message(
+            &state.http,
+            &state.api_base_url,
+            &state.bot_token,
+            sender_id,
+            context_token,
+            &reply,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn stable_channel_id(message: &ilink::WeixinMessage) -> &str {
+    let group_id = message.group_id.trim();
+    if group_id.is_empty() {
+        message.from_user_id.trim()
+    } else {
+        group_id
+    }
+}
+
+async fn download_image(
+    state: &Arc<BotState>,
+    image: &ilink::ImageItem,
+) -> Result<DownloadedImage> {
+    let encrypted = ilink::download_image_bytes(&state.http, image).await?;
+    if encrypted.is_empty() {
+        return Err(anyhow!("微信图片下载数据为空"));
+    }
+
+    let plaintext = if let Some(key) = image
+        .aeskey
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        crypto::decrypt_media_hex(key, &encrypted)?
+    } else if let Some(key) = image
+        .media
+        .as_ref()
+        .and_then(|media| media.aes_key.as_deref())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        crypto::decrypt_media_base64(key, &encrypted)?
+    } else {
+        encrypted
+    };
+
+    let mime_type = detect_image_mime(&plaintext).to_string();
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &plaintext);
+    Ok(DownloadedImage {
+        url: format!("data:{mime_type};base64,{encoded}"),
+        mime_type,
+    })
+}
+
+fn detect_image_mime(data: &[u8]) -> &'static str {
+    if data.len() >= 4 {
+        match &data[..4] {
+            [0x89, 0x50, 0x4e, 0x47] => return "image/png",
+            [0xff, 0xd8, 0xff, _] => return "image/jpeg",
+            [0x47, 0x49, 0x46, 0x38] => return "image/gif",
+            _ => {}
+        }
+    }
+    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    "image/jpeg"
+}
+
+async fn forward_to_tiangong(
+    state: &BotState,
+    channel_id: &str,
+    sender_id: &str,
+    message_id: Option<&str>,
+    content: ApiMessageContent,
+    media: Vec<MediaAsset>,
+) -> Result<String> {
+    let url = format!(
+        "{}/api/v1/messages",
+        state.tiangong_url.trim_end_matches('/')
+    );
+    let request = ConnectorRequest {
+        connector: "weixin-bot".to_string(),
+        channel_id: channel_id.to_string(),
+        sender_id: sender_id.to_string(),
+        message_id: message_id.map(str::to_string),
+        message: None,
+        content: Some(content),
+        media,
+    };
+
+    let mut builder = state.http.post(url);
+    if let Some(token) = &state.tiangong_token {
+        builder = builder.bearer_auth(token);
+    }
+    let response = builder
+        .json(&request)
+        .send()
+        .await
+        .context("天工 server 请求失败")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("天工 server 错误: {status}, {body}"));
+    }
+
+    let body: ConnectorResponse = response.json().await.context("解析天工响应失败")?;
+    let reply = body.content.text();
+    if reply.trim().is_empty() {
+        Ok(body.message)
+    } else {
+        Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_messages_can_retry_failed_message() {
+        let mut messages = RecentMessages::default();
+        assert!(messages.claim("chat-1", "msg-1"));
+        assert!(!messages.claim("chat-1", "msg-1"));
+        assert!(messages.claim("chat-2", "msg-1"));
+        messages.release("chat-1", "msg-1");
+        assert!(messages.claim("chat-1", "msg-1"));
+    }
+
+    #[test]
+    fn channel_id_is_stable_for_direct_and_group_messages() {
+        let mut message = ilink::WeixinMessage {
+            seq: None,
+            message_id: None,
+            from_user_id: "user@im.wechat".into(),
+            to_user_id: "bot@im.bot".into(),
+            message_type: 1,
+            context_token: "per-message-token".into(),
+            item_list: Vec::new(),
+            group_id: String::new(),
+        };
+        assert_eq!(stable_channel_id(&message), "user@im.wechat");
+        message.group_id = "group-1".into();
+        assert_eq!(stable_channel_id(&message), "group-1");
+    }
+
+    #[test]
+    fn connector_request_keeps_message_id_and_image_metadata() {
+        let request = ConnectorRequest {
+            connector: "weixin-bot".to_string(),
+            channel_id: "user@im.wechat".to_string(),
+            sender_id: "user@im.wechat".to_string(),
+            message_id: Some("42".to_string()),
+            message: None,
+            content: Some(ApiMessageContent::Text {
+                text: "你好".into(),
+            }),
+            media: vec![MediaAsset::image(
+                "data:image/png;base64,AA==".into(),
+                "image/png".into(),
+            )],
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["message_id"], "42");
+        assert_eq!(value["content"]["type"], "text");
+        assert_eq!(value["media"][0]["mime_type"], "image/png");
+        assert_eq!(value["media"][0]["capability"], "multimodal");
+    }
+
+    #[test]
+    fn content_validation_and_mime_detection() {
+        assert!(ApiMessageContent::Text { text: "  ".into() }.is_empty());
+        assert!(
+            !ApiMessageContent::Image {
+                url: "data:image/png;base64,AA==".into(),
+                caption: None,
+            }
+            .is_empty()
+        );
+        assert_eq!(
+            detect_image_mime(&[0x89, 0x50, 0x4e, 0x47, 0x0d]),
+            "image/png"
+        );
+        assert_eq!(detect_image_mime(&[0xff, 0xd8, 0xff, 0xe0]), "image/jpeg");
+        assert_eq!(
+            detect_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+            "image/webp"
+        );
+    }
+}

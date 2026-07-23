@@ -1,5 +1,8 @@
 {
   "artifact_id": "feishu",
+  "name": "飞书 Bot",
+  "description": "飞书机器人连接器，通过 WebSocket 长连接接收飞书消息并转发到天工",
+  "min_app_version": "0.12.3",
   "config_schema": [
     {
       "key": "provision",

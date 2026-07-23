@@ -16,31 +16,38 @@ bots/
   feishu/          # 飞书 bot（openlark WebSocket 长连接）
     Cargo.toml     # [[bin]] name = "tiangong-bot-feishu"，含 [workspace]（独立编译）
     src/main.rs
+  weixin/          # 微信 bot（腾讯 iLink 协议长轮询）
+    Cargo.toml     # [[bin]] name = "tiangong-bot-weixin"，含 [workspace]（独立编译）
+    src/main.rs
 ```
 
 ## 新增一个 bot
 
 1. 在 `bots/` 下新建目录，Cargo.toml 声明 `[[bin]]` + 空 `[workspace]` 表（避免被主 workspace 收编）。
-2. 实现消息接收逻辑，把 IM 消息 POST 到 `TIANGONG_URL/api/v1/messages`。
-3. 处理 SIGTERM/SIGINT 优雅退出（主程序 stop 时发送）。
-4. 日志输出到 stderr（主程序捕获 tail 用于诊断）。
-5. 在 `crates/tiangong-bots/src/config.rs` 的 `BotType` 枚举追加变体 + `config_schema()`。
-6. 在 `.github/workflows/release.yml` 的 `publish-bots` job 追加构建目标。
-7. 在 `bots-index.json` 生成逻辑里登记该 bot 的制品信息。
+2. 实现 `--describe` 输出配置 schema（单一真相来源），并可选实现 `--provision-begin`/`--provision-poll` 扫码配置。
+3. 实现消息接收逻辑，把 IM 消息 POST 到 `TIANGONG_URL/api/v1/messages`。
+4. 处理 SIGTERM/SIGINT 优雅退出（主程序 stop 时发送）。
+5. 日志输出到 stderr（主程序捕获 tail 用于诊断）。
+6. 在 `bots/<name>/bot.json` 补充 `name`/`description`/`min_app_version`/`config_schema`（发版元数据 + bots-index.json 预览）。
 
 ## bots-index.json
 
-bot 与主程序**独立发版**（CI 工作流 `.github/workflows/release-bots.yml`，tag 前缀 `bots-v*`）。
-`bots-index.json` 以**阿里云 OSS 根目录为权威源**（`silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json`），
-因为 GitHub 的 `releases/latest` 指向主程序 tag，无法用于解析 bot 的最新版本。
-GitHub Release 作为产物归档（人可查、CI 可用）。格式见 `crates/tiangong-bots/src/manifest.rs`。
+**每个 bot 独立发版**，各自有独立的 CI 工作流、tag 和 Release，互不影响。
+
+- 每个 bot 对应一个 workflow：`.github/workflows/release-<bot-id>.yml`（如 `release-feishu.yml`、`release-weixin.yml`）。
+- tag 约定：`bot-<bot-id>-v<version>`，如 `bot-feishu-v0.1.0`、`bot-weixin-v0.1.0`。
+- 新增 bot 时复制一个已有的 workflow，把 bot id、名称、描述改为新 bot 即可。
+- `bots-index.json` 采用 **merge 式更新**：发版时从 OSS 拉取现有 index，替换/新增当前 bot 条目，保留其他 bot 条目不变。
+- `bots-index.json` 以**阿里云 OSS 根目录为权威源**（`silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json`），
+  因为 GitHub 的 `releases/latest` 指向主程序 tag，无法用于解析 bot 的最新版本。
+  GitHub Release 作为产物归档（人可查、CI 可用）。格式见 `crates/tiangong-bots/src/manifest.rs`。
 
 ### 发版流程
 
-1. 推送 `bots-v0.1.0` tag，或 Actions 页面手动触发 `Release Bots` 工作流
-2. CI 交叉编译 4 平台制品 → 上传 `bots-v0.1.0` Release
-3. `generate-bots-index` job 汇总各平台 SHA256 → 生成 `bots-index.json`（URL 指向 OSS 版本化路径）→ 附到 Release
-4. `upload-to-oss` job 上传制品到 `bots/bots-v0.1.0/` + `bots-index.json` 到 OSS 根
+1. 推送 `bot-<bot-id>-v0.1.0` tag（如 `bot-weixin-v0.1.0`），或 Actions 页面手动触发对应 bot 的 workflow 并输入 tag。
+2. CI 交叉编译该 bot 的 4 平台制品 → 上传到对应 Release。
+3. `generate-bots-index` job 汇总该 bot 各平台 SHA256 → 从 OSS 拉取现有 index → merge 当前 bot 条目 → 附到 Release。
+4. `upload-to-oss` job 上传该 bot 制品到 `bots/bot-<bot-id>-v0.1.0/` + 更新后的 `bots-index.json` 到 OSS 根。
 
 ## 凭证注入约定
 
@@ -49,6 +56,7 @@ GitHub Release 作为产物归档（人可查、CI 可用）。格式见 `crates
 | 平台   | 环境变量                                                                 |
 | ------ | ------------------------------------------------------------------------ |
 | feishu | `TIANGONG_BOT_FEISHU_APP_ID` / `TIANGONG_BOT_FEISHU_APP_SECRET`（仅手工配置） |
+| weixin | `TIANGONG_BOT_WEIXIN_TOKEN`（仅手工配置，扫码所得凭证由 bot 自行保存）   |
 | 通用   | `TIANGONG_URL`（embedded server 地址）/ `TIANGONG_TOKEN`（认证 token）   |
 
 约定见 `crates/tiangong-bots/src/runtime.rs::bot_env`。
