@@ -74,6 +74,8 @@ export function BotFormDialog({
   const { showSuccess, showError } = useToast();
 
   const [schema, setSchema] = useState<ConfigFieldSchema[]>([]);
+  const [schemaLoading, setSchemaLoading] = useState(true);
+  const [schemaError, setSchemaError] = useState<string | null>(null);
   const [id, setId] = useState(bot?.id ?? suggestedId ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -100,6 +102,8 @@ export function BotFormDialog({
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setSchemaLoading(true);
+      setSchemaError(null);
       try {
         const fields = await api.botConfigSchema(artifactId, bot?.id);
         if (cancelled) return;
@@ -118,6 +122,12 @@ export function BotFormDialog({
         if (!cancelled) setValues(initial);
       } catch (err) {
         console.error('加载 bot 配置 schema 失败:', err);
+        if (!cancelled) {
+          setSchema([]);
+          setSchemaError(String(err));
+        }
+      } finally {
+        if (!cancelled) setSchemaLoading(false);
       }
     })();
     return () => {
@@ -331,11 +341,33 @@ export function BotFormDialog({
                 value={id}
                 onChange={(e) => setId(e.target.value)}
                 placeholder="例如：feishu"
-                disabled={isEdit}
+                disabled={isEdit || !!suggestedId}
               />
-              {isEdit && (
-                <p className="text-xs text-muted-foreground">创建后不可修改</p>
+              {(isEdit || suggestedId) && (
+                <p className="text-xs text-muted-foreground">
+                  {isEdit ? '创建后不可修改' : '与本地安装目录一致'}
+                </p>
               )}
+            </div>
+          )}
+
+          {schemaLoading && (
+            <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              正在读取 Bot 配置
+            </div>
+          )}
+
+          {schemaError && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+            >
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-medium">无法读取 Bot 配置</div>
+                <div className="mt-0.5 break-words text-xs opacity-80">{schemaError}</div>
+              </div>
             </div>
           )}
 
@@ -462,7 +494,7 @@ export function BotFormDialog({
             {!scanMode && (
               <Button
                 onClick={() => void persistBot('manual')}
-                disabled={saving || (!isEdit && !id.trim())}
+                disabled={saving || schemaLoading || !!schemaError || (!isEdit && !id.trim())}
               >
                 {saving ? '保存中...' : isEdit ? '更新' : '创建'}
               </Button>
