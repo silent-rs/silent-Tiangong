@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
+use tiangong_server::remote::core::resolve_or_create_connector_session;
 use tiangong_server::remote::event::{EventBus, TiangongEvent};
 use tiangong_types::{MediaAsset, OutgoingMessage, TurnStatus};
 use tokio::sync::{mpsc, oneshot};
@@ -168,6 +169,11 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                             {
                                 Ok((session_id, creates_session)) => {
                                     let completion_session_id = session_id.clone();
+                                    if creates_session {
+                                        request_event_bus.publish(TiangongEvent::SessionCreated(
+                                            completion_session_id.clone(),
+                                        ));
+                                    }
                                     let result = send_message_and_wait(
                                         request_app.clone(),
                                         state.inner(),
@@ -177,11 +183,6 @@ pub(crate) fn spawn_desktop_server_core_bridge(
                                         media,
                                     )
                                     .await;
-                                    if creates_session && result.is_ok() {
-                                        request_event_bus.publish(TiangongEvent::SessionCreated(
-                                            completion_session_id.clone(),
-                                        ));
-                                    }
                                     request_event_bus.publish(TiangongEvent::TurnCompleted {
                                         session_id: completion_session_id,
                                         success: result.is_ok(),
@@ -250,34 +251,17 @@ async fn resolve_connector_session(
             .await;
     }
 
-    let connector = connector.trim();
-    let title = if connector.is_empty() {
-        format!("外部通道 {channel_id}")
-    } else {
-        format!("{connector} {channel_id}")
-    }
-    .chars()
-    .take(80)
-    .collect::<String>();
     state
-        .with_state_read(|core_state| {
-            if let Some(metadata) = core_state
-                .core_manager
-                .list_session_metadata()
-                .iter()
-                .find(|metadata| metadata.id == channel_id)
-            {
-                return Ok((metadata.id.clone(), false));
+        .with_state(|core_state| {
+            let resolved = resolve_or_create_connector_session(
+                &core_state.core_manager,
+                connector,
+                channel_id,
+            )?;
+            if resolved.1 && core_state.active_session_id.trim().is_empty() {
+                core_state.active_session_id = resolved.0.clone();
             }
-            if let Some(metadata) = core_state
-                .core_manager
-                .list_session_metadata()
-                .iter()
-                .find(|metadata| metadata.title == title)
-            {
-                return Ok((metadata.id.clone(), false));
-            }
-            Ok((scru128::new().to_string(), true))
+            Ok(resolved)
         })
         .await
 }

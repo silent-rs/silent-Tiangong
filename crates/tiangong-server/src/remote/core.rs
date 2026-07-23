@@ -498,19 +498,19 @@ impl ServerCoreManager {
             return Ok(session_id);
         }
 
-        let title = remote_session_title(connector, channel_id);
-        let session_id = {
-            let state = self.state.lock().await;
-            let sessions = state.core_manager.list_session_metadata();
-            if sessions.iter().any(|metadata| metadata.id == channel_id) {
-                channel_id.to_string()
-            } else if let Some(metadata) = sessions.iter().find(|metadata| metadata.title == title)
-            {
-                metadata.id.clone()
-            } else {
-                scru128::new().to_string()
+        let (session_id, created) = {
+            let mut state = self.state.lock().await;
+            let resolved =
+                resolve_or_create_connector_session(&state.core_manager, connector, channel_id)?;
+            if resolved.1 && state.active_session_id.trim().is_empty() {
+                state.active_session_id = resolved.0.clone();
             }
+            resolved
         };
+        if created {
+            self.event_bus
+                .publish(TiangongEvent::SessionCreated(session_id.clone()));
+        }
 
         self.remote_sessions
             .lock()
@@ -745,6 +745,35 @@ fn attachment_capability_snapshot(
 
 fn remote_session_key(connector: &str, channel_id: &str) -> String {
     format!("{}:{}", connector.trim(), channel_id.trim())
+}
+
+pub fn resolve_or_create_connector_session(
+    core_manager: &tiangong_app_state::app_state::CoreManager,
+    connector: &str,
+    channel_id: &str,
+) -> Result<(String, bool)> {
+    let channel_id = channel_id.trim();
+    if channel_id.is_empty() {
+        return Err(anyhow!("外部通道 ID 不能为空"));
+    }
+
+    let title = remote_session_title(connector, channel_id);
+    let sessions = core_manager.list_session_metadata();
+    if let Some(metadata) = sessions.iter().find(|metadata| metadata.id == channel_id) {
+        return Ok((metadata.id.clone(), false));
+    }
+    if let Some(metadata) = sessions.iter().find(|metadata| metadata.title == title) {
+        return Ok((metadata.id.clone(), false));
+    }
+
+    let storage_root = core_manager.storage_root();
+    let mut session = Session::new_isolated(title, storage_root);
+    session.trust_mode = TrustMode::FullTrust;
+    session.bind_storage_root(storage_root.to_path_buf());
+    session
+        .try_persist_to_disk()
+        .map_err(|error| anyhow!("创建外部通道会话失败：{error}"))?;
+    Ok((session.id, true))
 }
 
 fn remote_session_title(connector: &str, channel_id: &str) -> String {
