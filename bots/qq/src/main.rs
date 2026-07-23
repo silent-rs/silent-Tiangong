@@ -28,7 +28,7 @@ mod provision;
 mod schema;
 mod token;
 
-use gateway::{DispatchEvent, GatewayRunner, INTENT_PUBLIC_MESSAGES};
+use gateway::{DispatchEvent, GatewayRunner, INTENT_GROUP_AND_C2C_EVENT};
 use token::AccessTokenCache;
 
 const RECENT_MESSAGE_LIMIT: usize = 1024;
@@ -313,7 +313,7 @@ async fn main() -> Result<()> {
     let runner = GatewayRunner::new(
         http,
         state.token.clone(),
-        INTENT_PUBLIC_MESSAGES,
+        INTENT_GROUP_AND_C2C_EVENT,
         {
             let state = state.clone();
             Arc::new(move |event| {

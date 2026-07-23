@@ -15,7 +15,7 @@
 //! - `op:9`  Invalid Session —— 鉴权/恢复失败，需全新 Identify
 //!
 //! ## intents
-//! C2C 与群 @ 消息对应 `PUBLIC_MESSAGES = 1 << 30`。
+//! C2C 与群 @ 消息对应 `GROUP_AND_C2C_EVENT = 1 << 25`。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,8 +31,8 @@ use url::Url;
 
 use crate::token::AccessTokenCache;
 
-/// C2C / 群 @ 消息 intent（QQ 官方 `PUBLIC_MESSAGES`）。
-pub const INTENT_PUBLIC_MESSAGES: u32 = 1 << 30;
+/// C2C / 群 @ 消息 intent（QQ 官方 `GROUP_AND_C2C_EVENT`）。
+pub const INTENT_GROUP_AND_C2C_EVENT: u32 = 1 << 25;
 
 const OPENAPI_BASE: &str = "https://api.sgroup.qq.com";
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -286,6 +286,7 @@ async fn handle_inbound_text(
                 }
                 "" => ControlFlow::Continue,
                 _ => {
+                    tracing::info!("收到 QQ Gateway 事件: {event_type}");
                     let event = DispatchEvent {
                         event_type,
                         seq: payload.s,
@@ -649,17 +650,18 @@ mod tests {
 
     #[test]
     fn identify_payload_shape() {
+        assert_eq!(INTENT_GROUP_AND_C2C_EVENT, 1 << 25);
         let value = serde_json::to_value(Payload::new(
             Op::Identify,
             serde_json::json!({
                 "token": "QQBot xxx",
-                "intents": INTENT_PUBLIC_MESSAGES,
+                "intents": INTENT_GROUP_AND_C2C_EVENT,
                 "shard": [0, 1],
             }),
         ))
         .unwrap();
         assert_eq!(value["op"], 2);
-        assert_eq!(value["d"]["intents"], INTENT_PUBLIC_MESSAGES);
+        assert_eq!(value["d"]["intents"], INTENT_GROUP_AND_C2C_EVENT);
         assert_eq!(value["d"]["token"], "QQBot xxx");
     }
 }
