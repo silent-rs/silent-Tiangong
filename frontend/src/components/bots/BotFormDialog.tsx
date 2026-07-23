@@ -39,8 +39,22 @@ type ProvisionState =
   | { kind: 'starting' }
   | { kind: 'pending' }
   | { kind: 'saving' }
+  | { kind: 'starting_bot' }
   | { kind: 'expired' }
-  | { kind: 'error'; message: string; retrySave?: boolean };
+  | { kind: 'error'; message: string; retryAction?: 'save' | 'start' };
+
+const BOT_START_POLL_INTERVAL_MS = 200;
+const BOT_START_POLL_ATTEMPTS = 25;
+
+async function waitForBotRunning(botId: string) {
+  for (let attempt = 0; attempt < BOT_START_POLL_ATTEMPTS; attempt += 1) {
+    const health = await api.botHealth(botId);
+    if (health === 'running') return;
+    if (typeof health === 'object') throw new Error(health.error.message);
+    await new Promise((resolve) => window.setTimeout(resolve, BOT_START_POLL_INTERVAL_MS));
+  }
+  throw new Error('Bot 启动后未进入运行状态');
+}
 
 /**
  * bot 配置表单对话框。
@@ -76,6 +90,10 @@ export function BotFormDialog({
   );
   const provisionBotId = bot?.id ?? suggestedId ?? '';
   const scanMode = provisionState.kind !== 'idle';
+  const provisionBusy =
+    provisionState.kind === 'starting' ||
+    provisionState.kind === 'saving' ||
+    provisionState.kind === 'starting_bot';
 
   // 加载该 bot 的配置字段 schema（优先已安装制品的缓存，回退到 index 预览），
   // 并用已有 bot.config / 字段默认值初始化表单。
@@ -107,6 +125,20 @@ export function BotFormDialog({
     };
   }, [artifactId, bot]);
 
+  const connectProvisionedBot = useCallback(
+    async (targetId: string) => {
+      setProvisionState({ kind: 'starting_bot' });
+      const health = await api.botHealth(targetId);
+      if (health === 'running') await api.botStop(targetId);
+      await api.botStart(targetId);
+      await waitForBotRunning(targetId);
+      await onSaved();
+      showSuccess('扫码配置完成', `“${artifactName || targetId}”已连接并启动`);
+      onClose();
+    },
+    [artifactName, onClose, onSaved, showSuccess],
+  );
+
   const persistBot = useCallback(
     async (mode: 'manual' | 'provision') => {
       const isProvision = mode === 'provision';
@@ -136,36 +168,40 @@ export function BotFormDialog({
       }
 
       setSaving(true);
+      let provisionSaved = false;
       try {
         if (isEdit && bot) {
           await api.botUpdate(bot.id, { config });
-          showSuccess(
-            isProvision ? '扫码配置完成' : '已更新',
-            `“${artifactName}”配置已更新`,
-          );
         } else {
           const created = await api.botRegister({
             id: targetId,
             artifact_id: artifactId,
             config,
           });
-          showSuccess(
-            isProvision ? '扫码配置完成' : '已注册',
-            `“${artifactName || created.id}”已配置`,
-          );
+          if (!isProvision) showSuccess('已注册', `“${artifactName || created.id}”已配置`);
         }
-        await onSaved();
-        onClose();
+        if (isProvision) {
+          provisionSaved = true;
+          await connectProvisionedBot(targetId);
+        } else {
+          if (isEdit) showSuccess('已更新', `“${artifactName}”配置已更新`);
+          await onSaved();
+          onClose();
+        }
       } catch (err) {
-        console.error('保存 bot 失败:', err);
+        console.error(isProvision ? '完成扫码配置失败:' : '保存 bot 失败:', err);
         const message = String(err);
         if (isProvision) {
+          const retryAction = provisionSaved ? 'start' : 'save';
           setProvisionState({
             kind: 'error',
-            message: `扫码已完成，但自动保存失败：${message}`,
-            retrySave: true,
+            message:
+              retryAction === 'start'
+                ? `配置已保存，但自动连接失败：${message}`
+                : `扫码已完成，但自动保存失败：${message}`,
+            retryAction,
           });
-          showError('自动保存失败', message);
+          showError(retryAction === 'start' ? '自动连接失败' : '自动保存失败', message);
         } else {
           showError('保存失败', message);
         }
@@ -176,6 +212,7 @@ export function BotFormDialog({
     [
       artifactId,
       bot,
+      connectProvisionedBot,
       configFields,
       id,
       isEdit,
@@ -187,6 +224,23 @@ export function BotFormDialog({
       values,
     ],
   );
+
+  const retryProvisionConnection = async () => {
+    setSaving(true);
+    try {
+      await connectProvisionedBot(provisionBotId);
+    } catch (err) {
+      const message = String(err);
+      setProvisionState({
+        kind: 'error',
+        message: `配置已保存，但自动连接失败：${message}`,
+        retryAction: 'start',
+      });
+      showError('自动连接失败', message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (!qrSession || provisionState.kind !== 'pending') return;
@@ -295,7 +349,7 @@ export function BotFormDialog({
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  {scanMode && provisionState.kind !== 'saving' && (
+                  {scanMode && !provisionBusy && (
                     <Button type="button" size="sm" variant="ghost" onClick={handleManualMode}>
                       手动输入
                     </Button>
@@ -305,15 +359,16 @@ export function BotFormDialog({
                     size="sm"
                     variant={scanMode ? 'outline' : 'default'}
                     onClick={() =>
-                      provisionState.kind === 'error' && provisionState.retrySave
+                      provisionState.kind === 'error' && provisionState.retryAction === 'save'
                         ? void persistBot('provision')
+                        : provisionState.kind === 'error' &&
+                            provisionState.retryAction === 'start'
+                          ? void retryProvisionConnection()
                         : void handleProvisionBegin()
                     }
-                    disabled={
-                      provisionState.kind === 'starting' || provisionState.kind === 'saving'
-                    }
+                    disabled={provisionBusy}
                   >
-                    {provisionState.kind === 'starting' || provisionState.kind === 'saving' ? (
+                    {provisionBusy ? (
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : qrSession || scanMode ? (
                       <RefreshCw className="mr-2 h-4 w-4" />
@@ -324,11 +379,17 @@ export function BotFormDialog({
                       ? '生成中...'
                       : provisionState.kind === 'saving'
                         ? '保存中...'
-                        : provisionState.kind === 'error' && provisionState.retrySave
-                          ? '重试保存'
-                          : scanMode
-                            ? '重新生成'
-                            : '扫码配置'}
+                        : provisionState.kind === 'starting_bot'
+                          ? '连接中...'
+                          : provisionState.kind === 'error' &&
+                              provisionState.retryAction === 'save'
+                            ? '重试保存'
+                            : provisionState.kind === 'error' &&
+                                provisionState.retryAction === 'start'
+                              ? '重试连接'
+                              : scanMode
+                                ? '重新生成'
+                                : '扫码配置'}
                   </Button>
                 </div>
               </div>
@@ -354,7 +415,14 @@ export function BotFormDialog({
               {provisionState.kind === 'saving' && (
                 <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  配置处理完成，正在保存
+                  扫码成功，正在保存配置
+                </div>
+              )}
+
+              {provisionState.kind === 'starting_bot' && (
+                <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  配置已保存，正在连接
                 </div>
               )}
 

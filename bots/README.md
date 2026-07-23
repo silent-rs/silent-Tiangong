@@ -19,6 +19,9 @@ bots/
   weixin/          # 微信 bot（腾讯 iLink 协议长轮询）
     Cargo.toml     # [[bin]] name = "tiangong-bot-weixin"，含 [workspace]（独立编译）
     src/main.rs
+  qq/              # QQ bot（QQ 开放平台 WebSocket 网关）
+    Cargo.toml     # [[bin]] name = "tiangong-bot-qq"，含 [workspace]（独立编译）
+    src/main.rs
 ```
 
 ## 新增一个 bot
@@ -34,8 +37,8 @@ bots/
 
 **每个 bot 独立发版**，各自有独立的 CI 工作流、tag 和 Release，互不影响。
 
-- 每个 bot 对应一个 workflow：`.github/workflows/release-<bot-id>.yml`（如 `release-feishu.yml`、`release-weixin.yml`）。
-- tag 约定：`bot-<bot-id>-v<version>`，如 `bot-feishu-v0.1.0`、`bot-weixin-v0.1.0`。
+- 每个 bot 对应一个 workflow：`.github/workflows/release-<bot-id>.yml`（如 `release-feishu.yml`、`release-weixin.yml`、`release-qq.yml`）。
+- tag 约定：`bot-<bot-id>-v<version>`，如 `bot-feishu-v0.1.0`、`bot-weixin-v0.1.0`、`bot-qq-v0.1.0`。
 - 新增 bot 时复制一个已有的 workflow，把 bot id、名称、描述改为新 bot 即可。
 - `bots-index.json` 采用 **merge 式更新**：发版时从 OSS 拉取现有 index，替换/新增当前 bot 条目，保留其他 bot 条目不变。
 - `bots-index.json` 以**阿里云 OSS 根目录为权威源**（`silent-tiangong.oss-cn-hangzhou.aliyuncs.com/bots-index.json`），
@@ -57,6 +60,7 @@ bots/
 | ------ | ------------------------------------------------------------------------ |
 | feishu | `TIANGONG_BOT_FEISHU_APP_ID` / `TIANGONG_BOT_FEISHU_APP_SECRET`（仅手工配置） |
 | weixin | `TIANGONG_BOT_WEIXIN_TOKEN`（仅手工配置，扫码所得凭证由 bot 自行保存）   |
+| qq     | `TIANGONG_BOT_QQ_APP_ID` / `TIANGONG_BOT_QQ_APP_SECRET`（可选手工配置，扫码所得凭证由 bot 自行保存） |
 | 通用   | `TIANGONG_URL`（embedded server 地址）/ `TIANGONG_TOKEN`（认证 token）   |
 
 约定见 `crates/tiangong-bots/src/runtime.rs::bot_env`。
