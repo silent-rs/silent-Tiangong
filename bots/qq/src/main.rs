@@ -229,8 +229,6 @@ struct C2cMessage {
     #[serde(default)]
     content: String,
     #[serde(default)]
-    user_openid: String,
-    #[serde(default)]
     author: MessageAuthor,
     #[serde(default)]
     attachments: Vec<QqAttachment>,
@@ -434,8 +432,12 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         tracing::warn!("QQ 私聊消息缺少 id，跳过");
         return Ok(());
     }
-    let channel_id = format!("c2c:{}", message.user_openid);
-    let sender_id = message.author.user_openid.as_str();
+    let user_openid = message.author.user_openid.trim().to_string();
+    if user_openid.is_empty() {
+        tracing::warn!("QQ 私聊消息缺少 author.user_openid，跳过");
+        return Ok(());
+    }
+    let channel_id = format!("c2c:{user_openid}");
     if !state
         .recent_messages
         .lock()
@@ -488,12 +490,13 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
     let _ = seq;
     tracing::info!(
         "转发 QQ 私聊消息 user={} content_type={} images={}",
-        message.user_openid,
+        user_openid,
         parsed.content.kind(),
         parsed.media.len()
     );
-    let user_openid = message.user_openid.clone();
-    let reply = match forward_to_tiangong(state, &channel_id, sender_id, message_id, parsed).await {
+    let forward_result =
+        forward_to_tiangong(state, &channel_id, &user_openid, message_id, parsed).await;
+    let reply = match forward_result {
         Ok(reply) => reply,
         Err(error) => {
             state
@@ -637,7 +640,9 @@ async fn send_text(state: &BotState, target: &ReplyTarget, msg_id: &str, text: &
         .send()
         .await
         .context("发送 QQ 消息请求失败")?;
-    check_send_response(response, "send_text").await
+    check_send_response(response, "send_text").await?;
+    tracing::info!("QQ 文本回复发送成功");
+    Ok(())
 }
 
 /// 上传本地文件并发送到 QQ（通过富媒体消息接口）。
@@ -944,13 +949,12 @@ mod tests {
         let raw = r#"{
             "id":"msg-9",
             "content":"看图",
-            "user_openid":"user-1",
             "author":{"member_openid":"","user_openid":"user-1"},
             "attachments":[{"content_type":"image/png","url":"/path","filename":"a.png"}]
         }"#;
         let message: C2cMessage = serde_json::from_str(raw).unwrap();
         assert_eq!(message.id, "msg-9");
-        assert_eq!(message.user_openid, "user-1");
+        assert_eq!(message.author.user_openid, "user-1");
         assert_eq!(message.attachments.len(), 1);
         assert_eq!(message.attachments[0].content_type, "image/png");
     }
