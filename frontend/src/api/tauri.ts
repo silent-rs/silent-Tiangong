@@ -351,6 +351,95 @@ export interface McpHealthStatus {
   server_version?: string;
 }
 
+// --- 通讯网关（bot）类型 ---
+
+export type FieldType =
+  | { kind: 'string' }
+  | { kind: 'secret' }
+  | { kind: 'boolean' }
+  | { kind: 'barcode' }
+  | { kind: 'select'; options: string[] };
+
+export interface ConfigFieldSchema {
+  key: string;
+  label: string;
+  field_type: FieldType;
+  required: boolean;
+  default?: unknown;
+  help?: string;
+}
+
+export interface BotConfig {
+  id: string;
+  artifact_id: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RegisterBotRequest {
+  id: string;
+  artifact_id: string;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateBotRequest {
+  config?: Record<string, unknown>;
+}
+
+export interface BotArtifact {
+  url: string;
+  checksum: string;
+}
+
+export interface BotManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  config_schema: ConfigFieldSchema[];
+  platforms: Record<string, BotArtifact>;
+  min_app_version?: string;
+}
+
+export interface BotsIndex {
+  version: number;
+  bots: BotManifest[];
+}
+
+export interface LocalArtifact {
+  id: string;
+  artifact_id: string;
+  version: string;
+  config_schema: ConfigFieldSchema[];
+}
+
+export interface QrSession {
+  qr_url: string;
+  expires_at: number;
+  interval: number;
+  state: unknown;
+}
+
+export interface BotLog {
+  content: string;
+  truncated: boolean;
+}
+
+export type ProvisionStatus =
+  | { status: 'pending'; retry_after?: number }
+  | { status: 'success' }
+  | { status: 'expired' }
+  | { status: 'error'; message: string };
+
+export type BotHealth =
+  | 'running'
+  | 'stopped'
+  | 'missing_artifact'
+  | { error: { message: string } };
+
 export interface ServerConfig {
   host: string;
   port: number;
@@ -732,6 +821,57 @@ export const api = {
 
   setMcpServerEnabled: (name: string, enabled: boolean): Promise<string> =>
     invoke('set_mcp_server_enabled', { name, enabled }),
+
+  // ----------------------------------------------------------------
+  // 通讯网关（bot）管理
+  // ----------------------------------------------------------------
+  botList: (): Promise<BotConfig[]> =>
+    invoke('bot_list'),
+
+  botHealth: (id: string): Promise<BotHealth> =>
+    invoke('bot_health', { id }),
+
+  botLog: (id: string): Promise<BotLog> =>
+    invoke('bot_log', { id }),
+
+  botConfigSchema: (artifactId: string, botId?: string): Promise<ConfigFieldSchema[]> =>
+    invoke('bot_config_schema', { artifactId, botId: botId ?? null }),
+
+  botProvisionBegin: (botId: string): Promise<QrSession> =>
+    invoke('bot_provision_begin', { botId }),
+
+  botProvisionPoll: (botId: string, session: QrSession): Promise<ProvisionStatus> =>
+    invoke('bot_provision_poll', { botId, session }),
+
+  botAvailable: (): Promise<BotsIndex> =>
+    invoke('bot_available'),
+
+  botScanLocal: (): Promise<LocalArtifact[]> =>
+    invoke('bot_scan_local'),
+
+  botRegister: (request: RegisterBotRequest): Promise<BotConfig> =>
+    invoke('bot_register', { request }),
+
+  botUpdate: (id: string, request: UpdateBotRequest): Promise<BotConfig> =>
+    invoke('bot_update', { id, request }),
+
+  botRemove: (id: string): Promise<string> =>
+    invoke('bot_remove', { id }),
+
+  botInstall: (artifactId: string, destBotId: string): Promise<string> =>
+    invoke('bot_install', { artifactId, destBotId }),
+
+  botStart: (id: string): Promise<string> =>
+    invoke('bot_start', { id }),
+
+  botStop: (id: string): Promise<string> =>
+    invoke('bot_stop', { id }),
+
+  botCheckUpdate: (artifactId: string): Promise<BotManifest | null> =>
+    invoke('bot_check_update', { artifactId }),
+
+  botUpgrade: (botId: string): Promise<string> =>
+    invoke('bot_upgrade', { botId }),
 
   // ----------------------------------------------------------------
   // Skill 管理

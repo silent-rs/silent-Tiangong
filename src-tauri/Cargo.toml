@@ -12,6 +12,7 @@ tiangong-llm = { workspace = true }
 tiangong-app-state = { workspace = true }
 tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
+tiangong-bots = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
@@ -46,7 +47,7 @@ scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 async-openai = { workspace = true, features = ["byot", "chat-completion", "model"] }
-tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync"] }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "sync", "signal"] }
 tracing = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 futures-util = { workspace = true }

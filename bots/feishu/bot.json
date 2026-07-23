@@ -1,0 +1,28 @@
+{
+  "artifact_id": "feishu",
+  "config_schema": [
+    {
+      "key": "provision",
+      "label": "飞书扫码授权",
+      "field_type": { "kind": "barcode" },
+      "required": false,
+      "help": "扫码所得凭证由飞书 bot 自行保存"
+    },
+    {
+      "key": "app_id",
+      "label": "App ID",
+      "field_type": { "kind": "secret" },
+      "required": false,
+      "env": "TIANGONG_BOT_FEISHU_APP_ID",
+      "help": "可选，仅用于手工配置已有飞书应用"
+    },
+    {
+      "key": "app_secret",
+      "label": "App Secret",
+      "field_type": { "kind": "secret" },
+      "required": false,
+      "env": "TIANGONG_BOT_FEISHU_APP_SECRET",
+      "help": "可选，仅用于手工配置已有飞书应用"
+    }
+  ]
+}

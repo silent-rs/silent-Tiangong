@@ -10,7 +10,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive, Clock } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, Database, X, HardDrive, Clock, Bot as BotIcon } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -22,6 +22,7 @@ import { MemoryManagementSettings } from './memory';
 import { IndexManagementSettings } from './index/IndexManagementSettings';
 import { AutomationSettings } from './automation/AutomationSettings';
 import { WebhookPanel } from './automation/WebhookPanel';
+import { BotPanel } from './bots/BotPanel';
 
 const appWindow = getCurrentWindow();
 
@@ -162,6 +163,10 @@ export function SettingsDialog() {
                   <Clock className="w-4 h-4 mr-2" />
                   定时任务
                 </TabsTrigger>
+                <TabsTrigger value="bots" className="w-full justify-start px-3 py-2">
+                  <BotIcon className="w-4 h-4 mr-2" />
+                  移动端控制
+                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
@@ -203,6 +208,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="automation" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AutomationSettings />
+              </TabsContent>
+              <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <BotPanel />
               </TabsContent>
               <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AppUpdateSettings />

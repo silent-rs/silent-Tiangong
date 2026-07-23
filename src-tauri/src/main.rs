@@ -511,6 +511,25 @@ fn run_gui() {
                 silent::Scheduler::schedule(silent::SCHEDULER.clone()).await;
             });
 
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));
+
+            #[cfg(debug_assertions)]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match tokio::signal::ctrl_c().await {
+                        Ok(()) => {
+                            info!("收到 Ctrl+C，正在正常退出天工");
+                            app_handle.exit(0);
+                        }
+                        Err(error) => {
+                            warn!(%error, "监听 Ctrl+C 失败");
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -622,6 +641,22 @@ fn run_gui() {
             tiangong_app::commands::webhook_delete,
             tiangong_app::commands::webhook_trigger,
             tiangong_app::commands::webhook_list_runs,
+            tiangong_app::commands::bot_list,
+            tiangong_app::commands::bot_health,
+            tiangong_app::commands::bot_log,
+            tiangong_app::commands::bot_config_schema,
+            tiangong_app::commands::bot_provision_begin,
+            tiangong_app::commands::bot_provision_poll,
+            tiangong_app::commands::bot_available,
+            tiangong_app::commands::bot_scan_local,
+            tiangong_app::commands::bot_register,
+            tiangong_app::commands::bot_update,
+            tiangong_app::commands::bot_remove,
+            tiangong_app::commands::bot_install,
+            tiangong_app::commands::bot_start,
+            tiangong_app::commands::bot_stop,
+            tiangong_app::commands::bot_check_update,
+            tiangong_app::commands::bot_upgrade,
             tiangong_app::commands::resolve_model_context_window,
         ])
         .plugin(tiangong_plugin_browser::init())
@@ -640,12 +675,22 @@ fn run_gui() {
         .build(generate_tauri_context())
         .expect("error while building tauri application")
         .run(|handle, event| {
+            // 应用退出前停止所有 bot 子进程，避免孤儿进程。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
+                    let runtime = app_state.bot_runtime.clone();
+                    // 阻塞当前线程等待 bot 停止，防止主进程先退出留下孤儿。
+                    tauri::async_runtime::block_on(async move {
+                        runtime.stop_all().await;
+                    });
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(handle);
             }
             #[cfg(not(target_os = "macos"))]
-            let _ = (handle, event);
+            let _ = handle;
         });
 
     drop(_guard);
@@ -718,30 +763,38 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         icon_running,
     );
 
-    // 自动拉起：如果上次退出时 Server 是开启的，自动启动嵌入式 Server
-    auto_start_embedded_server(&app_handle);
-
     Ok(())
 }
 
-/// 检查配置中 enabled 标记，自动启动嵌入式 Server
-fn auto_start_embedded_server(app: &tauri::AppHandle) {
-    let config = tiangong_server::config::load_server_config();
-    if !config.enabled {
+async fn auto_start_server_and_bots(app: tauri::AppHandle) {
+    let state = app.state::<tiangong_app::TiangongApp>();
+    let server_enabled = match state
+        .with_state_read(|core_state| Ok(core_state.config.server.enabled))
+        .await
+    {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            warn!(error = %error, "读取 Server 自动运行配置失败，跳过 bot 自动启动");
+            return;
+        }
+    };
+    let has_enabled_bot = state.bot_store.list().iter().any(|bot| bot.enabled);
+    if !server_enabled && !has_enabled_bot {
         return;
     }
-    let state = app.state::<tiangong_app::TiangongApp>();
-    match state.start_embedded_server(&config.host, config.port, config.auth_token.clone()) {
-        Ok(()) => {
-            info!(host = %config.host, port = config.port, "自动启动嵌入式 Server");
+
+    let config = match tiangong_app::commands::ensure_server_running_for_bots(state.inner()).await {
+        Ok(config) => config,
+        Err(error) => {
+            warn!(error = %error, "Server 未通过健康检查，跳过 bot 自动启动");
+            return;
         }
-        Err(err) => {
-            warn!(error = %err, "自动启动嵌入式 Server 失败");
-            // 启动失败时重置标记，避免下次启动继续失败
-            let mut config = config;
-            config.enabled = false;
-            let _ = tiangong_server::config::save_server_config(&config);
-        }
+    };
+    info!(host = %config.host, port = config.port, "Server 已就绪");
+
+    if has_enabled_bot {
+        let extra_env = tiangong_app::commands::bot_server_env(&config);
+        state.bot_runtime.start_enabled(&extra_env).await;
     }
 }
 

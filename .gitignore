@@ -19,6 +19,7 @@ src-tauri/gen/schemas/
 crates/tiangong-plugin-browser/permissions/schemas/
 AGENTS.md
 .worktrees/
-PLAN.md
-TODO.md
+/PLAN.md
+/TODO.md
+/docs/requirements.md
 .zcode
