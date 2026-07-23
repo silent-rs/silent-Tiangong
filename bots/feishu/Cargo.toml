@@ -16,7 +16,7 @@ path = "src/main.rs"
 openlark = { version = "0.18", default-features = false, features = ["auth", "communication", "websocket"] }
 openlark-client = { version = "0.18", default-features = false, features = ["websocket"] }
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
