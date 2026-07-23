@@ -10,6 +10,7 @@
 //! - `TIANGONG_TOKEN`（可选，embedded server 认证 token）
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -143,6 +144,8 @@ struct ConnectorResponse {
     channel_id: String,
     message: String,
     content: ApiMessageContent,
+    #[serde(default)]
+    attachments: Vec<ApiMessageContent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +182,10 @@ impl ApiMessageContent {
     fn text(&self) -> String {
         match self {
             Self::Text { text } => text.clone(),
-            _ => String::new(),
+            Self::Image { caption, .. } | Self::Video { caption, .. } => {
+                caption.clone().unwrap_or_default()
+            }
+            Self::File { .. } | Self::Audio { .. } => String::new(),
         }
     }
 
@@ -230,6 +236,62 @@ impl MediaAsset {
 struct ParsedMessage {
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
+}
+
+/// 待发送的图片数据（已解析为字节，飞书上传前需要原始字节）
+struct OutboundImage {
+    bytes: Vec<u8>,
+    mime_type: String,
+    name: Option<String>,
+}
+
+/// 天工响应摊开后的飞书回复：文本 + 一组图片
+struct BotReply {
+    text: String,
+    images: Vec<OutboundImage>,
+}
+
+impl BotReply {
+    fn text(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            images: Vec::new(),
+        }
+    }
+}
+
+/// 天工响应 → 飞书回复
+///
+/// 对齐微信 `reply_from_connector_response`：遍历 `content` 与 `attachments`，
+/// 文本取 `content.text()`（空则回退 `message`），图片收集为 `OutboundImage`。
+async fn build_reply(state: &Arc<BotState>, body: ConnectorResponse) -> BotReply {
+    let text = {
+        let content_text = body.content.text();
+        if content_text.trim().is_empty() {
+            body.message
+        } else {
+            content_text
+        }
+    };
+
+    let mut images = Vec::new();
+    for content in std::iter::once(&body.content).chain(body.attachments.iter()) {
+        match content {
+            ApiMessageContent::Image { url, .. } => {
+                if let Some(img) = resolve_outbound_image(state, url).await {
+                    images.push(img);
+                }
+            }
+            ApiMessageContent::File { .. }
+            | ApiMessageContent::Audio { .. }
+            | ApiMessageContent::Video { .. } => {
+                tracing::warn!("飞书暂不支持发送 {} 附件，跳过", content.kind());
+            }
+            ApiMessageContent::Text { .. } => {}
+        }
+    }
+
+    BotReply { text, images }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -441,8 +503,12 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
     let retryable_failure = handling.is_err();
     if let Err(error) = &handling {
         tracing::error!("飞书消息处理失败: {error}");
-        if let Err(reply_error) =
-            send_reply(state, chat_id, "抱歉，处理消息时出现了错误，请稍后重试。").await
+        if let Err(reply_error) = send_reply(
+            state,
+            chat_id,
+            &BotReply::text("抱歉，处理消息时出现了错误，请稍后重试。"),
+        )
+        .await
         {
             tracing::warn!("发送失败提示失败: {reply_error}");
         }
@@ -539,7 +605,11 @@ async fn process_user_message(
     .await
     {
         Ok(reply) => {
-            tracing::info!("天工回复 chat_id={chat_id} len={}", reply.len());
+            tracing::info!(
+                "天工回复 chat_id={chat_id} text_len={} images={}",
+                reply.text.len(),
+                reply.images.len()
+            );
             match send_reply(state, chat_id, &reply).await {
                 Ok(()) => Ok(MessageHandling::Forwarded),
                 Err(error) => {
@@ -780,13 +850,13 @@ async fn download_image_as_data_uri(
 // ── 天工 Server 调用 ──────────────────────────────────────────
 
 async fn forward_to_tiangong(
-    state: &BotState,
+    state: &Arc<BotState>,
     chat_id: &str,
     sender_id: &str,
     message_id: &Option<String>,
     content: ApiMessageContent,
     media: Vec<MediaAsset>,
-) -> Result<String> {
+) -> Result<BotReply> {
     let url = format!(
         "{}/api/v1/messages",
         state.tiangong_url.trim_end_matches('/')
@@ -824,13 +894,7 @@ async fn forward_to_tiangong(
         .await
         .map_err(|e| anyhow!("解析天工响应失败: {e}"))?;
 
-    // 优先使用 content.text()，回退到 message 字段
-    let reply = body.content.text();
-    if reply.is_empty() {
-        Ok(body.message)
-    } else {
-        Ok(reply)
-    }
+    Ok(build_reply(state, body).await)
 }
 
 // ── 飞书 token 管理 ───────────────────────────────────────────
@@ -877,76 +941,285 @@ async fn get_token(state: &Arc<BotState>) -> Result<String> {
 
 // ── 发送飞书消息 ──────────────────────────────────────────────
 
-async fn send_reply(state: &Arc<BotState>, chat_id: &str, text: &str) -> Result<()> {
-    let token = get_token(state).await?;
-
-    // 使用飞书互动卡片消息（白色背景），支持 Markdown 渲染
+/// 飞书互动卡片（Markdown 渲染）。token 过期自动刷新重试。
+async fn send_card(state: &Arc<BotState>, chat_id: &str, text: &str) -> Result<()> {
     let card_content = serde_json::json!({
-        "config": {
-            "wide_screen_mode": true
-        },
-        "elements": [
-            {
-                "tag": "markdown",
-                "content": text
-            }
-        ]
+        "config": { "wide_screen_mode": true },
+        "elements": [ { "tag": "markdown", "content": text } ]
     })
     .to_string();
 
+    let payload = serde_json::json!({
+        "receive_id": chat_id,
+        "msg_type": "interactive",
+        "content": card_content,
+    });
+
+    let body = post_message(state, payload).await?;
+    let code = body["code"].as_i64().unwrap_or(-1);
+    if code == 0 {
+        return Ok(());
+    }
+    let msg = body["msg"].as_str().unwrap_or("未知错误");
+    Err(anyhow!("发送卡片消息失败: code={code}, msg={msg}"))
+}
+
+/// 上传图片到飞书获取 `image_key`（`image_type=message`）。
+async fn upload_image(state: &Arc<BotState>, image: &OutboundImage) -> Result<String> {
+    let token = get_token(state).await?;
+    let filename = image
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("image.{}", mime_extension(&image.mime_type)));
+
+    let image_key = upload_image_request(state, &token, filename.clone(), &image.bytes).await;
+    let image_key = match image_key {
+        Ok(key) => key,
+        Err(UploadError::TokenExpired) => {
+            tracing::warn!("上传图片时 token 过期，刷新后重试...");
+            let new_token = refresh_token(state).await?;
+            upload_image_request(state, &new_token, filename, &image.bytes)
+                .await
+                .map_err(|e| anyhow!("重试上传图片失败: {e}"))?
+        }
+        Err(UploadError::Other(e)) => return Err(anyhow!("上传图片失败: {e}")),
+    };
+
+    tracing::info!(
+        "图片上传完成 image_key={image_key} size={}KB",
+        image.bytes.len() / 1024
+    );
+    Ok(image_key)
+}
+
+enum UploadError {
+    TokenExpired,
+    Other(String),
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TokenExpired => write!(f, "token 过期"),
+            Self::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+async fn upload_image_request(
+    state: &Arc<BotState>,
+    token: &str,
+    filename: String,
+    bytes: &[u8],
+) -> Result<String, UploadError> {
+    let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+        .file_name(filename)
+        .mime_str("application/octet-stream")
+        .map_err(|e| UploadError::Other(format!("构造 multipart 失败: {e}")))?;
+    let form = reqwest::multipart::Form::new()
+        .text("image_type", "message")
+        .part("image", part);
+
     let resp = state
         .http
-        .post("https://open.feishu.cn/open-apis/im/v1/messages")
-        .bearer_auth(&token)
-        .query(&[("receive_id_type", "chat_id")])
-        .json(&serde_json::json!({
-            "receive_id": chat_id,
-            "msg_type": "interactive",
-            "content": card_content,
-        }))
+        .post("https://open.feishu.cn/open-apis/im/v1/images")
+        .bearer_auth(token)
+        .multipart(form)
         .send()
         .await
-        .map_err(|e| anyhow!("发送消息请求失败: {e}"))?;
+        .map_err(|e| UploadError::Other(format!("上传图片请求失败: {e}")))?;
 
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| UploadError::Other(format!("解析上传响应失败: {e}")))?;
+
+    let code = body["code"].as_i64().unwrap_or(-1);
+    if code == 99991663 || code == 99991668 {
+        return Err(UploadError::TokenExpired);
+    }
+    if code != 0 {
+        let msg = body["msg"].as_str().unwrap_or("未知错误");
+        return Err(UploadError::Other(format!("code={code}, msg={msg}")));
+    }
+
+    body["data"]["image_key"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| UploadError::Other("响应缺少 image_key".to_string()))
+}
+
+/// 发送 `msg_type=image` 消息（单图）。
+async fn send_image_message(state: &Arc<BotState>, chat_id: &str, image_key: &str) -> Result<()> {
+    let payload = serde_json::json!({
+        "receive_id": chat_id,
+        "msg_type": "image",
+        "content": serde_json::to_string(&serde_json::json!({ "image_key": image_key }))?,
+    });
+    let body = post_message(state, payload).await?;
+    let code = body["code"].as_i64().unwrap_or(-1);
+    if code == 0 {
+        return Ok(());
+    }
+    let msg = body["msg"].as_str().unwrap_or("未知错误");
+    Err(anyhow!("发送图片消息失败: code={code}, msg={msg}"))
+}
+
+/// 向 `im/v1/messages` 投递消息体，处理 token 过期刷新重试。
+async fn post_message(
+    state: &Arc<BotState>,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let send = |token: &str| {
+        state
+            .http
+            .post("https://open.feishu.cn/open-apis/im/v1/messages")
+            .bearer_auth(token)
+            .query(&[("receive_id_type", "chat_id")])
+            .json(&payload)
+            .send()
+    };
+
+    let token = get_token(state).await?;
+    let resp = send(&token)
+        .await
+        .map_err(|e| anyhow!("发送消息请求失败: {e}"))?;
     let body: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| anyhow!("解析发送响应失败: {e}"))?;
 
     let code = body["code"].as_i64().unwrap_or(-1);
-    if code != 0 {
-        // token 过期 → 刷新重试
-        if code == 99991663 || code == 99991668 {
-            tracing::warn!("token 过期，刷新后重试...");
-            let new_token = refresh_token(state).await?;
-            let retry = state
-                .http
-                .post("https://open.feishu.cn/open-apis/im/v1/messages")
-                .bearer_auth(&new_token)
-                .query(&[("receive_id_type", "chat_id")])
-                .json(&serde_json::json!({
-                    "receive_id": chat_id,
-                    "msg_type": "interactive",
-                    "content": card_content,
-                }))
-                .send()
-                .await
-                .map_err(|e| anyhow!("重试发送失败: {e}"))?;
+    if code != 0 && (code == 99991663 || code == 99991668) {
+        tracing::warn!("token 过期，刷新后重试...");
+        let new_token = refresh_token(state).await?;
+        let retry = send(&new_token)
+            .await
+            .map_err(|e| anyhow!("重试发送失败: {e}"))?;
+        return retry
+            .json()
+            .await
+            .map_err(|e| anyhow!("解析重试响应失败: {e}"));
+    }
+    Ok(body)
+}
 
-            let retry_body: serde_json::Value = retry
-                .json()
-                .await
-                .map_err(|e| anyhow!("解析重试响应失败: {e}"))?;
-            let rc = retry_body["code"].as_i64().unwrap_or(-1);
-            if rc != 0 {
-                let rm = retry_body["msg"].as_str().unwrap_or("未知错误");
-                return Err(anyhow!("重试发送失败: code={rc}, msg={rm}"));
+/// 解析待发送图片 URL 为字节，支持 data URI、本地路径、http(s)。
+async fn resolve_outbound_image(state: &Arc<BotState>, url: &str) -> Option<OutboundImage> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        // data:{mime};base64,{data}
+        let (mime, data) = match rest.split_once(',') {
+            Some((meta, data)) => {
+                let mime = meta
+                    .split(';')
+                    .next()
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or("image/png");
+                (mime.to_string(), data)
             }
-        } else {
-            let msg = body["msg"].as_str().unwrap_or("未知错误");
-            return Err(anyhow!("发送消息失败: code={code}, msg={msg}"));
+            None => return None,
+        };
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data.trim()) {
+            Ok(bytes) => {
+                return Some(OutboundImage {
+                    bytes,
+                    mime_type: mime,
+                    name: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("data URI base64 解码失败: {e}");
+                return None;
+            }
         }
     }
+
+    let (path, needs_download) = match url.strip_prefix("file://") {
+        Some(p) => (PathBuf::from(p), false),
+        None if PathBuf::from(url).is_absolute() => (PathBuf::from(url), false),
+        None if url.starts_with("http://") || url.starts_with("https://") => {
+            (PathBuf::from(url), true)
+        }
+        _ => {
+            tracing::warn!("忽略非本地/可下载形式的图片 URL: {url}");
+            return None;
+        }
+    };
+
+    if needs_download {
+        let resp = state.http.get(url).send().await;
+        match resp {
+            Ok(resp) if resp.status().is_success() => {
+                let mime = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.split(';').next())
+                    .filter(|v| v.starts_with("image/"))
+                    .unwrap_or("image/png")
+                    .to_string();
+                match resp.bytes().await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        return Some(OutboundImage {
+                            bytes: bytes.to_vec(),
+                            mime_type: mime,
+                            name: path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string()),
+                        });
+                    }
+                    Ok(_) => tracing::warn!("图片下载结果为空: {url}"),
+                    Err(e) => tracing::warn!("读取图片数据失败: {url} {e}"),
+                }
+            }
+            Ok(resp) => tracing::warn!("图片下载失败: {url} status={}", resp.status()),
+            Err(e) => tracing::warn!("图片下载请求失败: {url} {e}"),
+        }
+        return None;
+    }
+
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let mime = detect_image_mime(&bytes).unwrap_or_else(|| "image/png".to_string());
+            Some(OutboundImage {
+                bytes,
+                mime_type: mime,
+                name: path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string()),
+            })
+        }
+        Err(e) => {
+            tracing::warn!("读取本地图片失败: {} {e}", path.display());
+            None
+        }
+    }
+}
+
+/// 发送天工回复：先发文本卡片，再逐张上传并发送图片。
+async fn send_reply(state: &Arc<BotState>, chat_id: &str, reply: &BotReply) -> Result<()> {
+    if !reply.text.trim().is_empty()
+        && let Err(error) = send_card(state, chat_id, &reply.text).await
+    {
+        tracing::error!("发送飞书文本回复失败: {error}");
+        return Err(error);
+    }
+
+    for image in &reply.images {
+        match upload_image(state, image).await {
+            Ok(image_key) => {
+                if let Err(error) = send_image_message(state, chat_id, &image_key).await {
+                    tracing::warn!("发送图片消息失败 image_key={image_key}: {error}");
+                }
+            }
+            Err(error) => {
+                tracing::warn!("上传图片失败 size={}KB: {error}", image.bytes.len() / 1024)
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1026,6 +1299,32 @@ fn truncate_str(value: &str, max_chars: usize) -> String {
         format!("{prefix}...")
     } else {
         prefix
+    }
+}
+
+/// 按 magic bytes 嗅探图片 MIME，与微信 `detect_image_mime` 对齐。
+fn detect_image_mime(bytes: &[u8]) -> Option<String> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]) {
+        Some("image/png".to_string())
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg".to_string())
+    } else if bytes.starts_with(b"GIF8") {
+        Some("image/gif".to_string())
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp".to_string())
+    } else {
+        None
+    }
+}
+
+/// MIME → 文件扩展名，用于上传图片时的文件名。
+fn mime_extension(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "png",
     }
 }
 
@@ -1129,5 +1428,123 @@ mod tests {
 
         messages.release("chat-a", "message-1");
         assert!(messages.claim("chat-a", "message-1"));
+    }
+
+    fn bot_state_for_test() -> Arc<BotState> {
+        Arc::new(BotState {
+            http: reqwest::Client::new(),
+            app_id: String::new(),
+            app_secret: String::new(),
+            access_token: RwLock::new(None),
+            tiangong_url: "http://127.0.0.1:8080".to_string(),
+            tiangong_token: None,
+            recent_messages: Mutex::new(RecentMessages::default()),
+        })
+    }
+
+    fn image_content(url: &str) -> ApiMessageContent {
+        ApiMessageContent::Image {
+            url: url.to_string(),
+            caption: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_reply_collects_content_and_attachment_images() {
+        let state = bot_state_for_test();
+        // data URI 不触发网络请求，可安全在单测中解析
+        let body = ConnectorResponse {
+            session_id: "s".into(),
+            connector: "feishu-bot".into(),
+            channel_id: "c".into(),
+            message: "回退文本".into(),
+            content: ApiMessageContent::Image {
+                url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                caption: Some("图片说明".into()),
+            },
+            attachments: vec![
+                image_content("data:image/jpeg;base64,/9j/4AAQSkZJRg=="),
+                image_content("relative/path.png"), // 非本地/可下载 → 跳过
+            ],
+        };
+
+        let reply = build_reply(&state, body).await;
+        // content.caption 作为文本回退
+        assert_eq!(reply.text, "图片说明");
+        assert_eq!(reply.images.len(), 2);
+        assert_eq!(reply.images[0].mime_type, "image/png");
+        assert_eq!(reply.images[1].mime_type, "image/jpeg");
+    }
+
+    #[tokio::test]
+    async fn build_reply_falls_back_to_message_when_content_has_no_text() {
+        let state = bot_state_for_test();
+        let body = ConnectorResponse {
+            session_id: "s".into(),
+            connector: "feishu-bot".into(),
+            channel_id: "c".into(),
+            message: "天工默认消息".into(),
+            content: image_content("data:image/png;base64,iVBORw0KGgo="),
+            attachments: Vec::new(),
+        };
+
+        let reply = build_reply(&state, body).await;
+        assert_eq!(reply.text, "天工默认消息");
+        assert_eq!(reply.images.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_outbound_image_decodes_data_uri() {
+        let state = bot_state_for_test();
+        // 1x1 透明 PNG
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+        let img = resolve_outbound_image(&state, url)
+            .await
+            .expect("应解析成功");
+        assert_eq!(img.mime_type, "image/png");
+        assert!(img.bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47]));
+    }
+
+    #[tokio::test]
+    async fn resolve_outbound_image_ignores_unsupported_url() {
+        let state = bot_state_for_test();
+        assert!(
+            resolve_outbound_image(&state, "relative/path.png")
+                .await
+                .is_none()
+        );
+        assert!(
+            resolve_outbound_image(&state, "data:image/png;base64,!!!invalid")
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn detect_image_mime_matches_common_formats() {
+        assert_eq!(
+            detect_image_mime(&[0x89, 0x50, 0x4e, 0x47, 0x0d]).as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            detect_image_mime(&[0xff, 0xd8, 0xff, 0xe0]).as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            detect_image_mime(b"RIFF\x00\x00\x00\x00WEBPVP8 ").as_deref(),
+            Some("image/webp")
+        );
+        assert_eq!(detect_image_mime(b"GIF89a").as_deref(), Some("image/gif"));
+        assert!(detect_image_mime(b"unknown").is_none());
+    }
+
+    #[test]
+    fn mime_extension_maps_common_types() {
+        assert_eq!(mime_extension("image/png"), "png");
+        assert_eq!(mime_extension("image/jpeg"), "jpg");
+        assert_eq!(mime_extension("image/gif"), "gif");
+        assert_eq!(mime_extension("image/webp"), "webp");
+        // 未知 MIME 回退为 png
+        assert_eq!(mime_extension("application/octet-stream"), "png");
     }
 }

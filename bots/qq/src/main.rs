@@ -16,9 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use md5::{Digest, Md5};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha1::Sha1;
 use tokio::signal;
 use tokio::sync::{Mutex, Notify};
 use tracing_subscriber::EnvFilter;
@@ -33,6 +35,8 @@ use token::AccessTokenCache;
 
 const RECENT_MESSAGE_LIMIT: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const MD5_10M_BYTES: usize = 10_002_432;
 const OPENAPI_BASE: &str = "https://api.sgroup.qq.com";
 
 struct BotState {
@@ -202,6 +206,24 @@ struct BotReply {
     files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UploadPrepareResponse {
+    upload_id: String,
+    block_size: String,
+    parts: Vec<UploadPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadPart {
+    index: usize,
+    presigned_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaUploadResponse {
+    file_info: String,
+}
+
 // ── QQ 事件载荷 ──────────────────────────────────────────────
 //
 // QQ 官方事件 payload 的字段不全部被消费，部分字段保留用于协议完整性
@@ -219,6 +241,8 @@ struct GroupAtMessage {
     #[serde(default)]
     message_type: String,
     author: MessageAuthor,
+    #[serde(default)]
+    attachments: Vec<QqAttachment>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,20 +418,17 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
     }
 
     let text = strip_at_mention(&message.content);
-    if text.trim().is_empty() {
-        tracing::debug!("QQ 群消息内容为空，跳过");
+    let Some(parsed) = parse_text_with_images(state, &text, &message.attachments).await else {
+        tracing::debug!("QQ 群消息没有可处理的文本或图片，跳过");
         return Ok(());
-    }
-    let parsed = ParsedMessage {
-        content: ApiMessageContent::Text { text },
-        media: Vec::new(),
     };
 
     let _ = seq;
     tracing::info!(
-        "转发 QQ 群消息 group={} sender={sender_id} len={}",
+        "转发 QQ 群消息 group={} sender={sender_id} content_type={} images={}",
         message.group_openid,
-        parsed.content.text().len()
+        parsed.content.kind(),
+        parsed.media.len()
     );
     let group_openid = message.group_openid.clone();
     let reply = match forward_to_tiangong(state, &channel_id, sender_id, message_id, parsed).await {
@@ -448,40 +469,10 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         return Ok(());
     }
 
-    let text = message.content.trim().to_string();
-    let mut downloaded_images = Vec::new();
-    for attachment in &message.attachments {
-        if attachment.content_type.starts_with("image/") {
-            match download_attachment(state, attachment).await {
-                Ok(image) => downloaded_images.push(image),
-                Err(error) => tracing::warn!("下载 QQ 图片失败: {error}"),
-            }
-        }
-    }
-
-    let parsed = if !text.is_empty() {
-        ParsedMessage {
-            content: ApiMessageContent::Text { text },
-            media: downloaded_images
-                .into_iter()
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        }
-    } else {
-        let mut images = downloaded_images.into_iter();
-        let Some(first) = images.next() else {
-            tracing::debug!("QQ 私聊消息没有可处理的文本或图片，跳过");
-            return Ok(());
-        };
-        ParsedMessage {
-            content: ApiMessageContent::Image {
-                url: first.url,
-                caption: None,
-            },
-            media: images
-                .map(|image| MediaAsset::image(image.url, image.mime_type))
-                .collect(),
-        }
+    let text = message.content.trim();
+    let Some(parsed) = parse_text_with_images(state, text, &message.attachments).await else {
+        tracing::debug!("QQ 私聊消息没有可处理的文本或图片，跳过");
+        return Ok(());
     };
 
     if parsed.content.is_empty() {
@@ -508,6 +499,51 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         }
     };
     send_reply(state, ReplyTarget::User(user_openid), message_id, reply).await
+}
+
+/// 把文本与图片附件解析为 `ParsedMessage`，对齐微信 `handle_message` 的图文组装逻辑。
+///
+/// - 文本非空 → `Text` + 图片作 `media`
+/// - 文本为空 → 首图作 `content`、余图作 `media`
+/// - 文本与图片皆空 → 返回 `None`
+async fn parse_text_with_images(
+    state: &BotState,
+    text: &str,
+    attachments: &[QqAttachment],
+) -> Option<ParsedMessage> {
+    let mut images = Vec::new();
+    for attachment in attachments {
+        if attachment.content_type.starts_with("image/") {
+            match download_attachment(state, attachment).await {
+                Ok(image) => images.push(image),
+                Err(error) => tracing::warn!("下载 QQ 图片失败: {error}"),
+            }
+        }
+    }
+
+    if !text.trim().is_empty() {
+        Some(ParsedMessage {
+            content: ApiMessageContent::Text {
+                text: text.to_string(),
+            },
+            media: images
+                .into_iter()
+                .map(|image| MediaAsset::image(image.url, image.mime_type))
+                .collect(),
+        })
+    } else {
+        let mut images = images.into_iter();
+        let first = images.next()?;
+        Some(ParsedMessage {
+            content: ApiMessageContent::Image {
+                url: first.url,
+                caption: None,
+            },
+            media: images
+                .map(|image| MediaAsset::image(image.url, image.mime_type))
+                .collect(),
+        })
+    }
 }
 
 // ── 天工 Server 调用 ──────────────────────────────────────────
@@ -597,38 +633,41 @@ async fn send_reply(
         if reply.text.trim().is_empty() {
             return Ok(());
         }
-        send_text(state, &target, msg_id, &reply.text).await?;
+        send_text(state, &target, msg_id, 1, &reply.text).await?;
         return Ok(());
     }
 
     // 有本地文件时，先发送文本（若有），再依次上传文件
+    let mut msg_seq = 1;
     if !reply.text.trim().is_empty() {
-        send_text(state, &target, msg_id, &reply.text).await?;
+        send_text(state, &target, msg_id, msg_seq, &reply.text).await?;
+        msg_seq += 1;
     }
     for path in &reply.files {
         let caption = "";
         tracing::info!("向 QQ 发送本地文件: {}", path.display());
-        if let Err(error) = send_local_file(state, &target, path, caption).await {
+        if let Err(error) = send_local_file(state, &target, msg_id, msg_seq, path, caption).await {
             tracing::warn!("上传 QQ 本地文件失败: {error}");
         }
+        msg_seq += 1;
     }
     Ok(())
 }
 
-async fn send_text(state: &BotState, target: &ReplyTarget, msg_id: &str, text: &str) -> Result<()> {
+async fn send_text(
+    state: &BotState,
+    target: &ReplyTarget,
+    msg_id: &str,
+    msg_seq: u32,
+    text: &str,
+) -> Result<()> {
     let access_token = state.token.get().await?;
-    let url = match target {
-        ReplyTarget::Group(group_openid) => {
-            format!("{OPENAPI_BASE}/v2/groups/{group_openid}/messages")
-        }
-        ReplyTarget::User(user_openid) => {
-            format!("{OPENAPI_BASE}/v2/users/{user_openid}/messages")
-        }
-    };
+    let url = target_api_url(target, "messages");
     let body = json!({
         // 0=文本，2=Markdown，7=富媒体
         "msg_type": 0,
         "msg_id": msg_id,
+        "msg_seq": msg_seq,
         "content": text,
     });
     let response = state
@@ -645,13 +684,12 @@ async fn send_text(state: &BotState, target: &ReplyTarget, msg_id: &str, text: &
     Ok(())
 }
 
-/// 上传本地文件并发送到 QQ（通过富媒体消息接口）。
-///
-/// QQ v2 接口要求先调用 `/v2/files/{openid}/rich_media` 上传获取 `file_info`，
-/// 再以 `msg_type=7` 发送富媒体消息。
+/// 按 QQ 分片上传流程上传本地文件，再发送富媒体消息。
 async fn send_local_file(
     state: &BotState,
     target: &ReplyTarget,
+    msg_id: &str,
+    msg_seq: u32,
     path: &std::path::Path,
     _caption: &str,
 ) -> Result<()> {
@@ -660,74 +698,186 @@ async fn send_local_file(
         .await
         .with_context(|| format!("读取待发送文件失败: {}", path.display()))?;
     let file_type = qq_file_type(path);
-    let (upload_url, openid) = match target {
-        ReplyTarget::Group(group_openid) => (
-            format!("{OPENAPI_BASE}/v2/groups/{group_openid}/files"),
-            group_openid.clone(),
-        ),
-        ReplyTarget::User(user_openid) => (
-            format!("{OPENAPI_BASE}/v2/users/{user_openid}/files"),
-            user_openid.clone(),
-        ),
-    };
-
-    let file_data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-    let upload_body = json!({
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("file");
+    let file_md5 = digest_md5(&bytes);
+    let prepare_body = json!({
         "file_type": file_type,
-        "url": format!("data:application/octet-stream;base64,{file_data}"),
-        "srv_send_msg": false,
+        "file_size": bytes.len().to_string(),
+        "file_name": file_name,
+        "md5": file_md5,
+        "sha1": digest_sha1(&bytes),
+        "md5_10m": digest_md5(&bytes[..bytes.len().min(MD5_10M_BYTES)]),
     });
-    let upload_response = state
+    let prepare_response = state
         .http
-        .post(&upload_url)
+        .post(target_api_url(target, "upload_prepare"))
         .header("Authorization", format!("QQBot {access_token}"))
-        .json(&upload_body)
+        .json(&prepare_body)
         .timeout(REQUEST_TIMEOUT)
         .send()
         .await
-        .context("上传 QQ 富媒体文件失败")?;
-    let file_uuid = extract_file_uuid(upload_response).await?;
+        .context("申请 QQ 富媒体分片上传失败")?;
+    let mut prepared: UploadPrepareResponse =
+        parse_json_response(prepare_response, "申请 QQ 富媒体分片上传").await?;
+    let block_size = prepared
+        .block_size
+        .parse::<usize>()
+        .context("QQ 富媒体分片大小无效")?;
+    if block_size == 0 || prepared.upload_id.is_empty() || prepared.parts.is_empty() {
+        return Err(anyhow!("QQ 富媒体分片上传响应不完整"));
+    }
+
+    prepared.parts.sort_by_key(|part| part.index);
+    let expected_parts = bytes.len().div_ceil(block_size);
+    if prepared.parts.len() != expected_parts {
+        return Err(anyhow!(
+            "QQ 富媒体分片数量不匹配：期望 {expected_parts}，实际 {}",
+            prepared.parts.len()
+        ));
+    }
+
+    for (part_order, part) in prepared.parts.iter().enumerate() {
+        if part.presigned_url.is_empty() {
+            return Err(anyhow!("QQ 富媒体分片信息无效"));
+        }
+        let start = part_order
+            .checked_mul(block_size)
+            .context("计算 QQ 富媒体分片位置失败")?;
+        let end = start.saturating_add(block_size).min(bytes.len());
+        let chunk = &bytes[start..end];
+
+        let put_response = state
+            .http
+            .put(&part.presigned_url)
+            .body(chunk.to_vec())
+            .timeout(UPLOAD_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("上传 QQ 富媒体分片 {} 失败", part.index))?;
+        check_upload_response(put_response, part.index).await?;
+
+        let finish_body = json!({
+            "upload_id": prepared.upload_id,
+            "part_index": part.index,
+            "block_size": chunk.len().to_string(),
+            "md5": digest_md5(chunk),
+        });
+        let finish_response = state
+            .http
+            .post(target_api_url(target, "upload_part_finish"))
+            .header("Authorization", format!("QQBot {access_token}"))
+            .json(&finish_body)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .with_context(|| format!("确认 QQ 富媒体分片 {} 失败", part.index))?;
+        check_send_response(finish_response, "upload_part_finish").await?;
+    }
+
+    let merge_body = json!({
+        "file_type": file_type,
+        "srv_send_msg": false,
+        "file_name": file_name,
+        "upload_id": prepared.upload_id,
+    });
+    let merge_response = state
+        .http
+        .post(target_api_url(target, "files"))
+        .header("Authorization", format!("QQBot {access_token}"))
+        .json(&merge_body)
+        .timeout(UPLOAD_TIMEOUT)
+        .send()
+        .await
+        .context("合并 QQ 富媒体分片失败")?;
+    let uploaded: MediaUploadResponse =
+        parse_json_response(merge_response, "合并 QQ 富媒体分片").await?;
+    if uploaded.file_info.is_empty() {
+        return Err(anyhow!("QQ 富媒体上传响应缺少 file_info"));
+    }
 
     // 以 msg_type=7 发送富媒体消息
-    let send_url = match target {
-        ReplyTarget::Group(_) => format!("{OPENAPI_BASE}/v2/groups/{openid}/messages"),
-        ReplyTarget::User(_) => format!("{OPENAPI_BASE}/v2/users/{openid}/messages"),
-    };
     let body = json!({
         "msg_type": 7,
-        "msg_id": "",
+        "msg_id": msg_id,
+        "msg_seq": msg_seq,
         "media": {
-            "file_info": file_uuid,
+            "file_info": uploaded.file_info,
         },
     });
     let response = state
         .http
-        .post(&send_url)
+        .post(target_api_url(target, "messages"))
         .header("Authorization", format!("QQBot {access_token}"))
         .json(&body)
         .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .context("发送 QQ 富媒体消息失败")?;
-    check_send_response(response, "send_rich_media").await
+    check_send_response(response, "send_rich_media").await?;
+    tracing::info!("QQ 富媒体回复发送成功");
+    Ok(())
 }
 
-async fn extract_file_uuid(response: reqwest::Response) -> Result<Value> {
+fn target_api_url(target: &ReplyTarget, endpoint: &str) -> String {
+    match target {
+        ReplyTarget::Group(group_openid) => {
+            format!("{OPENAPI_BASE}/v2/groups/{group_openid}/{endpoint}")
+        }
+        ReplyTarget::User(user_openid) => {
+            format!("{OPENAPI_BASE}/v2/users/{user_openid}/{endpoint}")
+        }
+    }
+}
+
+fn digest_md5(bytes: &[u8]) -> String {
+    format!("{:x}", Md5::digest(bytes))
+}
+
+fn digest_sha1(bytes: &[u8]) -> String {
+    format!("{:x}", Sha1::digest(bytes))
+}
+
+async fn check_upload_response(response: reqwest::Response, part_index: usize) -> Result<()> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(anyhow!(
+        "上传 QQ 富媒体分片 {part_index} 失败（HTTP {status}）: {}",
+        truncate_str(&body, 256)
+    ))
+}
+
+async fn parse_json_response<T>(response: reqwest::Response, action: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(anyhow!(
-            "上传 QQ 富媒体文件失败（HTTP {status}）: {}",
+            "{action}失败（HTTP {status}）: {}",
             truncate_str(&body, 256)
         ));
     }
     let value: Value = serde_json::from_str(&body)
-        .with_context(|| format!("解析 QQ 富媒体上传响应失败: {}", truncate_str(&body, 256)))?;
-    Ok(value
-        .get("file_uuid")
-        .or_else(|| value.get("file_info"))
-        .cloned()
-        .unwrap_or(value))
+        .with_context(|| format!("解析 {action} 响应失败: {}", truncate_str(&body, 256)))?;
+    if let Some(code) = value.get("code").and_then(Value::as_i64)
+        && code != 0
+    {
+        let message = value
+            .get("message")
+            .or_else(|| value.get("msg"))
+            .and_then(Value::as_str)
+            .unwrap_or("未知错误");
+        return Err(anyhow!("{action}业务失败: code={code}, message={message}"));
+    }
+    serde_json::from_value(value).with_context(|| format!("{action}响应字段无效"))
 }
 
 async fn check_send_response(response: reqwest::Response, api: &str) -> Result<()> {
@@ -971,5 +1121,48 @@ mod tests {
         let message: GroupAtMessage = serde_json::from_str(raw).unwrap();
         assert_eq!(message.group_openid, "group-1");
         assert_eq!(message.author.member_openid, "member-1");
+    }
+
+    #[test]
+    fn group_message_decodes_attachments() {
+        let raw = r#"{
+            "id":"msg-2",
+            "content":"看图",
+            "group_openid":"group-1",
+            "author":{"member_openid":"member-1","user_openid":""},
+            "attachments":[{"content_type":"image/png","url":"/path","filename":"a.png"}]
+        }"#;
+        let message: GroupAtMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].content_type, "image/png");
+        assert_eq!(message.attachments[0].filename, "a.png");
+    }
+
+    #[tokio::test]
+    async fn parse_text_with_images_text_only() {
+        let state = bot_state_for_test();
+        let parsed = parse_text_with_images(&state, "你好", &[])
+            .await
+            .expect("应解析文本");
+        assert!(matches!(parsed.content, ApiMessageContent::Text { ref text } if text == "你好"));
+        assert!(parsed.media.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_text_with_images_empty_returns_none() {
+        let state = bot_state_for_test();
+        // 无文本且无图片附件 → None（跳过）
+        assert!(parse_text_with_images(&state, "   ", &[]).await.is_none());
+    }
+
+    fn bot_state_for_test() -> BotState {
+        BotState {
+            http: Client::new(),
+            // 测试只覆盖文本/空附件路径，不会触发 token 刷新，故用空凭证
+            token: AccessTokenCache::new(Client::new(), String::new(), String::new()),
+            tiangong_url: String::new(),
+            tiangong_token: None,
+            recent_messages: Mutex::new(RecentMessages::default()),
+        }
     }
 }
