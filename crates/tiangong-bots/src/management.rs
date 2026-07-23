@@ -126,7 +126,7 @@ impl BotStore {
         self.get(id).context("刚更新的 bot 丢失，数据不一致")
     }
 
-    /// 删除 bot。
+    /// 删除 bot 配置，不删除已安装的制品和运行目录。
     pub fn remove(&self, id: &BotId) -> Result<()> {
         let mut next = self.snapshot();
         let prev_len = next.bots.len();
@@ -138,7 +138,7 @@ impl BotStore {
         append_audit_log(&AuditEntry::new(
             "bots.remove",
             id.as_str(),
-            "bot 已删除",
+            "bot 配置已删除，已安装制品保留",
             true,
         ));
         Ok(())

@@ -39,8 +39,10 @@ pub enum BotHealth {
 /// 本地已安装的制品（扫描 `~/.tiangong/bots/*/` 发现）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LocalArtifact {
-    /// 目录名（即 bot 实例 id/名称）。
+    /// 目录名（即 bot 实例 id）。
     pub id: String,
+    /// 制品展示名称。
+    pub name: String,
     /// 制品 id（来自 version.json 或 schema.json 的推断）。
     pub artifact_id: String,
     /// 已安装版本（来自 version.json，未知则为空）。
@@ -638,12 +640,19 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
                 Some(bot_id.as_str().to_string())
             })
             .unwrap_or_else(|| bot_id.as_str().to_string());
+        let name = version_info
+            .as_ref()
+            .map(|v| v.name.trim())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&artifact_id)
+            .to_string();
         let version = version_info
             .as_ref()
             .map(|v| v.version.clone())
             .unwrap_or_default();
         artifacts.push(LocalArtifact {
             id: bot_id.as_str().to_string(),
+            name,
             artifact_id,
             version,
             config_schema: schema,

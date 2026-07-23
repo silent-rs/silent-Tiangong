@@ -63,6 +63,7 @@ export function BotPanel() {
           merged.push({
             local: {
               id: bot.id,
+              name: bot.id,
               artifact_id: bot.artifact_id,
               version: '',
               config_schema: [],
@@ -95,17 +96,18 @@ export function BotPanel() {
     load();
   }, []);
 
-  const handleCheckUpdate = async (bot: BotConfig) => {
+  const handleCheckUpdate = async (bot: BotConfig, name: string) => {
     setChecking((prev) => ({ ...prev, [bot.id]: true }));
     try {
       const manifest = await api.botCheckUpdate(bot.artifact_id);
       if (!manifest) {
-        showSuccess('已是最新', `bot "${bot.id}" 已是最新版本`);
+        showSuccess('已是最新', `“${name}”已是最新版本`);
         return;
       }
-      if (!confirm(`发现新版本 ${manifest.version}，是否升级？升级会先停止 bot。`)) return;
+      if (!confirm(`“${name}”发现新版本 ${manifest.version}，是否升级？升级会先停止 Bot。`))
+        return;
       await api.botUpgrade(bot.id);
-      showSuccess('升级完成', `bot "${bot.id}" 已升级到 ${manifest.version}，请重新启动`);
+      showSuccess('升级完成', `“${name}”已升级到 ${manifest.version}，请重新启动`);
       load();
     } catch (err) {
       showError('检查更新失败', String(err));
@@ -114,31 +116,31 @@ export function BotPanel() {
     }
   };
 
-  const handleStart = async (bot: BotConfig) => {
+  const handleStart = async (bot: BotConfig, name: string) => {
     try {
       await api.botStart(bot.id);
-      showSuccess('已启动', `bot "${bot.id}" 已启动`);
+      showSuccess('已启动', `“${name}”已启动`);
       load();
     } catch (err) {
       showError('启动失败', String(err));
     }
   };
 
-  const handleStop = async (bot: BotConfig) => {
+  const handleStop = async (bot: BotConfig, name: string) => {
     try {
       await api.botStop(bot.id);
-      showSuccess('已停止', `bot "${bot.id}" 已停止`);
+      showSuccess('已停止', `“${name}”已停止`);
       load();
     } catch (err) {
       showError('停止失败', String(err));
     }
   };
 
-  const handleRemove = async (bot: BotConfig) => {
-    if (!confirm(`确定删除 bot "${bot.id}" 的配置？`)) return;
+  const handleRemove = async (bot: BotConfig, name: string) => {
+    if (!confirm(`确定删除“${name}”的配置？已安装的 Bot 程序会保留。`)) return;
     try {
       await api.botRemove(bot.id);
-      showSuccess('已删除', `bot "${bot.id}" 配置已删除`);
+      showSuccess('配置已删除', `“${name}”的程序仍保留在本机，可重新配置`);
       load();
     } catch (err) {
       showError('删除失败', String(err));
@@ -182,6 +184,7 @@ export function BotPanel() {
         <div className="space-y-2">
           {entries.map((entry) => {
             const bot = entry.configured;
+            const displayName = entry.local.name || entry.local.id;
             const isRunning = bot && healthMap[bot.id] === 'running';
             return (
               <Card key={entry.local.id}>
@@ -189,7 +192,7 @@ export function BotPanel() {
                   <BotIcon className="w-5 h-5 text-muted-foreground shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium truncate">{entry.local.id}</span>
+                      <span className="font-medium truncate">{displayName}</span>
                       <Badge variant="outline">{entry.local.artifact_id}</Badge>
                       {entry.local.version && (
                         <span className="text-xs text-muted-foreground">v{entry.local.version}</span>
@@ -221,9 +224,9 @@ export function BotPanel() {
                             size="icon"
                             variant="ghost"
                             className="h-5 w-5 rounded-none p-0 text-red-500 hover:bg-transparent hover:text-red-400"
-                            onClick={() => handleStop(bot)}
+                            onClick={() => handleStop(bot, displayName)}
                             title="停止"
-                            aria-label="停止并取消自动运行"
+                            aria-label={`停止 ${displayName} 并取消自动运行`}
                           >
                             <Square className="!h-5 !w-5 fill-current" />
                           </Button>
@@ -232,9 +235,9 @@ export function BotPanel() {
                             size="icon"
                             variant="ghost"
                             className="h-5 w-5 rounded-none p-0 text-emerald-500 hover:bg-transparent hover:text-emerald-400"
-                            onClick={() => handleStart(bot)}
+                            onClick={() => handleStart(bot, displayName)}
                             title="启动"
-                            aria-label="启动并设为自动运行"
+                            aria-label={`启动 ${displayName} 并设为自动运行`}
                           >
                             <Play className="!h-5 !w-5 fill-current" />
                           </Button>
@@ -242,7 +245,7 @@ export function BotPanel() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => handleCheckUpdate(bot)}
+                          onClick={() => handleCheckUpdate(bot, displayName)}
                           disabled={checking[bot.id]}
                           title="检查更新"
                         >
@@ -253,7 +256,7 @@ export function BotPanel() {
                           variant="ghost"
                           onClick={() => setLogBotId(bot.id)}
                           title="查看日志"
-                          aria-label={`查看 ${bot.id} 日志`}
+                          aria-label={`查看 ${displayName} 日志`}
                         >
                           <FileText className="w-4 h-4" />
                         </Button>
@@ -269,8 +272,9 @@ export function BotPanel() {
                           size="sm"
                           variant="ghost"
                           className="hover:bg-destructive/20 hover:text-destructive"
-                          onClick={() => handleRemove(bot)}
+                          onClick={() => handleRemove(bot, displayName)}
                           title="删除配置"
+                          aria-label={`删除 ${displayName} 配置`}
                         >
                           <Trash2 className="w-4 h-4" />
                         </Button>
@@ -289,6 +293,7 @@ export function BotPanel() {
         <BotFormDialog
           bot={formBot}
           artifactId={formArtifact.artifact_id}
+          artifactName={formArtifact.name || formArtifact.id}
           suggestedId={formArtifact.id}
           onClose={() => {
             setFormArtifact(null);
