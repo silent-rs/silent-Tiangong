@@ -382,7 +382,13 @@ export function BotFormDialog({
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   {scanMode && !provisionBusy && (
-                    <Button type="button" size="sm" variant="ghost" onClick={handleManualMode}>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs"
+                      onClick={handleManualMode}
+                    >
                       手动输入
                     </Button>
                   )}
@@ -390,6 +396,7 @@ export function BotFormDialog({
                     type="button"
                     size="sm"
                     variant={scanMode ? 'outline' : 'default'}
+                    className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                     onClick={() =>
                       provisionState.kind === 'error' && provisionState.retryAction === 'save'
                         ? void persistBot('provision')
@@ -401,11 +408,11 @@ export function BotFormDialog({
                     disabled={provisionBusy}
                   >
                     {provisionBusy ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      <Loader2 className="animate-spin" />
                     ) : qrSession || scanMode ? (
-                      <RefreshCw className="mr-2 h-4 w-4" />
+                      <RefreshCw />
                     ) : (
-                      <QrCode className="mr-2 h-4 w-4" />
+                      <QrCode />
                     )}
                     {provisionState.kind === 'starting'
                       ? '生成中...'
@@ -488,11 +495,19 @@ export function BotFormDialog({
             ))}
 
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={onClose} disabled={saving}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 px-3 text-xs"
+              onClick={onClose}
+              disabled={saving}
+            >
               取消
             </Button>
             {!scanMode && (
               <Button
+                size="sm"
+                className="h-7 px-3 text-xs"
                 onClick={() => void persistBot('manual')}
                 disabled={saving || schemaLoading || !!schemaError || (!isEdit && !id.trim())}
               >

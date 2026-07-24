@@ -3203,9 +3203,7 @@ pub async fn bot_check_update(
         .map_err(|e| e.to_string())
 }
 
-/// 升级 bot 制品（停止运行中的 bot → 下载新版本 → 写 version）。
-///
-/// 升级后需用户手动重新启动。
+/// 升级 bot 制品（记录原状态 → 停止 → 下载新版本 → 恢复原状态）。
 #[tauri::command]
 pub async fn bot_upgrade(
     bot_id: String,
@@ -3246,10 +3244,20 @@ pub async fn bot_upgrade(
             );
         }
     });
-    state
-        .bot_store
-        .set_enabled(&bot_id, false)
-        .map_err(|error| format!("升级前取消自动运行失败，未开始升级：{error}"))?;
+    let mcp_removed = unregister_bot_mcp(&bot_id, state.inner()).await?;
+    if let Err(error) = state.bot_store.set_enabled(&bot_id, false) {
+        let recovery = if mcp_removed {
+            ensure_bot_mcp_registered(&bot_id, state.inner())
+                .await
+                .map(|_| "已恢复 MCP 注册".to_string())
+                .unwrap_or_else(|restore_error| format!("恢复 MCP 注册失败：{restore_error}"))
+        } else {
+            "MCP 状态无需恢复".to_string()
+        };
+        return Err(format!(
+            "升级前取消自动运行失败，未开始升级：{error}；{recovery}"
+        ));
+    }
 
     let upgrade_result = state
         .bot_runtime
@@ -3290,12 +3298,65 @@ pub async fn bot_upgrade(
             recovery.push("自动运行状态仍为关闭".to_string());
         }
 
+        if state.bot_runtime.is_running(&bot_id).await {
+            match ensure_bot_mcp_registered(&bot_id, state.inner()).await {
+                Ok(Some(_)) => recovery.push("MCP 注册已恢复".to_string()),
+                Ok(None) => recovery.push("Bot 不需要 MCP 注册".to_string()),
+                Err(error) => recovery.push(format!("恢复 MCP 注册失败：{error}")),
+            }
+        } else if mcp_removed {
+            recovery.push("Bot 未恢复运行，MCP 保持注销".to_string());
+        }
+
         return Err(format!(
             "升级失败：{upgrade_error}；恢复结果：{}",
             recovery.join("；")
         ));
     }
-    Ok("升级完成，请重新启动 bot".to_string())
+
+    let mut restore_errors = Vec::new();
+    let mut restored_running = !was_running;
+    if was_running {
+        match state
+            .bot_runtime
+            .start(
+                &bot,
+                restart_env
+                    .as_ref()
+                    .expect("运行中的 bot 必须准备恢复环境变量"),
+            )
+            .await
+        {
+            Ok(()) => restored_running = true,
+            Err(error) => restore_errors.push(format!("恢复运行失败：{error}")),
+        }
+    }
+
+    if bot.enabled {
+        if let Err(error) = state.bot_store.set_enabled(&bot_id, true) {
+            restore_errors.push(format!("恢复自动运行状态失败：{error}"));
+        }
+    }
+
+    if was_running && restored_running {
+        match ensure_bot_mcp_registered(&bot_id, state.inner()).await {
+            Ok(_) => {}
+            Err(error) => restore_errors.push(format!("恢复 MCP 注册失败：{error}")),
+        }
+    }
+
+    if !restore_errors.is_empty() {
+        return Err(format!(
+            "升级已完成，但恢复原状态失败：{}",
+            restore_errors.join("；")
+        ));
+    }
+
+    if was_running {
+        Ok("升级完成，Bot 已恢复运行".to_string())
+    } else {
+        Ok("升级完成，Bot 保持停止".to_string())
+    }
 }
 
 // ============================================================================

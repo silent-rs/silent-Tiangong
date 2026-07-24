@@ -251,7 +251,7 @@ impl BotRuntime {
 
     /// 升级 bot 制品（停止运行中的 bot → 下载新版本 → 写 version）。
     ///
-    /// 升级后不自动重启——用户手动点启动。
+    /// 本层只负责停止和替换制品，是否恢复运行由调用方按升级前状态决定。
     pub async fn upgrade(
         &self,
         bot_id: &BotId,
