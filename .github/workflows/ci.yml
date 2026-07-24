@@ -26,6 +26,8 @@ jobs:
       # 需要校验的 crate 列表（JSON 数组），仅含被直接改动的 crate。
       # 不做反向依赖闭包扩散，避免底层改动触发几乎全部上游作业。
       matrix: ${{ steps.resolve.outputs.matrix }}
+      # 独立 workspace 的 Bot 列表，使用各自 Cargo.toml 单独校验。
+      bots: ${{ steps.resolve.outputs.bots }}
     steps:
       # 完整克隆：改动文件解析需用 git diff base.sha...HEAD，
       # 默认 fetch-depth: 1 是浅克隆，base commit 不可达会导致 diff 为空、matrix=[]。
@@ -47,26 +49,32 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/**'
+            bot_any:
+              - 'bots/**'
+              - '.github/workflows/ci.yml'
 
       - name: Resolve affected crates
         id: resolve
         env:
           FRONTEND_ANY: ${{ steps.filter.outputs.frontend }}
           RUST_ANY: ${{ steps.filter.outputs.rust_any }}
+          BOT_ANY: ${{ steps.filter.outputs.bot_any }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          # 1) 顶层 Rust / frontend 开关
+          # 1) 顶层 Rust / Bot / frontend 开关
           if [[ "$RUST_ANY" == "true" ]]; then rust_flag="true"; else rust_flag="false"; fi
+          if [[ "$BOT_ANY" == "true" ]]; then bot_flag="true"; else bot_flag="false"; fi
           if [[ "$FRONTEND_ANY" == "true" ]]; then frontend_flag="true"; else frontend_flag="false"; fi
 
-          # 2) 若无任何 Rust 改动，直接输出空矩阵，跳过全部逐 crate 作业
-          if [[ "$rust_flag" != "true" ]]; then
+          # 2) 若根 workspace 与独立 Bot 都无 Rust 改动，直接输出空矩阵。
+          if [[ "$rust_flag" != "true" && "$bot_flag" != "true" ]]; then
             echo "rust=false" >> "$GITHUB_OUTPUT"
             echo "frontend=${frontend_flag}" >> "$GITHUB_OUTPUT"
             echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+            echo 'bots=[]' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -143,10 +151,33 @@ jobs:
           PY
           )"
 
+          # 5) Bot 是独立 workspace，不能加入上面的 cargo -p 矩阵。
+          bots_json="$(python3 <<'PY'
+          import json, os
+          from pathlib import Path
+
+          available = sorted(path.parent.name for path in Path("bots").glob("*/Cargo.toml"))
+          file_list = [f for f in os.environ.get("CHANGED_FILES", "").splitlines() if f]
+          if ".github/workflows/ci.yml" in file_list:
+              affected = available
+          else:
+              changed = {
+                  parts[1]
+                  for f in file_list
+                  if len(parts := f.split("/")) >= 3 and parts[0] == "bots"
+              }
+              affected = [bot for bot in available if bot in changed]
+
+          print(json.dumps(affected))
+          PY
+          )"
+
           echo "Affected crates: $matrix_json"
-          echo "rust=true" >> "$GITHUB_OUTPUT"
+          echo "Affected bots: $bots_json"
+          echo "rust=${rust_flag}" >> "$GITHUB_OUTPUT"
           echo "frontend=${frontend_flag}" >> "$GITHUB_OUTPUT"
           echo "matrix=${matrix_json}" >> "$GITHUB_OUTPUT"
+          echo "bots=${bots_json}" >> "$GITHUB_OUTPUT"
 
   rust-fmt:
     name: Rust fmt (workspace)
@@ -220,6 +251,45 @@ jobs:
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
         run: cargo nextest run $PKGS --no-tests pass
+
+  bot-check:
+    name: Bot Check (${{ matrix.bot }})
+    needs: changes
+    if: needs.changes.outputs.bots != '[]' && needs.changes.outputs.bots != ''
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bot: ${{ fromJson(needs.changes.outputs.bots) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Bot system dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/azure-cli.list /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+
+      - name: Cache Bot build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bots/${{ matrix.bot }} -> ../../target
+
+      - name: Check Bot formatting
+        run: cargo fmt --manifest-path bots/${{ matrix.bot }}/Cargo.toml -- --check
+
+      - name: Check Bot
+        run: cargo check --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml
+
+      - name: Lint Bot
+        run: cargo clippy --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test Bot
+        run: cargo test --locked --manifest-path bots/${{ matrix.bot }}/Cargo.toml
 
   tauri:
     name: Tauri Shell Check
