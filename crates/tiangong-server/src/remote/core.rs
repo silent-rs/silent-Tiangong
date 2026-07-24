@@ -26,6 +26,8 @@ pub struct ServerCoreManager {
     /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
     /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
     mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    /// 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
+    index_manager: Arc<tiangong_plugin_index::IndexManager>,
     /// 同一会话的 Core 创建、消息投递和删除共用这一把锁。
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
@@ -44,12 +46,14 @@ impl ServerCoreManager {
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+        index_manager: Arc<tiangong_plugin_index::IndexManager>,
     ) -> Self {
         Self {
             state,
             core_manager,
             event_bus,
             mcp_plugin,
+            index_manager,
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
@@ -373,7 +377,9 @@ impl ServerCoreManager {
             // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
             let mut plugins = tiangong_plugin_prompt::default_plugins();
             plugins.extend(tiangong_plugin_fs::default_plugins());
-            plugins.extend(tiangong_plugin_index::default_plugins());
+            plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
+                self.index_manager.clone(),
+            ));
             if let Some(ep) = image_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }
@@ -407,10 +413,13 @@ impl ServerCoreManager {
             // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
             let child_plugin_factory = Arc::new({
                 let storage_root = storage_root.clone();
+                let index_manager = self.index_manager.clone();
                 move || {
                     let mut child_plugins = tiangong_plugin_prompt::default_plugins();
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                    child_plugins.extend(tiangong_plugin_index::default_plugins());
+                    child_plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
+                        index_manager.clone(),
+                    ));
                     if let Some(ep) = image_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                     }
@@ -1280,6 +1289,10 @@ mod tests {
             Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
                 root.join("mcp"),
             )),
+            std::sync::Arc::new(
+                tiangong_plugin_index::IndexManager::new_with_dir(root.join("index"))
+                    .expect("IndexManager test init"),
+            ),
         ));
         (manager, session, session_path, state)
     }

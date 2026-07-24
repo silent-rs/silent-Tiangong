@@ -51,11 +51,20 @@ impl ServerAppContext {
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root,
         ));
+        // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
+        // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
+        let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
+            tracing::warn!("共享 IndexManager 初始化失败，降级独立实例: {e}");
+            Arc::new(
+                tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
+            )
+        });
         let cores = Arc::new(ServerCoreManager::new(
             state.clone(),
             core_manager,
             event_bus.clone(),
             mcp_plugin.clone(),
+            index_manager,
         ));
         let core_backend: Arc<dyn ServerCoreBackend> = cores;
         let scheduler_context: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {

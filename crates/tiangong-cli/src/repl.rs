@@ -39,6 +39,14 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> = std::sync::Arc::new(
         tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
     );
+    // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
+    // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
+    let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
+        tracing::warn!("共享 IndexManager 初始化失败，降级独立实例: {e}");
+        std::sync::Arc::new(
+            tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
+        )
+    });
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     let runtime = tokio::runtime::Runtime::new()?;
@@ -120,6 +128,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 memory_handle.clone(),
                 &skill_plugin,
                 &mcp_plugin,
+                &index_manager,
             )
         };
         runtime
@@ -169,6 +178,7 @@ fn build_cli_plugins(
     memory_handle: Option<tiangong_memory::MemoryHandle>,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
     mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
+    index_manager: &std::sync::Arc<tiangong_plugin_index::IndexManager>,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
     use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
 
@@ -191,7 +201,9 @@ fn build_cli_plugins(
 
     let mut plugins = tiangong_plugin_prompt::default_plugins();
     plugins.extend(tiangong_plugin_fs::default_plugins());
-    plugins.extend(tiangong_plugin_index::default_plugins());
+    plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
+        index_manager.clone(),
+    ));
     if let Some(ep) = image_endpoint.clone() {
         plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
     }
@@ -219,10 +231,13 @@ fn build_cli_plugins(
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
+        let index_manager = index_manager.clone();
         move || {
             let mut child_plugins = tiangong_plugin_prompt::default_plugins();
             child_plugins.extend(tiangong_plugin_fs::default_plugins());
-            child_plugins.extend(tiangong_plugin_index::default_plugins());
+            child_plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
+                index_manager.clone(),
+            ));
             if let Some(ep) = image_endpoint.clone() {
                 child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }

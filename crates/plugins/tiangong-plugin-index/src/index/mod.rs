@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -89,6 +90,9 @@ pub struct WorkspaceIndexInfo {
 pub struct IndexManager {
     workspaces: DashMap<String, Arc<std::sync::Mutex<WorkspaceIndex>>>,
     sessions: DashMap<String, Arc<std::sync::Mutex<SessionIndex>>>,
+    /// 每个 workspace root 的后台扫描标志（key = root display string）。
+    /// 单例化后由所有 IndexPlugin 共享，使 A 对话扫描时 B 对话的 index_search 也能降级。
+    scanning_roots: DashMap<String, Arc<AtomicBool>>,
     base_dir: PathBuf,
 }
 
@@ -107,8 +111,28 @@ impl IndexManager {
         Ok(Self {
             workspaces: DashMap::new(),
             sessions: DashMap::new(),
+            scanning_roots: DashMap::new(),
             base_dir,
         })
+    }
+
+    /// 取（或创建）指定 root 的后台扫描标志。同一 manager + 同一 root 返回同一 Arc。
+    pub fn scanning_flag_for(&self, root: &Path) -> Arc<AtomicBool> {
+        let key = root.to_string_lossy().to_string();
+        if let Some(entry) = self.scanning_roots.get(&key) {
+            return Arc::clone(entry.value());
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        self.scanning_roots.insert(key, Arc::clone(&flag));
+        flag
+    }
+
+    /// 指定 root 是否正在后台扫描。
+    pub fn is_scanning(&self, root: &Path) -> bool {
+        let key = root.to_string_lossy().to_string();
+        self.scanning_roots
+            .get(&key)
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn get_or_create_workspace_index(

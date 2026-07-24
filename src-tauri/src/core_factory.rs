@@ -20,6 +20,7 @@ use tiangong_core::core_config::CoreConfigProvider;
 /// - `skill_plugin` / `mcp_plugin`：管理插件句柄（core 拿 clone 做 LLM 工具）
 /// - `config`：全局 CoreConfigProvider（取 generation 用于 memory handle 初始化）
 /// - `storage_root`：会话文件根
+/// - `index_manager`：工作区索引单例（issue #259，跨 Core 共享底层索引缓存与扫描状态）
 #[derive(Clone)]
 pub struct DesktopCoreFactory {
     pub app_handle: Arc<std::sync::OnceLock<AppHandle>>,
@@ -27,6 +28,7 @@ pub struct DesktopCoreFactory {
     pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
+    pub index_manager: Arc<tiangong_plugin_index::IndexManager>,
 }
 
 impl DesktopCoreFactory {
@@ -72,7 +74,9 @@ impl DesktopCoreFactory {
                 false
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
-        plugins.push(tiangong_plugin_index::build_plugin());
+        plugins.push(tiangong_plugin_index::build_plugin_with_manager(
+            self.index_manager.clone(),
+        ));
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
         let resolve_ep = |cap: ModelCapability| {
@@ -116,6 +120,7 @@ impl DesktopCoreFactory {
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
             let storage_root = storage_root.clone();
+            let index_manager = self.index_manager.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
                 child_plugins.extend(tiangong_plugin_prompt::default_plugins());
@@ -130,7 +135,9 @@ impl DesktopCoreFactory {
                     }
                 }
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
-                child_plugins.push(tiangong_plugin_index::build_plugin());
+                child_plugins.push(tiangong_plugin_index::build_plugin_with_manager(
+                    index_manager.clone(),
+                ));
                 if let Some(ep) = image_endpoint.clone() {
                     child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                 }

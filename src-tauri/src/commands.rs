@@ -3732,11 +3732,35 @@ pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
     tiangong_plugin_index::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
 }
 
-/// 预热指定路径的 Workspace 索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）
+/// 预热指定路径的 Workspace 索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）。
+///
+/// 使用 app 层共享 IndexManager，与各 Core 的 IndexPlugin 共享同一 per-root mutex
+/// 与扫描标志，避免预热与插件后台扫描并发时的目录锁竞争。
 #[tauri::command]
-pub async fn prewarm_workspace_index(root: String) -> Result<(), String> {
+pub async fn prewarm_workspace_index(
+    root: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
     let root = std::path::PathBuf::from(&root);
-    tiangong_plugin_index::prewarm_workspace_index_for_gui(&root).map_err(|err| err.to_string())
+    if !root.is_dir() || tiangong_plugin_index::workspace_index_exists(&root) {
+        return Ok(());
+    }
+    let manager = state.desktop_factory.index_manager.clone();
+    // 经共享 manager 的 per-root scanning flag 去重：已在扫描则直接返回。
+    let scanning = manager.scanning_flag_for(&root);
+    if scanning.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+    tracing::info!(workspace = %root.display(), "Workspace 索引预热启动（共享 manager）");
+    tokio::task::spawn_blocking(move || {
+        let result = manager.full_scan(&root);
+        match result {
+            Ok(count) => tracing::info!(count, "Workspace 索引预热完成"),
+            Err(e) => tracing::warn!("Workspace 索引预热失败: {e}"),
+        }
+        scanning.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+    Ok(())
 }
 
 /// 获取所有可用的模型能力列表
