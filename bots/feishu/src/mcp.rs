@@ -262,6 +262,7 @@ pub async fn serve() -> Result<()> {
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()?,
+        tiangong_http: reqwest::Client::new(),
         app_id: credentials.app_id,
         app_secret: credentials.app_secret,
         access_token: tokio::sync::RwLock::new(None),

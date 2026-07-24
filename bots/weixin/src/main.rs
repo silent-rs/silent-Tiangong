@@ -22,12 +22,17 @@ mod mcp;
 mod provision;
 mod schema;
 mod target_store;
+#[cfg(test)]
+#[path = "../../test_support.rs"]
+mod test_support;
 
 const POLL_ERROR_BACKOFF: Duration = Duration::from_secs(5);
 const RECENT_MESSAGE_LIMIT: usize = 1024;
 
 struct BotState {
     http: Client,
+    /// 天工任务允许长时间执行，不设置请求总时限。
+    tiangong_http: Client,
     bot_token: String,
     api_base_url: String,
     tiangong_url: String,
@@ -275,6 +280,9 @@ async fn main() -> Result<()> {
             .timeout(Duration::from_secs(120))
             .build()
             .context("构建 HTTP 客户端失败")?,
+        tiangong_http: Client::builder()
+            .build()
+            .context("构建天工 HTTP 客户端失败")?,
         bot_token: credentials.bot_token,
         api_base_url: credentials
             .base_url
@@ -624,7 +632,7 @@ async fn forward_to_tiangong(
         media,
     };
 
-    let mut builder = state.http.post(url);
+    let mut builder = state.tiangong_http.post(url);
     if let Some(token) = &state.tiangong_token {
         builder = builder.bearer_auth(token);
     }
@@ -672,6 +680,53 @@ fn reply_from_connector_response(body: ConnectorResponse) -> BotReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
+
+    #[tokio::test]
+    #[ignore = "长时回归测试会等待 125 秒"]
+    async fn forward_to_tiangong_waits_beyond_120_seconds() {
+        let body = serde_json::json!({
+            "session_id": "mock-session",
+            "message": "mock-ok",
+            "content": { "type": "text", "text": "mock-ok" },
+            "attachments": []
+        })
+        .to_string();
+        let (tiangong_url, server) =
+            test_support::spawn_delayed_json_response(LONG_MOCK_DELAY, body).await;
+        let state = BotState {
+            http: Client::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .unwrap(),
+            tiangong_http: Client::builder().build().unwrap(),
+            bot_token: String::new(),
+            api_base_url: String::new(),
+            tiangong_url,
+            tiangong_token: None,
+            cursor: RwLock::new(String::new()),
+            recent_messages: Mutex::new(RecentMessages::default()),
+        };
+
+        let started = std::time::Instant::now();
+        let reply = forward_to_tiangong(
+            &state,
+            "mock-channel",
+            "mock-sender",
+            Some("mock-message"),
+            ApiMessageContent::Text {
+                text: "mock-request".to_string(),
+            },
+            Vec::new(),
+        )
+        .await
+        .expect("天工长任务响应不应在 120 秒时超时");
+
+        assert!(started.elapsed() >= LONG_MOCK_DELAY);
+        assert_eq!(reply.text, "mock-ok");
+        server.await.expect("长时 Mock 服务异常退出");
+    }
 
     #[test]
     fn recent_messages_can_retry_failed_message() {

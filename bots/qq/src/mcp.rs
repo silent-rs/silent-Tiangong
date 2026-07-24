@@ -257,6 +257,7 @@ pub async fn serve() -> Result<()> {
     let token = AccessTokenCache::new(http.clone(), credentials.app_id, credentials.app_secret);
     let state = Arc::new(BotState {
         http,
+        tiangong_http: reqwest::Client::new(),
         token,
         tiangong_url: String::new(),
         tiangong_token: None,

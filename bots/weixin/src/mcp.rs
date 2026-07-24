@@ -248,6 +248,7 @@ pub async fn serve() -> Result<()> {
             .timeout(Duration::from_secs(120))
             .build()
             .context("构建微信 MCP HTTP 客户端失败")?,
+        tiangong_http: reqwest::Client::new(),
         bot_token: credentials.bot_token,
         api_base_url: credentials
             .base_url

@@ -31,6 +31,9 @@ mod mcp;
 mod provision;
 mod schema;
 mod target_store;
+#[cfg(test)]
+#[path = "../../test_support.rs"]
+mod test_support;
 mod token;
 
 use gateway::{DispatchEvent, GatewayRunner, INTENT_GROUP_AND_C2C_EVENT};
@@ -44,6 +47,8 @@ const OPENAPI_BASE: &str = "https://api.sgroup.qq.com";
 
 struct BotState {
     http: Client,
+    /// 天工任务允许长时间执行，不设置请求总时限。
+    tiangong_http: Client,
     token: AccessTokenCache,
     /// 天工 server 地址，如 http://127.0.0.1:8080
     tiangong_url: String,
@@ -364,6 +369,9 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(BotState {
         http: http.clone(),
+        tiangong_http: Client::builder()
+            .build()
+            .context("构建天工 HTTP 客户端失败")?,
         token,
         tiangong_url,
         tiangong_token,
@@ -615,7 +623,7 @@ async fn forward_to_tiangong(
         media: parsed.media,
     };
 
-    let mut builder = state.http.post(url);
+    let mut builder = state.tiangong_http.post(url);
     if let Some(token) = &state.tiangong_token {
         builder = builder.bearer_auth(token);
     }
@@ -1052,6 +1060,54 @@ fn truncate_str(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    const LONG_MOCK_DELAY: Duration = Duration::from_secs(125);
+
+    #[tokio::test]
+    #[ignore = "长时回归测试会等待 125 秒"]
+    async fn forward_to_tiangong_waits_beyond_120_seconds() {
+        let body = serde_json::json!({
+            "session_id": "mock-session",
+            "message": "mock-ok",
+            "content": { "type": "text", "text": "mock-ok" },
+            "attachments": []
+        })
+        .to_string();
+        let (tiangong_url, server) =
+            test_support::spawn_delayed_json_response(LONG_MOCK_DELAY, body).await;
+        let http = Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+            .unwrap();
+        let state = BotState {
+            http: http.clone(),
+            tiangong_http: Client::builder().build().unwrap(),
+            token: AccessTokenCache::new(http, String::new(), String::new()),
+            tiangong_url,
+            tiangong_token: None,
+            recent_messages: Mutex::new(RecentMessages::default()),
+        };
+
+        let started = std::time::Instant::now();
+        let reply = forward_to_tiangong(
+            &state,
+            "mock-channel",
+            "mock-sender",
+            "mock-message",
+            ParsedMessage {
+                content: ApiMessageContent::Text {
+                    text: "mock-request".to_string(),
+                },
+                media: Vec::new(),
+            },
+        )
+        .await
+        .expect("天工长任务响应不应在 120 秒时超时");
+
+        assert!(started.elapsed() >= LONG_MOCK_DELAY);
+        assert_eq!(reply.text, "mock-ok");
+        server.await.expect("长时 Mock 服务异常退出");
+    }
+
     #[test]
     fn recent_messages_deduplicates_and_releases() {
         let mut messages = RecentMessages::default();
@@ -1204,6 +1260,7 @@ mod tests {
     fn bot_state_for_test() -> BotState {
         BotState {
             http: Client::new(),
+            tiangong_http: Client::new(),
             // 测试只覆盖文本/空附件路径，不会触发 token 刷新，故用空凭证
             token: AccessTokenCache::new(Client::new(), String::new(), String::new()),
             tiangong_url: String::new(),
