@@ -3732,6 +3732,13 @@ pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
     tiangong_plugin_index::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
 }
 
+/// 预热指定路径的 Workspace 索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）
+#[tauri::command]
+pub async fn prewarm_workspace_index(root: String) -> Result<(), String> {
+    let root = std::path::PathBuf::from(&root);
+    tiangong_plugin_index::prewarm_workspace_index_for_gui(&root).map_err(|err| err.to_string())
+}
+
 /// 获取所有可用的模型能力列表
 #[tauri::command]
 pub async fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {

@@ -10,6 +10,7 @@
 //! - [`Plugin::on_session_ended`]：finalize Session 索引。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::index::{IndexManager, TurnData};
@@ -32,6 +33,8 @@ pub struct IndexPlugin {
     trust_mode: RwLock<Option<TrustMode>>,
     /// 自建并私有持有的 IndexManager（core 不感知）。
     index_manager: RwLock<Option<Arc<IndexManager>>>,
+    /// 后台扫描进行中标志（true 时 index_search 降级提示，避免在索引 Mutex 上阻塞）。
+    scanning: Arc<AtomicBool>,
 }
 
 impl IndexPlugin {
@@ -49,6 +52,7 @@ impl IndexPlugin {
             last_scanned: RwLock::new(None),
             trust_mode: RwLock::new(None),
             index_manager: RwLock::new(im),
+            scanning: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -73,6 +77,11 @@ impl IndexPlugin {
         *tm == TrustMode::FullTrust
     }
 
+    /// 后台扫描是否进行中（供 handler 降级判断）。
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.scanning.load(Ordering::Relaxed)
+    }
+
     /// 取 IndexManager 引用执行闭包；若未初始化则跳过（用于钩子内的写入操作）。
     fn with_index_manager<R>(&self, f: impl FnOnce(&IndexManager) -> R) -> Option<R> {
         let guard = self.index_manager.read().ok()?;
@@ -82,34 +91,22 @@ impl IndexPlugin {
 
     /// 对工作区做全量扫描（供 set_workspace / on_session_ready 共用）。
     ///
-    /// - 索引不存在：同步全量扫描（首次使用，阻塞直到完成）。
+    /// - 索引不存在：后台全量扫描（不阻塞 IPC 线程）。
     /// - 索引过期（>1 小时）：后台重建，不阻塞当前搜索。
     /// - 索引新鲜：跳过。
     ///
-    /// 仅在索引已存在（复用或后台重建）或同步首次扫描成功时置位 `last_scanned`，
-    /// 使后续 `set_workspace` 对同一目录不再重复扫描；扫描失败时不置位，允许下次重试。
+    /// 仅在索引已存在（复用）时同步置位 `last_scanned`；后台扫描完成前由 `scanning`
+    /// flag 守护，扫描完成后 `workspace_index_exists` 变 true，后续 `set_workspace`
+    /// 走复用路径置位 `last_scanned`。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
             return;
         }
         if !crate::index::workspace_index_exists(&root) {
-            // 首次：同步全量扫描。仅在成功后置位 last_scanned，失败则允许下次重试。
-            let scanned = self.with_index_manager(|im| match im.full_scan(&root) {
-                Ok(count) => {
-                    tracing::info!(count, "Workspace 初始索引扫描完成");
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!("Workspace 初始索引扫描失败: {e}");
-                    false
-                }
-            });
-            if scanned.unwrap_or(false)
-                && let Ok(mut guard) = self.last_scanned.write()
-            {
-                guard.clone_from(&Some(root));
-            }
+            // 首次：后台扫描（不阻塞调用线程）。扫描完成后 `workspace_index_exists`
+            // 变 true，后续 set_workspace 走复用路径。
+            self.spawn_background_scan(root);
             return;
         }
         // 索引已存在——复用，置位 last_scanned。
@@ -122,16 +119,34 @@ impl IndexPlugin {
             && age > STALE_THRESHOLD_SECS
         {
             tracing::info!(age_secs = age, "Workspace 索引过期，后台重建");
-            let im = self.index_manager();
-            let root_clone = root.clone();
-            std::thread::spawn(move || {
-                if let Some(im) = im
-                    && let Err(e) = im.full_scan(&root_clone)
-                {
-                    tracing::warn!("Workspace 索引后台重建失败: {e}");
-                }
-            });
+            self.spawn_background_scan(root);
         }
+    }
+
+    /// 后台扫描工作区（首次扫描 / 过期重建共用）。
+    ///
+    /// 通过 `scanning` flag 保证同一时刻只有一个后台扫描；进入前 `swap` 置位，
+    /// 线程结束（成功或失败）后复位。不在线程内写 `last_scanned`：扫描完成后
+    /// `workspace_index_exists` 变 true，后续 `set_workspace` 走复用路径置位。
+    fn spawn_background_scan(&self, root: PathBuf) {
+        // swap 返回旧值；已 true 表示有扫描在进行，直接返回。
+        if self.scanning.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let im = self.index_manager();
+        let scanning = Arc::clone(&self.scanning);
+        tracing::info!(workspace = %root.display(), "Workspace 索引后台扫描启动");
+        std::thread::spawn(move || {
+            let result = im
+                .as_ref()
+                .map(|im| im.full_scan(&root))
+                .unwrap_or_else(|| Err(anyhow::anyhow!("IndexManager 未初始化")));
+            match result {
+                Ok(count) => tracing::info!(count, "Workspace 索引后台扫描完成"),
+                Err(e) => tracing::warn!("Workspace 索引后台扫描失败: {e}"),
+            }
+            scanning.store(false, Ordering::SeqCst);
+        });
     }
 }
 
@@ -153,7 +168,8 @@ impl Plugin for IndexPlugin {
         }
         // 工作区变更后重扫索引（原 on_cwd_changed 的职责）。
         // 仅当新路径与上次已扫描路径不同时才触发，避免重复扫描。
-        // 复用 full_scan_workspace 的检查策略：索引已存在则复用，不存在才同步全量扫描。
+        // 后台扫描进行中时也跳过（扫描完成后 workspace_index_exists 变 true，
+        // 下次 set_workspace 走复用路径置位 last_scanned）。
         if let Some(ref root) = new_path
             && root.is_dir()
         {
@@ -162,7 +178,7 @@ impl Plugin for IndexPlugin {
                 .read()
                 .map(|g| g.as_ref() == Some(root))
                 .unwrap_or(false);
-            if !already_scanned {
+            if !already_scanned && !self.scanning.load(Ordering::Relaxed) {
                 self.full_scan_workspace(&root.display().to_string());
             }
         }
@@ -180,6 +196,10 @@ impl Plugin for IndexPlugin {
     fn on_session_ready(&self, session: &mut Session) {
         // set_workspace 已在 engine 初始化时对当前 cwd 触发过扫描（last_scanned 已置位）。
         // 若 set_workspace 因扫描失败未置位，此处兜底重试一次。
+        // 后台扫描进行中时跳过，避免重复 spawn。
+        if self.scanning.load(Ordering::Relaxed) {
+            return;
+        }
         let root = PathBuf::from(&session.cwd);
         if root.is_dir() {
             let already_scanned = self
@@ -245,5 +265,52 @@ impl PromptSectionProvider for IndexPlugin {
              再用 search_code 取精确行号。"
                 .to_string(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// 首次扫描工作区（索引不存在）时不应阻塞调用线程：`full_scan_workspace`
+    /// 立即返回，扫描在后台线程执行。
+    #[test]
+    fn full_scan_workspace_does_not_block_on_first_scan() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let workspace = temp.path().to_path_buf();
+        std::fs::write(workspace.join("lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let plugin = IndexPlugin::new();
+        let started = Instant::now();
+        plugin.full_scan_workspace(&workspace.display().to_string());
+        let elapsed = started.elapsed();
+        // 后台扫描 spawn 后立即返回；即使工作区只有一个文件，调度也应在很短时间内返回。
+        assert!(
+            elapsed.as_millis() < 200,
+            "full_scan_workspace 首次扫描应在后台执行，实际耗时 {elapsed:?}"
+        );
+    }
+
+    /// 不存在的目录应直接返回且不触发后台扫描（`scanning` 不被置位）。
+    #[test]
+    fn full_scan_workspace_skips_missing_dir() {
+        let plugin = IndexPlugin::new();
+        plugin.full_scan_workspace("/this/path/does/not/exist/abc123");
+        assert!(!plugin.is_scanning(), "不存在的目录不应启动后台扫描");
+    }
+
+    /// 重复对同一根目录发起后台扫描，scanning flag 应阻止并发 spawn（第二次立即返回）。
+    #[test]
+    fn spawn_background_scan_is_idempotent_while_scanning() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let workspace = temp.path().to_path_buf();
+        std::fs::write(workspace.join("lib.rs"), "pub fn demo() {}\n").unwrap();
+
+        let plugin = IndexPlugin::new();
+        plugin.spawn_background_scan(workspace.clone());
+        // 第一次已置位 scanning，第二次应直接返回（不会 panic / 不会重复 spawn）。
+        plugin.spawn_background_scan(workspace);
+        assert!(plugin.is_scanning());
     }
 }
