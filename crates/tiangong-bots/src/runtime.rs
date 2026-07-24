@@ -8,14 +8,18 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::BotId;
-use crate::config::{BotConfig, ConfigFieldSchema};
+use crate::config::{
+    BotConfig, BotDescription, BotMcpConfig, ConfigFieldSchema, PushTargetList, PushTargetView,
+};
 use crate::downloader::{Downloader, ProgressFn};
 use crate::management::BotStore;
 use crate::manifest::BotManifest;
@@ -49,6 +53,8 @@ pub struct LocalArtifact {
     pub version: String,
     /// config schema（来自 schema.json 缓存）。
     pub config_schema: Vec<ConfigFieldSchema>,
+    /// 是否声明了主动推送 MCP 能力。
+    pub supports_mcp: bool,
 }
 
 /// 被运行时管理的 bot 条目。
@@ -60,6 +66,7 @@ struct RuntimeEntry {
 struct ArtifactFiles {
     artifact: PathBuf,
     schema: PathBuf,
+    description: PathBuf,
     version: PathBuf,
 }
 
@@ -68,6 +75,7 @@ impl ArtifactFiles {
         Self {
             artifact: paths::bot_artifact_path(id),
             schema: paths::bot_schema_path(id),
+            description: paths::bot_description_path(id),
             version: paths::bot_version_path(id),
         }
     }
@@ -76,12 +84,18 @@ impl ArtifactFiles {
         Self {
             artifact: transaction_path(&self.artifact, purpose, transaction_id),
             schema: transaction_path(&self.schema, purpose, transaction_id),
+            description: transaction_path(&self.description, purpose, transaction_id),
             version: transaction_path(&self.version, purpose, transaction_id),
         }
     }
 
-    fn all(&self) -> [&Path; 3] {
-        [&self.artifact, &self.schema, &self.version]
+    fn all(&self) -> [&Path; 4] {
+        [
+            &self.artifact,
+            &self.schema,
+            &self.description,
+            &self.version,
+        ]
     }
 }
 
@@ -175,6 +189,9 @@ impl BotRuntime {
         let schema_content = serde_json::to_string_pretty(&description.config_schema)
             .context("序列化 bot schema 失败")?;
         write_new_file(&staged.schema, &schema_content)?;
+        let description_content =
+            serde_json::to_string_pretty(&description).context("序列化 bot 描述失败")?;
+        write_new_file(&staged.description, &description_content)?;
         let version_content = crate::version::installed_version_json(manifest)?;
         write_new_file(&staged.version, &version_content)?;
 
@@ -188,6 +205,11 @@ impl BotRuntime {
                 target: files.schema.clone(),
                 staged: staged.schema.clone(),
                 backup: backups.schema,
+            },
+            FileReplacement {
+                target: files.description.clone(),
+                staged: staged.description.clone(),
+                backup: backups.description,
             },
             FileReplacement {
                 target: files.version.clone(),
@@ -261,6 +283,51 @@ impl BotRuntime {
     ) -> Result<crate::ProvisionStatus> {
         paths::ensure_executable_paths_safe(bot_id)?;
         crate::provision::poll(&paths::bot_artifact_path(bot_id), session).await
+    }
+
+    /// 读取 Bot 已发现的推送目标。
+    pub async fn push_targets(&self, bot_id: &BotId) -> Result<Vec<PushTargetView>> {
+        ensure_mcp_capability(bot_id).await?;
+        let output = run_management_command(bot_id, &["--push-target-list"], None).await?;
+        let parsed: PushTargetList =
+            serde_json::from_slice(&output.stdout).context("解析 Bot 推送目标列表失败")?;
+        Ok(parsed.targets)
+    }
+
+    /// 修改一个 Bot 推送目标的授权状态。
+    pub async fn set_push_target_enabled(
+        &self,
+        bot_id: &BotId,
+        target_id: &str,
+        enabled: bool,
+    ) -> Result<PushTargetView> {
+        ensure_mcp_capability(bot_id).await?;
+        let target_id = target_id.trim();
+        if target_id.is_empty() {
+            bail!("推送目标 ID 不能为空");
+        }
+        let input = serde_json::to_vec(&serde_json::json!({
+            "target_id": target_id,
+            "enabled": enabled,
+        }))
+        .context("序列化推送目标授权请求失败")?;
+        let output = run_management_command(
+            bot_id,
+            &["--push-target-set-enabled"],
+            Some(input.as_slice()),
+        )
+        .await?;
+        serde_json::from_slice(&output.stdout).context("解析 Bot 推送目标授权结果失败")
+    }
+
+    /// 执行 `bot --mcp generate` 并校验其普通 MCP 注册配置。
+    pub async fn generate_mcp_config(&self, bot_id: &BotId) -> Result<BotMcpConfig> {
+        ensure_mcp_capability(bot_id).await?;
+        let output = run_management_command(bot_id, &["--mcp", "generate"], None).await?;
+        let config: BotMcpConfig =
+            serde_json::from_slice(&output.stdout).context("解析 Bot MCP 配置失败")?;
+        validate_generated_mcp_config(bot_id, &config)?;
+        Ok(config)
     }
 
     /// 启动指定 bot 实例（需制品已安装）。
@@ -387,36 +454,38 @@ pub fn bot_env(config: &BotConfig, schema: &[ConfigFieldSchema]) -> BTreeMap<Str
     env
 }
 
-/// bot `--describe` 上报的顶层结构。
-#[derive(Debug, Deserialize)]
-struct DescribeOutput {
-    /// schema 格式版本。
-    schema_version: u32,
-    /// 制品 id（标识 bot 平台，与 manifest 的 id 一致）。
-    artifact_id: String,
-    /// 配置字段 schema。
-    config_schema: Vec<ConfigFieldSchema>,
-}
-
 /// 调用 `bot --describe` 获取 schema 并缓存到 `schema.json`。
 ///
 /// bot 二进制收到 `--describe` 参数后，输出 schema JSON 到 stdout 并退出。
 /// 用于没有远端清单和版本记录的本地 bot；其 `artifact_id` 必须与目录 ID 一致。
 pub async fn describe_and_cache(bot_id: &BotId) -> Result<Vec<ConfigFieldSchema>> {
+    Ok(describe_and_cache_full(bot_id).await?.config_schema)
+}
+
+async fn describe_and_cache_full(bot_id: &BotId) -> Result<BotDescription> {
     paths::ensure_executable_paths_safe(bot_id)?;
     let artifact_path = paths::bot_artifact_path(bot_id);
     let parsed = describe_artifact(&artifact_path).await?;
     validate_local_description(&parsed, bot_id)?;
-
-    let schema_path = paths::bot_schema_path(bot_id);
-    let content =
-        serde_json::to_string_pretty(&parsed.config_schema).context("序列化 bot schema 失败")?;
-    crate::store::atomic_write(&schema_path, &content)
-        .with_context(|| format!("写入 schema 缓存失败：{}", schema_path.display()))?;
-    Ok(parsed.config_schema)
+    cache_description(bot_id, &parsed)?;
+    Ok(parsed)
 }
 
-fn validate_local_description(description: &DescribeOutput, bot_id: &BotId) -> Result<()> {
+fn cache_description(bot_id: &BotId, description: &BotDescription) -> Result<()> {
+    let schema_path = paths::bot_schema_path(bot_id);
+    let schema_content = serde_json::to_string_pretty(&description.config_schema)
+        .context("序列化 bot schema 失败")?;
+    crate::store::atomic_write(&schema_path, &schema_content)
+        .with_context(|| format!("写入 schema 缓存失败：{}", schema_path.display()))?;
+
+    let description_path = paths::bot_description_path(bot_id);
+    let description_content =
+        serde_json::to_string_pretty(description).context("序列化 bot 描述失败")?;
+    crate::store::atomic_write(&description_path, &description_content)
+        .with_context(|| format!("写入 Bot 描述缓存失败：{}", description_path.display()))
+}
+
+fn validate_local_description(description: &BotDescription, bot_id: &BotId) -> Result<()> {
     if description.schema_version != 1 {
         bail!(
             "bot --describe schema_version 不受支持：{}",
@@ -430,10 +499,10 @@ fn validate_local_description(description: &DescribeOutput, bot_id: &BotId) -> R
             description.artifact_id
         );
     }
-    Ok(())
+    validate_capabilities(description)
 }
 
-async fn describe_artifact(artifact_path: &Path) -> Result<DescribeOutput> {
+async fn describe_artifact(artifact_path: &Path) -> Result<BotDescription> {
     use tokio::process::Command;
     paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
@@ -460,7 +529,7 @@ async fn describe_artifact(artifact_path: &Path) -> Result<DescribeOutput> {
     })
 }
 
-fn validate_description(description: &DescribeOutput, manifest: &BotManifest) -> Result<()> {
+fn validate_description(description: &BotDescription, manifest: &BotManifest) -> Result<()> {
     if description.schema_version != 1 {
         bail!(
             "bot --describe schema_version 不受支持：{}",
@@ -474,7 +543,108 @@ fn validate_description(description: &DescribeOutput, manifest: &BotManifest) ->
             description.artifact_id
         );
     }
+    validate_capabilities(description)
+}
+
+fn validate_capabilities(description: &BotDescription) -> Result<()> {
+    let Some(capability) = description.capabilities.mcp.as_ref() else {
+        return Ok(());
+    };
+    if capability.protocol_version != 1 {
+        bail!(
+            "bot mcp protocol_version 不受支持：{}",
+            capability.protocol_version
+        );
+    }
     Ok(())
+}
+
+async fn ensure_mcp_capability(bot_id: &BotId) -> Result<BotDescription> {
+    let description = match cached_description(bot_id) {
+        Some(description) => description,
+        None => describe_and_cache_full(bot_id).await?,
+    };
+    if description.capabilities.mcp.is_none() {
+        bail!("该 Bot 不支持 MCP");
+    }
+    Ok(description)
+}
+
+fn validate_generated_mcp_config(bot_id: &BotId, config: &BotMcpConfig) -> Result<()> {
+    if config.schema_version != 1 {
+        bail!("Bot MCP 配置版本不受支持：{}", config.schema_version);
+    }
+    let expected_name = format!("bot-{bot_id}");
+    if config.name != expected_name {
+        bail!(
+            "Bot MCP 名称无效：期望 {expected_name}，实际 {}",
+            config.name
+        );
+    }
+    if config.transport != "stdio" {
+        bail!("Bot MCP 仅支持 stdio transport");
+    }
+    if config.args != ["--mcp"] {
+        bail!("Bot MCP 启动参数必须为 --mcp");
+    }
+    if !config.enabled {
+        bail!("Bot MCP 生成配置必须默认启用");
+    }
+    let expected_command = std::fs::canonicalize(paths::bot_artifact_path(bot_id))
+        .context("解析已安装 Bot 制品路径失败")?;
+    let generated_command =
+        std::fs::canonicalize(&config.command).context("解析 Bot 生成的 MCP 命令路径失败")?;
+    if generated_command != expected_command {
+        bail!("Bot MCP 配置试图注册非当前制品命令");
+    }
+    Ok(())
+}
+
+async fn run_management_command(
+    bot_id: &BotId,
+    arguments: &[&str],
+    input: Option<&[u8]>,
+) -> Result<std::process::Output> {
+    use tokio::process::Command;
+
+    paths::ensure_executable_paths_safe(bot_id)?;
+    let artifact = paths::bot_artifact_path(bot_id);
+    let command_label = arguments.join(" ");
+    let mut command = Command::new(&artifact);
+    command
+        .args(arguments)
+        .current_dir(paths::bot_runtime_dir(bot_id))
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    tiangong_types::process::configure_tokio_no_window(&mut command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("启动 Bot 管理命令失败：{command_label}"))?;
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().context("打开 Bot 管理命令 stdin 失败")?;
+        stdin
+            .write_all(input)
+            .await
+            .context("写入 Bot 管理命令 stdin 失败")?;
+    }
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .map_err(|_| anyhow!("Bot 管理命令超时：{command_label}"))??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Bot 管理命令失败：{command_label} status={} stderr={}",
+            output.status,
+            stderr.chars().take(1024).collect::<String>()
+        );
+    }
+    Ok(output)
 }
 
 fn transaction_path(target: &Path, purpose: &str, transaction_id: &str) -> PathBuf {
@@ -602,6 +772,13 @@ pub fn cached_schema(bot_id: &BotId) -> Option<Vec<ConfigFieldSchema>> {
     serde_json::from_str(&content).ok()
 }
 
+/// 读取 `description.json` 中缓存的完整 Bot 描述。
+pub fn cached_description(bot_id: &BotId) -> Option<BotDescription> {
+    let path = paths::bot_description_path(bot_id);
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 /// 在 `~/.tiangong/bots/` 下查找指定 artifact_id 的已安装版本。
 ///
 /// 一个 artifact_id 可能对应多个 bot 实例（如两个 feishu bot），
@@ -646,6 +823,9 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
         }
         // 读取 schema 缓存。
         let schema = cached_schema(&bot_id).unwrap_or_default();
+        let supports_mcp = cached_description(&bot_id)
+            .and_then(|description| description.capabilities.mcp)
+            .is_some();
         // 读取版本记录（推断 artifact_id）。
         let version_info = crate::version::read_installed_version(&bot_id);
         let artifact_id = version_info
@@ -674,6 +854,7 @@ fn scan_local_artifacts_impl() -> Vec<LocalArtifact> {
             artifact_id,
             version,
             config_schema: schema,
+            supports_mcp,
         });
     }
     artifacts
@@ -890,11 +1071,13 @@ mod tests {
         let files = ArtifactFiles {
             artifact: dir.path().join("bot"),
             schema: dir.path().join("schema.json"),
+            description: dir.path().join("description.json"),
             version: dir.path().join("version.json"),
         };
         for (path, content) in files.all().into_iter().zip([
             b"old artifact".as_slice(),
             b"old schema".as_slice(),
+            b"old description".as_slice(),
             b"old version".as_slice(),
         ]) {
             std::fs::write(path, content).unwrap();
@@ -919,6 +1102,11 @@ mod tests {
                 backup: backups.schema.clone(),
             },
             FileReplacement {
+                target: files.description.clone(),
+                staged: staged.description,
+                backup: backups.description.clone(),
+            },
+            FileReplacement {
                 target: files.version.clone(),
                 staged: staged.version,
                 backup: backups.version.clone(),
@@ -929,6 +1117,10 @@ mod tests {
         assert!(format!("{error}").contains("旧制品已恢复"));
         assert_eq!(std::fs::read(&files.artifact).unwrap(), b"old artifact");
         assert_eq!(std::fs::read(&files.schema).unwrap(), b"old schema");
+        assert_eq!(
+            std::fs::read(&files.description).unwrap(),
+            b"old description"
+        );
         assert_eq!(std::fs::read(&files.version).unwrap(), b"old version");
         assert!(backups.all().into_iter().all(|path| !path.exists()));
     }
@@ -939,6 +1131,7 @@ mod tests {
         let files = ArtifactFiles {
             artifact: dir.path().join("bot"),
             schema: dir.path().join("schema.json"),
+            description: dir.path().join("description.json"),
             version: dir.path().join("version.json"),
         };
         let staged = files.transaction_files("download", "success");
@@ -946,6 +1139,7 @@ mod tests {
         for (path, content) in files.all().into_iter().zip([
             b"old artifact".as_slice(),
             b"old schema".as_slice(),
+            b"old description".as_slice(),
             b"old version".as_slice(),
         ]) {
             std::fs::write(path, content).unwrap();
@@ -953,6 +1147,7 @@ mod tests {
         for (path, content) in staged.all().into_iter().zip([
             b"new artifact".as_slice(),
             b"new schema".as_slice(),
+            b"new description".as_slice(),
             b"new version".as_slice(),
         ]) {
             std::fs::write(path, content).unwrap();
@@ -969,6 +1164,11 @@ mod tests {
                 backup: backups.schema.clone(),
             },
             FileReplacement {
+                target: files.description.clone(),
+                staged: staged.description,
+                backup: backups.description.clone(),
+            },
+            FileReplacement {
                 target: files.version.clone(),
                 staged: staged.version,
                 backup: backups.version.clone(),
@@ -979,6 +1179,10 @@ mod tests {
 
         assert_eq!(std::fs::read(&files.artifact).unwrap(), b"new artifact");
         assert_eq!(std::fs::read(&files.schema).unwrap(), b"new schema");
+        assert_eq!(
+            std::fs::read(&files.description).unwrap(),
+            b"new description"
+        );
         assert_eq!(std::fs::read(&files.version).unwrap(), b"new version");
         assert!(backups.all().into_iter().all(|path| !path.exists()));
     }
@@ -1005,11 +1209,13 @@ printf '%s\n' '{"schema_version":1,"artifact_id":"other","config_schema":[]}'
         let files = ArtifactFiles {
             artifact: install_dir.join("bot"),
             schema: install_dir.join("schema.json"),
+            description: install_dir.join("description.json"),
             version: install_dir.join("version.json"),
         };
         for (path, content) in files.all().into_iter().zip([
             b"old artifact".as_slice(),
             b"old schema".as_slice(),
+            b"old description".as_slice(),
             b"old version".as_slice(),
         ]) {
             std::fs::write(path, content).unwrap();

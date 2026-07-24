@@ -26,6 +26,11 @@ anyhow = "1"
 base64 = "0.22"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+fs2 = "0.4"
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+scru128 = "4"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

@@ -15,7 +15,9 @@ import {
   Download,
   FileText,
   Loader2,
+  MessageSquareText,
   Play,
+  Plug,
   RefreshCw,
   Settings as SettingsIcon,
   Square,
@@ -25,6 +27,7 @@ import {
 import { useToast } from '../Toast';
 import { BotFormDialog } from './BotFormDialog';
 import { BotLogDialog } from './BotLogDialog';
+import { BotPushTargetsDialog } from './BotPushTargetsDialog';
 
 /** 已安装或已配置的 Bot 条目。 */
 interface BotEntry {
@@ -51,6 +54,9 @@ export function BotPanel() {
   const [formArtifact, setFormArtifact] = useState<LocalArtifact | null>(null);
   const [formBot, setFormBot] = useState<BotConfig | null>(null);
   const [logBotId, setLogBotId] = useState<string | null>(null);
+  const [pushTargetBot, setPushTargetBot] = useState<{ id: string; name: string } | null>(null);
+  const [registeredMcpNames, setRegisteredMcpNames] = useState<Set<string>>(new Set());
+  const [registeringMcpId, setRegisteringMcpId] = useState<string | null>(null);
 
   // 检查更新中状态。
   const [checking, setChecking] = useState<Record<string, boolean>>({});
@@ -58,15 +64,21 @@ export function BotPanel() {
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [localResult, botsResult, onlineResult] = await Promise.allSettled([
+      const [localResult, botsResult, onlineResult, mcpResult] = await Promise.allSettled([
         api.botScanLocal(),
         api.botList(),
         api.botAvailable(),
+        api.getMcpServers(),
       ]);
 
       const local = localResult.status === 'fulfilled' ? localResult.value : [];
       const bots = botsResult.status === 'fulfilled' ? botsResult.value : [];
       const manifests = onlineResult.status === 'fulfilled' ? onlineResult.value.bots : [];
+      setRegisteredMcpNames(
+        new Set(
+          mcpResult.status === 'fulfilled' ? mcpResult.value.map((server) => server.name) : [],
+        ),
+      );
 
       if (localResult.status === 'rejected') {
         console.error('扫描本地 Bot 失败:', localResult.reason);
@@ -231,6 +243,19 @@ export function BotPanel() {
     }
   };
 
+  const handleRegisterMcp = async (bot: BotConfig, name: string) => {
+    setRegisteringMcpId(bot.id);
+    try {
+      await api.botRegisterMcp(bot.id);
+      showSuccess('MCP 已注册', `“${name}”现在可以用于主动推送`);
+      await load();
+    } catch (err) {
+      showError('MCP 注册失败', String(err));
+    } finally {
+      setRegisteringMcpId(null);
+    }
+  };
+
   const openConfigure = (entry: BotEntry) => {
     if (!entry.local) return;
     setFormArtifact(entry.local);
@@ -317,7 +342,7 @@ export function BotPanel() {
                           {description}
                         </div>
                       </div>
-                      <div className="col-span-2 flex shrink-0 items-center justify-end gap-1 sm:col-span-1">
+                      <div className="col-span-2 flex flex-wrap items-center justify-end gap-1 sm:col-span-1">
                         {!bot && entry.local && (
                           <Button
                             size="sm"
@@ -390,6 +415,51 @@ export function BotPanel() {
                             >
                               <FileText className="h-4 w-4" />
                             </Button>
+                            {entry.local.supports_mcp && (
+                              <>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-9 w-9"
+                                  onClick={() =>
+                                    setPushTargetBot({ id: bot.id, name: displayName })
+                                  }
+                                  title="管理推送目标"
+                                  aria-label={`管理 ${displayName} 推送目标`}
+                                >
+                                  <MessageSquareText className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant={
+                                    registeredMcpNames.has(`bot-${bot.id}`)
+                                      ? 'outline'
+                                      : 'default'
+                                  }
+                                  className="h-9 min-w-[108px]"
+                                  onClick={() => void handleRegisterMcp(bot, displayName)}
+                                  disabled={
+                                    registeringMcpId === bot.id ||
+                                    registeredMcpNames.has(`bot-${bot.id}`)
+                                  }
+                                  title={
+                                    registeredMcpNames.has(`bot-${bot.id}`)
+                                      ? 'MCP 已注册'
+                                      : '注册主动推送 MCP'
+                                  }
+                                  aria-label={`${displayName} 主动推送 MCP`}
+                                >
+                                  {registeringMcpId === bot.id ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Plug className="h-4 w-4" />
+                                  )}
+                                  {registeredMcpNames.has(`bot-${bot.id}`)
+                                    ? 'MCP 已注册'
+                                    : '注册 MCP'}
+                                </Button>
+                              </>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"
@@ -492,6 +562,14 @@ export function BotPanel() {
       )}
 
       {logBotId && <BotLogDialog botId={logBotId} onClose={() => setLogBotId(null)} />}
+
+      {pushTargetBot && (
+        <BotPushTargetsDialog
+          botId={pushTargetBot.id}
+          botName={pushTargetBot.name}
+          onClose={() => setPushTargetBot(null)}
+        />
+      )}
     </div>
   );
 }

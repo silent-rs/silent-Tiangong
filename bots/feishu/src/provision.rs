@@ -56,11 +56,18 @@ pub fn load_credentials() -> Result<Credentials> {
         return Ok(credentials);
     }
 
-    let app_id = std::env::var("TIANGONG_BOT_FEISHU_APP_ID")
-        .context("尚未扫码配置，且缺少环境变量 TIANGONG_BOT_FEISHU_APP_ID")?;
-    let app_secret = std::env::var("TIANGONG_BOT_FEISHU_APP_SECRET")
-        .context("尚未扫码配置，且缺少环境变量 TIANGONG_BOT_FEISHU_APP_SECRET")?;
-    validate_credentials(Credentials { app_id, app_secret })
+    if let (Ok(app_id), Ok(app_secret)) = (
+        std::env::var("TIANGONG_BOT_FEISHU_APP_ID"),
+        std::env::var("TIANGONG_BOT_FEISHU_APP_SECRET"),
+    ) {
+        return validate_credentials(Credentials { app_id, app_secret });
+    }
+
+    if let Some(credentials) = load_runtime_bot_credentials()? {
+        return Ok(credentials);
+    }
+
+    bail!("尚未扫码配置，且当前 Bot 配置缺少 App ID 或 App Secret")
 }
 
 pub async fn begin() -> Result<QrSession> {
@@ -273,6 +280,44 @@ fn load_provisioned_credentials() -> Result<Option<Credentials>> {
     let credentials = serde_json::from_slice(&content)
         .with_context(|| format!("解析飞书 bot 配置失败：{}", path.display()))?;
     validate_credentials(credentials).map(Some)
+}
+
+/// 普通 MCP 注册不会携带 Bot 进程环境变量，因此从当前制品所在实例读取
+/// 已有的 `bots.json` 手工配置。这里只读取，不产生第二份凭证文件。
+fn load_runtime_bot_credentials() -> Result<Option<Credentials>> {
+    let executable = std::env::current_exe().context("获取飞书 bot 路径失败")?;
+    let runtime_dir = executable.parent().context("飞书 bot 路径缺少父目录")?;
+    let bot_id = runtime_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("飞书 bot 实例目录名称无效")?;
+    let bots_dir = runtime_dir.parent().context("飞书 bot 路径缺少配置目录")?;
+    let config_path = bots_dir.join("bots.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read(&config_path)
+        .with_context(|| format!("读取 Bot 配置失败：{}", config_path.display()))?;
+    let root: Value = serde_json::from_slice(&content)
+        .with_context(|| format!("解析 Bot 配置失败：{}", config_path.display()))?;
+    let Some(bot) = root["bots"]
+        .as_array()
+        .and_then(|bots| bots.iter().find(|bot| bot["id"].as_str() == Some(bot_id)))
+    else {
+        return Ok(None);
+    };
+    let Some(app_id) = bot["config"]["app_id"].as_str() else {
+        return Ok(None);
+    };
+    let Some(app_secret) = bot["config"]["app_secret"].as_str() else {
+        return Ok(None);
+    };
+    validate_credentials(Credentials {
+        app_id: app_id.to_string(),
+        app_secret: app_secret.to_string(),
+    })
+    .map(Some)
 }
 
 fn save_credentials(credentials: &Credentials) -> Result<()> {

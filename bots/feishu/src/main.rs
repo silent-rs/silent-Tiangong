@@ -10,6 +10,7 @@
 //! - `TIANGONG_TOKEN`（可选，embedded server 认证 token）
 
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +23,10 @@ use tokio::signal;
 use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::EnvFilter;
 
+mod mcp;
 mod provision;
 mod schema;
+mod target_store;
 
 // ── 数据结构 ──────────────────────────────────────────────────
 
@@ -109,6 +112,8 @@ struct EventMessage {
         default
     )]
     msg_type: String,
+    #[serde(rename = "chatType", alias = "chat_type", default)]
+    chat_type: Option<String>,
     #[serde(default)]
     content: String,
     #[serde(rename = "messageId", alias = "message_id")]
@@ -306,7 +311,9 @@ enum MessageHandling {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 管理命令必须在日志和常驻运行初始化前处理，stdout 只输出协议 JSON。
-    match std::env::args().nth(1).as_deref() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let mode = arguments.first().map(String::as_str);
+    match mode {
         Some("--describe") => {
             println!("{}", serde_json::to_string(&schema::describe_output())?);
             return Ok(());
@@ -324,6 +331,30 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        Some("--push-target-list") => {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "targets": target_store::list_views()?
+                }))?
+            );
+            return Ok(());
+        }
+        Some("--push-target-set-enabled") => {
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .context("读取推送目标授权请求失败")?;
+            let request: target_store::SetTargetEnabledRequest =
+                serde_json::from_str(&input).context("解析推送目标授权请求失败")?;
+            let target = target_store::set_enabled(&request.target_id, request.enabled)?;
+            println!("{}", serde_json::to_string(&target)?);
+            return Ok(());
+        }
+        Some("--mcp") if arguments.get(1).map(String::as_str) == Some("generate") => {
+            println!("{}", serde_json::to_string(&mcp::registration_config()?)?);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -335,6 +366,10 @@ async fn main() -> Result<()> {
 
     // 安装 rustls 加密后端
     install_rustls_provider()?;
+
+    if mode == Some("--mcp") {
+        return mcp::serve().await;
+    }
 
     let credentials = provision::load_credentials()?;
     let app_id = credentials.app_id;
@@ -453,6 +488,14 @@ async fn handle_event(state: &Arc<BotState>, payload: &[u8]) -> Result<()> {
     }
 
     let chat_id = &envelope.event.message.chat_id;
+    let target_kind = if envelope.event.message.chat_type.as_deref() == Some("group") {
+        "group"
+    } else {
+        "direct"
+    };
+    if let Err(error) = target_store::upsert_discovered(chat_id, target_kind) {
+        tracing::warn!("更新飞书推送目标失败: {error}");
+    }
     let msg_type = &envelope.event.message.msg_type;
     let message_id = envelope.event.message.message_id.clone();
     let sender_id = envelope

@@ -2784,6 +2784,108 @@ pub async fn bot_scan_local(
     Ok(state.bot_runtime.scan_local_artifacts())
 }
 
+/// 获取 Bot 已发现的主动推送目标。
+#[tauri::command]
+pub async fn bot_push_targets(
+    id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_bots::PushTargetView>, String> {
+    let id = validate_bot_id(id)?;
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    state
+        .bot_runtime
+        .push_targets(&id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 启用或停用一个 Bot 主动推送目标。
+#[tauri::command]
+pub async fn bot_set_push_target_enabled(
+    id: String,
+    target_id: String,
+    enabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_bots::PushTargetView, String> {
+    let id = validate_bot_id(id)?;
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    state
+        .bot_runtime
+        .set_push_target_enabled(&id, &target_id, enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 把 Bot 声明的出站能力注册为普通 stdio MCP。
+#[tauri::command]
+pub async fn bot_register_mcp(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    use tiangong_plugin_mcp::{
+        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest, ResolvedMcpTransport,
+    };
+
+    let id = validate_bot_id(id)?;
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    let generated = state
+        .bot_runtime
+        .generate_mcp_config(&id)
+        .await
+        .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
+    let name = generated.name.clone();
+
+    if let Some(existing) = state
+        .mcp_plugin
+        .mcp_servers()
+        .into_iter()
+        .find(|server| server.name == name)
+    {
+        let same_connection = existing.resolved_transport() == ResolvedMcpTransport::Stdio
+            && existing.command == generated.command
+            && existing.args == generated.args
+            && existing.endpoint.is_empty()
+            && existing.auth_header.is_empty()
+            && existing.headers.is_empty()
+            && existing.env.is_empty();
+        if !same_connection || existing.tags != generated.tags {
+            return Err(format!(
+                "MCP 名称 {name} 已被其他配置占用，请先在 MCP 页面处理"
+            ));
+        }
+        if !existing.enabled {
+            let message = state
+                .mcp_plugin
+                .set_mcp_server_enabled(&name, true)
+                .map_err(|error| error.to_string())?;
+            state.sync_core_config_from_state().await?;
+            return Ok(message);
+        }
+        return Ok(format!("MCP 已注册：{name}"));
+    }
+
+    let request = RegisterMcpServerRequest {
+        name: name.clone(),
+        command: generated.command,
+        args: generated.args,
+        tags: generated.tags,
+        enabled: generated.enabled,
+        options: RegisterMcpServerOptions {
+            transport: Some(McpTransportMode::Stdio),
+            ..Default::default()
+        },
+    };
+    let message = state
+        .mcp_plugin
+        .register_mcp_server(request)
+        .map_err(|error| error.to_string())?;
+    state.sync_core_config_from_state().await?;
+    Ok(message)
+}
+
 /// 注册新 bot（不启动；需先 `bot_install` 下载制品再 `bot_start`）
 #[tauri::command]
 pub async fn bot_register(

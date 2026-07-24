@@ -56,6 +56,80 @@ pub struct ConfigFieldSchema {
     pub help: Option<String>,
 }
 
+/// Bot 制品通过 `--describe` 上报的完整描述。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotDescription {
+    /// 描述协议版本。
+    pub schema_version: u32,
+    /// 制品 id，必须与安装清单或本地目录一致。
+    pub artifact_id: String,
+    /// 配置字段 schema。
+    pub config_schema: Vec<ConfigFieldSchema>,
+    /// 可选运行能力；旧 Bot 缺失时按无扩展能力处理。
+    #[serde(default)]
+    pub capabilities: BotCapabilities,
+}
+
+/// Bot 可选能力集合。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BotCapabilities {
+    /// Bot 自带的 MCP 服务与配置生成能力。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<BotMcpCapability>,
+}
+
+/// Bot MCP 生成协议声明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotMcpCapability {
+    /// `bot --mcp generate` 输出协议版本。
+    pub protocol_version: u32,
+}
+
+/// `bot --mcp generate` 输出的普通 MCP 注册配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotMcpConfig {
+    pub schema_version: u32,
+    pub name: String,
+    pub transport: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Bot 管理命令返回的通用推送目标视图。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushTargetView {
+    /// Bot 生成的稳定目标 id，不暴露平台会话 id。
+    pub target_id: String,
+    /// 面向用户的目标名称。
+    pub label: String,
+    /// `direct` 或 `group`。
+    pub kind: String,
+    /// 是否已允许主动推送。
+    pub enabled: bool,
+    /// `ready`、`reply_window`、`unavailable` 或 `unknown`。
+    pub availability: String,
+    /// 最近一次收到该目标消息的本地时间。
+    pub last_seen_at: String,
+    /// 平台限制说明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation: Option<String>,
+}
+
+/// `--push-target-list` 的标准输出。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushTargetList {
+    pub targets: Vec<PushTargetView>,
+}
+
 /// 单个 bot 实例的配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BotConfig {
