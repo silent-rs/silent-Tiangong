@@ -55,12 +55,11 @@ pub struct AuthorizedTarget {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SetTargetEnabledRequest {
+pub struct DeleteTargetRequest {
     pub target_id: String,
-    pub enabled: bool,
 }
 
-/// 收到用户消息后保存目标的最新回复消息编号。发现本身不会授权发送。
+/// 收到用户消息后保存最新回复消息编号，并自动授权该会话用于主动推送。
 pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Result<()> {
     let recipient_id = recipient_id.trim();
     let message_id = message_id.trim();
@@ -76,6 +75,7 @@ pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Re
             .find(|target| target.kind == kind && target.recipient_id == recipient_id)
         {
             target.message_id = message_id.to_string();
+            target.enabled = true;
             target.last_seen_at = now;
         } else {
             store.targets.push(TargetRecord {
@@ -83,7 +83,7 @@ pub fn upsert_discovered(kind: &str, recipient_id: &str, message_id: &str) -> Re
                 recipient_id: recipient_id.to_string(),
                 kind: kind.to_string(),
                 message_id: message_id.to_string(),
-                enabled: false,
+                enabled: true,
                 last_seen_at: now,
             });
         }
@@ -104,19 +104,18 @@ pub fn list_enabled_views() -> Result<Vec<PushTargetView>> {
         .collect())
 }
 
-pub fn set_enabled(target_id: &str, enabled: bool) -> Result<PushTargetView> {
+pub fn delete(target_id: &str) -> Result<()> {
     let target_id = target_id.trim();
     if target_id.is_empty() {
         bail!("推送目标 ID 不能为空");
     }
     with_exclusive_store(|store| {
-        let target = store
-            .targets
-            .iter_mut()
-            .find(|target| target.target_id == target_id)
-            .ok_or_else(|| anyhow!("未找到推送目标：{target_id}"))?;
-        target.enabled = enabled;
-        Ok(view_from_record(target))
+        let original_len = store.targets.len();
+        store.targets.retain(|target| target.target_id != target_id);
+        if store.targets.len() == original_len {
+            return Err(anyhow!("未找到推送目标：{target_id}"));
+        }
+        Ok(())
     })
 }
 

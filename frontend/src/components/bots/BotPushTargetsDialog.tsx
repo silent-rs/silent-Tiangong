@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { api, type BotPushTarget } from '../../api/tauri';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { ScrollArea } from '../ui/scroll-area';
-import { Switch } from '../ui/switch';
 
 interface Props {
   botId: string;
@@ -17,7 +16,7 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
   const [targets, setTargets] = useState<BotPushTarget[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [updating, setUpdating] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,18 +34,17 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
     void load();
   }, [load]);
 
-  const setEnabled = async (target: BotPushTarget, enabled: boolean) => {
-    setUpdating((current) => new Set(current).add(target.target_id));
+  const deleteTarget = async (target: BotPushTarget) => {
+    if (!confirm(`确定删除“${target.label}”的推送授权？`)) return;
+    setDeleting((current) => new Set(current).add(target.target_id));
     setError(null);
     try {
-      const updated = await api.botSetPushTargetEnabled(botId, target.target_id, enabled);
-      setTargets((current) =>
-        current.map((item) => (item.target_id === updated.target_id ? updated : item)),
-      );
+      await api.botDeletePushTarget(botId, target.target_id);
+      setTargets((current) => current.filter((item) => item.target_id !== target.target_id));
     } catch (err) {
       setError(String(err));
     } finally {
-      setUpdating((current) => {
+      setDeleting((current) => {
         const next = new Set(current);
         next.delete(target.target_id);
         return next;
@@ -59,7 +57,7 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
       <DialogContent className="flex h-[62vh] min-h-[360px] max-h-[620px] max-w-2xl flex-col overflow-hidden">
         <DialogHeader className="mb-0 shrink-0 pr-8">
           <div className="flex items-center justify-between gap-3">
-            <DialogTitle className="truncate">{botName} 推送目标</DialogTitle>
+            <DialogTitle className="truncate">{botName} 推送授权</DialogTitle>
             <Button
               size="icon"
               variant="ghost"
@@ -97,11 +95,7 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
           ) : (
             <div className="divide-y">
               {targets.map((target) => {
-                const isUpdating = updating.has(target.target_id);
-                const canChangeEnabled =
-                  target.enabled ||
-                  target.availability === 'ready' ||
-                  target.availability === 'reply_window';
+                const isDeleting = deleting.has(target.target_id);
                 return (
                   <div
                     key={target.target_id}
@@ -123,12 +117,21 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
                         最近使用：{target.last_seen_at}
                       </div>
                     </div>
-                    <Switch
-                      checked={target.enabled}
-                      disabled={isUpdating || !canChangeEnabled}
-                      onCheckedChange={(enabled) => void setEnabled(target, enabled)}
-                      aria-label={`${target.enabled ? '停用' : '启用'} ${target.label}`}
-                    />
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-9 w-9 text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+                      onClick={() => void deleteTarget(target)}
+                      disabled={isDeleting}
+                      title="删除推送授权"
+                      aria-label={`删除 ${target.label} 推送授权`}
+                    >
+                      {isDeleting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                    </Button>
                   </div>
                 );
               })}

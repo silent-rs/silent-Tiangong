@@ -2801,39 +2801,79 @@ pub async fn bot_push_targets(
         .map_err(|error| error.to_string())
 }
 
-/// 启用或停用一个 Bot 主动推送目标。
+/// 删除一个 Bot 主动推送授权目标。
 #[tauri::command]
-pub async fn bot_set_push_target_enabled(
+pub async fn bot_delete_push_target(
     id: String,
     target_id: String,
-    enabled: bool,
     state: State<'_, TiangongApp>,
-) -> Result<tiangong_bots::PushTargetView, String> {
+) -> Result<String, String> {
     let id = validate_bot_id(id)?;
     if state.bot_store.get(&id).is_none() {
         return Err(format!("bot 不存在：{id}"));
     }
     state
         .bot_runtime
-        .set_push_target_enabled(&id, &target_id, enabled)
+        .delete_push_target(&id, &target_id)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok("推送授权已删除".to_string())
 }
 
-/// 把 Bot 声明的出站能力注册为普通 stdio MCP。
-#[tauri::command]
-pub async fn bot_register_mcp(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+fn bot_mcp_connection_matches(
+    existing: &tiangong_plugin_mcp::McpServerConfig,
+    generated: &tiangong_bots::BotMcpConfig,
+) -> bool {
+    use tiangong_plugin_mcp::ResolvedMcpTransport;
+
+    existing.resolved_transport() == ResolvedMcpTransport::Stdio
+        && existing.command == generated.command
+        && existing.args == generated.args
+        && existing.endpoint.is_empty()
+        && existing.auth_header.is_empty()
+        && existing.headers.is_empty()
+        && existing.env.is_empty()
+        && existing.tags == generated.tags
+}
+
+fn bot_mcp_registration_request(
+    generated: &tiangong_bots::BotMcpConfig,
+    enabled: bool,
+) -> tiangong_plugin_mcp::RegisterMcpServerRequest {
     use tiangong_plugin_mcp::{
-        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest, ResolvedMcpTransport,
+        McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
     };
 
-    let id = validate_bot_id(id)?;
-    if state.bot_store.get(&id).is_none() {
-        return Err(format!("bot 不存在：{id}"));
+    RegisterMcpServerRequest {
+        name: generated.name.clone(),
+        command: generated.command.clone(),
+        args: generated.args.clone(),
+        tags: generated.tags.clone(),
+        enabled,
+        options: RegisterMcpServerOptions {
+            transport: Some(McpTransportMode::Stdio),
+            ..Default::default()
+        },
     }
+}
+
+/// 为支持 MCP 的 Bot 确保对应普通 MCP 已注册并启用。
+pub async fn ensure_bot_mcp_registered(
+    id: &tiangong_bots::BotId,
+    state: &TiangongApp,
+) -> Result<Option<String>, String> {
+    let supports_mcp = state
+        .bot_runtime
+        .supports_mcp(id)
+        .await
+        .map_err(|error| format!("读取 Bot MCP 能力失败：{error}"))?;
+    if !supports_mcp {
+        return Ok(None);
+    }
+
     let generated = state
         .bot_runtime
-        .generate_mcp_config(&id)
+        .generate_mcp_config(id)
         .await
         .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
     let name = generated.name.clone();
@@ -2844,46 +2884,98 @@ pub async fn bot_register_mcp(id: String, state: State<'_, TiangongApp>) -> Resu
         .into_iter()
         .find(|server| server.name == name)
     {
-        let same_connection = existing.resolved_transport() == ResolvedMcpTransport::Stdio
-            && existing.command == generated.command
-            && existing.args == generated.args
-            && existing.endpoint.is_empty()
-            && existing.auth_header.is_empty()
-            && existing.headers.is_empty()
-            && existing.env.is_empty();
-        if !same_connection || existing.tags != generated.tags {
-            return Err(format!(
-                "MCP 名称 {name} 已被其他配置占用，请先在 MCP 页面处理"
-            ));
+        if !bot_mcp_connection_matches(&existing, &generated) {
+            return Err(format!("MCP 名称 {name} 已被其他配置占用，未自动覆盖"));
         }
         if !existing.enabled {
             let message = state
                 .mcp_plugin
                 .set_mcp_server_enabled(&name, true)
                 .map_err(|error| error.to_string())?;
-            state.sync_core_config_from_state().await?;
-            return Ok(message);
+            if let Err(sync_error) = state.sync_core_config_from_state().await {
+                let rollback = state
+                    .mcp_plugin
+                    .set_mcp_server_enabled(&name, false)
+                    .map(|_| "已恢复为停用".to_string())
+                    .unwrap_or_else(|error| format!("恢复停用失败：{error}"));
+                return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
+            }
+            return Ok(Some(message));
         }
-        return Ok(format!("MCP 已注册：{name}"));
+        return Ok(Some(format!("MCP 已注册：{name}")));
     }
 
-    let request = RegisterMcpServerRequest {
-        name: name.clone(),
-        command: generated.command,
-        args: generated.args,
-        tags: generated.tags,
-        enabled: generated.enabled,
-        options: RegisterMcpServerOptions {
-            transport: Some(McpTransportMode::Stdio),
-            ..Default::default()
-        },
-    };
+    let request = bot_mcp_registration_request(&generated, generated.enabled);
     let message = state
         .mcp_plugin
         .register_mcp_server(request)
         .map_err(|error| error.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(message)
+    if let Err(sync_error) = state.sync_core_config_from_state().await {
+        let rollback = state
+            .mcp_plugin
+            .remove_mcp_server(&name)
+            .map(|_| "已撤销 MCP 注册".to_string())
+            .unwrap_or_else(|error| format!("撤销 MCP 注册失败：{error}"));
+        return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
+    }
+    Ok(Some(message))
+}
+
+async fn unregister_bot_mcp(
+    id: &tiangong_bots::BotId,
+    state: &TiangongApp,
+) -> Result<bool, String> {
+    let supports_mcp = state
+        .bot_runtime
+        .supports_mcp(id)
+        .await
+        .map_err(|error| format!("读取 Bot MCP 能力失败：{error}"))?;
+    if !supports_mcp {
+        return Ok(false);
+    }
+
+    let generated = state
+        .bot_runtime
+        .generate_mcp_config(id)
+        .await
+        .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
+    let Some(existing) = state
+        .mcp_plugin
+        .mcp_servers()
+        .into_iter()
+        .find(|server| server.name == generated.name)
+    else {
+        return Ok(false);
+    };
+    if !bot_mcp_connection_matches(&existing, &generated) {
+        return Ok(false);
+    }
+
+    state
+        .mcp_plugin
+        .remove_mcp_server(&generated.name)
+        .map_err(|error| error.to_string())?;
+    if let Err(sync_error) = state.sync_core_config_from_state().await {
+        let rollback = state
+            .mcp_plugin
+            .register_mcp_server(bot_mcp_registration_request(&generated, existing.enabled))
+            .map(|_| "已恢复 MCP 注册".to_string())
+            .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"));
+        return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
+    }
+    Ok(true)
+}
+
+/// 把 Bot 声明的出站能力注册为普通 stdio MCP。
+#[tauri::command]
+pub async fn bot_register_mcp(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
+    let id = validate_bot_id(id)?;
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    ensure_bot_mcp_registered(&id, state.inner())
+        .await?
+        .ok_or_else(|| "该 Bot 不支持 MCP".to_string())
 }
 
 /// 注册新 bot（不启动；需先 `bot_install` 下载制品再 `bot_start`）
@@ -2893,7 +2985,10 @@ pub async fn bot_register(
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_bots::BotConfig, String> {
     tiangong_bots::BotId::try_from(request.id.as_str()).map_err(|error| error.to_string())?;
-    state.bot_store.register(request).map_err(|e| e.to_string())
+    state
+        .bot_store
+        .register(request)
+        .map_err(|error| error.to_string())
 }
 
 /// 更新已有 bot（id 主键不变）
@@ -2907,16 +3002,41 @@ pub async fn bot_update(
     state
         .bot_store
         .update(&id, request)
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// 删除 bot 配置（若运行中则先停止），保留已安装制品和运行目录。
 #[tauri::command]
 pub async fn bot_remove(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
     let id = validate_bot_id(id)?;
-    // 先停止运行中的 bot（忽略未运行的错误）
-    let _ = state.bot_runtime.stop(&id).await;
-    state.bot_store.remove(&id).map_err(|e| e.to_string())?;
+    if state.bot_store.get(&id).is_none() {
+        return Err(format!("bot 不存在：{id}"));
+    }
+    let mcp_removed = unregister_bot_mcp(&id, state.inner()).await?;
+    if let Err(stop_error) = state.bot_runtime.stop(&id).await {
+        let recovery = if mcp_removed {
+            ensure_bot_mcp_registered(&id, state.inner())
+                .await
+                .map(|_| "已恢复 MCP 注册".to_string())
+                .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"))
+        } else {
+            "MCP 状态无需恢复".to_string()
+        };
+        return Err(format!(
+            "停止 bot 失败，未删除配置：{stop_error}；{recovery}"
+        ));
+    }
+    if let Err(remove_error) = state.bot_store.remove(&id) {
+        let recovery = if mcp_removed {
+            ensure_bot_mcp_registered(&id, state.inner())
+                .await
+                .map(|_| "已恢复 MCP 注册".to_string())
+                .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"))
+        } else {
+            "MCP 状态无需恢复".to_string()
+        };
+        return Err(format!("删除 bot 配置失败：{remove_error}；{recovery}"));
+    }
     Ok("bot 配置已删除，已安装程序保留".to_string())
 }
 
@@ -2993,14 +3113,26 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
 #[tauri::command]
 pub async fn bot_stop(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
     let id = validate_bot_id(id)?;
-    stop_bot_with_state(state.bot_store.as_ref(), &id, || async {
+    let mcp_removed = unregister_bot_mcp(&id, state.inner()).await?;
+    let stop_result = stop_bot_with_state(state.bot_store.as_ref(), &id, || async {
         state
             .bot_runtime
             .stop(&id)
             .await
             .map_err(|error| error.to_string())
     })
-    .await?;
+    .await;
+    if let Err(stop_error) = stop_result {
+        let recovery = if mcp_removed {
+            ensure_bot_mcp_registered(&id, state.inner())
+                .await
+                .map(|_| "已恢复 MCP 注册".to_string())
+                .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"))
+        } else {
+            "MCP 状态无需恢复".to_string()
+        };
+        return Err(format!("{stop_error}；{recovery}"));
+    }
     Ok("bot 已停止".to_string())
 }
 

@@ -285,6 +285,15 @@ impl BotRuntime {
         crate::provision::poll(&paths::bot_artifact_path(bot_id), session).await
     }
 
+    /// 判断 Bot 是否声明了 MCP 能力。
+    pub async fn supports_mcp(&self, bot_id: &BotId) -> Result<bool> {
+        let description = match cached_description(bot_id) {
+            Some(description) => description,
+            None => describe_and_cache_full(bot_id).await?,
+        };
+        Ok(description.capabilities.mcp.is_some())
+    }
+
     /// 读取 Bot 已发现的推送目标。
     pub async fn push_targets(&self, bot_id: &BotId) -> Result<Vec<PushTargetView>> {
         ensure_mcp_capability(bot_id).await?;
@@ -294,13 +303,8 @@ impl BotRuntime {
         Ok(parsed.targets)
     }
 
-    /// 修改一个 Bot 推送目标的授权状态。
-    pub async fn set_push_target_enabled(
-        &self,
-        bot_id: &BotId,
-        target_id: &str,
-        enabled: bool,
-    ) -> Result<PushTargetView> {
+    /// 删除一个 Bot 推送授权目标。
+    pub async fn delete_push_target(&self, bot_id: &BotId, target_id: &str) -> Result<()> {
         ensure_mcp_capability(bot_id).await?;
         let target_id = target_id.trim();
         if target_id.is_empty() {
@@ -308,16 +312,10 @@ impl BotRuntime {
         }
         let input = serde_json::to_vec(&serde_json::json!({
             "target_id": target_id,
-            "enabled": enabled,
         }))
-        .context("序列化推送目标授权请求失败")?;
-        let output = run_management_command(
-            bot_id,
-            &["--push-target-set-enabled"],
-            Some(input.as_slice()),
-        )
-        .await?;
-        serde_json::from_slice(&output.stdout).context("解析 Bot 推送目标授权结果失败")
+        .context("序列化推送目标删除请求失败")?;
+        run_management_command(bot_id, &["--push-target-delete"], Some(input.as_slice())).await?;
+        Ok(())
     }
 
     /// 执行 `bot --mcp generate` 并校验其普通 MCP 注册配置。

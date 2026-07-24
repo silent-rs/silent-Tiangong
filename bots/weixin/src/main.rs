@@ -225,20 +225,26 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
-                    "targets": target_store::list_views()?
+                    "targets": target_store::list_enabled_views()?
                 }))?
             );
             return Ok(());
         }
-        Some("--push-target-set-enabled") => {
+        Some("--push-target-delete") => {
             let mut input = String::new();
             std::io::stdin()
                 .read_to_string(&mut input)
-                .context("读取推送目标授权请求失败")?;
-            let request: target_store::SetTargetEnabledRequest =
-                serde_json::from_str(&input).context("解析推送目标授权请求失败")?;
-            let target = target_store::set_enabled(&request.target_id, request.enabled)?;
-            println!("{}", serde_json::to_string(&target)?);
+                .context("读取推送目标删除请求失败")?;
+            let request: target_store::DeleteTargetRequest =
+                serde_json::from_str(&input).context("解析推送目标删除请求失败")?;
+            target_store::delete(&request.target_id)?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "target_id": request.target_id,
+                    "deleted": true
+                }))?
+            );
             return Ok(());
         }
         Some("--mcp") if arguments.get(1).map(String::as_str) == Some("generate") => {

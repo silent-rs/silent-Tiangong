@@ -869,12 +869,8 @@ export const api = {
   botPushTargets: (id: string): Promise<BotPushTarget[]> =>
     invoke('bot_push_targets', { id }),
 
-  botSetPushTargetEnabled: (
-    id: string,
-    targetId: string,
-    enabled: boolean,
-  ): Promise<BotPushTarget> =>
-    invoke('bot_set_push_target_enabled', { id, targetId, enabled }),
+  botDeletePushTarget: (id: string, targetId: string): Promise<string> =>
+    invoke('bot_delete_push_target', { id, targetId }),
 
   botRegisterMcp: (id: string): Promise<string> =>
     invoke('bot_register_mcp', { id }),

@@ -17,7 +17,6 @@ import {
   Loader2,
   MessageSquareText,
   Play,
-  Plug,
   RefreshCw,
   Settings as SettingsIcon,
   Square,
@@ -55,8 +54,6 @@ export function BotPanel() {
   const [formBot, setFormBot] = useState<BotConfig | null>(null);
   const [logBotId, setLogBotId] = useState<string | null>(null);
   const [pushTargetBot, setPushTargetBot] = useState<{ id: string; name: string } | null>(null);
-  const [registeredMcpNames, setRegisteredMcpNames] = useState<Set<string>>(new Set());
-  const [registeringMcpId, setRegisteringMcpId] = useState<string | null>(null);
 
   // 检查更新中状态。
   const [checking, setChecking] = useState<Record<string, boolean>>({});
@@ -64,22 +61,15 @@ export function BotPanel() {
   const load = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [localResult, botsResult, onlineResult, mcpResult] = await Promise.allSettled([
+      const [localResult, botsResult, onlineResult] = await Promise.allSettled([
         api.botScanLocal(),
         api.botList(),
         api.botAvailable(),
-        api.getMcpServers(),
       ]);
 
       const local = localResult.status === 'fulfilled' ? localResult.value : [];
       const bots = botsResult.status === 'fulfilled' ? botsResult.value : [];
       const manifests = onlineResult.status === 'fulfilled' ? onlineResult.value.bots : [];
-      setRegisteredMcpNames(
-        new Set(
-          mcpResult.status === 'fulfilled' ? mcpResult.value.map((server) => server.name) : [],
-        ),
-      );
-
       if (localResult.status === 'rejected') {
         console.error('扫描本地 Bot 失败:', localResult.reason);
         showError('加载 Bot 失败', String(localResult.reason));
@@ -212,13 +202,26 @@ export function BotPanel() {
     }
   };
 
-  const handleStart = async (bot: BotConfig, name: string) => {
+  const handleStart = async (bot: BotConfig, name: string, supportsMcp: boolean) => {
+    let started = false;
     try {
       await api.botStart(bot.id);
+      started = true;
+      if (supportsMcp) await api.botRegisterMcp(bot.id);
       showSuccess('已启动', `“${name}”已启动`);
-      load();
+      await load();
     } catch (err) {
-      showError('启动失败', String(err));
+      let detail = String(err);
+      if (started) {
+        try {
+          await api.botStop(bot.id);
+          detail = `${detail}；Bot 已自动停止`;
+        } catch (stopErr) {
+          detail = `${detail}；自动停止失败：${String(stopErr)}`;
+        }
+      }
+      showError('启动失败', detail);
+      await load();
     }
   };
 
@@ -240,19 +243,6 @@ export function BotPanel() {
       load();
     } catch (err) {
       showError('删除失败', String(err));
-    }
-  };
-
-  const handleRegisterMcp = async (bot: BotConfig, name: string) => {
-    setRegisteringMcpId(bot.id);
-    try {
-      await api.botRegisterMcp(bot.id);
-      showSuccess('MCP 已注册', `“${name}”现在可以用于主动推送`);
-      await load();
-    } catch (err) {
-      showError('MCP 注册失败', String(err));
-    } finally {
-      setRegisteringMcpId(null);
     }
   };
 
@@ -387,7 +377,9 @@ export function BotPanel() {
                                 size="icon"
                                 variant="ghost"
                                 className="h-5 w-5 rounded-none p-0 text-emerald-500 hover:bg-transparent hover:text-emerald-400"
-                                onClick={() => handleStart(bot, displayName)}
+                                onClick={() =>
+                                  handleStart(bot, displayName, entry.local!.supports_mcp)
+                                }
                                 title="启动"
                                 aria-label={`启动 ${displayName} 并设为自动运行`}
                               >
@@ -416,49 +408,18 @@ export function BotPanel() {
                               <FileText className="h-4 w-4" />
                             </Button>
                             {entry.local.supports_mcp && (
-                              <>
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  className="h-9 w-9"
-                                  onClick={() =>
-                                    setPushTargetBot({ id: bot.id, name: displayName })
-                                  }
-                                  title="管理推送目标"
-                                  aria-label={`管理 ${displayName} 推送目标`}
-                                >
-                                  <MessageSquareText className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant={
-                                    registeredMcpNames.has(`bot-${bot.id}`)
-                                      ? 'outline'
-                                      : 'default'
-                                  }
-                                  className="h-9 min-w-[108px]"
-                                  onClick={() => void handleRegisterMcp(bot, displayName)}
-                                  disabled={
-                                    registeringMcpId === bot.id ||
-                                    registeredMcpNames.has(`bot-${bot.id}`)
-                                  }
-                                  title={
-                                    registeredMcpNames.has(`bot-${bot.id}`)
-                                      ? 'MCP 已注册'
-                                      : '注册主动推送 MCP'
-                                  }
-                                  aria-label={`${displayName} 主动推送 MCP`}
-                                >
-                                  {registeringMcpId === bot.id ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <Plug className="h-4 w-4" />
-                                  )}
-                                  {registeredMcpNames.has(`bot-${bot.id}`)
-                                    ? 'MCP 已注册'
-                                    : '注册 MCP'}
-                                </Button>
-                              </>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-9 w-9"
+                                onClick={() =>
+                                  setPushTargetBot({ id: bot.id, name: displayName })
+                                }
+                                title="管理推送授权"
+                                aria-label={`管理 ${displayName} 推送授权`}
+                              >
+                                <MessageSquareText className="h-4 w-4" />
+                              </Button>
                             )}
                             <Button
                               size="icon"
