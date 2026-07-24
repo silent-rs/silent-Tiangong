@@ -3725,11 +3725,40 @@ pub async fn delete_workspace_index(workspace_id: String) -> Result<(), String> 
         .map_err(|err| err.to_string())
 }
 
-/// 重建指定路径的 Workspace 索引
+/// 重建指定路径的 Workspace 索引。
+///
+/// 使用 app 层共享 IndexManager，与预热 / 插件后台扫描共用同一 per-root 扫描许可：
+/// 若已有扫描在进行，短暂轮询等待其结束后再取得许可执行重建，避免与后台扫描并发
+/// 写同一磁盘索引（目录锁竞争 / 重建失败 / 状态不一致）。重建为用户显式请求，
+/// 不应无故失败，故选择等待而非直接拒绝。
 #[tauri::command]
-pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
+pub async fn rebuild_workspace_index(
+    root: String,
+    state: State<'_, TiangongApp>,
+) -> Result<usize, String> {
     let root = std::path::PathBuf::from(&root);
-    tiangong_plugin_index::rebuild_workspace_index_for_gui(&root).map_err(|err| err.to_string())
+    let manager = state.desktop_factory.index_manager.clone();
+    // 轮询等待扫描许可：最多等约 30s，期间后台扫描应已完成。
+    let mut permit = None;
+    for _ in 0..300 {
+        if let Some(p) = manager.try_begin_workspace_scan(&root) {
+            permit = Some(p);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let permit = permit.ok_or_else(|| "索引正在构建中，请稍后重试".to_string())?;
+    tracing::info!(workspace = %root.display(), "Workspace 索引重建启动（共享 manager）");
+    let manager_clone = manager.clone();
+    let count = tokio::task::spawn_blocking(move || {
+        // permit 持有期间状态保持占用；drop（含 panic 展开）时自动复位。
+        let _permit = permit;
+        manager_clone.full_scan(&root)
+    })
+    .await
+    .map_err(|e| format!("重建任务执行失败: {e}"))?
+    .map_err(|e| e.to_string())?;
+    Ok(count)
 }
 
 /// 预热指定路径的 Workspace 索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）。

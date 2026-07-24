@@ -23,8 +23,7 @@ pub mod plugin;
 pub use index::{
     IndexHit, IndexManager, IndexMeta, IndexQuery, IndexScope, SessionIndexHit, TurnData,
     WorkspaceIndexInfo, backfill_session_index, delete_workspace_index_for_gui,
-    list_workspace_indexes_for_gui, prewarm_workspace_index_for_gui,
-    rebuild_workspace_index_for_gui, session_index_exists, workspace_index_exists,
+    list_workspace_indexes_for_gui, session_index_exists, workspace_index_exists,
 };
 pub use plugin::IndexPlugin;
 

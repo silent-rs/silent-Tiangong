@@ -137,12 +137,10 @@ impl IndexManager {
 
     /// 取（或创建）指定 root 的后台扫描标志。同一 manager + 同一 root 返回同一 Arc。
     ///
+    /// 取（或创建）指定 root 的后台扫描标志。同一 manager + 同一 root 返回同一 Arc。
+    ///
     /// 私有：扫描状态的获取与释放应由 [`IndexManager::try_begin_workspace_scan`]
     /// 返回的许可统一管理，避免调用方各自 `swap`/`store` 造成漏复位或绕过去重。
-    ///
-    /// 经 `entry().or_insert_with()` 原子化「取或建」，避免并发首次访问时多个线程
-    /// 各自 miss 后创建不同 flag，导致同一工作区被并发扫描、状态观察失真。
-    /// 取（或创建）指定 root 的后台扫描标志。同一 manager + 同一 root 返回同一 Arc。
     ///
     /// 经 `Mutex<HashMap>` 保护 get-or-create：并发首次访问时锁保证只有一个线程
     /// 创建该 root 的标志，其余线程在锁内读到已存在的 Arc。此前用 `DashMap::entry()`
@@ -400,29 +398,6 @@ pub fn list_workspace_indexes_for_gui() -> Result<Vec<WorkspaceIndexInfo>> {
 pub fn delete_workspace_index_for_gui(workspace_id: &str) -> Result<()> {
     let manager = IndexManager::new()?;
     manager.delete_workspace_index(workspace_id)
-}
-
-pub fn rebuild_workspace_index_for_gui(root: &Path) -> Result<usize> {
-    let manager = IndexManager::new()?;
-    manager.rebuild_workspace_index(root)
-}
-
-/// 预热工作区索引：若索引已存在则直接返回，否则后台启动全量扫描，立即返回不阻塞。
-///
-/// 用于在创建新对话/选定工作目录时提前构建索引，消除首次发送消息时的同步扫描延迟。
-/// 线程内结果仅记日志（info 成功 / warn 失败），不影响调用方。
-pub fn prewarm_workspace_index_for_gui(root: &Path) -> Result<()> {
-    if !root.is_dir() || workspace_index_exists(root) {
-        return Ok(());
-    }
-    let manager = IndexManager::new()?;
-    let root = root.to_path_buf();
-    tracing::info!(workspace = %root.display(), "Workspace 索引预热启动");
-    std::thread::spawn(move || match manager.full_scan(&root) {
-        Ok(count) => tracing::info!(count, "Workspace 索引预热完成"),
-        Err(e) => tracing::warn!("Workspace 索引预热失败: {e}"),
-    });
-    Ok(())
 }
 
 /// 检查 workspace 索引是否已存在
