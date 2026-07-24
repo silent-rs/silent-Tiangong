@@ -37,6 +37,54 @@ interface BotEntry {
   configured: BotConfig | null;
 }
 
+interface ParsedVersion {
+  core: [bigint, bigint, bigint];
+  prerelease: string[] | null;
+}
+
+const SEMVER_PATTERN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function parseVersion(version: string): ParsedVersion | null {
+  const match = SEMVER_PATTERN.exec(version);
+  if (!match) return null;
+  return {
+    core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+    prerelease: match[4]?.split('.') ?? null,
+  };
+}
+
+function isVersionNewer(remoteVersion: string, localVersion: string): boolean {
+  const remote = parseVersion(remoteVersion);
+  const local = parseVersion(localVersion);
+  if (!remote || !local) return remoteVersion !== localVersion;
+
+  for (let index = 0; index < remote.core.length; index += 1) {
+    if (remote.core[index] !== local.core[index]) {
+      return remote.core[index] > local.core[index];
+    }
+  }
+
+  if (!remote.prerelease) return local.prerelease !== null;
+  if (!local.prerelease) return false;
+
+  const count = Math.max(remote.prerelease.length, local.prerelease.length);
+  for (let index = 0; index < count; index += 1) {
+    const remotePart = remote.prerelease[index];
+    const localPart = local.prerelease[index];
+    if (remotePart === localPart) continue;
+    if (remotePart === undefined) return false;
+    if (localPart === undefined) return true;
+
+    const remoteNumeric = /^\d+$/.test(remotePart);
+    const localNumeric = /^\d+$/.test(localPart);
+    if (remoteNumeric && localNumeric) return BigInt(remotePart) > BigInt(localPart);
+    if (remoteNumeric !== localNumeric) return !remoteNumeric;
+    return remotePart > localPart;
+  }
+  return false;
+}
+
 /** Bot 列表面板——合并线上目录、本地制品和已保存配置。 */
 export function BotPanel() {
   const { showSuccess, showError } = useToast();
@@ -55,8 +103,7 @@ export function BotPanel() {
   const [logBotId, setLogBotId] = useState<string | null>(null);
   const [pushTargetBot, setPushTargetBot] = useState<{ id: string; name: string } | null>(null);
 
-  // 检查更新中状态。
-  const [checking, setChecking] = useState<Record<string, boolean>>({});
+  const [upgrading, setUpgrading] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -182,23 +229,28 @@ export function BotPanel() {
     }
   };
 
-  const handleCheckUpdate = async (bot: BotConfig, name: string) => {
-    setChecking((prev) => ({ ...prev, [bot.id]: true }));
+  const handleUpgrade = async (
+    bot: BotConfig,
+    name: string,
+    localVersion: string,
+    manifest: BotManifest,
+  ) => {
+    if (
+      !confirm(
+        `“${name}”将从 ${localVersion} 更新到 ${manifest.version}。更新期间会停止 Bot，完成后恢复当前状态。`,
+      )
+    )
+      return;
+
+    setUpgrading((prev) => ({ ...prev, [bot.id]: true }));
     try {
-      const manifest = await api.botCheckUpdate(bot.artifact_id);
-      if (!manifest) {
-        showSuccess('已是最新', `“${name}”已是最新版本`);
-        return;
-      }
-      if (!confirm(`“${name}”发现新版本 ${manifest.version}，是否升级？升级会先停止 Bot。`))
-        return;
-      await api.botUpgrade(bot.id);
-      showSuccess('升级完成', `“${name}”已升级到 ${manifest.version}，请重新启动`);
-      load();
+      const result = await api.botUpgrade(bot.id);
+      showSuccess('更新完成', `“${name}”已更新到 ${manifest.version}。${result}`);
     } catch (err) {
-      showError('检查更新失败', String(err));
+      showError('更新失败', String(err));
     } finally {
-      setChecking((prev) => ({ ...prev, [bot.id]: false }));
+      await load();
+      setUpgrading((prev) => ({ ...prev, [bot.id]: false }));
     }
   };
 
@@ -272,15 +324,16 @@ export function BotPanel() {
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-medium">移动端控制</h3>
         <Button
-          size="icon"
+          size="sm"
           variant="outline"
-          className="h-9 w-9"
+          className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
           onClick={() => void load()}
           disabled={isLoading}
           title="刷新"
           aria-label="刷新 Bot 列表"
         >
-          <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={isLoading ? 'animate-spin' : ''} />
+          刷新
         </Button>
       </div>
 
@@ -309,6 +362,12 @@ export function BotPanel() {
                 const displayName = entry.local?.name || entry.manifest?.name || entry.id;
                 const version = entry.local?.version || entry.manifest?.version;
                 const isRunning = bot && healthMap[bot.id] === 'running';
+                const updateManifest =
+                  entry.local &&
+                  entry.manifest &&
+                  isVersionNewer(entry.manifest.version, entry.local.version)
+                    ? entry.manifest
+                    : null;
                 const description = entry.local
                   ? bot
                     ? `创建于 ${bot.created_at}`
@@ -337,9 +396,10 @@ export function BotPanel() {
                           <Button
                             size="sm"
                             variant="outline"
+                            className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                             onClick={() => openConfigure(entry)}
                           >
-                            <SettingsIcon className="h-4 w-4" />
+                            <SettingsIcon />
                             配置
                           </Button>
                         )}
@@ -347,14 +407,14 @@ export function BotPanel() {
                           <Button
                             size="sm"
                             variant="outline"
-                            className="min-w-[88px]"
+                            className="h-7 min-w-[72px] gap-1 px-2 text-xs [&_svg]:size-3.5"
                             onClick={() => void handleInstall(entry.manifest!, bot.id, bot)}
                             disabled={installingBotId !== null}
                           >
                             {installingBotId === bot.id ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
+                              <Loader2 className="animate-spin" />
                             ) : (
-                              <Download className="h-4 w-4" />
+                              <Download />
                             )}
                             {installButtonLabel(bot.id)}
                           </Button>
@@ -363,86 +423,105 @@ export function BotPanel() {
                           <>
                             {isRunning ? (
                               <Button
-                                size="icon"
+                                size="sm"
                                 variant="ghost"
-                                className="h-5 w-5 rounded-none p-0 text-red-500 hover:bg-transparent hover:text-red-400"
+                                className="h-7 gap-1 px-2 text-xs text-red-500 hover:bg-red-500/10 hover:text-red-400 [&_svg]:size-3.5"
                                 onClick={() => handleStop(bot, displayName)}
                                 title="停止"
                                 aria-label={`停止 ${displayName} 并取消自动运行`}
                               >
-                                <Square className="!h-5 !w-5 fill-current" />
+                                <Square className="fill-current" />
+                                停止
                               </Button>
                             ) : (
                               <Button
-                                size="icon"
+                                size="sm"
                                 variant="ghost"
-                                className="h-5 w-5 rounded-none p-0 text-emerald-500 hover:bg-transparent hover:text-emerald-400"
+                                className="h-7 gap-1 px-2 text-xs text-emerald-500 hover:bg-emerald-500/10 hover:text-emerald-400 [&_svg]:size-3.5"
                                 onClick={() =>
                                   handleStart(bot, displayName, entry.local!.supports_mcp)
                                 }
                                 title="启动"
                                 aria-label={`启动 ${displayName} 并设为自动运行`}
                               >
-                                <Play className="!h-5 !w-5 fill-current" />
+                                <Play className="fill-current" />
+                                启动
+                              </Button>
+                            )}
+                            {updateManifest && (
+                              <Button
+                                size="sm"
+                                className="h-7 min-w-[68px] gap-1 px-2 text-xs [&_svg]:size-3.5"
+                                onClick={() =>
+                                  handleUpgrade(
+                                    bot,
+                                    displayName,
+                                    entry.local!.version,
+                                    updateManifest,
+                                  )
+                                }
+                                disabled={upgrading[bot.id]}
+                                title={`更新到 v${updateManifest.version}`}
+                                aria-label={`更新 ${displayName} 到 ${updateManifest.version}`}
+                              >
+                                {upgrading[bot.id] ? (
+                                  <Loader2 className="animate-spin" />
+                                ) : (
+                                  <ArrowUpCircle />
+                                )}
+                                {upgrading[bot.id] ? '更新中' : '更新'}
                               </Button>
                             )}
                             <Button
-                              size="icon"
+                              size="sm"
                               variant="ghost"
-                              className="h-9 w-9"
-                              onClick={() => handleCheckUpdate(bot, displayName)}
-                              disabled={checking[bot.id]}
-                              title="检查更新"
-                              aria-label={`检查 ${displayName} 更新`}
-                            >
-                              <ArrowUpCircle className={checking[bot.id] ? 'animate-spin' : ''} />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-9 w-9"
+                              className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                               onClick={() => setLogBotId(bot.id)}
                               title="查看日志"
                               aria-label={`查看 ${displayName} 日志`}
                             >
-                              <FileText className="h-4 w-4" />
+                              <FileText />
+                              日志
                             </Button>
                             {entry.local.supports_mcp && (
                               <Button
-                                size="icon"
+                                size="sm"
                                 variant="ghost"
-                                className="h-9 w-9"
+                                className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                                 onClick={() =>
                                   setPushTargetBot({ id: bot.id, name: displayName })
                                 }
                                 title="管理推送授权"
                                 aria-label={`管理 ${displayName} 推送授权`}
                               >
-                                <MessageSquareText className="h-4 w-4" />
+                                <MessageSquareText />
+                                推送授权
                               </Button>
                             )}
                             <Button
-                              size="icon"
+                              size="sm"
                               variant="ghost"
-                              className="h-9 w-9"
+                              className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                               onClick={() => openConfigure(entry)}
                               title="编辑配置"
                               aria-label={`编辑 ${displayName} 配置`}
                             >
-                              <SettingsIcon className="h-4 w-4" />
+                              <SettingsIcon />
+                              配置
                             </Button>
                           </>
                         )}
                         {bot && (
                           <Button
-                            size="icon"
+                            size="sm"
                             variant="ghost"
-                            className="h-9 w-9 hover:bg-destructive/20 hover:text-destructive"
+                            className="h-7 gap-1 px-2 text-xs hover:bg-destructive/20 hover:text-destructive [&_svg]:size-3.5"
                             onClick={() => handleRemove(bot, displayName)}
                             title="删除配置"
                             aria-label={`删除 ${displayName} 配置`}
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 />
+                            删除
                           </Button>
                         )}
                       </div>
@@ -479,14 +558,14 @@ export function BotPanel() {
                     <div className="col-span-2 flex justify-end sm:col-span-1">
                       <Button
                         size="sm"
-                        className="min-w-[88px]"
+                        className="h-7 min-w-[72px] gap-1 px-2 text-xs [&_svg]:size-3.5"
                         onClick={() => void handleInstall(manifest, manifest.id, null)}
                         disabled={installingBotId !== null}
                       >
                         {installingBotId === manifest.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <Loader2 className="animate-spin" />
                         ) : (
-                          <Download className="h-4 w-4" />
+                          <Download />
                         )}
                         {installButtonLabel(manifest.id)}
                       </Button>

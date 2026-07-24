@@ -59,15 +59,16 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
           <div className="flex items-center justify-between gap-3">
             <DialogTitle className="truncate">{botName} 推送授权</DialogTitle>
             <Button
-              size="icon"
+              size="sm"
               variant="ghost"
-              className="h-8 w-8 shrink-0"
+              className="h-7 shrink-0 gap-1 px-2 text-xs [&_svg]:size-3.5"
               onClick={() => void load()}
               disabled={loading}
               title="刷新推送目标"
               aria-label="刷新推送目标"
             >
               <RefreshCw className={loading ? 'animate-spin' : ''} />
+              刷新
             </Button>
           </div>
         </DialogHeader>
@@ -118,9 +119,9 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
                       </div>
                     </div>
                     <Button
-                      size="icon"
+                      size="sm"
                       variant="ghost"
-                      className="h-9 w-9 text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
+                      className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:bg-destructive/15 hover:text-destructive [&_svg]:size-3.5"
                       onClick={() => void deleteTarget(target)}
                       disabled={isDeleting}
                       title="删除推送授权"
@@ -129,8 +130,9 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
                       {isDeleting ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
                       ) : (
-                        <Trash2 className="h-4 w-4" />
+                        <Trash2 />
                       )}
+                      {isDeleting ? '删除中' : '删除'}
                     </Button>
                   </div>
                 );

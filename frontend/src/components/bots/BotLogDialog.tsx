@@ -51,15 +51,16 @@ export function BotLogDialog({ botId, onClose }: Props) {
                 <span className="text-xs text-muted-foreground">仅显示最近内容</span>
               )}
               <Button
-                size="icon"
+                size="sm"
                 variant="ghost"
-                className="h-8 w-8"
+                className="h-7 gap-1 px-2 text-xs [&_svg]:size-3.5"
                 onClick={() => void load()}
                 disabled={loading}
                 title="刷新日志"
                 aria-label="刷新日志"
               >
                 <RefreshCw className={loading ? 'animate-spin' : ''} />
+                刷新
               </Button>
             </div>
           </div>
@@ -78,7 +79,12 @@ export function BotLogDialog({ botId, onClose }: Props) {
             <div className="flex min-h-64 flex-col items-center justify-center gap-3 px-6 text-center text-zinc-300">
               <AlertTriangle className="h-5 w-5 text-red-400" />
               <p className="max-w-xl break-words text-sm">{error}</p>
-              <Button size="sm" variant="secondary" onClick={() => void load()}>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7 px-2 text-xs"
+                onClick={() => void load()}
+              >
                 重新读取
               </Button>
             </div>
