@@ -117,14 +117,17 @@ impl IndexManager {
     }
 
     /// 取（或创建）指定 root 的后台扫描标志。同一 manager + 同一 root 返回同一 Arc。
+    ///
+    /// 经 `entry().or_insert_with()` 原子化「取或建」，避免并发首次访问时多个线程
+    /// 各自 miss 后创建不同 flag，导致同一工作区被并发扫描、`is_scanning` 观察失真。
     pub fn scanning_flag_for(&self, root: &Path) -> Arc<AtomicBool> {
         let key = root.to_string_lossy().to_string();
-        if let Some(entry) = self.scanning_roots.get(&key) {
-            return Arc::clone(entry.value());
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        self.scanning_roots.insert(key, Arc::clone(&flag));
-        flag
+        Arc::clone(
+            self.scanning_roots
+                .entry(key)
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                .value(),
+        )
     }
 
     /// 指定 root 是否正在后台扫描。
@@ -460,4 +463,49 @@ fn default_base_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".tiangong").join("index")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    /// 并发首次为同一路径创建扫描标志，必须全部返回同一 Arc（去重原子性）。
+    ///
+    /// 回归覆盖：原「先 get 再 insert」实现下，多线程同时 miss 会各自创建不同 flag，
+    /// 导致同一工作区被并发扫描、`is_scanning` 观察失真。
+    #[test]
+    fn scanning_flag_for_concurrent_returns_same_arc() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let manager =
+            Arc::new(IndexManager::new_with_dir(temp.path().join("index")).expect("manager"));
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let manager = Arc::clone(&manager);
+            let barrier = Arc::clone(&barrier);
+            let root = root.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                manager.scanning_flag_for(&root)
+            }));
+        }
+        let flags: Vec<Arc<AtomicBool>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let anchor = Arc::as_ptr(&flags[0]);
+        assert!(
+            flags.iter().all(|f| Arc::as_ptr(f) == anchor),
+            "并发创建的扫描标志必须全部指向同一 Arc"
+        );
+
+        // 置位后 is_scanning 应反映该 root 的状态，其它 root 不受影响。
+        flags[0].store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(manager.is_scanning(&root));
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!manager.is_scanning(&other));
+    }
 }
