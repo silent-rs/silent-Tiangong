@@ -9571,7 +9571,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "tiangong-config",
@@ -9580,7 +9580,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-anthropic"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "eventsource-stream",
  "futures-util",
@@ -9592,7 +9592,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9657,7 +9657,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-app-state"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "serde",
  "tiangong-config",
@@ -9668,7 +9668,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-bots"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9689,7 +9689,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-cli"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -9725,7 +9725,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-config"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "scru128",
@@ -9743,7 +9743,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -9774,7 +9774,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-core-manager"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9801,7 +9801,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-entry"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -9823,7 +9823,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-llm"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -9844,7 +9844,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9857,7 +9857,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-media-archive"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.13.4",
@@ -9869,7 +9869,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-memory"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9898,7 +9898,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-agent-team"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "chrono",
  "scru128",
@@ -9914,7 +9914,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -9927,7 +9927,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-browser"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64-url",
@@ -9946,7 +9946,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -9959,7 +9959,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "reqwest 0.13.4",
@@ -9976,7 +9976,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9993,7 +9993,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10006,7 +10006,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10019,7 +10019,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10039,7 +10039,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "http",
@@ -10056,7 +10056,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "scru128",
  "serde",
@@ -10070,14 +10070,14 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-prompt"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "tiangong-core",
 ]
 
 [[package]]
 name = "tiangong-plugin-scheduler"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10093,7 +10093,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "scru128",
@@ -10109,7 +10109,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10121,7 +10121,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-task"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "scru128",
  "serde",
@@ -10133,7 +10133,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-terminal"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "descape",
@@ -10157,7 +10157,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "scru128",
  "serde",
@@ -10170,7 +10170,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-scheduler"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10187,7 +10187,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-server"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -10238,7 +10238,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-toolkit"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "tiangong-types",
@@ -10246,7 +10246,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-types"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "chrono",
  "scru128",
