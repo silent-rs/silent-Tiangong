@@ -119,7 +119,6 @@ export function MainApp() {
   const workspaceOpenRequestIdRef = useRef(0);
   const chatPanelWidthRef = useRef(MIN_CHAT_WIDTH);
   const isDraggingRef = useRef(false);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
   const streamEventQueueRef = useRef<SessionStreamEvent[]>([]);
   const streamEventTimerRef = useRef<number | null>(null);
   // sessions_updated 在一次 done 后会被连续 emit 多次（done/标题生成/Core 退役），
@@ -343,10 +342,29 @@ export function MainApp() {
       streamEventTimerRef.current = window.setTimeout(flushStreamEvents, 16);
     };
 
-    const setupListener = async () => {
-      const unlistenStream = await api.onStreamEvent(scheduleStreamEvent);
+    // 本轮 effect 的生命周期标记与取消函数集合。
+    // 关键：不使用跨 effect 的单值引用（会被旧异步流程覆盖，导致第一轮监听器成为孤儿）。
+    // 每个 await 注册完成后立即交给 track 收纳；guard 在每个 await 点之后检查 disposed，
+    // 已清理则立即取消并中止后续注册，避免 StrictMode 挂载→清理→再挂载时第一轮监听器残留。
+    let disposed = false;
+    const cleanups: UnlistenFn[] = [];
+    const track = (un: UnlistenFn) => {
+      if (disposed) {
+        un();
+        return;
+      }
+      cleanups.push(un);
+    };
+    const guard = () => {
+      if (disposed) throw new DOMException('Aborted', 'AbortError');
+    };
 
-      const { listen } = await import('@tauri-apps/api/event');
+    const setupListener = async () => {
+      try {
+        track(await api.onStreamEvent(scheduleStreamEvent));
+        guard();
+
+        const { listen } = await import('@tauri-apps/api/event');
       // 尾沿去抖 + in-flight 串行化 + dirty rerun。
       // - 每次事件都重置 120ms 计时器，等事件静默后再刷新；
       // - 刷新进行中来的事件标记 dirty，settle 后 rerun 一次，避免并发读取。
@@ -377,24 +395,27 @@ export function MainApp() {
           runProtectiveRefresh();
         }, 120);
       };
-      const unlistenSessions = await listen('sessions_updated', () => {
+      track(await listen('sessions_updated', () => {
         scheduleSessionsRefresh();
-      });
-      const unlistenOpenSession = await listen<string>('desktop_notification_open_session', (event) => {
+      }));
+      guard();
+      track(await listen<string>('desktop_notification_open_session', (event) => {
         const sessionId = event.payload;
         if (sessionId) {
           useStore.getState().switchSession(sessionId).catch(console.error);
         }
-      });
+      }));
+      guard();
 
-      const unlistenBrowserOpen = await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
+      track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
         const { session_id } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
         await openWorkspacePanel('browser');
         await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         // browser:open 已在后端完成导航，前端不再重复 navigate
-      });
-      const unlistenTerminalTabUpdated = await listen<{
+      }));
+      guard();
+      track(await listen<{
         session_id: string;
         active_tab_id?: string | null;
         source?: string | null;
@@ -425,9 +446,10 @@ export function MainApp() {
         if (showWorkspacePanelRef.current && workspaceTabKindRef.current === 'terminal' && active_tab_id) {
           await openWorkspacePanel('terminal', active_tab_id);
         }
-      });
+      }));
+      guard();
 
-      const unlistenResize = await getCurrentWindow().onResized(async () => {
+      track(await getCurrentWindow().onResized(async () => {
         if (programmaticResizeRef.current) return;
 
         const appWindow = getCurrentWindow();
@@ -452,16 +474,13 @@ export function MainApp() {
         ) {
           setSidebarOpenByLayout(true);
         }
-      });
-
-      unlistenRef.current = () => {
-        unlistenStream();
-        unlistenSessions();
-        unlistenOpenSession();
-        unlistenBrowserOpen();
-        unlistenTerminalTabUpdated();
-        unlistenResize();
-      };
+      }));
+      } catch (error) {
+        // effect 已被清理（guard 抛 AbortError），释放本轮已收纳的监听。
+        if ((error as DOMException)?.name !== 'AbortError') {
+          throw error;
+        }
+      }
     };
 
     setupListener();
@@ -493,6 +512,13 @@ export function MainApp() {
     window.addEventListener('tiangong:open-browser', onOpenBrowser);
 
     return () => {
+      // 先标记本轮 disposed，使尚未完成的异步注册流程在后续 guard 处自行放弃；
+      // 再释放本轮已收纳的监听，避免遗留孤儿监听导致事件被重复消费。
+      disposed = true;
+      while (cleanups.length > 0) {
+        const un = cleanups.pop();
+        un?.();
+      }
       if (streamEventTimerRef.current !== null) {
         window.clearTimeout(streamEventTimerRef.current);
         streamEventTimerRef.current = null;
@@ -503,7 +529,6 @@ export function MainApp() {
         sessionsRefreshTimerRef.current = null;
       }
       window.removeEventListener('tiangong:open-browser', onOpenBrowser);
-      unlistenRef.current?.();
     };
   }, [
     setSidebarOpenByLayout,

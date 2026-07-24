@@ -1,4 +1,4 @@
-import { act, type ReactNode } from 'react';
+import { act, StrictMode, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,23 +6,49 @@ import type { Session } from '@/api/tauri';
 
 const mocks = vi.hoisted(() => {
   const eventHandlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
+  const streamEventHandlers = new Set<(event: unknown) => void>();
   const unlisteners: ReturnType<typeof vi.fn>[] = [];
+  // 注册是否立即完成。默认 true：注册 Promise 同步 resolve，保持现有用例行为。
+  // StrictMode 竞态用例临时置为 false，让注册延迟完成，模拟"清理早于注册完成"。
+  let deferRegistrations = false;
+  // 待 resolve 的注册 Promise：defer 模式下调用方 hold 住 resolve，按需放行。
+  type Pending = { resolve: (un: ReturnType<typeof vi.fn>) => void; unlisten: ReturnType<typeof vi.fn> };
+  const pending: Pending[] = [];
   const makeUnlistener = () => {
     const unlisten = vi.fn();
     unlisteners.push(unlisten);
     return unlisten;
   };
+  // 返回注册 Promise。immediate 模式下立即 resolve；defer 模式下入队 pending。
+  const makeRegistration = () => {
+    const unlisten = makeUnlistener();
+    if (!deferRegistrations) {
+      return Promise.resolve(unlisten);
+    }
+    let resolveFn!: (un: ReturnType<typeof vi.fn>) => void;
+    const promise = new Promise<ReturnType<typeof vi.fn>>((resolve) => {
+      resolveFn = resolve;
+    });
+    pending.push({ resolve: resolveFn, unlisten });
+    return promise;
+  };
   const appWindow = {
     scaleFactor: vi.fn(() => Promise.resolve(1)),
     innerSize: vi.fn(() => Promise.resolve({ width: 1200, height: 800 })),
     setSize: vi.fn(() => Promise.resolve()),
-    onResized: vi.fn(() => Promise.resolve(makeUnlistener())),
+    onResized: vi.fn(() => makeRegistration()),
   };
   const api = {
     getSessions: vi.fn(),
     getReasoningEffort: vi.fn(() => Promise.resolve('medium')),
     getWorkspaceDir: vi.fn(() => Promise.resolve('/workspace')),
-    onStreamEvent: vi.fn(() => Promise.resolve(makeUnlistener())),
+    onStreamEvent: vi.fn((callback: (event: unknown) => void) => {
+      streamEventHandlers.add(callback);
+      return makeRegistration().then((unlisten) => {
+        unlisten.mockImplementation(() => streamEventHandlers.delete(callback));
+        return unlisten;
+      });
+    }),
     browserHide: vi.fn(() => Promise.resolve()),
   };
   const listen = vi.fn((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -32,11 +58,12 @@ const mocks = vi.hoisted(() => {
       eventHandlers.set(eventName, handlers);
     }
     handlers.add(handler);
-    const unlisten = vi.fn(() => handlers!.delete(handler));
-    unlisteners.push(unlisten);
-    return Promise.resolve(unlisten);
+    return makeRegistration().then((unlisten) => {
+      unlisten.mockImplementation(() => handlers!.delete(handler));
+      return unlisten;
+    });
   });
-  return { api, appWindow, eventHandlers, listen, makeUnlistener, unlisteners };
+  return { api, appWindow, eventHandlers, listen, makeUnlistener, unlisteners, pending, streamEventHandlers, setDefer: (v: boolean) => { deferRegistrations = v; } };
 });
 
 vi.mock('@/api/tauri', async (importOriginal) => {
@@ -129,6 +156,8 @@ describe('MainApp sessions_updated scheduling contract', () => {
     vi.useFakeTimers();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.eventHandlers.clear();
+    mocks.streamEventHandlers.clear();
+    mocks.pending.length = 0;
     mocks.unlisteners.length = 0;
     mocks.listen.mockClear();
     mocks.appWindow.onResized.mockClear();
@@ -258,5 +287,155 @@ describe('MainApp sessions_updated scheduling contract', () => {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
     expect(mocks.eventHandlers.get('sessions_updated')?.size ?? 0).toBe(0);
+  });
+});
+
+describe('MainApp StrictMode 异步监听注册竞态', () => {
+  // 事件名清单：每类都应只保留一个有效监听器。
+  const LISTENED_EVENTS = [
+    'sessions_updated',
+    'desktop_notification_open_session',
+    'browser:open',
+    'terminal:tab_updated',
+  ] as const;
+
+  function emitStreamDelta(messageId: string, text: string) {
+    for (const handler of mocks.streamEventHandlers) {
+      handler({ session_id: 'a', event: { type: 'delta', message_id: messageId, content: text } });
+    }
+  }
+
+  function emitStreamReasoning(messageId: string, text: string) {
+    for (const handler of mocks.streamEventHandlers) {
+      handler({ session_id: 'a', event: { type: 'reasoning', message_id: messageId, content: text } });
+    }
+  }
+
+  async function mountMainAppStrict() {
+    mocks.setDefer(true);
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <StrictMode>
+          <MainApp />
+        </StrictMode>,
+      );
+      await flushMicrotasks();
+    });
+  }
+
+  async function resolveAllPending() {
+    await act(async () => {
+      for (let i = 0; i < 40; i += 1) {
+        if (mocks.pending.length === 0) {
+          await flushMicrotasks();
+          if (mocks.pending.length === 0) break;
+        }
+        while (mocks.pending.length > 0) {
+          const entry = mocks.pending.pop()!;
+          entry.resolve(entry.unlisten);
+        }
+        await flushMicrotasks();
+      }
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    mocks.eventHandlers.clear();
+    mocks.streamEventHandlers.clear();
+    mocks.pending.length = 0;
+    mocks.unlisteners.length = 0;
+    mocks.setDefer(false);
+    mocks.listen.mockClear();
+    mocks.appWindow.onResized.mockClear();
+    mocks.api.onStreamEvent.mockClear();
+    mocks.api.getWorkspaceDir.mockClear();
+    mocks.api.getReasoningEffort.mockClear();
+    mocks.api.getReasoningEffort.mockResolvedValue('medium');
+    getSessionsMock.mockReset();
+    getSessionsMock.mockResolvedValue([session('a', 1)]);
+    useStore.setState({
+      ...initialState,
+      sessions: [session('a', 1)],
+      activeSessionId: 'a',
+      isNewConversation: false,
+    }, true);
+  });
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => root!.unmount());
+    }
+    root = null;
+    container?.remove();
+    container = null;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    mocks.setDefer(false);
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it('StrictMode 挂载→清理→再挂载后，每类事件最终只剩一个有效监听器', async () => {
+    await mountMainAppStrict();
+    // defer 模式下注册串行进行：每轮 effect 卡在首个 await（onStreamEvent）。
+    // StrictMode 挂载→清理→再挂载会跑两轮 effect，故至少有 2 个未 resolve 的注册。
+    // 此时第一轮 effect 已被清理，但注册尚未完成；resolve 后第一轮应在 guard 处放弃。
+    expect(mocks.pending.length).toBeGreaterThanOrEqual(2);
+
+    await resolveAllPending();
+
+    // stream_event（onStreamEvent）+ 4 个 listen 事件，每类恰好一个 handler。
+    // 第一轮的孤儿监听已被 guard 放弃时取消，不会重复消费。
+    expect(mocks.streamEventHandlers.size).toBe(1);
+    for (const eventName of LISTENED_EVENTS) {
+      expect(mocks.eventHandlers.get(eventName)?.size ?? 0).toBe(1);
+    }
+  });
+
+  it('一个后端流事件只被消费一次，正文与 reasoning 各追加一次', async () => {
+    await mountMainAppStrict();
+    await resolveAllPending();
+
+    const messageId = 'msg-1';
+    // 发送一次正文增量，flush 后应只追加一次。
+    act(() => emitStreamDelta(messageId, 'hello'));
+    await advance(16);
+    let message = useStore.getState().messages.find((item) => item.id === messageId);
+    expect(message?.content).toEqual([{ type: 'text', text: 'hello' }]);
+
+    // 再发一次 reasoning 增量，只追加一次。
+    act(() => emitStreamReasoning(messageId, 'thinking'));
+    await advance(16);
+    message = useStore.getState().messages.find((item) => item.id === messageId);
+    expect(message?.reasoning_content).toBe('thinking');
+  });
+
+  it('卸载后所有迟到的 unlisten 都被调用，且再发事件不改变状态', async () => {
+    await mountMainAppStrict();
+    await resolveAllPending();
+    const registeredUnlisteners = [...mocks.unlisteners];
+
+    await act(async () => root!.unmount());
+    root = null;
+
+    // 卸载后再发送事件，store 状态不应变化（无遗留监听）。
+    const before = useStore.getState().messages.length;
+    act(() => emitStreamDelta('late-msg', 'late'));
+    await advance(16);
+    expect(useStore.getState().messages.length).toBe(before);
+
+    // 第一轮的迟到 unlisten 在 guard 放弃时被立即调用；第二轮在 cleanup 中释放。
+    // 每个注册产生的 unlisten 至少被调用一次。
+    for (const unlisten of registeredUnlisteners) {
+      expect(unlisten).toHaveBeenCalled();
+    }
+    expect(mocks.streamEventHandlers.size).toBe(0);
+    for (const eventName of LISTENED_EVENTS) {
+      expect(mocks.eventHandlers.get(eventName)?.size ?? 0).toBe(0);
+    }
   });
 });
