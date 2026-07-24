@@ -11,7 +11,6 @@
 //! - [`Plugin::on_session_ended`]：finalize Session 索引。
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 
 use crate::index::{IndexManager, TurnData};
@@ -96,7 +95,7 @@ impl IndexPlugin {
         let Some(cwd) = self.workspace() else {
             return false;
         };
-        self.with_index_manager(|im| im.is_scanning(&cwd))
+        self.with_index_manager(|im| im.is_workspace_scanning(&cwd))
             .unwrap_or(false)
     }
 
@@ -114,8 +113,8 @@ impl IndexPlugin {
     /// - 索引新鲜：跳过。
     ///
     /// 仅在索引已存在（复用）时同步置位 `last_scanned`；后台扫描完成前由 manager 的
-    /// per-root scanning flag 守护，扫描完成后 `workspace_index_exists` 变 true，
-    /// 后续 `set_workspace` 走复用路径置位 `last_scanned`。
+    /// 扫描许可守护，扫描完成后 `workspace_index_exists` 变 true，后续 `set_workspace`
+    /// 走复用路径置位 `last_scanned`。
     fn full_scan_workspace(&self, cwd: &str) {
         let root = PathBuf::from(cwd);
         if !root.is_dir() {
@@ -143,28 +142,30 @@ impl IndexPlugin {
 
     /// 后台扫描工作区（首次扫描 / 过期重建共用）。
     ///
-    /// 经共享 manager 的 per-root scanning flag 保证同一 root 同一时刻只有一个
-    /// 后台扫描；进入前 `swap` 置位，线程结束（成功或失败）后复位。不在线程内写
-    /// `last_scanned`：扫描完成后 `workspace_index_exists` 变 true，后续
-    /// `set_workspace` 走复用路径置位。
+    /// 扫描去重经共享 manager 的 [`IndexManager::try_begin_workspace_scan`] 取得许可：
+    /// 拿到 permit 才 spawn 线程，线程内持有 permit 直到 `full_scan` 返回（成功或失败）
+    /// 后随 permit drop 自动复位——无需手动 `store`。同一 root 已有扫描在进行时返回
+    /// `None`，直接跳过。
     fn spawn_background_scan(&self, root: PathBuf) {
         let Some(im) = self.index_manager() else {
             tracing::warn!("Workspace 索引后台扫描跳过：IndexManager 未初始化");
             return;
         };
-        let scanning = im.scanning_flag_for(&root);
-        // swap 返回旧值；已 true 表示该 root 有扫描在进行，直接返回。
-        if scanning.swap(true, Ordering::SeqCst) {
+        let Some(permit) = im.try_begin_workspace_scan(&root) else {
+            tracing::debug!(
+                workspace = %root.display(),
+                "Workspace 索引已有后台扫描在进行，跳过本次"
+            );
             return;
-        }
+        };
         tracing::info!(workspace = %root.display(), "Workspace 索引后台扫描启动");
         std::thread::spawn(move || {
-            let result = im.full_scan(&root);
-            match result {
+            // permit 持有期间状态保持占用；drop（含 panic 展开）时自动复位。
+            let _permit = permit;
+            match im.full_scan(&root) {
                 Ok(count) => tracing::info!(count, "Workspace 索引后台扫描完成"),
                 Err(e) => tracing::warn!("Workspace 索引后台扫描失败: {e}"),
             }
-            scanning.store(false, Ordering::SeqCst);
         });
     }
 }
@@ -198,7 +199,7 @@ impl Plugin for IndexPlugin {
                 .map(|g| g.as_ref() == Some(root))
                 .unwrap_or(false);
             let scanning = self
-                .with_index_manager(|im| im.is_scanning(root))
+                .with_index_manager(|im| im.is_workspace_scanning(root))
                 .unwrap_or(false);
             if !already_scanned && !scanning {
                 self.full_scan_workspace(&root.display().to_string());
@@ -222,7 +223,7 @@ impl Plugin for IndexPlugin {
         let root = PathBuf::from(&session.cwd);
         if root.is_dir() {
             let scanning = self
-                .with_index_manager(|im| im.is_scanning(&root))
+                .with_index_manager(|im| im.is_workspace_scanning(&root))
                 .unwrap_or(false);
             if scanning {
                 return;
@@ -328,7 +329,7 @@ mod tests {
         );
     }
 
-    /// 不存在的目录应直接返回且不触发后台扫描（manager scanning flag 不被置位）。
+    /// 不存在的目录应直接返回且不触发后台扫描（扫描许可不被占用）。
     #[test]
     fn full_scan_workspace_skips_missing_dir() {
         let temp = tempfile::tempdir().expect("create tempdir");
@@ -340,25 +341,32 @@ mod tests {
         assert!(!plugin.is_scanning(), "不存在的目录不应启动后台扫描");
     }
 
-    /// 重复对同一根目录发起后台扫描，per-root scanning flag 应阻止并发 spawn。
+    /// 重复对同一根目录发起后台扫描，扫描许可应阻止并发 spawn。
+    ///
+    /// 该测试直接经 manager 持有扫描许可，不依赖 set_workspace 的扫描触发
+    /// （后者涉及磁盘索引目录匹配，与测试用的临时 base_dir 不一致）。
     #[test]
     fn spawn_background_scan_is_idempotent_while_scanning() {
         let temp = tempfile::tempdir().expect("create tempdir");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::write(workspace.join("lib.rs"), "pub fn demo() {}\n").unwrap();
 
         let manager = shared_manager(&temp);
-        // 手动置位该 root 的 flag，模拟扫描进行中。
-        let flag = manager.scanning_flag_for(&workspace);
-        flag.store(true, Ordering::SeqCst);
-        // set_workspace 在扫描中应跳过 full_scan_workspace（不 panic、不重复 spawn）。
-        let plugin = IndexPlugin::from_index_manager(Some(manager));
-        plugin.set_workspace(Some(&workspace));
-        assert!(plugin.is_scanning());
+        // 持有扫描许可模拟扫描进行中：后续 try_begin 应返回 None。
+        let _permit = manager
+            .try_begin_workspace_scan(&workspace)
+            .expect("首次应取得扫描许可");
+        assert!(
+            manager.try_begin_workspace_scan(&workspace).is_none(),
+            "扫描进行中再次取许可应返回 None"
+        );
+        assert!(manager.is_workspace_scanning(&workspace));
     }
 
-    /// 两个 IndexPlugin 共享同一 manager 时，A 的后台扫描对 B 可见（跨 plugin 降级一致）。
+    /// 两个 IndexPlugin 共享同一 manager 时，A 占用的扫描许可对 B 可见（跨 plugin 降级一致）。
+    ///
+    /// 直接经 manager 占用扫描许可（不依赖 set_workspace 的扫描逻辑与磁盘索引目录），
+    /// 断言两个注入相同 manager 的 plugin 查询同一 root 都看到「正在扫描」。
     #[test]
     fn shared_manager_propagates_scanning_across_plugins() {
         let temp = tempfile::tempdir().expect("create tempdir");
@@ -366,15 +374,16 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
 
         let manager = shared_manager(&temp);
+        // 先占用扫描许可（模拟后台扫描进行中），使后续 set_workspace 检测到扫描而跳过，
+        // 避免测试自身的后台扫描与本许可竞争。
+        let _permit = manager
+            .try_begin_workspace_scan(&workspace)
+            .expect("取得扫描许可");
         let plugin_a = IndexPlugin::from_index_manager(Some(manager.clone()));
         let plugin_b = IndexPlugin::from_index_manager(Some(manager.clone()));
         plugin_a.set_workspace(Some(&workspace));
         plugin_b.set_workspace(Some(&workspace));
 
-        // A 置位该 root 的扫描标志，B 查询同一 root 应看到 true。
-        manager
-            .scanning_flag_for(&workspace)
-            .store(true, Ordering::SeqCst);
         assert!(plugin_a.is_scanning(), "plugin_a 应看到正在扫描");
         assert!(
             plugin_b.is_scanning(),

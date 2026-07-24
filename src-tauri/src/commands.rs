@@ -3735,7 +3735,8 @@ pub async fn rebuild_workspace_index(root: String) -> Result<usize, String> {
 /// 预热指定路径的 Workspace 索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）。
 ///
 /// 使用 app 层共享 IndexManager，与各 Core 的 IndexPlugin 共享同一 per-root mutex
-/// 与扫描标志，避免预热与插件后台扫描并发时的目录锁竞争。
+/// 与扫描许可，避免预热与插件后台扫描并发时的目录锁竞争。扫描去重经
+/// `try_begin_workspace_scan` 取得的许可统一管理，drop 时自动复位。
 #[tauri::command]
 pub async fn prewarm_workspace_index(
     root: String,
@@ -3746,19 +3747,18 @@ pub async fn prewarm_workspace_index(
         return Ok(());
     }
     let manager = state.desktop_factory.index_manager.clone();
-    // 经共享 manager 的 per-root scanning flag 去重：已在扫描则直接返回。
-    let scanning = manager.scanning_flag_for(&root);
-    if scanning.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    // 经扫描许可去重：已有扫描在进行（预热或插件后台扫描）则直接返回。
+    let Some(permit) = manager.try_begin_workspace_scan(&root) else {
         return Ok(());
-    }
+    };
     tracing::info!(workspace = %root.display(), "Workspace 索引预热启动（共享 manager）");
     tokio::task::spawn_blocking(move || {
-        let result = manager.full_scan(&root);
-        match result {
+        // permit 持有期间状态保持占用；drop（含 panic 展开）时自动复位。
+        let _permit = permit;
+        match manager.full_scan(&root) {
             Ok(count) => tracing::info!(count, "Workspace 索引预热完成"),
             Err(e) => tracing::warn!("Workspace 索引预热失败: {e}"),
         }
-        scanning.store(false, std::sync::atomic::Ordering::SeqCst);
     });
     Ok(())
 }
