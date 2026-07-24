@@ -28,6 +28,11 @@ pub fn describe_output() -> Value {
                 "env": "TIANGONG_BOT_WEIXIN_TOKEN",
                 "help": "可选，仅用于手工配置已有 iLink bot_token"
             }
-        ]
+        ],
+        "capabilities": {
+            "mcp": {
+                "protocol_version": 1
+            }
+        }
     })
 }

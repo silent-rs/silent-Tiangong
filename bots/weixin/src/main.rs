@@ -4,6 +4,7 @@
 //! 再把天工返回的文本回复发送回微信。
 
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +18,10 @@ use tracing_subscriber::EnvFilter;
 
 mod crypto;
 mod ilink;
+mod mcp;
 mod provision;
 mod schema;
+mod target_store;
 
 const POLL_ERROR_BACKOFF: Duration = Duration::from_secs(5);
 const RECENT_MESSAGE_LIMIT: usize = 1024;
@@ -199,7 +202,10 @@ struct BotReply {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match std::env::args().nth(1).as_deref() {
+    // 管理命令必须在日志和常驻运行初始化前处理，stdout 只输出协议 JSON。
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let mode = arguments.first().map(String::as_str);
+    match mode {
         Some("--describe") => {
             println!("{}", serde_json::to_string(&schema::describe_output())?);
             return Ok(());
@@ -215,6 +221,30 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        Some("--push-target-list") => {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "targets": target_store::list_views()?
+                }))?
+            );
+            return Ok(());
+        }
+        Some("--push-target-set-enabled") => {
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .context("读取推送目标授权请求失败")?;
+            let request: target_store::SetTargetEnabledRequest =
+                serde_json::from_str(&input).context("解析推送目标授权请求失败")?;
+            let target = target_store::set_enabled(&request.target_id, request.enabled)?;
+            println!("{}", serde_json::to_string(&target)?);
+            return Ok(());
+        }
+        Some("--mcp") if arguments.get(1).map(String::as_str) == Some("generate") => {
+            println!("{}", serde_json::to_string(&mcp::registration_config()?)?);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -222,6 +252,10 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
         .with_writer(std::io::stderr)
         .init();
+
+    if mode == Some("--mcp") {
+        return mcp::serve().await;
+    }
 
     let credentials = provision::load_credentials()?;
     let tiangong_url =
@@ -400,6 +434,16 @@ async fn handle_message(
         return Ok(());
     }
     let channel_id = stable_channel_id(message);
+    let target_kind = if message.group_id.trim().is_empty() {
+        "direct"
+    } else {
+        "group"
+    };
+    if let Err(error) =
+        target_store::upsert_discovered(channel_id, sender_id, target_kind, context_token)
+    {
+        tracing::warn!("更新微信推送目标失败: {error}");
+    }
 
     let text = message.text_content();
     let mut images = Vec::new();

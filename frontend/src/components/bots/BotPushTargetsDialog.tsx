@@ -92,12 +92,16 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
             </div>
           ) : targets.length === 0 ? (
             <div className="flex min-h-56 items-center justify-center px-6 text-center text-sm text-muted-foreground">
-              暂无已发现的飞书会话
+              暂无已发现的推送目标
             </div>
           ) : (
             <div className="divide-y">
               {targets.map((target) => {
                 const isUpdating = updating.has(target.target_id);
+                const canChangeEnabled =
+                  target.enabled ||
+                  target.availability === 'ready' ||
+                  target.availability === 'reply_window';
                 return (
                   <div
                     key={target.target_id}
@@ -109,9 +113,11 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
                         <Badge variant="outline">
                           {target.kind === 'group' ? '群聊' : '私聊'}
                         </Badge>
-                        {target.availability !== 'ready' && (
+                        {target.availability === 'reply_window' ? (
+                          <Badge variant="secondary">回复窗口</Badge>
+                        ) : target.availability !== 'ready' ? (
                           <Badge variant="secondary">暂不可用</Badge>
-                        )}
+                        ) : null}
                       </div>
                       <div className="mt-1 truncate text-xs text-muted-foreground">
                         最近使用：{target.last_seen_at}
@@ -119,7 +125,7 @@ export function BotPushTargetsDialog({ botId, botName, onClose }: Props) {
                     </div>
                     <Switch
                       checked={target.enabled}
-                      disabled={isUpdating || target.availability !== 'ready'}
+                      disabled={isUpdating || !canChangeEnabled}
                       onCheckedChange={(enabled) => void setEnabled(target, enabled)}
                       aria-label={`${target.enabled ? '停用' : '启用'} ${target.label}`}
                     />
