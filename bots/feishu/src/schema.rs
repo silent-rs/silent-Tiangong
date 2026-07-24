@@ -36,6 +36,11 @@ pub fn describe_output() -> Value {
                 "env": "TIANGONG_BOT_FEISHU_APP_SECRET",
                 "help": "可选，仅用于手工配置已有飞书应用"
             }
-        ]
+        ],
+        "capabilities": {
+            "mcp": {
+                "protocol_version": 1
+            }
+        }
     })
 }

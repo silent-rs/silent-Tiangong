@@ -11,6 +11,7 @@
 //! - `TIANGONG_TOKEN`（可选，embedded server 认证 token）
 
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +27,10 @@ use tokio::sync::{Mutex, Notify};
 use tracing_subscriber::EnvFilter;
 
 mod gateway;
+mod mcp;
 mod provision;
 mod schema;
+mod target_store;
 mod token;
 
 use gateway::{DispatchEvent, GatewayRunner, INTENT_GROUP_AND_C2C_EVENT};
@@ -283,7 +286,9 @@ struct QqAttachment {
 #[tokio::main]
 async fn main() -> Result<()> {
     // 管理命令必须在日志和常驻运行初始化前处理，stdout 只输出协议 JSON。
-    match std::env::args().nth(1).as_deref() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let mode = arguments.first().map(String::as_str);
+    match mode {
         Some("--describe") => {
             println!("{}", serde_json::to_string(&schema::describe_output())?);
             return Ok(());
@@ -299,6 +304,36 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        Some("--push-target-list") => {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "targets": target_store::list_enabled_views()?
+                }))?
+            );
+            return Ok(());
+        }
+        Some("--push-target-delete") => {
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .context("读取推送目标删除请求失败")?;
+            let request: target_store::DeleteTargetRequest =
+                serde_json::from_str(&input).context("解析推送目标删除请求失败")?;
+            target_store::delete(&request.target_id)?;
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "target_id": request.target_id,
+                    "deleted": true
+                }))?
+            );
+            return Ok(());
+        }
+        Some("--mcp") if arguments.get(1).map(String::as_str) == Some("generate") => {
+            println!("{}", serde_json::to_string(&mcp::registration_config()?)?);
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -306,6 +341,10 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
         .with_writer(std::io::stderr)
         .init();
+
+    if mode == Some("--mcp") {
+        return mcp::serve().await;
+    }
 
     let credentials = provision::load_credentials()?;
     let tiangong_url =
@@ -407,6 +446,10 @@ async fn handle_group_message(state: &Arc<BotState>, data: Value, seq: Option<u6
     } else {
         message.author.user_openid.as_str()
     };
+    if let Err(error) = target_store::upsert_discovered("group", &message.group_openid, message_id)
+    {
+        tracing::warn!("更新 QQ 群聊推送目标失败: {error}");
+    }
     if !state
         .recent_messages
         .lock()
@@ -459,6 +502,9 @@ async fn handle_c2c_message(state: &Arc<BotState>, data: Value, seq: Option<u64>
         return Ok(());
     }
     let channel_id = format!("c2c:{user_openid}");
+    if let Err(error) = target_store::upsert_discovered("direct", &user_openid, message_id) {
+        tracing::warn!("更新 QQ 私聊推送目标失败: {error}");
+    }
     if !state
         .recent_messages
         .lock()

@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-qq"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工 QQ bot 制品——通过 QQ 开放平台 WebSocket 网关接收 QQ 消息并转发到天工"
@@ -28,6 +28,11 @@ url = "2"
 futures-util = "0.3"
 md-5 = "0.10"
 sha1 = "0.10"
+sha2 = "0.10"
+fs2 = "0.4"
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+scru128 = "4"
 
 [profile.release]
 opt-level = 3

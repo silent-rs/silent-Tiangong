@@ -73,6 +73,11 @@ pub fn bot_schema_path(id: &BotId) -> PathBuf {
     bot_runtime_dir(id).join("schema.json")
 }
 
+/// bot 完整描述缓存路径：`~/.tiangong/bots/<id>/description.json`。
+pub fn bot_description_path(id: &BotId) -> PathBuf {
+    bot_runtime_dir(id).join("description.json")
+}
+
 /// bot 已安装版本记录路径：`~/.tiangong/bots/<id>/version.json`。
 ///
 /// install/upgrade 成功后写入，用于检查更新时对比线上版本。

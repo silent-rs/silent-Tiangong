@@ -36,6 +36,11 @@ pub fn describe_output() -> Value {
                 "env": "TIANGONG_BOT_QQ_APP_SECRET",
                 "help": "可选，仅用于手工配置已有 QQ 机器人的 ClientSecret"
             }
-        ]
+        ],
+        "capabilities": {
+            "mcp": {
+                "protocol_version": 1
+            }
+        }
     })
 }

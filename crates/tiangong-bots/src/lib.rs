@@ -26,7 +26,9 @@ pub mod supervisor;
 pub mod version;
 
 pub use config::{
-    BotConfig, BotsConfig, ConfigFieldSchema, FieldType, RegisterBotRequest, UpdateBotRequest,
+    BotCapabilities, BotConfig, BotDescription, BotMcpCapability, BotMcpConfig, BotsConfig,
+    ConfigFieldSchema, FieldType, PushTargetList, PushTargetView, RegisterBotRequest,
+    UpdateBotRequest,
 };
 pub use downloader::{Downloader, ProgressFn};
 pub use id::{BotId, InvalidBotId};
@@ -35,7 +37,8 @@ pub use management::BotStore;
 pub use manifest::{BotArtifact, BotManifest, BotsIndex, current_platform_key};
 pub use provision::{ProvisionStatus, QrSession};
 pub use runtime::{
-    BotHealth, BotRuntime, LocalArtifact, bot_env, cached_schema, describe_and_cache,
+    BotHealth, BotRuntime, LocalArtifact, bot_env, cached_description, cached_schema,
+    describe_and_cache,
 };
 pub use store::{AuditEntry, append_audit_log, atomic_write, load_bots_config, write_bots_config};
 pub use supervisor::SupervisedBot;

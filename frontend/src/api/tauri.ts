@@ -415,6 +415,17 @@ export interface LocalArtifact {
   artifact_id: string;
   version: string;
   config_schema: ConfigFieldSchema[];
+  supports_mcp: boolean;
+}
+
+export interface BotPushTarget {
+  target_id: string;
+  label: string;
+  kind: 'direct' | 'group' | string;
+  enabled: boolean;
+  availability: 'ready' | 'reply_window' | 'unavailable' | 'unknown' | string;
+  last_seen_at: string;
+  limitation?: string;
 }
 
 export interface QrSession {
@@ -854,6 +865,15 @@ export const api = {
 
   botScanLocal: (): Promise<LocalArtifact[]> =>
     invoke('bot_scan_local'),
+
+  botPushTargets: (id: string): Promise<BotPushTarget[]> =>
+    invoke('bot_push_targets', { id }),
+
+  botDeletePushTarget: (id: string, targetId: string): Promise<string> =>
+    invoke('bot_delete_push_target', { id, targetId }),
+
+  botRegisterMcp: (id: string): Promise<string> =>
+    invoke('bot_register_mcp', { id }),
 
   botRegister: (request: RegisterBotRequest): Promise<BotConfig> =>
     invoke('bot_register', { request }),

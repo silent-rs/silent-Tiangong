@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-feishu"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工飞书 bot 制品——WebSocket 长连接接收飞书消息并转发到天工"
@@ -26,6 +26,11 @@ anyhow = "1"
 base64 = "0.22"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+fs2 = "0.4"
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+scru128 = "4"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

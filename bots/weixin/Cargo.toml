@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-bot-weixin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "天工微信 bot 制品——基于腾讯 iLink 协议长轮询接收微信消息并转发到天工"
@@ -26,6 +26,10 @@ rand = "0.8"
 scru128 = "4"
 hex = "0.4"
 md5 = "0.8"
+fs2 = "0.4"
+rmcp = { version = "=2.0.0", default-features = false, features = ["server", "macros", "transport-io"] }
+schemars = "1"
+sha2 = "0.10"
 # iLink 媒体加解密使用 AES-128-ECB
 aes = "0.8"
 ecb = "0.1"

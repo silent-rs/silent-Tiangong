@@ -15,6 +15,7 @@ import {
   Download,
   FileText,
   Loader2,
+  MessageSquareText,
   Play,
   RefreshCw,
   Settings as SettingsIcon,
@@ -25,6 +26,7 @@ import {
 import { useToast } from '../Toast';
 import { BotFormDialog } from './BotFormDialog';
 import { BotLogDialog } from './BotLogDialog';
+import { BotPushTargetsDialog } from './BotPushTargetsDialog';
 
 /** 已安装或已配置的 Bot 条目。 */
 interface BotEntry {
@@ -51,6 +53,7 @@ export function BotPanel() {
   const [formArtifact, setFormArtifact] = useState<LocalArtifact | null>(null);
   const [formBot, setFormBot] = useState<BotConfig | null>(null);
   const [logBotId, setLogBotId] = useState<string | null>(null);
+  const [pushTargetBot, setPushTargetBot] = useState<{ id: string; name: string } | null>(null);
 
   // 检查更新中状态。
   const [checking, setChecking] = useState<Record<string, boolean>>({});
@@ -67,7 +70,6 @@ export function BotPanel() {
       const local = localResult.status === 'fulfilled' ? localResult.value : [];
       const bots = botsResult.status === 'fulfilled' ? botsResult.value : [];
       const manifests = onlineResult.status === 'fulfilled' ? onlineResult.value.bots : [];
-
       if (localResult.status === 'rejected') {
         console.error('扫描本地 Bot 失败:', localResult.reason);
         showError('加载 Bot 失败', String(localResult.reason));
@@ -200,13 +202,26 @@ export function BotPanel() {
     }
   };
 
-  const handleStart = async (bot: BotConfig, name: string) => {
+  const handleStart = async (bot: BotConfig, name: string, supportsMcp: boolean) => {
+    let started = false;
     try {
       await api.botStart(bot.id);
+      started = true;
+      if (supportsMcp) await api.botRegisterMcp(bot.id);
       showSuccess('已启动', `“${name}”已启动`);
-      load();
+      await load();
     } catch (err) {
-      showError('启动失败', String(err));
+      let detail = String(err);
+      if (started) {
+        try {
+          await api.botStop(bot.id);
+          detail = `${detail}；Bot 已自动停止`;
+        } catch (stopErr) {
+          detail = `${detail}；自动停止失败：${String(stopErr)}`;
+        }
+      }
+      showError('启动失败', detail);
+      await load();
     }
   };
 
@@ -317,7 +332,7 @@ export function BotPanel() {
                           {description}
                         </div>
                       </div>
-                      <div className="col-span-2 flex shrink-0 items-center justify-end gap-1 sm:col-span-1">
+                      <div className="col-span-2 flex flex-wrap items-center justify-end gap-1 sm:col-span-1">
                         {!bot && entry.local && (
                           <Button
                             size="sm"
@@ -362,7 +377,9 @@ export function BotPanel() {
                                 size="icon"
                                 variant="ghost"
                                 className="h-5 w-5 rounded-none p-0 text-emerald-500 hover:bg-transparent hover:text-emerald-400"
-                                onClick={() => handleStart(bot, displayName)}
+                                onClick={() =>
+                                  handleStart(bot, displayName, entry.local!.supports_mcp)
+                                }
                                 title="启动"
                                 aria-label={`启动 ${displayName} 并设为自动运行`}
                               >
@@ -390,6 +407,20 @@ export function BotPanel() {
                             >
                               <FileText className="h-4 w-4" />
                             </Button>
+                            {entry.local.supports_mcp && (
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-9 w-9"
+                                onClick={() =>
+                                  setPushTargetBot({ id: bot.id, name: displayName })
+                                }
+                                title="管理推送授权"
+                                aria-label={`管理 ${displayName} 推送授权`}
+                              >
+                                <MessageSquareText className="h-4 w-4" />
+                              </Button>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"
@@ -492,6 +523,14 @@ export function BotPanel() {
       )}
 
       {logBotId && <BotLogDialog botId={logBotId} onClose={() => setLogBotId(null)} />}
+
+      {pushTargetBot && (
+        <BotPushTargetsDialog
+          botId={pushTargetBot.id}
+          botName={pushTargetBot.name}
+          onClose={() => setPushTargetBot(null)}
+        />
+      )}
     </div>
   );
 }

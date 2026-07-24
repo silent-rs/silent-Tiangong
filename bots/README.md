@@ -29,11 +29,16 @@ Bot 可以使用任意语言实现，但最终必须提供当前系统可直接�
       "required": true,
       "env": "EXAMPLE_BOT_API_TOKEN"
     }
-  ]
+  ],
+  "capabilities": {
+    "mcp": { "protocol_version": 1 }
+  }
 }
 ```
 
 `artifact_id` 必须以小写英文字母开头，只包含小写英文字母和数字，总长 1～64 位。字段类型支持 `string`、`secret`、`boolean`、`barcode` 和带 `options` 的 `select`。
+
+`capabilities.mcp` 是可选能力。未声明时，移动端控制页不会显示 MCP 快速注册按钮。
 
 ### 正常运行
 
@@ -62,6 +67,29 @@ Bot 应正确处理 `SIGTERM`/`SIGINT` 并退出。运行日志写 stdout 或 st
 - `--provision-begin`：在 stdout 返回 `qr_url`、Unix 秒级 `expires_at`、秒级 `interval` 和 Bot 自用的 `state`。
 - `--provision-poll`：从 stdin 读取上一条扫码会话 JSON，在 stdout 返回 `pending`、`success`、`expired` 或带 `message` 的 `error`。
 - 扫码所得凭证由 Bot 自行保存，天工不读取凭证明文。
+
+### 可选 MCP 协议
+
+声明 `capabilities.mcp` 的 Bot 必须支持两个命令：
+
+- `--mcp generate`：stdout 只输出普通 MCP 注册 JSON 后退出。
+- `--mcp`：通过 stdin/stdout 运行 MCP stdio 服务，普通日志只写 stderr。
+
+生成配置示例：
+
+```json
+{
+  "schema_version": 1,
+  "name": "bot-examplebot",
+  "transport": "stdio",
+  "command": "/home/user/.tiangong/bots/examplebot/bot",
+  "args": ["--mcp"],
+  "enabled": true,
+  "tags": ["bot-outbound"]
+}
+```
+
+`name` 必须为 `bot-<bot-id>`，`command` 必须是当前 Bot 自身的真实路径，`transport` 必须为 `stdio`，`args` 必须为 `["--mcp"]`，`enabled` 必须为 `true`。主程序会在注册前再次校验这些字段。
 
 ## 目录结构
 

@@ -649,6 +649,9 @@ fn run_gui() {
             tiangong_app::commands::bot_provision_poll,
             tiangong_app::commands::bot_available,
             tiangong_app::commands::bot_scan_local,
+            tiangong_app::commands::bot_push_targets,
+            tiangong_app::commands::bot_delete_push_target,
+            tiangong_app::commands::bot_register_mcp,
             tiangong_app::commands::bot_register,
             tiangong_app::commands::bot_update,
             tiangong_app::commands::bot_remove,
@@ -795,6 +798,41 @@ async fn auto_start_server_and_bots(app: tauri::AppHandle) {
     if has_enabled_bot {
         let extra_env = tiangong_app::commands::bot_server_env(&config);
         state.bot_runtime.start_enabled(&extra_env).await;
+        for bot in state.bot_store.list().into_iter().filter(|bot| bot.enabled) {
+            if !matches!(
+                state.bot_runtime.health(&bot.id).await,
+                tiangong_bots::BotHealth::Running
+            ) {
+                continue;
+            }
+            if let Err(register_error) =
+                tiangong_app::commands::ensure_bot_mcp_registered(&bot.id, state.inner()).await
+            {
+                warn!(
+                    bot_id = %bot.id,
+                    error = %register_error,
+                    "bot 自动启动后注册 MCP 失败，正在停止 bot"
+                );
+                match state.bot_runtime.stop(&bot.id).await {
+                    Ok(()) => {
+                        if let Err(save_error) = state.bot_store.set_enabled(&bot.id, false) {
+                            warn!(
+                                bot_id = %bot.id,
+                                error = %save_error,
+                                "bot 已停止，但保存停止状态失败"
+                            );
+                        }
+                    }
+                    Err(stop_error) => {
+                        warn!(
+                            bot_id = %bot.id,
+                            error = %stop_error,
+                            "MCP 注册失败后停止 bot 失败"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
