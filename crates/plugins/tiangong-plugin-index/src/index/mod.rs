@@ -626,74 +626,92 @@ mod tests {
         );
     }
 
-    /// 删除工作区索引后，共享 manager 的内存缓存应被清理（修复 cache-key 不匹配）。
+    /// 删除工作区索引后，共享 manager 的内存缓存被清理、磁盘目录被删除。
     ///
-    /// 回归覆盖：原 `delete_workspace_index` 仅传 `workspace_id`（hash_path），而缓存
-    /// 以 `workspace_key(root)`（canonicalize）为键，键不匹配导致 `workspaces.remove`
-    /// 无法清理——删除后进程内仍使用旧 `WorkspaceIndex` 对象。修复后传 `(root,
-    /// workspace_id)`，缓存按 root 正确移除。
+    /// 用测试 manager 实际的 base_dir 定位磁盘目录（而非 `workspace_index_exists`，
+    /// 后者检查用户默认目录，与测试临时目录无关），并用 `Arc::ptr_eq` 确认删除后
+    /// 返回的是全新对象而非旧缓存——这是缓存清理测试最关键的断言。
     #[test]
-    fn delete_workspace_index_clears_in_memory_cache() {
+    fn delete_workspace_index_clears_cache_and_disk_index() {
         use crate::index::workspace_index;
         let temp = tempfile::tempdir().expect("create tempdir");
-        let manager =
-            Arc::new(IndexManager::new_with_dir(temp.path().join("index")).expect("manager"));
-        let root = temp.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join("lib.rs"),
-            "pub fn demo() {}
-",
-        )
-        .unwrap();
+        let base_dir = temp.path().join("index");
+        let manager = Arc::new(IndexManager::new_with_dir(base_dir.clone()).expect("manager"));
 
-        // 建索引使 manager 缓存中存在该 root 的 WorkspaceIndex。
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).expect("create workspace");
+        std::fs::write(root.join("lib.rs"), "pub fn demo() {}\n").expect("write source file");
+
+        // 首次建索引，并保存缓存对象。
         let count = manager.full_scan(&root).expect("full_scan");
         assert_eq!(count, 1);
-        let workspace_id = workspace_index::hash_path(&root);
+        let old_index = manager
+            .get_or_create_workspace_index(&root)
+            .expect("get old index");
 
-        // 删除应同时清理内存缓存与磁盘目录。
+        let workspace_id = workspace_index::hash_path(&root);
+        let workspace_dir = base_dir.join("workspaces").join(&workspace_id);
+        let tantivy_dir = workspace_dir.join("tantivy");
+        // 删除前确认磁盘目录确实存在（避免测试因目录本就不存在而误通过）。
+        assert!(workspace_dir.is_dir(), "删除前工作区索引目录应存在");
+        assert!(tantivy_dir.is_dir(), "删除前 Tantivy 索引目录应存在");
+
+        // 删除索引。
         manager
             .delete_workspace_index(&root, &workspace_id)
-            .expect("delete");
+            .expect("delete index");
 
-        // 内存缓存应已移除：再次 get_or_create 应得到全新对象（而非旧缓存）。
+        // 确认测试 manager 实际使用的磁盘目录已删除。
+        assert!(!workspace_dir.exists(), "删除后工作区索引目录不应存在");
+
+        // 再次获取时必须创建新的对象，不能返回旧缓存。
+        let new_index = manager
+            .get_or_create_workspace_index(&root)
+            .expect("recreate index");
         assert!(
-            manager.get_or_create_workspace_index(&root).is_ok(),
-            "删除后可重新创建索引对象"
+            !Arc::ptr_eq(&old_index, &new_index),
+            "删除后不应继续返回旧的缓存对象"
         );
-        // 磁盘目录应已删除（workspace_index_exists 检查磁盘）。
-        assert!(!workspace_index_exists(&root), "磁盘索引目录应已删除");
     }
 
-    /// root 与 workspace_id 不一致时拒绝删除（防御性校验）。
+    /// root 与 workspace_id 不一致时拒绝删除（防御性校验），且校验失败完全无副作用：
+    /// 不删除正确的磁盘目录，也不清理正确的缓存对象。
     #[test]
     fn delete_workspace_index_rejects_mismatched_id() {
         use crate::index::workspace_index;
         let temp = tempfile::tempdir().expect("create tempdir");
-        let manager =
-            Arc::new(IndexManager::new_with_dir(temp.path().join("index")).expect("manager"));
+        let base_dir = temp.path().join("index");
+        let manager = Arc::new(IndexManager::new_with_dir(base_dir.clone()).expect("manager"));
+
         let root = temp.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join("lib.rs"),
-            "pub fn demo() {}
-",
-        )
-        .unwrap();
+        std::fs::create_dir_all(&root).expect("create workspace");
+        std::fs::write(root.join("lib.rs"), "pub fn demo() {}\n").expect("write source file");
         manager.full_scan(&root).expect("full_scan");
 
-        // 用错误的 workspace_id 删除应报错，不触及磁盘目录。
-        let wrong_id = "deadbeefdeadbeef";
-        let err = manager.delete_workspace_index(&root, wrong_id).unwrap_err();
+        let old_index = manager
+            .get_or_create_workspace_index(&root)
+            .expect("get old index");
+        let correct_id = workspace_index::hash_path(&root);
+        let workspace_dir = base_dir.join("workspaces").join(&correct_id);
+        assert!(workspace_dir.is_dir(), "删除前工作区索引目录应存在");
+
+        // 用错误的 workspace_id 删除应报错。
+        let err = manager
+            .delete_workspace_index(&root, "deadbeefdeadbeef")
+            .expect_err("mismatched id should fail");
         assert!(
             err.to_string().contains("不匹配"),
             "应拒绝不匹配的 workspace_id，实际错误: {err}"
         );
-        // 正确的 id 仍可删除。
-        let correct_id = workspace_index::hash_path(&root);
-        manager
-            .delete_workspace_index(&root, &correct_id)
-            .expect("正确 id 应删除成功");
+
+        // 校验失败不应删除正确的磁盘目录，也不应清理正确的缓存对象。
+        assert!(workspace_dir.is_dir(), "错误请求不应删除正确索引目录");
+        let current_index = manager
+            .get_or_create_workspace_index(&root)
+            .expect("get cached index");
+        assert!(
+            Arc::ptr_eq(&old_index, &current_index),
+            "错误请求不应清理正确的缓存对象"
+        );
     }
 }
