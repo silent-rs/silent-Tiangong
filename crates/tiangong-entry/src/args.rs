@@ -530,12 +530,6 @@ pub(crate) enum BotSubcommand {
         /// bot 实例 ID
         #[arg(help = "bot 实例 ID")]
         id: String,
-        /// 启用 bot
-        #[arg(long, conflicts_with = "disable", help = "启用 bot")]
-        enable: bool,
-        /// 禁用 bot
-        #[arg(long, conflicts_with = "enable", help = "禁用 bot")]
-        disable: bool,
     },
     /// 查看单个 bot 详情（配置脱敏）
     #[command(about = "查看单个 bot 详情（配置脱敏）")]

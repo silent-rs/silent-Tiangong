@@ -55,11 +55,7 @@ async fn run_subcommand(
             id,
             version,
         } => cmd_install(&runtime, artifact_id, id, version).await,
-        BotSubcommand::Configure {
-            id,
-            enable,
-            disable,
-        } => cmd_configure(&store, &runtime, id, enable, disable).await,
+        BotSubcommand::Configure { id } => cmd_configure(&store, &runtime, id).await,
         BotSubcommand::Show { id } => cmd_show(&store, id),
         BotSubcommand::Start { id } => cmd_start(&store, id),
         BotSubcommand::Stop { id } => cmd_stop(id),
@@ -200,13 +196,7 @@ async fn cmd_install(
     Ok(())
 }
 
-async fn cmd_configure(
-    store: &BotStore,
-    runtime: &BotRuntime,
-    id: String,
-    enable: bool,
-    disable: bool,
-) -> Result<()> {
+async fn cmd_configure(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
     use crate::interactive as ui;
 
     let id = parse_bot_id(&id)?;
@@ -253,14 +243,12 @@ async fn cmd_configure(
         let idx = ui::select("选择配置方式", &options)?;
         if idx == 0 {
             // 扫码：先以空配置注册（bot 需要运行才能进入扫码流程）。
-            let config_map = BTreeMap::new();
-            upsert_bot_config(store, &id, &artifact_id, config_map.clone(), !disable)?;
+            upsert_bot_config(store, &id, &artifact_id, BTreeMap::new())?;
             eprintln!("\n启动 bot 进入扫码流程...");
             bot_spawn_daemon(&store.get(&id).context("刚注册的 bot 丢失")?)?;
             println!();
             run_provision_flow(runtime, &id).await?;
             // 扫码授权成功后凭证已由 bot 自行保存，无需再启动。
-            apply_enable_disable(store, &id, enable, disable)?;
             return Ok(());
         }
         prompt_manual_fields(&schema)?
@@ -270,8 +258,7 @@ async fn cmd_configure(
     };
 
     // 落盘配置。
-    upsert_bot_config(store, &id, &artifact_id, config_map, !disable)?;
-    apply_enable_disable(store, &id, enable, disable)?;
+    upsert_bot_config(store, &id, &artifact_id, config_map)?;
 
     // 配置完成，自动启动 bot。
     println!();
@@ -373,7 +360,6 @@ fn upsert_bot_config(
     id: &BotId,
     artifact_id: &str,
     config_map: BTreeMap<String, serde_json::Value>,
-    enabled: bool,
 ) -> Result<()> {
     if store.get(id).is_some() {
         store.update(id, UpdateBotRequest { config: config_map })?;
@@ -383,20 +369,10 @@ fn upsert_bot_config(
             id: id.to_string(),
             artifact_id: artifact_id.to_string(),
             config: config_map,
-            enabled,
+            // 配置完即启动，注册时默认启用。
+            enabled: true,
         })?;
         println!("bot 配置已注册：{id}");
-    }
-    Ok(())
-}
-
-/// 应用 --enable/--disable 标志。
-fn apply_enable_disable(store: &BotStore, id: &BotId, enable: bool, disable: bool) -> Result<()> {
-    if enable {
-        store.set_enabled(id, true)?;
-    }
-    if disable {
-        store.set_enabled(id, false)?;
     }
     Ok(())
 }
