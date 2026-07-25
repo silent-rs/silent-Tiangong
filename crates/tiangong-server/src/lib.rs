@@ -80,6 +80,16 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
         storage_root,
     ));
 
+    // 启动已启用的 bot（issue #286 阶段 2：Server 接管 Bot 生命周期）。
+    // extra_env 由 Server 自身的 URL/Token 推导，供 bot 回连本 Server。
+    // 必须在 build_routes（move token）之前调用，因 extra_env 借用 token。
+    let bot_runtime_for_start = app.bot_runtime.clone();
+    let extra_env = bot_extra_env(host, port, token.as_deref());
+    runtime.block_on(async {
+        bot_runtime_for_start.start_enabled(&extra_env).await;
+    });
+    tracing::info!("已启动启用的 bot（若任何）");
+
     tracing::info!("构建路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
 
@@ -93,10 +103,37 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
 
+    // with_shutdown 使 Server 在收到 Ctrl-C/SIGTERM 时优雅关停（停止接受新连接、
+    // 等待活动连接完成）；run() 阻塞直到关停完成后返回。
     tracing::info!("Server 启动：http://{addr}");
-    Server::new().bind(addr).run(route);
+    Server::new()
+        .bind(addr)
+        .with_shutdown(std::time::Duration::from_secs(5))
+        .run(route);
+
+    // 收到关停信号后：停止所有 bot 子进程（含 supervisor，避免孤儿重启），再退出。
+    tracing::info!("Server 收到关停信号，停止所有 bot...");
+    let bot_runtime_for_stop = app.bot_runtime.clone();
+    runtime.block_on(async {
+        bot_runtime_for_stop.stop_all().await;
+    });
+    tracing::info!("Server 已停止所有 bot，退出");
 
     Ok(())
+}
+
+/// 推导 bot 回连 Server 所需的 extra_env（TIANGONG_URL / TIANGONG_TOKEN）。
+fn bot_extra_env(
+    host: &str,
+    port: u16,
+    token: Option<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("TIANGONG_URL".to_string(), format!("http://{host}:{port}"));
+    if let Some(t) = token {
+        env.insert("TIANGONG_TOKEN".to_string(), t.to_string());
+    }
+    env
 }
 
 /// 后台运行 Server
