@@ -537,8 +537,8 @@ pub(crate) enum BotSubcommand {
         #[arg(help = "bot 实例 ID")]
         id: String,
     },
-    /// 启动 bot（注意：bot 进程随本 CLI 退出而停止，长期运行请用桌面端）
-    #[command(about = "启动 bot 进程（随 CLI 退出而停止）")]
+    /// 在后台启动 bot（独立进程，不随 CLI 退出而停止）
+    #[command(about = "在后台启动 bot 进程")]
     Start {
         #[arg(help = "bot 实例 ID")]
         id: String,
@@ -576,12 +576,6 @@ pub(crate) enum BotSubcommand {
     /// 查看 bot 日志尾部
     #[command(about = "查看 bot 日志尾部")]
     Log {
-        #[arg(help = "bot 实例 ID")]
-        id: String,
-    },
-    /// 扫码配置（终端渲染二维码并轮询授权状态）
-    #[command(about = "扫码配置（终端渲染二维码）")]
-    Provision {
         #[arg(help = "bot 实例 ID")]
         id: String,
     },

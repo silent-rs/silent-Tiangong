@@ -3,9 +3,8 @@
 //! 复用 `tiangong-bots` crate 的 `BotRuntime`/`BotStore`（与桌面端同源），
 //! 直接读写 `~/.tiangong/bots/`，不走 HTTP。风格对齐 `mcp`/`skill` 子命令。
 //!
-//! 注意：`start` 启动的 bot 进程作为本 CLI 的子进程，随 CLI 退出而停止
-//! （`supervisor` 用 `kill_on_drop`）。长期运行请用桌面端。本命令主要面向
-//! headless 下的下载/配置/升级/扫码，以及"测试启动是否成功"。
+//! start/configure 启动的 bot 作为独立后台进程运行（setsid 脱离会话），
+//! 不随 CLI 退出而终止，适合 headless 常驻场景。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -66,7 +65,6 @@ async fn run_subcommand(
         }
         BotSubcommand::Remove { id } => cmd_remove(&store, id),
         BotSubcommand::Log { id } => cmd_log(id),
-        BotSubcommand::Provision { id } => cmd_provision(&runtime, id).await,
     }
 }
 
@@ -214,6 +212,13 @@ async fn cmd_configure(store: &BotStore, runtime: &BotRuntime, id: String) -> Re
             .with_context(|| "bot 未注册且无法推断制品 ID，请先 `tiangong bot install` 安装制品")?,
     };
 
+    // 制品必须已安装（扫码与启动都依赖制品二进制）。
+    if !tiangong_bots::paths::bot_artifact_path(&id).exists() {
+        return Err(anyhow!(
+            "bot 制品未安装：{id}，请先 `tiangong bot install {artifact_id}`"
+        ));
+    }
+
     println!("=== Bot 配置向导：{id}（制品 {artifact_id}）===\n");
 
     // schema 来源：优先本地缓存，否则拉取线上 manifest。
@@ -233,59 +238,70 @@ async fn cmd_configure(store: &BotStore, runtime: &BotRuntime, id: String) -> Re
     let has_barcode = schema
         .iter()
         .any(|f| matches!(f.field_type, tiangong_bots::FieldType::Barcode));
+    let has_manual_fields = schema
+        .iter()
+        .any(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode));
 
-    // 选择配置方式：有扫码字段时优先引导扫码。
-    let config_map = if has_barcode {
-        let options = if schema
-            .iter()
-            .any(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode))
-        {
+    // 选择配置方式：有扫码字段时优先引导扫码（对齐 Desktop 流程——先授权后注册启动）。
+    let use_provision = if has_barcode {
+        let options = if has_manual_fields {
             vec!["扫码授权（推荐）", "手工填写凭证"]
         } else {
             vec!["扫码授权"]
         };
-        let idx = ui::select("选择配置方式", &options)?;
-        if idx == 0 {
-            // 扫码：先以空配置注册（bot 需要运行才能进入扫码流程）。
-            upsert_bot_config(store, &id, &artifact_id, BTreeMap::new())?;
-            eprintln!("\n启动 bot 进入扫码流程...");
-            bot_spawn_daemon(&store.get(&id).context("刚注册的 bot 丢失")?)?;
-            println!();
-            run_provision_flow(runtime, &id).await?;
-            // 扫码授权成功后凭证已由 bot 自行保存，无需再启动。
-            return Ok(());
-        }
-        prompt_manual_fields(&schema)?
+        ui::select("选择配置方式", &options)? == 0
     } else {
         println!("该 bot 不支持扫码配置，将逐项填写凭证。");
-        prompt_manual_fields(&schema)?
+        false
     };
 
-    // 落盘配置。
-    upsert_bot_config(store, &id, &artifact_id, config_map)?;
+    if use_provision {
+        // 扫码流程：先创建扫码会话并展示二维码（不依赖 bot 常驻运行），
+        // 授权成功后再注册/保留配置并启动 bot。对齐 Desktop 的顺序，避免
+        // bot 启动时的必填校验在二维码出现前就失败。
+        run_provision_flow(runtime, &id).await?;
+        // 扫码凭证由 bot 自行保存。此处保留已有手工配置（若有），仅确保 bot 已注册。
+        let preserved_config = existing
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or_default();
+        upsert_bot_config(store, &id, &artifact_id, preserved_config)?;
+    } else {
+        // 手工流程：以已有配置为初始值，按字段逐项收集（secret 留空保留原值）。
+        let current_config = existing
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or_default();
+        let config_map = prompt_manual_fields(&schema, &current_config)?;
+        upsert_bot_config(store, &id, &artifact_id, config_map)?;
+    }
 
-    // 配置完成，自动启动 bot。
+    // 配置完成，启动 bot（已在运行则重启以应用新配置）。
     println!();
     let bot = store.get(&id).context("刚配置的 bot 丢失")?;
     if bot_is_running(&id) {
-        eprintln!("bot 已在运行，跳过启动。");
+        eprintln!("bot 已在运行，重启以应用新配置...");
+        bot_stop(&id)?;
     } else {
         eprintln!("启动 bot...");
-        bot_spawn_daemon(&bot)?;
-        println!("✅ bot {id} 配置完成并已启动");
     }
+    bot_spawn_daemon(&bot)?;
+    println!("✅ bot {id} 配置完成并已启动");
     Ok(())
 }
 
 /// 逐个提示用户填写非 barcode 字段，返回填好的 config map。
 ///
-/// secret 字段遮蔽输入，string 普通输入，select 下拉，boolean 确认。
+/// 已有配置作为初始值：普通字段显示现有值作默认，secret 字段不显示原文，
+/// secret 留空表示保留原值。barcode 字段自动跳过（走扫码分支）。
 fn prompt_manual_fields(
     schema: &[tiangong_bots::ConfigFieldSchema],
+    current: &BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, serde_json::Value>> {
     use crate::interactive as ui;
 
-    let mut config_map = BTreeMap::new();
+    // 以已有配置为基底，逐字段合并用户输入（只覆盖用户明确填写的字段）。
+    let mut config_map = current.clone();
     let editable: Vec<&tiangong_bots::ConfigFieldSchema> = schema
         .iter()
         .filter(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode))
@@ -296,7 +312,7 @@ fn prompt_manual_fields(
         return Ok(config_map);
     }
 
-    println!("请按提示填写各字段（直接回车跳过可选字段）：\n");
+    println!("请按提示填写各字段（直接回车保留当前值/跳过）：\n");
     for field in editable {
         if let Some(help) = &field.help {
             println!("  💡 {help}");
@@ -306,53 +322,61 @@ fn prompt_manual_fields(
         } else {
             field.label.clone()
         };
+        let current_value = current.get(&field.key);
 
-        let value: serde_json::Value = match &field.field_type {
+        match &field.field_type {
             tiangong_bots::FieldType::Secret => {
-                let raw = ui::password(&format!("{label}（不回显）"))?;
+                // secret 不回显；留空保留原值（若有），否则删除。
+                let prompt = if current_value.is_some() {
+                    format!("{label}（留空保留原值，不回显）")
+                } else {
+                    format!("{label}（不回显）")
+                };
+                let raw = ui::password(&prompt)?;
                 if raw.trim().is_empty() {
-                    if field.required {
+                    if field.required && current_value.is_none() {
                         return Err(anyhow!("必填字段不能为空：{}", field.label));
                     }
-                    continue;
+                    // 留空：保留原值（current 已含），无需操作。
+                } else {
+                    config_map.insert(field.key.clone(), serde_json::json!(raw.trim()));
                 }
-                serde_json::json!(raw.trim())
             }
             tiangong_bots::FieldType::String => {
-                let default = field
-                    .default
-                    .as_ref()
+                let default = current_value
                     .and_then(|v| v.as_str())
+                    .or_else(|| field.default.as_ref().and_then(|v| v.as_str()))
                     .unwrap_or("");
                 let raw = ui::input(&label, default)?;
-                if raw.trim().is_empty() {
-                    if field.required {
-                        return Err(anyhow!("必填字段不能为空：{}", field.label));
-                    }
-                    continue;
+                if raw.trim().is_empty() && field.required && current_value.is_none() {
+                    return Err(anyhow!("必填字段不能为空：{}", field.label));
                 }
-                serde_json::json!(raw.trim())
+                if !raw.trim().is_empty() {
+                    config_map.insert(field.key.clone(), serde_json::json!(raw.trim()));
+                }
             }
             tiangong_bots::FieldType::Boolean => {
-                let default = field
-                    .default
-                    .as_ref()
+                let default = current_value
                     .and_then(|v| v.as_bool())
+                    .or_else(|| field.default.as_ref().and_then(|v| v.as_bool()))
                     .unwrap_or(false);
                 let val = ui::confirm(&label, default)?;
-                serde_json::json!(val)
+                config_map.insert(field.key.clone(), serde_json::json!(val));
             }
             tiangong_bots::FieldType::Select { options } => {
                 let opts: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-                let idx = ui::select(&label, &opts)?;
-                serde_json::json!(options[idx])
+                // 默认选中当前值对应的选项。
+                let default_idx = current_value
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| options.iter().position(|o| o == s))
+                    .unwrap_or(0);
+                let idx = ui::select_with_default(&label, &opts, default_idx)?;
+                config_map.insert(field.key.clone(), serde_json::json!(options[idx]));
             }
             tiangong_bots::FieldType::Barcode => {
                 // 已过滤，不会到达。
-                continue;
             }
-        };
-        config_map.insert(field.key.clone(), value);
+        }
         println!();
     }
     Ok(config_map)
@@ -564,11 +588,6 @@ fn cmd_log(id: String) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_provision(runtime: &BotRuntime, id: String) -> Result<()> {
-    let id = parse_bot_id(&id)?;
-    run_provision_flow(runtime, &id).await
-}
-
 // ============================ 辅助函数 ============================
 
 /// 从 bots-index 中按 artifact_id（及可选版本）选取 manifest。
@@ -732,13 +751,10 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("后台启动 bot 失败：{id}"))?;
     let pid = child.id();
-
-    // 确认子进程未立即退出（daemon 化后 child 不需 wait，但检查启动是否成功）。
-    drop(child);
 
     // 写 PID 文件（与 supervisor 的 bot.pid 共用）。
     let pid_path = tiangong_bots::paths::bot_pid_path(id);
@@ -747,6 +763,28 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
     }
     std::fs::write(&pid_path, pid.to_string())
         .with_context(|| format!("写入 PID 文件失败：{}", pid_path.display()))?;
+
+    // 短暂等待后确认进程未立即退出，避免因配置错误/制品损坏导致崩溃却报告成功。
+    // 用 try_wait（非阻塞）探测：已退出则报错并读日志尾部，仍在运行则 detach。
+    std::thread::sleep(Duration::from_millis(500));
+    if let Ok(Some(_status)) = child.try_wait() {
+        let _ = std::fs::remove_file(&pid_path);
+        let log_tail = tiangong_bots::read_log_tail(id)
+            .map(|l| l.content)
+            .unwrap_or_default();
+        let hint = if log_tail.trim().is_empty() {
+            String::from("（无日志输出）")
+        } else {
+            log_tail.lines().next_back().unwrap_or("").to_string()
+        };
+        return Err(anyhow!(
+            "bot {id} 启动后立即退出，可能配置错误或制品损坏。最近日志：{hint}"
+        ));
+    }
+    // 仍在运行：detach（std::process::Child drop 不 kill 子进程，daemon 继续）。
+    // 注意：不能 wait 到结束，否则 CLI 阻塞；此处主动放弃句柄，daemon 后台运行。
+    // 进程退出后会变 zombie，由系统（launchd）或后续 CLI 调用清理。
+    std::mem::forget(child);
 
     Ok(())
 }
