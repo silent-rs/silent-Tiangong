@@ -9849,6 +9849,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dialoguer",
+ "libc",
  "qrcode",
  "reqwest 0.13.4",
  "semver",

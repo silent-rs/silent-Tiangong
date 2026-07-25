@@ -48,7 +48,7 @@ async fn run_subcommand(
     runtime: Arc<BotRuntime>,
 ) -> Result<()> {
     match args.command {
-        BotSubcommand::List => cmd_list(&store, &runtime).await,
+        BotSubcommand::List => cmd_list(&store, &runtime),
         BotSubcommand::Available => cmd_available(&runtime).await,
         BotSubcommand::Install {
             artifact_id,
@@ -64,14 +64,14 @@ async fn run_subcommand(
             disable,
         } => cmd_configure(&store, id, set, secret, config_file, enable, disable),
         BotSubcommand::Show { id } => cmd_show(&store, id),
-        BotSubcommand::Start { id } => cmd_start(&store, &runtime, id).await,
-        BotSubcommand::Stop { id } => cmd_stop(&runtime, id).await,
-        BotSubcommand::Restart { id } => cmd_restart(&store, &runtime, id).await,
+        BotSubcommand::Start { id } => cmd_start(&store, id),
+        BotSubcommand::Stop { id } => cmd_stop(id),
+        BotSubcommand::Restart { id } => cmd_restart(&store, id),
         BotSubcommand::Upgrade { id } => cmd_upgrade(&store, &runtime, id).await,
         BotSubcommand::CheckUpdate { artifact_id } => {
             cmd_check_update(&store, &runtime, artifact_id).await
         }
-        BotSubcommand::Remove { id } => cmd_remove(&store, &runtime, id).await,
+        BotSubcommand::Remove { id } => cmd_remove(&store, id),
         BotSubcommand::Log { id } => cmd_log(id),
         BotSubcommand::Provision { id } => cmd_provision(&runtime, id).await,
     }
@@ -79,7 +79,7 @@ async fn run_subcommand(
 
 // ============================ 子命令实现 ============================
 
-async fn cmd_list(store: &BotStore, runtime: &BotRuntime) -> Result<()> {
+fn cmd_list(store: &BotStore, runtime: &BotRuntime) -> Result<()> {
     let registered = store.list();
     let local_artifacts = runtime.scan_local_artifacts();
 
@@ -96,7 +96,7 @@ async fn cmd_list(store: &BotStore, runtime: &BotRuntime) -> Result<()> {
     if !registered.is_empty() {
         println!("已注册 bot（{}）：", registered.len());
         for bot in &registered {
-            let health = runtime.health(&bot.id).await;
+            let health = bot_health(&bot.id);
             let health_str = format_health(&health);
             let version = read_version_label(&bot.id);
             println!(
@@ -280,29 +280,32 @@ fn cmd_show(store: &BotStore, id: String) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_start(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
+fn cmd_start(store: &BotStore, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
     let bot = store.get(&id).ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
-    let extra_env = derive_server_env();
-    runtime.start(&bot, &extra_env).await?;
-    println!("bot 已启动：{id}");
-    println!("（提示：bot 进程随本 CLI 退出而停止，长期运行请用桌面端）");
+
+    // 已在运行则拒绝（基于 PID 文件跨进程判断，避免重复拉起）。
+    if bot_is_running(&id) {
+        return Err(anyhow!("bot 已在运行：{id}"));
+    }
+
+    bot_spawn_daemon(&bot)?;
+    println!("bot 已在后台启动：{id}（PID 见 ~/.tiangong/bots/{id}/bot.pid）");
     Ok(())
 }
 
-async fn cmd_stop(runtime: &BotRuntime, id: String) -> Result<()> {
+fn cmd_stop(id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
-    runtime.stop(&id).await?;
+    bot_stop(&id)?;
     println!("bot 已停止：{id}");
     Ok(())
 }
 
-async fn cmd_restart(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
+fn cmd_restart(store: &BotStore, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
-    runtime.stop(&id).await.ok();
+    bot_stop(&id).ok();
     let bot = store.get(&id).ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
-    let extra_env = derive_server_env();
-    runtime.start(&bot, &extra_env).await?;
+    bot_spawn_daemon(&bot)?;
     println!("bot 已重启：{id}");
     Ok(())
 }
@@ -318,22 +321,21 @@ async fn cmd_upgrade(store: &BotStore, runtime: &BotRuntime, id: String) -> Resu
         println!("bot {id} 已是最新版本");
         return Ok(());
     };
-    let was_running = runtime.is_running(&id).await;
-    let extra_env = if was_running {
-        Some(derive_server_env())
-    } else {
-        None
-    };
+    let was_running = bot_is_running(&id);
+    // daemon 模式下 bot 不在进程内监督表，runtime.upgrade 的内部 stop 是空操作，
+    // 必须先手动停止后台进程，否则运行中的二进制文件可能被占用导致替换失败。
+    if was_running {
+        bot_stop(&id)?;
+    }
     runtime.upgrade(&id, manifest, None).await?;
     println!("bot {id} 已升级到最新版本");
     if was_running {
+        // 升级后重新读取配置（artifact_id 不变，但确保用最新 store 状态）。
         let bot = store
             .get(&id)
             .ok_or_else(|| anyhow!("升级后 bot 配置丢失：{id}"))?;
-        if let Some(env) = extra_env {
-            runtime.start(&bot, &env).await?;
-            println!("bot {id} 已恢复运行");
-        }
+        bot_spawn_daemon(&bot)?;
+        println!("bot {id} 已恢复运行");
     }
     Ok(())
 }
@@ -376,12 +378,12 @@ async fn cmd_check_update(
     Ok(())
 }
 
-async fn cmd_remove(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
+fn cmd_remove(store: &BotStore, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
     if store.get(&id).is_none() {
         return Err(anyhow!("bot 不存在：{id}"));
     }
-    runtime.stop(&id).await.ok();
+    bot_stop(&id).ok();
     store.remove(&id)?;
     println!("bot 配置已删除：{id}（已安装制品保留）");
     Ok(())
@@ -474,14 +476,177 @@ fn read_version_label(id: &BotId) -> String {
         .unwrap_or_else(|| "未安装".to_string())
 }
 
+/// bot 健康状态（基于 PID 文件的跨进程判断）。
+enum BotHealthStatus {
+    Running,
+    Stopped,
+    MissingArtifact,
+}
+
 /// 格式化健康状态。
-fn format_health(health: &tiangong_bots::BotHealth) -> String {
+fn format_health(health: &BotHealthStatus) -> String {
     match health {
-        tiangong_bots::BotHealth::Running => "运行中".to_string(),
-        tiangong_bots::BotHealth::Stopped => "已停止".to_string(),
-        tiangong_bots::BotHealth::MissingArtifact => "未安装".to_string(),
-        tiangong_bots::BotHealth::Error { message } => format!("错误：{message}"),
+        BotHealthStatus::Running => "运行中".to_string(),
+        BotHealthStatus::Stopped => "已停止".to_string(),
+        BotHealthStatus::MissingArtifact => "未安装".to_string(),
     }
+}
+
+/// 读取 bot.pid 记录的 PID；文件不存在或无效返回 None。
+fn read_pid(id: &BotId) -> Option<u32> {
+    let path = tiangong_bots::paths::bot_pid_path(id);
+    let content = std::fs::read_to_string(path).ok()?;
+    content.trim().parse::<u32>().ok()
+}
+
+/// 判断进程是否存活（仅 Unix；非 Unix 始终返回 false）。
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // kill(pid, 0) 不发信号，仅做存在性检查。
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// bot 是否正在后台运行（基于 bot.pid + 进程存活检查）。
+fn bot_is_running(id: &BotId) -> bool {
+    read_pid(id).is_some_and(process_alive)
+}
+
+/// bot 健康状态：综合制品存在性 + PID 存活判断。
+fn bot_health(id: &BotId) -> BotHealthStatus {
+    if bot_is_running(id) {
+        return BotHealthStatus::Running;
+    }
+    if tiangong_bots::paths::bot_artifact_path(id).exists() {
+        BotHealthStatus::Stopped
+    } else {
+        BotHealthStatus::MissingArtifact
+    }
+}
+
+/// 以后台 daemon 方式启动 bot 二进制：setsid 脱离会话、stdin/null、
+/// stdout/stderr 追加到 bot.log、写 bot.pid。
+///
+/// 与桌面端 supervisor 的进程内监督不同——此处 bot 作为独立后台进程运行，
+/// 不随 CLI 退出而终止。崩溃不自动重启（用户据日志决定）。
+/// PID 文件与 supervisor 共用 bot.pid，确保 CLI 与桌面端互斥管理同一 bot。
+fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+
+    let id = &bot.id;
+    let artifact = tiangong_bots::paths::bot_artifact_path(id);
+    if !artifact.exists() {
+        return Err(anyhow!("bot 制品未安装：{id}（{}）", artifact.display()));
+    }
+
+    // 按缓存 schema 注入凭证环境变量（对齐 BotRuntime::start 的 bot_env 逻辑）。
+    let schema = tiangong_bots::cached_schema(id).unwrap_or_default();
+    tiangong_bots::management::validate_bot_config_fields(&schema, &bot.config)?;
+    let mut env = tiangong_bots::bot_env(bot, &schema);
+    // 主程序注入的 TIANGONG_URL/TOKEN 覆盖优先级最高（与 runtime 一致）。
+    env.extend(derive_server_env());
+
+    let log_path = tiangong_bots::paths::bot_log_path(id);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("打开 bot 日志失败：{}", log_path.display()))?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("打开 bot 日志失败：{}", log_path.display()))?;
+
+    let mut cmd = Command::new(&artifact);
+    cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+    for (key, value) in &env {
+        cmd.env(key, value);
+    }
+
+    // Unix：setsid 脱离父进程会话，避免 CLI 退出波及 bot。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    // Windows：独立进程组 + 无窗口。
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("后台启动 bot 失败：{id}"))?;
+    let pid = child.id();
+
+    // 确认子进程未立即退出（daemon 化后 child 不需 wait，但检查启动是否成功）。
+    drop(child);
+
+    // 写 PID 文件（与 supervisor 的 bot.pid 共用）。
+    let pid_path = tiangong_bots::paths::bot_pid_path(id);
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("写入 PID 文件失败：{}", pid_path.display()))?;
+
+    Ok(())
+}
+
+/// 停止后台 bot 进程：读 bot.pid → SIGTERM（Unix）→ 清理 PID 文件。
+///
+/// PID 文件不存在或进程已退出视为已停止（幂等）。Windows 暂不支持信号停止。
+fn bot_stop(id: &BotId) -> Result<()> {
+    let Some(pid) = read_pid(id) else {
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    {
+        if process_alive(pid) {
+            let status = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status()
+                .context("发送 SIGTERM 失败")?;
+            if !status.success() {
+                // 进程可能在读 PID 与发信号之间退出，清理残留 PID 文件。
+                let _ = std::fs::remove_file(tiangong_bots::paths::bot_pid_path(id));
+                return Err(anyhow!("向 PID {pid} 发送 SIGTERM 失败，进程可能已退出"));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        return Err(anyhow!(
+            "非 Unix 平台暂不支持 bot stop，请手动终止进程（PID 见 bot.pid）"
+        ));
+    }
+
+    // 清理 PID 文件。
+    let _ = std::fs::remove_file(tiangong_bots::paths::bot_pid_path(id));
+    Ok(())
 }
 
 /// 从 server.json 读取配置，拼装 bot 启动所需的 TIANGONG_URL/TIANGONG_TOKEN。
