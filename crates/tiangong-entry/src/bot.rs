@@ -200,7 +200,11 @@ async fn cmd_configure(store: &BotStore, runtime: &BotRuntime, id: String) -> Re
     use crate::interactive as ui;
 
     let id = parse_bot_id(&id)?;
-    ui::ensure_terminal()?;
+    ui::ensure_terminal().with_context(|| {
+        "bot configure 需要交互式终端。\n\
+         若通过 `cargo tauri dev` 运行，其子进程 stdin 会被重定向导致无 TTY，\n\
+         请直接运行编译产物：./target/debug/tiangong bot configure <id>"
+    })?;
 
     // 确定制品 ID 与 schema 来源。
     let existing = store.get(&id);
