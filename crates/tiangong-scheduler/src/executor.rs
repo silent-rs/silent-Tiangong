@@ -148,12 +148,7 @@ async fn execute_core(
         }
     };
 
-    // 首次执行时将 session_id 写回 job/webhook，后续复用同一会话
-    if created_new {
-        pin_session_to_tracker(tracker, &params.trigger_id, &session_id);
-    }
-
-    // 记录开始执行
+    // 记录开始执行（本轮使用的 session，即便随后失败也保留痕迹）
     insert_run(tracker, &run_id, &params.trigger_id, &session_id, &now);
 
     // 构造消息
@@ -163,11 +158,17 @@ async fn execute_core(
     );
 
     // 发送消息到 core（不等结果）
-    let result = sender(session_id, message).await;
+    let result = sender(session_id.clone(), message).await;
 
     let finished_at = chrono::Local::now().naive_local().to_string();
     match result {
         Ok(()) => {
+            // 投递成功后才把新 session_id 写回 job/webhook：失败时新会话很可能尚未
+            // 落盘，立刻绑定会让后续触发因 session_exists==false 反复换新 id，
+            // 彻底丢失关联（见 resolve_session_id 仅按磁盘文件判定）。
+            if created_new {
+                pin_session_to_tracker(tracker, &params.trigger_id, &session_id);
+            }
             update_run_success(
                 tracker,
                 &run_id,
@@ -564,5 +565,114 @@ mod tests {
         let reader = JobStore::open_at(store_path).unwrap();
         let runs = reader.list_job_runs("test-job-concurrent", 10).unwrap();
         assert_eq!(runs.len(), 1, "并发执行应被跳过，只有一条记录");
+    }
+
+    // 投递成功才把新 session_id 写回 Job：失败时不绑定，下轮重新创建。
+    #[tokio::test]
+    async fn pins_session_id_only_after_successful_delivery() {
+        let dir = TempDir::new().unwrap();
+        let (store, _) = setup_job_store(&dir, "test-job-pin-success");
+        let store_path = dir.path().to_path_buf();
+
+        let ctx = Arc::new(MockContext {
+            sessions: StdMutex::new(vec![]),
+        });
+        let params = ExecuteParams {
+            trigger_id: "test-job-pin-success".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+
+        execute_core(
+            ctx.as_ref(),
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_ok(),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let job = reader.get_job("test-job-pin-success").unwrap().unwrap();
+        assert!(
+            job.session_id.is_some(),
+            "投递成功后应把新 session_id 写回 Job"
+        );
+    }
+
+    // 投递失败不得绑定新 session_id：否则该 id 多半未落盘，下次触发会因
+    // session_exists==false 反复换新 id，关联彻底丢失。
+    #[tokio::test]
+    async fn does_not_pin_session_id_on_delivery_failure() {
+        let dir = TempDir::new().unwrap();
+        let (store, _) = setup_job_store(&dir, "test-job-pin-failure");
+        let store_path = dir.path().to_path_buf();
+
+        let ctx = Arc::new(MockContext {
+            sessions: StdMutex::new(vec![]),
+        });
+        let params = ExecuteParams {
+            trigger_id: "test-job-pin-failure".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: None,
+            payload: "hello".to_string(),
+        };
+
+        execute_core(
+            ctx.as_ref(),
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_err("core 投递失败"),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let job = reader.get_job("test-job-pin-failure").unwrap().unwrap();
+        assert!(
+            job.session_id.is_none(),
+            "投递失败时不得把未落盘的 session_id 写回 Job"
+        );
+    }
+
+    // 复用既有会话（created_new=false）时不应触发写回。
+    #[tokio::test]
+    async fn reuse_existing_session_does_not_rewrite_job() {
+        let dir = TempDir::new().unwrap();
+        let existing_session = "session-existing";
+        let (store, _job) = setup_job_store(&dir, "test-job-reuse");
+        // 预置既有 session_id，模拟任务已绑定到一个落盘会话
+        let store_path = dir.path().to_path_buf();
+        {
+            let req = UpdateJobRequest {
+                session_id: Some(existing_session.to_string()),
+                ..Default::default()
+            };
+            store.update_job("test-job-reuse", &req).unwrap();
+        }
+
+        let ctx = Arc::new(MockContext {
+            sessions: StdMutex::new(vec![existing_session.to_string()]),
+        });
+        let params = ExecuteParams {
+            trigger_id: "test-job-reuse".to_string(),
+            trigger_name: "测试任务".to_string(),
+            trigger_description: "测试".to_string(),
+            session_id: Some(existing_session.to_string()),
+            payload: "hello".to_string(),
+        };
+
+        execute_core(
+            ctx.as_ref(),
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_ok(),
+        )
+        .await;
+
+        let reader = JobStore::open_at(store_path).unwrap();
+        let job = reader.get_job("test-job-reuse").unwrap().unwrap();
+        assert_eq!(job.session_id.as_deref(), Some(existing_session));
     }
 }
