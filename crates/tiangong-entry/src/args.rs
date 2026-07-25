@@ -524,33 +524,12 @@ pub(crate) enum BotSubcommand {
         #[arg(long, help = "指定版本，默认最新")]
         version: Option<String>,
     },
-    /// 写入或更新 bot 配置（凭证）
-    #[command(about = "写入或更新 bot 配置（凭证）")]
+    /// 交互式配置 bot（扫码授权或手工填写凭证），配置完成自动启动
+    #[command(about = "交互式配置 bot（扫码或手工填凭证），完成后自动启动")]
     Configure {
         /// bot 实例 ID
         #[arg(help = "bot 实例 ID")]
         id: String,
-        /// 设置普通字段，格式 key=value，可重复
-        #[arg(
-            long = "set",
-            value_parser = parse_key_value,
-            help = "设置普通字段，格式 key=value，可重复"
-        )]
-        set: Vec<(String, String)>,
-        /// 从环境变量读取 secret 字段，格式 KEY=ENV_VAR，可重复
-        #[arg(
-            long = "secret",
-            value_parser = parse_key_value,
-            help = "从环境变量读取 secret 字段，格式 KEY=ENV_VAR，可重复"
-        )]
-        secret: Vec<(String, String)>,
-        /// 从 JSON 文件读取整个 config map
-        #[arg(
-            long = "config-file",
-            value_name = "PATH",
-            help = "从 JSON 文件读取整个 config map"
-        )]
-        config_file: Option<String>,
         /// 启用 bot
         #[arg(long, conflicts_with = "disable", help = "启用 bot")]
         enable: bool,

@@ -57,12 +57,9 @@ async fn run_subcommand(
         } => cmd_install(&runtime, artifact_id, id, version).await,
         BotSubcommand::Configure {
             id,
-            set,
-            secret,
-            config_file,
             enable,
             disable,
-        } => cmd_configure(&store, id, set, secret, config_file, enable, disable),
+        } => cmd_configure(&store, &runtime, id, enable, disable).await,
         BotSubcommand::Show { id } => cmd_show(&store, id),
         BotSubcommand::Start { id } => cmd_start(&store, id),
         BotSubcommand::Stop { id } => cmd_stop(id),
@@ -203,58 +200,242 @@ async fn cmd_install(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_configure(
+async fn cmd_configure(
     store: &BotStore,
+    runtime: &BotRuntime,
     id: String,
-    set: Vec<(String, String)>,
-    secret: Vec<(String, String)>,
-    config_file: Option<String>,
     enable: bool,
     disable: bool,
 ) -> Result<()> {
+    use crate::interactive as ui;
+
     let id = parse_bot_id(&id)?;
-    let mut config_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    ui::ensure_terminal()?;
 
-    for (key, value) in set {
-        config_map.insert(key, serde_json::json!(value));
+    // 确定制品 ID 与 schema 来源。
+    let existing = store.get(&id);
+    let artifact_id = match &existing {
+        Some(bot) => bot.artifact_id.clone(),
+        None => infer_artifact_id(&id)
+            .with_context(|| "bot 未注册且无法推断制品 ID，请先 `tiangong bot install` 安装制品")?,
+    };
+
+    println!("=== Bot 配置向导：{id}（制品 {artifact_id}）===\n");
+
+    // schema 来源：优先本地缓存，否则拉取线上 manifest。
+    let schema = match tiangong_bots::cached_schema(&id) {
+        Some(s) => s,
+        None => {
+            eprintln!("本地无 schema 缓存，拉取线上 bots-index...");
+            let index = runtime
+                .fetch_index()
+                .await
+                .context("拉取 bots-index 失败")?;
+            let manifest = pick_manifest(&index, &artifact_id, None)?;
+            manifest.config_schema
+        }
+    };
+
+    let has_barcode = schema
+        .iter()
+        .any(|f| matches!(f.field_type, tiangong_bots::FieldType::Barcode));
+
+    // 选择配置方式：有扫码字段时优先引导扫码。
+    let config_map = if has_barcode {
+        let options = if schema
+            .iter()
+            .any(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode))
+        {
+            vec!["扫码授权（推荐）", "手工填写凭证"]
+        } else {
+            vec!["扫码授权"]
+        };
+        let idx = ui::select("选择配置方式", &options)?;
+        if idx == 0 {
+            // 扫码：先以空配置注册（bot 需要运行才能进入扫码流程）。
+            let config_map = BTreeMap::new();
+            upsert_bot_config(store, &id, &artifact_id, config_map.clone(), !disable)?;
+            eprintln!("\n启动 bot 进入扫码流程...");
+            bot_spawn_daemon(&store.get(&id).context("刚注册的 bot 丢失")?)?;
+            println!();
+            run_provision_flow(runtime, &id).await?;
+            // 扫码授权成功后凭证已由 bot 自行保存，无需再启动。
+            apply_enable_disable(store, &id, enable, disable)?;
+            return Ok(());
+        }
+        prompt_manual_fields(&schema)?
+    } else {
+        println!("该 bot 不支持扫码配置，将逐项填写凭证。");
+        prompt_manual_fields(&schema)?
+    };
+
+    // 落盘配置。
+    upsert_bot_config(store, &id, &artifact_id, config_map, !disable)?;
+    apply_enable_disable(store, &id, enable, disable)?;
+
+    // 配置完成，自动启动 bot。
+    println!();
+    let bot = store.get(&id).context("刚配置的 bot 丢失")?;
+    if bot_is_running(&id) {
+        eprintln!("bot 已在运行，跳过启动。");
+    } else {
+        eprintln!("启动 bot...");
+        bot_spawn_daemon(&bot)?;
+        println!("✅ bot {id} 配置完成并已启动");
     }
-    for (key, env_var) in secret {
-        let value = std::env::var(&env_var)
-            .with_context(|| format!("读取 secret 环境变量失败：{env_var} 未设置"))?;
-        config_map.insert(key, serde_json::json!(value));
-    }
-    if let Some(path) = config_file {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("读取 config 文件失败：{path}"))?;
-        let map: BTreeMap<String, serde_json::Value> =
-            serde_json::from_str(&raw).context("解析 config 文件 JSON 失败")?;
-        config_map.extend(map);
+    Ok(())
+}
+
+/// 逐个提示用户填写非 barcode 字段，返回填好的 config map。
+///
+/// secret 字段遮蔽输入，string 普通输入，select 下拉，boolean 确认。
+fn prompt_manual_fields(
+    schema: &[tiangong_bots::ConfigFieldSchema],
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    use crate::interactive as ui;
+
+    let mut config_map = BTreeMap::new();
+    let editable: Vec<&tiangong_bots::ConfigFieldSchema> = schema
+        .iter()
+        .filter(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode))
+        .collect();
+
+    if editable.is_empty() {
+        println!("（无可手工配置的字段）");
+        return Ok(config_map);
     }
 
-    if store.get(&id).is_some() {
-        store.update(&id, UpdateBotRequest { config: config_map })?;
+    println!("请按提示填写各字段（直接回车跳过可选字段）：\n");
+    for field in editable {
+        if let Some(help) = &field.help {
+            println!("  💡 {help}");
+        }
+        let label = if field.required {
+            format!("{} *", field.label)
+        } else {
+            field.label.clone()
+        };
+
+        let value: serde_json::Value = match &field.field_type {
+            tiangong_bots::FieldType::Secret => {
+                let raw = ui::password(&format!("{label}（不回显）"))?;
+                if raw.trim().is_empty() {
+                    if field.required {
+                        return Err(anyhow!("必填字段不能为空：{}", field.label));
+                    }
+                    continue;
+                }
+                serde_json::json!(raw.trim())
+            }
+            tiangong_bots::FieldType::String => {
+                let default = field
+                    .default
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let raw = ui::input(&label, default)?;
+                if raw.trim().is_empty() {
+                    if field.required {
+                        return Err(anyhow!("必填字段不能为空：{}", field.label));
+                    }
+                    continue;
+                }
+                serde_json::json!(raw.trim())
+            }
+            tiangong_bots::FieldType::Boolean => {
+                let default = field
+                    .default
+                    .as_ref()
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let val = ui::confirm(&label, default)?;
+                serde_json::json!(val)
+            }
+            tiangong_bots::FieldType::Select { options } => {
+                let opts: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+                let idx = ui::select(&label, &opts)?;
+                serde_json::json!(options[idx])
+            }
+            tiangong_bots::FieldType::Barcode => {
+                // 已过滤，不会到达。
+                continue;
+            }
+        };
+        config_map.insert(field.key.clone(), value);
+        println!();
+    }
+    Ok(config_map)
+}
+
+/// 注册或更新 bot 配置（已存在则 update，否则 register）。
+fn upsert_bot_config(
+    store: &BotStore,
+    id: &BotId,
+    artifact_id: &str,
+    config_map: BTreeMap<String, serde_json::Value>,
+    enabled: bool,
+) -> Result<()> {
+    if store.get(id).is_some() {
+        store.update(id, UpdateBotRequest { config: config_map })?;
         println!("bot 配置已更新：{id}");
     } else {
-        let artifact_id = infer_artifact_id(&id).with_context(|| {
-            "bot 未注册且无法推断制品 ID，请先 `tiangong bot install` 安装制品或手动指定 artifact_id"
-        })?;
         store.register(RegisterBotRequest {
             id: id.to_string(),
-            artifact_id,
+            artifact_id: artifact_id.to_string(),
             config: config_map,
-            enabled: !disable,
+            enabled,
         })?;
         println!("bot 配置已注册：{id}");
     }
+    Ok(())
+}
 
+/// 应用 --enable/--disable 标志。
+fn apply_enable_disable(store: &BotStore, id: &BotId, enable: bool, disable: bool) -> Result<()> {
     if enable {
-        store.set_enabled(&id, true)?;
+        store.set_enabled(id, true)?;
     }
     if disable {
-        store.set_enabled(&id, false)?;
+        store.set_enabled(id, false)?;
     }
     Ok(())
+}
+
+/// 扫码配置流程：渲染二维码 + 轮询授权状态（configure 扫码分支与 provision 命令共用）。
+async fn run_provision_flow(runtime: &BotRuntime, id: &BotId) -> Result<()> {
+    let session = runtime.provision_begin(id).await?;
+
+    print_qr(&session.qr_url)?;
+    println!();
+    println!("请用手机扫码授权，或手动访问：");
+    println!("  {}", session.qr_url);
+    println!();
+
+    let mut interval = session.interval.max(1);
+    loop {
+        tokio::time::sleep(Duration::from_secs(interval)).await;
+        match runtime.provision_poll(id, &session).await? {
+            ProvisionStatus::Pending { retry_after } => {
+                if let Some(next) = retry_after {
+                    interval = next.max(1);
+                }
+                eprint!("\r等待扫码授权...");
+            }
+            ProvisionStatus::Success => {
+                eprintln!();
+                println!("✅ 授权成功，凭证已由 bot 自行保存");
+                return Ok(());
+            }
+            ProvisionStatus::Expired => {
+                eprintln!();
+                return Err(anyhow!("扫码会话已过期，请重新执行"));
+            }
+            ProvisionStatus::Error { message } => {
+                eprintln!();
+                return Err(anyhow!("扫码授权失败：{message}"));
+            }
+        }
+    }
 }
 
 fn cmd_show(store: &BotStore, id: String) -> Result<()> {
@@ -405,39 +586,7 @@ fn cmd_log(id: String) -> Result<()> {
 
 async fn cmd_provision(runtime: &BotRuntime, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
-    let session = runtime.provision_begin(&id).await?;
-
-    print_qr(&session.qr_url)?;
-    println!();
-    println!("请用手机扫码授权，或手动访问：");
-    println!("  {}", session.qr_url);
-    println!();
-
-    let mut interval = session.interval.max(1);
-    loop {
-        tokio::time::sleep(Duration::from_secs(interval)).await;
-        match runtime.provision_poll(&id, &session).await? {
-            ProvisionStatus::Pending { retry_after } => {
-                if let Some(next) = retry_after {
-                    interval = next.max(1);
-                }
-                eprint!("\r等待扫码授权...");
-            }
-            ProvisionStatus::Success => {
-                eprintln!();
-                println!("授权成功");
-                return Ok(());
-            }
-            ProvisionStatus::Expired => {
-                eprintln!();
-                return Err(anyhow!("扫码会话已过期，请重新执行 provision"));
-            }
-            ProvisionStatus::Error { message } => {
-                eprintln!();
-                return Err(anyhow!("扫码授权失败：{message}"));
-            }
-        }
-    }
+    run_provision_flow(runtime, &id).await
 }
 
 // ============================ 辅助函数 ============================
