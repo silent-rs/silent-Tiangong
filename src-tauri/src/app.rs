@@ -982,6 +982,8 @@ impl TiangongApp {
                 core_backend,
                 scheduler_context: self.create_scheduler_context(),
                 mcp_plugin: self.mcp_plugin.clone(),
+                bot_store: self.bot_store.clone(),
+                bot_runtime: self.bot_runtime.clone(),
                 event_bus,
             },
         )

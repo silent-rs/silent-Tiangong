@@ -10256,6 +10256,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tiangong-app-state",
+ "tiangong-bots",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",

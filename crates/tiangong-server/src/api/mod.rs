@@ -38,6 +38,10 @@ pub struct ServerAppContext {
     /// MCP 管理插件共享句柄：API 管理（register/remove/...）与 core 注册使用同一实例，
     /// 避免管理实例与运行实例状态分叉（对齐 CLI/Tauri 的 dual-ownership）。
     pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    /// Bot 配置存储（读写 bots.json）。独立 Server 自建；嵌入式复用 Desktop 注入实例。
+    pub bot_store: Arc<tiangong_bots::BotStore>,
+    /// Bot 运行时——制品下载、进程监督与启停（issue #286 阶段 2，Server 接管生命周期）。
+    pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
 }
 
 impl ServerAppContext {
@@ -49,7 +53,7 @@ impl ServerAppContext {
     ) -> Self {
         let config = core_manager.config().clone();
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-            storage_root,
+            storage_root.clone(),
         ));
         // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
         // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
@@ -71,6 +75,18 @@ impl ServerAppContext {
             state: state.clone(),
             core_backend: core_backend.clone(),
         });
+        // Bot 管理句柄（issue #286 阶段 2）：独立 Server 自建，对齐 Desktop app.rs。
+        // 构造失败不阻断 Server 启动（bot 相关 API 会返回错误）。
+        let bot_store = Arc::new(
+            tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(|e| {
+                tracing::warn!("BotStore 初始化失败，bot 管理 API 将不可用: {e}");
+                tiangong_bots::BotStore::default()
+            }),
+        );
+        let bot_runtime = Arc::new(
+            tiangong_bots::BotRuntime::new(bot_store.clone())
+                .unwrap_or_else(|e| panic!("独立 Server 构造 BotRuntime 失败: {e}")),
+        );
         Self::with_backend(
             state,
             config,
@@ -78,12 +94,15 @@ impl ServerAppContext {
             core_backend,
             scheduler_context,
             mcp_plugin,
+            bot_store,
+            bot_runtime,
         )
     }
 
     /// 使用宿主提供的 Core 与调度上下文构建 Server。
     ///
     /// Desktop 内嵌模式必须走此入口，确保 HTTP 与桌面 UI 共用同一套 Core 生命周期。
+    #[allow(clippy::too_many_arguments)]
     pub fn with_backend(
         state: SharedState,
         config: CoreConfigProvider,
@@ -91,6 +110,8 @@ impl ServerAppContext {
         core_backend: Arc<dyn ServerCoreBackend>,
         scheduler_context: Arc<dyn SchedulerContext>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+        bot_store: Arc<tiangong_bots::BotStore>,
+        bot_runtime: Arc<tiangong_bots::BotRuntime>,
     ) -> Self {
         let router = Arc::new(MessageRouter::new(
             state.clone(),
@@ -104,6 +125,8 @@ impl ServerAppContext {
             scheduler_context,
             router,
             mcp_plugin,
+            bot_store,
+            bot_runtime,
         }
     }
 
@@ -288,9 +311,22 @@ mod tests {
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             temp.path().to_path_buf(),
         ));
+        let bot_store = Arc::new(
+            tiangong_bots::BotStore::with_config_path(temp.path().join("bots.json"))
+                .expect("test bot store"),
+        );
+        let bot_runtime =
+            Arc::new(tiangong_bots::BotRuntime::new(bot_store.clone()).expect("test bot runtime"));
 
         let context = ServerAppContext::with_backend(
-            state, config, event_bus, backend, scheduler, mcp_plugin,
+            state,
+            config,
+            event_bus,
+            backend,
+            scheduler,
+            mcp_plugin,
+            bot_store,
+            bot_runtime,
         );
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);

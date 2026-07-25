@@ -140,6 +140,10 @@ pub struct EmbeddedServerDependencies {
     pub core_backend: Arc<dyn ServerCoreBackend>,
     pub scheduler_context: Arc<dyn SchedulerContext>,
     pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
+    /// Bot 管理句柄（issue #286）：嵌入式 Server 复用 Desktop 的 bot_store/bot_runtime，
+    /// 使 HTTP /api/v1/bots 在 Desktop 下也指向同一管理实例。
+    pub bot_store: Arc<tiangong_bots::BotStore>,
+    pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
     pub event_bus: Arc<EventBus>,
 }
 
@@ -158,6 +162,8 @@ pub fn run_embedded(
         core_backend,
         scheduler_context,
         mcp_plugin,
+        bot_store,
+        bot_runtime,
         event_bus,
     } = dependencies;
     let app = Arc::new(ServerAppContext::with_backend(
@@ -167,6 +173,8 @@ pub fn run_embedded(
         core_backend,
         scheduler_context,
         mcp_plugin,
+        bot_store,
+        bot_runtime,
     ));
 
     tracing::info!("构建嵌入式 Server 路由...");
