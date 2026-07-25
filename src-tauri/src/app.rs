@@ -181,6 +181,14 @@ impl TiangongApp {
         let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             storage_root.clone(),
         ));
+        // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
+        // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
+        let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
+            tracing::warn!("共享 IndexManager 初始化失败，降级独立实例: {e}");
+            std::sync::Arc::new(
+                tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
+            )
+        });
         let bot_store = std::sync::Arc::new(
             tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
                 |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
@@ -195,6 +203,7 @@ impl TiangongApp {
             mcp_plugin: mcp_plugin.clone(),
             config: config.clone(),
             storage_root: storage_root.clone(),
+            index_manager: index_manager.clone(),
         });
         Self {
             state,

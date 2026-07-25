@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -49,12 +51,34 @@ const SKIP_EXTENSIONS: &[&str] = &[
     ".lock", ".log",
 ];
 
+/// 跳过目录集合（OnceLock 惰性初始化，O(1) 查询）。
+fn skip_dirs() -> &'static HashSet<&'static str> {
+    static SKIP_DIRS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SKIP_DIRS_SET.get_or_init(|| SKIP_DIRS.iter().copied().collect())
+}
+
+/// 跳过扩展名集合（不含点，小写）。
+fn skip_extensions() -> &'static HashSet<&'static str> {
+    static SKIP_EXTENSIONS_SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SKIP_EXTENSIONS_SET.get_or_init(|| {
+        SKIP_EXTENSIONS
+            .iter()
+            .copied()
+            .map(|e| e.trim_start_matches('.'))
+            .collect()
+    })
+}
+
 fn should_skip_dir(name: &str) -> bool {
-    name.starts_with('.') || SKIP_DIRS.contains(&name)
+    name.starts_with('.') || skip_dirs().contains(name)
 }
 
 fn should_skip_file(name: &str) -> bool {
-    SKIP_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
+    // 用扩展名提取 + HashSet O(1) 查询替代 ~40 项 ends_with 线性比较。
+    Path::new(name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| skip_extensions().contains(ext))
 }
 
 fn detect_language(path: &Path) -> String {
@@ -366,14 +390,20 @@ impl WorkspaceIndex {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            if path.is_dir() {
+            // 用 DirEntry 缓存的 file_type 判定类型，避免 path.is_dir()/is_file() 各一次 stat。
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
                 if should_skip_dir(&name_str) {
                     continue;
                 }
                 self.scan_dir(writer, &path, depth + 1)?;
-            } else if path.is_file()
+            } else if file_type.is_file()
                 && !should_skip_file(&name_str)
-                && let Err(err) = self.index_file_with_writer(writer, &path)
+                && let Err(err) =
+                    self.index_file_with_writer(writer, &path, entry.metadata().ok().as_ref())
             {
                 tracing::warn!(
                     workspace = %self.root.display(),
@@ -388,7 +418,7 @@ impl WorkspaceIndex {
 
     pub fn index_file(&mut self, path: &Path) -> Result<()> {
         let mut writer = self.create_writer("index_file")?;
-        self.index_file_with_writer(&mut writer, path)?;
+        self.index_file_with_writer(&mut writer, path, None)?;
         writer
             .commit()
             .with_context(|| self.context("index_file", "提交 Workspace 索引失败"))?;
@@ -396,9 +426,26 @@ impl WorkspaceIndex {
         Ok(())
     }
 
-    fn index_file_with_writer(&mut self, writer: &mut IndexWriter, path: &Path) -> Result<()> {
-        let metadata = fs::metadata(path).ok();
-        let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+    /// 写入单个文件到索引。`metadata` 为调用方已获取的元数据（scan_dir 会复用
+    /// `DirEntry::metadata()`），传入 `None` 时此处自行 stat 兜底。
+    fn index_file_with_writer(
+        &mut self,
+        writer: &mut IndexWriter,
+        path: &Path,
+        metadata: Option<&fs::Metadata>,
+    ) -> Result<()> {
+        let owned_metadata;
+        let metadata = match metadata {
+            Some(m) => m,
+            None => {
+                owned_metadata = fs::metadata(path).ok();
+                match owned_metadata.as_ref() {
+                    Some(m) => m,
+                    None => return Ok(()),
+                }
+            }
+        };
+        let size = metadata.len();
         if size > MAX_FILE_SIZE {
             return Ok(());
         }
@@ -633,6 +680,46 @@ mod tests {
             "workspace search should find indexed Rust symbol"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn should_skip_uses_hashset() {
+        // 被跳过的目录与扩展名
+        assert!(should_skip_dir("node_modules"));
+        assert!(should_skip_dir(".git"));
+        assert!(should_skip_file("trace.log"));
+        assert!(should_skip_file("binary.png"));
+        // 正常源码不跳过
+        assert!(!should_skip_dir("src"));
+        assert!(!should_skip_file("lib.rs"));
+        assert!(!should_skip_file("index.ts"));
+        // 无扩展名文件不跳过
+        assert!(!should_skip_file("Makefile"));
+    }
+
+    #[test]
+    fn full_scan_skips_ignored_entries() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        let base_dir = temp.path().join("index");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::create_dir_all(workspace.join("node_modules").join("pkg"))?;
+        fs::write(workspace.join("src").join("lib.rs"), "pub fn kept() {}\n")?;
+        // 应被跳过：node_modules 下与 .log 扩展
+        fs::write(
+            workspace.join("node_modules").join("pkg").join("lib.rs"),
+            "pub fn skipped() {}\n",
+        )?;
+        fs::write(workspace.join("trace.log"), "noise\n")?;
+
+        let mut index = WorkspaceIndex::open_or_create(&workspace, &base_dir)?;
+        assert_eq!(index.full_scan()?, 1, "只应索引 src/lib.rs 一个文件");
+
+        let hits = index.search("skipped", 5)?;
+        assert!(hits.is_empty(), "node_modules 内容不应进入索引");
+        let hits = index.search("kept", 5)?;
+        assert!(hits.iter().any(|h| h.path == "src/lib.rs"));
         Ok(())
     }
 }

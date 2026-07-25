@@ -91,19 +91,24 @@ impl IndexPlugin {
             && let Some(cwd) = self.workspace()
             && cwd.is_dir()
         {
-            let index_query = IndexQuery::new(query)
-                .with_scope(IndexScope::Workspace)
-                .with_limit(limit);
-            match im.search(&cwd, &index_query) {
-                Ok(hits) if !hits.is_empty() => {
-                    stdout_parts.push("【工作区文件】".to_string());
-                    for hit in &hits {
-                        stdout_parts.push(format!("- {} ({})", hit.path, hit.language));
+            // 后台扫描进行中时 workspace 索引在自身 Mutex 上不可用，降级提示而非阻塞。
+            if self.is_scanning() {
+                stdout_parts.push("【工作区索引正在构建中，请稍候】".to_string());
+            } else {
+                let index_query = IndexQuery::new(query)
+                    .with_scope(IndexScope::Workspace)
+                    .with_limit(limit);
+                match im.search(&cwd, &index_query) {
+                    Ok(hits) if !hits.is_empty() => {
+                        stdout_parts.push("【工作区文件】".to_string());
+                        for hit in &hits {
+                            stdout_parts.push(format!("- {} ({})", hit.path, hit.language));
+                        }
                     }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    stdout_parts.push(format!("【工作区搜索失败: {e}】"));
+                    Ok(_) => {}
+                    Err(e) => {
+                        stdout_parts.push(format!("【工作区搜索失败: {e}】"));
+                    }
                 }
             }
         }

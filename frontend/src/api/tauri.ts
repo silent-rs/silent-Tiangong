@@ -987,11 +987,15 @@ export const api = {
   listWorkspaceIndexes: (): Promise<WorkspaceIndexInfo[]> =>
     invoke('list_workspace_indexes'),
 
-  deleteWorkspaceIndex: (workspaceId: string): Promise<void> =>
-    invoke('delete_workspace_index', { workspaceId }),
+  deleteWorkspaceIndex: (workspaceId: string, root: string): Promise<void> =>
+    invoke('delete_workspace_index', { workspaceId, root }),
 
   rebuildWorkspaceIndex: (root: string): Promise<number> =>
     invoke('rebuild_workspace_index', { root }),
+
+  // 预热工作区索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）
+  prewarmWorkspaceIndex: (root: string): Promise<void> =>
+    invoke('prewarm_workspace_index', { root }),
 
   getModelCapabilities: (): Promise<ModelCapabilityInfo[]> =>
     invoke('get_model_capabilities'),

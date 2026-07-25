@@ -1108,6 +1108,10 @@ export const useStore = create<AppState>((set, get) => ({
         };
       });
       syncInputCacheInBackground(get().syncInputCache(newConversationId, initialCache));
+      // 后台预热工作区索引：消除首次发送消息时的同步扫描延迟，不阻塞 UI。
+      api
+        .prewarmWorkspaceIndex(newConversationCwd)
+        .catch((error) => console.error('索引预热失败:', error));
     } catch (error) {
       console.error('开始新对话失败:', error);
     }
@@ -1675,6 +1679,12 @@ export const useStore = create<AppState>((set, get) => ({
         if (cache) sessionViewCaches.set(activeSessionId, { ...cache, cwd });
       }
       set({ sessionCwd: cwd });
+      // 新对话选定目录后立即预热索引（现有会话由后端在目录变更时处理）。
+      if (isNewConversation) {
+        api
+          .prewarmWorkspaceIndex(cwd)
+          .catch((error) => console.error('索引预热失败:', error));
+      }
     } catch (error) {
       console.error('设置工作目录失败:', error);
       throw error;
