@@ -772,6 +772,12 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
 async fn auto_start_server_and_bots(app: tauri::AppHandle) {
     let state = app.state::<tiangong_app::TiangongApp>();
+    // 所有权守卫（issue #286）：Desktop 未取得 Bot 管理锁（独立 Server 在运行）时，
+    // 不启动 bot，避免双管理者。bot_ownership 为 None 即放弃管理权。
+    if state.bot_ownership.is_none() {
+        warn!("Desktop 未持有 Bot 管理所有权（独立 Server 可能在运行），跳过 bot 自动启动");
+        return;
+    }
     let server_enabled = match state
         .with_state_read(|core_state| Ok(core_state.config.server.enabled))
         .await

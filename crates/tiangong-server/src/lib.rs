@@ -21,8 +21,37 @@ use self::remote::backend::ServerCoreBackend;
 use self::remote::event::EventBus;
 
 /// 启动 Server 模式（前台运行，阻塞）
+///
+/// 获取 Bot 管理所有权锁（issue #286）：若 Desktop 已持 `desktop.lock` 则拒绝启动，
+/// 避免 Desktop 与独立 Server 同时管理 bot。锁句柄随函数返回释放（正常退出），
+/// 崩溃/强杀由 OS 自动释放。阶段 2b 将补信号处理确保收到 SIGTERM 时优雅停 bot。
 #[allow(deprecated)]
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
+    use tiangong_config::lock::{OwnerKind, OwnershipLock};
+    match OwnershipLock::acquire(OwnerKind::Server)? {
+        Ok(lock) => {
+            tracing::info!("已获取 Server Bot 管理所有权锁");
+            // 持有锁至函数返回；存入变量防止过早 drop。
+            let _bot_ownership = lock;
+            run_server_inner(host, port, token)
+        }
+        Err(owner) => Err(anyhow::anyhow!(
+            "Bot 管理权已被 {} 占用，无法启动独立 Server。请先退出 {} 后重试。",
+            owner_label(owner),
+            owner_label(owner)
+        )),
+    }
+}
+
+fn owner_label(owner: tiangong_config::lock::OwnerKind) -> &'static str {
+    use tiangong_config::lock::OwnerKind;
+    match owner {
+        OwnerKind::Desktop => "Desktop",
+        OwnerKind::Server => "另一个独立 Server",
+    }
+}
+
+fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -55,6 +55,9 @@ pub struct TiangongApp {
     pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
     /// bot 运行时——制品下载、进程监督与启停。
     pub bot_runtime: std::sync::Arc<tiangong_bots::BotRuntime>,
+    /// Bot 管理所有权锁（issue #286）。Desktop 持有期间独占管理 bot；若独立 Server
+    /// 已持锁则此处为 None（bot 不自动启动，由 Server 管理）。随 TiangongApp drop 释放。
+    pub bot_ownership: Option<tiangong_config::lock::OwnershipLock>,
     /// 内嵌 HTTP 的等待者按稳定用户消息 ID 绑定。终态由唯一的桌面流消费者完成，
     /// 不能按“当前最后一轮”唤醒，否则同会话排队消息会串答。
     remote_turn_waiters: Mutex<HashMap<(String, String), Vec<RemoteTurnWaiter>>>,
@@ -189,6 +192,23 @@ impl TiangongApp {
                 tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
             )
         });
+        // 获取 Bot 管理所有权（issue #286）：若独立 Server 已持锁，Desktop 不抢占
+        // （阶段 5 将补自动移交）。锁失败时 bot_ownership 为 None，后续 auto_start 跳过。
+        let bot_ownership = match tiangong_config::lock::OwnershipLock::acquire(
+            tiangong_config::lock::OwnerKind::Desktop,
+        ) {
+            Ok(Ok(lock)) => Some(lock),
+            Ok(Err(peer)) => {
+                tracing::warn!(
+                    "独立 Server 正在运行并持有 Bot 管理权（{peer:?}），Desktop 将不启动 bot。                     若需 Desktop 管理，请先停止独立 Server 后重启 Desktop。"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!("获取 Bot 管理所有权锁失败，Desktop 将不启动 bot: {e}");
+                None
+            }
+        };
         let bot_store = std::sync::Arc::new(
             tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
                 |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
@@ -220,6 +240,7 @@ impl TiangongApp {
             mcp_plugin,
             bot_store,
             bot_runtime,
+            bot_ownership,
             remote_turn_waiters: Mutex::new(HashMap::new()),
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),

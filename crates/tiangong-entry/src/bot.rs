@@ -32,6 +32,22 @@ fn parse_bot_id(raw: &str) -> Result<BotId> {
 }
 
 pub(crate) fn run_bot_command(args: BotArgs) -> Result<()> {
+    // 所有权守卫（issue #286）：Desktop 运行时拒绝 CLI 直接操作 bot，避免双管理者。
+    // Server 运行时：阶段 2 将改为经 HTTP 操作 Server；当前阶段 1 暂沿用本地逻辑
+    // （Server 与 CLI 不同进程，本地 bots.json 读写仍可能竞争，阶段 2 完成后消除）。
+    match tiangong_config::lock::OwnershipLock::current_owner() {
+        Some(tiangong_config::lock::OwnerKind::Desktop) => {
+            return Err(anyhow!(
+                "Desktop 正在运行并独占管理 bot。请在 Desktop 中操作 bot，                 或先退出 Desktop 后再用 CLI。"
+            ));
+        }
+        Some(tiangong_config::lock::OwnerKind::Server) => {
+            // 阶段 2 起：改走 Server HTTP API。当前先放行本地逻辑。
+        }
+        None => {
+            // 无管理者：阶段 2 起将提示「请先启动 Server」。
+        }
+    }
     let (store, runtime) = load_runtime()?;
     // CLI 需要独立 tokio runtime 驱动 BotRuntime 的 async 方法。
     let rt = tokio::runtime::Builder::new_current_thread()
