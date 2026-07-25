@@ -544,12 +544,21 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
         return Err(anyhow!("bot 制品未安装：{id}（{}）", artifact.display()));
     }
 
+    // bot 通过 server 的 /api/v1/messages 收发消息，启动前必须确保 server 已运行。
+    // 未运行则自动以后台 daemon 方式拉起（tiangong server --daemon）。
+    let server_config = ensure_server_running()?;
+    eprintln!(
+        "Server 已就绪：{}:{}",
+        connect_host(&server_config.host),
+        server_config.port
+    );
+
     // 按缓存 schema 注入凭证环境变量（对齐 BotRuntime::start 的 bot_env 逻辑）。
     let schema = tiangong_bots::cached_schema(id).unwrap_or_default();
     tiangong_bots::management::validate_bot_config_fields(&schema, &bot.config)?;
     let mut env = tiangong_bots::bot_env(bot, &schema);
     // 主程序注入的 TIANGONG_URL/TOKEN 覆盖优先级最高（与 runtime 一致）。
-    env.extend(derive_server_env());
+    env.extend(server_env_from_config(&server_config));
 
     let log_path = tiangong_bots::paths::bot_log_path(id);
     if let Some(parent) = log_path.parent() {
@@ -649,12 +658,84 @@ fn bot_stop(id: &BotId) -> Result<()> {
     Ok(())
 }
 
-/// 从 server.json 读取配置，拼装 bot 启动所需的 TIANGONG_URL/TIANGONG_TOKEN。
+/// 确保 server 已在后台运行：健康检查通过则直接返回；否则以 daemon 方式拉起
+/// 并轮询等待健康。
+///
+/// bot 必须通过 server 的 `/api/v1/messages` 收发消息，server 未运行时 bot
+/// 启动后会立即因连接失败而崩溃。对齐桌面端 `ensure_server_running_for_bots`
+/// 的语义，但 CLI 模式拉起的是独立 server 进程（`tiangong server --daemon`），
+/// 而非桌面端的 embedded server。
+fn ensure_server_running() -> Result<tiangong_config::ServerConfig> {
+    let config = tiangong_config::load_server_config();
+    if server_health_check(&config) {
+        return Ok(config);
+    }
+
+    eprintln!("Server 未运行，以后台 daemon 方式拉起...");
+    tiangong_server::run_daemon(&config.host, config.port, config.auth_token.clone())
+        .context("拉起 Server daemon 失败")?;
+
+    // 轮询等待健康（最多 6 秒，对齐桌面端 wait_for_server_health）。
+    for _ in 0..30 {
+        if server_health_check(&config) {
+            // 标记 enabled，确保下次主程序启动时自动拉起。
+            if !config.enabled {
+                let mut updated = config.clone();
+                updated.enabled = true;
+                let _ = tiangong_config::save_server_config(&updated);
+            }
+            return Ok(config);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(anyhow!(
+        "Server 已启动但健康检查未通过（{}:{}），bot 无法收发消息",
+        connect_host(&config.host),
+        config.port
+    ))
+}
+
+/// Server 健康检查：TCP 连接 host:port 并发 GET /api/v1/health，返回 200 即健康。
+///
+/// 复刻桌面端 `server_health_check`（src-tauri/src/commands.rs），用裸 TCP
+/// 避免引入 HTTP 客户端依赖。
+fn server_health_check(config: &tiangong_config::ServerConfig) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::net::ToSocketAddrs;
+
+    let host = connect_host(&config.host);
+    let Ok(mut addrs) = (host.as_str(), config.port).to_socket_addrs() else {
+        return false;
+    };
+    let Some(addr) = addrs.next() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(150)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
+    let request = format!(
+        "GET /api/v1/health HTTP/1.1\r\nHost: {host}:{}\r\nConnection: close\r\n\r\n",
+        config.port
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0u8; 1024];
+    let Ok(len) = stream.read(&mut response) else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&response[..len]);
+    response.starts_with("HTTP/") && response.contains(" 200 ")
+}
+
+/// 由 ServerConfig 拼装 bot 启动所需的 TIANGONG_URL/TIANGONG_TOKEN。
 ///
 /// 对齐桌面端 `bot_server_env` 的逻辑（src-tauri/src/commands.rs）。host 为空
 /// 或通配地址时回退到 127.0.0.1。
-fn derive_server_env() -> BTreeMap<String, String> {
-    let config = tiangong_config::load_server_config();
+fn server_env_from_config(config: &tiangong_config::ServerConfig) -> BTreeMap<String, String> {
     let host = connect_host(&config.host);
     let mut env = BTreeMap::new();
     env.insert(
@@ -663,7 +744,7 @@ fn derive_server_env() -> BTreeMap<String, String> {
     );
     env.insert(
         "TIANGONG_TOKEN".into(),
-        config.auth_token.unwrap_or_default(),
+        config.auth_token.clone().unwrap_or_default(),
     );
     env
 }
