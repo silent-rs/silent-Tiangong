@@ -30,6 +30,8 @@ pub(crate) enum MainCommand {
     Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
     Mcp(McpArgs),
+    #[command(about = "Bot 制品管理（下载/配置/安装/升级/启停）")]
+    Bot(BotArgs),
     #[command(about = "模型配置管理（Provider / Model / Routing）")]
     Model(ModelArgs),
     #[command(about = "Memory 系统配置管理")]
@@ -493,6 +495,90 @@ pub(crate) enum SkillSubcommand {
     Refresh,
     #[command(about = "校验配置")]
     Validate,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BotArgs {
+    #[command(subcommand)]
+    pub(crate) command: BotSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BotSubcommand {
+    /// 查看已注册 bot 与已安装制品（含健康状态）
+    #[command(about = "查看已注册 bot 与已安装制品")]
+    List,
+    /// 查看线上 bots-index 可安装制品
+    #[command(about = "查看线上可安装的 bot 制品")]
+    Available,
+    /// 下载并安装 bot 制品（不自动注册配置）
+    #[command(about = "下载并安装 bot 制品（不自动注册配置）")]
+    Install {
+        /// 制品 ID（如 feishu）
+        #[arg(help = "制品 ID（如 feishu）")]
+        artifact_id: String,
+        /// bot 实例 ID（默认与制品 ID 相同）
+        #[arg(long, help = "bot 实例 ID，默认与制品 ID 相同")]
+        id: Option<String>,
+        /// 指定版本（默认最新）
+        #[arg(long, help = "指定版本，默认最新")]
+        version: Option<String>,
+    },
+    /// 交互式配置 bot（扫码授权或手工填写凭证），配置完成自动启动
+    #[command(about = "交互式配置 bot（扫码或手工填凭证），完成后自动启动")]
+    Configure {
+        /// bot 实例 ID
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 查看单个 bot 详情（配置脱敏）
+    #[command(about = "查看单个 bot 详情（配置脱敏）")]
+    Show {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 在后台启动 bot（独立进程，不随 CLI 退出而停止）
+    #[command(about = "在后台启动 bot 进程")]
+    Start {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 停止 bot
+    #[command(about = "停止 bot 进程")]
+    Stop {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 重启 bot
+    #[command(about = "重启 bot 进程")]
+    Restart {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 升级 bot 到最新版本（停止 → 下载 → 写版本，运行中则自动恢复运行）
+    #[command(about = "升级 bot 到最新版本")]
+    Upgrade {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 检查是否有更新（不安装），不传 artifact_id 则检查全部已安装制品
+    #[command(about = "检查是否有更新（不安装）")]
+    CheckUpdate {
+        #[arg(help = "制品 ID，不传则检查全部已安装制品")]
+        artifact_id: Option<String>,
+    },
+    /// 删除 bot 配置（若运行中则先停止，保留已安装制品）
+    #[command(about = "删除 bot 配置（保留已安装制品）")]
+    Remove {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 查看 bot 日志尾部
+    #[command(about = "查看 bot 日志尾部")]
+    Log {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
 }
 
 pub(crate) fn parse_key_value(raw: &str) -> Result<(String, String), String> {

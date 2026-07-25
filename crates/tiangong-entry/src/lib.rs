@@ -1,4 +1,5 @@
 mod args;
+mod bot;
 mod config;
 mod configure;
 mod doctor;
@@ -35,6 +36,7 @@ pub fn run() -> anyhow::Result<()> {
     match args.command {
         Some(MainCommand::Server(args)) => server::run_server_command(args),
         Some(MainCommand::Mcp(args)) => mcp::run_mcp_command(args),
+        Some(MainCommand::Bot(args)) => bot::run_bot_command(args),
         Some(MainCommand::Model(args)) => model::run_model_command(args),
         Some(MainCommand::Memory(args)) => memory::run_memory_command(args),
         Some(MainCommand::Skill(args)) => skill::run_skill_command(args),
