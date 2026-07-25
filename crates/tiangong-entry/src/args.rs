@@ -30,6 +30,8 @@ pub(crate) enum MainCommand {
     Server(ServerArgs),
     #[command(about = "MCP 配置管理")]
     Mcp(McpArgs),
+    #[command(about = "Bot 制品管理（下载/配置/安装/升级/启停）")]
+    Bot(BotArgs),
     #[command(about = "模型配置管理（Provider / Model / Routing）")]
     Model(ModelArgs),
     #[command(about = "Memory 系统配置管理")]
@@ -493,6 +495,123 @@ pub(crate) enum SkillSubcommand {
     Refresh,
     #[command(about = "校验配置")]
     Validate,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct BotArgs {
+    #[command(subcommand)]
+    pub(crate) command: BotSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum BotSubcommand {
+    /// 查看已注册 bot 与已安装制品（含健康状态）
+    #[command(about = "查看已注册 bot 与已安装制品")]
+    List,
+    /// 查看线上 bots-index 可安装制品
+    #[command(about = "查看线上可安装的 bot 制品")]
+    Available,
+    /// 下载并安装 bot 制品（不自动注册配置）
+    #[command(about = "下载并安装 bot 制品（不自动注册配置）")]
+    Install {
+        /// 制品 ID（如 feishu）
+        #[arg(help = "制品 ID（如 feishu）")]
+        artifact_id: String,
+        /// bot 实例 ID（默认与制品 ID 相同）
+        #[arg(long, help = "bot 实例 ID，默认与制品 ID 相同")]
+        id: Option<String>,
+        /// 指定版本（默认最新）
+        #[arg(long, help = "指定版本，默认最新")]
+        version: Option<String>,
+    },
+    /// 写入或更新 bot 配置（凭证）
+    #[command(about = "写入或更新 bot 配置（凭证）")]
+    Configure {
+        /// bot 实例 ID
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+        /// 设置普通字段，格式 key=value，可重复
+        #[arg(
+            long = "set",
+            value_parser = parse_key_value,
+            help = "设置普通字段，格式 key=value，可重复"
+        )]
+        set: Vec<(String, String)>,
+        /// 从环境变量读取 secret 字段，格式 KEY=ENV_VAR，可重复
+        #[arg(
+            long = "secret",
+            value_parser = parse_key_value,
+            help = "从环境变量读取 secret 字段，格式 KEY=ENV_VAR，可重复"
+        )]
+        secret: Vec<(String, String)>,
+        /// 从 JSON 文件读取整个 config map
+        #[arg(
+            long = "config-file",
+            value_name = "PATH",
+            help = "从 JSON 文件读取整个 config map"
+        )]
+        config_file: Option<String>,
+        /// 启用 bot
+        #[arg(long, conflicts_with = "disable", help = "启用 bot")]
+        enable: bool,
+        /// 禁用 bot
+        #[arg(long, conflicts_with = "enable", help = "禁用 bot")]
+        disable: bool,
+    },
+    /// 查看单个 bot 详情（配置脱敏）
+    #[command(about = "查看单个 bot 详情（配置脱敏）")]
+    Show {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 启动 bot（注意：bot 进程随本 CLI 退出而停止，长期运行请用桌面端）
+    #[command(about = "启动 bot 进程（随 CLI 退出而停止）")]
+    Start {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 停止 bot
+    #[command(about = "停止 bot 进程")]
+    Stop {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 重启 bot
+    #[command(about = "重启 bot 进程")]
+    Restart {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 升级 bot 到最新版本（停止 → 下载 → 写版本，运行中则自动恢复运行）
+    #[command(about = "升级 bot 到最新版本")]
+    Upgrade {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 检查是否有更新（不安装），不传 artifact_id 则检查全部已安装制品
+    #[command(about = "检查是否有更新（不安装）")]
+    CheckUpdate {
+        #[arg(help = "制品 ID，不传则检查全部已安装制品")]
+        artifact_id: Option<String>,
+    },
+    /// 删除 bot 配置（若运行中则先停止，保留已安装制品）
+    #[command(about = "删除 bot 配置（保留已安装制品）")]
+    Remove {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 查看 bot 日志尾部
+    #[command(about = "查看 bot 日志尾部")]
+    Log {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
+    /// 扫码配置（终端渲染二维码并轮询授权状态）
+    #[command(about = "扫码配置（终端渲染二维码）")]
+    Provision {
+        #[arg(help = "bot 实例 ID")]
+        id: String,
+    },
 }
 
 pub(crate) fn parse_key_value(raw: &str) -> Result<(String, String), String> {

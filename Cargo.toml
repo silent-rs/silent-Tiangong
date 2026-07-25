@@ -104,6 +104,7 @@ http-body-util = "0.1"
 libc = "0.2"
 lancedb = "0.29"
 notify = "8"
+qrcode = "0.14"
 ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false }
 rmcp = { version = "2", default-features = false }

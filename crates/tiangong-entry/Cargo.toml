@@ -14,6 +14,7 @@ tiangong-config = { workspace = true }
 tiangong-memory = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-server = { workspace = true }
+tiangong-bots = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
@@ -21,3 +22,5 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["blocking", "json", "rustls"] }
 semver = { workspace = true }
 dialoguer = "0.12.0"
+tokio = { workspace = true, features = ["rt", "time", "sync"] }
+qrcode = { workspace = true }
