@@ -354,6 +354,18 @@ impl IndexManager {
     /// `workspaces.remove(workspace_id)` 因键不匹配而无法清理缓存，导致删除后进程内
     /// 仍使用旧索引对象。
     pub fn delete_workspace_index(&self, root: &Path, workspace_id: &str) -> Result<()> {
+        // 防御性校验：root 与 workspace_id 必须一致（workspace_id 应为 hash_path(root)）。
+        // 二者来自前端同一条记录，正常一致；校验可防止过期数据、错误调用或未来维护
+        // 时误删其他工作区的磁盘索引目录。
+        let expected_id = workspace_index::hash_path(root);
+        if workspace_id != expected_id {
+            return Err(anyhow::anyhow!(
+                "工作区路径与索引 ID 不匹配：root={} workspace_id={} expected={}",
+                root.display(),
+                workspace_id,
+                expected_id
+            ));
+        }
         self.workspaces.remove(&workspace_key(root));
         let dir = self.base_dir.join("workspaces").join(workspace_id);
         if dir.exists() {
@@ -652,5 +664,36 @@ mod tests {
         );
         // 磁盘目录应已删除（workspace_index_exists 检查磁盘）。
         assert!(!workspace_index_exists(&root), "磁盘索引目录应已删除");
+    }
+
+    /// root 与 workspace_id 不一致时拒绝删除（防御性校验）。
+    #[test]
+    fn delete_workspace_index_rejects_mismatched_id() {
+        use crate::index::workspace_index;
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let manager =
+            Arc::new(IndexManager::new_with_dir(temp.path().join("index")).expect("manager"));
+        let root = temp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("lib.rs"),
+            "pub fn demo() {}
+",
+        )
+        .unwrap();
+        manager.full_scan(&root).expect("full_scan");
+
+        // 用错误的 workspace_id 删除应报错，不触及磁盘目录。
+        let wrong_id = "deadbeefdeadbeef";
+        let err = manager.delete_workspace_index(&root, wrong_id).unwrap_err();
+        assert!(
+            err.to_string().contains("不匹配"),
+            "应拒绝不匹配的 workspace_id，实际错误: {err}"
+        );
+        // 正确的 id 仍可删除。
+        let correct_id = workspace_index::hash_path(&root);
+        manager
+            .delete_workspace_index(&root, &correct_id)
+            .expect("正确 id 应删除成功");
     }
 }
