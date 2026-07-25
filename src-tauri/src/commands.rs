@@ -3718,11 +3718,42 @@ pub async fn list_workspace_indexes(
     tiangong_plugin_index::list_workspace_indexes_for_gui().map_err(|err| err.to_string())
 }
 
-/// 删除指定 Workspace 索引
+/// 删除指定 Workspace 索引。
+///
+/// 使用 app 层共享 IndexManager：先按 `root` 取得扫描许可（与预热 / 插件后台扫描 /
+/// 重建互斥，避免删除时后台线程继续写已移除的磁盘目录），再清理共享 manager 的内存
+/// 缓存（以 `workspace_key(root)` 为键）并删除磁盘索引目录（以 `workspace_id` 定位）。
+/// 已有扫描在进行时短暂轮询等待，保证删除期间无并发写入。
 #[tauri::command]
-pub async fn delete_workspace_index(workspace_id: String) -> Result<(), String> {
-    tiangong_plugin_index::delete_workspace_index_for_gui(&workspace_id)
-        .map_err(|err| err.to_string())
+pub async fn delete_workspace_index(
+    workspace_id: String,
+    root: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let root_path = std::path::PathBuf::from(&root);
+    let manager = state.desktop_factory.index_manager.clone();
+    // 轮询等待扫描许可：最多约 30s，期间后台扫描应已完成。
+    let mut permit = None;
+    for _ in 0..300 {
+        if let Some(p) = manager.try_begin_workspace_scan(&root_path) {
+            permit = Some(p);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let permit = permit.ok_or_else(|| "索引正在构建中，请稍后重试".to_string())?;
+    tracing::info!(workspace_id, root = %root_path.display(), "Workspace 索引删除启动（共享 manager）");
+    let manager_clone = manager.clone();
+    tokio::task::spawn_blocking(move || {
+        // permit 持有期间状态保持占用；drop（含 panic 展开）时自动复位。
+        let _permit = permit;
+        manager_clone
+            .delete_workspace_index(&root_path, &workspace_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("删除任务执行失败: {e}"))??;
+    Ok(())
 }
 
 /// 重建指定路径的 Workspace 索引。

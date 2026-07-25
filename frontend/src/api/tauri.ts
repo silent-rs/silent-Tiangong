@@ -967,8 +967,8 @@ export const api = {
   listWorkspaceIndexes: (): Promise<WorkspaceIndexInfo[]> =>
     invoke('list_workspace_indexes'),
 
-  deleteWorkspaceIndex: (workspaceId: string): Promise<void> =>
-    invoke('delete_workspace_index', { workspaceId }),
+  deleteWorkspaceIndex: (workspaceId: string, root: string): Promise<void> =>
+    invoke('delete_workspace_index', { workspaceId, root }),
 
   rebuildWorkspaceIndex: (root: string): Promise<number> =>
     invoke('rebuild_workspace_index', { root }),

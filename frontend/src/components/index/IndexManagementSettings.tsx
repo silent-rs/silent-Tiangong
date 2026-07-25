@@ -28,10 +28,10 @@ export function IndexManagementSettings() {
     loadIndexes();
   }, [loadIndexes]);
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string, root: string) => {
     setDeleting(id);
     try {
-      await api.deleteWorkspaceIndex(id);
+      await api.deleteWorkspaceIndex(id, root);
       showSuccess('索引已删除');
       await loadIndexes();
     } catch (err) {
@@ -125,7 +125,7 @@ export function IndexManagementSettings() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => handleDelete(idx.id)}
+                    onClick={() => handleDelete(idx.id, idx.root)}
                     disabled={deleting === idx.id}
                     className="text-destructive hover:text-destructive"
                   >
