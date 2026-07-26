@@ -279,19 +279,39 @@ fn upsert_bot_config_http(
 
 /// 经 HTTP 执行扫码配置流程（展示二维码 + 轮询）。
 fn run_provision_flow_http(client: &crate::bot_client::BotClient, id: &str) -> Result<()> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     let session = client.provision_begin(id).context("开始扫码配置失败")?;
     print_qr(&session.qr_url)?;
     println!(
         "
 请用 bot 客户端扫描二维码完成授权..."
     );
+
+    // 遵循扫码协议的间隔与过期（review 问题5）：初始用 session.interval，
+    // Pending.retry_after 存在时更新；每次轮询前检查 expires_at，到期即停。
+    let mut interval = Duration::from_secs(session.interval.max(1));
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // 会话已过期：直接退出，不等 bot 返回 Expired。
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if now >= session.expires_at {
+            return Err(anyhow!("二维码已过期，请重新执行 configure"));
+        }
+        std::thread::sleep(interval);
         match client
             .provision_poll(id, &session)
             .context("轮询扫码状态失败")?
         {
-            tiangong_bots::ProvisionStatus::Pending { .. } => continue,
+            tiangong_bots::ProvisionStatus::Pending { retry_after } => {
+                // bot 返回新的轮询间隔则更新。
+                if let Some(secs) = retry_after {
+                    interval = Duration::from_secs(secs.max(1));
+                }
+                continue;
+            }
             tiangong_bots::ProvisionStatus::Success => {
                 println!("✅ 扫码授权成功");
                 return Ok(());

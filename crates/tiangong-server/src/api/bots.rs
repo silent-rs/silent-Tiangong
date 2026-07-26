@@ -233,8 +233,14 @@ pub async fn delete_bot(req: Request) -> Result<Response> {
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
     let bot_id = parse_bot_id(&id)?;
-    // 先停止运行中的 bot（忽略错误：可能未运行）。
-    let _ = app_ctx.bot_runtime.stop(&bot_id).await;
+    // 先停止运行中的 bot。stop 在 bot 未运行时返回 Ok（幂等），仅在 supervisor 停止
+    // 失败时返回 Err——此时不删除配置，避免留下失控进程（review 问题4）。
+    app_ctx.bot_runtime.stop(&bot_id).await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("停止 Bot 失败，未删除配置：{e}"),
+        )
+    })?;
     app_ctx.bot_store.remove(&bot_id).map_err(|e| {
         SilentError::business_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -379,6 +385,11 @@ pub async fn upgrade_bot(req: Request) -> Result<Response> {
     let bot = app_ctx.bot_store.get(&bot_id).ok_or_else(|| {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("Bot '{id}' 不存在"))
     })?;
+    // 记录升级前运行状态：BotRuntime::upgrade 只 stop→install，不恢复运行（review 问题3）。
+    let was_running = matches!(
+        app_ctx.bot_runtime.health(&bot_id).await,
+        tiangong_bots::BotHealth::Running
+    );
     // 检查并取得最新 manifest，失败恢复由 BotRuntime::upgrade 内部处理（stop→install）。
     let manifest = app_ctx
         .bot_runtime
@@ -406,6 +417,20 @@ pub async fn upgrade_bot(req: Request) -> Result<Response> {
                 format!("升级 Bot 失败：{e}"),
             )
         })?;
+    // 升级前在运行则重新启动；启动失败返回明确错误（不混为"升级成功"）。
+    if was_running {
+        let extra_env = app_ctx.bot_connect.to_bot_env();
+        app_ctx
+            .bot_runtime
+            .start(&bot, &extra_env)
+            .await
+            .map_err(|e| {
+                SilentError::business_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("升级成功但恢复运行失败：{e}"),
+                )
+            })?;
+    }
     Ok(Response::json(&serde_json::json!({ "status": "upgraded" })))
 }
 
