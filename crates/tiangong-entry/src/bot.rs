@@ -637,8 +637,14 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
             bot.artifact_id
         ));
     }
-    let env = server_env_from_config(&tiangong_config::load_server_config());
+    let config = tiangong_config::load_server_config();
+    let env = server_env_from_config(&config);
     tiangong_bots::pid::spawn_detached(&bot.id, &artifact, &env)?;
+    // 提示 Server 状态（不阻止 bot 启动）。
+    if !server_health_check(&config) {
+        println!("当前未检测到天工 Server，Bot 暂时无法调用 Agent。");
+        println!("请执行：tiangong server --daemon");
+    }
     Ok(())
 }
 

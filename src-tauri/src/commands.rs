@@ -3090,7 +3090,11 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
         .get(&id)
         .ok_or_else(|| format!("bot 不存在：{id}"))?;
 
-    let server_config = ensure_server_running_for_bots(state.inner()).await?;
+    // 读取 Server 配置生成 bot 回连 env，但不强制启动 Server（方案：bot 独立运行）。
+    let server_config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
     let extra_env = bot_server_env(&server_config);
 
     state
@@ -3106,6 +3110,13 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
             .map_err(|error| error.to_string())
     })
     .await?;
+    // 提示 Server 状态（不阻止 bot 启动）。
+    if !server_health_check(&server_config) {
+        return Ok(format!(
+            "bot 已启动：{}\n当前未检测到天工 Server，Bot 暂时无法调用 Agent。             请启动 Server 后 Bot 将自动恢复连接。",
+            bot.id
+        ));
+    }
     Ok(format!("bot 已启动：{}", bot.id))
 }
 
@@ -3646,6 +3657,7 @@ async fn save_server_config_to_state(
         .await
 }
 
+#[allow(dead_code)]
 pub async fn ensure_server_running_for_bots(
     state: &TiangongApp,
 ) -> Result<tiangong_server::config::ServerConfig, String> {

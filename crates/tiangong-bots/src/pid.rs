@@ -13,7 +13,7 @@ use crate::paths;
 
 /// 读取 bot 的 PID 文件，返回解析出的 PID。文件不存在或无效返回 None（并清理无效文件）。
 pub fn read_pid(id: &BotId) -> Option<u32> {
-    let path = paths::bot_pid_path(&id);
+    let path = paths::bot_pid_path(id);
     let content = std::fs::read_to_string(&path).ok()?;
     let pid = content.trim().parse::<u32>().ok();
     if pid.is_none() {
@@ -129,7 +129,7 @@ pub fn stop_bot(id: &BotId) -> Result<()> {
 
 /// 写入 PID 文件。
 pub fn write_pid(id: &BotId, pid: u32) -> Result<()> {
-    let path = paths::bot_pid_path(&id);
+    let path = paths::bot_pid_path(id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建 PID 文件目录失败: {}", parent.display()))?;
