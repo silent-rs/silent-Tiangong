@@ -28,6 +28,51 @@ use crate::scheduler::context::ServerSchedulerContext;
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
 
+/// Bot 回连 Server 所需的实际连接信息（issue #286 review 问题2）。
+///
+/// 由 Server 启动时的实际参数（host/port/token）填充，所有 bot 启动路径
+/// （start_enabled / start / restart / 升级恢复）统一从本结构生成 extra_env，
+/// 不再重新读 server.json——避免命令行参数与持久化配置不一致导致 bot 连不上。
+#[derive(Debug, Clone)]
+pub struct BotConnectInfo {
+    /// 规范化后的可连接 host（通配地址 0.0.0.0/::/空 → 127.0.0.1）。
+    pub connect_host: String,
+    pub port: u16,
+    pub token: Option<String>,
+}
+
+impl BotConnectInfo {
+    /// 由原始监听 host/port/token 构造，host 经 connect_host 规范化。
+    pub fn new(host: &str, port: u16, token: Option<String>) -> Self {
+        Self {
+            connect_host: connect_host(host),
+            port,
+            token,
+        }
+    }
+
+    /// 生成 bot 回连所需的 extra_env（TIANGONG_URL / TIANGONG_TOKEN）。
+    pub fn to_bot_env(&self) -> std::collections::BTreeMap<String, String> {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(
+            "TIANGONG_URL".to_string(),
+            format!("http://{}:{}", self.connect_host, self.port),
+        );
+        if let Some(t) = &self.token {
+            env.insert("TIANGONG_TOKEN".to_string(), t.clone());
+        }
+        env
+    }
+}
+
+/// 规范化监听地址为可连接地址（通配/空 → 127.0.0.1）。
+pub fn connect_host(host: &str) -> String {
+    match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
+        value => value.to_string(),
+    }
+}
+
 /// Server 共享上下文：统一持有应用状态、Core 运行时与消息路由器
 #[derive(Clone)]
 pub struct ServerAppContext {
@@ -43,6 +88,8 @@ pub struct ServerAppContext {
     pub bot_store: Arc<tiangong_bots::BotStore>,
     /// Bot 运行时——制品下载、进程监督与启停（issue #286 阶段 2，Server 接管生命周期）。
     pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
+    /// Bot 回连 Server 的实际连接信息（review 问题2）：所有 bot 启动路径统一使用。
+    pub bot_connect: BotConnectInfo,
 }
 
 impl ServerAppContext {
@@ -51,6 +98,7 @@ impl ServerAppContext {
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
         storage_root: std::path::PathBuf,
+        bot_connect: BotConnectInfo,
     ) -> Self {
         let config = core_manager.config().clone();
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
@@ -97,6 +145,7 @@ impl ServerAppContext {
             mcp_plugin,
             bot_store,
             bot_runtime,
+            bot_connect,
         )
     }
 
@@ -113,6 +162,7 @@ impl ServerAppContext {
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
         bot_store: Arc<tiangong_bots::BotStore>,
         bot_runtime: Arc<tiangong_bots::BotRuntime>,
+        bot_connect: BotConnectInfo,
     ) -> Self {
         let router = Arc::new(MessageRouter::new(
             state.clone(),
@@ -128,6 +178,7 @@ impl ServerAppContext {
             mcp_plugin,
             bot_store,
             bot_runtime,
+            bot_connect,
         }
     }
 
@@ -357,6 +408,7 @@ mod tests {
             mcp_plugin,
             bot_store,
             bot_runtime,
+            BotConnectInfo::new("127.0.0.1", 8080, None),
         );
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);

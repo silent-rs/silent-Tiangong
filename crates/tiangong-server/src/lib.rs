@@ -73,18 +73,20 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
     let state: SharedState = Arc::new(Mutex::new(app_state));
 
     let event_bus = Arc::new(EventBus::default());
+    let bot_connect = api::BotConnectInfo::new(host, port, token.clone());
     let app = Arc::new(ServerAppContext::new(
         state,
         core_manager,
         event_bus.clone(),
         storage_root,
+        bot_connect,
     ));
 
     // 启动已启用的 bot（issue #286 阶段 2：Server 接管 Bot 生命周期）。
     // extra_env 由 Server 自身的 URL/Token 推导，供 bot 回连本 Server。
     // 必须在 build_routes（move token）之前调用，因 extra_env 借用 token。
     let bot_runtime_for_start = app.bot_runtime.clone();
-    let extra_env = bot_extra_env(host, port, token.as_deref());
+    let extra_env = app.bot_connect.to_bot_env();
     runtime.block_on(async {
         bot_runtime_for_start.start_enabled(&extra_env).await;
     });
@@ -120,20 +122,6 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
     tracing::info!("Server 已停止所有 bot，退出");
 
     Ok(())
-}
-
-/// 推导 bot 回连 Server 所需的 extra_env（TIANGONG_URL / TIANGONG_TOKEN）。
-fn bot_extra_env(
-    host: &str,
-    port: u16,
-    token: Option<&str>,
-) -> std::collections::BTreeMap<String, String> {
-    let mut env = std::collections::BTreeMap::new();
-    env.insert("TIANGONG_URL".to_string(), format!("http://{host}:{port}"));
-    if let Some(t) = token {
-        env.insert("TIANGONG_TOKEN".to_string(), t.to_string());
-    }
-    env
 }
 
 /// 后台运行 Server
@@ -181,6 +169,8 @@ pub struct EmbeddedServerDependencies {
     /// 使 HTTP /api/v1/bots 在 Desktop 下也指向同一管理实例。
     pub bot_store: Arc<tiangong_bots::BotStore>,
     pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
+    /// Bot 回连 Server 的实际连接信息（review 问题2）。
+    pub bot_connect: api::BotConnectInfo,
     pub event_bus: Arc<EventBus>,
 }
 
@@ -201,6 +191,7 @@ pub fn run_embedded(
         mcp_plugin,
         bot_store,
         bot_runtime,
+        bot_connect,
         event_bus,
     } = dependencies;
     let app = Arc::new(ServerAppContext::with_backend(
@@ -212,6 +203,7 @@ pub fn run_embedded(
         mcp_plugin,
         bot_store,
         bot_runtime,
+        bot_connect,
     ));
 
     tracing::info!("构建嵌入式 Server 路由...");

@@ -103,7 +103,7 @@ pub async fn start_bot(req: Request) -> Result<Response> {
     })?;
     // extra_env 由 Server URL/Token 推导（与 start_enabled 一致），供 bot 回连。
     // TODO 阶段 3：从请求 body 接收额外 env；当前用 Server 自身配置。
-    let extra_env = server_bot_env();
+    let extra_env = app_ctx.bot_connect.to_bot_env();
     app_ctx
         .bot_runtime
         .start(&bot, &extra_env)
@@ -150,7 +150,7 @@ pub async fn restart_bot(req: Request) -> Result<Response> {
     let runtime = app_ctx.bot_runtime.clone();
     // stop 忽略错误（可能未运行），再 start。
     let _ = runtime.stop(&bot_id).await;
-    let extra_env = server_bot_env();
+    let extra_env = app_ctx.bot_connect.to_bot_env();
     runtime.start(&bot, &extra_env).await.map_err(|e| {
         SilentError::business_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -167,22 +167,6 @@ fn parse_bot_id(raw: &str) -> Result<tiangong_bots::BotId> {
     tiangong_bots::BotId::try_from(raw).map_err(|err: tiangong_bots::InvalidBotId| {
         SilentError::business_error(StatusCode::BAD_REQUEST, format!("Bot ID 非法：{err}"))
     })
-}
-
-/// 推导 bot 回连 Server 所需的 extra_env。
-///
-/// host/port/token 从 Server 配置读取（阶段 3 起可从请求 body 补充覆盖）。
-fn server_bot_env() -> std::collections::BTreeMap<String, String> {
-    let config = tiangong_config::load_server_config();
-    let mut env = std::collections::BTreeMap::new();
-    env.insert(
-        "TIANGONG_URL".to_string(),
-        format!("http://{}:{}", config.host, config.port),
-    );
-    if let Some(t) = config.auth_token {
-        env.insert("TIANGONG_TOKEN".to_string(), t);
-    }
-    env
 }
 
 // ── 配置与扫码（issue #286 阶段 3）──

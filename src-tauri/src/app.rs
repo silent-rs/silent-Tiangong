@@ -1015,6 +1015,7 @@ impl TiangongApp {
         let event_bus = std::sync::Arc::new(tiangong_server::remote::event::EventBus::default());
         let core_backend: std::sync::Arc<dyn tiangong_server::remote::backend::ServerCoreBackend> =
             crate::embedded_server::spawn_desktop_server_core_bridge(app_handle, event_bus.clone());
+        let token_for_connect = token.clone();
         let handle = tiangong_server::run_embedded(
             host,
             port,
@@ -1027,6 +1028,12 @@ impl TiangongApp {
                 mcp_plugin: self.mcp_plugin.clone(),
                 bot_store: self.bot_store.clone(),
                 bot_runtime: self.bot_runtime.clone(),
+                // Bot 回连信息：用 Desktop 内嵌 Server 的实际启动参数（host/port/token）。
+                bot_connect: tiangong_server::api::BotConnectInfo::new(
+                    host,
+                    port,
+                    token_for_connect,
+                ),
                 event_bus,
             },
         )
