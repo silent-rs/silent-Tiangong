@@ -63,14 +63,14 @@ fn run_http_subcommand(args: BotArgs, client: &crate::bot_client::BotClient) -> 
         BotSubcommand::Start { id } => cmd_start_http(client, id),
         BotSubcommand::Stop { id } => cmd_stop_http(client, id),
         BotSubcommand::Restart { id } => cmd_restart_http(client, id),
-        // 配置/安装/升级类命令阶段 3/4 补充 HTTP 端点。
+        BotSubcommand::Configure { id } => cmd_configure_http(client, id),
+        BotSubcommand::Remove { id } => cmd_remove_http(client, id),
+        // 安装/升级类命令阶段 4 补充 HTTP 端点。
         BotSubcommand::Available
         | BotSubcommand::Install { .. }
-        | BotSubcommand::Configure { .. }
         | BotSubcommand::Upgrade { .. }
-        | BotSubcommand::CheckUpdate { .. }
-        | BotSubcommand::Remove { .. } => Err(anyhow!(
-            "该命令经 Server 操作的 HTTP 端点尚未实现（阶段 3/4）。生命周期命令（list/show/log/start/stop/restart）已支持。"
+        | BotSubcommand::CheckUpdate { .. } => Err(anyhow!(
+            "该命令经 Server 操作的 HTTP 端点尚未实现（阶段 4）。生命周期与配置命令已支持。"
         )),
     }
 }
@@ -170,6 +170,139 @@ fn cmd_restart_http(client: &crate::bot_client::BotClient, id: String) -> Result
         .post_action(&id, "restart")
         .context("重启 Bot 失败")?;
     println!("已请求 Server 重启 bot：{id}");
+    Ok(())
+}
+
+fn cmd_configure_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    use crate::interactive as ui;
+
+    let bot_id = parse_bot_id(&id)?;
+    ui::ensure_terminal().with_context(|| {
+        "bot configure 需要交互式终端。请直接运行编译产物：./target/debug/tiangong bot configure <id>"
+    })?;
+
+    // 经 HTTP 取已注册配置（可能不存在）与 schema（制品由 Server 侧安装）。
+    let existing = match client.get_bot(&id) {
+        Ok(item) => Some(item.config),
+        Err(_) => None,
+    };
+    let artifact_id = match &existing {
+        Some(bot) => bot.artifact_id.clone(),
+        None => infer_artifact_id(&bot_id).with_context(
+            || "bot 未注册且无法推断制品 ID，请先在 Server 上 `tiangong bot install` 安装制品",
+        )?,
+    };
+    let schema = client
+        .get_schema(&id)
+        .context("获取配置 schema 失败（制品可能未在 Server 安装）")?;
+
+    println!(
+        "=== Bot 配置向导：{id}（制品 {artifact_id}）===
+"
+    );
+
+    let has_barcode = schema
+        .iter()
+        .any(|f| matches!(f.field_type, tiangong_bots::FieldType::Barcode));
+    let has_manual = schema
+        .iter()
+        .any(|f| !matches!(f.field_type, tiangong_bots::FieldType::Barcode));
+
+    let use_provision = if has_barcode {
+        let options = if has_manual {
+            vec!["扫码授权（推荐）", "手工填写凭证"]
+        } else {
+            vec!["扫码授权"]
+        };
+        ui::select("选择配置方式", &options)? == 0
+    } else {
+        println!("该 bot 不支持扫码配置，将逐项填写凭证。");
+        false
+    };
+
+    if use_provision {
+        // 扫码：经 Server provision_begin/poll，二维码本地展示。
+        run_provision_flow_http(client, &id)?;
+        let preserved = existing
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or_default();
+        upsert_bot_config_http(client, &id, &artifact_id, preserved)?;
+    } else {
+        let current = existing
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or_default();
+        let config_map = prompt_manual_fields(&schema, &current)?;
+        upsert_bot_config_http(client, &id, &artifact_id, config_map)?;
+    }
+
+    // 配置完成，经 Server 启动（已运行则重启）。
+    println!();
+    client
+        .post_action(&id, "restart")
+        .context("启动/重启 Bot 失败")?;
+    println!("✅ bot {id} 配置完成并已请求 Server 启动");
+    Ok(())
+}
+
+/// 经 HTTP 注册或更新 bot 配置。
+fn upsert_bot_config_http(
+    client: &crate::bot_client::BotClient,
+    id: &str,
+    artifact_id: &str,
+    config: BTreeMap<String, serde_json::Value>,
+) -> Result<()> {
+    let existing = client.get_bot(id).ok().map(|i| i.config);
+    if existing.is_some() {
+        client
+            .update_config(id, &tiangong_bots::UpdateBotRequest { config })
+            .context("更新配置失败")?;
+    } else {
+        client
+            .register_bot(&tiangong_bots::RegisterBotRequest {
+                id: id.to_string(),
+                artifact_id: artifact_id.to_string(),
+                config,
+                enabled: true,
+            })
+            .context("注册 Bot 失败")?;
+    }
+    Ok(())
+}
+
+/// 经 HTTP 执行扫码配置流程（展示二维码 + 轮询）。
+fn run_provision_flow_http(client: &crate::bot_client::BotClient, id: &str) -> Result<()> {
+    let session = client.provision_begin(id).context("开始扫码配置失败")?;
+    print_qr(&session.qr_url)?;
+    println!(
+        "
+请用 bot 客户端扫描二维码完成授权..."
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        match client
+            .provision_poll(id, &session)
+            .context("轮询扫码状态失败")?
+        {
+            tiangong_bots::ProvisionStatus::Pending { .. } => continue,
+            tiangong_bots::ProvisionStatus::Success => {
+                println!("✅ 扫码授权成功");
+                return Ok(());
+            }
+            tiangong_bots::ProvisionStatus::Expired => {
+                return Err(anyhow!("二维码已过期，请重新执行 configure"));
+            }
+            tiangong_bots::ProvisionStatus::Error { message } => {
+                return Err(anyhow!("扫码授权失败：{message}"));
+            }
+        }
+    }
+}
+
+fn cmd_remove_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    client.delete_bot(&id).context("删除 Bot 失败")?;
+    println!("已请求 Server 删除 bot：{id}");
     Ok(())
 }
 

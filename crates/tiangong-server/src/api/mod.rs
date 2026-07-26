@@ -171,15 +171,26 @@ pub fn build_routes(
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
         .append(
-            Route::new("bots").get(bots::list_bots).append(
-                Route::new("<id>")
-                    .get(bots::get_bot)
-                    .append(Route::new("health").get(bots::get_bot_health))
-                    .append(Route::new("logs").get(bots::get_bot_logs))
-                    .append(Route::new("start").post(bots::start_bot))
-                    .append(Route::new("stop").post(bots::stop_bot))
-                    .append(Route::new("restart").post(bots::restart_bot)),
-            ),
+            Route::new("bots")
+                .get(bots::list_bots)
+                .post(bots::register_bot)
+                .append(
+                    Route::new("<id>")
+                        .get(bots::get_bot)
+                        .delete(bots::delete_bot)
+                        .append(Route::new("health").get(bots::get_bot_health))
+                        .append(Route::new("logs").get(bots::get_bot_logs))
+                        .append(Route::new("schema").get(bots::get_bot_schema))
+                        .append(Route::new("config").put(bots::update_bot_config))
+                        .append(Route::new("start").post(bots::start_bot))
+                        .append(Route::new("stop").post(bots::stop_bot))
+                        .append(Route::new("restart").post(bots::restart_bot))
+                        .append(
+                            Route::new("provision")
+                                .append(Route::new("begin").post(bots::provision_begin))
+                                .append(Route::new("poll").post(bots::provision_poll)),
+                        ),
+                ),
         )
         .append(Route::new("skills").get(skills::list_skills))
         .append(

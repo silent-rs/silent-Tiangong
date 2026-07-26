@@ -169,7 +169,7 @@ pub struct BotsConfig {
 
 /// 注册 bot 的请求参数（前端表单提交）。
 /// 注册 bot 的请求参数（前端表单提交）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterBotRequest {
     /// bot 实例名称（同时作为主键和目录名）。
     pub id: String,
@@ -182,7 +182,7 @@ pub struct RegisterBotRequest {
 }
 
 /// 更新 bot 的请求参数（id 主键不变，就地更新配置）。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateBotRequest {
     #[serde(default)]
     pub config: BTreeMap<String, Value>,

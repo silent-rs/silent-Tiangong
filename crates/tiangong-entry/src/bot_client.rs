@@ -103,6 +103,85 @@ impl BotClient {
             .with_context(|| format!("{action} Bot 请求失败"))?;
         ensure_success(resp)
     }
+    /// GET /api/v1/bots/{id}/schema — 配置字段 schema。
+    pub fn get_schema(&self, id: &str) -> Result<Vec<tiangong_bots::ConfigFieldSchema>> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/v1/bots/{id}/schema")))
+            .bearer(&self.token)
+            .send()
+            .context("请求 Bot schema 失败")?;
+        decode(resp)
+    }
+
+    /// POST /api/v1/bots — 注册新 bot。
+    pub fn register_bot(
+        &self,
+        req: &tiangong_bots::RegisterBotRequest,
+    ) -> Result<tiangong_bots::BotConfig> {
+        let resp = self
+            .http
+            .post(self.url("/api/v1/bots"))
+            .bearer(&self.token)
+            .json(req)
+            .send()
+            .context("注册 Bot 请求失败")?;
+        decode(resp)
+    }
+
+    /// PUT /api/v1/bots/{id}/config — 更新 bot 配置。
+    pub fn update_config(
+        &self,
+        id: &str,
+        req: &tiangong_bots::UpdateBotRequest,
+    ) -> Result<tiangong_bots::BotConfig> {
+        let resp = self
+            .http
+            .put(self.url(&format!("/api/v1/bots/{id}/config")))
+            .bearer(&self.token)
+            .json(req)
+            .send()
+            .context("更新 Bot 配置请求失败")?;
+        decode(resp)
+    }
+
+    /// DELETE /api/v1/bots/{id} — 删除 bot。
+    pub fn delete_bot(&self, id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(self.url(&format!("/api/v1/bots/{id}")))
+            .bearer(&self.token)
+            .send()
+            .context("删除 Bot 请求失败")?;
+        ensure_success(resp)
+    }
+
+    /// POST /api/v1/bots/{id}/provision/begin — 开始扫码配置。
+    pub fn provision_begin(&self, id: &str) -> Result<tiangong_bots::QrSession> {
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/v1/bots/{id}/provision/begin")))
+            .bearer(&self.token)
+            .send()
+            .context("开始扫码配置请求失败")?;
+        decode(resp)
+    }
+
+    /// POST /api/v1/bots/{id}/provision/poll — 轮询扫码状态。
+    pub fn provision_poll(
+        &self,
+        id: &str,
+        session: &tiangong_bots::QrSession,
+    ) -> Result<tiangong_bots::ProvisionStatus> {
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/v1/bots/{id}/provision/poll")))
+            .bearer(&self.token)
+            .json(session)
+            .send()
+            .context("轮询扫码状态请求失败")?;
+        decode(resp)
+    }
 }
 
 trait Bearer {
