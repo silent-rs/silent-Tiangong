@@ -65,13 +65,19 @@ fn run_http_subcommand(args: BotArgs, client: &crate::bot_client::BotClient) -> 
         BotSubcommand::Restart { id } => cmd_restart_http(client, id),
         BotSubcommand::Configure { id } => cmd_configure_http(client, id),
         BotSubcommand::Remove { id } => cmd_remove_http(client, id),
-        // 安装/升级类命令阶段 4 补充 HTTP 端点。
-        BotSubcommand::Available
-        | BotSubcommand::Install { .. }
-        | BotSubcommand::Upgrade { .. }
-        | BotSubcommand::CheckUpdate { .. } => Err(anyhow!(
-            "该命令经 Server 操作的 HTTP 端点尚未实现（阶段 4）。生命周期与配置命令已支持。"
-        )),
+        BotSubcommand::Available => cmd_available_http(client),
+        BotSubcommand::Install {
+            artifact_id,
+            id,
+            version,
+        } => cmd_install_http(client, artifact_id, id, version),
+        BotSubcommand::Upgrade { id } => cmd_upgrade_http(client, id),
+        BotSubcommand::CheckUpdate { artifact_id } => match artifact_id {
+            Some(aid) => cmd_check_update_http(client, aid),
+            None => Err(anyhow!(
+                "经 Server 检查全部制品更新暂不支持，请指定 --artifact-id。"
+            )),
+        },
     }
 }
 
@@ -303,6 +309,66 @@ fn run_provision_flow_http(client: &crate::bot_client::BotClient, id: &str) -> R
 fn cmd_remove_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
     client.delete_bot(&id).context("删除 Bot 失败")?;
     println!("已请求 Server 删除 bot：{id}");
+    Ok(())
+}
+
+fn cmd_available_http(client: &crate::bot_client::BotClient) -> Result<()> {
+    let index = client.list_available().context("拉取线上制品索引失败")?;
+    if index.bots.is_empty() {
+        println!("线上暂无可安装制品。");
+        return Ok(());
+    }
+    println!("线上可安装制品（{}）：", index.bots.len());
+    for manifest in &index.bots {
+        let platform = tiangong_bots::manifest::current_platform_key();
+        let supported = manifest.platforms.contains_key(&platform);
+        let mark = if supported {
+            "✓"
+        } else {
+            "✗（当前平台无制品）"
+        };
+        println!(
+            "  {id:<12} {name:<16} v{ver:<10} {mark}",
+            id = manifest.id,
+            name = manifest.name,
+            ver = manifest.version,
+            mark = mark,
+        );
+    }
+    Ok(())
+}
+
+fn cmd_install_http(
+    client: &crate::bot_client::BotClient,
+    artifact_id: String,
+    id: Option<String>,
+    version: Option<String>,
+) -> Result<()> {
+    println!("请求 Server 安装制品 {artifact_id}...");
+    let dest_id = client
+        .install_bot(&artifact_id, id.as_deref(), version.as_deref())
+        .context("安装制品失败")?;
+    println!("制品已安装：{dest_id}");
+    println!("（尚未注册配置，请使用 `tiangong bot configure {dest_id}` 填写凭证）");
+    Ok(())
+}
+
+fn cmd_upgrade_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    println!("请求 Server 升级 bot {id}...");
+    client.upgrade_bot(&id).context("升级 Bot 失败")?;
+    println!("✅ bot {id} 已升级");
+    Ok(())
+}
+
+fn cmd_check_update_http(client: &crate::bot_client::BotClient, artifact_id: String) -> Result<()> {
+    match client.check_update(&artifact_id).context("检查更新失败")? {
+        Some(manifest) => {
+            println!("制品 {artifact_id} 有可用版本：{}", manifest.version);
+        }
+        None => {
+            println!("制品 {artifact_id} 已是最新或线上无此制品。");
+        }
+    }
     Ok(())
 }
 

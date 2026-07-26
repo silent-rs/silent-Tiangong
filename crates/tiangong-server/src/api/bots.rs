@@ -304,3 +304,144 @@ pub async fn provision_poll(mut req: Request) -> Result<Response> {
         })?;
     Ok(Response::json(&status))
 }
+
+// ── 安装与升级（issue #286 阶段 4）──
+
+/// GET /api/v1/bots/available — 线上可安装制品索引
+#[allow(deprecated)]
+pub async fn list_available(req: Request) -> Result<Response> {
+    let token = req.get_config::<AuthToken>()?.clone();
+    check_auth(&req, token.0.as_deref())?;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let index = app_ctx.bot_runtime.fetch_index().await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("拉取线上制品索引失败：{e}"),
+        )
+    })?;
+    Ok(Response::json(&index))
+}
+
+/// GET /api/v1/bots/check-update?artifact_id=… — 检查更新
+#[allow(deprecated)]
+pub async fn check_update(req: Request) -> Result<Response> {
+    let token = req.get_config::<AuthToken>()?.clone();
+    check_auth(&req, token.0.as_deref())?;
+    let artifact_id: String = req.get_path_params("artifact_id")?;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let manifest = app_ctx
+        .bot_runtime
+        .check_update(&artifact_id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("检查更新失败：{e}"),
+            )
+        })?;
+    Ok(Response::json(&manifest))
+}
+
+/// POST /api/v1/bots/install — 安装制品
+#[allow(deprecated)]
+pub async fn install_bot(mut req: Request) -> Result<Response> {
+    let token = req.get_config::<AuthToken>()?.clone();
+    check_auth(&req, token.0.as_deref())?;
+
+    #[derive(serde::Deserialize)]
+    struct InstallReq {
+        artifact_id: String,
+        id: Option<String>,
+        version: Option<String>,
+    }
+    let body: InstallReq = req.json_parse().await?;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+
+    // 取线上 manifest（按可选 version 选择），下载安装到 dest_id。
+    let index = app_ctx.bot_runtime.fetch_index().await.map_err(|e| {
+        SilentError::business_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("拉取制品索引失败：{e}"),
+        )
+    })?;
+    let manifest = pick_manifest(&index, &body.artifact_id, body.version.as_deref())
+        .map_err(|e| SilentError::business_error(StatusCode::NOT_FOUND, e.to_string()))?;
+    let dest_id_str = body.id.unwrap_or_else(|| body.artifact_id.clone());
+    let dest_id = parse_bot_id(&dest_id_str)?;
+    app_ctx
+        .bot_runtime
+        .install(manifest, &dest_id, None)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("安装制品失败：{e}"),
+            )
+        })?;
+    Ok(Response::json(&serde_json::json!({
+        "status": "installed",
+        "id": dest_id_str,
+    })))
+}
+
+/// POST /api/v1/bots/<id>/upgrade — 升级 bot
+#[allow(deprecated)]
+pub async fn upgrade_bot(req: Request) -> Result<Response> {
+    let token = req.get_config::<AuthToken>()?.clone();
+    check_auth(&req, token.0.as_deref())?;
+    let id: String = req.get_path_params("id")?;
+    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let bot_id = parse_bot_id(&id)?;
+    let bot = app_ctx.bot_store.get(&bot_id).ok_or_else(|| {
+        SilentError::business_error(StatusCode::NOT_FOUND, format!("Bot '{id}' 不存在"))
+    })?;
+    // 检查并取得最新 manifest，失败恢复由 BotRuntime::upgrade 内部处理（stop→install）。
+    let manifest = app_ctx
+        .bot_runtime
+        .check_update(&bot.artifact_id)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("检查更新失败：{e}"),
+            )
+        })?
+        .ok_or_else(|| {
+            SilentError::business_error(
+                StatusCode::NOT_FOUND,
+                format!("未找到制品 {} 的更新", bot.artifact_id),
+            )
+        })?;
+    app_ctx
+        .bot_runtime
+        .upgrade(&bot_id, manifest, None)
+        .await
+        .map_err(|e| {
+            SilentError::business_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("升级 Bot 失败：{e}"),
+            )
+        })?;
+    Ok(Response::json(&serde_json::json!({ "status": "upgraded" })))
+}
+
+/// 从 bots-index 中按 artifact_id（及可选版本）选取 manifest。
+fn pick_manifest(
+    index: &tiangong_bots::manifest::BotsIndex,
+    artifact_id: &str,
+    version: Option<&str>,
+) -> std::result::Result<tiangong_bots::manifest::BotManifest, String> {
+    let mut candidates: Vec<_> = index.bots.iter().filter(|m| m.id == artifact_id).collect();
+    if candidates.is_empty() {
+        return Err(format!("线上索引中未找到制品：{artifact_id}"));
+    }
+    if let Some(ver) = version {
+        candidates.retain(|m| m.version == ver);
+        if candidates.is_empty() {
+            return Err(format!("制品 {artifact_id} 无版本 {ver}"));
+        }
+    }
+    // 取候选中版本最高者。
+    candidates.sort_by(|a, b| b.version.cmp(&a.version));
+    Ok(candidates[0].clone())
+}

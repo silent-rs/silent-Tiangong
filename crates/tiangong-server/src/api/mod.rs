@@ -174,6 +174,12 @@ pub fn build_routes(
             Route::new("bots")
                 .get(bots::list_bots)
                 .post(bots::register_bot)
+                .append(Route::new("available").get(bots::list_available))
+                .append(Route::new("install").post(bots::install_bot))
+                .append(
+                    Route::new("check-update")
+                        .append(Route::new("<artifact_id>").get(bots::check_update)),
+                )
                 .append(
                     Route::new("<id>")
                         .get(bots::get_bot)
@@ -185,6 +191,7 @@ pub fn build_routes(
                         .append(Route::new("start").post(bots::start_bot))
                         .append(Route::new("stop").post(bots::stop_bot))
                         .append(Route::new("restart").post(bots::restart_bot))
+                        .append(Route::new("upgrade").post(bots::upgrade_bot))
                         .append(
                             Route::new("provision")
                                 .append(Route::new("begin").post(bots::provision_begin))

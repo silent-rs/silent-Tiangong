@@ -182,6 +182,77 @@ impl BotClient {
             .context("轮询扫码状态请求失败")?;
         decode(resp)
     }
+
+    /// GET /api/v1/bots/available — 线上可安装制品索引。
+    pub fn list_available(&self) -> Result<tiangong_bots::manifest::BotsIndex> {
+        let resp = self
+            .http
+            .get(self.url("/api/v1/bots/available"))
+            .bearer(&self.token)
+            .send()
+            .context("请求可安装制品索引失败")?;
+        decode(resp)
+    }
+
+    /// GET /api/v1/bots/check-update/{artifact_id} — 检查更新。
+    pub fn check_update(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<tiangong_bots::manifest::BotManifest>> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/api/v1/bots/check-update/{artifact_id}")))
+            .bearer(&self.token)
+            .send()
+            .context("检查更新请求失败")?;
+        decode(resp)
+    }
+
+    /// POST /api/v1/bots/install — 安装制品。
+    pub fn install_bot(
+        &self,
+        artifact_id: &str,
+        id: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<String> {
+        #[derive(serde::Serialize)]
+        struct InstallReq<'a> {
+            artifact_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            id: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            version: Option<&'a str>,
+        }
+        #[derive(serde::Deserialize)]
+        struct InstallResp {
+            id: String,
+        }
+        let body = InstallReq {
+            artifact_id,
+            id,
+            version,
+        };
+        let resp = self
+            .http
+            .post(self.url("/api/v1/bots/install"))
+            .bearer(&self.token)
+            .json(&body)
+            .send()
+            .context("安装制品请求失败")?;
+        let parsed: InstallResp = decode(resp)?;
+        Ok(parsed.id)
+    }
+
+    /// POST /api/v1/bots/{id}/upgrade — 升级 bot。
+    pub fn upgrade_bot(&self, id: &str) -> Result<()> {
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/v1/bots/{id}/upgrade")))
+            .bearer(&self.token)
+            .send()
+            .context("升级 Bot 请求失败")?;
+        ensure_success(resp)
+    }
 }
 
 trait Bearer {
