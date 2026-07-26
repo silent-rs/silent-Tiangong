@@ -1,10 +1,11 @@
-//! `tiangong bot` 子命令——直接操作本地文件管理 bot 制品。
+//! `tiangong bot` 子命令——经独立 Server HTTP 管理 bot（issue #286）。
 //!
-//! 复用 `tiangong-bots` crate 的 `BotRuntime`/`BotStore`（与桌面端同源），
-//! 直接读写 `~/.tiangong/bots/`，不走 HTTP。风格对齐 `mcp`/`skill` 子命令。
+//! CLI 不再直接 spawn bot 进程或读写 bots.json：根据 Bot 管理所有权（锁），
+//! Desktop 运行时拒绝；Server 运行时经 HTTP 操作 Server 的 BotRuntime；
+//! 无管理者时提示启动 Server。仅交互逻辑（prompt/扫码展示）在本地执行。
 //!
-//! start/configure 启动的 bot 作为独立后台进程运行（setsid 脱离会话），
-//! 不随 CLI 退出而终止，适合 headless 常驻场景。
+//! 保留的本地直管路径（run_subcommand/load_runtime 等）为历史实现，已标记
+//! `#[allow(dead_code)]`，待后续清理。
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

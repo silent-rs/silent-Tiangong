@@ -71,17 +71,6 @@ impl BotClient {
         decode(resp)
     }
 
-    /// GET /api/v1/bots/{id}/health — 健康状态。
-    pub fn get_health(&self, id: &str) -> Result<BotHealth> {
-        let resp = self
-            .http
-            .get(self.url(&format!("/api/v1/bots/{id}/health")))
-            .bearer(&self.token)
-            .send()
-            .context("请求 Bot 健康状态失败")?;
-        decode(resp)
-    }
-
     /// GET /api/v1/bots/{id}/logs — 日志尾部。
     pub fn get_logs(&self, id: &str) -> Result<BotLog> {
         let resp = self
