@@ -20,8 +20,10 @@ pub mod logger;
 pub mod management;
 pub mod manifest;
 pub mod paths;
+pub mod pid;
 mod provision;
 pub mod store;
+#[allow(dead_code)]
 pub mod supervisor;
 pub mod version;
 

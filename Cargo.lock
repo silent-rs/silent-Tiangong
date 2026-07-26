@@ -9717,6 +9717,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "libc",
  "reqwest 0.13.4",
  "scru128",
  "semver",
