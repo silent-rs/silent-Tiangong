@@ -20,6 +20,7 @@ use tiangong_bots::{
 use crate::args::{BotArgs, BotSubcommand};
 
 /// 构造共享 bot 运行时（默认路径 `~/.tiangong/bots/bots.json`）。
+#[allow(dead_code)]
 fn load_runtime() -> Result<(Arc<BotStore>, Arc<BotRuntime>)> {
     let store = Arc::new(BotStore::new().context("加载 bot 配置失败")?);
     let runtime = Arc::new(BotRuntime::new(store.clone()).context("构造 bot 运行时失败")?);
@@ -32,31 +33,49 @@ fn parse_bot_id(raw: &str) -> Result<BotId> {
 }
 
 pub(crate) fn run_bot_command(args: BotArgs) -> Result<()> {
-    // 所有权守卫（issue #286）：Desktop 运行时拒绝 CLI 直接操作 bot，避免双管理者。
-    // Server 运行时：阶段 2 将改为经 HTTP 操作 Server；当前阶段 1 暂沿用本地逻辑
-    // （Server 与 CLI 不同进程，本地 bots.json 读写仍可能竞争，阶段 2 完成后消除）。
+    // 所有权守卫（issue #286）：Desktop 运行时拒绝；Server 运行时经 HTTP；无管理者提示。
     match tiangong_config::lock::OwnershipLock::current_owner() {
-        Some(tiangong_config::lock::OwnerKind::Desktop) => {
-            return Err(anyhow!(
-                "Desktop 正在运行并独占管理 bot。请在 Desktop 中操作 bot，                 或先退出 Desktop 后再用 CLI。"
-            ));
-        }
+        Some(tiangong_config::lock::OwnerKind::Desktop) => Err(anyhow!(
+            "Desktop 正在运行并独占管理 bot。请在 Desktop 中操作 bot，或先退出 Desktop 后再用 CLI。"
+        )),
         Some(tiangong_config::lock::OwnerKind::Server) => {
-            // 阶段 2 起：改走 Server HTTP API。当前先放行本地逻辑。
+            let client = crate::bot_client::BotClient::from_config()
+                .context("加载 Server 配置失败，请检查 server.json")?;
+            if !client.is_reachable() {
+                return Err(anyhow!(
+                    "无法连接到独立 Server。请确认 Server 正在运行（`tiangong server status`）。"
+                ));
+            }
+            run_http_subcommand(args, &client)
         }
-        None => {
-            // 无管理者：阶段 2 起将提示「请先启动 Server」。
-        }
+        None => Err(anyhow!(
+            "没有 Bot 管理者在运行。请先启动独立 Server（`tiangong server --daemon`），或启动 Desktop。"
+        )),
     }
-    let (store, runtime) = load_runtime()?;
-    // CLI 需要独立 tokio runtime 驱动 BotRuntime 的 async 方法。
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("创建 tokio runtime 失败")?;
-    rt.block_on(run_subcommand(args, store, runtime))
 }
 
+/// Server 所有权下：所有命令经 HTTP 调用 Server。
+fn run_http_subcommand(args: BotArgs, client: &crate::bot_client::BotClient) -> Result<()> {
+    match args.command {
+        BotSubcommand::List => cmd_list_http(client),
+        BotSubcommand::Show { id } => cmd_show_http(client, id),
+        BotSubcommand::Log { id } => cmd_log_http(client, id),
+        BotSubcommand::Start { id } => cmd_start_http(client, id),
+        BotSubcommand::Stop { id } => cmd_stop_http(client, id),
+        BotSubcommand::Restart { id } => cmd_restart_http(client, id),
+        // 配置/安装/升级类命令阶段 3/4 补充 HTTP 端点。
+        BotSubcommand::Available
+        | BotSubcommand::Install { .. }
+        | BotSubcommand::Configure { .. }
+        | BotSubcommand::Upgrade { .. }
+        | BotSubcommand::CheckUpdate { .. }
+        | BotSubcommand::Remove { .. } => Err(anyhow!(
+            "该命令经 Server 操作的 HTTP 端点尚未实现（阶段 3/4）。生命周期命令（list/show/log/start/stop/restart）已支持。"
+        )),
+    }
+}
+
+#[allow(dead_code)]
 async fn run_subcommand(
     args: BotArgs,
     store: Arc<BotStore>,
@@ -86,6 +105,76 @@ async fn run_subcommand(
 
 // ============================ 子命令实现 ============================
 
+// —— HTTP-backed 生命周期命令（Server 所有权路径，issue #286 阶段 2d）——
+
+fn cmd_list_http(client: &crate::bot_client::BotClient) -> Result<()> {
+    let bots = client.list_bots().context("获取 Bot 列表失败")?;
+    if bots.is_empty() {
+        println!("暂无已注册 bot。");
+        return Ok(());
+    }
+    println!("已注册 bot（{}）：", bots.len());
+    for item in &bots {
+        let bot = &item.config;
+        println!(
+            "  {id:<16} {name:<12} {enabled} {health:?}",
+            id = bot.id,
+            name = bot.artifact_id,
+            enabled = if bot.enabled { "[启用]" } else { "[禁用]" },
+            health = item.health,
+        );
+    }
+    Ok(())
+}
+
+fn cmd_show_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    let item = client.get_bot(&id).context("获取 Bot 详情失败")?;
+    let bot = &item.config;
+    println!("ID:          {}", bot.id);
+    println!("制品:        {}", bot.artifact_id);
+    println!("启用状态:    {}", if bot.enabled { "启用" } else { "禁用" });
+    println!("健康状态:    {:?}", item.health);
+    println!("创建时间:    {}", bot.created_at);
+    println!("更新时间:    {}", bot.updated_at);
+    println!("配置: {:?}", bot.config);
+    Ok(())
+}
+
+fn cmd_log_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    let log = client.get_logs(&id).context("获取 Bot 日志失败")?;
+    if log.content.is_empty() {
+        println!("（暂无日志）");
+    } else {
+        if log.truncated {
+            println!("（日志过长，仅显示尾部内容）");
+        }
+        print!("{}", log.content);
+    }
+    Ok(())
+}
+
+fn cmd_start_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    client.post_action(&id, "start").context("启动 Bot 失败")?;
+    println!("已请求 Server 启动 bot：{id}");
+    Ok(())
+}
+
+fn cmd_stop_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    client.post_action(&id, "stop").context("停止 Bot 失败")?;
+    println!("已请求 Server 停止 bot：{id}");
+    Ok(())
+}
+
+fn cmd_restart_http(client: &crate::bot_client::BotClient, id: String) -> Result<()> {
+    client
+        .post_action(&id, "restart")
+        .context("重启 Bot 失败")?;
+    println!("已请求 Server 重启 bot：{id}");
+    Ok(())
+}
+
+// —— 本地直管路径（保留至阶段 3/4 迁移完成）——
+#[allow(dead_code)]
 fn cmd_list(store: &BotStore, runtime: &BotRuntime) -> Result<()> {
     let registered = store.list();
     let local_artifacts = runtime.scan_local_artifacts();
