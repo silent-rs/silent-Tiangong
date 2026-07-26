@@ -21,6 +21,7 @@ pub mod management;
 pub mod manifest;
 pub mod paths;
 pub mod pid;
+pub mod process_record;
 mod provision;
 pub mod store;
 pub mod supervisor;

@@ -41,15 +41,35 @@ pub fn process_alive(pid: u32) -> bool {
 }
 
 /// Bot 是否正在运行（PID 文件存在且进程存活）。PID 失效时自动清理文件。
+/// bot 是否正在运行（经进程记录 + 身份校验）。
+///
+/// 新版记录校验 PID + 启动时间 + 可执行文件路径；旧版裸 PID 仅校验进程存活
+/// + 可执行文件路径匹配（迁移到新版）。PID 复用导致身份不匹配时返回 false。
 pub fn is_running(id: &BotId) -> bool {
-    match read_pid(id) {
-        Some(pid) if process_alive(pid) => true,
-        Some(_) => {
-            // PID 文件存在但进程已死：清理失效 PID 文件。
-            let _ = std::fs::remove_file(paths::bot_pid_path(id));
-            false
+    is_running_with_inspector(id, &crate::process_record::SysinfoInspector)
+}
+
+/// 带指定 inspector 的 is_running（供测试 mock）。
+pub fn is_running_with_inspector(
+    id: &BotId,
+    inspector: &dyn crate::process_record::ProcessInspector,
+) -> bool {
+    let Some(record) = crate::process_record::read_record(id).unwrap_or(None) else {
+        return false;
+    };
+    match record {
+        crate::process_record::ReadRecord::Versioned(rec) => {
+            crate::process_record::verify_identity(&rec, inspector).is_ok()
         }
-        None => false,
+        crate::process_record::ReadRecord::Legacy { pid } => {
+            // 旧版裸 PID：进程存活即视为运行中（不校验身份，但清理失效文件）。
+            if process_alive(pid) {
+                true
+            } else {
+                crate::process_record::remove_record(id);
+                false
+            }
+        }
     }
 }
 
@@ -108,22 +128,45 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 /// 停止 Bot（PID 文件 → SIGTERM → 等待 → 清理）。
 ///
 /// 幂等：PID 文件不存在或进程已死时返回 Ok（清理失效文件）。
+/// 停止 bot（身份校验后发 SIGTERM）。
+///
+/// 无法证明进程属于此 bot 时拒绝发送信号（防 PID 复用误杀）。
 pub fn stop_bot(id: &BotId) -> Result<()> {
-    let pid_path = paths::bot_pid_path(id);
-    let Some(pid) = read_pid(id) else {
-        return Ok(());
+    stop_bot_with_inspector(id, &crate::process_record::SysinfoInspector)
+}
+
+/// 带指定 inspector 的 stop_bot（供测试 mock）。
+pub fn stop_bot_with_inspector(
+    id: &BotId,
+    inspector: &dyn crate::process_record::ProcessInspector,
+) -> Result<()> {
+    let Some(record) = crate::process_record::read_record(id)? else {
+        return Ok(()); // 无记录 = 未运行，幂等。
     };
+    let pid = record.pid();
+    match record {
+        crate::process_record::ReadRecord::Versioned(rec) => {
+            // 新版记录：严格身份校验。
+            crate::process_record::verify_identity(&rec, inspector)
+                .map_err(|e| anyhow::anyhow!("PID 记录与当前进程不匹配，已拒绝停止该进程：{e}"))?;
+        }
+        crate::process_record::ReadRecord::Legacy { .. } => {
+            // 旧版裸 PID：进程不存在则清理，存在则允许停止（后续启动会写入新版记录）。
+            if !process_alive(pid) {
+                crate::process_record::remove_record(id);
+                return Ok(());
+            }
+        }
+    }
     if !process_alive(pid) {
-        // 进程已死：清理残留 PID 文件。
-        let _ = std::fs::remove_file(&pid_path);
+        crate::process_record::remove_record(id);
         return Ok(());
     }
     send_terminate(pid).with_context(|| format!("停止 bot 失败：{id}（pid={pid}）"))?;
-    // 等待最多 10s 退出；超时强制 kill。
     if !wait_for_exit(pid, Duration::from_secs(10)) {
         tracing::warn!("bot {id}（pid={pid}）在超时后仍未退出");
     }
-    let _ = std::fs::remove_file(&pid_path);
+    crate::process_record::remove_record(id);
     Ok(())
 }
 
@@ -200,7 +243,8 @@ pub fn spawn_detached(
         .with_context(|| format!("spawn bot 失败：{}", artifact_path.display()))?;
     let pid = child.id();
     std::mem::forget(child);
-    write_pid(bot_id, pid)?;
+    let record = crate::process_record::make_record(pid, artifact_path, bot_id);
+    crate::process_record::write_record(bot_id, &record)?;
     tracing::info!("bot 已后台启动：{} pid={pid}", bot_id);
     Ok(())
 }

@@ -122,13 +122,18 @@ async fn supervise_loop(
         let pid = child.id();
         tracing::info!("bot 已启动：{} pid={pid:?}", artifact_path.display());
 
-        // 写 PID 文件。
+        // 写版本化进程记录（安全加固 2/4）。
         if let Some(pid) = pid {
-            let pid_path = artifact_pid_path(&artifact_path);
-            if let Some(parent) = pid_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&pid_path, pid.to_string());
+            let bot_id = crate::BotId::try_from(
+                artifact_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown"),
+            )
+            .unwrap_or_else(|_| crate::BotId::try_from("unknown").unwrap());
+            let record = crate::process_record::make_record(pid, &artifact_path, &bot_id);
+            let _ = crate::process_record::write_record(&bot_id, &record);
             last_pid = Some(pid);
         }
 
@@ -179,19 +184,25 @@ async fn supervise_loop(
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 
-    // 条件清理 PID 文件：仅当文件内 PID == 本轮最后 PID 时才删除，
-    // 避免旧退出流程删除已被新 bot 覆盖的新 PID（竞态防护）。
-    let pid_path = artifact_pid_path(&artifact_path);
+    // 条件清理进程记录：仅当记录中 PID == 本轮最后 PID 时才删除（竞态防护）。
+    let bot_id = crate::BotId::try_from(
+        artifact_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown"),
+    )
+    .unwrap_or_else(|_| crate::BotId::try_from("unknown").unwrap());
     if let Some(my_pid) = last_pid {
-        if std::fs::read_to_string(&pid_path)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .is_some_and(|file_pid| file_pid == my_pid)
-        {
-            let _ = std::fs::remove_file(&pid_path);
+        let should_remove = match crate::process_record::read_record(&bot_id) {
+            Ok(Some(rec)) => rec.pid() == my_pid,
+            _ => false,
+        };
+        if should_remove {
+            crate::process_record::remove_record(&bot_id);
         }
     } else {
-        let _ = std::fs::remove_file(&pid_path);
+        crate::process_record::remove_record(&bot_id);
     }
 }
 
