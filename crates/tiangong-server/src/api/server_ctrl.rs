@@ -16,6 +16,10 @@ pub async fn shutdown(req: Request) -> Result<Response> {
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
     tracing::info!("收到 shutdown 请求，准备停止 bot 后关闭服务");
 
+    // 立即进入 draining（review 问题6）：拒绝新的 Bot 写操作，保证移交期间无并发写入。
+    app_ctx
+        .draining
+        .store(true, std::sync::atomic::Ordering::Release);
     // 在后台任务中：先 stop_all（bot 退出），再 exit，给响应留出返回窗口。
     let bot_runtime = app_ctx.bot_runtime.clone();
     tokio::spawn(async move {

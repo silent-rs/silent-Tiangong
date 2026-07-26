@@ -90,6 +90,9 @@ pub struct ServerAppContext {
     pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
     /// Bot 回连 Server 的实际连接信息（review 问题2）：所有 bot 启动路径统一使用。
     pub bot_connect: BotConnectInfo,
+    /// Server draining 标志（review 问题6）：收到 shutdown/移交后置位，期间拒绝新的
+    /// Bot 写操作（start/stop/...），保证移交期间无并发写入。只读操作不受影响。
+    pub draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ServerAppContext {
@@ -179,6 +182,7 @@ impl ServerAppContext {
             bot_store,
             bot_runtime,
             bot_connect,
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

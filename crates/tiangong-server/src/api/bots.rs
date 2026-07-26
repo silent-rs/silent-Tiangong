@@ -97,6 +97,7 @@ pub async fn start_bot(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let bot = app_ctx.bot_store.get(&bot_id).ok_or_else(|| {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("Bot '{id}' 不存在"))
@@ -125,6 +126,7 @@ pub async fn stop_bot(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     app_ctx.bot_runtime.stop(&bot_id).await.map_err(|e| {
         SilentError::business_error(
@@ -143,6 +145,7 @@ pub async fn restart_bot(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let bot = app_ctx.bot_store.get(&bot_id).ok_or_else(|| {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("Bot '{id}' 不存在"))
@@ -160,6 +163,18 @@ pub async fn restart_bot(req: Request) -> Result<Response> {
     Ok(Response::json(
         &serde_json::json!({ "status": "restarted" }),
     ))
+}
+
+/// 若 Server 处于 draining（review 问题6），写操作返回 503。
+fn ensure_not_draining(app_ctx: &SharedAppContext) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if app_ctx.draining.load(Ordering::Acquire) {
+        return Err(SilentError::business_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Server 正在关闭（移交中），暂不接受 Bot 写操作，请稍后重试".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// 解析路径参数为 BotId。
@@ -202,6 +217,7 @@ pub async fn register_bot(mut req: Request) -> Result<Response> {
 
     let body: tiangong_bots::RegisterBotRequest = req.json_parse().await?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot = app_ctx.bot_store.register(body).map_err(|e| {
         SilentError::business_error(StatusCode::BAD_REQUEST, format!("注册 Bot 失败：{e}"))
     })?;
@@ -217,6 +233,7 @@ pub async fn update_bot_config(mut req: Request) -> Result<Response> {
     let id: String = req.get_path_params("id")?;
     let body: tiangong_bots::UpdateBotRequest = req.json_parse().await?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let bot = app_ctx.bot_store.update(&bot_id, body).map_err(|e| {
         SilentError::business_error(StatusCode::BAD_REQUEST, format!("更新 Bot 配置失败：{e}"))
@@ -232,6 +249,7 @@ pub async fn delete_bot(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     // 先停止运行中的 bot。stop 在 bot 未运行时返回 Ok（幂等），仅在 supervisor 停止
     // 失败时返回 Err——此时不删除配置，避免留下失控进程（review 问题4）。
@@ -258,6 +276,7 @@ pub async fn provision_begin(req: Request) -> Result<Response> {
 
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let session = app_ctx
         .bot_runtime
@@ -281,6 +300,7 @@ pub async fn provision_poll(mut req: Request) -> Result<Response> {
     let id: String = req.get_path_params("id")?;
     let session: tiangong_bots::QrSession = req.json_parse().await?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let status = app_ctx
         .bot_runtime
@@ -346,6 +366,7 @@ pub async fn install_bot(mut req: Request) -> Result<Response> {
     }
     let body: InstallReq = req.json_parse().await?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
 
     // 取线上 manifest（按可选 version 选择），下载安装到 dest_id。
     let index = app_ctx.bot_runtime.fetch_index().await.map_err(|e| {
@@ -381,6 +402,7 @@ pub async fn upgrade_bot(req: Request) -> Result<Response> {
     check_auth(&req, token.0.as_deref())?;
     let id: String = req.get_path_params("id")?;
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    ensure_not_draining(&app_ctx)?;
     let bot_id = parse_bot_id(&id)?;
     let bot = app_ctx.bot_store.get(&bot_id).ok_or_else(|| {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("Bot '{id}' 不存在"))
