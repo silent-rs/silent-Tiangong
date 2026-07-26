@@ -1,3 +1,4 @@
+mod bots;
 mod chat;
 mod health;
 mod jobs;
@@ -169,6 +170,17 @@ pub fn build_routes(
             ),
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
+        .append(
+            Route::new("bots").get(bots::list_bots).append(
+                Route::new("<id>")
+                    .get(bots::get_bot)
+                    .append(Route::new("health").get(bots::get_bot_health))
+                    .append(Route::new("logs").get(bots::get_bot_logs))
+                    .append(Route::new("start").post(bots::start_bot))
+                    .append(Route::new("stop").post(bots::stop_bot))
+                    .append(Route::new("restart").post(bots::restart_bot)),
+            ),
+        )
         .append(Route::new("skills").get(skills::list_skills))
         .append(
             Route::new("jobs")
