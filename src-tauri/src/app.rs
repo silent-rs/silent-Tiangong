@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::core_config::CoreConfigProvider;
@@ -542,7 +542,11 @@ impl TiangongApp {
         }
 
         if ensured.is_new {
-            crate::commands::start_stream_consumer(app_handle, sid, stream_rx);
+            crate::commands::start_stream_consumer(app_handle.clone(), sid, stream_rx);
+            // 与 send_message_inner / 嵌入式 Server / Server 端入口一致：新建会话后
+            // 通知前端刷新会话列表。否则定时消息虽已入队、Core 已建，但用户在 UI
+            // 上看不到新对话，表现为「定时任务未设置对话时触发后没有创建新对话」。
+            let _ = app_handle.emit("sessions_updated", &());
         }
         Ok(())
     }
