@@ -679,8 +679,15 @@ fn run_gui() {
         .build(generate_tauri_context())
         .expect("error while building tauri application")
         .run(|handle, event| {
-            // Desktop 退出不停止 bot（方案：bot 独立后台运行，不受 Desktop 生命周期影响）。
-            // 仅关闭 Desktop 自身资源。
+            // Desktop 退出时停止自己 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
+                    let runtime = app_state.bot_runtime.clone();
+                    tauri::async_runtime::block_on(async move {
+                        runtime.stop_all().await;
+                    });
+                }
+            }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(handle);

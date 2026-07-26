@@ -100,6 +100,7 @@ async fn supervise_loop(
     mut stop_rx: oneshot::Receiver<()>,
 ) {
     let mut backoff = MIN_BACKOFF;
+    let mut last_pid: Option<u32> = None;
     loop {
         // 停止信号优先。
         if stop_rx.try_recv().is_ok() {
@@ -128,6 +129,7 @@ async fn supervise_loop(
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::write(&pid_path, pid.to_string());
+            last_pid = Some(pid);
         }
 
         // 立即 take stdout/stderr 交给 BotLogger 消费——必须在 wait() 之前，
@@ -177,8 +179,20 @@ async fn supervise_loop(
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 
-    // 清理 PID 文件。
-    let _ = std::fs::remove_file(artifact_pid_path(&artifact_path));
+    // 条件清理 PID 文件：仅当文件内 PID == 本轮最后 PID 时才删除，
+    // 避免旧退出流程删除已被新 bot 覆盖的新 PID（竞态防护）。
+    let pid_path = artifact_pid_path(&artifact_path);
+    if let Some(my_pid) = last_pid {
+        if std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .is_some_and(|file_pid| file_pid == my_pid)
+        {
+            let _ = std::fs::remove_file(&pid_path);
+        }
+    } else {
+        let _ = std::fs::remove_file(&pid_path);
+    }
 }
 
 /// spawn 单个 bot 子进程，stdout/stderr pipe 用于日志捕获。

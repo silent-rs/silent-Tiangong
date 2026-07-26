@@ -114,9 +114,16 @@ struct FileReplacement {
 }
 
 /// bot 运行时表。
+struct RuntimeEntry {
+    supervised: crate::supervisor::SupervisedBot,
+}
+
 pub struct BotRuntime {
     store: Arc<BotStore>,
     downloader: Downloader,
+    /// 本进程 supervisor 管理的 bot 运行表（Desktop 启动的 bot）。
+    /// CLI 独立启动的 bot 不在此表中，仅通过 PID 识别。
+    entries: Mutex<HashMap<BotId, RuntimeEntry>>,
     /// 制品 manifest 缓存（artifact_id → manifest），由安装时填入。
     manifests: Mutex<HashMap<String, BotManifest>>,
 }
@@ -126,6 +133,7 @@ impl BotRuntime {
         Ok(Self {
             store,
             downloader: Downloader::new()?,
+            entries: Mutex::new(HashMap::new()),
             manifests: Mutex::new(HashMap::new()),
         })
     }
@@ -332,14 +340,29 @@ impl BotRuntime {
     ///
     /// spawn 子进程（脱离会话）、写 PID 文件、不持有句柄、不自动重启。
     /// bot 崩溃即停止（PID 文件残留失效，下次 health 清理）。已在运行则拒绝重复启动。
+    /// 启动 bot（混合模式：Desktop 经 supervisor 监督，含自动重启+日志采集）。
+    ///
+    /// 先检查 PID 避免重复启动 CLI 已启动的 bot，再经 supervisor 启动并加入 entries。
     pub async fn start(
         &self,
         config: &BotConfig,
         extra_env: &BTreeMap<String, String>,
     ) -> Result<()> {
-        if crate::pid::is_running(&config.id) {
-            return Err(anyhow!("bot 已在运行：{}", config.id));
+        let mut entries = self.entries.lock().await;
+        // 清理已结束的残留条目。
+        if let Some(entry) = entries.get(&config.id)
+            && entry.supervised.is_finished()
+        {
+            entries.remove(&config.id);
         }
+        if entries.contains_key(&config.id) {
+            return Err(anyhow!("bot 已在运行（supervisor）：{}", config.id));
+        }
+        // 跨进程 PID 检查：CLI 独立启动的 bot PID 存活时拒绝重复启动。
+        if crate::pid::is_running(&config.id) {
+            return Err(anyhow!("bot 已在运行（外部 PID）：{}", config.id));
+        }
+
         let artifact = paths::bot_artifact_path(&config.id);
         if !artifact.exists() {
             return Err(anyhow!(
@@ -352,39 +375,60 @@ impl BotRuntime {
         crate::management::validate_bot_config_fields(&schema, &config.config)?;
         let mut env = bot_env(config, &schema);
         env.extend(extra_env.clone());
-        spawn_detached(&config.id, &artifact, &env)?;
+        let supervised = crate::supervisor::spawn_supervised(&config.id, artifact, env)
+            .context("启动 bot 进程失败")?;
+        entries.insert(config.id.clone(), RuntimeEntry { supervised });
         Ok(())
     }
 
     /// 停止指定 bot 实例。
-    /// 停止 bot（PID-based：读 PID → SIGTERM → 等待 → 清理）。
+    /// 停止 bot（混合模式：优先停 supervisor 管理的，无则 PID-based 停外部启动的）。
     pub async fn stop(&self, id: &BotId) -> Result<()> {
-        crate::pid::stop_bot(id)
+        let entry = self.entries.lock().await.remove(id);
+        if let Some(entry) = entry {
+            // Desktop supervisor 管理的：停 supervisor + 子进程 + PID。
+            entry.supervised.stop().await?;
+            Ok(())
+        } else {
+            // 外部（CLI）启动的：经 PID 发信号停止。
+            crate::pid::stop_bot(id)
+        }
     }
 
     /// 停止所有运行中的 bot。
-    /// 停止所有 bot（遍历 store 配置的 bot，逐个 PID-based stop）。
+    /// 停止所有本进程 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
     pub async fn stop_all(&self) {
-        for bot in self.store.list() {
-            if let Err(err) = crate::pid::stop_bot(&bot.id) {
-                tracing::warn!("停止 bot {} 失败：{err}", bot.id);
+        let mut entries = self.entries.lock().await;
+        let drained: Vec<(BotId, RuntimeEntry)> = entries.drain().collect();
+        drop(entries);
+        for (_, entry) in drained {
+            if let Err(err) = entry.supervised.stop().await {
+                tracing::warn!("停止 bot 监督任务失败：{err}");
             }
         }
     }
 
     /// 查询 bot 是否正在由运行时监督；已结束条目会被清理。
-    /// bot 是否正在运行（PID 文件存在且进程存活）。
+    /// bot 是否正在运行（先查本进程 supervisor 运行表，无则查外部 PID）。
     pub async fn is_running(&self, id: &BotId) -> bool {
-        crate::pid::is_running(id)
+        let mut entries = self.entries.lock().await;
+        match entries.get(id) {
+            Some(entry) if !entry.supervised.is_finished() => true,
+            Some(_) => {
+                entries.remove(id);
+                crate::pid::is_running(id)
+            }
+            None => crate::pid::is_running(id),
+        }
     }
 
     /// 查询 bot 健康状态。
     ///
     /// 若 bot 正常退出（监督任务结束），自动从运行表移除并返回 Stopped，
     /// 避免 health 长期误报 Running。
-    /// bot 健康状态（PID-based）。
+    /// bot 健康状态（先查 supervisor 运行表，无则查外部 PID）。
     pub async fn health(&self, id: &BotId) -> BotHealth {
-        if crate::pid::is_running(id) {
+        if self.is_running(id).await {
             BotHealth::Running
         } else if paths::bot_artifact_path(id).exists() {
             BotHealth::Stopped
@@ -396,7 +440,7 @@ impl BotRuntime {
     /// 启动所有 enabled 且已安装制品的 bot（主程序启动时调用）。
     ///
     /// `extra_env` 为注入所有 bot 的额外环境变量（如 TIANGONG_URL/TIANGONG_TOKEN）。
-    /// 启动所有 enabled 的 bot（跳过 PID 已存活的，避免重复启动）。
+    /// 启动所有 enabled 的 bot（supervisor 监督；跳过 PID 已存活的避免重复启动）。
     pub async fn start_enabled(&self, extra_env: &BTreeMap<String, String>) {
         let bots = self.store.list();
         for bot in bots.iter().filter(|b| b.enabled) {
@@ -869,43 +913,6 @@ fn local_directory_id(entry: &std::fs::DirEntry) -> Option<BotId> {
             None
         }
     }
-}
-
-/// 后台 spawn bot 子进程（脱离会话、不随父进程退出、写 PID 文件）。
-fn spawn_detached(
-    bot_id: &BotId,
-    artifact_path: &Path,
-    env: &BTreeMap<String, String>,
-) -> Result<()> {
-    use std::process::Command;
-    paths::ensure_executable_paths_safe(bot_id)?;
-    paths::reject_symlink(artifact_path, "Bot 制品")?;
-    let mut cmd = Command::new(artifact_path);
-    tiangong_types::process::configure_no_window(&mut cmd);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                let _ = libc::setsid();
-                Ok(())
-            });
-        }
-    }
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("spawn bot 失败：{}", artifact_path.display()))?;
-    let pid = child.id();
-    std::mem::forget(child);
-    crate::pid::write_pid(bot_id, pid)?;
-    tracing::info!("bot 已后台启动：{} pid={pid}", bot_id);
-    Ok(())
 }
 
 #[cfg(test)]

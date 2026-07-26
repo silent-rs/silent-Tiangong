@@ -156,9 +156,32 @@ pub fn spawn_detached(
     crate::paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
     tiangong_types::process::configure_no_window(&mut cmd);
+    // 日志重定向到 bot.log（方案第十节：CLI 启动的 bot 日志也要在 Desktop 可见）。
+    let log_path = crate::paths::bot_log_path(bot_id);
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let stdout_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
     cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(
+            stdout_file
+                .map(std::process::Stdio::from)
+                .unwrap_or(std::process::Stdio::null()),
+        )
+        .stderr(
+            stderr_file
+                .map(std::process::Stdio::from)
+                .unwrap_or(std::process::Stdio::null()),
+        );
     for (k, v) in env {
         cmd.env(k, v);
     }

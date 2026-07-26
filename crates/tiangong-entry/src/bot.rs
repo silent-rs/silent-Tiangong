@@ -32,6 +32,21 @@ fn parse_bot_id(raw: &str) -> Result<BotId> {
 }
 
 pub(crate) fn run_bot_command(args: BotArgs) -> Result<()> {
+    // Desktop 运行时拒绝写操作（方案第八节：避免 CLI 停止 Desktop supervisor 的 bot 后被自动拉起）。
+    let is_write = !matches!(
+        args.command,
+        BotSubcommand::List
+            | BotSubcommand::Show { .. }
+            | BotSubcommand::Log { .. }
+            | BotSubcommand::Available
+            | BotSubcommand::CheckUpdate { .. }
+    );
+    if is_write && tiangong_config::desktop_lock::is_desktop_running() {
+        return Err(anyhow!(
+            "Desktop 正在运行，该 Bot 可能由 Desktop 监督。\
+             请在 Desktop 中执行此操作，或退出 Desktop 后重试。"
+        ));
+    }
     let (store, runtime) = load_runtime()?;
     // CLI 需要独立 tokio runtime 驱动 BotRuntime 的 async 方法。
     let rt = tokio::runtime::Builder::new_current_thread()

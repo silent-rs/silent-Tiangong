@@ -9772,6 +9772,7 @@ name = "tiangong-config"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "fs4",
  "scru128",
  "serde",
  "serde_json",
