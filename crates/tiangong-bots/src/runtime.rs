@@ -27,7 +27,7 @@ use crate::paths;
 use crate::supervisor::SupervisedBot;
 
 /// bot 运行时健康状态。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BotHealth {
     /// 进程运行中。
