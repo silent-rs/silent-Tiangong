@@ -3780,7 +3780,7 @@ fn wait_for_server_stop(config: &tiangong_server::config::ServerConfig) -> Resul
     Err("已发送停止信号，但 Server 仍在响应健康检查".to_string())
 }
 
-fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
+pub fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
     let host = connect_host(&config.host);
     let Ok(mut addrs) = (host.as_str(), config.port).to_socket_addrs() else {
         return false;

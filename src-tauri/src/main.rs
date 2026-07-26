@@ -679,16 +679,8 @@ fn run_gui() {
         .build(generate_tauri_context())
         .expect("error while building tauri application")
         .run(|handle, event| {
-            // 应用退出前停止所有 bot 子进程，避免孤儿进程。
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                if let Some(app_state) = handle.try_state::<tiangong_app::TiangongApp>() {
-                    let runtime = app_state.bot_runtime.clone();
-                    // 阻塞当前线程等待 bot 停止，防止主进程先退出留下孤儿。
-                    tauri::async_runtime::block_on(async move {
-                        runtime.stop_all().await;
-                    });
-                }
-            }
+            // Desktop 退出不停止 bot（方案：bot 独立后台运行，不受 Desktop 生命周期影响）。
+            // 仅关闭 Desktop 自身资源。
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(handle);
@@ -772,67 +764,39 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
 async fn auto_start_server_and_bots(app: tauri::AppHandle) {
     let state = app.state::<tiangong_app::TiangongApp>();
-    let server_enabled = match state
-        .with_state_read(|core_state| Ok(core_state.config.server.enabled))
-        .await
-    {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            warn!(error = %error, "读取 Server 自动运行配置失败，跳过 bot 自动启动");
-            return;
-        }
-    };
+    // 方案：bot 独立运行，不自动启动 Server。仅启动 enabled 且 PID 不存活的 bot。
     let has_enabled_bot = state.bot_store.list().iter().any(|bot| bot.enabled);
-    if !server_enabled && !has_enabled_bot {
+    if !has_enabled_bot {
         return;
     }
-
-    let config = match tiangong_app::commands::ensure_server_running_for_bots(state.inner()).await {
-        Ok(config) => config,
-        Err(error) => {
-            warn!(error = %error, "Server 未通过健康检查，跳过 bot 自动启动");
-            return;
+    // Server 地址/Token 从配置读取注入（供 bot 回连），但不强制 Server 运行。
+    let server_config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await
+        .unwrap_or_default();
+    let extra_env = tiangong_app::commands::bot_server_env(&server_config);
+    state.bot_runtime.start_enabled(&extra_env).await;
+    // MCP 注册需要 Server 运行；Server 未运行时跳过（bot 仍独立运行）。
+    let server_ok = tiangong_app::commands::server_health_check(&server_config);
+    if !server_ok {
+        info!("Server 未运行，已启动的 bot 将独立运行；启动 Server 后可恢复 Agent 调用");
+        return;
+    }
+    for bot in state.bot_store.list().into_iter().filter(|bot| bot.enabled) {
+        if !matches!(
+            state.bot_runtime.health(&bot.id).await,
+            tiangong_bots::BotHealth::Running
+        ) {
+            continue;
         }
-    };
-    info!(host = %config.host, port = config.port, "Server 已就绪");
-
-    if has_enabled_bot {
-        let extra_env = tiangong_app::commands::bot_server_env(&config);
-        state.bot_runtime.start_enabled(&extra_env).await;
-        for bot in state.bot_store.list().into_iter().filter(|bot| bot.enabled) {
-            if !matches!(
-                state.bot_runtime.health(&bot.id).await,
-                tiangong_bots::BotHealth::Running
-            ) {
-                continue;
-            }
-            if let Err(register_error) =
-                tiangong_app::commands::ensure_bot_mcp_registered(&bot.id, state.inner()).await
-            {
-                warn!(
-                    bot_id = %bot.id,
-                    error = %register_error,
-                    "bot 自动启动后注册 MCP 失败，正在停止 bot"
-                );
-                match state.bot_runtime.stop(&bot.id).await {
-                    Ok(()) => {
-                        if let Err(save_error) = state.bot_store.set_enabled(&bot.id, false) {
-                            warn!(
-                                bot_id = %bot.id,
-                                error = %save_error,
-                                "bot 已停止，但保存停止状态失败"
-                            );
-                        }
-                    }
-                    Err(stop_error) => {
-                        warn!(
-                            bot_id = %bot.id,
-                            error = %stop_error,
-                            "MCP 注册失败后停止 bot 失败"
-                        );
-                    }
-                }
-            }
+        if let Err(register_error) =
+            tiangong_app::commands::ensure_bot_mcp_registered(&bot.id, state.inner()).await
+        {
+            warn!(
+                bot_id = %bot.id,
+                error = %register_error,
+                "bot 自动启动后注册 MCP 失败"
+            );
         }
     }
 }
