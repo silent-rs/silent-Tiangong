@@ -238,14 +238,44 @@ pub fn spawn_detached(
             });
         }
     }
-    let child = cmd
+    // 事务性 spawn：保留 Child 句柄 → 存活确认 → 原子写记录 → 成功后才 forget。
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn bot 失败：{}", artifact_path.display()))?;
     let pid = child.id();
-    std::mem::forget(child);
+
+    // 500ms 启动存活确认：子进程立即退出则返回错误（含日志尾部提示）。
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            // 子进程已退出：返回错误，不写记录。
+            let log_tail = crate::logger::read_log_tail(bot_id)
+                .map(|l| l.content)
+                .unwrap_or_default();
+            let truncated: String = log_tail.chars().take(500).collect();
+            return Err(anyhow::anyhow!(
+                "bot 启动后立即退出（{status}）。日志尾部：
+{truncated}"
+            ));
+        }
+        Ok(None) => {} // 仍在运行，继续。
+        Err(e) => {
+            return Err(anyhow::anyhow!("检查 bot 启动状态失败：{e}"));
+        }
+    }
+
+    // 原子写进程记录。写失败则 kill+回收子进程，返回原始错误。
     let record = crate::process_record::make_record(pid, artifact_path, bot_id);
-    crate::process_record::write_record(bot_id, &record)?;
-    tracing::info!("bot 已后台启动：{} pid={pid}", bot_id);
+    if let Err(e) = crate::process_record::write_record(bot_id, &record) {
+        // PID 写失败：终止并回收子进程，避免产生无法管理的孤儿进程。
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(e.context("写入进程记录失败，已终止 bot 子进程"));
+    }
+
+    // 成功：脱离父进程，让 bot 独立存活。
+    std::mem::forget(child);
+    tracing::info!("bot 已后台启动：{} pid={}", bot_id, pid);
     Ok(())
 }
 
