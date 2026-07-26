@@ -371,10 +371,7 @@ impl BotRuntime {
                 artifact.display()
             ));
         }
-        let schema = cached_schema(&config.id).unwrap_or_default();
-        crate::management::validate_bot_config_fields(&schema, &config.config)?;
-        let mut env = bot_env(config, &schema);
-        env.extend(extra_env.clone());
+        let env = build_launch_env(config, extra_env)?;
         let supervised = crate::supervisor::spawn_supervised(&config.id, artifact, env)
             .context("启动 bot 进程失败")?;
         entries.insert(config.id.clone(), RuntimeEntry { supervised });
@@ -470,6 +467,40 @@ pub fn bot_env(config: &BotConfig, schema: &[ConfigFieldSchema]) -> BTreeMap<Str
             env.insert(var.clone(), val);
         }
     }
+    env
+}
+
+/// 构造 bot 启动所需的完整环境变量（Desktop 与 CLI 共用，统一入口）。
+///
+/// 流程：加载 cached schema → 校验必填字段 → 按 schema env 映射注入凭证 →
+/// 叠加宿主 extra_env（TIANGONG_URL/TOKEN，覆盖优先）。
+/// 缺少必填字段时返回错误（不 spawn、不写 PID）。错误信息不包含 secret 值。
+pub fn build_launch_env(
+    bot: &BotConfig,
+    extra_env: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let schema = cached_schema(&bot.id).unwrap_or_default();
+    crate::management::validate_bot_config_fields(&schema, &bot.config)?;
+    let mut env = bot_env(bot, &schema);
+    // 宿主 env 覆盖优先（URL/Token 不被 bot 配置伪造）。
+    env.extend(extra_env.clone());
+    Ok(env)
+}
+
+/// 从 Server 配置生成 bot 回连环境变量（TIANGONG_URL / TIANGONG_TOKEN）。
+///
+/// 通配地址（0.0.0.0/::/空）规范化为 127.0.0.1。Desktop 与 CLI 共用。
+pub fn server_env(host: &str, port: u16, token: Option<String>) -> BTreeMap<String, String> {
+    let connect_host = match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        value => value,
+    };
+    let mut env = BTreeMap::new();
+    env.insert(
+        "TIANGONG_URL".to_string(),
+        format!("http://{connect_host}:{port}"),
+    );
+    env.insert("TIANGONG_TOKEN".to_string(), token.unwrap_or_default());
     env
 }
 

@@ -3700,17 +3700,7 @@ pub async fn ensure_server_running_for_bots(
 pub fn bot_server_env(
     config: &tiangong_server::config::ServerConfig,
 ) -> std::collections::BTreeMap<String, String> {
-    let host = connect_host(&config.host);
-    let mut extra_env = std::collections::BTreeMap::new();
-    extra_env.insert(
-        "TIANGONG_URL".into(),
-        format!("http://{host}:{}", config.port),
-    );
-    extra_env.insert(
-        "TIANGONG_TOKEN".into(),
-        config.auth_token.clone().unwrap_or_default(),
-    );
-    extra_env
+    tiangong_bots::server_env(&config.host, config.port, config.auth_token.clone())
 }
 
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
