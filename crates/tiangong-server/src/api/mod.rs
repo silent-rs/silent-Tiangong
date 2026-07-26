@@ -1,4 +1,3 @@
-mod bots;
 mod chat;
 mod health;
 mod jobs;
@@ -28,51 +27,6 @@ use crate::scheduler::context::ServerSchedulerContext;
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
 
-/// Bot 回连 Server 所需的实际连接信息（issue #286 review 问题2）。
-///
-/// 由 Server 启动时的实际参数（host/port/token）填充，所有 bot 启动路径
-/// （start_enabled / start / restart / 升级恢复）统一从本结构生成 extra_env，
-/// 不再重新读 server.json——避免命令行参数与持久化配置不一致导致 bot 连不上。
-#[derive(Debug, Clone)]
-pub struct BotConnectInfo {
-    /// 规范化后的可连接 host（通配地址 0.0.0.0/::/空 → 127.0.0.1）。
-    pub connect_host: String,
-    pub port: u16,
-    pub token: Option<String>,
-}
-
-impl BotConnectInfo {
-    /// 由原始监听 host/port/token 构造，host 经 connect_host 规范化。
-    pub fn new(host: &str, port: u16, token: Option<String>) -> Self {
-        Self {
-            connect_host: connect_host(host),
-            port,
-            token,
-        }
-    }
-
-    /// 生成 bot 回连所需的 extra_env（TIANGONG_URL / TIANGONG_TOKEN）。
-    pub fn to_bot_env(&self) -> std::collections::BTreeMap<String, String> {
-        let mut env = std::collections::BTreeMap::new();
-        env.insert(
-            "TIANGONG_URL".to_string(),
-            format!("http://{}:{}", self.connect_host, self.port),
-        );
-        if let Some(t) = &self.token {
-            env.insert("TIANGONG_TOKEN".to_string(), t.clone());
-        }
-        env
-    }
-}
-
-/// 规范化监听地址为可连接地址（通配/空 → 127.0.0.1）。
-pub fn connect_host(host: &str) -> String {
-    match host.trim() {
-        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
-        value => value.to_string(),
-    }
-}
-
 /// Server 共享上下文：统一持有应用状态、Core 运行时与消息路由器
 #[derive(Clone)]
 pub struct ServerAppContext {
@@ -84,15 +38,6 @@ pub struct ServerAppContext {
     /// MCP 管理插件共享句柄：API 管理（register/remove/...）与 core 注册使用同一实例，
     /// 避免管理实例与运行实例状态分叉（对齐 CLI/Tauri 的 dual-ownership）。
     pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
-    /// Bot 配置存储（读写 bots.json）。独立 Server 自建；嵌入式复用 Desktop 注入实例。
-    pub bot_store: Arc<tiangong_bots::BotStore>,
-    /// Bot 运行时——制品下载、进程监督与启停（issue #286 阶段 2，Server 接管生命周期）。
-    pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
-    /// Bot 回连 Server 的实际连接信息（review 问题2）：所有 bot 启动路径统一使用。
-    pub bot_connect: BotConnectInfo,
-    /// Server draining 标志（review 问题6）：收到 shutdown/移交后置位，期间拒绝新的
-    /// Bot 写操作（start/stop/...），保证移交期间无并发写入。只读操作不受影响。
-    pub draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ServerAppContext {
@@ -101,11 +46,10 @@ impl ServerAppContext {
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
         storage_root: std::path::PathBuf,
-        bot_connect: BotConnectInfo,
     ) -> Self {
         let config = core_manager.config().clone();
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-            storage_root.clone(),
+            storage_root,
         ));
         // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
         // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
@@ -127,18 +71,6 @@ impl ServerAppContext {
             state: state.clone(),
             core_backend: core_backend.clone(),
         });
-        // Bot 管理句柄（issue #286 阶段 2）：独立 Server 自建，对齐 Desktop app.rs。
-        // 构造失败不阻断 Server 启动（bot 相关 API 会返回错误）。
-        let bot_store = Arc::new(
-            tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(|e| {
-                tracing::warn!("BotStore 初始化失败，bot 管理 API 将不可用: {e}");
-                tiangong_bots::BotStore::default()
-            }),
-        );
-        let bot_runtime = Arc::new(
-            tiangong_bots::BotRuntime::new(bot_store.clone())
-                .unwrap_or_else(|e| panic!("独立 Server 构造 BotRuntime 失败: {e}")),
-        );
         Self::with_backend(
             state,
             config,
@@ -146,16 +78,12 @@ impl ServerAppContext {
             core_backend,
             scheduler_context,
             mcp_plugin,
-            bot_store,
-            bot_runtime,
-            bot_connect,
         )
     }
 
     /// 使用宿主提供的 Core 与调度上下文构建 Server。
     ///
     /// Desktop 内嵌模式必须走此入口，确保 HTTP 与桌面 UI 共用同一套 Core 生命周期。
-    #[allow(clippy::too_many_arguments)]
     pub fn with_backend(
         state: SharedState,
         config: CoreConfigProvider,
@@ -163,9 +91,6 @@ impl ServerAppContext {
         core_backend: Arc<dyn ServerCoreBackend>,
         scheduler_context: Arc<dyn SchedulerContext>,
         mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
-        bot_store: Arc<tiangong_bots::BotStore>,
-        bot_runtime: Arc<tiangong_bots::BotRuntime>,
-        bot_connect: BotConnectInfo,
     ) -> Self {
         let router = Arc::new(MessageRouter::new(
             state.clone(),
@@ -179,10 +104,6 @@ impl ServerAppContext {
             scheduler_context,
             router,
             mcp_plugin,
-            bot_store,
-            bot_runtime,
-            bot_connect,
-            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -225,35 +146,6 @@ pub fn build_routes(
             ),
         )
         .append(Route::new("mcp").get(mcp::list_mcp))
-        .append(
-            Route::new("bots")
-                .get(bots::list_bots)
-                .post(bots::register_bot)
-                .append(Route::new("available").get(bots::list_available))
-                .append(Route::new("install").post(bots::install_bot))
-                .append(
-                    Route::new("check-update")
-                        .append(Route::new("<artifact_id>").get(bots::check_update)),
-                )
-                .append(
-                    Route::new("<id>")
-                        .get(bots::get_bot)
-                        .delete(bots::delete_bot)
-                        .append(Route::new("health").get(bots::get_bot_health))
-                        .append(Route::new("logs").get(bots::get_bot_logs))
-                        .append(Route::new("schema").get(bots::get_bot_schema))
-                        .append(Route::new("config").put(bots::update_bot_config))
-                        .append(Route::new("start").post(bots::start_bot))
-                        .append(Route::new("stop").post(bots::stop_bot))
-                        .append(Route::new("restart").post(bots::restart_bot))
-                        .append(Route::new("upgrade").post(bots::upgrade_bot))
-                        .append(
-                            Route::new("provision")
-                                .append(Route::new("begin").post(bots::provision_begin))
-                                .append(Route::new("poll").post(bots::provision_poll)),
-                        ),
-                ),
-        )
         .append(Route::new("skills").get(skills::list_skills))
         .append(
             Route::new("jobs")
@@ -396,23 +288,9 @@ mod tests {
         let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
             temp.path().to_path_buf(),
         ));
-        let bot_store = Arc::new(
-            tiangong_bots::BotStore::with_config_path(temp.path().join("bots.json"))
-                .expect("test bot store"),
-        );
-        let bot_runtime =
-            Arc::new(tiangong_bots::BotRuntime::new(bot_store.clone()).expect("test bot runtime"));
 
         let context = ServerAppContext::with_backend(
-            state,
-            config,
-            event_bus,
-            backend,
-            scheduler,
-            mcp_plugin,
-            bot_store,
-            bot_runtime,
-            BotConnectInfo::new("127.0.0.1", 8080, None),
+            state, config, event_bus, backend, scheduler, mcp_plugin,
         );
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);

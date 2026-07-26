@@ -36,7 +36,6 @@ mod tests {
             core_manager,
             event_bus,
             storage_root,
-            crate::api::BotConnectInfo::new("127.0.0.1", 8080, None),
         ))
     }
 

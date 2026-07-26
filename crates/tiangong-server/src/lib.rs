@@ -21,37 +21,8 @@ use self::remote::backend::ServerCoreBackend;
 use self::remote::event::EventBus;
 
 /// 启动 Server 模式（前台运行，阻塞）
-///
-/// 获取 Bot 管理所有权锁（issue #286）：若 Desktop 已持 `desktop.lock` 则拒绝启动，
-/// 避免 Desktop 与独立 Server 同时管理 bot。锁句柄随函数返回释放（正常退出），
-/// 崩溃/强杀由 OS 自动释放。阶段 2b 将补信号处理确保收到 SIGTERM 时优雅停 bot。
 #[allow(deprecated)]
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
-    use tiangong_config::lock::{OwnerKind, OwnershipLock};
-    match OwnershipLock::acquire(OwnerKind::Server)? {
-        Ok(lock) => {
-            tracing::info!("已获取 Server Bot 管理所有权锁");
-            // 持有锁至函数返回；存入变量防止过早 drop。
-            let _bot_ownership = lock;
-            run_server_inner(host, port, token)
-        }
-        Err(owner) => Err(anyhow::anyhow!(
-            "Bot 管理权已被 {} 占用，无法启动独立 Server。请先退出 {} 后重试。",
-            owner_label(owner),
-            owner_label(owner)
-        )),
-    }
-}
-
-fn owner_label(owner: tiangong_config::lock::OwnerKind) -> &'static str {
-    use tiangong_config::lock::OwnerKind;
-    match owner {
-        OwnerKind::Desktop => "Desktop",
-        OwnerKind::Server => "另一个独立 Server",
-    }
-}
-
-fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -73,24 +44,12 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
     let state: SharedState = Arc::new(Mutex::new(app_state));
 
     let event_bus = Arc::new(EventBus::default());
-    let bot_connect = api::BotConnectInfo::new(host, port, token.clone());
     let app = Arc::new(ServerAppContext::new(
         state,
         core_manager,
         event_bus.clone(),
         storage_root,
-        bot_connect,
     ));
-
-    // 启动已启用的 bot（issue #286 阶段 2：Server 接管 Bot 生命周期）。
-    // extra_env 由 Server 自身的 URL/Token 推导，供 bot 回连本 Server。
-    // 必须在 build_routes（move token）之前调用，因 extra_env 借用 token。
-    let bot_runtime_for_start = app.bot_runtime.clone();
-    let extra_env = app.bot_connect.to_bot_env();
-    runtime.block_on(async {
-        bot_runtime_for_start.start_enabled(&extra_env).await;
-    });
-    tracing::info!("已启动启用的 bot（若任何）");
 
     tracing::info!("构建路由...");
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
@@ -105,21 +64,8 @@ fn run_server_inner(host: &str, port: u16, token: Option<String>) -> Result<()> 
         Scheduler::schedule(silent::SCHEDULER.clone()).await;
     });
 
-    // with_shutdown 使 Server 在收到 Ctrl-C/SIGTERM 时优雅关停（停止接受新连接、
-    // 等待活动连接完成）；run() 阻塞直到关停完成后返回。
     tracing::info!("Server 启动：http://{addr}");
-    Server::new()
-        .bind(addr)
-        .with_shutdown(std::time::Duration::from_secs(5))
-        .run(route);
-
-    // 收到关停信号后：停止所有 bot 子进程（含 supervisor，避免孤儿重启），再退出。
-    tracing::info!("Server 收到关停信号，停止所有 bot...");
-    let bot_runtime_for_stop = app.bot_runtime.clone();
-    runtime.block_on(async {
-        bot_runtime_for_stop.stop_all().await;
-    });
-    tracing::info!("Server 已停止所有 bot，退出");
+    Server::new().bind(addr).run(route);
 
     Ok(())
 }
@@ -165,12 +111,6 @@ pub struct EmbeddedServerDependencies {
     pub core_backend: Arc<dyn ServerCoreBackend>,
     pub scheduler_context: Arc<dyn SchedulerContext>,
     pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
-    /// Bot 管理句柄（issue #286）：嵌入式 Server 复用 Desktop 的 bot_store/bot_runtime，
-    /// 使 HTTP /api/v1/bots 在 Desktop 下也指向同一管理实例。
-    pub bot_store: Arc<tiangong_bots::BotStore>,
-    pub bot_runtime: Arc<tiangong_bots::BotRuntime>,
-    /// Bot 回连 Server 的实际连接信息（review 问题2）。
-    pub bot_connect: api::BotConnectInfo,
     pub event_bus: Arc<EventBus>,
 }
 
@@ -189,9 +129,6 @@ pub fn run_embedded(
         core_backend,
         scheduler_context,
         mcp_plugin,
-        bot_store,
-        bot_runtime,
-        bot_connect,
         event_bus,
     } = dependencies;
     let app = Arc::new(ServerAppContext::with_backend(
@@ -201,9 +138,6 @@ pub fn run_embedded(
         core_backend,
         scheduler_context,
         mcp_plugin,
-        bot_store,
-        bot_runtime,
-        bot_connect,
     ));
 
     tracing::info!("构建嵌入式 Server 路由...");

@@ -28,7 +28,7 @@ const LOG_KEEP_ROTATED: usize = 3;
 const LOG_VIEW_BYTES: u64 = 256 * 1024;
 
 /// 桌面端展示的 bot 日志内容。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BotLog {
     pub content: String,
     pub truncated: bool,

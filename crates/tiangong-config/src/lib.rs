@@ -21,7 +21,6 @@
 mod config;
 pub mod io;
 mod loader;
-pub mod lock;
 pub mod logging;
 pub mod registry;
 

@@ -1,6 +1,5 @@
 mod args;
 mod bot;
-mod bot_client;
 mod config;
 mod configure;
 mod doctor;
