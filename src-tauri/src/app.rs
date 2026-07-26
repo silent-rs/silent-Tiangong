@@ -159,6 +159,62 @@ fn merge_agent_output_messages(
     }
 }
 
+/// 获取 Desktop 的 Bot 管理所有权（issue #286 阶段 5）。
+///
+/// 若独立 Server 持锁：经 HTTP 请求其 shutdown（优雅停 bot 后退出），轮询等待
+/// server.lock 释放（最多 ~15s），再获取 desktop.lock。失败则返回 None（Desktop
+/// 不启动 bot，由 Server 继续管理）。
+fn acquire_desktop_bot_ownership() -> Option<tiangong_config::lock::OwnershipLock> {
+    use tiangong_config::lock::{OwnerKind, OwnershipLock};
+    // 先直接尝试获取。
+    match OwnershipLock::acquire(OwnerKind::Desktop) {
+        Ok(Ok(lock)) => return Some(lock),
+        Ok(Err(OwnerKind::Server)) => {
+            tracing::info!("独立 Server 持有 Bot 管理权，请求移交...");
+        }
+        Ok(Err(OwnerKind::Desktop)) => {
+            tracing::warn!("另一个 Desktop 实例已在运行并持有 Bot 管理权");
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("获取 Bot 管理所有权锁失败: {e}");
+            return None;
+        }
+    }
+    // 请求独立 Server 移交（shutdown）。
+    let config = tiangong_config::load_server_config();
+    let url = format!(
+        "http://{}:{}/api/v1/server/shutdown",
+        config.host, config.port
+    );
+    let token = config.auth_token.clone();
+    // 发送 shutdown（fire-and-forget；Server 收到后停 bot 再 exit）。
+    let _ = std::thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+        if let Ok(client) = client {
+            let mut req = client.post(&url);
+            if let Some(t) = token.as_deref() {
+                req = req.bearer_auth(t);
+            }
+            let _ = req.send();
+        }
+    })
+    .join();
+    // 轮询等待 server.lock 释放后获取 desktop.lock。
+    for _ in 0..75 {
+        // 每 200ms 一次，共 ~15s。
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Ok(Ok(lock)) = OwnershipLock::acquire(OwnerKind::Desktop) {
+            tracing::info!("独立 Server 已移交，Desktop 获取 Bot 管理权");
+            return Some(lock);
+        }
+    }
+    tracing::warn!("等待独立 Server 移交超时，Desktop 将不启动 bot");
+    None
+}
+
 impl TiangongApp {
     /// 构造应用状态。`app_handle` 由 setup 阶段经 [`Self::set_app_handle`] 注入。
     #[allow(clippy::new_without_default)]
@@ -192,23 +248,10 @@ impl TiangongApp {
                 tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
             )
         });
-        // 获取 Bot 管理所有权（issue #286）：若独立 Server 已持锁，Desktop 不抢占
-        // （阶段 5 将补自动移交）。锁失败时 bot_ownership 为 None，后续 auto_start 跳过。
-        let bot_ownership = match tiangong_config::lock::OwnershipLock::acquire(
-            tiangong_config::lock::OwnerKind::Desktop,
-        ) {
-            Ok(Ok(lock)) => Some(lock),
-            Ok(Err(peer)) => {
-                tracing::warn!(
-                    "独立 Server 正在运行并持有 Bot 管理权（{peer:?}），Desktop 将不启动 bot。                     若需 Desktop 管理，请先停止独立 Server 后重启 Desktop。"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!("获取 Bot 管理所有权锁失败，Desktop 将不启动 bot: {e}");
-                None
-            }
-        };
+        // 获取 Bot 管理所有权（issue #286 阶段 5）：若独立 Server 已持锁，请求其移交
+        // （POST /api/v1/server/shutdown）→ 等 server.lock 释放 → 重试获取 Desktop 锁。
+        // 移交失败或超时则放弃管理（bot_ownership=None，auto_start 跳过）。
+        let bot_ownership = acquire_desktop_bot_ownership();
         let bot_store = std::sync::Arc::new(
             tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
                 |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
