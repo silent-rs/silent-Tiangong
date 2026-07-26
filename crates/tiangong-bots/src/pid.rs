@@ -143,6 +143,44 @@ pub fn write_pid(id: &BotId, pid: u32) -> Result<()> {
 pub fn remove_pid(id: &BotId) {
     let _ = std::fs::remove_file(paths::bot_pid_path(id));
 }
+/// 后台启动 bot 制品（脱离会话、写 PID、forget）。不监督、不自动重启。
+///
+/// 复用 `BotRuntime::start` 的 spawn 逻辑的独立版本，供 CLI 直接调用（无需 BotRuntime）。
+pub fn spawn_detached(
+    bot_id: &BotId,
+    artifact_path: &std::path::Path,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    use std::process::Command;
+    crate::paths::ensure_executable_paths_safe(bot_id)?;
+    crate::paths::reject_symlink(artifact_path, "Bot 制品")?;
+    let mut cmd = Command::new(artifact_path);
+    tiangong_types::process::configure_no_window(&mut cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn bot 失败：{}", artifact_path.display()))?;
+    let pid = child.id();
+    std::mem::forget(child);
+    write_pid(bot_id, pid)?;
+    tracing::info!("bot 已后台启动：{} pid={pid}", bot_id);
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
