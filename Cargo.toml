@@ -92,6 +92,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false }
 clap = "4"
 crossterm = "0.29"
+cron = "0.16"
 dashmap = "6"
 diffy = "0.5"
 dirs = "6"

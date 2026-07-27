@@ -4294,6 +4294,9 @@ pub async fn job_create(
     payload: String,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    // 校验 cron 表达式：后端 cron 0.16 要求 6 字段（秒 分 时 日 月 周），在此兜底拦截，
+    // 即便前端校验被绕过（旧版前端、直接调 API）也不会落库无法解析的表达式。
+    validate_job_schedule(&schedule)?;
     let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().naive_local().to_string();
     let job = tiangong_scheduler::model::Job {
@@ -4322,6 +4325,10 @@ pub async fn job_update(
     payload: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    // 更新 schedule 时同样校验（非空串才校验；None 表示不变，空串表示清空）。
+    if let Some(s) = schedule.as_ref().filter(|s| !s.is_empty()) {
+        validate_job_schedule(s)?;
+    }
     let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
     let req = tiangong_scheduler::model::UpdateJobRequest {
         name,
@@ -4337,6 +4344,16 @@ pub async fn job_update(
     }
     let job = store.get_job(&id).map_err(|e| e.to_string())?;
     Ok(serde_json::to_value(job).unwrap())
+}
+
+/// 校验 cron 表达式是否合法（与 restore_cron_jobs 同一套解析）。
+///
+/// 失败返回带 6 字段示例提示的错误字符串（直接成为 Tauri command 的 Err，
+/// 前端 invoke 会 reject 并拿到此信息）。
+fn validate_job_schedule(expr: &str) -> Result<(), String> {
+    tiangong_scheduler::executor::validate_cron_schedule(expr).map_err(|e| {
+        format!("schedule 不是合法的 cron 表达式（需 6 字段，如 '0 0 9 * * *' 表示每天 9 点）：{e}")
+    })
 }
 
 #[tauri::command]

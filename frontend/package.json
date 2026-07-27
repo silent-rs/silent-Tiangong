@@ -32,6 +32,8 @@
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cron-parser": "^5.6.2",
+    "cronstrue": "^3.24.0",
     "graphology": "^0.26.0",
     "graphology-types": "^0.24.8",
     "lucide-react": "^0.577.0",
