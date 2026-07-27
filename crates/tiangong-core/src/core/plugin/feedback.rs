@@ -38,11 +38,20 @@ impl PluginFeedbackTx {
     }
 
     /// 将插件产生的结构化内容注入当前会话。
-    pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) {
-        let _ = self.tx.send(Command::InjectTool {
-            tool_name: tool_name.into(),
-            payload,
-        });
+    ///
+    /// 返回 `true` 表示已成功投递到当前 turn 的命令队列；`false` 表示通道已关闭
+    ///（turn 已结束消费 / Core 已退出）。调用方可据此决定是否回退到缓冲重试。
+    ///
+    /// 注意：`true` 仅保证命令已入队，不保证 turn 内一定会处理它——若 turn 在
+    /// 入队后、消费前结束，命令仍可能丢失。彻底消除该竞态需配合 turn 侧在
+    /// Agent Loop 结束后立即 drop 接收端（见 `run_turn`）。
+    pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) -> bool {
+        self.tx
+            .send(Command::InjectTool {
+                tool_name: tool_name.into(),
+                payload,
+            })
+            .is_ok()
     }
 
     /// 上报插件内部模型调用产生的用量，并向前端发送用量事件。
@@ -116,5 +125,29 @@ mod tests {
         };
         assert_eq!(source, "child");
         assert!(!emit_event);
+    }
+
+    #[test]
+    fn inject_tool_returns_true_when_consumer_alive() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let feedback = PluginFeedbackTx::new(tx);
+
+        assert!(feedback.inject_tool("browser_data", serde_json::json!({"url": "x"})));
+        match rx.try_recv() {
+            Ok(Command::InjectTool { tool_name, .. }) => assert_eq!(tool_name, "browser_data"),
+            _ => panic!("expected InjectTool"),
+        }
+    }
+
+    #[test]
+    fn inject_tool_returns_false_after_receiver_dropped() {
+        // 模拟 turn 收尾窗口：Agent Loop 已退出，接收端被显式 drop。
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let feedback = PluginFeedbackTx::new(tx);
+        drop(rx);
+
+        // drop 接收端后，is_closed() 应为 true，inject_tool 也必须返回 false。
+        assert!(feedback.is_closed());
+        assert!(!feedback.inject_tool("terminal_user_input", serde_json::json!({})));
     }
 }

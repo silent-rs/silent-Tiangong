@@ -425,19 +425,12 @@ impl TiangongApp {
                 // 绑定和最终 deliver，禁止在 take→删除/重建空窗中复活孤立 Core。
                 let session_lock = app_state.session_send_lock(&session_id);
                 let _send_guard = session_lock.lock_owned().await;
-                // 会话存在性用 metadata 判定；ensure_core 需要的完整 session
-                // 从磁盘 load（issue #245：真相源归磁盘）。
-                let session_exists = state
-                    .lock()
-                    .await
-                    .core_manager
-                    .list_session_metadata()
-                    .iter()
-                    .any(|m| m.id == session_id);
-                if !session_exists {
-                    tracing::warn!(session_id, "消费者无法恢复 core：session 不存在");
-                    continue;
-                }
+                // session 不存在时由 ensure_core 新建并物化（load_session 处理磁盘
+                // 无 session 文件的情况：新建 Session 并 try_persist_to_disk）。
+                // 此前这里用 session_exists 门控提前 continue，导致首条消息前的终端
+                // 命令（terminal:user_command）被静默丢弃——session 物化只发生在首条
+                // 消息投递后，而终端命令可能在更早就已上报。移除门控后，工具注入
+                // 会触发 ensure_core 物化 session，命令得以正确 deliver。
                 use std::sync::mpsc;
                 let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
                 let ensured = app_state

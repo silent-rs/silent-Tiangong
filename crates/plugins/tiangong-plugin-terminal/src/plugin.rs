@@ -11,6 +11,8 @@ use std::sync::{Arc, RwLock};
 
 use serde_json::json;
 use tauri::{Manager, Wry};
+use tiangong_core::agent_input::ToolInput;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
@@ -18,7 +20,7 @@ use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler};
 
 use crate::capability::TerminalProvider;
 use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
-use crate::session_pty::SessionAwareTerminalProvider;
+use crate::session_pty::{SessionAwareTerminalProvider, SessionPtyRegistry};
 use tiangong_core::permission::TrustMode;
 
 /// 终端插件：聚合终端能力、工具覆盖处理器与 Prompt 段落提供者。
@@ -32,6 +34,15 @@ pub struct TerminalPlugin {
     /// 插件贡献环境变量的共享句柄（与 `SessionPtyRegistry` 共享同一实例）。
     /// `set_exec_env` 写入此句柄，PTY 创建时读取快照注入。
     runtime_env: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
+    /// 全局 PTY 注册表句柄：`on_session_ready` 时读取终端状态快照注入会话。
+    registry: Arc<SessionPtyRegistry>,
+    /// 当前 turn 的反馈通道：`on_session_ready` 注入 `terminal_data` 首轮快照用。
+    /// turn 结束后接收端释放，迟到注入会 send 失败（首轮注入在 Agent Loop 启动前，
+    /// 时序上通道必然存活）。
+    feedback_tx: RwLock<Option<PluginFeedbackTx>>,
+    /// 是否已为该 session 注入过初始 `terminal_data` 快照。
+    /// `on_session_ready` 每轮触发，用此标志保证仅首轮注入一次。
+    injected_initial_state: std::sync::atomic::AtomicBool,
 }
 
 impl TerminalPlugin {
@@ -42,9 +53,10 @@ impl TerminalPlugin {
     /// 返回 `None` 表示插件 state 未就绪（与旧 `get_*` 工厂一致）。
     pub fn from_app_handle(app: &tauri::AppHandle<Wry>) -> Option<Self> {
         let state = app.state::<crate::TerminalPluginState>();
-        let runtime_env = state.registry.runtime_env_handle();
+        let registry = state.registry.clone();
+        let runtime_env = registry.runtime_env_handle();
         let provider: Arc<dyn TerminalProvider> =
-            Arc::new(SessionAwareTerminalProvider::new(state.registry.clone()));
+            Arc::new(SessionAwareTerminalProvider::new(registry.clone()));
         let override_handler = TerminalToolOverride::new(provider);
         let prompt_provider = TerminalPromptSectionProvider;
         Some(Self {
@@ -52,6 +64,9 @@ impl TerminalPlugin {
             prompt_provider,
             workspace: RwLock::new(None),
             runtime_env,
+            registry,
+            feedback_tx: RwLock::new(None),
+            injected_initial_state: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -84,6 +99,44 @@ impl Plugin for TerminalPlugin {
         if let Ok(mut guard) = self.runtime_env.write() {
             *guard = env;
         }
+    }
+
+    /// 注入当前 turn 的反馈通道，供 `on_session_ready` 投递首轮终端状态快照。
+    fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
+        if let Ok(mut guard) = self.feedback_tx.write() {
+            *guard = Some(tx);
+        }
+    }
+
+    /// session 就绪：首轮注入终端状态快照（对齐 browser_data 范式）。
+    ///
+    /// `on_session_ready` 每轮触发，用 `injected_initial_state` 标志保证仅首轮注入
+    /// 一次——后续用户命令由 `terminal_user_input`（经 ToolInjection 消费者）实时
+    /// 注入，无需重复快照。
+    ///
+    /// 此时 feedback 通道已注入（`set_feedback_tx` 在 `on_session_ready` 之前调用），
+    /// 且注入发生在 Agent Loop 的 select! 启动前，命令入队后会被本轮消费。
+    fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
+        use std::sync::atomic::Ordering;
+        if self
+            .injected_initial_state
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return; // 已注入过初始快照
+        }
+        let Some(tx) = self.feedback_tx.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let state = self.registry.snapshot_for_injection(&session.id);
+        let payload = state.render();
+        if !tx.inject_tool("terminal_data", payload) {
+            // 通道未就绪：重置标志，下个 turn 重新尝试。
+            self.injected_initial_state.store(false, Ordering::SeqCst);
+            tracing::debug!(session_id = %session.id, "首轮 terminal_data 注入失败，下轮重试");
+            return;
+        }
+        tracing::debug!(session_id = %session.id, "首轮 terminal_data 已注入");
     }
 }
 
