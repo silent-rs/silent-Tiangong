@@ -332,17 +332,14 @@ impl BotRuntime {
 
     /// 启动指定 bot 实例（需制品已安装）。
     ///
+    /// Desktop 通过 BotRuntime 经 supervisor 启动 bot（含自动重启与日志采集）；
+    /// CLI 通过 `pid::spawn_detached` 独立启动，脱离 CLI 进程。两者都写入相同的
+    /// 版本化进程记录，`is_running` 据此跨进程判断存活，避免重复启动。
+    ///
     /// 启动时按缓存的 schema（`bot --describe` 上报）校验必填字段，
     /// 并按 schema 的 `env` 映射注入环境变量。`extra_env` 提供主程序注入的
     /// 额外环境变量（如 `TIANGONG_URL`/`TIANGONG_TOKEN`，由 ServerConfig 推导），
     /// 覆盖同名 schema 映射。
-    /// 启动 bot（PID-based 独立运行，issue #286 方案）。
-    ///
-    /// spawn 子进程（脱离会话）、写 PID 文件、不持有句柄、不自动重启。
-    /// bot 崩溃即停止（PID 文件残留失效，下次 health 清理）。已在运行则拒绝重复启动。
-    /// 启动 bot（混合模式：Desktop 经 supervisor 监督，含自动重启+日志采集）。
-    ///
-    /// 先检查 PID 避免重复启动 CLI 已启动的 bot，再经 supervisor 启动并加入 entries。
     pub async fn start(
         &self,
         config: &BotConfig,
@@ -378,8 +375,7 @@ impl BotRuntime {
         Ok(())
     }
 
-    /// 停止指定 bot 实例。
-    /// 停止 bot（混合模式：优先停 supervisor 管理的，无则 PID-based 停外部启动的）。
+    /// 停止指定 bot 实例（优先本进程 supervisor 管理的，否则经 PID 停外部启动的）。
     pub async fn stop(&self, id: &BotId) -> Result<()> {
         let entry = self.entries.lock().await.remove(id);
         if let Some(entry) = entry {
@@ -392,7 +388,6 @@ impl BotRuntime {
         }
     }
 
-    /// 停止所有运行中的 bot。
     /// 停止所有本进程 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
     pub async fn stop_all(&self) {
         let mut entries = self.entries.lock().await;
@@ -405,7 +400,6 @@ impl BotRuntime {
         }
     }
 
-    /// 查询 bot 是否正在由运行时监督；已结束条目会被清理。
     /// bot 是否正在运行（先查本进程 supervisor 运行表，无则查外部 PID）。
     pub async fn is_running(&self, id: &BotId) -> bool {
         let mut entries = self.entries.lock().await;
@@ -419,11 +413,10 @@ impl BotRuntime {
         }
     }
 
-    /// 查询 bot 健康状态。
+    /// bot 健康状态（先查 supervisor 运行表，无则查外部 PID）。
     ///
     /// 若 bot 正常退出（监督任务结束），自动从运行表移除并返回 Stopped，
     /// 避免 health 长期误报 Running。
-    /// bot 健康状态（先查 supervisor 运行表，无则查外部 PID）。
     pub async fn health(&self, id: &BotId) -> BotHealth {
         if self.is_running(id).await {
             BotHealth::Running

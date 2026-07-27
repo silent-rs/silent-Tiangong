@@ -73,7 +73,6 @@ async fn run_subcommand(
         BotSubcommand::Show { id } => cmd_show(&store, id),
         BotSubcommand::Start { id } => cmd_start(&store, id),
         BotSubcommand::Stop { id } => cmd_stop(id),
-        BotSubcommand::Restart { id } => cmd_restart(&store, id),
         BotSubcommand::Upgrade { id } => cmd_upgrade(&store, &runtime, id).await,
         BotSubcommand::CheckUpdate { artifact_id } => {
             cmd_check_update(&store, &runtime, artifact_id).await
@@ -504,15 +503,6 @@ fn cmd_stop(id: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_restart(store: &BotStore, id: String) -> Result<()> {
-    let id = parse_bot_id(&id)?;
-    tiangong_bots::pid::stop_bot(&id).ok();
-    let bot = store.get(&id).ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
-    bot_spawn_daemon(&bot)?;
-    println!("bot 已重启：{id}");
-    Ok(())
-}
-
 async fn cmd_upgrade(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
     let bot = store.get(&id).ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
@@ -586,7 +576,8 @@ fn cmd_remove(store: &BotStore, id: String) -> Result<()> {
     if store.get(&id).is_none() {
         return Err(anyhow!("bot 不存在：{id}"));
     }
-    tiangong_bots::pid::stop_bot(&id).ok();
+    // 仅当 bot 已确认停止（或本来就未运行）时才删除配置，避免配置被删但进程仍在运行。
+    tiangong_bots::pid::stop_bot(&id)?;
     store.remove(&id)?;
     println!("bot 配置已删除：{id}（已安装制品保留）");
     Ok(())

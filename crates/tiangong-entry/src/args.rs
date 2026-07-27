@@ -549,12 +549,6 @@ pub(crate) enum BotSubcommand {
         #[arg(help = "bot 实例 ID")]
         id: String,
     },
-    /// 重启 bot
-    #[command(about = "重启 bot 进程")]
-    Restart {
-        #[arg(help = "bot 实例 ID")]
-        id: String,
-    },
     /// 升级 bot 到最新版本（停止 → 下载 → 写版本，运行中则自动恢复运行）
     #[command(about = "升级 bot 到最新版本")]
     Upgrade {
