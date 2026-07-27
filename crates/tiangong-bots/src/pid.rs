@@ -37,9 +37,11 @@ pub fn process_alive(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 pub fn process_alive(pid: u32) -> bool {
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
+    // Desktop 模式下高频调用（health/is_running 轮询），必须抑制控制台窗口闪现（issue #290）。
+    let mut cmd = Command::new("tasklist");
+    tiangong_types::process::configure_no_window(&mut cmd);
+    cmd.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
+    cmd.output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
 }
 
@@ -78,8 +80,13 @@ pub fn send_terminate(pid: u32) -> Result<()> {
 
 #[cfg(not(unix))]
 pub fn send_terminate(pid: u32) -> Result<()> {
-    let output = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T"])
+    // Desktop（GUI）进程没有可附加的控制台，`taskkill /T`（不带 /F）只能向目标投递
+    // WM_CLOSE，对独立后台 bot 几乎无效，导致 bot 长期无法停止（issue #290）。
+    // 与 supervisor 路径的 `child.kill()`（= TerminateProcess，强制终止）对齐，使用 /F。
+    let mut cmd = Command::new("taskkill");
+    tiangong_types::process::configure_no_window(&mut cmd);
+    let output = cmd
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
         .context("执行 taskkill 失败")?;
     if !output.status.success() {
@@ -304,7 +311,9 @@ fn send_kill(pid: u32) -> Result<()> {
 
 #[cfg(not(unix))]
 fn send_kill(pid: u32) -> Result<()> {
-    let output = Command::new("taskkill")
+    let mut cmd = Command::new("taskkill");
+    tiangong_types::process::configure_no_window(&mut cmd);
+    let output = cmd
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
         .context("执行 taskkill /F 失败")?;
