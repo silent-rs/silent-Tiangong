@@ -701,24 +701,6 @@ fn server_health_check(config: &tiangong_config::ServerConfig) -> bool {
     response.starts_with("HTTP/") && response.contains(" 200 ")
 }
 
-/// 由 ServerConfig 拼装 bot 启动所需的 TIANGONG_URL/TIANGONG_TOKEN。
-///
-/// 对齐桌面端 `bot_server_env` 的逻辑（src-tauri/src/commands.rs）。host 为空
-/// 或通配地址时回退到 127.0.0.1。
-fn server_env_from_config(config: &tiangong_config::ServerConfig) -> BTreeMap<String, String> {
-    let host = connect_host(&config.host);
-    let mut env = BTreeMap::new();
-    env.insert(
-        "TIANGONG_URL".into(),
-        format!("http://{host}:{}", config.port),
-    );
-    env.insert(
-        "TIANGONG_TOKEN".into(),
-        config.auth_token.clone().unwrap_or_default(),
-    );
-    env
-}
-
 /// 规范化监听地址为可连接地址（通配/空 → 127.0.0.1）。
 fn connect_host(host: &str) -> String {
     match host.trim() {

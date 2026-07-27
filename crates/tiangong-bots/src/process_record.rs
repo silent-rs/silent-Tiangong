@@ -5,7 +5,7 @@
 //!
 //! 旧版裸数字 PID 文件兼容读取，但标记为 Legacy，需校验可执行文件路径后才能操作。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,28 @@ impl ReadRecord {
 pub fn write_record(id: &BotId, record: &ProcessRecord) -> Result<()> {
     let path = paths::bot_pid_path(id);
     let json = serde_json::to_string_pretty(record).context("序列化进程记录失败")?;
-    crate::store::atomic_write(&path, &json)
+    if let Err(error) = crate::store::atomic_write(&path, &json) {
+        let _ = std::fs::remove_file(path.with_extension("tmp"));
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// 仅当记录仍指向给定 PID 时删除，避免清理掉后来启动的新进程记录。
+pub fn remove_record_if_pid(id: &BotId, pid: u32) {
+    let should_remove = read_record(id)
+        .ok()
+        .flatten()
+        .is_some_and(|record| record.pid() == pid);
+    if should_remove {
+        remove_record(id);
+    }
+}
+
+/// 清理一次失败写入可能留下的正式记录和临时文件。
+pub(crate) fn cleanup_record_write(id: &BotId, pid: u32) {
+    remove_record_if_pid(id, pid);
+    let _ = std::fs::remove_file(paths::bot_pid_path(id).with_extension("tmp"));
 }
 
 /// 删除进程记录文件（若存在）。
@@ -135,6 +156,9 @@ pub fn remove_record(id: &BotId) {
 /// 比较项：PID 存活 + 启动时间 + 可执行文件路径。
 /// 任意一项不匹配返回 Err（拒绝发送信号）。
 pub fn verify_identity(record: &ProcessRecord, inspector: &dyn ProcessInspector) -> Result<()> {
+    if record.version != RECORD_VERSION {
+        return Err(anyhow!("不支持的进程记录版本：{}", record.version));
+    }
     let identity = inspector
         .inspect(record.pid)?
         .ok_or_else(|| anyhow!("进程 {} 不存在", record.pid))?;
@@ -145,12 +169,11 @@ pub fn verify_identity(record: &ProcessRecord, inspector: &dyn ProcessInspector)
             identity.started_at
         ));
     }
-    // 可执行文件路径规范化比较。
-    let record_exe = std::path::Path::new(&record.executable);
-    if !identity.executable.as_os_str().is_empty()
-        && !record_exe.as_os_str().is_empty()
-        && identity.executable != record_exe
-    {
+    let record_executable = Path::new(&record.executable);
+    if identity.executable.as_os_str().is_empty() || record_executable.as_os_str().is_empty() {
+        return Err(anyhow!("进程可执行文件路径为空，无法确认进程身份"));
+    }
+    if identity.executable != record_executable {
         return Err(anyhow!(
             "可执行文件路径不匹配（记录 {}，实际 {}）",
             record.executable,
@@ -160,23 +183,47 @@ pub fn verify_identity(record: &ProcessRecord, inspector: &dyn ProcessInspector)
     Ok(())
 }
 
-/// 构造当前时间的 Unix 秒。
-pub fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// 校验操作系统报告的进程可执行文件与预期 Bot 制品相同。
+pub fn verify_expected_executable(identity: &ProcessIdentity, expected: &Path) -> Result<()> {
+    if identity.executable.as_os_str().is_empty() {
+        return Err(anyhow!("进程可执行文件路径为空，无法确认进程身份"));
+    }
+    let expected = std::fs::canonicalize(expected)
+        .with_context(|| format!("解析 Bot 制品路径失败：{}", expected.display()))?;
+    let actual = std::fs::canonicalize(&identity.executable).with_context(|| {
+        format!(
+            "解析进程可执行文件路径失败：{}",
+            identity.executable.display()
+        )
+    })?;
+    if actual != expected {
+        return Err(anyhow!(
+            "可执行文件路径不匹配（期望 {}，实际 {}）",
+            expected.display(),
+            actual.display()
+        ));
+    }
+    Ok(())
 }
 
-/// 创建新进程记录。
-pub fn make_record(pid: u32, executable: &std::path::Path, bot_id: &BotId) -> ProcessRecord {
-    ProcessRecord {
+/// 从操作系统的实时身份信息创建进程记录。
+pub fn record_for_process(
+    pid: u32,
+    expected_executable: &Path,
+    bot_id: &BotId,
+    inspector: &dyn ProcessInspector,
+) -> Result<ProcessRecord> {
+    let identity = inspector
+        .inspect(pid)?
+        .ok_or_else(|| anyhow!("进程 {pid} 不存在"))?;
+    verify_expected_executable(&identity, expected_executable)?;
+    Ok(ProcessRecord {
         version: RECORD_VERSION,
-        pid,
-        started_at: now_unix(),
-        executable: executable.to_string_lossy().to_string(),
+        pid: identity.pid,
+        started_at: identity.started_at,
+        executable: identity.executable.to_string_lossy().into_owned(),
         bot_id: bot_id.to_string(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -281,7 +328,7 @@ mod tests {
     #[test]
     fn read_record_missing_returns_none() {
         let id = BotId::try_from("missingtest").unwrap();
-        assert!(matches!(read_record(&id).unwrap(), None));
+        assert!(read_record(&id).unwrap().is_none());
     }
 
     #[test]
@@ -292,7 +339,7 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(&path, "garbage").unwrap();
-        assert!(matches!(read_record(&id).unwrap(), None));
+        assert!(read_record(&id).unwrap().is_none());
         assert!(!path.exists(), "无效 PID 文件应被清理");
     }
 }
