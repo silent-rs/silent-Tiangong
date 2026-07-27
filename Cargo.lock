@@ -10248,6 +10248,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "cron",
  "dirs",
  "scru128",
  "serde",

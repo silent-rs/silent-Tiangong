@@ -69,6 +69,14 @@ impl SchedulerPlugin {
             return param_error("缺少必填参数 payload");
         };
 
+        // 校验 cron 表达式：调度器要求 6 字段（秒 分 时 日 月 周），否则恢复期会解析失败。
+        // 在此提前拦截，避免无效表达式静默落库后开机才报错。
+        if let Err(e) = tiangong_scheduler::executor::validate_cron_schedule(&schedule) {
+            return param_error(&format!(
+                "schedule 不是合法的 cron 表达式（需 6 字段，如 '0 25 21 * * *' 表示每天 21:25）：{e}"
+            ));
+        }
+
         // 可选字段：session_id 为空时透传 None，沿用「首次触发时延迟创建会话」机制
         let session_id = get_opt_str_field(args, "session_id");
         let enabled = get_bool_field(args, "enabled").unwrap_or(true);
@@ -168,6 +176,16 @@ impl SchedulerPlugin {
             payload: get_opt_str_field(args, "payload"),
             enabled: get_bool_field(args, "enabled"),
         };
+
+        // 更新 schedule 时同样校验（三态：未传/None 表示不变，显式空串表示清空，
+        // 非空串才需校验）。与 create 用同一校验，确保落库即可解析。
+        if let Some(schedule) = req.schedule.as_ref().filter(|s| !s.is_empty()) {
+            if let Err(e) = tiangong_scheduler::executor::validate_cron_schedule(schedule) {
+                return param_error(&format!(
+                    "schedule 不是合法的 cron 表达式（需 6 字段，如 '0 25 21 * * *' 表示每天 21:25）：{e}"
+                ));
+            }
+        }
 
         let store = match self.open_store() {
             Ok(s) => s,
@@ -355,7 +373,7 @@ impl ToolSpecProvider for SchedulerPlugin {
                     "properties": {
                         "name": { "type": "string", "description": "任务名称" },
                         "description": { "type": "string", "description": "任务描述" },
-                        "schedule": { "type": "string", "description": "Cron 表达式，如 '0 9 * * *' 表示每天 9 点" },
+                        "schedule": { "type": "string", "description": "Cron 表达式（6 字段：秒 分 时 日 月 周），如 '0 0 9 * * *' 表示每天 9 点" },
                         "payload": { "type": "string", "description": "触发时发送给 LLM 的任务描述" },
                         "session_id": { "type": "string", "description": "关联已有会话 ID（可选，不指定则首次触发时自动创建新会话）" },
                         "enabled": { "type": "boolean", "description": "是否启用，默认 true" }
@@ -377,7 +395,7 @@ impl ToolSpecProvider for SchedulerPlugin {
                         "id": { "type": "string", "description": "任务 ID" },
                         "name": { "type": "string", "description": "任务名称" },
                         "description": { "type": "string", "description": "任务描述" },
-                        "schedule": { "type": "string", "description": "Cron 表达式" },
+                        "schedule": { "type": "string", "description": "Cron 表达式（6 字段：秒 分 时 日 月 周）" },
                         "payload": { "type": "string", "description": "触发时发送给 LLM 的任务描述" },
                         "session_id": { "type": "string", "description": "关联会话 ID" },
                         "enabled": { "type": "boolean", "description": "是否启用" }
@@ -688,7 +706,7 @@ mod tests {
             json!({
                 "name": "无会话任务",
                 "description": "验证 session_id 可选",
-                "schedule": "0 9 * * *",
+                "schedule": "0 0 9 * * *",
                 "payload": "ping",
             }),
         );
@@ -707,6 +725,66 @@ mod tests {
         let (handler, _dir) = handler_in_tmp();
         let call = make_call("not_a_scheduler_tool", json!({}));
         assert!(handler.dispatch(&call).is_none());
+    }
+
+    // ── cron 表达式校验（5 字段被拒、6 字段通过）──────────────────────
+
+    /// 5 字段 crontab 写法（如 `25 21 * * *`）应被 create 拒绝：调度器底层 cron
+    /// crate 要求 6 字段（秒 分 时 日 月 周），5 字段会在第 6 字段处 EOF 失败。
+    /// 回归保护：在线日志曾出现 `解析 cron 表达式失败 [25 21 * * *]`。
+    #[test]
+    fn create_job_rejects_five_field_cron() {
+        let (handler, _dir) = handler_in_tmp();
+        let call = make_call(
+            TOOL_CREATE_JOB,
+            json!({
+                "name": "五字段任务",
+                "description": "应被拒绝",
+                "schedule": "25 21 * * *",
+                "payload": "ping",
+            }),
+        );
+        let result = handler.dispatch(&call).expect("create 应被处理");
+        assert!(
+            !result.ok,
+            "5 字段 cron 应被拒绝，却成功了：{}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("cron") || result.stdout.contains("cron"),
+            "错误信息应说明是 cron 校验失败：{}",
+            result.summary
+        );
+    }
+
+    /// 等价的 6 字段写法（`0 25 21 * * *`，每天 21:25）应创建成功。
+    #[test]
+    fn create_job_accepts_six_field_cron() {
+        let (handler, _dir) = handler_in_tmp();
+        let call = make_call(
+            TOOL_CREATE_JOB,
+            json!({
+                "name": "六字段任务",
+                "description": "应通过",
+                "schedule": "0 25 21 * * *",
+                "payload": "ping",
+            }),
+        );
+        let result = handler.dispatch(&call).expect("create 应被处理");
+        assert!(result.ok, "6 字段 cron 应通过：{}", result.summary);
+    }
+
+    /// update 同样校验：传入 5 字段应被拒。
+    #[test]
+    fn update_job_rejects_five_field_cron() {
+        let (handler, _dir) = handler_in_tmp();
+        let id = seed_job(&handler, "原任务");
+        let call = make_call(
+            TOOL_UPDATE_JOB,
+            json!({ "id": id, "schedule": "0 9 * * *" }),
+        );
+        let result = handler.dispatch(&call).expect("update 应被处理");
+        assert!(!result.ok, "5 字段 cron 更新应被拒绝：{}", result.summary);
     }
 
     // ── 缺陷回归保护（Review #1/#3/#4，已修复）─────────────────────────
@@ -782,7 +860,7 @@ mod tests {
             json!({
                 "name": "带会话",
                 "description": "验证清空字段",
-                "schedule": "0 9 * * *",
+                "schedule": "0 0 9 * * *",
                 "payload": "ping",
                 "session_id": "sess-original",
             }),
