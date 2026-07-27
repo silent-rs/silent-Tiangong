@@ -10,15 +10,17 @@
 //! - `TIANGONG_TOKEN`（可选，embedded server 认证 token）
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use openlark_client::CoreConfig as Config;
 use openlark_client::ws_client::{EventDispatcherHandler, EventHandler, LarkWsClient};
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use tokio::signal;
 use tokio::sync::{Mutex, RwLock};
 use tracing_subscriber::EnvFilter;
@@ -424,38 +426,194 @@ async fn main() -> Result<()> {
 
     tracing::info!("正在连接飞书 WebSocket 长连接...");
 
-    // 在独立 task 启动 WebSocket 长连接
-    let ws_handle = tokio::spawn({
+    // 每次调用重新执行 LarkWsClient::open：内部会重新拉取飞书 WS 端点，
+    // 因此重连时无需手工刷新连接地址。
+    let connect = {
         let config = Arc::new(config);
-        async move {
-            if let Err(e) = LarkWsClient::open(config, dispatcher).await {
-                tracing::error!("飞书 WebSocket 长连接退出: {e}");
+        move || {
+            let (config, dispatcher) = (config.clone(), dispatcher.clone());
+            async move {
+                let started = Instant::now();
+                let outcome = match LarkWsClient::open(config, dispatcher).await {
+                    Ok(()) => ConnectOutcome::Closed,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "飞书 WebSocket 连接断开");
+                        ConnectOutcome::Failed
+                    }
+                };
+                (outcome, started.elapsed())
             }
         }
-    });
+    };
 
-    // 等待终止信号（SIGTERM/SIGINT/Ctrl+C），主程序 stop 时发送
+    let stop: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(wait_for_stop());
+    reconnect_loop(ReconnectPolicy::default(), connect, stop).await;
+
+    tracing::info!("飞书机器人已停止");
+    Ok(())
+}
+
+// ── WebSocket 重连 ───────────────────────────────────────────
+
+/// 单次 `LarkWsClient::open` 的结果分类。
+///
+/// `open` 在会话终止时几乎总是返回 `Err`，正常关闭也以
+/// `Err(ConnectionClosed)` 体现；这里把「正常关闭」与「异常失败」区分开，
+/// 便于日志分级与后续策略扩展。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConnectOutcome {
+    /// 会话正常结束（`open` 返回 `Ok`）。
+    Closed,
+    /// 连接或会话异常退出（`open` 返回 `Err`）。
+    Failed,
+}
+
+/// 重连退避策略。
+#[derive(Clone, Copy, Debug)]
+struct ReconnectPolicy {
+    /// 首次重连前的等待时间。
+    initial_backoff: Duration,
+    /// 退避时间的上限。
+    max_backoff: Duration,
+    /// 单次连接稳定运行超过该阈值后，下一次退避重置为 `initial_backoff`。
+    stable_threshold: Duration,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
+            stable_threshold: Duration::from_secs(60),
+        }
+    }
+}
+
+/// 根据上一次连接的持续时长，计算下一次重连前的退避时间。
+///
+/// - 连接稳定运行超过 `stable_threshold`：退避重置为 `initial_backoff`；
+/// - 否则在 `current` 基础上翻倍，但不超过 `max_backoff`。
+fn next_backoff(policy: &ReconnectPolicy, current: Duration, lasted: Duration) -> Duration {
+    if lasted >= policy.stable_threshold {
+        policy.initial_backoff
+    } else {
+        std::cmp::min(current.saturating_mul(2), policy.max_backoff)
+    }
+}
+
+/// 为退避时间叠加少量随机抖动，避免多实例集中重连。
+///
+/// 抖动上限为 `backoff / 4`，`seed` 决定具体取值；注入 seed 便于单测断言。
+fn backoff_with_jitter(backoff: Duration, seed: u128) -> Duration {
+    if backoff.is_zero() {
+        return backoff;
+    }
+    let jitter_cap = backoff / 4;
+    if jitter_cap.is_zero() {
+        return backoff;
+    }
+    let jitter = Duration::from_nanos((seed % jitter_cap.as_nanos().max(1)) as u64);
+    backoff + jitter
+}
+
+/// 收集一个用于抖动的种子，来源为系统时钟纳秒。
+fn jitter_seed() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+/// 重连驱动。
+///
+/// 每一轮：先 `select` 同时等待 `connect()` 与停止信号；连接结束后按策略计算
+/// 下一次退避时间，再 `select` 等待退避与停止信号。停止信号在连接与退避
+/// 两个阶段都会被监听，确保收到 SIGTERM/SIGINT 时立即退出且不再重连。
+async fn reconnect_loop<F, Fut>(
+    policy: ReconnectPolicy,
+    mut connect: F,
+    mut stop: Pin<Box<dyn Future<Output = ()> + Send>>,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = (ConnectOutcome, Duration)>,
+{
+    let mut backoff = policy.initial_backoff;
+    let mut attempt: u64 = 0;
+
+    loop {
+        attempt += 1;
+
+        let (outcome, lasted) = tokio::select! {
+            biased;
+            _ = &mut stop => {
+                tracing::info!("收到停止信号，不再重连 attempt={attempt}");
+                return;
+            }
+            pair = connect() => pair,
+        };
+
+        let lasted_secs = lasted.as_secs_f64();
+        match outcome {
+            ConnectOutcome::Closed => tracing::info!(
+                lasted_secs = format!("{lasted_secs:.3}"),
+                "飞书 WebSocket 长连接已结束"
+            ),
+            ConnectOutcome::Failed => tracing::warn!(
+                lasted_secs = format!("{lasted_secs:.3}"),
+                "飞书 WebSocket 长连接异常退出"
+            ),
+        }
+
+        backoff = next_backoff(&policy, backoff, lasted);
+        let delay = backoff_with_jitter(backoff, jitter_seed());
+        tracing::info!(
+            attempt,
+            delay_secs = format!("{:.3}", delay.as_secs_f64()),
+            backoff_secs = format!("{:.3}", backoff.as_secs_f64()),
+            "等待后重连"
+        );
+
+        tokio::select! {
+            biased;
+            _ = &mut stop => {
+                tracing::info!("收到停止信号，不再重连 attempt={attempt}");
+                return;
+            }
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// 等待进程终止信号（SIGTERM/SIGINT/Ctrl+C），主程序 stop 时发送。
+async fn wait_for_stop() {
     #[cfg(unix)]
     {
-        let mut term = signal::unix::signal(signal::unix::SignalKind::terminate())
-            .context("注册 SIGTERM 处理失败")?;
-        let mut int = signal::unix::signal(signal::unix::SignalKind::interrupt())
-            .context("注册 SIGINT 处理失败")?;
+        let term = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .context("注册 SIGTERM 处理失败")
+                .expect("注册 SIGTERM 处理失败")
+                .recv()
+                .await;
+            tracing::info!("收到 SIGTERM，正在退出...");
+        };
+        let int = async {
+            signal::unix::signal(signal::unix::SignalKind::interrupt())
+                .context("注册 SIGINT 处理失败")
+                .expect("注册 SIGINT 处理失败")
+                .recv()
+                .await;
+            tracing::info!("收到 SIGINT，正在退出...");
+        };
         tokio::select! {
-            _ = term.recv() => tracing::info!("收到 SIGTERM，正在退出..."),
-            _ = int.recv() => tracing::info!("收到 SIGINT，正在退出..."),
-            _ = ws_handle => tracing::info!("WebSocket 长连接已结束"),
+            _ = term => {}
+            _ = int => {}
         }
     }
     #[cfg(not(unix))]
     {
-        tokio::select! {
-            _ = signal::ctrl_c() => tracing::info!("收到 Ctrl+C，正在退出..."),
-            _ = ws_handle => tracing::info!("WebSocket 长连接已结束"),
-        }
+        let _ = signal::ctrl_c().await;
+        tracing::info!("收到 Ctrl+C，正在退出...");
     }
-
-    Ok(())
 }
 
 fn install_rustls_provider() -> Result<()> {
@@ -1651,5 +1809,120 @@ mod tests {
         assert_eq!(mime_extension("image/webp"), "webp");
         // 未知 MIME 回退为 png
         assert_eq!(mime_extension("application/octet-stream"), "png");
+    }
+
+    fn policy() -> ReconnectPolicy {
+        ReconnectPolicy {
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(60),
+            stable_threshold: Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps_at_max() {
+        let policy = policy();
+        let mut current = policy.initial_backoff;
+
+        // 每次短暂断开后退避翻倍：1 → 2 → 4 → 8 → 16 → 32 → 60（封顶）
+        let expected = [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+            Duration::from_secs(8),
+            Duration::from_secs(16),
+            Duration::from_secs(32),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ];
+        for &want in &expected[1..] {
+            current = next_backoff(&policy, current, Duration::from_secs(1));
+            assert_eq!(current, want);
+        }
+    }
+
+    #[test]
+    fn stable_connection_resets_backoff() {
+        let policy = policy();
+        let current = Duration::from_secs(32);
+        // 持续 90s ≥ 60s 阈值 → 重置为 initial_backoff
+        let next = next_backoff(&policy, current, Duration::from_secs(90));
+        assert_eq!(next, policy.initial_backoff);
+    }
+
+    #[test]
+    fn backoff_jitter_stays_within_quarter_and_is_deterministic() {
+        let backoff = Duration::from_secs(8);
+        // 同一 seed 必须得到同一抖动
+        let a = backoff_with_jitter(backoff, 123);
+        let b = backoff_with_jitter(backoff, 123);
+        assert_eq!(a, b);
+
+        // 抖动落在 [0, backoff/4] 区间内
+        for seed in [0u128, 1, 7, 999, 1_000_000, u64::MAX as u128] {
+            let v = backoff_with_jitter(backoff, seed);
+            assert!(v >= backoff, "{seed} 抖动低于退避基准");
+            assert!(v <= backoff + backoff / 4, "{seed} 抖动超过上限");
+        }
+    }
+
+    #[test]
+    fn backoff_jitter_zero_backoff_is_zero() {
+        assert_eq!(backoff_with_jitter(Duration::ZERO, 5), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn reconnect_loop_retries_until_stop_and_respects_signal() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::sync::Notify;
+
+        // 前 2 次失败、第 3 次起挂起（模拟连接成功后长期占用）。
+        let calls = Arc::new(AtomicU32::new(0));
+        let third_block = Arc::new(Notify::new());
+        let calls_for_connect = calls.clone();
+        let block_for_connect = third_block.clone();
+
+        let mut connect = move || {
+            let calls = calls_for_connect.clone();
+            let block = block_for_connect.clone();
+            async move {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    return (ConnectOutcome::Failed, Duration::from_millis(1));
+                }
+                // 模拟稳定连接：让 select 同时挂在 connect 与 stop 上，
+                // 直到被 stop 打断。
+                block.notified().await;
+                (ConnectOutcome::Closed, Duration::from_secs(0))
+            }
+        };
+
+        // 用 fast 策略压缩退避：initial=1ms, max=4ms。
+        let fast = ReconnectPolicy {
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(4),
+            stable_threshold: Duration::from_secs(60),
+        };
+
+        let calls_for_stop = calls.clone();
+        let stop = async move {
+            // 等待第 3 次连接开始（calls==3）再完成 stop future，
+            // 让重连循环在 select 处感知到停止。
+            loop {
+                if calls_for_stop.load(Ordering::SeqCst) >= 3 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        };
+        let stop: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(stop);
+
+        reconnect_loop(fast, &mut connect, stop).await;
+
+        // 停止后不应再发起第 4 次连接
+        let total = calls.load(Ordering::SeqCst);
+        assert!(total < 4, "停止信号后不应继续重连，calls={total}");
+        assert!(total >= 3, "至少应重连到第 3 次，calls={total}");
     }
 }
