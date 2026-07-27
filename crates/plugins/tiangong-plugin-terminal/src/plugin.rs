@@ -36,13 +36,10 @@ pub struct TerminalPlugin {
     runtime_env: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
     /// 全局 PTY 注册表句柄：`on_session_ready` 时读取终端状态快照注入会话。
     registry: Arc<SessionPtyRegistry>,
-    /// 当前 turn 的反馈通道：`on_session_ready` 注入 `terminal_data` 首轮快照用。
-    /// turn 结束后接收端释放，迟到注入会 send 失败（首轮注入在 Agent Loop 启动前，
+    /// 当前 turn 的反馈通道：`on_session_ready` 注入 `terminal_data` 终端状态快照用。
+    /// turn 结束后接收端释放，迟到注入会 send 失败（注入发生在 Agent Loop 启动前，
     /// 时序上通道必然存活）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
-    /// 是否已为该 session 注入过初始 `terminal_data` 快照。
-    /// `on_session_ready` 每轮触发，用此标志保证仅首轮注入一次。
-    injected_initial_state: std::sync::atomic::AtomicBool,
 }
 
 impl TerminalPlugin {
@@ -66,7 +63,6 @@ impl TerminalPlugin {
             runtime_env,
             registry,
             feedback_tx: RwLock::new(None),
-            injected_initial_state: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -108,35 +104,28 @@ impl Plugin for TerminalPlugin {
         }
     }
 
-    /// session 就绪：首轮注入终端状态快照（对齐 browser_data 范式）。
+    /// session 就绪：每轮注入终端状态快照（对齐 browser_data 范式）。
     ///
-    /// `on_session_ready` 每轮触发，用 `injected_initial_state` 标志保证仅首轮注入
-    /// 一次——后续用户命令由 `terminal_user_input`（经 ToolInjection 消费者）实时
-    /// 注入，无需重复快照。
+    /// `on_session_ready` 每轮触发，每次都注入当前终端全貌（各 Tab 的 cwd/shell/
+    /// phase/recent_output）。这样：
+    /// - 首轮：agent 看到初始终端状态；
+    /// - 后续每轮：agent 看到「截至本轮开始时」的终端状态，自然包含上一轮结束后
+    ///   用户在终端敲的命令及其输出——无需依赖 `terminal_user_input` 的实时注入
+    ///   （后者在两轮之间 / turn 收尾窗口可能丢失，但下一轮的 terminal_data 会补全）。
     ///
     /// 此时 feedback 通道已注入（`set_feedback_tx` 在 `on_session_ready` 之前调用），
     /// 且注入发生在 Agent Loop 的 select! 启动前，命令入队后会被本轮消费。
     fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
-        use std::sync::atomic::Ordering;
-        if self
-            .injected_initial_state
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return; // 已注入过初始快照
-        }
         let Some(tx) = self.feedback_tx.read().ok().and_then(|g| g.clone()) else {
             return;
         };
         let state = self.registry.snapshot_for_injection(&session.id);
         let payload = state.render();
         if !tx.inject_tool("terminal_data", payload) {
-            // 通道未就绪：重置标志，下个 turn 重新尝试。
-            self.injected_initial_state.store(false, Ordering::SeqCst);
-            tracing::debug!(session_id = %session.id, "首轮 terminal_data 注入失败，下轮重试");
+            tracing::debug!(session_id = %session.id, "terminal_data 注入失败（通道未就绪）");
             return;
         }
-        tracing::debug!(session_id = %session.id, "首轮 terminal_data 已注入");
+        tracing::debug!(session_id = %session.id, "terminal_data 已注入");
     }
 }
 
