@@ -24,7 +24,6 @@ use crate::downloader::{Downloader, ProgressFn};
 use crate::management::BotStore;
 use crate::manifest::BotManifest;
 use crate::paths;
-use crate::supervisor::SupervisedBot;
 
 /// bot 运行时健康状态。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -58,9 +57,6 @@ pub struct LocalArtifact {
 }
 
 /// 被运行时管理的 bot 条目。
-struct RuntimeEntry {
-    supervised: SupervisedBot,
-}
 
 #[derive(Clone)]
 struct ArtifactFiles {
@@ -118,9 +114,15 @@ struct FileReplacement {
 }
 
 /// bot 运行时表。
+struct RuntimeEntry {
+    supervised: crate::supervisor::SupervisedBot,
+}
+
 pub struct BotRuntime {
     store: Arc<BotStore>,
     downloader: Downloader,
+    /// 本进程 supervisor 管理的 bot 运行表（Desktop 启动的 bot）。
+    /// CLI 独立启动的 bot 不在此表中，仅通过 PID 识别。
     entries: Mutex<HashMap<BotId, RuntimeEntry>>,
     /// 制品 manifest 缓存（artifact_id → manifest），由安装时填入。
     manifests: Mutex<HashMap<String, BotManifest>>,
@@ -330,6 +332,10 @@ impl BotRuntime {
 
     /// 启动指定 bot 实例（需制品已安装）。
     ///
+    /// Desktop 通过 BotRuntime 经 supervisor 启动 bot（含自动重启与日志采集）；
+    /// CLI 通过 `pid::spawn_detached` 独立启动，脱离 CLI 进程。两者都写入相同的
+    /// 版本化进程记录，`is_running` 据此跨进程判断存活，避免重复启动。
+    ///
     /// 启动时按缓存的 schema（`bot --describe` 上报）校验必填字段，
     /// 并按 schema 的 `env` 映射注入环境变量。`extra_env` 提供主程序注入的
     /// 额外环境变量（如 `TIANGONG_URL`/`TIANGONG_TOKEN`，由 ServerConfig 推导），
@@ -340,14 +346,18 @@ impl BotRuntime {
         extra_env: &BTreeMap<String, String>,
     ) -> Result<()> {
         let mut entries = self.entries.lock().await;
-        // 清理已结束的残留条目，避免误报"已在运行"。
+        // 清理已结束的残留条目。
         if let Some(entry) = entries.get(&config.id)
             && entry.supervised.is_finished()
         {
             entries.remove(&config.id);
         }
         if entries.contains_key(&config.id) {
-            return Err(anyhow!("bot 已在运行：{}", config.id));
+            return Err(anyhow!("bot 已在运行（supervisor）：{}", config.id));
+        }
+        // 跨进程 PID 检查：CLI 独立启动的 bot PID 存活时拒绝重复启动。
+        if crate::pid::is_running(&config.id) {
+            return Err(anyhow!("bot 已在运行（外部 PID）：{}", config.id));
         }
 
         let artifact = paths::bot_artifact_path(&config.id);
@@ -358,30 +368,27 @@ impl BotRuntime {
                 artifact.display()
             ));
         }
-
-        // 按缓存 schema 校验必填字段。
-        let schema = cached_schema(&config.id).unwrap_or_default();
-        crate::management::validate_bot_config_fields(&schema, &config.config)?;
-
-        let mut env = bot_env(config, &schema);
-        // 主程序注入的额外环境变量覆盖 schema 映射（优先级更高）。
-        env.extend(extra_env.clone());
+        let env = build_launch_env(config, extra_env)?;
         let supervised = crate::supervisor::spawn_supervised(&config.id, artifact, env)
             .context("启动 bot 进程失败")?;
         entries.insert(config.id.clone(), RuntimeEntry { supervised });
         Ok(())
     }
 
-    /// 停止指定 bot 实例。
+    /// 停止指定 bot 实例（优先本进程 supervisor 管理的，否则经 PID 停外部启动的）。
     pub async fn stop(&self, id: &BotId) -> Result<()> {
         let entry = self.entries.lock().await.remove(id);
         if let Some(entry) = entry {
+            // Desktop supervisor 管理的：停 supervisor + 子进程 + PID。
             entry.supervised.stop().await?;
+            Ok(())
+        } else {
+            // 外部（CLI）启动的：经 PID 发信号停止。
+            crate::pid::stop_bot(id)
         }
-        Ok(())
     }
 
-    /// 停止所有运行中的 bot。
+    /// 停止所有本进程 supervisor 管理的 bot（仅 entries，不影响 CLI 独立启动的）。
     pub async fn stop_all(&self) {
         let mut entries = self.entries.lock().await;
         let drained: Vec<(BotId, RuntimeEntry)> = entries.drain().collect();
@@ -393,26 +400,25 @@ impl BotRuntime {
         }
     }
 
-    /// 查询 bot 是否正在由运行时监督；已结束条目会被清理。
+    /// bot 是否正在运行（先查本进程 supervisor 运行表，无则查外部 PID）。
     pub async fn is_running(&self, id: &BotId) -> bool {
         let mut entries = self.entries.lock().await;
         match entries.get(id) {
             Some(entry) if !entry.supervised.is_finished() => true,
             Some(_) => {
                 entries.remove(id);
-                false
+                crate::pid::is_running(id)
             }
-            None => false,
+            None => crate::pid::is_running(id),
         }
     }
 
-    /// 查询 bot 健康状态。
+    /// bot 健康状态（先查 supervisor 运行表，无则查外部 PID）。
     ///
     /// 若 bot 正常退出（监督任务结束），自动从运行表移除并返回 Stopped，
     /// 避免 health 长期误报 Running。
     pub async fn health(&self, id: &BotId) -> BotHealth {
-        let running = self.is_running(id).await;
-        if running {
+        if self.is_running(id).await {
             BotHealth::Running
         } else if paths::bot_artifact_path(id).exists() {
             BotHealth::Stopped
@@ -424,9 +430,14 @@ impl BotRuntime {
     /// 启动所有 enabled 且已安装制品的 bot（主程序启动时调用）。
     ///
     /// `extra_env` 为注入所有 bot 的额外环境变量（如 TIANGONG_URL/TIANGONG_TOKEN）。
+    /// 启动所有 enabled 的 bot（supervisor 监督；跳过 PID 已存活的避免重复启动）。
     pub async fn start_enabled(&self, extra_env: &BTreeMap<String, String>) {
         let bots = self.store.list();
         for bot in bots.iter().filter(|b| b.enabled) {
+            if crate::pid::is_running(&bot.id) {
+                tracing::info!("bot {} 已在运行（PID 存活），跳过", bot.id);
+                continue;
+            }
             if paths::bot_artifact_path(&bot.id).exists() {
                 if let Err(err) = self.start(bot, extra_env).await {
                     tracing::warn!("启动 bot {} 失败：{err}", bot.id);
@@ -449,6 +460,40 @@ pub fn bot_env(config: &BotConfig, schema: &[ConfigFieldSchema]) -> BTreeMap<Str
             env.insert(var.clone(), val);
         }
     }
+    env
+}
+
+/// 构造 bot 启动所需的完整环境变量（Desktop 与 CLI 共用，统一入口）。
+///
+/// 流程：加载 cached schema → 校验必填字段 → 按 schema env 映射注入凭证 →
+/// 叠加宿主 extra_env（TIANGONG_URL/TOKEN，覆盖优先）。
+/// 缺少必填字段时返回错误（不 spawn、不写 PID）。错误信息不包含 secret 值。
+pub fn build_launch_env(
+    bot: &BotConfig,
+    extra_env: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    let schema = cached_schema(&bot.id).unwrap_or_default();
+    crate::management::validate_bot_config_fields(&schema, &bot.config)?;
+    let mut env = bot_env(bot, &schema);
+    // 宿主 env 覆盖优先（URL/Token 不被 bot 配置伪造）。
+    env.extend(extra_env.clone());
+    Ok(env)
+}
+
+/// 从 Server 配置生成 bot 回连环境变量（TIANGONG_URL / TIANGONG_TOKEN）。
+///
+/// 通配地址（0.0.0.0/::/空）规范化为 127.0.0.1。Desktop 与 CLI 共用。
+pub fn server_env(host: &str, port: u16, token: Option<String>) -> BTreeMap<String, String> {
+    let connect_host = match host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        value => value,
+    };
+    let mut env = BTreeMap::new();
+    env.insert(
+        "TIANGONG_URL".to_string(),
+        format!("http://{connect_host}:{port}"),
+    );
+    env.insert("TIANGONG_TOKEN".to_string(), token.unwrap_or_default());
     env
 }
 

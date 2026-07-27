@@ -55,6 +55,8 @@ pub struct TiangongApp {
     pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
     /// bot 运行时——制品下载、进程监督与启停。
     pub bot_runtime: std::sync::Arc<tiangong_bots::BotRuntime>,
+    /// Desktop 运行检测锁（CLI 据此拒绝写操作，方案第八节）。
+    pub desktop_lock: Option<std::fs::File>,
     /// 内嵌 HTTP 的等待者按稳定用户消息 ID 绑定。终态由唯一的桌面流消费者完成，
     /// 不能按“当前最后一轮”唤醒，否则同会话排队消息会串答。
     remote_turn_waiters: Mutex<HashMap<(String, String), Vec<RemoteTurnWaiter>>>,
@@ -197,6 +199,8 @@ impl TiangongApp {
         let bot_runtime = std::sync::Arc::new(
             tiangong_bots::BotRuntime::new(bot_store.clone()).expect("构造 bot runtime 失败"),
         );
+        // 获取 Desktop 运行检测锁（CLI 据此判断 Desktop 是否运行）。
+        let desktop_lock = tiangong_config::desktop_lock::acquire();
         let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
             skill_plugin: skill_plugin.clone(),
@@ -220,6 +224,7 @@ impl TiangongApp {
             mcp_plugin,
             bot_store,
             bot_runtime,
+            desktop_lock,
             remote_turn_waiters: Mutex::new(HashMap::new()),
             remote_turn_states: Mutex::new(HashMap::new()),
             embedded_server: Mutex::new(None),

@@ -10,6 +10,7 @@ tiangong-llm = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
 tiangong-types = { workspace = true }
 anyhow = { workspace = true }
+fs4 = "0.8"
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

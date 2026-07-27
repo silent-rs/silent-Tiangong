@@ -82,8 +82,15 @@ pub(crate) fn spawn_supervised(
     let logger = Arc::new(BotLogger::new(paths::bot_log_path(bot_id)));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
 
+    let bot_id_for_task = bot_id.clone();
     let logger_for_task = logger.clone();
-    let handle = tokio::spawn(supervise_loop(artifact_path, env, logger_for_task, stop_rx));
+    let handle = tokio::spawn(supervise_loop(
+        bot_id_for_task,
+        artifact_path,
+        env,
+        logger_for_task,
+        stop_rx,
+    ));
 
     Ok(SupervisedBot {
         stop_tx: Some(stop_tx),
@@ -94,12 +101,14 @@ pub(crate) fn spawn_supervised(
 
 /// 监督循环：spawn → 等待退出 → 崩溃则退避后重启，直到收到停止信号。
 async fn supervise_loop(
+    bot_id: BotId,
     artifact_path: PathBuf,
     env: BTreeMap<String, String>,
     logger: Arc<BotLogger>,
     mut stop_rx: oneshot::Receiver<()>,
 ) {
     let mut backoff = MIN_BACKOFF;
+    let mut last_pid: Option<u32> = None;
     loop {
         // 停止信号优先。
         if stop_rx.try_recv().is_ok() {
@@ -121,14 +130,30 @@ async fn supervise_loop(
         let pid = child.id();
         tracing::info!("bot 已启动：{} pid={pid:?}", artifact_path.display());
 
-        // 写 PID 文件。
-        if let Some(pid) = pid {
-            let pid_path = artifact_pid_path(&artifact_path);
-            if let Some(parent) = pid_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        let (registered_child, pid) = match register_child(
+            child,
+            &bot_id,
+            &artifact_path,
+            &crate::process_record::SysinfoInspector,
+            crate::process_record::write_record,
+        )
+        .await
+        {
+            Ok(registered) => registered,
+            Err(error) => {
+                tracing::error!(
+                    "启动 bot 后写入进程记录失败（{}）：{error}",
+                    artifact_path.display()
+                );
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    break;
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
             }
-            let _ = std::fs::write(&pid_path, pid.to_string());
-        }
+        };
+        child = registered_child;
+        last_pid = Some(pid);
 
         // 立即 take stdout/stderr 交给 BotLogger 消费——必须在 wait() 之前，
         // 否则子进程写满管道缓冲区（默认 64KB）后会阻塞，导致 wait() 死锁。
@@ -177,8 +202,10 @@ async fn supervise_loop(
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 
-    // 清理 PID 文件。
-    let _ = std::fs::remove_file(artifact_pid_path(&artifact_path));
+    // 条件清理进程记录：仅当记录中 PID == 本轮最后 PID 时才删除。
+    if let Some(my_pid) = last_pid {
+        crate::process_record::remove_record_if_pid(&bot_id, my_pid);
+    }
 }
 
 /// spawn 单个 bot 子进程，stdout/stderr pipe 用于日志捕获。
@@ -202,6 +229,40 @@ fn spawn_child(artifact_path: &PathBuf, env: &BTreeMap<String, String>) -> Resul
     Ok(child)
 }
 
+async fn register_child<W>(
+    mut child: Child,
+    bot_id: &BotId,
+    artifact_path: &std::path::Path,
+    inspector: &dyn crate::process_record::ProcessInspector,
+    write_record: W,
+) -> Result<(Child, u32)>
+where
+    W: FnOnce(&BotId, &crate::process_record::ProcessRecord) -> Result<()>,
+{
+    let pid = child.id().context("spawn 成功但未返回 bot PID")?;
+    let result = crate::process_record::record_for_process(pid, artifact_path, bot_id, inspector)
+        .and_then(|record| write_record(bot_id, &record));
+    if let Err(error) = result {
+        let kill_error = child.kill().await.err();
+        let wait_error = child.wait().await.err();
+        crate::process_record::cleanup_record_write(bot_id, pid);
+
+        let mut details = Vec::new();
+        if let Some(error) = kill_error {
+            details.push(format!("终止子进程失败：{error}"));
+        }
+        if let Some(error) = wait_error {
+            details.push(format!("回收子进程失败：{error}"));
+        }
+        return if details.is_empty() {
+            Err(error.context("已终止并回收 bot 子进程"))
+        } else {
+            Err(error.context(format!("bot 子进程回滚不完整：{}", details.join("；"))))
+        };
+    }
+    Ok((child, pid))
+}
+
 /// 等待 `delay` 或停止信号；返回 true 表示收到停止信号。
 async fn wait_or_stop(stop_rx: &mut oneshot::Receiver<()>, delay: Duration) -> bool {
     tokio::select! {
@@ -210,10 +271,45 @@ async fn wait_or_stop(stop_rx: &mut oneshot::Receiver<()>, delay: Duration) -> b
     }
 }
 
-/// 由制品路径推导 PID 文件路径（同目录下 `bot.pid`）。
-fn artifact_pid_path(artifact_path: &std::path::Path) -> PathBuf {
-    artifact_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("bot.pid")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn record_write_error_terminates_supervised_child() {
+        let id = BotId::try_from("supervisorrollback").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "--exact",
+                "supervisor::tests::spawn_helper_sleeps",
+                "--ignored",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+
+        let result = register_child(
+            child,
+            &id,
+            &executable,
+            &crate::process_record::SysinfoInspector,
+            |_, _| Err(anyhow::anyhow!("injected write failure")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!crate::pid::process_alive(pid));
+        assert!(crate::process_record::read_record(&id).unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore]
+    fn spawn_helper_sleeps() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }

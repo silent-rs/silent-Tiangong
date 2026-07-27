@@ -3090,7 +3090,11 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
         .get(&id)
         .ok_or_else(|| format!("bot 不存在：{id}"))?;
 
-    let server_config = ensure_server_running_for_bots(state.inner()).await?;
+    // 读取 Server 配置生成 bot 回连 env，但不强制启动 Server（方案：bot 独立运行）。
+    let server_config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
     let extra_env = bot_server_env(&server_config);
 
     state
@@ -3106,6 +3110,13 @@ pub async fn bot_start(id: String, state: State<'_, TiangongApp>) -> Result<Stri
             .map_err(|error| error.to_string())
     })
     .await?;
+    // 提示 Server 状态（不阻止 bot 启动）。
+    if !server_health_check(&server_config) {
+        return Ok(format!(
+            "bot 已启动：{}\n当前未检测到天工 Server，Bot 暂时无法调用 Agent。             请启动 Server 后 Bot 将自动恢复连接。",
+            bot.id
+        ));
+    }
     Ok(format!("bot 已启动：{}", bot.id))
 }
 
@@ -3646,6 +3657,7 @@ async fn save_server_config_to_state(
         .await
 }
 
+#[allow(dead_code)]
 pub async fn ensure_server_running_for_bots(
     state: &TiangongApp,
 ) -> Result<tiangong_server::config::ServerConfig, String> {
@@ -3688,17 +3700,7 @@ pub async fn ensure_server_running_for_bots(
 pub fn bot_server_env(
     config: &tiangong_server::config::ServerConfig,
 ) -> std::collections::BTreeMap<String, String> {
-    let host = connect_host(&config.host);
-    let mut extra_env = std::collections::BTreeMap::new();
-    extra_env.insert(
-        "TIANGONG_URL".into(),
-        format!("http://{host}:{}", config.port),
-    );
-    extra_env.insert(
-        "TIANGONG_TOKEN".into(),
-        config.auth_token.clone().unwrap_or_default(),
-    );
-    extra_env
+    tiangong_bots::server_env(&config.host, config.port, config.auth_token.clone())
 }
 
 /// 检查 Server 是否在运行：优先访问健康检查，PID 仅作为兜底。
@@ -3780,7 +3782,7 @@ fn wait_for_server_stop(config: &tiangong_server::config::ServerConfig) -> Resul
     Err("已发送停止信号，但 Server 仍在响应健康检查".to_string())
 }
 
-fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
+pub fn server_health_check(config: &tiangong_server::config::ServerConfig) -> bool {
     let host = connect_host(&config.host);
     let Ok(mut addrs) = (host.as_str(), config.port).to_socket_addrs() else {
         return false;
