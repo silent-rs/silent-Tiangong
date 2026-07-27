@@ -527,6 +527,50 @@ impl SessionPtyRegistry {
         }
     }
 
+    /// 收集终端状态快照供 agent 首轮 `terminal_data` 注入。
+    ///
+    /// 基于 [`list_tabs`]（纯读取，合并持久化 + 运行态，不创建 PTY），对每个存活
+    /// Tab 额外读取 `recent_output`。未存活的 Tab（前端未打开 / 已退出）只返回
+    /// 元信息，`recent_output` 为空。
+    ///
+    /// **纯读取，绝不创建 PTY**：全程不调 `ensure` 或 `TerminalProvider` 的懒创建
+    /// 方法（`recent_output`/`current_cwd` 会触发 `ensure`）。仅用 registry 层的
+    /// `list_tabs` + `get`（返回 None 不创建）+ manager 层的 `recent_output`。
+    pub fn snapshot_for_injection(
+        &self,
+        session_id: &str,
+    ) -> crate::collaboration::TerminalStateData {
+        const INJECT_OUTPUT_LINES: usize = 40;
+        let tab_list = self.list_tabs(session_id);
+        let tabs = tab_list
+            .tabs
+            .into_iter()
+            .map(|info| {
+                let recent_output = if info.alive {
+                    let terminal_id = terminal_instance_id(session_id, &info.id);
+                    self.get(&terminal_id)
+                        .map(|slot| slot.manager.recent_output(INJECT_OUTPUT_LINES))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                crate::collaboration::TerminalTabSnapshot {
+                    id: info.id,
+                    title: info.title,
+                    cwd: info.cwd,
+                    shell: info.shell,
+                    phase: info.phase,
+                    alive: info.alive,
+                    recent_output,
+                }
+            })
+            .collect();
+        crate::collaboration::TerminalStateData {
+            tabs,
+            active_tab_id: tab_list.active_tab_id,
+        }
+    }
+
     pub fn tab_new(
         &self,
         session_id: &str,
@@ -853,10 +897,18 @@ impl SessionAwareTerminalProvider {
         if route.tab_id.is_some() {
             return self.tx(session_id);
         }
-        // 只返回处于 AgentInteractive 态的 tab；找不到返回 None（不 fallback active/first）
-        self.registry
+        // 1. 优先 AgentInteractive tab：agent 自己经 exec_interactive 启动的交互程序，
+        //    即使它已不是 active tab，也优先路由，保证后续输入发到正确的终端。
+        if let Some(slot) = self
+            .registry
             .interactive_slot_for_session(&route.session_id)
-            .map(|slot| slot.cmd_tx)
+        {
+            return Some(slot.cmd_tx);
+        }
+        // 2. 回退到 active tab（任意存活状态）：与用户输入路由（registry.get →
+        //    active_or_first_tab_id）一致，使 agent 能接手用户已手动启动的交互程序
+        //    （ssh/vim/REPL 等）。此前这里返回 None → terminal pty unavailable。
+        self.registry.get(session_id).map(|s| s.cmd_tx)
     }
 }
 

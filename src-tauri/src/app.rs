@@ -427,6 +427,11 @@ impl TiangongApp {
                 let _send_guard = session_lock.lock_owned().await;
                 // 会话存在性用 metadata 判定；ensure_core 需要的完整 session
                 // 从磁盘 load（issue #245：真相源归磁盘）。
+                //
+                // 首条消息前的终端命令（terminal:user_command）会在此被跳过——但
+                // terminal 插件的 on_session_ready 会在每轮 turn 启动时注入完整终端
+                // 状态（terminal_data，含 recent_output），agent 下一轮自然能看到，
+                // 不依赖这里的离散事件实时注入。
                 let session_exists = state
                     .lock()
                     .await

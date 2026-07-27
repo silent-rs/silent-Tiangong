@@ -45,6 +45,11 @@ pub(crate) async fn run_turn(
     // ── 执行 Agent Loop ──
     // execute_turn 返回明确的执行结果和累计用量，不在内部发送终态事件。
     let execution = execute_turn(&mut ctx, &mut cmd_rx).await;
+    // Agent Loop 结束后，本函数的收尾阶段（消息协议修复、插件回调、持久化）不再
+    // 消费命令通道。显式 drop 接收端，使所有 PluginFeedbackTx 的 is_closed() 立即
+    // 返回 true——否则 turn task 退出前会出现"通道未关闭但已无人消费"的窗口，
+    // 此时 watcher 经 inject_tool 投递的终端命令会成功入队但随队列销毁而丢失。
+    drop(cmd_rx);
     let usage = execution.usage;
     let mut outcome = execution.outcome;
     ctx.session.token_usage.accumulate(&usage);

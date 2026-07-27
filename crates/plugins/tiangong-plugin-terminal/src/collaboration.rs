@@ -132,3 +132,56 @@ impl tiangong_core::agent_input::ToolInput for TerminalUserInput {
         })
     }
 }
+
+/// 单个终端 Tab 的状态快照（用于首轮 `terminal_data` 注入）。
+#[derive(Debug, Clone)]
+pub struct TerminalTabSnapshot {
+    pub id: String,
+    pub title: String,
+    pub cwd: String,
+    pub shell: String,
+    pub phase: String,
+    pub alive: bool,
+    /// 该 Tab 最近 N 行输出（已过滤 marker 行）。仅存活 Tab 填充。
+    pub recent_output: String,
+}
+
+/// 终端状态快照注入（ToolInput 实现）。
+///
+/// 对齐浏览器的 `browser_data`：agent 首轮启动时注入当前终端全貌——各 Tab 的工作
+/// 目录、shell 类型、运行阶段和最近输出，使 agent 像感知浏览器页面一样感知终端
+/// 上下文（用户已在终端做了什么、当前处于什么环境），避免重复执行已知命令。
+///
+/// tool_name 为 `terminal_data`，render 返回结构化 JSON。
+pub struct TerminalStateData {
+    pub tabs: Vec<TerminalTabSnapshot>,
+    pub active_tab_id: Option<String>,
+}
+
+impl tiangong_core::agent_input::ToolInput for TerminalStateData {
+    fn tool_name(&self) -> &str {
+        "terminal_data"
+    }
+
+    fn render(&self) -> serde_json::Value {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "title": t.title,
+                    "cwd": t.cwd,
+                    "shell": t.shell,
+                    "phase": t.phase,
+                    "alive": t.alive,
+                    "recent_output": t.recent_output,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "tabs": tabs,
+            "active_tab_id": self.active_tab_id,
+        })
+    }
+}
