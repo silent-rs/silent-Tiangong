@@ -458,6 +458,33 @@ fn default_shell() -> String {
     }
 }
 
+/// 推导以「登录 shell」方式启动所需的命令行参数。
+///
+/// `shell` 可能是绝对路径（`/bin/zsh`、`/usr/local/bin/bash`）或裸名（`bash`），
+/// 取 basename 判定。各 shell 的登录启动参数：
+/// - **bash / zsh**：`--login`。会读 `/etc/profile`、`~/.zprofile`/`~/.bash_profile`；
+///   PTY 是交互式 TTY，zsh 还会读 `~/.zshrc`。Homebrew 默认把
+///   `eval "$(brew shellenv)"` 写进 `~/.zprofile`，恰好在此被加载，
+///   从而注入 `/opt/homebrew/bin` 等 PATH。
+/// - **sh**：`-l`（POSIX 登录 shell 约定）。
+/// - **Windows / powershell / 未知 shell**：不传登录参数（无等价概念或语义不明）。
+///
+/// 返回静态字符串切片以直接喂给 `CommandBuilder::arg`。
+fn login_shell_args(shell: &str) -> Vec<&'static str> {
+    if cfg!(target_os = "windows") {
+        return Vec::new();
+    }
+    let basename = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell);
+    match basename {
+        "bash" | "zsh" => vec!["--login"],
+        "sh" => vec!["-l"],
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn start_pty(
     session_id: &str,
     cwd: &str,
@@ -475,6 +502,13 @@ pub(crate) fn start_pty(
         .map_err(|e| anyhow::anyhow!("PTY 创建失败: {}", e))?;
 
     let mut cmd = CommandBuilder::new(shell);
+    // 以登录 shell 方式启动（对齐 Terminal.app / iTerm2 / VSCode 的默认行为）：
+    // 让 shell source /etc/profile → /etc/paths、~/.zprofile/~/.bash_profile，
+    // 从而拿到用户真实 PATH（如 Homebrew 的 /opt/homebrew/bin），避免 GUI 主进程
+    // 继承的残缺 PATH 导致 gh 等命令 "command not found"。见 issue #151。
+    for arg in login_shell_args(shell) {
+        cmd.arg(arg);
+    }
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     // 追加各插件贡献的环境变量（MCP/skill 等注入的 token、.env.local 等）。
@@ -562,5 +596,35 @@ mod tests {
         // 没有新输出
         let inc3 = manager.incremental_output();
         assert!(inc3.is_empty());
+    }
+
+    // login_shell_args 仅在非 Windows 上产出登录参数，相关断言限定平台编译，
+    // 避免 Windows 下因函数固定返回空而必然失败。
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_login_shell_args() {
+        // macOS 常见绝对路径 → basename 判定
+        assert_eq!(login_shell_args("/bin/zsh"), vec!["--login"]);
+        assert_eq!(login_shell_args("/bin/bash"), vec!["--login"]);
+        // Homebrew 安装的 shell 路径
+        assert_eq!(login_shell_args("/opt/homebrew/bin/zsh"), vec!["--login"]);
+        assert_eq!(login_shell_args("/usr/local/bin/bash"), vec!["--login"]);
+        // 裸名
+        assert_eq!(login_shell_args("zsh"), vec!["--login"]);
+        assert_eq!(login_shell_args("bash"), vec!["--login"]);
+        // POSIX sh
+        assert_eq!(login_shell_args("/bin/sh"), vec!["-l"]);
+        assert_eq!(login_shell_args("sh"), vec!["-l"]);
+        // 未知 shell：不传登录参数（保持原行为，避免错误语义）
+        assert!(login_shell_args("/usr/bin/fish").is_empty());
+        assert!(login_shell_args("fish").is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_login_shell_args_on_windows() {
+        // Windows 下无论什么 shell 都不应传登录参数（无 -l/--login 概念）。
+        assert!(login_shell_args("powershell.exe").is_empty());
+        assert!(login_shell_args("bash").is_empty());
     }
 }
