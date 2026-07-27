@@ -96,7 +96,7 @@ impl SessionIndex {
         let query = query_parser
             .parse_query(query_text)
             .context("解析 Session 搜索查询失败")?;
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
 
         let mut hits = Vec::new();
         for (_score, doc_address) in top_docs {

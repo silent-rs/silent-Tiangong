@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use arrow_array::{
-    Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, builder::Float32Builder,
-};
-use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
+use lancedb::arrow::arrow_array::{
+    Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, builder::Float32Builder,
+};
+use lancedb::arrow::arrow_schema::{DataType, Field, Schema, SchemaRef};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{DistanceType, Table, connect};
 

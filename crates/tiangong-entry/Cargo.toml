@@ -21,7 +21,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["blocking", "json", "rustls"] }
 semver = { workspace = true }
-dialoguer = "0.12.0"
+dialoguer = "0.12"
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 libc = { workspace = true }
 qrcode = { workspace = true }

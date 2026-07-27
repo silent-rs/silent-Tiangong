@@ -161,7 +161,7 @@ impl TantivyIndex {
         };
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit))
+            .search(&query, &TopDocs::with_limit(limit).order_by_score())
             .with_context(|| "Tantivy 搜索执行失败")?;
 
         let mut hits = Vec::new();

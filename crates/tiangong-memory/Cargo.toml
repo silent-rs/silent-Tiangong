@@ -36,8 +36,6 @@ libc = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
 lancedb = { workspace = true }
-arrow-array = { workspace = true }
-arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 
