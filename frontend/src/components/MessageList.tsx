@@ -683,7 +683,7 @@ export function MessageList() {
                 欢迎使用天工
               </h2>
               <p className="text-muted-foreground text-sm">
-                我可以帮助您完成各种编程任务
+                我可以帮助您完成各种任务
               </p>
             </div>
           ) : (
