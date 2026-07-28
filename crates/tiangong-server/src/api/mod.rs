@@ -66,11 +66,15 @@ impl ServerAppContext {
             mcp_plugin.clone(),
             index_manager,
         ));
-        let core_backend: Arc<dyn ServerCoreBackend> = cores;
+        let core_backend: Arc<dyn ServerCoreBackend> = cores.clone();
         let scheduler_context: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
             state: state.clone(),
             core_backend: core_backend.clone(),
         });
+        // 回填执行上下文，让 Agent 手动触发定时任务（scheduler_trigger_job）能真正执行。
+        // 存在循环依赖（ServerSchedulerContext 需 core_backend，而 core_backend 即 cores），
+        // 故用回填而非构造参数。
+        cores.set_scheduler_context(scheduler_context.clone());
         Self::with_backend(
             state,
             config,

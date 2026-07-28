@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
-use tiangong_scheduler::model::{Job, JobRun, JobRunStatus, TriggerType, UpdateJobRequest};
+use tiangong_scheduler::model::{Job, TriggerType, UpdateJobRequest};
 use tiangong_scheduler::store::JobStore;
 
 use crate::plugin::SchedulerPlugin;
@@ -272,36 +272,28 @@ impl SchedulerPlugin {
             Err(e) => return io_error("查询任务", e),
         };
 
-        // 记录一次手动触发（Agent 发起）的执行记录。
-        //
-        // 说明：plugin handler 所在链路无法访问 SchedulerContext（运行时上下文，含发消息/建会话能力），
-        // 真正执行 LLM 调用由 GUI/Server 的 `job_trigger`（Tauri command / API）通过 execute_job 完成。
-        // 此处只补记一条 JobRun，让 scheduler_get_job_runs 能查到手动触发历史，避免「已标记触发」
-        // 但执行历史为空的不一致。状态直接记为 Succeeded（已成功登记触发请求）。
-        let now = chrono::Local::now().naive_local().to_string();
-        let run = JobRun {
-            id: scru128::new().to_string(),
-            job_id: job.id.clone(),
-            session_id: job.session_id.clone().unwrap_or_default(),
-            status: JobRunStatus::Succeeded,
-            started_at: now.clone(),
-            finished_at: Some(now),
-            result_summary: Some("Agent 手动触发（已登记，实际执行由调度器完成）".to_string()),
-        };
-        if let Err(e) = store.insert_job_run(&run) {
-            return io_error("记录触发历史", e);
-        }
+        // 交给 execute_job_with_store 真正执行：解析/新建任务专属会话、写
+        // Running→Succeeded/Failed 的真实 JobRun、把 `[定时任务触发]` 消息经宿主路由
+        // 投递给 Core。行为与 UI 按钮（job_trigger）和 cron 调度完全一致。异步执行，
+        // 不阻塞当前 Agent turn。context 由入口层必填注入，无需降级处理。
+        let ctx = self.context.clone();
+        let job_clone = job.clone();
+        let store_clone = store.clone();
+        tokio::spawn(async move {
+            tracing::info!(job_id = %job_clone.id, "Agent 手动触发定时任务，开始执行");
+            tiangong_scheduler::executor::execute_job_with_store(ctx, job_clone, store_clone).await;
+        });
 
         ToolResult {
             ok: true,
             summary: format!(
-                "定时任务 '{}' 已标记为触发（实际执行需通过调度器或 API 触发）",
+                "定时任务 '{}' 已触发并开始执行（异步，结果见执行历史）",
                 job.name
             ),
             stdout: serde_json::to_string_pretty(&json!({
                 "id": job.id,
                 "name": job.name,
-                "status": "trigger_requested"
+                "status": "triggered"
             }))
             .unwrap_or_default(),
             stderr: String::new(),
@@ -416,7 +408,7 @@ impl ToolSpecProvider for SchedulerPlugin {
             },
             ToolSpec {
                 name: TOOL_TRIGGER_JOB.to_string(),
-                description: "按 ID 手动触发一次定时任务（标记为触发，实际执行由调度器执行）。".to_string(),
+                description: "按 ID 立即手动触发一次定时任务执行（会真正执行任务并把结果写入执行历史）。".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -551,13 +543,57 @@ fn not_found(id: &str) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
     use tiangong_core::model::ToolCall;
+    use tiangong_scheduler::executor::SchedulerContext;
+    use tiangong_scheduler::model::JobRunStatus;
 
-    /// 构造一个绑定到临时存储目录的插件，避免污染真实的 `~/.tiangong/scheduler`。
+    /// 记录消息投递次数的 mock 执行上下文。
+    ///
+    /// 复用 execute_job_with_store 真实链路（resolve_session_id + send_message），
+    /// 通过 send_count 断言「任务确实被执行」，而非只登记。
+    #[derive(Default)]
+    struct RecordingContext {
+        send_count: StdArc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SchedulerContext for RecordingContext {
+        async fn send_message(&self, _session_id: &str, _content: String) -> Result<()> {
+            self.send_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn resolve_session_id(
+            &self,
+            requested_session_id: Option<&str>,
+        ) -> Result<(String, bool)> {
+            if let Some(sid) = requested_session_id {
+                return Ok((sid.to_string(), false));
+            }
+            Ok((scru128::new().to_string(), true))
+        }
+    }
+
+    /// 构造一个绑定到临时存储目录、注入 RecordingContext 的插件。
+    ///
+    /// context 为必填项，测试统一注入 RecordingContext，避免污染真实的
+    /// `~/.tiangong/scheduler`。需要断言 execute_job 是否被调用时，用
+    /// [`handler_in_tmp_with_send_count`] 取回计数器。
     fn handler_in_tmp() -> (SchedulerPlugin, tempfile::TempDir) {
+        handler_in_tmp_with_send_count(StdArc::new(AtomicUsize::new(0)))
+    }
+
+    /// 同 [`handler_in_tmp`]，但返回 RecordingContext 的 send_count 供测试轮询。
+    fn handler_in_tmp_with_send_count(
+        send_count: StdArc<AtomicUsize>,
+    ) -> (SchedulerPlugin, tempfile::TempDir) {
         let dir = tempfile::TempDir::new().unwrap();
-        let handler = SchedulerPlugin::with_store_base(dir.path().to_path_buf());
+        let ctx: StdArc<dyn SchedulerContext> = StdArc::new(RecordingContext { send_count });
+        let handler = SchedulerPlugin::new(ctx).with_store_base(dir.path().to_path_buf());
         (handler, dir)
     }
 
@@ -789,10 +825,9 @@ mod tests {
 
     // ── 缺陷回归保护（Review #1/#3/#4，已修复）─────────────────────────
     //
-    // 以下三个测试原为暴露缺陷的失败基线（#[ignore]），对应生产代码已修复，
-    // 现作为永久回归保护运行。
+    // 以下测试为永久回归保护：
     //
-    //   - trigger_job_should_record_run            → Review 第 1 项：手动触发补记执行历史
+    //   - trigger_job_actually_executes            → 手动触发真正执行（execute_job + send_message）
     //   - get_job_runs_unknown_job_should_error    → Review 第 3 项：校验任务存在
     //   - update_job_can_clear_optional_field      → Review 第 4 项：显式空串清空字段
 
@@ -801,29 +836,59 @@ mod tests {
         tiangong_scheduler::store::JobStore::open_at(dir.path().to_path_buf()).unwrap()
     }
 
-    /// Review 第 1 项：`scheduler_trigger_job` 原先只返回「已标记触发」提示，不写任何
-    /// 执行历史，导致 scheduler_get_job_runs 查不到手动触发记录。修复后应补记一条
-    /// JobRun（状态 Succeeded）。
+    /// 核心回归：Agent 手动触发应真正执行任务（调用 `execute_job_with_store` →
+    /// `send_message`），而非只登记。
     ///
-    /// 说明：plugin handler 链路无法访问 SchedulerContext，无法真正执行 LLM 调用——
-    /// 那由 GUI/Server 的 job_trigger（execute_job）完成。此处仅校验「补记」行为。
-    #[test]
-    fn trigger_job_should_record_run() {
-        let (handler, dir) = handler_in_tmp();
+    /// 修复前 handler 只写假 Succeeded 记录（started_at == finished_at）就返回，
+    /// 从不调用 execute_job，是本次 Bug 的直接现场。现在 context 必填注入，触发即执行。
+    ///
+    /// 断言三件事：
+    /// 1. handler 立即返回 ok=true（已派发执行）；
+    /// 2. 后台 send_message 被真正调用（证明 execute_job 跑通）；
+    /// 3. JobRun 为 Succeeded 且 started_at != finished_at（真实执行，非假记录）。
+    #[tokio::test]
+    async fn trigger_job_actually_executes() {
+        let send_count = StdArc::new(AtomicUsize::new(0));
+        let (handler, dir) = handler_in_tmp_with_send_count(send_count.clone());
         let id = seed_job(&handler, "待触发");
 
         let call = make_call(TOOL_TRIGGER_JOB, json!({ "id": id }));
         let result = handler.dispatch(&call).expect("trigger 应被处理");
-        assert!(result.ok, "触发应成功：{}", result.summary);
+        assert!(result.ok, "注入上下文后触发应成功派发：{}", result.summary);
 
-        // 触发后应补记至少一条执行记录
+        // execute_job 在后台 tokio::spawn 中异步执行，轮询等待 send_message 被调用。
+        let waited = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            poll_until(send_count.clone(), 1),
+        )
+        .await;
+        assert!(
+            waited.is_ok(),
+            "execute_job 应在后台调用 send_message，但 3s 内未触发"
+        );
+
+        // 真实执行应写一条 Succeeded 记录，且起止时间不同（execute_core 各写一次 now）。
         let store = store_at(&dir);
         let runs = store.list_job_runs(&id, 10).unwrap();
-        assert!(
-            !runs.is_empty(),
-            "手动触发应产生执行记录，当前 {} 条",
-            runs.len()
+        let succeeded = runs
+            .iter()
+            .find(|r| matches!(r.status, JobRunStatus::Succeeded))
+            .expect("应存在一条 Succeeded 记录");
+        assert_ne!(
+            succeeded.started_at,
+            succeeded.finished_at.clone().unwrap_or_default(),
+            "真实执行的起止时间应不同（修复前假记录两者相同）"
         );
+    }
+
+    /// 轮询直到 send_count 达到 target，用于异步等待后台 execute_job 完成。
+    async fn poll_until(counter: StdArc<AtomicUsize>, target: usize) {
+        loop {
+            if counter.load(Ordering::SeqCst) >= target {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// Review 第 3 项：`scheduler_get_job_runs` 原先不校验任务存在，未知 id 返回

@@ -54,7 +54,9 @@ type MessageSender = Box<
 static RUNNING: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
-/// 执行定时任务
+/// 执行定时任务（生产入口，使用默认存储目录 `~/.tiangong/scheduler`）。
+///
+/// 由 cron 调度（`restore_cron_jobs`）和 REST API / Tauri 手动触发调用。
 pub async fn execute_job(ctx: Arc<dyn SchedulerContext>, job: Job) {
     let store = match JobStore::open() {
         Ok(s) => s,
@@ -63,7 +65,14 @@ pub async fn execute_job(ctx: Arc<dyn SchedulerContext>, job: Job) {
             return;
         }
     };
+    execute_job_with_store(ctx, job, store).await;
+}
 
+/// 执行定时任务（使用指定的存储，供 plugin 触发链路复用以保持存储一致）。
+///
+/// 与 [`execute_job`] 唯一区别：store 由调用方传入，而非固定打开默认目录。plugin
+/// handler 已持有自己的 store（可能指向测试临时目录），直接复用避免重复打开和路径分叉。
+pub async fn execute_job_with_store(ctx: Arc<dyn SchedulerContext>, job: Job, store: JobStore) {
     let fresh = store.get_job(&job.id).ok().flatten().unwrap_or(job);
 
     let params = ExecuteParams {

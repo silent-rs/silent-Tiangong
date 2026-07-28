@@ -5,6 +5,10 @@ use anyhow::{Context, Result};
 use super::model::{Job, JobRun, JobRunStatus, UpdateJobRequest};
 
 /// Job 存储（JSON 文件）
+///
+/// 仅持有两个路径，派生 `Clone` 便于把同一存储根传给后台执行任务（如 Agent 触发
+/// 后 `tokio::spawn(execute_job_with_store(..., store.clone()))`）。
+#[derive(Clone)]
 pub struct JobStore {
     jobs_path: PathBuf,
     runs_dir: PathBuf,
