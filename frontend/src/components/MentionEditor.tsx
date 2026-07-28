@@ -393,64 +393,70 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     };
 
     // ===== 整块删除 / 跨块方向键 / 边界守卫 =====
-    // 判断当前光标是否紧邻一个 mention chip（中间可隔哨兵 ZWSP，但不可隔普通文本）。
-    //   afterCaret=false（Backspace / ArrowLeft）：找"光标之前"方向上紧邻的 chip。
-    //     光标在哨兵内（任意位置）或普通文本起点时，向前跳过哨兵找第一个 chip；
-    //     若先遇到普通文本/br 则不算紧邻（中间有内容）。
-    //   afterCaret=true（Delete / ArrowRight）：对称地找"光标之后"的 chip。
+    interface MentionBoundary {
+      chip: HTMLElement;
+      start: number;
+      end: number;
+      leadingSeparatorStart: number | null;
+      trailingSeparatorEnd: number | null;
+    }
+
+    // 以序列化文本为准计算 mention 边界，避免浏览器合并空格与 ZWSP 后 DOM 邻接失真。
+    function mentionBoundaries(): MentionBoundary[] {
+      const root = rootRef.current;
+      if (!root) return [];
+      const text = domToText(root);
+      const chips = Array.from(root.querySelectorAll<HTMLElement>('.mention-chip'));
+      const boundaries: MentionBoundary[] = [];
+      let offset = 0;
+      let chipIndex = 0;
+
+      for (const block of parseBlocks(text)) {
+        if (block.type === 'text') {
+          offset += block.value.length;
+          continue;
+        }
+        const chip = chips[chipIndex];
+        chipIndex += 1;
+        if (!chip) break;
+        const start = offset;
+        const end = start + block.token.length;
+        boundaries.push({
+          chip,
+          start,
+          end,
+          leadingSeparatorStart: start > 0 && text[start - 1] === ' ' ? start - 1 : null,
+          trailingSeparatorEnd: text[end] === ' ' ? end + 1 : null,
+        });
+        offset = end;
+      }
+      return boundaries;
+    }
+
+    function boundaryForChip(chip: HTMLElement): MentionBoundary | null {
+      return mentionBoundaries().find((boundary) => boundary.chip === chip) ?? null;
+    }
+
+    // afterCaret=true 用于 Delete / ArrowRight；false 用于 Backspace / ArrowLeft。
+    // includeSeparator=true 时，把紧贴 mention 的一个普通空格视为原子块边界的一部分。
     function adjacentMention(afterCaret: boolean, includeSeparator = false): HTMLElement | null {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return null;
       const range = sel.getRangeAt(0);
       if (!range.collapsed) return null;
-      const root = rootRef.current!;
-      const segs = collectSegments(root);
-      const container = range.startContainer;
-      const offset = range.startOffset;
+      const selection = currentSelectionOffsets();
+      if (!selection || selection.start !== selection.end) return null;
+      const caret = selection.start;
 
-      // 从 startIdx 向 step 方向跳过哨兵，返回第一个非哨兵 seg
-      const findNeighbor = (startIdx: number, step: 1 | -1): Seg | null => {
-        for (let j = startIdx; j >= 0 && j < segs.length; j += step) {
-          if (segs[j].kind === 'sentinel') continue;
-          return segs[j];
+      const boundary = mentionBoundaries().find((item) => {
+        if (afterCaret) {
+          return caret === item.start
+            || (includeSeparator && item.leadingSeparatorStart === caret);
         }
-        return null;
-      };
-
-      // 光标在文本节点内（普通文本或哨兵）
-      if (container.nodeType === Node.TEXT_NODE) {
-        const value = container.nodeValue ?? '';
-        const idx = segs.findIndex((s) => s.node === container);
-        if (idx < 0) return null;
-        const isSentinel = segs[idx].kind === 'sentinel';
-        if (!afterCaret) {
-          // Backspace/ArrowLeft：哨兵任意位置，或普通文本在起点（offset===0）才向前找
-          // 候选项会在 chip 后自动插入一个分隔空格；ArrowLeft 从该空格右侧移动时，
-          // 连同空格一起跨过 chip，避免光标停在会破坏 mention 边界的位置。
-          const afterSeparator = includeSeparator && offset === 1 && value.startsWith(' ');
-          if (!isSentinel && offset !== 0 && !afterSeparator) return null;
-          const neighbor = findNeighbor(idx - 1, -1);
-          return neighbor && neighbor.kind === 'chip' ? (neighbor.node as HTMLElement) : null;
-        } else {
-          // Delete/ArrowRight：哨兵任意位置，或普通文本在末尾才向后找
-          if (!isSentinel && offset !== value.length) return null;
-          const neighbor = findNeighbor(idx + 1, 1);
-          return neighbor && neighbor.kind === 'chip' ? (neighbor.node as HTMLElement) : null;
-        }
-      }
-
-      // 光标在元素边界（container 为 root），offset 是子序号
-      if (container === root) {
-        if (!afterCaret) {
-          // 向前：offset-1 处的子节点
-          const child = container.childNodes[offset - 1];
-          if (child && isChip(child)) return child as HTMLElement;
-        } else {
-          const child = container.childNodes[offset];
-          if (child && isChip(child)) return child as HTMLElement;
-        }
-      }
-      return null;
+        return caret === item.end
+          || (includeSeparator && item.trailingSeparatorEnd === caret);
+      });
+      return boundary?.chip ?? null;
     }
 
     const isChip = (node: Node): boolean =>
@@ -487,7 +493,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       }
 
       if (e.key === 'Backspace' && !hasSelection) {
-        const chip = adjacentMention(false);
+        const chip = adjacentMention(false, true);
         if (chip) {
           e.preventDefault();
           removeChip(chip);
@@ -495,7 +501,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         }
       }
       if (e.key === 'Delete' && !hasSelection) {
-        const chip = adjacentMention(true);
+        const chip = adjacentMention(true, true);
         if (chip) {
           e.preventDefault();
           removeChip(chip);
@@ -511,7 +517,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         }
       }
       if (e.key === 'ArrowRight' && !hasSelection) {
-        const chip = adjacentMention(true);
+        const chip = adjacentMention(true, true);
         if (chip) {
           e.preventDefault();
           placeAfter(chip);
@@ -529,32 +535,28 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       }
     };
 
-    // 删除 chip 及其相邻哨兵，提交并把光标放回原位（chip 前哨兵位置）
+    // 删除 mention 及一个右侧分隔；没有右侧分隔时改删一个左侧分隔。
+    // 这样既整块删除，又能在前后文本之间保留至多一个必要空格。
     function removeChip(chip: HTMLElement) {
-      const root = rootRef.current!;
-      const segs = collectSegments(root);
-      const idx = segs.findIndex((s) => s.node === chip);
-      // chip 前哨兵：idx-1；chip 后哨兵：idx+1
-      const beforeSentinel = segs[idx - 1];
-      const afterSentinel = segs[idx + 1];
-      // 删除 chip 与两个哨兵中"在删除后会冗余"的部分：
-      // 保留 beforeSentinel 作为光标落点，删除 chip + afterSentinel
-      // （afterSentinel 若与 beforeSentinel 相邻会造成两个 ZWSP 拼一起，剥离即可）
-      chip.remove();
-      if (isTextLike(afterSentinel)) {
-        afterSentinel.node.parentNode?.removeChild(afterSentinel.node);
+      const root = rootRef.current;
+      const boundary = boundaryForChip(chip);
+      if (!root || !boundary) return;
+      const text = domToText(root);
+      let removeStart = boundary.start;
+      let removeEnd = boundary.end;
+      if (boundary.trailingSeparatorEnd != null) {
+        removeEnd = boundary.trailingSeparatorEnd;
+        if (removeEnd === text.length && boundary.leadingSeparatorStart != null) {
+          removeStart = boundary.leadingSeparatorStart;
+        }
+      } else if (boundary.leadingSeparatorStart != null) {
+        removeStart = boundary.leadingSeparatorStart;
       }
-      // 先把光标落在 beforeSentinel 末尾，再提交新文本，让补全状态读取到正确位置。
+
       root.focus();
-      if (isTextLike(beforeSentinel) && beforeSentinel.node.parentNode) {
-        const range = document.createRange();
-        range.setStart(beforeSentinel.node, (beforeSentinel.node.nodeValue ?? '').length);
-        range.collapse(true);
-        applyRange(range);
-      } else {
-        restoreCaretEnd();
-      }
-      commit();
+      selectionRevisionRef.current += 1;
+      pendingSelectionRef.current = removeStart;
+      onChange(text.slice(0, removeStart) + text.slice(removeEnd));
     }
 
     function shouldPreventArrow(text: string, pos: number, key: string): boolean {
@@ -583,39 +585,23 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     }
 
     function placeBefore(chip: HTMLElement) {
-      const root = rootRef.current!;
-      const segs = collectSegments(root);
-      const idx = segs.findIndex((s) => s.node === chip);
-      const sentinel = segs[idx - 1];
-      root.focus();
-      if (isTextLike(sentinel)) {
-        const range = document.createRange();
-        range.setStart(sentinel.node, 0);
-        range.collapse(true);
-        applyRange(range);
-      } else {
-        const parent = chip.parentNode!;
-        const range = document.createRange();
-        range.setStart(parent, indexOf(chip));
-        range.collapse(true);
-        applyRange(range);
-      }
+      const boundary = boundaryForChip(chip);
+      if (!boundary) return;
+      placeCaretAtOffset(boundary.leadingSeparatorStart ?? boundary.start);
     }
     function placeAfter(chip: HTMLElement) {
-      const root = rootRef.current!;
-      const segs = collectSegments(root);
-      const idx = segs.findIndex((s) => s.node === chip);
-      const sentinel = segs[idx + 1];
+      const boundary = boundaryForChip(chip);
+      if (!boundary) return;
+      placeCaretAtOffset(boundary.trailingSeparatorEnd ?? boundary.end);
+    }
+    function placeCaretAtOffset(offset: number) {
+      const root = rootRef.current;
+      if (!root) return;
       root.focus();
-      if (isTextLike(sentinel)) {
+      const target = resolveOffset(offset);
+      if (target) {
         const range = document.createRange();
-        range.setStart(sentinel.node, (sentinel.node.nodeValue ?? '').length);
-        range.collapse(true);
-        applyRange(range);
-      } else {
-        const parent = chip.parentNode!;
-        const range = document.createRange();
-        range.setStart(parent, indexOf(chip) + 1);
+        range.setStart(target.node, target.offset);
         range.collapse(true);
         applyRange(range);
       }
@@ -808,8 +794,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       commit();
     }
 
-    // 点击定位：contenteditable 在点击 chip 紧邻空白处时可能把光标选进 chip，
-    // 这里兜底——若选区落在 chip 内部，夹到 chip 一侧的哨兵。
+    // 点击定位：chip 与相邻分隔之间不是合法停靠点，统一吸附到原子块外侧。
     const handleMouseUp = () => {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
@@ -824,6 +809,20 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           return;
         }
         node = node.parentNode;
+      }
+
+      const selection = currentSelectionOffsets();
+      if (!selection || selection.start !== selection.end) return;
+      const caret = selection.start;
+      for (const boundary of mentionBoundaries()) {
+        if (boundary.trailingSeparatorEnd != null && caret === boundary.end) {
+          placeAfter(boundary.chip);
+          return;
+        }
+        if (boundary.leadingSeparatorStart != null && caret === boundary.start) {
+          placeBefore(boundary.chip);
+          return;
+        }
       }
     };
 
