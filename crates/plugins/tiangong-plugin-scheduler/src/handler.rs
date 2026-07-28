@@ -363,8 +363,8 @@ impl ToolSpecProvider for SchedulerPlugin {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "name": { "type": "string", "description": "任务名称（单行，不可包含换行）" },
-                        "description": { "type": "string", "description": "任务描述（单行，不可包含换行）" },
+                        "name": { "type": "string", "description": "任务名称" },
+                        "description": { "type": "string", "description": "任务描述" },
                         "schedule": { "type": "string", "description": "Cron 表达式（6 字段：秒 分 时 日 月 周），如 '0 0 9 * * *' 表示每天 9 点" },
                         "payload": { "type": "string", "description": "触发时发送给 LLM 的任务描述" },
                         "session_id": { "type": "string", "description": "关联已有会话 ID（可选，不指定则首次触发时自动创建新会话）" },
@@ -385,8 +385,8 @@ impl ToolSpecProvider for SchedulerPlugin {
                     "type": "object",
                     "properties": {
                         "id": { "type": "string", "description": "任务 ID" },
-                        "name": { "type": "string", "description": "任务名称（单行，不可包含换行）" },
-                        "description": { "type": "string", "description": "任务描述（单行，不可包含换行）" },
+                        "name": { "type": "string", "description": "任务名称" },
+                        "description": { "type": "string", "description": "任务描述" },
                         "schedule": { "type": "string", "description": "Cron 表达式（6 字段：秒 分 时 日 月 周）" },
                         "payload": { "type": "string", "description": "触发时发送给 LLM 的任务描述" },
                         "session_id": { "type": "string", "description": "关联会话 ID" },

@@ -20,9 +20,7 @@ pub enum JobRunStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub id: String,
-    /// 单行任务名称，用于构造可识别的触发消息。
     pub name: String,
-    /// 单行任务描述，用于构造可识别的触发消息。
     pub description: String,
     pub trigger_type: TriggerType,
     /// Cron 表达式
@@ -42,9 +40,7 @@ pub struct Job {
 /// 创建 Job 请求
 #[derive(Debug, Deserialize)]
 pub struct CreateJobRequest {
-    /// 单行任务名称。
     pub name: String,
-    /// 单行任务描述。
     pub description: String,
     pub trigger_type: TriggerType,
     #[serde(default)]
@@ -60,10 +56,8 @@ pub struct CreateJobRequest {
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateJobRequest {
     #[serde(default)]
-    /// 单行任务名称。
     pub name: Option<String>,
     #[serde(default)]
-    /// 单行任务描述。
     pub description: Option<String>,
     #[serde(default)]
     pub schedule: Option<String>,
