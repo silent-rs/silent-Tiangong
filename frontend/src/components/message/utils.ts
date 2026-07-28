@@ -94,7 +94,10 @@ export function llmOutputHasToolCalls(content: string): boolean {
 }
 
 export function toolItemSucceeded(tool: MessageItem): boolean {
-  return !textContent(tool).includes("ok=false") && !tool.tool_result_is_error;
+  // 只用后端透传的结构化字段判断；不要扫描正文文本。
+  // read_file 的正文是被读取文件的原始内容，若文件里恰好含 "ok=false"
+  // 字样（配置/日志/源码），基于文本的启发式会把它误判为失败。
+  return !tool.tool_result_is_error;
 }
 
 export function summarizeToolGroup(tools: MessageItem[]): string {
