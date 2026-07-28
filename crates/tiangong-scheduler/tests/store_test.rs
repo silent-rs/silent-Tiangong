@@ -37,6 +37,31 @@ fn insert_and_get_job() {
 }
 
 #[test]
+fn insert_job_rejects_multiline_name_and_description() {
+    let (_dir, store) = setup();
+
+    for (id, name, description, field) in [
+        ("multiline-name", "第一行\n第二行", "测试描述", "任务名称"),
+        (
+            "multiline-description",
+            "测试任务",
+            "第一行\r\n第二行",
+            "任务描述",
+        ),
+    ] {
+        let mut job = sample_job(id);
+        job.name = name.to_string();
+        job.description = description.to_string();
+
+        let error = store.insert_job(&job).unwrap_err().to_string();
+        assert!(error.contains(field), "错误应指出非法字段：{error}");
+        assert!(error.contains("换行"), "错误应说明换行限制：{error}");
+    }
+
+    assert!(store.list_jobs().unwrap().is_empty());
+}
+
+#[test]
 fn update_session_id_persists() {
     let (_dir, store) = setup();
     let job = sample_job("job-2");
@@ -57,6 +82,42 @@ fn update_session_id_persists() {
     let store2 = JobStore::open_at(PathBuf::from(_dir.path())).unwrap();
     let got = store2.get_job("job-2").unwrap().unwrap();
     assert_eq!(got.session_id.as_deref(), Some("session-abc"));
+}
+
+#[test]
+fn update_job_rejects_multiline_name_and_description() {
+    let (_dir, store) = setup();
+    store
+        .insert_job(&sample_job("job-multiline-update"))
+        .unwrap();
+
+    for (req, field) in [
+        (
+            UpdateJobRequest {
+                name: Some("第一行\n第二行".to_string()),
+                ..Default::default()
+            },
+            "任务名称",
+        ),
+        (
+            UpdateJobRequest {
+                description: Some("第一行\r\n第二行".to_string()),
+                ..Default::default()
+            },
+            "任务描述",
+        ),
+    ] {
+        let error = store
+            .update_job("job-multiline-update", &req)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(field), "错误应指出非法字段：{error}");
+        assert!(error.contains("换行"), "错误应说明换行限制：{error}");
+    }
+
+    let job = store.get_job("job-multiline-update").unwrap().unwrap();
+    assert_eq!(job.name, "测试任务");
+    assert_eq!(job.description, "测试描述");
 }
 
 #[test]

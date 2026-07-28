@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::model::{Job, JobRun, JobRunStatus, UpdateJobRequest};
 
@@ -39,6 +39,7 @@ impl JobStore {
     // ── Job CRUD ──────────────────────────────────────────────────
 
     pub fn insert_job(&self, job: &Job) -> Result<()> {
+        validate_job_display_fields(&job.name, &job.description)?;
         let mut jobs = self.load_jobs()?;
         jobs.push(job.clone());
         self.save_jobs(&jobs)
@@ -68,6 +69,12 @@ impl JobStore {
         let Some(job) = jobs.iter_mut().find(|j| j.id == id) else {
             return Ok(false);
         };
+        if let Some(name) = req.name.as_deref() {
+            validate_single_line("任务名称", name)?;
+        }
+        if let Some(description) = req.description.as_deref() {
+            validate_single_line("任务描述", description)?;
+        }
         job.updated_at = now;
         if let Some(ref v) = req.name {
             job.name = v.clone();
@@ -184,6 +191,20 @@ impl JobStore {
         atomic_write(&path, &content).with_context(|| format!("写入 {} 失败", path.display()))?;
         Ok(())
     }
+}
+
+fn validate_job_display_fields(name: &str, description: &str) -> Result<()> {
+    for (field, value) in [("任务名称", name), ("任务描述", description)] {
+        validate_single_line(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_single_line(field: &str, value: &str) -> Result<()> {
+    if value.contains('\n') || value.contains('\r') {
+        bail!("{field}不能包含换行符");
+    }
+    Ok(())
 }
 
 fn scheduler_dir() -> PathBuf {
