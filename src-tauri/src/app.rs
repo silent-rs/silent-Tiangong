@@ -208,6 +208,8 @@ impl TiangongApp {
             config: config.clone(),
             storage_root: storage_root.clone(),
             index_manager: index_manager.clone(),
+            scheduler_context: scheduler_context.clone()
+                as std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext>,
         });
         Self {
             state,

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tauri::AppHandle;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfigProvider;
+use tiangong_scheduler::executor::SchedulerContext;
 
 /// 桌面端 Core 构造依赖。
 ///
@@ -21,6 +22,7 @@ use tiangong_core::core_config::CoreConfigProvider;
 /// - `config`：全局 CoreConfigProvider（取 generation 用于 memory handle 初始化）
 /// - `storage_root`：会话文件根
 /// - `index_manager`：工作区索引单例（issue #259，跨 Core 共享底层索引缓存与扫描状态）
+/// - `scheduler_context`：调度器执行上下文（让 Agent 手动触发定时任务能真正执行）
 #[derive(Clone)]
 pub struct DesktopCoreFactory {
     pub app_handle: Arc<std::sync::OnceLock<AppHandle>>,
@@ -29,6 +31,7 @@ pub struct DesktopCoreFactory {
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
     pub index_manager: Arc<tiangong_plugin_index::IndexManager>,
+    pub scheduler_context: Arc<dyn SchedulerContext>,
 }
 
 impl DesktopCoreFactory {
@@ -107,7 +110,11 @@ impl DesktopCoreFactory {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
-        plugins.push(tiangong_plugin_scheduler::build_plugin());
+        // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
+        // 能真正执行任务（execute_job）。
+        plugins.push(tiangong_plugin_scheduler::build_plugin(
+            self.scheduler_context.clone(),
+        ));
         plugins.push(tiangong_plugin_task::build_plugin());
         if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
@@ -121,6 +128,7 @@ impl DesktopCoreFactory {
             let app_handle = app_handle.clone();
             let storage_root = storage_root.clone();
             let index_manager = self.index_manager.clone();
+            let scheduler_context = self.scheduler_context.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
                 child_plugins.extend(tiangong_plugin_prompt::default_plugins());
@@ -151,7 +159,10 @@ impl DesktopCoreFactory {
                     child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                 }
                 child_plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
-                child_plugins.push(tiangong_plugin_scheduler::build_plugin());
+                // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。
+                child_plugins.push(tiangong_plugin_scheduler::build_plugin(
+                    scheduler_context.clone(),
+                ));
                 child_plugins.push(tiangong_plugin_task::build_plugin());
                 if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                     child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));

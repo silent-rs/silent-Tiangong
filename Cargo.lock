@@ -10095,7 +10095,6 @@ dependencies = [
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
- "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
@@ -10466,6 +10465,7 @@ name = "tiangong-plugin-scheduler"
 version = "0.13.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "scru128",
  "serde",

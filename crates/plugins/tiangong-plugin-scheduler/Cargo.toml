@@ -13,7 +13,10 @@ scru128 = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+# tokio::spawn 用于 handle_trigger_job 异步派发 execute_job_with_store
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
