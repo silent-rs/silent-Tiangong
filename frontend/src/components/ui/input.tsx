@@ -1,9 +1,13 @@
 import * as React from "react"
 
 import { cn } from "@/lib/utils"
+import { useArrowKeyBoundaryGuard } from "@/hooks/useArrowKeyBoundaryGuard"
 
 const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
-  ({ className, type, ...props }, ref) => {
+  ({ className, type, onKeyDown, ...props }, ref) => {
+    // WKWebView 在光标处于边界时会把方向键转义序列误当文本插入（渲染成方格），
+    // 这里在边界处兜底 preventDefault。详见 useArrowKeyBoundaryGuard。
+    const handleKeyDown = useArrowKeyBoundaryGuard<HTMLInputElement>(onKeyDown);
     return (
       <input
         type={type}
@@ -12,6 +16,7 @@ const Input = React.forwardRef<HTMLInputElement, React.ComponentProps<"input">>(
           className
         )}
         ref={ref}
+        onKeyDown={handleKeyDown}
         {...props}
       />
     )

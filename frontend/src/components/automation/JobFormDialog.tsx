@@ -3,6 +3,7 @@ import { api, type Job, type Session } from '../../api/tauri';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
+import { Textarea } from '../ui/textarea';
 import { Badge } from '../ui/badge';
 import {
   Select,
@@ -213,7 +214,7 @@ export function JobFormDialog({ job, onClose }: Props) {
           </div>
           <div className="space-y-1.5">
             <Label>任务内容</Label>
-            <textarea
+            <Textarea
               className="flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               value={payload}
               onChange={(e) => setPayload(e.target.value)}
