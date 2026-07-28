@@ -1,11 +1,16 @@
 import * as React from "react"
+
 import { cn } from "@/lib/utils"
+import { useArrowKeyBoundaryGuard } from "@/hooks/useArrowKeyBoundaryGuard"
 
 export interface TextareaProps
   extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {}
 
 const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
-  ({ className, ...props }, ref) => {
+  ({ className, onKeyDown, ...props }, ref) => {
+    // WKWebView 在光标处于边界时会把方向键转义序列误当文本插入（渲染成方格），
+    // 这里在边界处兜底 preventDefault。详见 useArrowKeyBoundaryGuard。
+    const handleKeyDown = useArrowKeyBoundaryGuard<HTMLTextAreaElement>(onKeyDown);
     return (
       <textarea
         className={cn(
@@ -13,6 +18,7 @@ const Textarea = React.forwardRef<HTMLTextAreaElement, TextareaProps>(
           className
         )}
         ref={ref}
+        onKeyDown={handleKeyDown}
         {...props}
       />
     )
