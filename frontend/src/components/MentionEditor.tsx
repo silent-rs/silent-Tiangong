@@ -5,6 +5,7 @@ import {
   useImperativeHandle,
   useRef,
   type ClipboardEvent,
+  type FormEvent,
   type KeyboardEvent,
 } from 'react';
 import {
@@ -88,6 +89,8 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     // 重建 DOM 后需要恢复的光标偏移（解决 selectCandidate 先改 value、
     // 后设光标的时序竞态：DOM 重建会清掉光标）。
     const pendingSelectionRef = useRef<number | null>(null);
+    // 异步恢复执行前若已有更新的程序化选区，则丢弃旧恢复，避免光标被拉回。
+    const selectionRevisionRef = useRef(0);
 
     // ===== DOM 构建 =====
     const renderBlocks = useCallback((blocks: Block[]) => {
@@ -149,7 +152,9 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       }
       const selectionToRestore = pending ?? selectionBeforeRebuild;
       if (selectionToRestore != null) {
+        const selectionRevision = selectionRevisionRef.current;
         requestAnimationFrame(() => {
+          if (selectionRevisionRef.current !== selectionRevision) return;
           root.focus();
           const target = resolveOffset(selectionToRestore);
           if (target) {
@@ -393,7 +398,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     //     光标在哨兵内（任意位置）或普通文本起点时，向前跳过哨兵找第一个 chip；
     //     若先遇到普通文本/br 则不算紧邻（中间有内容）。
     //   afterCaret=true（Delete / ArrowRight）：对称地找"光标之后"的 chip。
-    function adjacentMention(afterCaret: boolean): HTMLElement | null {
+    function adjacentMention(afterCaret: boolean, includeSeparator = false): HTMLElement | null {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return null;
       const range = sel.getRangeAt(0);
@@ -420,7 +425,10 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         const isSentinel = segs[idx].kind === 'sentinel';
         if (!afterCaret) {
           // Backspace/ArrowLeft：哨兵任意位置，或普通文本在起点（offset===0）才向前找
-          if (!isSentinel && offset !== 0) return null;
+          // 候选项会在 chip 后自动插入一个分隔空格；ArrowLeft 从该空格右侧移动时，
+          // 连同空格一起跨过 chip，避免光标停在会破坏 mention 边界的位置。
+          const afterSeparator = includeSeparator && offset === 1 && value.startsWith(' ');
+          if (!isSentinel && offset !== 0 && !afterSeparator) return null;
           const neighbor = findNeighbor(idx - 1, -1);
           return neighbor && neighbor.kind === 'chip' ? (neighbor.node as HTMLElement) : null;
         } else {
@@ -461,6 +469,23 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       const sel = window.getSelection();
       const hasSelection = !!sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed;
 
+      if (
+        !hasSelection
+        && !isComposingRef.current
+        && !e.metaKey
+        && !e.ctrlKey
+        && !e.altKey
+        && e.key.length === 1
+        && !/\s/.test(e.key)
+      ) {
+        const chip = adjacentMention(true);
+        if (chip) {
+          e.preventDefault();
+          insertTextBeforeMention(e.key);
+          return;
+        }
+      }
+
       if (e.key === 'Backspace' && !hasSelection) {
         const chip = adjacentMention(false);
         if (chip) {
@@ -478,7 +503,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         }
       }
       if (e.key === 'ArrowLeft' && !hasSelection) {
-        const chip = adjacentMention(false);
+        const chip = adjacentMention(false, true);
         if (chip) {
           e.preventDefault();
           placeBefore(chip);
@@ -601,6 +626,21 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       sel?.addRange(range);
     }
 
+    function insertTextBeforeMention(text: string) {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      if (!range.collapsed) return;
+
+      const textNode = document.createTextNode(`${text} `);
+      range.insertNode(textNode);
+      range.setStart(textNode, text.length);
+      range.collapse(true);
+      applyRange(range);
+      normalizeSentinels();
+      commit();
+    }
+
     function restoreCaretEnd() {
       const root = rootRef.current!;
       root.focus();
@@ -622,13 +662,41 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       applyRange(range);
     }
 
-    const handleInput = () => {
-      if (isComposingRef.current) return;
+    const commitInput = () => {
       // 仅当存在 chip 时才检查哨兵完整性（避免每次普通输入都跑 normalize 破坏光标）
       if (hasChip()) {
         normalizeSentinels();
+        normalizeMentionLeftBoundaries();
       }
       commit();
+    };
+
+    const handleInput = () => {
+      if (isComposingRef.current) return;
+      commitInput();
+    };
+
+    // 浏览器可能把“紧贴 chip 左侧”的文字直接写进 contenteditable=false 节点。
+    // 在写入前手工插入文字与分隔，保持 chip 原子结构和后续连续输入位置。
+    const handleBeforeInput = (e: FormEvent<HTMLDivElement>) => {
+      if (disabled || isComposingRef.current) return;
+      const inputEvent = e.nativeEvent as InputEvent;
+      const insertedText = inputEvent.data;
+      if (
+        (inputEvent.inputType && inputEvent.inputType !== 'insertText')
+        || !insertedText
+        || /^\s+$/.test(insertedText)
+      ) return;
+
+      const chip = adjacentMention(true);
+      if (!chip) return;
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+      const range = selection.getRangeAt(0);
+      if (!range.collapsed) return;
+
+      e.preventDefault();
+      insertTextBeforeMention(insertedText);
     };
 
     const hasChip = (): boolean => {
@@ -659,6 +727,43 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         }
       }
       return changed;
+    }
+
+    // 在 chip 前直接输入非空白字符时补回分隔，避免序列化后与 mention token 粘连。
+    // 光标仍停在新文字末尾、分隔之前，后续连续输入保持自然顺序。
+    function normalizeMentionLeftBoundaries() {
+      const root = rootRef.current;
+      const selection = currentSelectionOffsets();
+      if (!root || !selection || selection.start !== selection.end) return;
+
+      let changed = false;
+      for (const chip of Array.from(root.querySelectorAll<HTMLElement>('.mention-chip'))) {
+        let previous = chip.previousSibling;
+        while (previous) {
+          if (previous.nodeType === Node.TEXT_NODE) {
+            const visibleText = stripZwsp(previous.nodeValue ?? '');
+            if (visibleText.length === 0) {
+              previous = previous.previousSibling;
+              continue;
+            }
+            if (!/\s$/.test(visibleText)) {
+              chip.parentNode?.insertBefore(document.createTextNode(' '), chip);
+              changed = true;
+            }
+          }
+          break;
+        }
+      }
+
+      if (changed) {
+        const target = resolveOffset(selection.start);
+        if (target) {
+          const range = document.createRange();
+          range.setStart(target.node, target.offset);
+          range.collapse(true);
+          applyRange(range);
+        }
+      }
     }
 
     const handlePaste = (e: ClipboardEvent<HTMLDivElement>) => {
@@ -737,6 +842,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       setSelection: (offset: number) => {
         const root = rootRef.current;
         if (!root) return;
+        selectionRevisionRef.current += 1;
         // 同时登记 pending，应对紧接着的 DOM 重建清掉光标
         pendingSelectionRef.current = offset;
         root.focus();
@@ -785,6 +891,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         contentEditable={!disabled}
         suppressContentEditableWarning
         spellCheck={false}
+        onBeforeInput={handleBeforeInput}
         onInput={handleInput}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
@@ -797,7 +904,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
           isComposingRef.current = false;
           // 合成结束：把合成结果提交
           // 部分浏览器 compositionEnd 在 DOM 更新前触发，下一帧提交
-          requestAnimationFrame(() => commit());
+          requestAnimationFrame(() => commitInput());
           onCompositionEnd?.();
         }}
         onBlur={onBlur}
