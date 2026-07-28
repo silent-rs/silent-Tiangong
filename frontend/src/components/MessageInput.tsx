@@ -21,6 +21,7 @@ import {
   estimatedBase64Size,
   resolveAttachmentUrl,
 } from '@/utils/attachments';
+import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 
 interface MentionCandidate {
   value: string;
@@ -312,16 +313,19 @@ export function MessageInput() {
     }
     const editor = editorRef.current;
     const cursorPos = editor?.getSelection()?.start ?? inputContent.length;
-    const before = inputContent.slice(0, mentionStart);
-    const after = inputContent.slice(cursorPos);
-    const newValue = `${before}${candidate.value} ${after}`;
-    setInputContent(newValue);
+    const replacement = replaceMentionCompletion(
+      inputContent,
+      mentionStart,
+      cursorPos,
+      candidate.value,
+    );
+    if (!replacement) return;
+    setInputContent(replacement.value);
     setMentionOpen(false);
     setTimeout(() => {
       if (editor) {
-        const newPos = mentionStart + candidate.value.length + 1;
         editor.focus();
-        editor.setSelection(newPos);
+        editor.setSelection(replacement.offset);
       }
     }, 0);
   };

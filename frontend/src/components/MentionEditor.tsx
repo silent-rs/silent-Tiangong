@@ -7,7 +7,17 @@ import {
   type ClipboardEvent,
   type FormEvent,
   type KeyboardEvent,
+  type MouseEvent,
 } from 'react';
+import {
+  deleteMentionSelection,
+  getMentionBoundaries,
+  insertTextAtMentionBoundary,
+  normalizePastedText,
+  resolveMentionKeyAction,
+  type MentionBoundary,
+  type MentionKey,
+} from '@/utils/mentionEditorModel';
 import {
   MENTION_LABEL_CLASS,
   MENTION_MARK,
@@ -86,6 +96,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
 
     const rootRef = useRef<HTMLDivElement>(null);
     const isComposingRef = useRef(false);
+    const compositionSnapshotRef = useRef<{ text: string; caret: number } | null>(null);
     // 重建 DOM 后需要恢复的光标偏移（解决 selectCandidate 先改 value、
     // 后设光标的时序竞态：DOM 重建会清掉光标）。
     const pendingSelectionRef = useRef<number | null>(null);
@@ -201,6 +212,12 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     }
 
     function rawDomText(root: HTMLElement): string {
+      if (
+        root.childNodes.length === 1
+        && root.firstChild?.nodeType === Node.ELEMENT_NODE
+        && (root.firstChild as HTMLElement).tagName === 'BR'
+      ) return '';
+
       let text = '';
       root.childNodes.forEach((node) => {
         if (node.nodeType === Node.TEXT_NODE) {
@@ -393,70 +410,23 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
     };
 
     // ===== 整块删除 / 跨块方向键 / 边界守卫 =====
-    interface MentionBoundary {
+    interface DomMentionBoundary extends MentionBoundary {
       chip: HTMLElement;
-      start: number;
-      end: number;
-      leadingSeparatorStart: number | null;
-      trailingSeparatorEnd: number | null;
     }
 
     // 以序列化文本为准计算 mention 边界，避免浏览器合并空格与 ZWSP 后 DOM 邻接失真。
-    function mentionBoundaries(): MentionBoundary[] {
+    function mentionBoundaries(): DomMentionBoundary[] {
       const root = rootRef.current;
       if (!root) return [];
       const text = domToText(root);
       const chips = Array.from(root.querySelectorAll<HTMLElement>('.mention-chip'));
-      const boundaries: MentionBoundary[] = [];
-      let offset = 0;
-      let chipIndex = 0;
-
-      for (const block of parseBlocks(text)) {
-        if (block.type === 'text') {
-          offset += block.value.length;
-          continue;
-        }
-        const chip = chips[chipIndex];
-        chipIndex += 1;
-        if (!chip) break;
-        const start = offset;
-        const end = start + block.token.length;
-        boundaries.push({
-          chip,
-          start,
-          end,
-          leadingSeparatorStart: start > 0 && text[start - 1] === ' ' ? start - 1 : null,
-          trailingSeparatorEnd: text[end] === ' ' ? end + 1 : null,
-        });
-        offset = end;
-      }
-      return boundaries;
+      return getMentionBoundaries(text)
+        .slice(0, chips.length)
+        .map((boundary, index) => ({ ...boundary, chip: chips[index] }));
     }
 
     function boundaryForChip(chip: HTMLElement): MentionBoundary | null {
       return mentionBoundaries().find((boundary) => boundary.chip === chip) ?? null;
-    }
-
-    // afterCaret=true 用于 Delete / ArrowRight；false 用于 Backspace / ArrowLeft。
-    // includeSeparator=true 时，把紧贴 mention 的一个普通空格视为原子块边界的一部分。
-    function adjacentMention(afterCaret: boolean, includeSeparator = false): HTMLElement | null {
-      const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0) return null;
-      const range = sel.getRangeAt(0);
-      if (!range.collapsed) return null;
-      const selection = currentSelectionOffsets();
-      if (!selection || selection.start !== selection.end) return null;
-      const caret = selection.start;
-
-      const boundary = mentionBoundaries().find((item) => {
-        if (afterCaret) {
-          return caret === item.start
-            || (includeSeparator && item.leadingSeparatorStart === caret);
-        }
-        return caret === item.end
-          || (includeSeparator && item.trailingSeparatorEnd === caret);
-      });
-      return boundary?.chip ?? null;
     }
 
     const isChip = (node: Node): boolean =>
@@ -474,9 +444,11 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
 
       const sel = window.getSelection();
       const hasSelection = !!sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed;
+      const offsets = currentSelectionOffsets();
 
       if (
         !hasSelection
+        && offsets
         && !isComposingRef.current
         && !e.metaKey
         && !e.ctrlKey
@@ -484,43 +456,48 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         && e.key.length === 1
         && !/\s/.test(e.key)
       ) {
-        const chip = adjacentMention(true);
-        if (chip) {
+        const replacement = insertTextAtMentionBoundary(
+          domToText(rootRef.current!),
+          offsets.start,
+          e.key,
+        );
+        if (replacement) {
           e.preventDefault();
-          insertTextBeforeMention(e.key);
+          applyValue(replacement.value, replacement.offset);
           return;
         }
       }
 
-      if (e.key === 'Backspace' && !hasSelection) {
-        const chip = adjacentMention(false, true);
-        if (chip) {
-          e.preventDefault();
-          removeChip(chip);
-          return;
-        }
+      if (
+        hasSelection
+        && offsets
+        && hasChip()
+        && (e.key === 'Backspace' || e.key === 'Delete')
+      ) {
+        e.preventDefault();
+        const text = domToText(rootRef.current!);
+        const replacement = deleteMentionSelection(text, offsets.start, offsets.end);
+        applyValue(replacement.value, replacement.offset);
+        return;
       }
-      if (e.key === 'Delete' && !hasSelection) {
-        const chip = adjacentMention(true, true);
-        if (chip) {
+
+      if (
+        !hasSelection
+        && offsets
+        && isMentionKey(e.key)
+      ) {
+        const text = domToText(rootRef.current!);
+        const action = resolveMentionKeyAction(text, offsets.start, e.key);
+        if (action) {
           e.preventDefault();
-          removeChip(chip);
-          return;
-        }
-      }
-      if (e.key === 'ArrowLeft' && !hasSelection) {
-        const chip = adjacentMention(false, true);
-        if (chip) {
-          e.preventDefault();
-          placeBefore(chip);
-          return;
-        }
-      }
-      if (e.key === 'ArrowRight' && !hasSelection) {
-        const chip = adjacentMention(true, true);
-        if (chip) {
-          e.preventDefault();
-          placeAfter(chip);
+          if (action.type === 'move') {
+            placeCaretAtOffset(action.offset);
+          } else {
+            applyValue(
+              text.slice(0, action.start) + text.slice(action.end),
+              action.offset,
+            );
+          }
           return;
         }
       }
@@ -535,28 +512,20 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       }
     };
 
-    // 删除 mention 及一个右侧分隔；没有右侧分隔时改删一个左侧分隔。
-    // 这样既整块删除，又能在前后文本之间保留至多一个必要空格。
-    function removeChip(chip: HTMLElement) {
+    function applyValue(text: string, offset: number) {
       const root = rootRef.current;
-      const boundary = boundaryForChip(chip);
-      if (!root || !boundary) return;
-      const text = domToText(root);
-      let removeStart = boundary.start;
-      let removeEnd = boundary.end;
-      if (boundary.trailingSeparatorEnd != null) {
-        removeEnd = boundary.trailingSeparatorEnd;
-        if (removeEnd === text.length && boundary.leadingSeparatorStart != null) {
-          removeStart = boundary.leadingSeparatorStart;
-        }
-      } else if (boundary.leadingSeparatorStart != null) {
-        removeStart = boundary.leadingSeparatorStart;
-      }
-
+      if (!root) return;
       root.focus();
       selectionRevisionRef.current += 1;
-      pendingSelectionRef.current = removeStart;
-      onChange(text.slice(0, removeStart) + text.slice(removeEnd));
+      pendingSelectionRef.current = offset;
+      onChange(text);
+    }
+
+    function isMentionKey(key: string): key is MentionKey {
+      return key === 'Backspace'
+        || key === 'Delete'
+        || key === 'ArrowLeft'
+        || key === 'ArrowRight';
     }
 
     function shouldPreventArrow(text: string, pos: number, key: string): boolean {
@@ -612,21 +581,6 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       sel?.addRange(range);
     }
 
-    function insertTextBeforeMention(text: string) {
-      const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) return;
-      const range = selection.getRangeAt(0);
-      if (!range.collapsed) return;
-
-      const textNode = document.createTextNode(`${text} `);
-      range.insertNode(textNode);
-      range.setStart(textNode, text.length);
-      range.collapse(true);
-      applyRange(range);
-      normalizeSentinels();
-      commit();
-    }
-
     function restoreCaretEnd() {
       const root = rootRef.current!;
       root.focus();
@@ -652,7 +606,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       // 仅当存在 chip 时才检查哨兵完整性（避免每次普通输入都跑 normalize 破坏光标）
       if (hasChip()) {
         normalizeSentinels();
-        normalizeMentionLeftBoundaries();
+        normalizeMentionBoundaries();
       }
       commit();
     };
@@ -674,15 +628,17 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         || /^\s+$/.test(insertedText)
       ) return;
 
-      const chip = adjacentMention(true);
-      if (!chip) return;
-      const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) return;
-      const range = selection.getRangeAt(0);
-      if (!range.collapsed) return;
+      const selection = currentSelectionOffsets();
+      if (!selection || selection.start !== selection.end) return;
+      const replacement = insertTextAtMentionBoundary(
+        domToText(rootRef.current!),
+        selection.start,
+        insertedText,
+      );
+      if (!replacement) return;
 
       e.preventDefault();
-      insertTextBeforeMention(insertedText);
+      applyValue(replacement.value, replacement.offset);
     };
 
     const hasChip = (): boolean => {
@@ -715,14 +671,11 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       return changed;
     }
 
-    // 在 chip 前直接输入非空白字符时补回分隔，避免序列化后与 mention token 粘连。
-    // 光标仍停在新文字末尾、分隔之前，后续连续输入保持自然顺序。
-    function normalizeMentionLeftBoundaries() {
+    // 浏览器原生输入或粘贴可能紧贴 chip 落字；补齐两侧分隔，避免标签被当成普通文本。
+    function normalizeMentionBoundaries() {
       const root = rootRef.current;
-      const selection = currentSelectionOffsets();
-      if (!root || !selection || selection.start !== selection.end) return;
+      if (!root) return;
 
-      let changed = false;
       for (const chip of Array.from(root.querySelectorAll<HTMLElement>('.mention-chip'))) {
         let previous = chip.previousSibling;
         while (previous) {
@@ -734,20 +687,24 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
             }
             if (!/\s$/.test(visibleText)) {
               chip.parentNode?.insertBefore(document.createTextNode(' '), chip);
-              changed = true;
             }
           }
           break;
         }
-      }
 
-      if (changed) {
-        const target = resolveOffset(selection.start);
-        if (target) {
-          const range = document.createRange();
-          range.setStart(target.node, target.offset);
-          range.collapse(true);
-          applyRange(range);
+        let next = chip.nextSibling;
+        while (next) {
+          if (next.nodeType === Node.TEXT_NODE) {
+            const visibleText = stripZwsp(next.nodeValue ?? '');
+            if (visibleText.length === 0) {
+              next = next.nextSibling;
+              continue;
+            }
+            if (!/^\s/.test(visibleText)) {
+              chip.parentNode?.insertBefore(document.createTextNode(' '), chip.nextSibling);
+            }
+          }
+          break;
         }
       }
     }
@@ -777,7 +734,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       range.deleteContents();
 
       const fragment = document.createDocumentFragment();
-      const lines = text.replace(/\r\n?/g, '\n').split('\n');
+      const lines = normalizePastedText(text).split('\n');
       lines.forEach((line, index) => {
         if (index > 0) fragment.appendChild(document.createElement('br'));
         if (line) fragment.appendChild(document.createTextNode(line));
@@ -790,12 +747,44 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
       }
       range.collapse(true);
       applyRange(range);
-      if (hasChip()) normalizeSentinels();
+      if (hasChip()) {
+        normalizeSentinels();
+        normalizeMentionBoundaries();
+      }
       commit();
     }
 
+    function separatorClientRect(chip: HTMLElement, after: boolean): DOMRect | null {
+      let node: ChildNode | null = after ? chip.nextSibling : chip.previousSibling;
+      while (node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const value = node.nodeValue ?? '';
+          const indexes = after
+            ? Array.from(value, (_, index) => index)
+            : Array.from(value, (_, index) => value.length - index - 1);
+          for (const index of indexes) {
+            if (value[index] === ZWSP) continue;
+            if (value[index] !== ' ') return null;
+            const range = document.createRange();
+            range.setStart(node, index);
+            range.setEnd(node, index + 1);
+            if (typeof range.getBoundingClientRect !== 'function') return null;
+            return range.getBoundingClientRect();
+          }
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          return null;
+        }
+        node = after ? node.nextSibling : node.previousSibling;
+      }
+      return null;
+    }
+
+    function pointInRect(x: number, y: number, rect: DOMRect): boolean {
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
     // 点击定位：chip 与相邻分隔之间不是合法停靠点，统一吸附到原子块外侧。
-    const handleMouseUp = () => {
+    const handleMouseUp = (e: MouseEvent<HTMLDivElement>) => {
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       const range = sel.getRangeAt(0);
@@ -811,10 +800,35 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         node = node.parentNode;
       }
 
+      const boundaries = mentionBoundaries();
+      for (let index = 0; index < boundaries.length; index += 1) {
+        const boundary = boundaries[index];
+        if (boundary.trailingSeparatorEnd != null) {
+          const rect = separatorClientRect(boundary.chip, true);
+          if (rect && pointInRect(e.clientX, e.clientY, rect)) {
+            const nextBoundary = boundaries[index + 1];
+            const separatorIsShared = nextBoundary?.leadingSeparatorStart === boundary.end;
+            if (separatorIsShared && e.clientX > (rect.left + rect.right) / 2) {
+              placeBefore(nextBoundary.chip);
+            } else {
+              placeAfter(boundary.chip);
+            }
+            return;
+          }
+        }
+        if (boundary.leadingSeparatorStart != null) {
+          const rect = separatorClientRect(boundary.chip, false);
+          if (rect && pointInRect(e.clientX, e.clientY, rect)) {
+            placeBefore(boundary.chip);
+            return;
+          }
+        }
+      }
+
       const selection = currentSelectionOffsets();
       if (!selection || selection.start !== selection.end) return;
       const caret = selection.start;
-      for (const boundary of mentionBoundaries()) {
+      for (const boundary of boundaries) {
         if (boundary.trailingSeparatorEnd != null && caret === boundary.end) {
           placeAfter(boundary.chip);
           return;
@@ -897,13 +911,32 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         onMouseUp={handleMouseUp}
         onCompositionStart={() => {
           isComposingRef.current = true;
+          const root = rootRef.current;
+          const selection = currentSelectionOffsets();
+          compositionSnapshotRef.current = root
+            && selection
+            && selection.start === selection.end
+            ? { text: domToText(root), caret: selection.start }
+            : null;
           onCompositionStart?.();
         }}
-        onCompositionEnd={() => {
+        onCompositionEnd={(event) => {
           isComposingRef.current = false;
+          const snapshot = compositionSnapshotRef.current;
+          const composedText = event.data;
+          compositionSnapshotRef.current = null;
           // 合成结束：把合成结果提交
           // 部分浏览器 compositionEnd 在 DOM 更新前触发，下一帧提交
-          requestAnimationFrame(() => commitInput());
+          requestAnimationFrame(() => {
+            const replacement = snapshot
+              ? insertTextAtMentionBoundary(snapshot.text, snapshot.caret, composedText)
+              : null;
+            if (replacement) {
+              applyValue(replacement.value, replacement.offset);
+            } else {
+              commitInput();
+            }
+          });
           onCompositionEnd?.();
         }}
         onBlur={onBlur}
