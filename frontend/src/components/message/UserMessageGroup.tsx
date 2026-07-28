@@ -1,10 +1,12 @@
 import { useSearchStore } from "@/store/useSearchStore";
 import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
-import { Textarea } from "../ui/textarea";
+import { MentionChip } from "../MentionChip";
+import { MentionEditor, type MentionEditorHandle } from "../MentionEditor";
 import { X, Paperclip } from "lucide-react";
 import { resolveAttachmentUrl, type Attachment } from "@/utils/attachments";
 import { textContent } from "@/api/tauri";
+import { hasMention, parseBlocks } from "@/utils/mentionBlocks";
 import { formatMessageTime } from "./utils";
 import type { MessageGroup } from "./types";
 import { VoiceBubble } from "./VoiceBubble";
@@ -19,14 +21,14 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   editingMessageId: string | null;
   editingContent: string;
   editingAttachments: Attachment[];
-  editingTextareaRef: React.RefObject<HTMLTextAreaElement>;
+  editingTextareaRef: React.RefObject<MentionEditorHandle>;
   onStartEdit: (messageId: string, text: string) => void;
   onConfirmEdit: () => void;
   onCancelEdit: () => void;
   onSetEditingContent: (v: string) => void;
   onSetEditingAttachments: React.Dispatch<React.SetStateAction<Attachment[]>>;
   onAttachFiles: () => void;
-  onEditPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onEditPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
 }) {
   const message = group.messages[0];
   const voiceInfo = voiceMessages[message.id];
@@ -37,11 +39,61 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   const caseSensitive = useSearchStore((s) => s.caseSensitive);
 
   const renderUserText = (text: string) => {
-    if (!searchQuery) return text;
-    const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
-    if (occurrences.length === 0) return text;
+    // 无提及：走原有纯文本 / 高亮路径，行为完全不变
+    if (!hasMention(text)) {
+      if (!searchQuery) return text;
+      const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
+      if (occurrences.length === 0) return text;
+      const isCurrent = message.id === currentMessageId;
+      return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
+    }
+
+    // 有提及：按块分段渲染。搜索高亮的 offset 空间仍是原始字符串，
+    // 因此对每个 text 段切分其在全串中的匹配，保留既有高亮语义。
     const isCurrent = message.id === currentMessageId;
-    return <HighlightText text={text} matches={occurrences} currentMatchStart={isCurrent ? currentMatchStart : null} />;
+    const allOccurrences = searchQuery
+      ? findTextOccurrences(text, searchQuery, caseSensitive)
+      : [];
+    const nodes: React.ReactNode[] = [];
+    let segStart = 0;
+    let key = 0;
+    for (const block of parseBlocks(text)) {
+      if (block.type === 'text') {
+        const segEnd = segStart + block.value.length;
+        const segMatches = allOccurrences
+          .filter((m) => m.start >= segStart && m.end <= segEnd)
+          .map((m) => ({ start: m.start - segStart, end: m.end - segStart }));
+        if (segMatches.length === 0) {
+          nodes.push(<span key={key++}>{block.value}</span>);
+        } else {
+          // currentMatchStart 是全串偏移，落在本段内才传（并按段起点 rebase）
+          const rebasedCurrent = isCurrent && currentMatchStart != null
+            && currentMatchStart >= segStart && currentMatchStart < segEnd
+              ? currentMatchStart - segStart
+              : null;
+          nodes.push(
+            <HighlightText
+              key={key++}
+              text={block.value}
+              matches={segMatches}
+              currentMatchStart={rebasedCurrent}
+            />,
+          );
+        }
+        segStart = segEnd;
+      } else {
+        nodes.push(
+          <MentionChip
+            key={key++}
+            kind={block.kind}
+            label={block.label}
+            token={block.token}
+          />,
+        );
+        segStart += block.token.length;
+      }
+    }
+    return <>{nodes}</>;
   };
 
   return (
@@ -61,14 +113,10 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
               ))}
             </div>
           )}
-          <Textarea
+          <MentionEditor
             ref={editingTextareaRef}
             value={editingContent}
-            onChange={(e) => {
-              onSetEditingContent(e.target.value);
-              const textarea = editingTextareaRef.current;
-              if (textarea) { textarea.style.height = "60px"; textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px"; }
-            }}
+            onChange={onSetEditingContent}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); onConfirmEdit(); }
               if (e.key === "Escape") { onCancelEdit(); }

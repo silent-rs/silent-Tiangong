@@ -37,6 +37,7 @@ import {
   UserMessageGroup,
   AgentTurn,
 } from "./message";
+import { type MentionEditorHandle } from "./MentionEditor";
 
 export function MessageList() {
   const messages = useStore(s => s.messages);
@@ -78,7 +79,7 @@ export function MessageList() {
   const editingRevisionRef = useRef(0);
   const editingGenerationRef = useRef(0);
   const editingBaseContentRef = useRef<ContentBlock[]>([]);
-  const editingTextareaRef = useRef<HTMLTextAreaElement>(null!);
+  const editingTextareaRef = useRef<MentionEditorHandle>(null!);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
   // 百分比轨道：鼠标 Y 比例映射到的用户提问序号，-1 表示未在轨道内
@@ -482,13 +483,6 @@ export function MessageList() {
       editingBaseContentRef.current = [];
       setEditingAttachments([]);
     }
-    setTimeout(() => {
-      const textarea = editingTextareaRef.current;
-      if (textarea) {
-        textarea.style.height = '60px';
-        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-      }
-    }, 0);
   }, [activeSessionId, runStatus, messages]);
 
   const handleConfirmEdit = useCallback(async () => {
@@ -584,7 +578,7 @@ export function MessageList() {
     }
   }, [handleSetEditingAttachments]);
 
-  const handleEditPaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+  const handleEditPaste = useCallback(async (e: React.ClipboardEvent<HTMLDivElement>) => {
     const files = Array.from(e.clipboardData.files);
     if (files.length === 0) return;
     e.preventDefault();

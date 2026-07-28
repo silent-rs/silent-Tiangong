@@ -260,6 +260,33 @@
   animation: fade-in 0.2s ease-out;
 }
 
+/* @提及内联块（输入框 contenteditable 与消息气泡共用） */
+.mention-chip {
+  vertical-align: baseline;
+}
+.mention-editor .mention-chip {
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mention-editor:empty:before {
+  content: attr(data-placeholder);
+  color: hsl(var(--muted-foreground));
+  pointer-events: none;
+}
+.mention-editor {
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mention-editor::-webkit-scrollbar {
+  width: 6px;
+}
+.mention-editor::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: hsl(var(--muted-foreground) / 0.3);
+}
+
 /* 搜索高亮样式 */
 .search-highlight {
   background-color: hsl(50 80% 60% / 0.3);
