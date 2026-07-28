@@ -3,6 +3,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/api/tauri';
+import type { MentionEditorHandle } from '@/components/MentionEditor';
 import { UserMessageGroup } from '@/components/message/UserMessageGroup';
 import type { MessageGroup } from '@/components/message/types';
 import { useSearchStore } from '@/store/useSearchStore';
@@ -152,7 +153,7 @@ describe('定时任务消息展示与编辑保护', () => {
           editingMessageId="scheduled-message"
           editingContent={UNIX_MESSAGE}
           editingAttachments={[]}
-          editingTextareaRef={createRef<HTMLTextAreaElement>()}
+          editingTextareaRef={createRef<MentionEditorHandle>()}
           onStartEdit={onStartEdit}
           onConfirmEdit={vi.fn()}
           onCancelEdit={vi.fn()}
@@ -189,7 +190,7 @@ describe('定时任务消息展示与编辑保护', () => {
           editingMessageId={null}
           editingContent=""
           editingAttachments={[]}
-          editingTextareaRef={createRef<HTMLTextAreaElement>()}
+          editingTextareaRef={createRef<MentionEditorHandle>()}
           onStartEdit={vi.fn()}
           onConfirmEdit={vi.fn()}
           onCancelEdit={vi.fn()}
@@ -202,5 +203,48 @@ describe('定时任务消息展示与编辑保护', () => {
     });
 
     expect(container.textContent).toContain('无执行内容');
+  });
+
+  it('执行内容中的提及保持标签展示，并正确高亮其后的搜索结果', async () => {
+    const text = [
+      '[定时任务触发]',
+      '任务名称：夜间巡检',
+      '任务描述：检查服务状态',
+      '',
+      '请 @dev 处理巡检',
+    ].join('\n');
+    const query = '处理巡检';
+
+    useSearchStore.setState({
+      searchQuery: query,
+      currentMessageId: 'scheduled-message',
+      currentMatchStart: text.indexOf(query),
+      caseSensitive: false,
+    });
+
+    await act(async () => {
+      root.render(
+        <UserMessageGroup
+          group={group(text)}
+          runStatus="idle"
+          nonEditableIds={new Set()}
+          voiceMessages={{}}
+          editingMessageId={null}
+          editingContent=""
+          editingAttachments={[]}
+          editingTextareaRef={createRef<MentionEditorHandle>()}
+          onStartEdit={vi.fn()}
+          onConfirmEdit={vi.fn()}
+          onCancelEdit={vi.fn()}
+          onSetEditingContent={vi.fn()}
+          onSetEditingAttachments={vi.fn()}
+          onAttachFiles={vi.fn()}
+          onEditPaste={vi.fn()}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-mention-token="@dev"]')).not.toBeNull();
+    expect(container.querySelector('.search-highlight-current')?.textContent).toBe(query);
   });
 });
