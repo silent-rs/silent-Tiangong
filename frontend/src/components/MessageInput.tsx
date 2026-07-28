@@ -1,7 +1,7 @@
 import { useState, KeyboardEvent, ClipboardEvent, DragEvent, useEffect, useRef, useCallback } from 'react';
 import type { SetStateAction } from 'react';
 import { selectCurrentInputCacheKey, selectCurrentInputCache, useStore } from '@/store/useStore';
-import { Textarea } from './ui/textarea';
+import { MentionEditor, type MentionEditorHandle } from './MentionEditor';
 import { Button } from './ui/button';
 import { Send, Square, FolderOpen, Wrench, Cpu, Mic, Loader2, Keyboard, MessageSquarePlus, ShieldCheck, ShieldOff, Circle, Paperclip, X, Users, Brain, Clock } from 'lucide-react';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -21,6 +21,7 @@ import {
   estimatedBase64Size,
   resolveAttachmentUrl,
 } from '@/utils/attachments';
+import { replaceMentionCompletion } from '@/utils/mentionEditorModel';
 
 interface MentionCandidate {
   value: string;
@@ -75,7 +76,7 @@ export function MessageInput() {
   const reasoningEffort = useStore((state) => state.reasoningEffort);
   const setReasoningEffort = useStore((state) => state.setReasoningEffort);
   const isComposingRef = useRef(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<MentionEditorHandle>(null);
   const inputAreaRef = useRef<HTMLDivElement>(null);
   const lastNativeDropAtRef = useRef(0);
 
@@ -179,14 +180,7 @@ export function MessageInput() {
     ? `${Math.floor(lastDurationMs / 1000)}s`
     : '';
 
-  // 自动调整文本框高度
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = '60px';
-      textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-    }
-  }, [inputContent]);
+  // 自动调整文本框高度（MentionEditor 内部按 value 自适应，这里不再单独维护）
 
   // ===== 文字模式相关 =====
   const loadCandidates = useCallback(async () => {
@@ -278,9 +272,7 @@ export function MessageInput() {
 
   const handleInputChange = (value: string) => {
     setInputContent(value);
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const cursorPos = textarea.selectionStart;
+    const cursorPos = editorRef.current?.getSelection()?.start ?? value.length;
     const beforeCursor = value.slice(0, cursorPos);
     if (beforeCursor.startsWith('/') && !/\s/.test(beforeCursor)) {
       setMentionStart(0);
@@ -319,18 +311,21 @@ export function MessageInput() {
       void executeSlashCommand(candidate.value);
       return;
     }
-    const textarea = textareaRef.current;
-    const cursorPos = textarea?.selectionStart ?? inputContent.length;
-    const before = inputContent.slice(0, mentionStart);
-    const after = inputContent.slice(cursorPos);
-    const newValue = `${before}${candidate.value} ${after}`;
-    setInputContent(newValue);
+    const editor = editorRef.current;
+    const cursorPos = editor?.getSelection()?.start ?? inputContent.length;
+    const replacement = replaceMentionCompletion(
+      inputContent,
+      mentionStart,
+      cursorPos,
+      candidate.value,
+    );
+    if (!replacement) return;
+    setInputContent(replacement.value);
     setMentionOpen(false);
     setTimeout(() => {
-      if (textarea) {
-        const newPos = mentionStart + candidate.value.length + 1;
-        textarea.focus();
-        textarea.setSelectionRange(newPos, newPos);
+      if (editor) {
+        editor.focus();
+        editor.setSelection(replacement.offset);
       }
     }, 0);
   };
@@ -376,7 +371,7 @@ export function MessageInput() {
         if (payload.paths.length > 0) {
           lastNativeDropAtRef.current = Date.now();
           addAttachmentsFromPaths(payload.paths);
-          textareaRef.current?.focus();
+          editorRef.current?.focus();
         }
       }
     }).then((stopListening) => {
@@ -442,14 +437,14 @@ export function MessageInput() {
     if (Date.now() - lastNativeDropAtRef.current < 500) return;
     try {
       await filesToAttachments(files);
-      textareaRef.current?.focus();
+      editorRef.current?.focus();
     } catch (err) {
       console.error('读取拖放文件失败:', err);
       alert(err instanceof Error ? err.message : '读取拖放文件失败');
     }
   };
 
-  const handlePaste = async (e: ClipboardEvent<HTMLTextAreaElement>) => {
+  const handlePaste = async (e: ClipboardEvent<HTMLDivElement>) => {
     const files = Array.from(e.clipboardData.files);
     if (files.length > 0) {
       e.preventDefault();
@@ -523,7 +518,7 @@ export function MessageInput() {
     }
   };
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (mentionOpen && filteredCandidates.length > 0) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % filteredCandidates.length); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + filteredCandidates.length) % filteredCandidates.length); return; }
@@ -962,10 +957,10 @@ export function MessageInput() {
                 </div>
               )}
 
-              <Textarea
-                ref={textareaRef}
+              <MentionEditor
+                ref={editorRef}
                 value={inputContent}
-                onChange={(e) => handleInputChange(e.target.value)}
+                onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 onCompositionStart={() => { isComposingRef.current = true; }}
