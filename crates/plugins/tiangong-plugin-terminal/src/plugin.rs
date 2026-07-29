@@ -113,6 +113,9 @@ impl Plugin for TerminalPlugin {
     ///   用户在终端敲的命令及其输出——无需依赖 `terminal_user_input` 的实时注入
     ///   （后者在两轮之间 / turn 收尾窗口可能丢失，但下一轮的 terminal_data 会补全）。
     ///
+    /// 当会话尚未打开任何终端 Tab 时（pre session 阶段），跳过注入——此时没有真实
+    /// 终端上下文，空快照对 agent 无意义，反而引入一条空的 `terminal_data` 反馈。
+    ///
     /// 此时 feedback 通道已注入（`set_feedback_tx` 在 `on_session_ready` 之前调用），
     /// 且注入发生在 Agent Loop 的 select! 启动前，命令入队后会被本轮消费。
     fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
@@ -120,6 +123,10 @@ impl Plugin for TerminalPlugin {
             return;
         };
         let state = self.registry.snapshot_for_injection(&session.id);
+        if state.tabs.is_empty() {
+            tracing::debug!(session_id = %session.id, "terminal_data 跳过注入（无终端 Tab）");
+            return;
+        }
         let payload = state.render();
         if !tx.inject_tool("terminal_data", payload) {
             tracing::debug!(session_id = %session.id, "terminal_data 注入失败（通道未就绪）");
