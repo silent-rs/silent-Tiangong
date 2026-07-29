@@ -13,8 +13,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 
 use tiangong_bots::{
-    BotId, BotRuntime, BotStore, InvalidBotId, ProgressFn, ProvisionStatus, RegisterBotRequest,
-    UpdateBotRequest,
+    BotId, BotMcpConfig, BotRuntime, BotStore, InvalidBotId, ProgressFn, ProvisionStatus,
+    RegisterBotRequest, UpdateBotRequest,
+};
+use tiangong_plugin_mcp::{
+    McpPlugin, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
+    RegisterMcpServerRequest, ResolvedMcpTransport,
 };
 
 use crate::args::{BotArgs, BotSubcommand};
@@ -71,13 +75,13 @@ async fn run_subcommand(
         } => cmd_install(&runtime, artifact_id, id, version).await,
         BotSubcommand::Configure { id } => cmd_configure(&store, &runtime, id).await,
         BotSubcommand::Show { id } => cmd_show(&store, id),
-        BotSubcommand::Start { id } => cmd_start(&store, id),
-        BotSubcommand::Stop { id } => cmd_stop(id),
+        BotSubcommand::Start { id } => cmd_start(&store, &runtime, id).await,
+        BotSubcommand::Stop { id } => cmd_stop(&runtime, id).await,
         BotSubcommand::Upgrade { id } => cmd_upgrade(&store, &runtime, id).await,
         BotSubcommand::CheckUpdate { artifact_id } => {
             cmd_check_update(&store, &runtime, artifact_id).await
         }
-        BotSubcommand::Remove { id } => cmd_remove(&store, id),
+        BotSubcommand::Remove { id } => cmd_remove(&store, &runtime, id).await,
         BotSubcommand::Log { id } => cmd_log(id),
     }
 }
@@ -304,6 +308,10 @@ async fn cmd_configure(store: &BotStore, runtime: &BotRuntime, id: String) -> Re
     }
     bot_spawn_daemon(&bot)?;
     println!("✅ bot {id} 配置完成并已启动");
+    // 注册 Bot 声明的 MCP（不支持则静默跳过）；失败不阻断启动。
+    if let Err(err) = ensure_bot_mcp_registered(runtime, &id).await {
+        eprintln!("⚠️ MCP 注册失败：{err}（Bot 已启动，但 Agent 暂无法调用其工具）");
+    }
     Ok(())
 }
 
@@ -482,7 +490,7 @@ fn cmd_show(store: &BotStore, id: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_start(store: &BotStore, id: String) -> Result<()> {
+async fn cmd_start(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
     let bot = store.get(&id).ok_or_else(|| anyhow!("bot 不存在：{id}"))?;
 
@@ -493,11 +501,19 @@ fn cmd_start(store: &BotStore, id: String) -> Result<()> {
 
     bot_spawn_daemon(&bot)?;
     println!("bot 已在后台启动：{id}（PID 见 ~/.tiangong/bots/{id}/bot.pid）");
+    // 注册 Bot 声明的 MCP（不支持则静默跳过）；失败不阻断启动。
+    if let Err(err) = ensure_bot_mcp_registered(runtime, &id).await {
+        eprintln!("⚠️ MCP 注册失败：{err}（Bot 已启动，但 Agent 暂无法调用其工具）");
+    }
     Ok(())
 }
 
-fn cmd_stop(id: String) -> Result<()> {
+async fn cmd_stop(runtime: &BotRuntime, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
+    // 停止前先注销 MCP（对齐 Desktop bot_stop：仅移除本 bot 注册的同名 stdio MCP）。
+    if let Err(err) = unregister_bot_mcp(runtime, &id).await {
+        eprintln!("⚠️ 注销 MCP 失败：{err}（仍将停止 bot）");
+    }
     tiangong_bots::pid::stop_bot(&id)?;
     println!("bot 已停止：{id}");
     Ok(())
@@ -529,6 +545,10 @@ async fn cmd_upgrade(store: &BotStore, runtime: &BotRuntime, id: String) -> Resu
             .ok_or_else(|| anyhow!("升级后 bot 配置丢失：{id}"))?;
         bot_spawn_daemon(&bot)?;
         println!("bot {id} 已恢复运行");
+        // 升级可能更换制品二进制，MCP 的 command 路径随之变化，需重新校验/更新。
+        if let Err(err) = ensure_bot_mcp_registered(runtime, &id).await {
+            eprintln!("⚠️ MCP 注册失败：{err}（Bot 已启动，但 Agent 暂无法调用其工具）");
+        }
     }
     Ok(())
 }
@@ -571,10 +591,14 @@ async fn cmd_check_update(
     Ok(())
 }
 
-fn cmd_remove(store: &BotStore, id: String) -> Result<()> {
+async fn cmd_remove(store: &BotStore, runtime: &BotRuntime, id: String) -> Result<()> {
     let id = parse_bot_id(&id)?;
     if store.get(&id).is_none() {
         return Err(anyhow!("bot 不存在：{id}"));
+    }
+    // 删除前先注销 MCP（对齐 Desktop bot_remove）。
+    if let Err(err) = unregister_bot_mcp(runtime, &id).await {
+        eprintln!("⚠️ 注销 MCP 失败：{err}（仍将删除配置）");
     }
     // 仅当 bot 已确认停止（或本来就未运行）时才删除配置，避免配置被删但进程仍在运行。
     tiangong_bots::pid::stop_bot(&id)?;
@@ -658,6 +682,110 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
         println!("请执行：tiangong server --daemon");
     }
     Ok(())
+}
+
+// ============================ Bot MCP 注册 ============================
+//
+// 对齐 Desktop 的 ensure_bot_mcp_registered / unregister_bot_mcp
+// （src-tauri/src/commands.rs）。CLI 直接经 McpPlugin 读写共享的
+// `~/.tiangong/mcp.json`，无需 Server 运行；Server 下次启动会读到。
+//
+// 启动支持 MCP 的 bot 后需把其声明的出站能力注册为普通 stdio MCP，
+// 否则 Agent 无法调用该 bot 的工具。停止/删除时反向注销，避免遗留。
+
+/// 把 Bot 声明的出站能力注册为普通 stdio MCP（写 `~/.tiangong/mcp.json`）。
+///
+/// 不支持 MCP 的 bot 静默跳过；注册失败仅打印警告，不阻断 bot 启动主流程。
+async fn ensure_bot_mcp_registered(runtime: &BotRuntime, id: &BotId) -> Result<()> {
+    if !runtime.supports_mcp(id).await? {
+        return Ok(());
+    }
+    let generated = runtime.generate_mcp_config(id).await?;
+    let mcp_plugin = McpPlugin::new();
+
+    if let Some(existing) = mcp_plugin
+        .mcp_servers()
+        .into_iter()
+        .find(|server| server.name == generated.name)
+    {
+        if !bot_mcp_connection_matches(&existing, &generated) {
+            return Err(anyhow!(
+                "MCP 名称 {} 已被其他配置占用，未自动覆盖",
+                generated.name
+            ));
+        }
+        if !existing.enabled {
+            mcp_plugin.set_mcp_server_enabled(&generated.name, true)?;
+            println!("✅ 已启用 MCP：{}", generated.name);
+        } else {
+            println!("✅ MCP 已注册：{}", generated.name);
+        }
+        return Ok(());
+    }
+
+    mcp_plugin.register_mcp_server(bot_mcp_registration_request(&generated, generated.enabled))?;
+    println!(
+        "✅ 已注册 MCP：{}（Agent 现可调用该 Bot 的工具）",
+        generated.name
+    );
+    Ok(())
+}
+
+/// 注销 Bot 注册的 MCP（仅当同名且连接匹配时移除，避免误删用户手动配置）。
+///
+/// 返回是否实际移除。不支持 MCP 或无对应注册时返回 Ok(false)。
+async fn unregister_bot_mcp(runtime: &BotRuntime, id: &BotId) -> Result<bool> {
+    if !runtime.supports_mcp(id).await? {
+        return Ok(false);
+    }
+    let generated = runtime.generate_mcp_config(id).await?;
+    let mcp_plugin = McpPlugin::new();
+    let Some(existing) = mcp_plugin
+        .mcp_servers()
+        .into_iter()
+        .find(|server| server.name == generated.name)
+    else {
+        return Ok(false);
+    };
+    if !bot_mcp_connection_matches(&existing, &generated) {
+        return Ok(false);
+    }
+    mcp_plugin.remove_mcp_server(&generated.name)?;
+    Ok(true)
+}
+
+/// 判断既有 MCP server 配置是否与 Bot 生成的 stdio 连接一致。
+///
+/// 与 Desktop `bot_mcp_connection_matches` 逐字对齐，保证两端判定一致。
+fn bot_mcp_connection_matches(existing: &McpServerConfig, generated: &BotMcpConfig) -> bool {
+    existing.resolved_transport() == ResolvedMcpTransport::Stdio
+        && existing.command == generated.command
+        && existing.args == generated.args
+        && existing.endpoint.is_empty()
+        && existing.auth_header.is_empty()
+        && existing.headers.is_empty()
+        && existing.env.is_empty()
+        && existing.tags == generated.tags
+}
+
+/// 由 Bot 生成的 MCP 配置构造注册请求（transport 固定 stdio）。
+///
+/// 与 Desktop `bot_mcp_registration_request` 对齐。
+fn bot_mcp_registration_request(
+    generated: &BotMcpConfig,
+    enabled: bool,
+) -> RegisterMcpServerRequest {
+    RegisterMcpServerRequest {
+        name: generated.name.clone(),
+        command: generated.command.clone(),
+        args: generated.args.clone(),
+        tags: generated.tags.clone(),
+        enabled,
+        options: RegisterMcpServerOptions {
+            transport: Some(McpTransportMode::Stdio),
+            ..Default::default()
+        },
+    }
 }
 
 fn server_health_check(config: &tiangong_config::ServerConfig) -> bool {
