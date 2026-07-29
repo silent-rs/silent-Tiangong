@@ -7,9 +7,8 @@ use tiangong_scheduler::model::{CreateJobRequest, Job, TriggerType, UpdateJobReq
 use tiangong_scheduler::store::JobStore;
 
 /// GET /api/v1/jobs — Job 列表
-#[allow(deprecated)]
 pub async fn list_jobs(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let store = open_store()?;
@@ -27,9 +26,8 @@ pub async fn list_jobs(req: Request) -> Result<Response> {
 }
 
 /// POST /api/v1/jobs — 创建 Job
-#[allow(deprecated)]
 pub async fn create_job(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let body: CreateJobRequest = req.json_parse().await?;
@@ -61,9 +59,8 @@ pub async fn create_job(mut req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/jobs/<id> — Job 详情
-#[allow(deprecated)]
 pub async fn get_job(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -85,9 +82,8 @@ pub async fn get_job(req: Request) -> Result<Response> {
 }
 
 /// PUT /api/v1/jobs/<id> — 更新 Job
-#[allow(deprecated)]
 pub async fn update_job(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -119,9 +115,8 @@ pub async fn update_job(mut req: Request) -> Result<Response> {
 }
 
 /// DELETE /api/v1/jobs/<id> — 删除 Job
-#[allow(deprecated)]
 pub async fn delete_job(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -147,9 +142,8 @@ pub async fn delete_job(req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/jobs/<id>/runs — Job 执行历史
-#[allow(deprecated)]
 pub async fn list_job_runs(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -188,9 +182,8 @@ pub async fn list_job_runs(mut req: Request) -> Result<Response> {
 }
 
 /// POST /api/v1/jobs/<id>/trigger — 手动触发 Job
-#[allow(deprecated)]
 pub async fn trigger_job(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -206,7 +199,7 @@ pub async fn trigger_job(req: Request) -> Result<Response> {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("任务 '{id}' 不存在"))
     })?;
 
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let scheduler_ctx = app_ctx.scheduler_context.clone();
     let job_clone = job.clone();
     tokio::spawn(async move {

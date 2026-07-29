@@ -8,14 +8,13 @@ use crate::auth::{
 };
 
 /// GET /api/v1/sessions — 会话列表
-#[allow(deprecated)]
 pub async fn list_sessions(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_observe(), "查看会话")?;
 
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let app = app_ctx.state.lock().await;
 
     let visible_session_id = (!access.role.can_manage_sessions())
@@ -47,15 +46,14 @@ pub async fn list_sessions(req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/sessions/:id — 会话详情（消息列表）
-#[allow(deprecated)]
 pub async fn get_session(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_observe(), "查看会话")?;
 
     let requested_id: String = req.get_path_params("id")?;
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let (id, core_manager, session_exists) = {
         let app = app_ctx.state.lock().await;
         let id = resolve_visible_session_id(
@@ -101,15 +99,14 @@ pub async fn get_session(req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/sessions/:id/cost — 会话成本详情
-#[allow(deprecated)]
 pub async fn get_session_cost(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_observe(), "查看会话成本")?;
 
     let requested_id: String = req.get_path_params("id")?;
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let (id, core_manager, session_exists) = {
         let app = app_ctx.state.lock().await;
         let id = resolve_visible_session_id(
@@ -141,15 +138,14 @@ pub async fn get_session_cost(req: Request) -> Result<Response> {
 }
 
 /// DELETE /api/v1/sessions/:id — 删除会话
-#[allow(deprecated)]
 pub async fn delete_session(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_manage_sessions(), "删除会话")?;
 
     let id: String = req.get_path_params("id")?;
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let deleted = app_ctx
         .core_backend
         .delete_session(&id)

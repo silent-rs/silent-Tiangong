@@ -121,18 +121,17 @@ impl ServerAppContext {
 /// 共享 Server 上下文
 pub type SharedAppContext = Arc<ServerAppContext>;
 
-/// 认证 Token 包装（用于注入到 Configs 中）
+/// 认证 Token 包装（用于注入到 State 中）
 #[derive(Clone, Debug)]
 pub struct AuthToken(pub Option<String>);
 
-/// 构建完整的 API 路由树，通过 Configs 注入共享状态和 Token
-#[allow(deprecated)]
+/// 构建完整的 API 路由树，通过 State 注入共享状态和 Token
 pub fn build_routes(
     app: SharedAppContext,
     token: Option<String>,
     event_bus: Arc<EventBus>,
-) -> (Route, Configs) {
-    let mut configs = Configs::default();
+) -> (Route, State) {
+    let mut configs = State::default();
     configs.insert(app);
     configs.insert(AuthToken(token));
     configs.insert(ws::SharedEventBus(event_bus));
