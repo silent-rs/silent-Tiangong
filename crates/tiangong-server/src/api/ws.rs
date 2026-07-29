@@ -15,7 +15,7 @@ use crate::remote::event::{EventBus, TiangongEvent};
 use tiangong_core::session::now_text;
 use tiangong_types::{IncomingMessage, MessageContent};
 
-/// 共享的 EventBus 类型（注入到 Configs 中）
+/// 共享的 EventBus 类型（注入到 State 中）
 #[derive(Clone)]
 pub struct SharedEventBus(pub Arc<EventBus>);
 

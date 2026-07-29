@@ -7,12 +7,11 @@ use crate::auth::check_auth;
 ///
 /// 复用 ServerAppContext 持有的共享 MCP plugin 实例（与运行中 core 同一实例），
 /// 确保返回的配置与 core 实际使用的工具状态一致。
-#[allow(deprecated)]
 pub async fn list_mcp(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let servers: Vec<serde_json::Value> = app_ctx
         .mcp_plugin
         .mcp_servers()

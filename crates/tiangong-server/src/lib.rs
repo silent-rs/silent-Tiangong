@@ -21,7 +21,6 @@ use self::remote::backend::ServerCoreBackend;
 use self::remote::event::EventBus;
 
 /// 启动 Server 模式（前台运行，阻塞）
-#[allow(deprecated)]
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -55,7 +54,7 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
 
     let mut route = Route::new_root().append(api_routes);
-    route.set_configs(Some(configs));
+    route.set_state(Some(configs));
 
     // 初始化调度器，恢复已启用的 cron job
     let scheduler_ctx = app.scheduler_context.clone();
@@ -114,7 +113,6 @@ pub struct EmbeddedServerDependencies {
     pub event_bus: Arc<EventBus>,
 }
 
-#[allow(deprecated)]
 pub fn run_embedded(
     host: &str,
     port: u16,
@@ -144,7 +142,7 @@ pub fn run_embedded(
     let (api_routes, configs) = build_routes(app.clone(), token, event_bus);
 
     let mut route = Route::new_root().append(api_routes);
-    route.set_configs(Some(configs));
+    route.set_state(Some(configs));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 

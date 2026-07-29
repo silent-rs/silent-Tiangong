@@ -6,9 +6,8 @@ use crate::auth::check_auth;
 use crate::webhook::model::{CreateWebhookRequest, UpdateWebhookRequest, Webhook, open_store};
 
 /// GET /api/v1/webhooks — Webhook 列表
-#[allow(deprecated)]
 pub async fn list_webhooks(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let store = open_store()?;
@@ -26,9 +25,8 @@ pub async fn list_webhooks(req: Request) -> Result<Response> {
 }
 
 /// POST /api/v1/webhooks — 创建 Webhook
-#[allow(deprecated)]
 pub async fn create_webhook(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let body: CreateWebhookRequest = req.json_parse().await?;
@@ -58,9 +56,8 @@ pub async fn create_webhook(mut req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/webhooks/<id> — Webhook 详情
-#[allow(deprecated)]
 pub async fn get_webhook(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -82,9 +79,8 @@ pub async fn get_webhook(req: Request) -> Result<Response> {
 }
 
 /// PUT /api/v1/webhooks/<id> — 更新 Webhook
-#[allow(deprecated)]
 pub async fn update_webhook(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -116,9 +112,8 @@ pub async fn update_webhook(mut req: Request) -> Result<Response> {
 }
 
 /// DELETE /api/v1/webhooks/<id> — 删除 Webhook
-#[allow(deprecated)]
 pub async fn delete_webhook(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -144,9 +139,8 @@ pub async fn delete_webhook(req: Request) -> Result<Response> {
 }
 
 /// POST /api/v1/webhooks/<id>/trigger — 手动触发 Webhook
-#[allow(deprecated)]
 pub async fn trigger_webhook(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -162,11 +156,10 @@ pub async fn trigger_webhook(req: Request) -> Result<Response> {
         SilentError::business_error(StatusCode::NOT_FOUND, format!("Webhook '{id}' 不存在"))
     })?;
 
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let scheduler_ctx = app_ctx.scheduler_context.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
+        crate::webhook::executor::execute_webhook(app_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({
@@ -177,9 +170,8 @@ pub async fn trigger_webhook(req: Request) -> Result<Response> {
 }
 
 /// GET /api/v1/webhooks/<id>/runs — Webhook 执行历史
-#[allow(deprecated)]
 pub async fn list_webhook_runs(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     let id: String = req.get_path_params("id")?;
@@ -220,7 +212,6 @@ pub async fn list_webhook_runs(mut req: Request) -> Result<Response> {
 /// POST /api/v1/webhooks/<id>/invoke — 外部触发 Webhook（无需认证）
 ///
 /// 通过 webhook id 触发执行。如果配置了 secret，需在请求头 `X-Webhook-Signature` 中传入签名。
-#[allow(deprecated)]
 pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
     let id: String = req.get_path_params("id")?;
     let store = open_store()?;
@@ -269,11 +260,10 @@ pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
         }
     }
 
-    let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let scheduler_ctx = app_ctx.scheduler_context.clone();
+    let app_ctx = req.get_state::<SharedAppContext>()?.clone();
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
+        crate::webhook::executor::execute_webhook(app_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({

@@ -4409,8 +4409,7 @@ pub async fn job_list_runs(
 
 #[tauri::command]
 pub async fn webhook_list() -> Result<Vec<serde_json::Value>, String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let webhooks = store.list().map_err(|e| e.to_string())?;
     Ok(webhooks
         .into_iter()
@@ -4427,10 +4426,9 @@ pub async fn webhook_create(
     secret: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().naive_local().to_string();
-    let webhook = tiangong_scheduler::webhook::model::Webhook {
+    let webhook = tiangong_server::webhook::model::Webhook {
         id: scru128::new().to_string(),
         name,
         description,
@@ -4455,9 +4453,8 @@ pub async fn webhook_update(
     secret: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
-    let req = tiangong_scheduler::webhook::model::UpdateWebhookRequest {
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let req = tiangong_server::webhook::model::UpdateWebhookRequest {
         name,
         description,
         session_id,
@@ -4475,8 +4472,7 @@ pub async fn webhook_update(
 
 #[tauri::command]
 pub async fn webhook_delete(id: String) -> Result<(), String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let deleted = store.delete(&id).map_err(|e| e.to_string())?;
     if !deleted {
         return Err(format!("Webhook '{id}' 不存在"));
@@ -4489,23 +4485,55 @@ pub async fn webhook_trigger(
     id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<serde_json::Value, String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    // 校验 webhook 存在（CRUD 仍直接读写本地 store）
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let webhook = store
         .get(&id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Webhook '{id}' 不存在"))?;
 
-    let ctx = state.create_scheduler_context();
-    let webhook_clone = webhook.clone();
-    tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_webhook(ctx, webhook_clone).await;
-    });
+    // webhook 触发（投递消息到 Core）是 server 的能力：经嵌入 server 的 HTTP 接口执行，
+    // 由 server 用 ServerCoreBackend 投递。需嵌入 server 在线。
+    let server_config = state
+        .with_state_read(|core_state| Ok(core_state.config.server.clone()))
+        .await
+        .map_err(|e| e.to_string())?;
+    if !server_health_check(&server_config) {
+        return Err("Webhook 触发需要先启动内嵌 Server".to_string());
+    }
+    let host = connect_host(&server_config.host);
+    let url = format!(
+        "http://{host}:{}/api/v1/webhooks/{id}/trigger",
+        server_config.port
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
+    let mut request = client.post(&url);
+    if let Some(token) = server_config.auth_token.as_deref() {
+        if !token.trim().is_empty() {
+            request = request.bearer_auth(token);
+        }
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| format!("触发 Webhook 失败：{e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("触发 Webhook 失败：HTTP {status}，{body}"));
+    }
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析触发响应失败：{e}"))?;
 
     Ok(serde_json::json!({
         "webhook_id": webhook.id,
         "session_id": webhook.session_id,
-        "status": "triggered",
+        "status": value.get("status").cloned().unwrap_or(serde_json::json!("triggered")),
     }))
 }
 
@@ -4514,8 +4542,7 @@ pub async fn webhook_list_runs(
     id: String,
     limit: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let store =
-        tiangong_scheduler::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
+    let store = tiangong_server::webhook::store::WebhookStore::open().map_err(|e| e.to_string())?;
     let runs = store
         .list_runs(&id, limit.unwrap_or(20))
         .map_err(|e| e.to_string())?;

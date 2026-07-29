@@ -7,14 +7,13 @@ use tiangong_core::session::now_text;
 use tiangong_types::IncomingMessage;
 
 /// POST /api/v1/messages — 外部 Bot / Connector 统一消息入口
-#[allow(deprecated)]
 pub async fn post_message(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_send_message(), "发送消息")?;
 
-    let app = req.get_config::<SharedAppContext>()?.clone();
+    let app = req.get_state::<SharedAppContext>()?.clone();
     let body: ConnectorMessageRequest = req.json_parse().await?;
     let connector = body
         .connector

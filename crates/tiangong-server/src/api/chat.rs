@@ -10,14 +10,13 @@ use tiangong_core::session::now_text;
 use tiangong_types::{IncomingMessage, MessageContent};
 
 /// POST /api/v1/chat — 发送消息并获取 AI 回复
-#[allow(deprecated)]
 pub async fn chat(mut req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
     let access = extract_remote_access(&req)?;
     ensure_remote_action(&access, access.role.can_send_message(), "发送消息")?;
 
-    let app = req.get_config::<SharedAppContext>()?.clone();
+    let app = req.get_state::<SharedAppContext>()?.clone();
     let body: ChatRequest = req.json_parse().await?;
 
     let mut session_id = if body.session_id.is_none() && access.role.can_manage_sessions() {

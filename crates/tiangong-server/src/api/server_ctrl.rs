@@ -4,9 +4,8 @@ use super::AuthToken;
 use crate::auth::check_auth;
 
 /// POST /api/v1/server/shutdown — 优雅关闭服务
-#[allow(deprecated)]
 pub async fn shutdown(req: Request) -> Result<Response> {
-    let token = req.get_config::<AuthToken>()?.clone();
+    let token = req.get_state::<AuthToken>()?.clone();
     check_auth(&req, token.0.as_deref())?;
 
     tracing::info!("收到 shutdown 请求，准备关闭服务");
