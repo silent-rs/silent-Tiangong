@@ -2,6 +2,7 @@
 description = "允许使用浏览器面板的全部功能。"
 permissions = [
     "allow-browser-open",
+    "allow-browser-open-url",
     "allow-browser-close",
     "allow-browser-hide",
     "allow-browser-set-position",

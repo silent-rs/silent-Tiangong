@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-browser-open-url"
+description = "Enables the browser_open_url command without any pre-configured scope."
+commands.allow = ["browser_open_url"]
+
+[[permission]]
+identifier = "deny-browser-open-url"
+description = "Denies the browser_open_url command without any pre-configured scope."
+commands.deny = ["browser_open_url"]
