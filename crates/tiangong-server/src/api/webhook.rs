@@ -163,10 +163,9 @@ pub async fn trigger_webhook(req: Request) -> Result<Response> {
     })?;
 
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let scheduler_ctx = app_ctx.scheduler_context.clone();
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
+        crate::webhook::executor::execute_webhook(app_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({
@@ -270,10 +269,9 @@ pub async fn invoke_webhook(mut req: Request) -> Result<Response> {
     }
 
     let app_ctx = req.get_config::<SharedAppContext>()?.clone();
-    let scheduler_ctx = app_ctx.scheduler_context.clone();
     let webhook_clone = webhook.clone();
     tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_webhook(scheduler_ctx, webhook_clone).await;
+        crate::webhook::executor::execute_webhook(app_ctx, webhook_clone).await;
     });
 
     Ok(Response::json(&serde_json::json!({

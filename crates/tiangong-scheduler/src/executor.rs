@@ -7,8 +7,6 @@ use async_trait::async_trait;
 
 use crate::model::{Job, JobRun, JobRunStatus, UpdateJobRequest};
 use crate::store::JobStore;
-use crate::webhook::model::{UpdateWebhookRequest, Webhook, WebhookRun, WebhookRunStatus};
-use crate::webhook::store::WebhookStore;
 
 /// 调度器执行上下文，抽象消息发送和会话管理能力
 ///
@@ -33,14 +31,6 @@ pub struct ExecuteParams {
     pub trigger_description: String,
     pub session_id: Option<String>,
     pub payload: String,
-}
-
-/// 执行结果记录方式
-pub enum RunTracker {
-    /// 记录到 JobStore（定时任务）
-    Job { store: JobStore },
-    /// 记录到 WebhookStore（webhook 触发）
-    Webhook { store: WebhookStore },
 }
 
 /// 消息发送器类型：接受 (session_id, message)，仅发送不等结果。
@@ -83,48 +73,20 @@ pub async fn execute_job_with_store(ctx: Arc<dyn SchedulerContext>, job: Job, st
         payload: fresh.payload.clone(),
     };
 
-    execute(ctx, params, RunTracker::Job { store }).await;
-}
-
-/// 执行 webhook 触发
-pub async fn execute_webhook(ctx: Arc<dyn SchedulerContext>, webhook: Webhook) {
-    let store = match WebhookStore::open() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Webhook {} 打开 store 失败：{e}", webhook.id);
-            return;
-        }
-    };
-
-    let fresh = store.get(&webhook.id).ok().flatten().unwrap_or(webhook);
-
-    let params = ExecuteParams {
-        trigger_id: fresh.id.clone(),
-        trigger_name: fresh.name.clone(),
-        trigger_description: fresh.description.clone(),
-        session_id: fresh.session_id.clone(),
-        payload: fresh.payload.clone(),
-    };
-
-    execute(ctx, params, RunTracker::Webhook { store }).await;
-}
-
-/// 触发执行（生产入口）
-async fn execute(ctx: Arc<dyn SchedulerContext>, params: ExecuteParams, tracker: RunTracker) {
     let ctx_clone = ctx.clone();
     let sender: MessageSender = Box::new(move |session_id, message| {
         let ctx = ctx_clone.clone();
         Box::pin(async move { ctx.send_message(&session_id, message).await })
     });
 
-    execute_core(ctx.as_ref(), params, &tracker, &sender).await;
+    execute_core(ctx.as_ref(), params, &store, &sender).await;
 }
 
 /// 核心执行逻辑
 async fn execute_core(
     ctx: &dyn SchedulerContext,
     params: ExecuteParams,
-    tracker: &RunTracker,
+    store: &JobStore,
     sender: &MessageSender,
 ) {
     // 防止同一任务重叠执行
@@ -158,16 +120,22 @@ async fn execute_core(
     };
 
     // 记录开始执行（本轮使用的 session，即便随后失败也保留痕迹）
-    insert_run(tracker, &run_id, &params.trigger_id, &session_id, &now);
-
-    // 构造消息：定时任务与 webhook 使用不同消息头，前端据此区分渲染。
-    // 定时任务保留 `[定时任务触发]` 以兼容历史消息。
-    let header = match tracker {
-        RunTracker::Job { .. } => "[定时任务触发]",
-        RunTracker::Webhook { .. } => "[Webhook触发]",
+    let run = JobRun {
+        id: run_id.clone(),
+        job_id: params.trigger_id.clone(),
+        session_id: session_id.clone(),
+        status: JobRunStatus::Running,
+        started_at: now.clone(),
+        finished_at: None,
+        result_summary: None,
     };
+    if let Err(e) = store.insert_job_run(&run) {
+        tracing::error!("记录 JobRun 失败：{e}");
+    }
+
+    // 构造消息（定时任务专用头，兼容历史消息的前端解析）
     let message = format!(
-        "{header}\n任务名称：{}\n任务描述：{}\n\n{}",
+        "[定时任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
         params.trigger_name, params.trigger_description, params.payload
     );
 
@@ -177,24 +145,38 @@ async fn execute_core(
     let finished_at = chrono::Local::now().naive_local().to_string();
     match result {
         Ok(()) => {
-            // 投递成功后才把新 session_id 写回 job/webhook：失败时新会话很可能尚未
-            // 落盘，立刻绑定会让后续触发因 session_exists==false 反复换新 id，
-            // 彻底丢失关联（见 resolve_session_id 仅按磁盘文件判定）。
+            // 投递成功后才把新 session_id 写回 job：失败时新会话很可能尚未落盘，
+            // 立刻绑定会让后续触发因 session_exists==false 反复换新 id，彻底丢失
+            // 关联（见 resolve_session_id 仅按磁盘文件判定）。
             if created_new {
-                pin_session_to_tracker(tracker, &params.trigger_id, &session_id);
+                let req = UpdateJobRequest {
+                    session_id: Some(session_id.clone()),
+                    ..Default::default()
+                };
+                if let Err(e) = store.update_job(&params.trigger_id, &req) {
+                    tracing::warn!("任务 {} 写回 session_id 失败：{e}", params.trigger_id);
+                } else {
+                    tracing::info!("任务 {} 已绑定会话 {}", params.trigger_id, session_id);
+                }
             }
-            update_run_success(
-                tracker,
+            let _ = store.update_job_run_status(
                 &run_id,
                 &params.trigger_id,
-                &finished_at,
-                "消息已发送至会话",
+                &JobRunStatus::Succeeded,
+                Some(&finished_at),
+                Some("消息已发送至会话"),
             );
             tracing::info!("触发 {} 消息已发送", params.trigger_id);
         }
         Err(e) => {
             let err_msg = format!("发送失败：{e}");
-            update_run_failed(tracker, &run_id, &params.trigger_id, &finished_at, &err_msg);
+            let _ = store.update_job_run_status(
+                &run_id,
+                &params.trigger_id,
+                &JobRunStatus::Failed,
+                Some(&finished_at),
+                Some(&err_msg),
+            );
             tracing::error!("触发 {} 发送失败：{e}", params.trigger_id);
         }
     }
@@ -268,133 +250,6 @@ pub fn validate_cron_schedule(expr: &str) -> anyhow::Result<()> {
     use std::str::FromStr;
     cron::Schedule::from_str(expr).map(|_| ())?;
     Ok(())
-}
-
-// ── 内部方法 ──────────────────────────────────────────────────
-
-/// 将 session_id 写回 job/webhook，确保后续执行复用同一会话
-fn pin_session_to_tracker(tracker: &RunTracker, trigger_id: &str, session_id: &str) {
-    match tracker {
-        RunTracker::Job { store } => {
-            let req = UpdateJobRequest {
-                session_id: Some(session_id.to_string()),
-                ..Default::default()
-            };
-            if let Err(e) = store.update_job(trigger_id, &req) {
-                tracing::warn!("任务 {} 写回 session_id 失败：{e}", trigger_id);
-            } else {
-                tracing::info!("任务 {} 已绑定会话 {}", trigger_id, session_id);
-            }
-        }
-        RunTracker::Webhook { store } => {
-            let req = UpdateWebhookRequest {
-                session_id: Some(session_id.to_string()),
-                ..Default::default()
-            };
-            if let Err(e) = store.update(trigger_id, &req) {
-                tracing::warn!("Webhook {} 写回 session_id 失败：{e}", trigger_id);
-            } else {
-                tracing::info!("Webhook {} 已绑定会话 {}", trigger_id, session_id);
-            }
-        }
-    }
-}
-
-fn insert_run(
-    tracker: &RunTracker,
-    run_id: &str,
-    trigger_id: &str,
-    session_id: &str,
-    started_at: &str,
-) {
-    match tracker {
-        RunTracker::Job { store } => {
-            let run = JobRun {
-                id: run_id.to_string(),
-                job_id: trigger_id.to_string(),
-                session_id: session_id.to_string(),
-                status: JobRunStatus::Running,
-                started_at: started_at.to_string(),
-                finished_at: None,
-                result_summary: None,
-            };
-            if let Err(e) = store.insert_job_run(&run) {
-                tracing::error!("记录 JobRun 失败：{e}");
-            }
-        }
-        RunTracker::Webhook { store } => {
-            let run = WebhookRun {
-                id: run_id.to_string(),
-                webhook_id: trigger_id.to_string(),
-                session_id: session_id.to_string(),
-                status: WebhookRunStatus::Running,
-                started_at: started_at.to_string(),
-                finished_at: None,
-                result_summary: None,
-            };
-            if let Err(e) = store.insert_run(&run) {
-                tracing::error!("记录 WebhookRun 失败：{e}");
-            }
-        }
-    }
-}
-
-fn update_run_success(
-    tracker: &RunTracker,
-    run_id: &str,
-    trigger_id: &str,
-    finished_at: &str,
-    summary: &str,
-) {
-    match tracker {
-        RunTracker::Job { store } => {
-            let _ = store.update_job_run_status(
-                run_id,
-                trigger_id,
-                &JobRunStatus::Succeeded,
-                Some(finished_at),
-                Some(summary),
-            );
-        }
-        RunTracker::Webhook { store } => {
-            let _ = store.update_run_status(
-                run_id,
-                trigger_id,
-                &WebhookRunStatus::Succeeded,
-                Some(finished_at),
-                Some(summary),
-            );
-        }
-    }
-}
-
-fn update_run_failed(
-    tracker: &RunTracker,
-    run_id: &str,
-    trigger_id: &str,
-    finished_at: &str,
-    error: &str,
-) {
-    match tracker {
-        RunTracker::Job { store } => {
-            let _ = store.update_job_run_status(
-                run_id,
-                trigger_id,
-                &JobRunStatus::Failed,
-                Some(finished_at),
-                Some(error),
-            );
-        }
-        RunTracker::Webhook { store } => {
-            let _ = store.update_run_status(
-                run_id,
-                trigger_id,
-                &WebhookRunStatus::Failed,
-                Some(finished_at),
-                Some(error),
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -476,13 +331,7 @@ mod tests {
             payload: "hello".to_string(),
         };
 
-        execute_core(
-            ctx.as_ref(),
-            params,
-            &RunTracker::Job { store },
-            &mock_sender_ok(),
-        )
-        .await;
+        execute_core(ctx.as_ref(), params, &store, &mock_sender_ok()).await;
 
         let reader = JobStore::open_at(store_path).unwrap();
         let runs = reader.list_job_runs("test-job-succeed", 10).unwrap();
@@ -511,7 +360,7 @@ mod tests {
         execute_core(
             ctx.as_ref(),
             params,
-            &RunTracker::Job { store },
+            &store,
             &mock_sender_err("core 不存在"),
         )
         .await;
@@ -566,26 +415,14 @@ mod tests {
 
         let ctx_clone = ctx.clone();
         let h1 = tokio::spawn(async move {
-            execute_core(
-                ctx_clone.as_ref(),
-                params1,
-                &RunTracker::Job { store: store1 },
-                &slow_sender,
-            )
-            .await;
+            execute_core(ctx_clone.as_ref(), params1, &store1, &slow_sender).await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let ctx_clone2 = ctx.clone();
         let h2 = tokio::spawn(async move {
-            execute_core(
-                ctx_clone2.as_ref(),
-                params2,
-                &RunTracker::Job { store: store2 },
-                &mock_sender_ok(),
-            )
-            .await;
+            execute_core(ctx_clone2.as_ref(), params2, &store2, &mock_sender_ok()).await;
         });
 
         h1.await.unwrap();
@@ -614,13 +451,7 @@ mod tests {
             payload: "hello".to_string(),
         };
 
-        execute_core(
-            ctx.as_ref(),
-            params,
-            &RunTracker::Job { store },
-            &mock_sender_ok(),
-        )
-        .await;
+        execute_core(ctx.as_ref(), params, &store, &mock_sender_ok()).await;
 
         let reader = JobStore::open_at(store_path).unwrap();
         let job = reader.get_job("test-job-pin-success").unwrap().unwrap();
@@ -652,7 +483,7 @@ mod tests {
         execute_core(
             ctx.as_ref(),
             params,
-            &RunTracker::Job { store },
+            &store,
             &mock_sender_err("core 投递失败"),
         )
         .await;
@@ -692,13 +523,7 @@ mod tests {
             payload: "hello".to_string(),
         };
 
-        execute_core(
-            ctx.as_ref(),
-            params,
-            &RunTracker::Job { store },
-            &mock_sender_ok(),
-        )
-        .await;
+        execute_core(ctx.as_ref(), params, &store, &mock_sender_ok()).await;
 
         let reader = JobStore::open_at(store_path).unwrap();
         let job = reader.get_job("test-job-reuse").unwrap().unwrap();
@@ -713,23 +538,6 @@ mod tests {
                 Ok(())
             })
         })
-    }
-
-    fn setup_webhook_store(dir: &TempDir, webhook_id: &str) -> (WebhookStore, Webhook) {
-        let store = WebhookStore::open_at(dir.path().to_path_buf()).unwrap();
-        let webhook = Webhook {
-            id: webhook_id.to_string(),
-            name: "测试触发".to_string(),
-            description: "测试描述".to_string(),
-            session_id: None,
-            payload: "执行内容".to_string(),
-            secret: None,
-            enabled: true,
-            created_at: chrono::Local::now().naive_local().to_string(),
-            updated_at: chrono::Local::now().naive_local().to_string(),
-        };
-        store.insert(&webhook).unwrap();
-        (store, webhook)
     }
 
     // 定时任务消息头保持 `[定时任务触发]`，兼容历史消息的前端解析。
@@ -753,7 +561,7 @@ mod tests {
         execute_core(
             ctx.as_ref(),
             params,
-            &RunTracker::Job { store },
+            &store,
             &mock_sender_capture(sent.clone()),
         )
         .await;
@@ -765,47 +573,7 @@ mod tests {
             "定时任务消息应以 [定时任务触发] 开头：{}",
             sent[0]
         );
-        assert!(!sent[0].contains("[Webhook触发]"));
         assert!(sent[0].contains("任务名称：夜间巡检"));
         assert!(sent[0].contains("读取监控数据"));
-    }
-
-    // webhook 消息头为 `[Webhook触发]`，前端据此与定时任务区分渲染。
-    #[tokio::test]
-    async fn webhook_message_uses_webhook_header() {
-        let dir = TempDir::new().unwrap();
-        let (store, _webhook) = setup_webhook_store(&dir, "test-webhook-header");
-
-        let ctx = Arc::new(MockContext {
-            sessions: StdMutex::new(vec![]),
-        });
-        let sent = Arc::new(StdMutex::new(Vec::<String>::new()));
-        let params = ExecuteParams {
-            trigger_id: "test-webhook-header".to_string(),
-            trigger_name: "推送构建".to_string(),
-            trigger_description: "GitHub 推送".to_string(),
-            session_id: None,
-            payload: "运行部署".to_string(),
-        };
-
-        execute_core(
-            ctx.as_ref(),
-            params,
-            &RunTracker::Webhook { store },
-            &mock_sender_capture(sent.clone()),
-        )
-        .await;
-
-        let sent = sent.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1);
-        assert!(
-            sent[0].starts_with("[Webhook触发]\n"),
-            "webhook 消息应以 [Webhook触发] 开头：{}",
-            sent[0]
-        );
-        assert!(!sent[0].contains("[定时任务触发]"));
-        assert!(sent[0].contains("任务名称：推送构建"));
-        assert!(sent[0].contains("任务描述：GitHub 推送"));
-        assert!(sent[0].contains("运行部署"));
     }
 }

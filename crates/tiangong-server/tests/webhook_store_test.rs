@@ -1,6 +1,6 @@
 use tempfile::TempDir;
-use tiangong_scheduler::webhook::model::{UpdateWebhookRequest, Webhook};
-use tiangong_scheduler::webhook::store::WebhookStore;
+use tiangong_server::webhook::model::{UpdateWebhookRequest, Webhook};
+use tiangong_server::webhook::store::WebhookStore;
 
 fn setup() -> (TempDir, WebhookStore) {
     let dir = TempDir::new().unwrap();
@@ -109,7 +109,7 @@ fn update_webhook_preserves_other_fields() {
 
 #[test]
 fn webhook_run_lifecycle() {
-    use tiangong_scheduler::webhook::model::{WebhookRun, WebhookRunStatus};
+    use tiangong_server::webhook::model::{WebhookRun, WebhookRunStatus};
 
     let (_dir, store) = setup();
     store.insert(&sample_webhook("wh-r")).unwrap();

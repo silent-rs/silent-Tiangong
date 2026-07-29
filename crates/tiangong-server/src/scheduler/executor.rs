@@ -7,14 +7,6 @@ pub async fn execute_job(ctx: Arc<dyn SchedulerContext>, job: tiangong_scheduler
     tiangong_scheduler::executor::execute_job(ctx, job).await;
 }
 
-/// 执行 webhook 触发（委托给 tiangong_scheduler::executor）
-pub async fn execute_webhook(
-    ctx: Arc<dyn SchedulerContext>,
-    webhook: crate::webhook::model::Webhook,
-) {
-    tiangong_scheduler::executor::execute_webhook(ctx, webhook).await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
