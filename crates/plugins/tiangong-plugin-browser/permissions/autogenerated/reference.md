@@ -5,6 +5,7 @@
 #### This default permission set includes the following:
 
 - `allow-browser-open`
+- `allow-browser-open-url`
 - `allow-browser-close`
 - `allow-browser-hide`
 - `allow-browser-set-position`
@@ -344,6 +345,32 @@ Enables the browser_open command without any pre-configured scope.
 <td>
 
 Denies the browser_open command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-open-url`
+
+</td>
+<td>
+
+Enables the browser_open_url command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-open-url`
+
+</td>
+<td>
+
+Denies the browser_open_url command without any pre-configured scope.
 
 </td>
 </tr>
