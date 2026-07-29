@@ -50,7 +50,7 @@ pub async fn create_job(mut req: Request) -> Result<Response> {
     };
 
     let store = open_store()?;
-    store.insert_job(&job).map_err(|e| {
+    let job = store.insert_job(&job).map_err(|e| {
         SilentError::business_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("创建任务失败：{e}"),

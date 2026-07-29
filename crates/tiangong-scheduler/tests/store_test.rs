@@ -27,13 +27,67 @@ fn sample_job(id: &str) -> Job {
 #[test]
 fn insert_and_get_job() {
     let (_dir, store) = setup();
-    let job = sample_job("job-1");
-    store.insert_job(&job).unwrap();
+    let mut job = sample_job("job-1");
+    job.name = "  第一行\r\n第二行\n\n第三行  ".to_string();
+    job.description = " 描述一\r描述二 ".to_string();
+    job.payload = "执行第一行\r\n执行第二行".to_string();
+    let saved = store.insert_job(&job).unwrap();
+
+    assert_eq!(saved.name, "第一行 第二行 第三行");
+    assert_eq!(saved.description, "描述一 描述二");
+    assert_eq!(saved.payload, "执行第一行\r\n执行第二行");
 
     let got = store.get_job("job-1").unwrap().unwrap();
     assert_eq!(got.id, "job-1");
-    assert_eq!(got.name, "测试任务");
+    assert_eq!(got.name, "第一行 第二行 第三行");
+    assert_eq!(got.description, "描述一 描述二");
+    assert_eq!(got.payload, "执行第一行\r\n执行第二行");
     assert!(got.session_id.is_none());
+
+    let mut empty_job = sample_job("empty-name");
+    empty_job.name = " \r\n ".to_string();
+    let error = store.insert_job(&empty_job).unwrap_err().to_string();
+    assert!(error.contains("任务名称"), "错误应指出空字段：{error}");
+}
+
+#[test]
+fn update_job_normalizes_display_fields_without_changing_payload() {
+    let (_dir, store) = setup();
+    store
+        .insert_job(&sample_job("job-normalize-update"))
+        .unwrap();
+
+    store
+        .update_job(
+            "job-normalize-update",
+            &UpdateJobRequest {
+                name: Some(" 新版\n任务 ".to_string()),
+                description: Some(" 描述一\r\n\r描述二 ".to_string()),
+                payload: Some("执行第一行\n执行第二行".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let job = store.get_job("job-normalize-update").unwrap().unwrap();
+    assert_eq!(job.name, "新版 任务");
+    assert_eq!(job.description, "描述一 描述二");
+    assert_eq!(job.payload, "执行第一行\n执行第二行");
+
+    let error = store
+        .update_job(
+            "job-normalize-update",
+            &UpdateJobRequest {
+                description: Some(" \n\r ".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("任务描述"), "错误应指出空字段：{error}");
+
+    let job = store.get_job("job-normalize-update").unwrap().unwrap();
+    assert_eq!(job.description, "描述一 描述二");
 }
 
 #[test]

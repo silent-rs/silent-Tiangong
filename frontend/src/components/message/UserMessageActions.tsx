@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Pencil, Copy, Check } from "lucide-react";
 
-export function UserMessageActions({ text, messageId, runStatus, canEdit, onStartEdit }: {
+export function UserMessageActions({ text, messageId, runStatus, canEdit, showEdit = true, onStartEdit }: {
   text: string; messageId: string; runStatus: string; canEdit: boolean;
+  showEdit?: boolean;
   onStartEdit: (messageId: string, text: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -17,9 +18,11 @@ export function UserMessageActions({ text, messageId, runStatus, canEdit, onStar
       <button onClick={handleCopy} className={btnClass} title={copied ? "已复制" : "复制"}>
         {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
-      <button onClick={() => onStartEdit(messageId, text)} className={`${btnClass} ${(!idle || !canEdit) ? 'opacity-30 cursor-not-allowed' : ''}`} title={!canEdit ? "已压缩消息无法编辑" : !idle ? "执行中无法编辑" : "编辑并重发"} disabled={!idle || !canEdit}>
-        <Pencil className="w-3.5 h-3.5" />
-      </button>
+      {showEdit && (
+        <button onClick={() => onStartEdit(messageId, text)} className={`${btnClass} ${(!idle || !canEdit) ? 'opacity-30 cursor-not-allowed' : ''}`} title={!canEdit ? "已压缩消息无法编辑" : !idle ? "执行中无法编辑" : "编辑并重发"} disabled={!idle || !canEdit}>
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
     </div>
   );
 }

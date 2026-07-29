@@ -26,6 +26,7 @@ import {
   attachmentsFromContentBlocks,
   estimatedBase64Size,
 } from '@/utils/attachments';
+import { parseScheduledTaskMessage } from '@/utils/scheduledTaskMessage';
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
@@ -258,6 +259,18 @@ export function MessageList() {
       if (group.type === "user") {
         const msg = group.messages[0];
         const hasMedia = msg.media?.length || hasMediaBlocks(msg);
+        const scheduledTask = parseScheduledTaskMessage(textContent(msg));
+        if (scheduledTask) {
+          const textLength = scheduledTask.name.length
+            + scheduledTask.description.length
+            + scheduledTask.payload.length;
+          const explicitLines = scheduledTask.payload.split(/\r?\n/).length;
+          const contentHeight = Math.min(
+            Math.max(explicitLines, Math.ceil(textLength / 48)) * 20,
+            360,
+          );
+          return 140 + contentHeight + (hasMedia ? 220 : 0);
+        }
         return hasMedia ? 300 : 80;
       }
       if (group.type === "worker") return 120;
@@ -467,12 +480,13 @@ export function MessageList() {
   // 编辑相关回调
   const handleStartEdit = useCallback((messageId: string, text: string) => {
     if (runStatus !== "idle" || !activeSessionId) return;
+    const msg = messages.find(m => m.id === messageId);
+    if (msg && parseScheduledTaskMessage(textContent(msg))) return;
     setEditingMessageId(messageId);
     setEditingSessionId(activeSessionId);
     setEditingContent(text);
     editingRevisionRef.current = 0;
     editingGenerationRef.current += 1;
-    const msg = messages.find(m => m.id === messageId);
     if (msg) {
       editingBaseContentRef.current = msg.content.map((block) => structuredClone(block));
       const mediaAttachments = attachmentsFromContentBlocks(
@@ -636,7 +650,9 @@ export function MessageList() {
   const userPreviews = useMemo(
     () => userGroupIndices.map(idx => {
       const raw = textContent(completedGroups[idx].messages[0]);
-      return (raw.length > 15 ? raw.slice(0, 15) + '...' : raw) || '(空消息)';
+      const scheduledTask = parseScheduledTaskMessage(raw);
+      const preview = scheduledTask ? `定时：${scheduledTask.name || '未命名任务'}` : raw;
+      return (preview.length > 15 ? preview.slice(0, 15) + '...' : preview) || '(空消息)';
     }),
     [userGroupIndices, completedGroups],
   );
