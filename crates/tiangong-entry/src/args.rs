@@ -6,6 +6,7 @@ use tiangong_plugin_mcp::McpTransportMode;
 #[derive(Debug, Parser)]
 #[command(
     name = "tiangong",
+    version,
     disable_help_subcommand = true,
     arg_required_else_help = false,
     about = "天工应用入口"
