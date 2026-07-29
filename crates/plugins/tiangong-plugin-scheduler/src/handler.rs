@@ -100,9 +100,10 @@ impl SchedulerPlugin {
             updated_at: now,
         };
 
-        if let Err(e) = store.insert_job(&job) {
-            return io_error("写入任务", e);
-        }
+        let job = match store.insert_job(&job) {
+            Ok(job) => job,
+            Err(e) => return io_error("写入任务", e),
+        };
 
         let output = json!({
             "id": job.id,

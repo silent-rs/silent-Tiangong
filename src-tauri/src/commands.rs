@@ -4311,7 +4311,7 @@ pub async fn job_create(
         created_at: now.clone(),
         updated_at: now,
     };
-    store.insert_job(&job).map_err(|e| e.to_string())?;
+    let job = store.insert_job(&job).map_err(|e| e.to_string())?;
     Ok(serde_json::to_value(job).unwrap())
 }
 
