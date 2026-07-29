@@ -10187,9 +10187,11 @@ name = "tiangong-entry"
 version = "0.13.3"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "dialoguer",
  "libc",
+ "minisign-verify",
  "qrcode",
  "reqwest 0.13.4",
  "semver",
