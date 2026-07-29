@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::model::{Job, JobRun, JobRunStatus, UpdateJobRequest};
 
@@ -40,8 +40,8 @@ impl JobStore {
 
     pub fn insert_job(&self, job: &Job) -> Result<Job> {
         let mut job = job.clone();
-        job.name = normalize_required_single_line("任务名称", &job.name)?;
-        job.description = normalize_required_single_line("任务描述", &job.description)?;
+        job.name = crate::normalize_required_single_line("任务名称", &job.name)?;
+        job.description = crate::normalize_required_single_line("任务描述", &job.description)?;
         let mut jobs = self.load_jobs()?;
         jobs.push(job.clone());
         self.save_jobs(&jobs)?;
@@ -75,12 +75,12 @@ impl JobStore {
         let name = req
             .name
             .as_deref()
-            .map(|value| normalize_required_single_line("任务名称", value))
+            .map(|value| crate::normalize_required_single_line("任务名称", value))
             .transpose()?;
         let description = req
             .description
             .as_deref()
-            .map(|value| normalize_required_single_line("任务描述", value))
+            .map(|value| crate::normalize_required_single_line("任务描述", value))
             .transpose()?;
         job.updated_at = now;
         if let Some(v) = name {
@@ -198,21 +198,6 @@ impl JobStore {
         atomic_write(&path, &content).with_context(|| format!("写入 {} 失败", path.display()))?;
         Ok(())
     }
-}
-
-fn normalize_required_single_line(field: &str, value: &str) -> Result<String> {
-    let normalized = value
-        .split(['\r', '\n'])
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if normalized.is_empty() {
-        bail!("{field}不能为空");
-    }
-
-    Ok(normalized)
 }
 
 fn scheduler_dir() -> PathBuf {

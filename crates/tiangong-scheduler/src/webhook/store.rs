@@ -13,7 +13,11 @@ pub struct WebhookStore {
 impl WebhookStore {
     /// 打开或创建存储目录
     pub fn open() -> Result<Self> {
-        let base = webhook_dir();
+        Self::open_at(webhook_dir())
+    }
+
+    /// 在指定目录打开或创建存储（供测试用临时目录隔离）
+    pub fn open_at(base: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&base)
             .with_context(|| format!("创建 webhook 目录失败: {}", base.display()))?;
         let runs_dir = base.join("runs");
@@ -31,8 +35,12 @@ impl WebhookStore {
     // ── Webhook CRUD ──────────────────────────────────────────────
 
     pub fn insert(&self, webhook: &Webhook) -> Result<()> {
+        let mut webhook = webhook.clone();
+        webhook.name = crate::normalize_required_single_line("任务名称", &webhook.name)?;
+        webhook.description =
+            crate::normalize_required_single_line("任务描述", &webhook.description)?;
         let mut webhooks = self.load_webhooks()?;
-        webhooks.push(webhook.clone());
+        webhooks.push(webhook);
         self.save_webhooks(&webhooks)
     }
 
@@ -53,12 +61,22 @@ impl WebhookStore {
         let Some(webhook) = webhooks.iter_mut().find(|w| w.id == id) else {
             return Ok(false);
         };
+        let name = req
+            .name
+            .as_deref()
+            .map(|value| crate::normalize_required_single_line("任务名称", value))
+            .transpose()?;
+        let description = req
+            .description
+            .as_deref()
+            .map(|value| crate::normalize_required_single_line("任务描述", value))
+            .transpose()?;
         webhook.updated_at = now;
-        if let Some(ref v) = req.name {
-            webhook.name = v.clone();
+        if let Some(v) = name {
+            webhook.name = v;
         }
-        if let Some(ref v) = req.description {
-            webhook.description = v.clone();
+        if let Some(v) = description {
+            webhook.description = v;
         }
         if let Some(ref v) = req.session_id {
             webhook.session_id = Some(v.clone());

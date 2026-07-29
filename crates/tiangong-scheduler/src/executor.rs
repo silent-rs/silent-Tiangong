@@ -160,9 +160,14 @@ async fn execute_core(
     // 记录开始执行（本轮使用的 session，即便随后失败也保留痕迹）
     insert_run(tracker, &run_id, &params.trigger_id, &session_id, &now);
 
-    // 构造消息
+    // 构造消息：定时任务与 webhook 使用不同消息头，前端据此区分渲染。
+    // 定时任务保留 `[定时任务触发]` 以兼容历史消息。
+    let header = match tracker {
+        RunTracker::Job { .. } => "[定时任务触发]",
+        RunTracker::Webhook { .. } => "[Webhook触发]",
+    };
     let message = format!(
-        "[定时任务触发]\n任务名称：{}\n任务描述：{}\n\n{}",
+        "{header}\n任务名称：{}\n任务描述：{}\n\n{}",
         params.trigger_name, params.trigger_description, params.payload
     );
 
@@ -698,5 +703,109 @@ mod tests {
         let reader = JobStore::open_at(store_path).unwrap();
         let job = reader.get_job("test-job-reuse").unwrap().unwrap();
         assert_eq!(job.session_id.as_deref(), Some(existing_session));
+    }
+
+    fn mock_sender_capture(messages: Arc<StdMutex<Vec<String>>>) -> MessageSender {
+        Box::new(move |_sid, msg| {
+            let messages = messages.clone();
+            Box::pin(async move {
+                messages.lock().unwrap().push(msg);
+                Ok(())
+            })
+        })
+    }
+
+    fn setup_webhook_store(dir: &TempDir, webhook_id: &str) -> (WebhookStore, Webhook) {
+        let store = WebhookStore::open_at(dir.path().to_path_buf()).unwrap();
+        let webhook = Webhook {
+            id: webhook_id.to_string(),
+            name: "测试触发".to_string(),
+            description: "测试描述".to_string(),
+            session_id: None,
+            payload: "执行内容".to_string(),
+            secret: None,
+            enabled: true,
+            created_at: chrono::Local::now().naive_local().to_string(),
+            updated_at: chrono::Local::now().naive_local().to_string(),
+        };
+        store.insert(&webhook).unwrap();
+        (store, webhook)
+    }
+
+    // 定时任务消息头保持 `[定时任务触发]`，兼容历史消息的前端解析。
+    #[tokio::test]
+    async fn job_message_uses_scheduled_task_header() {
+        let dir = TempDir::new().unwrap();
+        let (store, _job) = setup_job_store(&dir, "test-job-header");
+
+        let ctx = Arc::new(MockContext {
+            sessions: StdMutex::new(vec![]),
+        });
+        let sent = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let params = ExecuteParams {
+            trigger_id: "test-job-header".to_string(),
+            trigger_name: "夜间巡检".to_string(),
+            trigger_description: "检查服务状态".to_string(),
+            session_id: None,
+            payload: "读取监控数据".to_string(),
+        };
+
+        execute_core(
+            ctx.as_ref(),
+            params,
+            &RunTracker::Job { store },
+            &mock_sender_capture(sent.clone()),
+        )
+        .await;
+
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].starts_with("[定时任务触发]\n"),
+            "定时任务消息应以 [定时任务触发] 开头：{}",
+            sent[0]
+        );
+        assert!(!sent[0].contains("[Webhook触发]"));
+        assert!(sent[0].contains("任务名称：夜间巡检"));
+        assert!(sent[0].contains("读取监控数据"));
+    }
+
+    // webhook 消息头为 `[Webhook触发]`，前端据此与定时任务区分渲染。
+    #[tokio::test]
+    async fn webhook_message_uses_webhook_header() {
+        let dir = TempDir::new().unwrap();
+        let (store, _webhook) = setup_webhook_store(&dir, "test-webhook-header");
+
+        let ctx = Arc::new(MockContext {
+            sessions: StdMutex::new(vec![]),
+        });
+        let sent = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let params = ExecuteParams {
+            trigger_id: "test-webhook-header".to_string(),
+            trigger_name: "推送构建".to_string(),
+            trigger_description: "GitHub 推送".to_string(),
+            session_id: None,
+            payload: "运行部署".to_string(),
+        };
+
+        execute_core(
+            ctx.as_ref(),
+            params,
+            &RunTracker::Webhook { store },
+            &mock_sender_capture(sent.clone()),
+        )
+        .await;
+
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].starts_with("[Webhook触发]\n"),
+            "webhook 消息应以 [Webhook触发] 开头：{}",
+            sent[0]
+        );
+        assert!(!sent[0].contains("[定时任务触发]"));
+        assert!(sent[0].contains("任务名称：推送构建"));
+        assert!(sent[0].contains("任务描述：GitHub 推送"));
+        assert!(sent[0].contains("运行部署"));
     }
 }
