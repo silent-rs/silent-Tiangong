@@ -3,9 +3,10 @@ import { findTextOccurrences } from "@/utils/search";
 import { HighlightText } from "../HighlightText";
 import { MentionChip } from "../MentionChip";
 import { MentionEditor, type MentionEditorHandle } from "../MentionEditor";
-import { Clock3, X, Paperclip } from "lucide-react";
+import { Clock3, Webhook as WebhookIcon, X, Paperclip } from "lucide-react";
 import { resolveAttachmentUrl, type Attachment } from "@/utils/attachments";
 import { parseScheduledTaskMessage } from "@/utils/scheduledTaskMessage";
+import { parseWebhookMessage } from "@/utils/webhookMessage";
 import { textContent } from "@/api/tauri";
 import { hasMention, parseBlocks } from "@/utils/mentionBlocks";
 import { formatMessageTime } from "./utils";
@@ -34,8 +35,9 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
   const message = group.messages[0];
   const messageText = textContent(message);
   const scheduledTask = parseScheduledTaskMessage(messageText);
+  const webhook = parseWebhookMessage(messageText);
   const voiceInfo = voiceMessages[message.id];
-  const isEditing = editingMessageId === message.id && !scheduledTask;
+  const isEditing = editingMessageId === message.id && !scheduledTask && !webhook;
   const searchQuery = useSearchStore((s) => s.searchQuery);
   const currentMessageId = useSearchStore((s) => s.currentMessageId);
   const currentMatchStart = useSearchStore((s) => s.currentMatchStart);
@@ -149,36 +151,43 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
         </div>
       ) : (
         <div className="flex justify-end" title={formatMessageTime(message.created_at)}>
-          {scheduledTask ? (
-            <div className="w-full max-w-[92%] overflow-hidden rounded-lg border border-border/70 bg-card text-foreground shadow-sm sm:max-w-[85%]">
-              <div className="flex items-start gap-2.5 bg-muted/35 px-3 py-2.5">
-                <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-medium text-muted-foreground">定时任务</p>
-                  <p className="mt-0.5 break-words text-sm font-medium">
-                    {scheduledTask.name
-                      ? renderUserText(scheduledTask.name, scheduledTask.offsets.name)
-                      : '未命名任务'}
-                  </p>
-                  {scheduledTask.description && (
-                    <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
-                      {renderUserText(scheduledTask.description, scheduledTask.offsets.description)}
-                    </p>
-                  )}
+          {scheduledTask || webhook ? (
+            (() => {
+              const data = scheduledTask ?? webhook!;
+              return (
+                <div className="w-full max-w-[92%] overflow-hidden rounded-lg border border-border/70 bg-card text-foreground shadow-sm sm:max-w-[85%]">
+                  <div className="flex items-start gap-2.5 bg-muted/35 px-3 py-2.5">
+                    {webhook
+                      ? <WebhookIcon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      : <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-medium text-muted-foreground">{webhook ? 'Webhook 触发' : '定时任务'}</p>
+                      <p className="mt-0.5 break-words text-sm font-medium">
+                        {data.name
+                          ? renderUserText(data.name, data.offsets.name)
+                          : webhook ? '未命名触发' : '未命名任务'}
+                      </p>
+                      {data.description && (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                          {renderUserText(data.description, data.offsets.description)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="border-t border-border/60 px-3 py-2.5">
+                    <p className="mb-1 text-[11px] font-medium text-muted-foreground">执行内容</p>
+                    <ContentMedia message={message} />
+                    {data.payload ? (
+                      <p className="whitespace-pre-wrap break-words text-sm leading-6">
+                        {renderUserText(data.payload, data.offsets.payload)}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">无执行内容</p>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div className="border-t border-border/60 px-3 py-2.5">
-                <p className="mb-1 text-[11px] font-medium text-muted-foreground">执行内容</p>
-                <ContentMedia message={message} />
-                {scheduledTask.payload ? (
-                  <p className="whitespace-pre-wrap break-words text-sm leading-6">
-                    {renderUserText(scheduledTask.payload, scheduledTask.offsets.payload)}
-                  </p>
-                ) : (
-                  <p className="text-sm text-muted-foreground">无执行内容</p>
-                )}
-              </div>
-            </div>
+              );
+            })()
           ) : (
             <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-foreground">
               {voiceInfo ? (
@@ -195,7 +204,7 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
       )}
       {messageText && !isEditing && (
         <div className="flex justify-end">
-          <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask} onStartEdit={onStartEdit} />
+          <UserMessageActions text={messageText} messageId={message.id} runStatus={runStatus} canEdit={!nonEditableIds.has(message.id)} showEdit={!scheduledTask && !webhook} onStartEdit={onStartEdit} />
         </div>
       )}
     </div>

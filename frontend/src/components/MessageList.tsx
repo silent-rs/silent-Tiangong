@@ -27,6 +27,7 @@ import {
   estimatedBase64Size,
 } from '@/utils/attachments';
 import { parseScheduledTaskMessage } from '@/utils/scheduledTaskMessage';
+import { parseWebhookMessage } from '@/utils/webhookMessage';
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
@@ -260,11 +261,13 @@ export function MessageList() {
         const msg = group.messages[0];
         const hasMedia = msg.media?.length || hasMediaBlocks(msg);
         const scheduledTask = parseScheduledTaskMessage(textContent(msg));
-        if (scheduledTask) {
-          const textLength = scheduledTask.name.length
-            + scheduledTask.description.length
-            + scheduledTask.payload.length;
-          const explicitLines = scheduledTask.payload.split(/\r?\n/).length;
+        const webhook = parseWebhookMessage(textContent(msg));
+        const structured = scheduledTask ?? webhook;
+        if (structured) {
+          const textLength = structured.name.length
+            + structured.description.length
+            + structured.payload.length;
+          const explicitLines = structured.payload.split(/\r?\n/).length;
           const contentHeight = Math.min(
             Math.max(explicitLines, Math.ceil(textLength / 48)) * 20,
             360,
@@ -481,7 +484,7 @@ export function MessageList() {
   const handleStartEdit = useCallback((messageId: string, text: string) => {
     if (runStatus !== "idle" || !activeSessionId) return;
     const msg = messages.find(m => m.id === messageId);
-    if (msg && parseScheduledTaskMessage(textContent(msg))) return;
+    if (msg && (parseScheduledTaskMessage(textContent(msg)) || parseWebhookMessage(textContent(msg)))) return;
     setEditingMessageId(messageId);
     setEditingSessionId(activeSessionId);
     setEditingContent(text);
@@ -651,7 +654,12 @@ export function MessageList() {
     () => userGroupIndices.map(idx => {
       const raw = textContent(completedGroups[idx].messages[0]);
       const scheduledTask = parseScheduledTaskMessage(raw);
-      const preview = scheduledTask ? `定时：${scheduledTask.name || '未命名任务'}` : raw;
+      const webhook = parseWebhookMessage(raw);
+      const preview = scheduledTask
+        ? `定时：${scheduledTask.name || '未命名任务'}`
+        : webhook
+          ? `Webhook：${webhook.name || '未命名触发'}`
+          : raw;
       return (preview.length > 15 ? preview.slice(0, 15) + '...' : preview) || '(空消息)';
     }),
     [userGroupIndices, completedGroups],
