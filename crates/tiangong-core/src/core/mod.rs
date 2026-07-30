@@ -129,11 +129,13 @@ impl TiangongCore {
             if only_if_default && !is_default_title(&session.title) {
                 return Ok(());
             }
-            session.title = title;
+            session.title = title.clone();
             session.updated_at = tiangong_types::now_text();
             session
                 .try_persist_to_disk()
                 .map_err(|_| CoreError::WorkerStopped)?;
+            // 空闲时也发 TitleChanged，让前端统一经事件更新标题（手动改空闲会话同样通知）。
+            let _ = self.stream_tx.send(StreamEvent::TitleChanged { title });
             Ok(())
         }
     }

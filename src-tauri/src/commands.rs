@@ -570,7 +570,6 @@ pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_i
 #[tauri::command]
 pub async fn update_session_title(
     title: String,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     if title.trim().is_empty() {
@@ -589,10 +588,10 @@ pub async fn update_session_title(
         return Err("活动会话已切换，请重新修改标题".to_string());
     }
     // 统一经 CoreManager（有 live Core 时委托 Core 走 turn 安全写入，否则直写盘）。
+    // 标题变更通知由 Core 统一发 TitleChanged 事件，前端据此更新，不再 emit sessions_updated。
     state
         .core_manager
         .set_core_title(&session_id, title, false)?;
-    let _ = app.emit("sessions_updated", &());
     Ok(())
 }
 
@@ -983,10 +982,10 @@ pub(crate) fn start_stream_consumer(
                 continue;
             }
 
-            // 标题变更：通知类事件，不触碰消息投递临界区，转发并刷新会话列表。
+            // 标题变更：通知类事件，不触碰消息投递临界区，只转发流事件。
+            // 前端收到 title_changed 后直接更新内存中对应会话标题，无需整表刷新。
             if matches!(&session_event, StreamEvent::TitleChanged { .. }) {
                 emit_session_stream_event(&app, &session_id, &session_event);
-                let _ = app.emit("sessions_updated", &());
                 continue;
             }
 
