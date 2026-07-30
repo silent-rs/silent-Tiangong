@@ -12,8 +12,9 @@ use tauri::{
 
 use crate::bridge::BRIDGE_SCRIPT;
 use crate::types::{
-    BrowserEvent, BrowserEventsEvent, BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse,
-    BrowserTab, BrowserTabsSnapshot, HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
+    BrowserEvent, BrowserEventsEvent, BrowserNavigationStateEvent, BrowserNavigationStateKind,
+    BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabsSnapshot,
+    HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
 /// 规范化标识符用于 webview label（避免特殊字符）。
@@ -41,6 +42,51 @@ fn webview_label(session_id: &str, tab_id: &str) -> String {
 const MIN_ZOOM: f64 = 0.25;
 /// 缩放上限：避免 WebKitGTK 高倍率渲染锯齿
 const MAX_ZOOM: f64 = 5.0;
+/// 天工统一判定页面加载异常的固定截止时间。
+const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PAGE_LOAD_ERROR_MESSAGE: &str = "页面未能在 30 秒内完成加载";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationPhase {
+    Loading,
+    Loaded,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct TabNavigationState {
+    navigation_id: u64,
+    requested_url: String,
+    started_url: Option<String>,
+    final_url: Option<String>,
+    phase: NavigationPhase,
+    internal_error_url: Option<String>,
+}
+
+struct NavigationSignal {
+    state: Mutex<TabNavigationState>,
+    cvar: Condvar,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NavigationTicket {
+    pub tab_id: String,
+    pub navigation_id: u64,
+}
+
+fn navigation_signal(url: &str) -> Arc<NavigationSignal> {
+    Arc::new(NavigationSignal {
+        state: Mutex::new(TabNavigationState {
+            navigation_id: 0,
+            requested_url: url.to_string(),
+            started_url: None,
+            final_url: Some(url.to_string()),
+            phase: NavigationPhase::Loaded,
+            internal_error_url: None,
+        }),
+        cvar: Condvar::new(),
+    })
+}
 
 /// 规范化 URL 用于比较：去除末尾的 /，统一 https://
 fn normalize_url_for_compare(url: &str) -> String {
@@ -52,8 +98,8 @@ fn normalize_url_for_compare(url: &str) -> String {
 pub struct BrowserState {
     /// 每个标签页对应的独立 WebView 实例
     pub webviews: HashMap<String, Webview<Wry>>,
-    /// 每个标签页的页面加载完成信号
-    pub page_loaded_signals: HashMap<String, Arc<(Mutex<bool>, Condvar)>>,
+    /// 每个标签页当前导航的编号、状态和等待信号。
+    navigation_signals: HashMap<String, Arc<NavigationSignal>>,
     /// 每个标签页的最近一次页面快照
     pub latest_snapshots: HashMap<String, BrowserPageSnapshot>,
     /// 轮询检测的最后一次已知 URL
@@ -110,7 +156,7 @@ impl BrowserState {
     pub(crate) fn new_empty(session_id: String, shared: Arc<BrowserSharedState>) -> Self {
         Self {
             webviews: HashMap::new(),
-            page_loaded_signals: HashMap::new(),
+            navigation_signals: HashMap::new(),
             latest_snapshots: HashMap::new(),
             last_known_url: String::new(),
             last_known_text_signature: String::new(),
@@ -133,11 +179,6 @@ impl BrowserState {
         let active_id = self.active_tab_id.as_ref()?;
         self.webviews.get(active_id)
     }
-
-    fn active_page_loaded_signal(&self) -> Option<Arc<(Mutex<bool>, Condvar)>> {
-        let active_id = self.active_tab_id.as_ref()?;
-        self.page_loaded_signals.get(active_id).cloned()
-    }
 }
 
 #[derive(Clone)]
@@ -157,7 +198,7 @@ impl BrowserManager {
         Self {
             state: Arc::new(Mutex::new(BrowserState {
                 webviews: HashMap::new(),
-                page_loaded_signals: HashMap::new(),
+                navigation_signals: HashMap::new(),
                 latest_snapshots: HashMap::new(),
                 last_known_url: String::new(),
                 last_known_text_signature: String::new(),
@@ -309,6 +350,247 @@ impl BrowserManager {
         self.set_zoom(1.0)
     }
 
+    fn begin_navigation_for_tab(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        url: &str,
+    ) -> Result<u64, String> {
+        let (session_id, navigation_id) = {
+            let mut state = state.lock().map_err(|e| e.to_string())?;
+            if !state.tabs.iter().any(|tab| tab.id == tab_id) {
+                return Err(format!("标签 {tab_id} 不存在"));
+            }
+
+            let signal = state
+                .navigation_signals
+                .entry(tab_id.to_string())
+                .or_insert_with(|| navigation_signal(url))
+                .clone();
+            let navigation_id = {
+                let mut navigation = signal.state.lock().map_err(|e| e.to_string())?;
+                navigation.navigation_id = navigation.navigation_id.wrapping_add(1).max(1);
+                navigation.requested_url = url.to_string();
+                navigation.started_url = None;
+                navigation.final_url = None;
+                navigation.phase = NavigationPhase::Loading;
+                navigation.internal_error_url = None;
+                navigation.navigation_id
+            };
+
+            if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.url = url.to_string();
+                tab.title.clear();
+            }
+            record_tab_navigation(&mut state, tab_id, url, None);
+            state.latest_snapshots.insert(
+                tab_id.to_string(),
+                BrowserPageSnapshot {
+                    title: String::new(),
+                    url: url.to_string(),
+                    text: String::new(),
+                    status: PageStatus::Loading,
+                    tabs: Vec::new(),
+                    active_tab_id: None,
+                    events: Vec::new(),
+                },
+            );
+            Self::persist_from_state(&state);
+            (state.session_id.clone(), navigation_id)
+        };
+
+        let _ = app.emit(
+            "browser:navigation_state",
+            BrowserNavigationStateEvent {
+                session_id: session_id.clone(),
+                tab_id: tab_id.to_string(),
+                navigation_id,
+                state: BrowserNavigationStateKind::Loading,
+                url: url.to_string(),
+                message: None,
+            },
+        );
+
+        let app_for_timeout = app.clone();
+        let state_for_timeout = state.clone();
+        let tab_id_for_timeout = tab_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(NAVIGATION_TIMEOUT).await;
+            Self::fail_navigation_for_tab(
+                &app_for_timeout,
+                state_for_timeout,
+                &tab_id_for_timeout,
+                navigation_id,
+            );
+        });
+
+        Ok(navigation_id)
+    }
+
+    fn fail_navigation_for_tab(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        navigation_id: u64,
+    ) {
+        let (session_id, requested_url, error_url, webview) = {
+            let mut state = match state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+                return;
+            };
+            let mut navigation = match signal.state.lock() {
+                Ok(navigation) => navigation,
+                Err(error) => error.into_inner(),
+            };
+            if navigation.navigation_id != navigation_id
+                || navigation.phase != NavigationPhase::Loading
+            {
+                return;
+            }
+
+            let requested_url = navigation.requested_url.clone();
+            let error_url = navigation_error_data_url(&requested_url);
+            navigation.phase = NavigationPhase::Failed;
+            navigation.final_url = None;
+            navigation.internal_error_url = Some(error_url.clone());
+            signal.cvar.notify_all();
+            drop(navigation);
+
+            if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.url = requested_url.clone();
+                tab.title = "页面加载异常".to_string();
+            } else {
+                return;
+            }
+            state.latest_snapshots.insert(
+                tab_id.to_string(),
+                BrowserPageSnapshot {
+                    title: "页面加载异常".to_string(),
+                    url: requested_url.clone(),
+                    text: String::new(),
+                    status: PageStatus::Error(PAGE_LOAD_ERROR_MESSAGE.to_string()),
+                    tabs: Vec::new(),
+                    active_tab_id: None,
+                    events: Vec::new(),
+                },
+            );
+            Self::persist_from_state(&state);
+            (
+                state.session_id.clone(),
+                requested_url,
+                error_url,
+                state.webviews.get(tab_id).cloned(),
+            )
+        };
+
+        warn!(
+            session_id = %session_id,
+            tab_id,
+            navigation_id,
+            url = %requested_url,
+            "browser navigation reached the page-load deadline"
+        );
+        let _ = app.emit(
+            "browser:navigation_state",
+            BrowserNavigationStateEvent {
+                session_id: session_id.clone(),
+                tab_id: tab_id.to_string(),
+                navigation_id,
+                state: BrowserNavigationStateKind::Failed,
+                url: requested_url,
+                message: Some(PAGE_LOAD_ERROR_MESSAGE.to_string()),
+            },
+        );
+        let _ = app.emit(
+            "browser:tab_updated",
+            serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
+        );
+
+        if let Some(webview) = webview {
+            let parsed_url = match error_url.parse::<Url>() {
+                Ok(url) => url,
+                Err(error) => {
+                    warn!(%error, "browser error page URL creation failed");
+                    return;
+                }
+            };
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                webview.navigate(parsed_url)
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!(%error, "browser error page navigation failed"),
+                Err(_) => warn!("browser error page navigation panicked"),
+            }
+        }
+    }
+
+    fn finish_navigation_for_tab(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        navigation_id: u64,
+        final_url: &str,
+    ) -> bool {
+        let session_id = {
+            let mut state = match state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+                return false;
+            };
+            let mut navigation = match signal.state.lock() {
+                Ok(navigation) => navigation,
+                Err(error) => error.into_inner(),
+            };
+            if navigation.navigation_id != navigation_id
+                || navigation.phase != NavigationPhase::Loading
+            {
+                return false;
+            }
+            navigation.phase = NavigationPhase::Loaded;
+            navigation.final_url = Some(final_url.to_string());
+            navigation.internal_error_url = None;
+            signal.cvar.notify_all();
+            drop(navigation);
+
+            if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.url = final_url.to_string();
+            }
+            state.latest_snapshots.insert(
+                tab_id.to_string(),
+                BrowserPageSnapshot {
+                    title: String::new(),
+                    url: final_url.to_string(),
+                    text: String::new(),
+                    status: PageStatus::Loaded,
+                    tabs: Vec::new(),
+                    active_tab_id: None,
+                    events: Vec::new(),
+                },
+            );
+            Self::persist_from_state(&state);
+            state.session_id.clone()
+        };
+
+        let _ = app.emit(
+            "browser:navigation_state",
+            BrowserNavigationStateEvent {
+                session_id,
+                tab_id: tab_id.to_string(),
+                navigation_id,
+                state: BrowserNavigationStateKind::Loaded,
+                url: final_url.to_string(),
+                message: None,
+            },
+        );
+        true
+    }
+
     /// 为指定标签创建独立的 WebView 实例
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_webview_for_tab(
@@ -330,7 +612,14 @@ impl BrowserManager {
             let s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.session_id.clone()
         };
-        let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
+        let navigation_id = Self::begin_navigation_for_tab(app, state.clone(), tab_id, url)?;
+        let parsed_url: Url = match url.parse() {
+            Ok(url) => url,
+            Err(error) => {
+                Self::fail_navigation_for_tab(app, state.clone(), tab_id, navigation_id);
+                return Err(format!("URL 解析失败：{error}"));
+            }
+        };
         let data_dir = browser_data_directory(&session_id);
         let label = webview_label(&session_id, tab_id);
         let tab_id_for_closure = tab_id.to_string();
@@ -354,27 +643,109 @@ impl BrowserManager {
             .devtools(true)
             .on_page_load(move |webview, payload| {
                 use tauri::webview::PageLoadEvent;
-                if payload.event() == PageLoadEvent::Finished {
-                    {
+                let event_url = payload.url().to_string();
+
+                if payload.event() == PageLoadEvent::Started {
+                    let should_begin = {
                         let state = match state_clone_holder.lock() {
-                            Ok(s) => s,
-                            Err(_) => return,
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
                         };
-                        if let Some(signal) =
-                            state.page_loaded_signals.get(&tab_id_for_closure)
-                        {
-                            let (lock, cvar) = &**signal;
-                            if let Ok(mut loaded) = lock.lock() {
-                                *loaded = true;
-                            }
-                            cvar.notify_all();
+                        let Some(signal) =
+                            state.navigation_signals.get(&tab_id_for_closure)
+                        else {
+                            return;
+                        };
+                        let mut navigation = match signal.state.lock() {
+                            Ok(navigation) => navigation,
+                            Err(error) => error.into_inner(),
+                        };
+                        if navigation.internal_error_url.as_deref() == Some(event_url.as_str()) {
+                            return;
                         }
+                        if navigation.phase == NavigationPhase::Loading {
+                            if navigation.started_url.is_some()
+                                || normalize_url_for_compare(&navigation.requested_url)
+                                    == normalize_url_for_compare(&event_url)
+                            {
+                                navigation.started_url = Some(event_url.clone());
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    };
+                    if should_begin {
+                        if let Ok(navigation_id) = Self::begin_navigation_for_tab(
+                            &app_clone,
+                            state_clone_holder.clone(),
+                            &tab_id_for_closure,
+                            &event_url,
+                        ) {
+                            let state = match state_clone_holder.lock() {
+                                Ok(state) => state,
+                                Err(error) => error.into_inner(),
+                            };
+                            if let Some(signal) =
+                                state.navigation_signals.get(&tab_id_for_closure)
+                            {
+                                if let Ok(mut navigation) = signal.state.lock() {
+                                    if navigation.navigation_id == navigation_id {
+                                        navigation.started_url = Some(event_url.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                if payload.event() == PageLoadEvent::Finished {
+                    let navigation_id = {
+                        let state = match state_clone_holder.lock() {
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
+                        };
+                        let Some(signal) =
+                            state.navigation_signals.get(&tab_id_for_closure)
+                        else {
+                            return;
+                        };
+                        let navigation = match signal.state.lock() {
+                            Ok(navigation) => navigation,
+                            Err(error) => error.into_inner(),
+                        };
+                        if navigation.internal_error_url.as_deref() == Some(event_url.as_str())
+                            || navigation.phase != NavigationPhase::Loading
+                        {
+                            return;
+                        }
+                        let expected_url = navigation
+                            .started_url
+                            .as_deref()
+                            .unwrap_or(&navigation.requested_url);
+                        if normalize_url_for_compare(expected_url)
+                            != normalize_url_for_compare(&event_url)
+                        {
+                            return;
+                        }
+                        navigation.navigation_id
+                    };
+                    if !Self::finish_navigation_for_tab(
+                        &app_clone,
+                        state_clone_holder.clone(),
+                        &tab_id_for_closure,
+                        navigation_id,
+                        &event_url,
+                    ) {
+                        return;
                     }
 
                     let state_clone2 = state_clone_holder.clone();
                     let tab_id_in_closure = tab_id_for_closure.clone();
                     let app_for_event = app_clone.clone();
                     let session_id_for_event = session_id_for_page_load.clone();
+                    let final_url_for_callback = event_url.clone();
                     let _ = webview.eval_with_callback(
                         "window.__tiangong_bridge.getFullText(12000)",
                         move |result| {
@@ -382,7 +753,11 @@ impl BrowserManager {
                                 serde_json::from_str::<serde_json::Value>(&result)
                             {
                                 let title = data["title"].as_str().unwrap_or("").to_string();
-                                let page_url = data["url"].as_str().unwrap_or("").to_string();
+                                let page_url = data["url"]
+                                    .as_str()
+                                    .filter(|url| !url.is_empty())
+                                    .unwrap_or(&final_url_for_callback)
+                                    .to_string();
                                 let text = data["text"].as_str().unwrap_or("").to_string();
                                 let snapshot = BrowserPageSnapshot {
                                     title: title.clone(),
@@ -393,7 +768,20 @@ impl BrowserManager {
                                     active_tab_id: None,
                                     events: Vec::new(),
                                 };
+                                let mut updated_current_navigation = false;
                                 if let Ok(mut state) = state_clone2.lock() {
+                                    let is_current = state
+                                        .navigation_signals
+                                        .get(&tab_id_in_closure)
+                                        .and_then(|signal| signal.state.lock().ok())
+                                        .is_some_and(|navigation| {
+                                            navigation.navigation_id == navigation_id
+                                                && navigation.phase == NavigationPhase::Loaded
+                                        });
+                                    if !is_current {
+                                        return;
+                                    }
+                                    updated_current_navigation = true;
                                     state
                                         .latest_snapshots
                                         .insert(tab_id_in_closure.clone(), snapshot);
@@ -409,39 +797,13 @@ impl BrowserManager {
                                     }
                                     let shared = state.shared.clone();
                                     // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
-                                    let should_persist = {
-                                        let active_id = Some(tab_id_in_closure.clone());
-                                        if !page_url.starts_with("about:") {
-                                            // 写入标签历史
-                                            if let Some(active_id) = active_id {
-                                                {
-                                                    let tab_entries = state.tab_histories.entry(active_id.clone()).or_default();
-                                                    let existing_pos = tab_entries.iter().position(|e| e.url == page_url);
-                                                    match existing_pos {
-                                                        Some(pos) => {
-                                                            // URL 已在栈中，更新索引（不追加）
-                                                            tab_entries[pos].title = if title.is_empty() { page_url.clone() } else { title.clone() };
-                                                            tab_entries[pos].timestamp = std::time::SystemTime::now()
-                                                                .duration_since(std::time::UNIX_EPOCH)
-                                                                .unwrap_or_default()
-                                                                .as_millis() as u64;
-                                                            state.tab_history_indices.insert(active_id.clone(), pos);
-                                                        }
-                                                        None => {
-                                                            tab_entries.push(HistoryEntry {
-                                                                url: page_url.clone(),
-                                                                title: if title.is_empty() { page_url.clone() } else { title.clone() },
-                                                                timestamp: std::time::SystemTime::now()
-                                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                                    .unwrap_or_default()
-                                                                    .as_millis() as u64,
-                                                            });
-                                                            let idx = tab_entries.len() - 1;
-                                                            state.tab_history_indices.insert(active_id.clone(), idx);
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                    let should_persist = if is_recordable_history_url(&page_url) {
+                                            record_tab_navigation(
+                                                &mut state,
+                                                &tab_id_in_closure,
+                                                &page_url,
+                                                Some(&title),
+                                            );
                                             // 写入全局历史（去重：移到末尾并更新时间戳）
                                             let mut history = shared
                                                 .global_history
@@ -451,18 +813,21 @@ impl BrowserManager {
                                             true
                                         } else {
                                             false
-                                        }
                                     };
                                     drop(state);
                                     if should_persist {
                                         persist_global_history(&shared);
                                     }
                                 }
+                                if !updated_current_navigation {
+                                    return;
+                                }
                                 let summary: String = text.chars().take(2000).collect();
                                 let _ = app_for_event.emit(
                                     "browser:page_loaded",
                                     BrowserPageLoadedEvent {
                                         session_id: session_id_for_event.clone(),
+                                        tab_id: tab_id_in_closure.clone(),
                                         title,
                                         url: page_url,
                                         text: summary,
@@ -475,9 +840,14 @@ impl BrowserManager {
                 }
             });
 
-        let webview = window
-            .add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h))
-            .map_err(|e| format!("创建浏览器 WebView 失败：{e}"))?;
+        let webview =
+            match window.add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(w, h)) {
+                Ok(webview) => webview,
+                Err(error) => {
+                    Self::fail_navigation_for_tab(app, state, tab_id, navigation_id);
+                    return Err(format!("创建浏览器 WebView 失败：{error}"));
+                }
+            };
 
         // 创建后立即应用当前缩放，避免首屏以 100% 渲染再跳变
         if (initial_zoom - 1.0).abs() > f64::EPSILON {
@@ -498,77 +868,47 @@ impl BrowserManager {
         w: f64,
         h: f64,
     ) -> Result<(), String> {
-        let existing_tab_webview_to_create = {
+        let existing_action = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.is_empty() {
-                // 已初始化：更新活跃标签（有 WebView 则导航，无则标记 URL 等待按需创建）
-                let mut webview_to_create = None;
-                if let Some(matching_tab) = state
+                let matching_id = state
                     .tabs
                     .iter()
                     .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
-                {
-                    // 切换到已有标签
-                    let matching_id = matching_tab.id.clone();
-                    let old_active = state.active_tab_id.clone();
-                    if old_active.as_deref() != Some(&matching_id) {
-                        // 隐藏旧活跃 WebView
-                        if let Some(old_id) = &old_active {
-                            if let Some(old_wv) = state.webviews.get(old_id) {
-                                let _ = old_wv.set_position(LogicalPosition::new(-10000, -10000));
-                            }
-                        }
-                        // 显示目标 WebView
-                        if let Some(new_wv) = state.webviews.get(&matching_id) {
-                            let _ = new_wv.set_position(LogicalPosition::new(x, y));
-                            let _ = new_wv.set_size(LogicalSize::new(w, h));
-                        } else if url != "about:blank" {
-                            webview_to_create = Some(matching_id.clone());
-                        }
-                        state.active_tab_id = Some(matching_id);
-                    } else {
-                        // 已经是当前标签，只更新位置
-                        if let Some(wv) = state.active_webview() {
-                            let _ = wv.set_position(LogicalPosition::new(x, y));
-                            let _ = wv.set_size(LogicalSize::new(w, h));
-                        } else if url != "about:blank" {
-                            webview_to_create = Some(matching_id);
+                    .map(|tab| tab.id.clone());
+                let target_id = matching_id
+                    .clone()
+                    .or_else(|| state.active_tab_id.clone())
+                    .ok_or_else(|| "当前没有可用标签".to_string())?;
+
+                if state.active_tab_id.as_deref() != Some(&target_id) {
+                    if let Some(old_id) = &state.active_tab_id {
+                        if let Some(old_webview) = state.webviews.get(old_id) {
+                            let _ = old_webview.set_position(LogicalPosition::new(-10000, -10000));
                         }
                     }
-                } else {
-                    // 无匹配 URL，导航当前活跃标签
-                    if let Some(wv) = state.active_webview() {
-                        let _ = wv.set_position(LogicalPosition::new(x, y));
-                        let _ = wv.set_size(LogicalSize::new(w, h));
-                    }
-                    let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-                    if let Some(wv) = state.active_webview() {
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let _ = wv.navigate(parsed_url);
-                        }));
-                    } else if url != "about:blank" {
-                        webview_to_create = state.active_tab_id.clone();
-                    }
-                    // 更新活跃标签 URL
-                    let active_id = state.active_tab_id.clone();
-                    if let Some(active_id) = active_id {
-                        if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == active_id) {
-                            tab.url = url.to_string();
-                        }
-                    }
+                    state.active_tab_id = Some(target_id.clone());
+                }
+                if let Some(webview) = state.webviews.get(&target_id) {
+                    let _ = webview.set_position(LogicalPosition::new(x, y));
+                    let _ = webview.set_size(LogicalSize::new(w, h));
                 }
                 state.browser_rect = (x, y, w, h);
                 state
                     .visible
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                Some(webview_to_create)
+                Some((
+                    target_id.clone(),
+                    !state.webviews.contains_key(&target_id) && url != "about:blank",
+                    matching_id.is_none() && state.webviews.contains_key(&target_id),
+                ))
             } else {
                 None
             }
         };
 
-        if let Some(webview_to_create) = existing_tab_webview_to_create {
-            if let Some(tab_id) = webview_to_create {
+        if let Some((tab_id, should_create, should_navigate)) = existing_action {
+            if should_create {
                 let webview = Self::create_webview_for_tab(
                     app,
                     self.state.clone(),
@@ -584,6 +924,8 @@ impl BrowserManager {
                 drop(state);
                 self.start_url_poll(app, url);
                 self.start_event_poll(app);
+            } else if should_navigate {
+                self.navigate(app, url)?;
             }
             return Ok(());
         }
@@ -592,42 +934,29 @@ impl BrowserManager {
         let tab_id = scru128::new().to_string();
         let is_blank = url == "about:blank";
 
+        {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            state
+                .navigation_signals
+                .insert(tab_id.clone(), navigation_signal(url));
+            state.tabs.push(BrowserTab {
+                id: tab_id.clone(),
+                url: url.to_string(),
+                title: String::new(),
+            });
+            state.active_tab_id = Some(tab_id.clone());
+            state.browser_rect = (x, y, w, h);
+            state
+                .visible
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         if !is_blank {
             let webview =
                 Self::create_webview_for_tab(app, self.state.clone(), &tab_id, url, x, y, w, h)?;
             if let Ok(mut state) = self.state.lock() {
                 state.webviews.insert(tab_id.clone(), webview);
             }
-        }
-
-        if let Ok(mut state) = self.state.lock() {
-            state.page_loaded_signals.insert(
-                tab_id.clone(),
-                Arc::new((Mutex::new(false), Condvar::new())),
-            );
-            // 初始化标签页历史（排除 about: 页面）
-            if !url.starts_with("about:") {
-                let entry = HistoryEntry {
-                    url: url.to_string(),
-                    title: url.to_string(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                };
-                state.tab_histories.insert(tab_id.clone(), vec![entry]);
-                state.tab_history_indices.insert(tab_id.clone(), 0);
-            }
-            state.tabs.push(BrowserTab {
-                id: tab_id.clone(),
-                url: url.to_string(),
-                title: String::new(),
-            });
-            state.active_tab_id = Some(tab_id);
-            state.browser_rect = (x, y, w, h);
-            state
-                .visible
-                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         self.start_url_poll(app, url);
@@ -677,18 +1006,26 @@ impl BrowserManager {
                     if !visible.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
-                    let current_url = {
+                    let (active_tab_id, current_url) = {
                         let s = match state.lock() {
                             Ok(s) => s,
                             Err(e) => e.into_inner(),
                         };
-                        match s.active_webview() {
+                        let Some(active_tab_id) = s.active_tab_id.clone() else {
+                            continue;
+                        };
+                        if tab_navigation_phase(&s, &active_tab_id)
+                            != Some(NavigationPhase::Loaded)
+                        {
+                            continue;
+                        }
+                        match s.webviews.get(&active_tab_id) {
                             Some(wv) => {
                                 no_webview_ticks = 0;
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     wv.url()
                                 })) {
-                                    Ok(Ok(u)) => u.to_string(),
+                                    Ok(Ok(u)) => (active_tab_id, u.to_string()),
                                     _ => continue,
                                 }
                             }
@@ -707,6 +1044,12 @@ impl BrowserManager {
                             Ok(s) => s,
                             Err(e) => e.into_inner(),
                         };
+                        if s.active_tab_id.as_deref() != Some(active_tab_id.as_str())
+                            || tab_navigation_phase(&s, &active_tab_id)
+                                != Some(NavigationPhase::Loaded)
+                        {
+                            continue;
+                        }
                         if current_url != s.last_known_url {
                             s.last_known_url = current_url.clone();
                             true
@@ -722,11 +1065,10 @@ impl BrowserManager {
                                 Ok(s) => s,
                                 Err(e) => e.into_inner(),
                             };
-                            let aid = s.active_tab_id.clone();
-                            if let Some(active_id) = aid {
-                                if let Some(tab) = s.tabs.iter_mut().find(|t| t.id == active_id) {
-                                    tab.url = current_url.clone();
-                                }
+                            if let Some(tab) =
+                                s.tabs.iter_mut().find(|tab| tab.id == active_tab_id)
+                            {
+                                tab.url = current_url.clone();
                             }
                             // url_poll 检测到 URL 变化，走统一过滤持久化
                             Self::persist_from_state(&s);
@@ -735,6 +1077,7 @@ impl BrowserManager {
                             "browser:page_loaded",
                             BrowserPageLoadedEvent {
                                 session_id: session_id.clone(),
+                                tab_id: active_tab_id.clone(),
                                 title: String::new(),
                                 url: current_url,
                                 text: String::new(),
@@ -747,8 +1090,10 @@ impl BrowserManager {
                         let mgr = BrowserManager {
                             state: state.clone(),
                         };
-                        if let Some(sig) = mgr.eval_with_result(
-                            "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()"
+                        if let Some(sig) = mgr.eval_tab_with_result_timeout(
+                            &active_tab_id,
+                            "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
+                            Duration::from_secs(15),
                         ) {
                             let content_changed = {
                                 let mut s = match state.lock() {
@@ -767,10 +1112,25 @@ impl BrowserManager {
                                 let mgr2 = BrowserManager {
                                     state: state.clone(),
                                 };
-                                if let Some(raw) = mgr2.eval_with_result(
-                                    "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);return JSON.stringify(t)}catch(e){return '{}'}})()"
+                                if let Some(raw) = mgr2.eval_tab_with_result_timeout(
+                                    &active_tab_id,
+                                    "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);return JSON.stringify(t)}catch(e){return '{}'}})()",
+                                    Duration::from_secs(15),
                                 ) {
                                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                                        let still_loaded = {
+                                            let state = match state.lock() {
+                                                Ok(state) => state,
+                                                Err(error) => error.into_inner(),
+                                            };
+                                            state.active_tab_id.as_deref()
+                                                == Some(active_tab_id.as_str())
+                                                && tab_navigation_phase(&state, &active_tab_id)
+                                                    == Some(NavigationPhase::Loaded)
+                                        };
+                                        if !still_loaded {
+                                            continue;
+                                        }
                                         let title = data["title"].as_str().unwrap_or("").to_string();
                                         let url = data["url"].as_str().unwrap_or("").to_string();
                                         let text: String =
@@ -779,6 +1139,7 @@ impl BrowserManager {
                                             "browser:page_loaded",
                                             BrowserPageLoadedEvent {
                                                 session_id: session_id.clone(),
+                                                tab_id: active_tab_id.clone(),
                                                 title,
                                                 url,
                                                 text,
@@ -830,12 +1191,32 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub fn go_back(&self) -> Result<(), String> {
-        self.eval("history.back()")
+    pub fn go_back(&self, app: &AppHandle<Wry>) -> Result<(), String> {
+        let target_url = self
+            .history_target(-1)
+            .ok_or_else(|| "当前标签没有可后退的页面".to_string())?;
+        self.navigate(app, &target_url).map(|_| ())
     }
 
-    pub fn go_forward(&self) -> Result<(), String> {
-        self.eval("history.forward()")
+    pub fn go_forward(&self, app: &AppHandle<Wry>) -> Result<(), String> {
+        let target_url = self
+            .history_target(1)
+            .ok_or_else(|| "当前标签没有可前进的页面".to_string())?;
+        self.navigate(app, &target_url).map(|_| ())
+    }
+
+    fn history_target(&self, offset: isize) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        let tab_id = state.active_tab_id.as_ref()?;
+        let entries = state.tab_histories.get(tab_id)?;
+        let current_index = *state.tab_history_indices.get(tab_id)? as isize;
+        let target_index = current_index.checked_add(offset)?;
+        if target_index < 0 {
+            return None;
+        }
+        entries
+            .get(target_index as usize)
+            .map(|entry| entry.url.clone())
     }
 
     pub fn set_position(&self, x: f64, y: f64) -> Result<(), String> {
@@ -874,6 +1255,19 @@ impl BrowserManager {
                         break;
                     }
                     if !visible.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    let active_loaded = {
+                        let state = match state.lock() {
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
+                        };
+                        state.active_tab_id.as_ref().is_some_and(|tab_id| {
+                            tab_navigation_phase(&state, tab_id)
+                                == Some(NavigationPhase::Loaded)
+                        })
+                    };
+                    if !active_loaded {
                         continue;
                     }
 
@@ -923,23 +1317,49 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub fn navigate(&self, url: &str) -> Result<(), String> {
-        let state = self.state.lock().map_err(|e| e.to_string())?;
-        if let Some(signal) = state.active_page_loaded_signal() {
-            let (lock, _cvar) = &*signal;
-            if let Ok(mut loaded) = lock.lock() {
-                *loaded = false;
+    pub(crate) fn navigate(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+    ) -> Result<NavigationTicket, String> {
+        let (tab_id, webview) = {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let tab_id = state
+                .active_tab_id
+                .clone()
+                .ok_or_else(|| "当前没有可用标签".to_string())?;
+            let webview = state
+                .webviews
+                .get(&tab_id)
+                .cloned()
+                .ok_or_else(|| "当前标签尚未创建 WebView".to_string())?;
+            (tab_id, webview)
+        };
+        let navigation_id = Self::begin_navigation_for_tab(app, self.state.clone(), &tab_id, url)?;
+        let parsed_url: Url = match url.parse() {
+            Ok(url) => url,
+            Err(error) => {
+                Self::fail_navigation_for_tab(app, self.state.clone(), &tab_id, navigation_id);
+                return Err(format!("URL 解析失败：{error}"));
+            }
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            webview.navigate(parsed_url)
+        }));
+        match result {
+            Ok(Ok(())) => Ok(NavigationTicket {
+                tab_id,
+                navigation_id,
+            }),
+            Ok(Err(error)) => {
+                Self::fail_navigation_for_tab(app, self.state.clone(), &tab_id, navigation_id);
+                Err(format!("导航失败：{error}"))
+            }
+            Err(_) => {
+                Self::fail_navigation_for_tab(app, self.state.clone(), &tab_id, navigation_id);
+                Err("WebView 导航内部错误".to_string())
             }
         }
-        if let Some(wv) = state.active_webview() {
-            let parsed_url: Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wv.navigate(parsed_url)));
-            result
-                .map_err(|_| "WebView 导航内部错误".to_string())?
-                .map_err(|e| format!("导航失败：{e}"))?;
-        }
-        Ok(())
     }
 
     /// 导航到 URL，自动处理所有场景：
@@ -947,18 +1367,25 @@ impl BrowserManager {
     /// 2. 已有匹配 URL 的标签 → 切换到该标签
     /// 3. 当前活跃标签无 WebView → 创建 WebView
     /// 4. 正常导航当前活跃 WebView
-    pub fn navigate_with_app(&self, app: &AppHandle<Wry>, url: &str) -> Result<(), String> {
+    pub(crate) fn navigate_with_app(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+    ) -> Result<NavigationTicket, String> {
         // Agent 主动导航时恢复可见状态，使数据读取路径可用
         self.set_visible(true);
         // 场景 1：浏览器完全未打开 → 在屏幕外创建，前端会通过 set_position 设置正确位置
         if !self.is_open() {
             if let Some((_, _, w, h)) = default_browser_rect(app) {
-                return self.open(app, url, -10000.0, -10000.0, w, h);
+                self.open(app, url, -10000.0, -10000.0, w, h)?;
+                return self
+                    .active_navigation_ticket()
+                    .ok_or_else(|| "浏览器导航状态未初始化".to_string());
             }
             return Err("无法确定浏览器位置".to_string());
         }
 
-        let (matching_tab_id, needs_create, active_id, rect) = {
+        let (matching_tab_id, active_id, rect) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
 
             // 场景 2：检查已有匹配 URL 的标签
@@ -968,23 +1395,16 @@ impl BrowserManager {
                 .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
                 .map(|t| t.id.clone());
 
-            let needs_create = state
-                .active_tab_id
-                .as_ref()
-                .map(|id| !state.webviews.contains_key(id))
-                .unwrap_or(false);
-
-            (
-                matching,
-                needs_create,
-                state.active_tab_id.clone(),
-                state.browser_rect,
-            )
+            (matching, state.active_tab_id.clone(), state.browser_rect)
         };
 
         // 场景 2：切换到已有标签
         if let Some(matching_id) = matching_tab_id {
+            let was_active;
+            let needs_create;
+            let should_retry;
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            was_active = state.active_tab_id.as_deref() == Some(&matching_id);
             if state.active_tab_id.as_deref() != Some(&matching_id) {
                 if let Some(old_id) = &state.active_tab_id {
                     if let Some(old_wv) = state.webviews.get(old_id) {
@@ -995,24 +1415,48 @@ impl BrowserManager {
                     let _ = new_wv.set_position(LogicalPosition::new(rect.0, rect.1));
                     let _ = new_wv.set_size(LogicalSize::new(rect.2, rect.3));
                 }
-                state.active_tab_id = Some(matching_id);
+                state.active_tab_id = Some(matching_id.clone());
             }
-            return Ok(());
-        }
+            needs_create = !state.webviews.contains_key(&matching_id) && url != "about:blank";
+            should_retry =
+                tab_navigation_phase(&state, &matching_id) == Some(NavigationPhase::Failed);
+            drop(state);
 
-        // 更新活跃标签 URL
-        {
-            let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            if let Some(ref id) = active_id {
-                if let Some(tab) = state.tabs.iter_mut().find(|t| t.id == *id) {
-                    tab.url = url.to_string();
-                }
+            if needs_create {
+                let webview = Self::create_webview_for_tab(
+                    app,
+                    self.state.clone(),
+                    &matching_id,
+                    url,
+                    rect.0,
+                    rect.1,
+                    rect.2,
+                    rect.3,
+                )?;
+                let mut state = self.state.lock().map_err(|e| e.to_string())?;
+                state.webviews.insert(matching_id.clone(), webview);
+                drop(state);
+                self.start_url_poll(app, url);
+                self.start_event_poll(app);
+                return self
+                    .navigation_ticket_for_tab(&matching_id)
+                    .ok_or_else(|| "浏览器导航状态未初始化".to_string());
             }
+            if was_active || should_retry {
+                return self.navigate(app, url);
+            }
+            return self
+                .navigation_ticket_for_tab(&matching_id)
+                .ok_or_else(|| "浏览器导航状态未初始化".to_string());
         }
 
         // 场景 3：活跃标签无 WebView，创建一个
-        if needs_create {
-            if let Some(tab_id) = active_id {
+        if let Some(tab_id) = active_id {
+            let needs_create = {
+                let state = self.state.lock().map_err(|e| e.to_string())?;
+                !state.webviews.contains_key(&tab_id)
+            };
+            if needs_create {
                 let webview = Self::create_webview_for_tab(
                     app,
                     self.state.clone(),
@@ -1033,22 +1477,33 @@ impl BrowserManager {
                 drop(state);
                 self.start_url_poll(app, url);
                 self.start_event_poll(app);
-                return Ok(());
+                return self
+                    .navigation_ticket_for_tab(&tab_id)
+                    .ok_or_else(|| "浏览器导航状态未初始化".to_string());
             }
         }
 
         // 场景 4：正常导航
-        self.navigate(url)
+        self.navigate(app, url)
+    }
+
+    fn navigation_ticket_for_tab(&self, tab_id: &str) -> Option<NavigationTicket> {
+        let state = self.state.lock().ok()?;
+        let signal = state.navigation_signals.get(tab_id)?;
+        let navigation = signal.state.lock().ok()?;
+        Some(NavigationTicket {
+            tab_id: tab_id.to_string(),
+            navigation_id: navigation.navigation_id,
+        })
+    }
+
+    fn active_navigation_ticket(&self) -> Option<NavigationTicket> {
+        let tab_id = self.state.lock().ok()?.active_tab_id.clone()?;
+        self.navigation_ticket_for_tab(&tab_id)
     }
 
     pub fn load_html(&self, html: &str) -> Result<(), String> {
         let state = self.state.lock().map_err(|e| e.to_string())?;
-        if let Some(signal) = state.active_page_loaded_signal() {
-            let (lock, _cvar) = &*signal;
-            if let Ok(mut loaded) = lock.lock() {
-                *loaded = false;
-            }
-        }
         if let Some(wv) = state.active_webview() {
             let encoded = base64_url::encode(html.as_bytes());
             let data_url = format!("data:text/html;base64,{encoded}");
@@ -1073,11 +1528,25 @@ impl BrowserManager {
     }
 
     pub(crate) fn eval_with_result(&self, js: &str) -> Option<String> {
+        self.eval_with_result_timeout(js, Duration::from_secs(15))
+    }
+
+    fn eval_with_result_timeout(&self, js: &str, timeout: Duration) -> Option<String> {
+        let tab_id = self.state.lock().ok()?.active_tab_id.clone()?;
+        self.eval_tab_with_result_timeout(&tab_id, js, timeout)
+    }
+
+    fn eval_tab_with_result_timeout(
+        &self,
+        tab_id: &str,
+        js: &str,
+        timeout: Duration,
+    ) -> Option<String> {
         let (sender, rx) = std::sync::mpsc::channel();
         let tx = Arc::new(std::sync::Mutex::new(Some(sender)));
         {
             let state = self.state.lock().ok()?;
-            let webview = state.active_webview()?;
+            let webview = state.webviews.get(tab_id)?;
             webview
                 .eval_with_callback(js, move |result| {
                     if let Ok(mut guard) = tx.lock() {
@@ -1088,7 +1557,7 @@ impl BrowserManager {
                 })
                 .ok()?;
         }
-        rx.recv_timeout(Duration::from_secs(15)).ok()
+        rx.recv_timeout(timeout).ok()
     }
 
     pub(crate) fn drain_events(&self) -> Vec<BrowserEvent> {
@@ -1158,85 +1627,50 @@ impl BrowserManager {
         removed
     }
 
-    fn wait_for_page_load(&self, timeout_ms: u64) -> bool {
-        let page_loaded = {
+    fn wait_for_navigation(
+        &self,
+        ticket: &NavigationTicket,
+        timeout: Duration,
+    ) -> Option<TabNavigationState> {
+        let signal = {
             let state = match self.state.lock() {
                 Ok(s) => s,
-                Err(_) => return false,
+                Err(_) => return None,
             };
-            state.active_page_loaded_signal()
+            state.navigation_signals.get(&ticket.tab_id).cloned()
         };
-        let Some(page_loaded) = page_loaded else {
-            return false;
+        let Some(signal) = signal else {
+            return None;
         };
-        let (lock, cvar) = &*page_loaded;
         let start = std::time::Instant::now();
-        let mut guard = match lock.lock() {
+        let mut navigation = match signal.state.lock() {
             Ok(g) => g,
-            Err(_) => return false,
+            Err(_) => return None,
         };
-        if *guard {
-            return true;
-        }
         loop {
-            let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis() as u64);
-            if remaining == 0 {
-                return *guard;
+            if navigation.navigation_id != ticket.navigation_id
+                || navigation.phase != NavigationPhase::Loading
+            {
+                return Some(navigation.clone());
             }
-            let result = cvar.wait_timeout(guard, Duration::from_millis(remaining));
+            let Some(remaining) = timeout.checked_sub(start.elapsed()) else {
+                return Some(navigation.clone());
+            };
+            let result = signal.cvar.wait_timeout(navigation, remaining);
             match result {
                 Ok((g, _)) => {
-                    guard = g;
-                    if *guard {
-                        return true;
-                    }
+                    navigation = g;
                 }
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
     }
 
-    fn wait_for_content_ready(&self, timeout_ms: u64) {
-        let start = std::time::Instant::now();
-        let check_interval = Duration::from_millis(500);
-        let timeout = Duration::from_millis(timeout_ms);
-        let mut last_len: usize = 0;
-        let mut stable_count: usize = 0;
-        let mut content_grew = false;
-
-        loop {
-            let text_len = self
-                .eval_with_result("(function(){if(!document.body)return 0;var c=document.body.cloneNode(true);var r=c.querySelectorAll('script,style,noscript');for(var i=0;i<r.length;i++)r[i].parentNode.removeChild(r[i]);return(c.textContent||'').length})()")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-
-            if text_len > last_len {
-                content_grew = true;
-                stable_count = 0;
-            } else {
-                stable_count += 1;
-            }
-            last_len = text_len;
-
-            if text_len > 1000 && stable_count >= 2 {
-                break;
-            }
-            if content_grew && stable_count >= 3 {
-                break;
-            }
-            if start.elapsed() >= timeout {
-                break;
-            }
-
-            std::thread::sleep(check_interval);
-        }
-    }
-
-    pub fn fetch_page_content(
+    pub(crate) fn fetch_page_content(
         &self,
         url: &str,
         max_chars: usize,
-        should_navigate: bool,
+        ticket: &NavigationTicket,
     ) -> BrowserResponse {
         let error_response = |err: String| BrowserResponse {
             ok: false,
@@ -1246,37 +1680,47 @@ impl BrowserManager {
             error: Some(err),
         };
 
-        if should_navigate {
-            if let Err(err) = self.navigate(url) {
-                return error_response(err);
+        let t0 = std::time::Instant::now();
+        let navigation = self.wait_for_navigation(
+            ticket,
+            NAVIGATION_TIMEOUT.saturating_add(Duration::from_secs(1)),
+        );
+        debug!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "browser wait_for_navigation"
+        );
+        let Some(navigation) = navigation else {
+            return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
+        };
+        if navigation.navigation_id != ticket.navigation_id {
+            return error_response("页面加载已被新的导航替代".to_string());
+        }
+        match navigation.phase {
+            NavigationPhase::Failed | NavigationPhase::Loading => {
+                return error_response(PAGE_LOAD_ERROR_MESSAGE.to_string());
             }
+            NavigationPhase::Loaded => {}
         }
 
-        let t0 = std::time::Instant::now();
-        let loaded = self.wait_for_page_load(15_000);
-        debug!(
-            loaded,
-            elapsed_ms = t0.elapsed().as_millis() as u64,
-            "browser wait_for_page_load"
+        let result = self.eval_tab_with_result_timeout(
+            &ticket.tab_id,
+            &format!("window.__tiangong_bridge.getFullText({max_chars})"),
+            Duration::from_secs(4),
         );
 
-        let t1 = std::time::Instant::now();
-        self.wait_for_content_ready(15_000);
-        debug!(
-            elapsed_ms = t1.elapsed().as_millis() as u64,
-            "browser wait_for_content_ready"
-        );
-
-        let result = self.eval_with_result(&format!(
-            "window.__tiangong_bridge.getFullText({max_chars})"
-        ));
+        let still_current = self
+            .navigation_ticket_for_tab(&ticket.tab_id)
+            .is_some_and(|current| current.navigation_id == ticket.navigation_id);
+        if !still_current {
+            return error_response("页面加载已被新的导航替代".to_string());
+        }
 
         match result {
             Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(data) => {
                     let title = data["title"].as_str().unwrap_or("").to_string();
                     let content = data["text"].as_str().unwrap_or("").to_string();
-                    let final_url = data["url"].as_str().unwrap_or(url).to_string();
+                    let final_url = navigation.final_url.unwrap_or_else(|| url.to_string());
                     BrowserResponse {
                         ok: true,
                         title,
@@ -1303,6 +1747,14 @@ impl BrowserManager {
     pub fn current_snapshot_without_events(&self, max_chars: usize) -> Option<BrowserPageSnapshot> {
         if !self.is_visible() {
             return None;
+        }
+        if let Some(mut snapshot) = self.get_snapshot() {
+            if matches!(&snapshot.status, PageStatus::Loading | PageStatus::Error(_)) {
+                let state = self.state.lock().ok()?;
+                snapshot.tabs = state.tabs.clone();
+                snapshot.active_tab_id = state.active_tab_id.clone();
+                return Some(snapshot);
+            }
         }
         let raw = self.eval_with_result(&format!(
             "(function(){{try{{var t=window.__tiangong_bridge.getFullText({max_chars});var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){{t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}}return JSON.stringify(t);}}catch(e){{return ''}}}})()"
@@ -1494,7 +1946,7 @@ impl BrowserManager {
     /// 同一会话下按 id 增量同步 tabs。
     ///
     /// - 不在 `next_tabs` 中的 id：关闭其 webview 并移除记录；
-    /// - 新增的 id：按元数据补建记录（history/page_loaded_signals 等），
+    /// - 新增的 id：按元数据补建记录（history/navigation_signals 等），
     ///   但**不**创建 webview（由调用方按需补建）；
     /// - id 仍存在的 tab：保留其现有 webview，仅用传入的 url/title 覆盖元数据，
     ///   避免 url/title 字段差异（后端导航持续更新）触发误销毁。
@@ -1517,7 +1969,7 @@ impl BrowserManager {
             if let Some(wv) = state.webviews.remove(id) {
                 webviews_to_close.push(wv);
             }
-            state.page_loaded_signals.remove(id);
+            state.navigation_signals.remove(id);
             state.latest_snapshots.remove(id);
             state.tab_histories.remove(id);
             state.tab_history_indices.remove(id);
@@ -1543,10 +1995,9 @@ impl BrowserManager {
             }
             // 新增 tab：插入记录并补建元数据（不含 webview）。
             state.tabs.push(tab.clone());
-            state.page_loaded_signals.insert(
-                tab.id.clone(),
-                Arc::new((Mutex::new(false), Condvar::new())),
-            );
+            state
+                .navigation_signals
+                .insert(tab.id.clone(), navigation_signal(&tab.url));
             if !tab.url.starts_with("about:") {
                 let title = if tab.title.is_empty() {
                     tab.url.clone()
@@ -1582,10 +2033,9 @@ impl BrowserManager {
                 }
             }
             let rect = state.browser_rect;
-            state.page_loaded_signals.insert(
-                tab_id.clone(),
-                Arc::new((Mutex::new(false), Condvar::new())),
-            );
+            state
+                .navigation_signals
+                .insert(tab_id.clone(), navigation_signal(url));
             // 初始化标签页历史（排除 about: 页面）
             if !url.starts_with("about:") {
                 let entry = HistoryEntry {
@@ -1678,7 +2128,7 @@ impl BrowserManager {
             if let Some(webview) = state.webviews.remove(tab_id) {
                 let _ = webview.close();
             }
-            state.page_loaded_signals.remove(tab_id);
+            state.navigation_signals.remove(tab_id);
             state.latest_snapshots.remove(tab_id);
             // 清除该标签页的历史
             state.tab_histories.remove(tab_id);
@@ -1703,7 +2153,7 @@ impl BrowserManager {
                     let _ = wv.set_size(LogicalSize::new(0.0, 0.0));
                     let _ = wv.set_position(LogicalPosition::new(-10000, -10000));
                 }
-                state.page_loaded_signals.clear();
+                state.navigation_signals.clear();
                 state.latest_snapshots.clear();
                 state.last_known_url.clear();
                 state.last_known_text_signature.clear();
@@ -1907,6 +2357,105 @@ impl BrowserManager {
     }
 }
 
+fn tab_navigation_phase(state: &BrowserState, tab_id: &str) -> Option<NavigationPhase> {
+    let signal = state.navigation_signals.get(tab_id)?;
+    let navigation = signal.state.lock().ok()?;
+    Some(navigation.phase)
+}
+
+fn is_recordable_history_url(url: &str) -> bool {
+    !url.is_empty() && !url.starts_with("about:") && !url.starts_with("data:")
+}
+
+fn record_tab_navigation(state: &mut BrowserState, tab_id: &str, url: &str, title: Option<&str>) {
+    if !is_recordable_history_url(url) {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let title = title.filter(|title| !title.is_empty()).unwrap_or(url);
+    let existing_position = state
+        .tab_histories
+        .get(tab_id)
+        .and_then(|entries| entries.iter().position(|entry| entry.url == url));
+
+    if let Some(position) = existing_position {
+        if let Some(entry) = state
+            .tab_histories
+            .get_mut(tab_id)
+            .and_then(|entries| entries.get_mut(position))
+        {
+            entry.title = title.to_string();
+            entry.timestamp = timestamp;
+        }
+        state
+            .tab_history_indices
+            .insert(tab_id.to_string(), position);
+        return;
+    }
+
+    let current_index = state.tab_history_indices.get(tab_id).copied();
+    let entries = state.tab_histories.entry(tab_id.to_string()).or_default();
+    if let Some(index) = current_index {
+        entries.truncate(index.saturating_add(1));
+    }
+    entries.push(HistoryEntry {
+        url: url.to_string(),
+        title: title.to_string(),
+        timestamp,
+    });
+    state
+        .tab_history_indices
+        .insert(tab_id.to_string(), entries.len().saturating_sub(1));
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn navigation_error_data_url(requested_url: &str) -> String {
+    let escaped_url = escape_html(requested_url);
+    let html = format!(
+        r#"<!doctype html>
+<html lang="zh-CN" data-tiangong-navigation-error="true">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>页面加载异常</title>
+  <style>
+    :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
+    main {{ width: min(560px, calc(100% - 40px)); }}
+    h1 {{ margin: 0 0 12px; font-size: 24px; letter-spacing: 0; }}
+    p {{ margin: 0 0 20px; line-height: 1.6; color: GrayText; }}
+    code {{ display: block; margin-bottom: 24px; padding: 12px; overflow-wrap: anywhere; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px; }}
+    a {{ display: inline-block; padding: 9px 14px; border-radius: 6px; background: CanvasText; color: Canvas; text-decoration: none; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>页面加载异常</h1>
+    <p>{PAGE_LOAD_ERROR_MESSAGE}</p>
+    <code>{escaped_url}</code>
+    <a href="{escaped_url}">重新加载</a>
+  </main>
+</body>
+</html>"#
+    );
+    format!(
+        "data:text/html;base64,{}",
+        base64_url::encode(html.as_bytes())
+    )
+}
+
 fn reset_runtime_state(state: &mut BrowserState, close_webviews: bool) {
     state
         .poll_stop
@@ -1925,15 +2474,14 @@ fn reset_runtime_state(state: &mut BrowserState, close_webviews: bool) {
         state.webviews.clear();
     }
 
-    for signal in state.page_loaded_signals.values() {
-        let (lock, cvar) = &**signal;
-        if let Ok(mut loaded) = lock.lock() {
-            *loaded = false;
+    for signal in state.navigation_signals.values() {
+        if let Ok(mut navigation) = signal.state.lock() {
+            navigation.phase = NavigationPhase::Failed;
         }
-        cvar.notify_all();
+        signal.cvar.notify_all();
     }
 
-    state.page_loaded_signals.clear();
+    state.navigation_signals.clear();
     state.latest_snapshots.clear();
     state.last_known_url.clear();
     state.last_known_text_signature.clear();
@@ -1955,10 +2503,9 @@ fn resolve_active_browser_tab(
 
 fn restore_tab_runtime_metadata(state: &mut BrowserState) {
     for tab in &state.tabs {
-        state.page_loaded_signals.insert(
-            tab.id.clone(),
-            Arc::new((Mutex::new(false), Condvar::new())),
-        );
+        state
+            .navigation_signals
+            .insert(tab.id.clone(), navigation_signal(&tab.url));
         if !tab.url.starts_with("about:") {
             let title = if tab.title.is_empty() {
                 tab.url.clone()
@@ -2176,7 +2723,7 @@ mod tests {
 
         assert_eq!(state.tabs.len(), 2);
         assert!(state.tab_histories.contains_key("t2"));
-        assert!(state.page_loaded_signals.contains_key("t2"));
+        assert!(state.navigation_signals.contains_key("t2"));
     }
 
     #[test]
@@ -2185,16 +2732,15 @@ mod tests {
         let mut state = manager.state.lock().unwrap();
         state.tabs = vec![tab("t1", "https://a.example.com", "A")];
         state.tab_histories.insert("t1".to_string(), Vec::new());
-        state.page_loaded_signals.insert(
-            "t1".to_string(),
-            Arc::new((Mutex::new(false), Condvar::new())),
-        );
+        state
+            .navigation_signals
+            .insert("t1".to_string(), navigation_signal("https://a.example.com"));
 
         // t1 被移除后其元数据应一并清理。
         BrowserManager::sync_tabs_by_id(&mut state, &[]);
 
         assert!(state.tabs.is_empty());
         assert!(!state.tab_histories.contains_key("t1"));
-        assert!(!state.page_loaded_signals.contains_key("t1"));
+        assert!(!state.navigation_signals.contains_key("t1"));
     }
 }

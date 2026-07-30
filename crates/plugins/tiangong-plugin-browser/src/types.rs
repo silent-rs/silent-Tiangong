@@ -37,11 +37,33 @@ pub struct BrowserOpenEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserPageLoadedEvent {
     pub session_id: String,
+    pub tab_id: String,
     #[serde(default)]
     pub title: String,
     pub url: String,
     #[serde(default)]
     pub text: String,
+}
+
+/// 页面导航状态。前端按会话和标签过滤，避免并发导航串台。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserNavigationStateKind {
+    Loading,
+    Loaded,
+    Failed,
+}
+
+/// 页面导航状态事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserNavigationStateEvent {
+    pub session_id: String,
+    pub tab_id: String,
+    pub navigation_id: u64,
+    pub state: BrowserNavigationStateKind,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// 浏览器事件队列及其来源会话。

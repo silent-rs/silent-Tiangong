@@ -110,17 +110,19 @@ pub async fn browser_hide(
 #[tauri::command]
 pub async fn browser_go_back(
     session_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    session_manager(&state, &session_id)?.go_back()
+    session_manager(&state, &session_id)?.go_back(&app)
 }
 
 #[tauri::command]
 pub async fn browser_go_forward(
     session_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    session_manager(&state, &session_id)?.go_forward()
+    session_manager(&state, &session_id)?.go_forward(&app)
 }
 
 #[tauri::command]

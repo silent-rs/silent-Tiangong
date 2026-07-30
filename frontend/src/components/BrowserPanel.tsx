@@ -202,8 +202,15 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
         syncPosition();
       });
       unlistenPage = await listen('browser:page_loaded', (event) => {
+        const payload = event.payload as {
+          session_id?: string;
+          tab_id?: string;
+          url?: string;
+          title?: string;
+        };
+        if (payload.session_id !== sessionId) return;
+        if (payload.tab_id && payload.tab_id !== activeTabIdRef.current) return;
         refreshTabs();
-        const payload = event.payload as { url?: string; title?: string };
         if (payload?.url) {
           setUrl(payload.url);
         }
@@ -330,8 +337,10 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
   }, [activeTabId, canGoForward]);
 
   const handleReload = useCallback(async () => {
-    await api.browserEval(sessionId, 'location.reload()').catch(console.error);
-  }, []);
+    const nextUrl = normalizeBrowserUrl(url);
+    if (!nextUrl) return;
+    await api.browserNavigate(sessionId, nextUrl).catch(console.error);
+  }, [sessionId, url]);
 
   // 缩放前关闭批注：批注 canvas 是 webview 内 DOM，set_zoom 会等比缩放整个 webview，
   // 因此缩放前若批注处于激活状态则先关闭并清空，避免视觉错位；用户可在缩放后重新开启。
