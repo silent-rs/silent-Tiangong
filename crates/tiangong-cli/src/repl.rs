@@ -604,6 +604,8 @@ impl ResponseState {
                     output::status(&format!("索引扫描完成: {count} 个文件"));
                 }
             }
+            // 标题变更由 GUI 消费；CLI 不维护会话列表视图，无需处理。
+            StreamEvent::TitleChanged { .. } => {}
         }
         false
     }

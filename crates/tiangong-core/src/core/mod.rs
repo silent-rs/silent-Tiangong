@@ -24,6 +24,13 @@ pub mod storage_location;
 pub use error::CoreError;
 pub use storage_location::CoreStorageLocation;
 
+/// 判断标题是否仍是默认值（"新对话"/"会话 X"）。
+///
+/// 用于 lite 自动生成标题写回时，避免覆盖用户已手动改过的标题。
+pub(crate) fn is_default_title(title: &str) -> bool {
+    title == "新对话" || title.starts_with("会话 ")
+}
+
 /// 天工智能体核心
 #[derive(TypedBuilder)]
 #[builder(
@@ -98,6 +105,39 @@ impl TiangongCore {
         let _ = self.send_cmd(Command::SetTrustMode(mode));
     }
 
+    /// 更新会话标题。用于用户手动编辑（不可放弃）。
+    ///
+    /// 与 trust_mode 一致的双分支协调：
+    /// - turn 进行中：发 `Command::SetTitle`，由 turn task 在命令分支写入 `ctx.session`，
+    ///   turn 结束 run_turn 统一落盘（避免与 turn 对 session 的读写竞争）。
+    /// - Core 空闲：Core 是 session 权威持有者且无并发 turn，直接 load+改+persist。
+    ///
+    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（用于 lite 自动生成，
+    /// 但那条路径直接走 `shared_runtime::send_command`，不经过此方法）；用户手动编辑传 false。
+    pub fn set_title(&self, title: String, only_if_default: bool) -> Result<(), CoreError> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err(CoreError::WorkerStopped);
+        }
+        if crate::shared_runtime::is_running(&self.session_id) {
+            self.send_cmd(Command::SetTitle {
+                title,
+                only_if_default,
+            })
+        } else {
+            let mut session = self.load_session()?;
+            if only_if_default && !is_default_title(&session.title) {
+                return Ok(());
+            }
+            session.title = title;
+            session.updated_at = tiangong_types::now_text();
+            session
+                .try_persist_to_disk()
+                .map_err(|_| CoreError::WorkerStopped)?;
+            Ok(())
+        }
+    }
+
     fn load_session(&self) -> Result<Session, CoreError> {
         match Session::load_from_storage(&self.storage_root, &self.session_id) {
             Ok(session) => Ok(session),
@@ -160,11 +200,13 @@ impl TiangongCore {
                 });
             });
         let client = SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
+        let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);
 
         Ok(TurnContext::builder()
             .client(client)
+            .lite_client(lite_client)
             .session(session)
             .stream_tx(stream_tx)
             .plugins(plugins)

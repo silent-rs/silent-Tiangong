@@ -123,4 +123,25 @@ impl CoreManager {
             core.set_trust_mode(mode);
         }
     }
+
+    /// 更新指定会话标题（落盘始终由 Core 负责，保证不与 turn 对 session 的读写竞争）。
+    ///
+    /// 必须存在 live Core（标题可编辑意味着 Core 应已创建）；不存在则视为异常并报错。
+    /// Core 内部按 is_busy 分流：忙时投递 turn task，Core 空闲时 Core 自己写盘。
+    ///
+    /// `only_if_default=true` 时仅当当前标题仍是默认值才覆盖（lite 自动生成用，
+    /// 用户手动改过则不覆盖）；用户手动编辑传 false。
+    pub fn set_core_title(
+        &self,
+        session_id: &str,
+        title: String,
+        only_if_default: bool,
+    ) -> Result<(), String> {
+        let registry = self.registry();
+        let Some(core) = registry.get(session_id) else {
+            return Err(format!("会话 {session_id} 无可用 Core，无法更新标题"));
+        };
+        core.set_title(title, only_if_default)
+            .map_err(|_| "更新会话标题失败".to_string())
+    }
 }

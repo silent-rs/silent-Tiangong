@@ -958,6 +958,20 @@ pub(super) async fn execute_turn(
                 Some(Command::InjectTool { tool_name, payload }) => {
                     injections.receive(&stream_tx, tool_name, payload);
                 }
+                Some(Command::SetTitle {
+                    title,
+                    only_if_default,
+                }) => {
+                    if !only_if_default
+                        || crate::core::is_default_title(&ctx.session.title)
+                    {
+                        ctx.session.title = title.clone();
+                        ctx.session.updated_at = tiangong_types::now_text();
+                        // 通知消费线程转发 sessions_updated（core 层不碰 tauri，走自有 StreamEvent 通道）。
+                        let _ = stream_tx.send(tiangong_types::StreamEvent::TitleChanged { title });
+                    }
+                    // 不立即 persist：turn 结束 run_turn 统一落盘。
+                }
                 Some(Command::EmitStreamEvent(event)) => {
                     let _ = stream_tx.send(*event);
                 }

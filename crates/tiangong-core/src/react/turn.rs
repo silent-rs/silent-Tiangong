@@ -42,6 +42,11 @@ pub(crate) async fn run_turn(
         plugin.on_turn_started(&mut ctx.session, turn_start_idx);
     }
 
+    // ── 标题自动生成（与 Agent Loop 并行）──
+    // 仅当标题仍是默认值时，用 lite 模型据首条用户消息生成标题，
+    // 完成后经 Command::SetTitle 投回 turn task 安全写入 ctx.session。
+    spawn_title_generation(&ctx);
+
     // ── 执行 Agent Loop ──
     // execute_turn 返回明确的执行结果和累计用量，不在内部发送终态事件。
     let execution = execute_turn(&mut ctx, &mut cmd_rx).await;
@@ -120,4 +125,49 @@ pub(crate) async fn run_turn(
     // ── 发布唯一终态 ──
     // 宿主在收到终态后从磁盘重载权威 Session，不再需要额外的最终消息快照。
     let _ = stream_tx.send(outcome.terminal_event(usage));
+}
+
+/// 标题仍是默认值时，并行用 lite 模型据首条用户消息生成标题。
+///
+/// 在独立阻塞线程上执行 `complete_lite`（同步网络请求），完成后经
+/// `shared_runtime::send_command` 投递 `Command::SetTitle` 回当前 turn task。
+/// turn task 收到后在 execute.rs 命令分支写入 `ctx.session.title`，
+/// 由 run_turn 统一落盘——标题落盘始终在 Core 内部，外部不参与。
+///
+/// 生成期间 turn 可能已结束（命令通道关闭），此时 `send_command` 返回 false，
+/// 标题本次未写入；下次提问时本函数发现标题仍是默认值会再次触发，天然自愈。
+fn spawn_title_generation(ctx: &TurnContext) {
+    use crate::core::is_default_title;
+    // 标题非默认值（用户已改过或已生成过）则跳过。
+    if !is_default_title(&ctx.session.title) {
+        return;
+    }
+    // 取首条用户消息文本作为生成输入。
+    let Some(input) = ctx
+        .session
+        .messages
+        .iter()
+        .find(|m| m.role == MessageRole::User)
+        .map(|m| m.text_content())
+    else {
+        return;
+    };
+    let lite_client = ctx.lite_client().clone();
+    let session_id = ctx.session.id.clone();
+    tokio::task::spawn_blocking(move || {
+        let Ok(title) = lite_client.complete_lite(&input) else {
+            return;
+        };
+        let clean = title.trim().trim_matches('"').to_string();
+        if clean.is_empty() {
+            return;
+        }
+        let _ = crate::shared_runtime::send_command(
+            &session_id,
+            Command::SetTitle {
+                title: clean,
+                only_if_default: true,
+            },
+        );
+    });
 }

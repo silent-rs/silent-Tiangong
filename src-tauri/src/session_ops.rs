@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use tiangong_app_state::app_state::{CoreManager, TiangongState};
-use tiangong_core::session::{now_text, MessageRole, Session, SessionCwdMode};
+use tiangong_core::session::{now_text, Session, SessionCwdMode};
 use tiangong_types::{ContentBlock, TrustMode};
 
 pub(crate) fn remove_session_state(
@@ -76,26 +76,6 @@ pub(crate) fn restore_session(snapshot: Session) -> Result<()> {
     snapshot
         .try_persist_to_disk()
         .map_err(|error| anyhow!("恢复会话失败：{error}"))
-}
-
-pub(crate) fn update_title(
-    manager: &CoreManager,
-    session_id: &str,
-    title: String,
-) -> Result<String> {
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return Err(anyhow!("会话标题不能为空"));
-    }
-    let mut session = manager
-        .load_session(session_id)
-        .map_err(|error| anyhow!("加载会话失败：{error}"))?;
-    let previous = std::mem::replace(&mut session.title, title);
-    session.updated_at = now_text();
-    session
-        .try_persist_to_disk()
-        .map_err(|error| anyhow!("保存会话标题失败：{error}"))?;
-    Ok(previous)
 }
 
 pub(crate) fn update_trust_mode(
@@ -176,16 +156,4 @@ pub(crate) fn update_workspace_dir(
             .map_err(|error| anyhow!("保存会话工作目录失败：{error}"))?;
     }
     Ok(())
-}
-
-pub(crate) fn title_generation_input(manager: &CoreManager, session_id: &str) -> Option<String> {
-    let session = manager.load_session(session_id).ok()?;
-    if session.title != "新对话" && !session.title.starts_with("会话 ") {
-        return None;
-    }
-    session
-        .messages
-        .iter()
-        .find(|message| message.role == MessageRole::User)
-        .map(|message| message.text_content())
 }
