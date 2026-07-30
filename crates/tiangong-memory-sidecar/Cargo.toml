@@ -1,0 +1,18 @@
+[package]
+name = "tiangong-memory-sidecar"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "Memory System 独立 sidecar 进程（承载 SQLite/tantivy/lancedb 原生运行）"
+publish = false
+
+[[bin]]
+name = "tiangong-memory-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-memory = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

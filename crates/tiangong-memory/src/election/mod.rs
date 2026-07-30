@@ -27,13 +27,15 @@ const FOLLOWER_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const HEARTBEAT_TIMEOUT_SECS: i64 = 10;
 static LEADER_INFO_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server）
+/// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server/Sidecar）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessType {
     Gui,
     Cli,
     Server,
+    /// 独立 memory sidecar 进程
+    Sidecar,
 }
 
 /// Leader 状态

@@ -38,6 +38,7 @@ members = [
     "crates/plugins/tiangong-plugin-prompt",
     "crates/plugins/tiangong-plugin-memory-wasm",
     "crates/tiangong-plugin-runtime",
+    "crates/tiangong-memory-sidecar",
     "src-tauri",
     "xtask",
 ]
@@ -58,6 +59,7 @@ tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-media-archive = { path = "crates/tiangong-media-archive" }
 tiangong-memory = { path = "crates/tiangong-memory" }
+tiangong-memory-sidecar = { path = "crates/tiangong-memory-sidecar" }
 tiangong-plugin-browser = { path = "crates/plugins/tiangong-plugin-browser" }
 tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch = { path = "crates/plugins/tiangong-plugin-fetch" }

@@ -1,11 +1,13 @@
 //! xtask：辅助构建任务。
 //!
-//! 当前提供 `build-wasm` 子命令：构建 memory wasm 组件并部署到
-//! `~/.tiangong/plugins/`，供三入口（CLI/Server/Desktop）运行时加载。
+//! 提供 `build-wasm` 和 `build-sidecar` 子命令：
+//! - build-wasm：构建 memory wasm 组件并部署到 `~/.tiangong/plugins/`
+//! - build-sidecar：构建 memory sidecar 二进制并部署到 `~/.tiangong/memory-sidecar/`
 //!
 //! 用法：
 //! ```sh
 //! cargo run -p xtask -- build-wasm
+//! cargo run -p xtask -- build-sidecar
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -15,6 +17,9 @@ const WASM_CRATE: &str = "tiangong-plugin-memory-wasm";
 const WASM_TARGET: &str = "wasm32-wasip2";
 const WASM_ARTIFACT: &str = "tiangong_plugin_memory_wasm.wasm";
 
+const SIDECAR_CRATE: &str = "tiangong-memory-sidecar";
+const SIDECAR_ARTIFACT: &str = "tiangong-memory-sidecar";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
@@ -22,6 +27,12 @@ fn main() {
         "build-wasm" => {
             if let Err(e) = build_wasm() {
                 eprintln!("build-wasm 失败: {e}");
+                std::process::exit(1);
+            }
+        }
+        "build-sidecar" => {
+            if let Err(e) = build_sidecar() {
+                eprintln!("build-sidecar 失败: {e}");
                 std::process::exit(1);
             }
         }
@@ -38,8 +49,9 @@ fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
     eprintln!("用法: cargo run -p xtask -- <子命令>\n");
     eprintln!("子命令:");
-    eprintln!("  build-wasm   构建 memory wasm 组件并部署到 ~/.tiangong/plugins/");
-    eprintln!("  help         显示本帮助");
+    eprintln!("  build-wasm      构建 memory wasm 组件并部署到 ~/.tiangong/plugins/");
+    eprintln!("  build-sidecar   构建 memory sidecar 二进制并部署到 ~/.tiangong/memory-sidecar/");
+    eprintln!("  help            显示本帮助");
 }
 
 /// 构建 wasm 组件并拷贝到 storage_root/plugins/。
@@ -87,6 +99,57 @@ fn build_wasm() -> std::io::Result<()> {
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(WASM_ARTIFACT);
     std::fs::copy(&artifact, &dest)?;
+    eprintln!("[xtask] 已部署到: {}", dest.display());
+
+    Ok(())
+}
+
+/// 构建 memory sidecar 二进制并部署到 storage_root/memory-sidecar/。
+fn build_sidecar() -> std::io::Result<()> {
+    let workspace_root = workspace_root();
+    eprintln!("[xtask] workspace 根目录: {}", workspace_root.display());
+
+    // 1. 构建 sidecar 二进制（release）。
+    eprintln!("[xtask] 构建 {SIDECAR_CRATE}（profile=release）...");
+    let status = Command::new(env_var_or("CARGO", "cargo"))
+        .current_dir(&workspace_root)
+        .args(["build", "-p", SIDECAR_CRATE, "--release"])
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other("cargo build sidecar 退出码非零"));
+    }
+
+    // 2. 定位构建产物（带平台可执行后缀）。
+    let exe = std::env::consts::EXE_SUFFIX;
+    let artifact = workspace_root
+        .join("target")
+        .join("release")
+        .join(format!("{SIDECAR_ARTIFACT}{exe}"));
+    if !artifact.exists() {
+        return Err(std::io::Error::other(format!(
+            "未找到 sidecar 产物: {}",
+            artifact.display()
+        )));
+    }
+    eprintln!(
+        "[xtask] 构建产物: {} ({} 字节)",
+        artifact.display(),
+        file_size(&artifact)?
+    );
+
+    // 3. 拷贝到 storage_root/memory-sidecar/。
+    let dest_dir = storage_root().join("memory-sidecar");
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(format!("{SIDECAR_ARTIFACT}{exe}"));
+    std::fs::copy(&artifact, &dest)?;
+
+    // Unix 设置可执行权限。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+
     eprintln!("[xtask] 已部署到: {}", dest.display());
 
     Ok(())

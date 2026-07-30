@@ -10739,6 +10739,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-memory-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "tiangong-memory",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tiangong-plugin-agent-team"
 version = "0.13.4"
 dependencies = [
@@ -10915,6 +10926,7 @@ dependencies = [
 name = "tiangong-plugin-memory-wasm"
 version = "0.13.4"
 dependencies = [
+ "serde_json",
  "wit-bindgen 0.46.0",
 ]
 
