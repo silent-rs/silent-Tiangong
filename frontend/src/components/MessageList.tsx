@@ -41,8 +41,19 @@ import {
 } from "./message";
 import { type MentionEditorHandle } from "./MentionEditor";
 
+/** 取路径最后 1-2 级目录用于简短展示，例如 /a/b/tiangong -> b/tiangong */
+function shortDir(path: string): string {
+  if (!path) return '';
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
+}
+
 export function MessageList() {
   const messages = useStore(s => s.messages);
+  const workspaceDir = useStore(s => s.workspaceDir);
+  const sessionCwd = useStore(s => s.sessionCwd);
   const runStatus = useStore(s => s.runStatus);
   const runSummary = useStore(s => s.runSummary);
   const streamingMessageId = useStore(s => s.streamingMessageId);
@@ -706,8 +717,15 @@ export function MessageList() {
               <h2 className="text-xl font-medium text-foreground mb-2">
                 欢迎使用天工
               </h2>
-              <p className="text-muted-foreground text-sm">
-                我可以帮助您完成各种任务
+              <p
+                className="text-muted-foreground text-sm"
+                title={(sessionCwd || workspaceDir) || undefined}
+              >
+                我可以帮助您在{' '}
+                <span className="text-foreground font-medium font-mono">
+                  {shortDir(sessionCwd || workspaceDir) || '当前工作区'}
+                </span>
+                {' '}中完成各种任务
               </p>
             </div>
           ) : (
