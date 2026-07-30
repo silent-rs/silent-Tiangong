@@ -19,6 +19,7 @@ pub mod gui_api;
 pub mod handle;
 pub mod ipc;
 pub mod registry;
+pub mod sidecar;
 pub mod types;
 
 mod actor;
@@ -47,6 +48,7 @@ pub use election::{
 };
 pub use handle::MemoryHandle;
 pub use options::{MemoryOptions, MemoryVectorMode};
+pub use sidecar::MemorySidecarManager;
 pub use types::*;
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）

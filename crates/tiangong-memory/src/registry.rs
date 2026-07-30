@@ -219,6 +219,15 @@ pub async fn init_memory_handle_for_process(
     config_generation: u64,
     process_type: crate::ProcessType,
 ) -> Option<crate::MemoryHandle> {
+    // 优先尝试拉起 sidecar 进程（如果二进制存在），让存储跑在独立进程。
+    // sidecar 不可用时（二进制缺失/spawn 失败）静默降级为进程内 actor。
+    let manager = crate::sidecar::MemorySidecarManager::new();
+    if manager.binary_exists()
+        && let Err(e) = manager.ensure_running().await
+    {
+        tracing::warn!("memory sidecar 拉起失败，降级为进程内 actor: {e}");
+    }
+
     let options = MemoryConfig::load_or_default().to_options();
     get_or_init_memory_async(options, config_generation, process_type).await
 }
