@@ -69,7 +69,6 @@ struct TabNavigationState {
     started_url: Option<String>,
     document_id: Option<String>,
     superseded_document_ids: Vec<String>,
-    superseded_urls: Vec<String>,
     final_url: Option<String>,
     history_index: Option<usize>,
     phase: NavigationPhase,
@@ -111,7 +110,6 @@ fn navigation_signal(url: &str) -> Arc<NavigationSignal> {
             started_url: None,
             document_id: None,
             superseded_document_ids: Vec::new(),
-            superseded_urls: Vec::new(),
             final_url: Some(url.to_string()),
             history_index: None,
             phase: NavigationPhase::Loaded,
@@ -142,15 +140,6 @@ fn remember_superseded_navigation(navigation: &mut TabNavigationState) {
     if let Some(document_id) = navigation.document_id.take() {
         push_recent_unique(&mut navigation.superseded_document_ids, document_id);
     }
-    let urls = [
-        Some(navigation.requested_url.clone()),
-        navigation.started_url.clone(),
-        navigation.final_url.clone(),
-    ];
-    for url in urls.into_iter().flatten() {
-        let normalized = normalize_url_for_compare(&url);
-        push_recent_unique(&mut navigation.superseded_urls, normalized);
-    }
 }
 
 fn parse_web_document_snapshot(result: &str) -> Option<WebDocumentSnapshot> {
@@ -173,22 +162,14 @@ fn accept_loading_document(
         return false;
     }
 
-    let normalized_url = normalize_url_for_compare(&snapshot.url);
-    let matches_request = normalized_url == normalize_url_for_compare(&navigation.requested_url);
-    let is_superseded_url = navigation
-        .superseded_urls
-        .iter()
-        .any(|url| url == &normalized_url);
-    if navigation.document_id.is_none() && !matches_request && is_superseded_url {
-        return false;
-    }
-
     if let Some(previous_document_id) = navigation.document_id.replace(snapshot.document_id.clone())
     {
-        push_recent_unique(
-            &mut navigation.superseded_document_ids,
-            previous_document_id,
-        );
+        if previous_document_id != snapshot.document_id {
+            push_recent_unique(
+                &mut navigation.superseded_document_ids,
+                previous_document_id,
+            );
+        }
     }
     navigation.started_url = Some(snapshot.url.clone());
     true
@@ -3198,7 +3179,6 @@ mod tests {
             started_url: None,
             document_id: None,
             superseded_document_ids: Vec::new(),
-            superseded_urls: Vec::new(),
             final_url: None,
             history_index: Some(0),
             phase: NavigationPhase::Loading,
@@ -3218,38 +3198,59 @@ mod tests {
     }
 
     #[test]
-    fn loading_navigation_rejects_superseded_document_and_accepts_redirect() {
+    fn loading_navigation_rejects_superseded_document_and_accepts_redirect_to_same_url() {
         let mut navigation = loading_navigation("https://example.com/b", 2);
         navigation
             .superseded_document_ids
-            .push("document-a".to_string());
-        navigation
-            .superseded_urls
-            .push("https://example.com/a".to_string());
+            .push("old-document-a".to_string());
 
-        let stale = document_snapshot("document-a", "complete", "https://example.com/a");
+        let stale = document_snapshot("old-document-a", "complete", "https://example.com/a");
         assert!(!accept_loading_document(&mut navigation, 2, &stale));
         assert!(navigation.document_id.is_none());
 
-        let redirect = document_snapshot("document-c", "loading", "https://example.com/c");
+        let requested = document_snapshot("document-b", "loading", "https://example.com/b");
+        assert!(accept_loading_document(&mut navigation, 2, &requested));
+
+        let redirect = document_snapshot("new-document-a", "loading", "https://example.com/a");
         assert!(accept_loading_document(&mut navigation, 2, &redirect));
-        assert_eq!(navigation.document_id.as_deref(), Some("document-c"));
+        assert_eq!(navigation.navigation_id, 2);
+        assert_eq!(navigation.document_id.as_deref(), Some("new-document-a"));
         assert_eq!(
             navigation.started_url.as_deref(),
-            Some("https://example.com/c")
+            Some("https://example.com/a")
         );
+        assert!(navigation
+            .superseded_document_ids
+            .iter()
+            .any(|document_id| document_id == "document-b"));
+
+        let completed = document_snapshot("new-document-a", "complete", "https://example.com/a");
+        assert!(accepts_completed_document(
+            &navigation,
+            2,
+            "new-document-a",
+            &completed,
+        ));
+        assert!(!accepts_completed_document(
+            &navigation,
+            2,
+            "old-document-a",
+            &completed,
+        ));
     }
 
     #[test]
-    fn loading_navigation_rejects_unknown_document_at_superseded_url() {
+    fn loading_navigation_does_not_supersede_repeated_current_document() {
         let mut navigation = loading_navigation("https://example.com/b", 2);
-        navigation
-            .superseded_urls
-            .push("https://example.com/a".to_string());
-        let stale = document_snapshot("unknown-document-a", "complete", "https://example.com/a");
+        let current = document_snapshot("document-b", "loading", "https://example.com/b");
 
-        assert!(!accept_loading_document(&mut navigation, 2, &stale));
-        assert!(navigation.document_id.is_none());
+        assert!(accept_loading_document(&mut navigation, 2, &current));
+        assert!(accept_loading_document(&mut navigation, 2, &current));
+        assert_eq!(navigation.document_id.as_deref(), Some("document-b"));
+        assert!(!navigation
+            .superseded_document_ids
+            .iter()
+            .any(|document_id| document_id == "document-b"));
     }
 
     #[test]
