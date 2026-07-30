@@ -10932,6 +10932,7 @@ dependencies = [
  "serde_json",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-memory",
  "tokio",
  "tracing",
  "wasmtime",

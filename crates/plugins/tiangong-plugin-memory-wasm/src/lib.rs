@@ -17,12 +17,12 @@ use bindings::exports::tiangong::plugin::plugin::{
     Guest, MemoryKind, PlannedRecall, PluginDescriptor, PluginError, RecallAnchors, RecallHit,
     SearchStrategy, ToolCall, ToolResult, ToolSpec,
 };
-use bindings::tiangong::plugin::clock;
+use bindings::tiangong::plugin::{clock, memory_store};
 
 mod descriptor {
     pub const ID: &str = "memory";
     pub const NAME: &str = "Memory";
-    pub const VERSION: &str = "0.2.0";
+    pub const VERSION: &str = "0.3.0";
 }
 
 /// recall_memory 工具的 input_schema（JSON 文本）。
@@ -111,11 +111,19 @@ impl Guest for Component {
             )));
         }
 
-        // 2. 用 mock 命中数据（阶段二无存储 host import）。
-        let mock_hits = mock_recall_hits(&query);
+        // 2. 经 memory-store host import 查询真实记忆（BM25 粗召回）。
+        //    宿主未注入 MemoryHandle 时返回 disabled，回退到 mock 命中。
+        //    wit-bindgen 对 import/export 生成了两份 RecallHit，需逐字段转换。
+        let store_hits: Vec<RecallHit> =
+            match memory_store::recall(&planned.anchors.query, &planned.anchors.keywords, limit) {
+                Ok(resp) if !resp.hits.is_empty() => {
+                    resp.hits.into_iter().map(convert_hit).collect()
+                }
+                _ => mock_recall_hits(&query),
+            };
 
         // 3. 规则整理召回结果（下沉的 fallback_synthesize）。
-        let content = synthesize::fallback_synthesize(&query, &[], &mock_hits);
+        let content = synthesize::fallback_synthesize(&query, &[], &store_hits);
 
         // 4. 经 clock host import 获取真实时间戳，附在结果中证明 host import 生效。
         let now_ms = clock::now_millis();
@@ -215,6 +223,27 @@ fn mock_recall_hits(query: &str) -> Vec<RecallHit> {
             depth1_loaded: false,
         },
     ]
+}
+
+/// 把 memory-store（import 侧）的 RecallHit 转成 plugin（export 侧）的 RecallHit。
+///
+/// wit-bindgen 对 import 和 export 分别生成类型，跨边界的 recall-hit 需逐字段转换。
+fn convert_hit(h: bindings::tiangong::plugin::plugin::RecallHit) -> RecallHit {
+    use bindings::tiangong::plugin::plugin::MemoryKind as ImportKind;
+    RecallHit {
+        node_id: h.node_id,
+        title: h.title,
+        summary: h.summary,
+        score: h.score,
+        kind: match h.kind {
+            ImportKind::Episode => MemoryKind::Episode,
+            ImportKind::Entity => MemoryKind::Entity,
+            ImportKind::Decision => MemoryKind::Decision,
+            ImportKind::Evidence => MemoryKind::Evidence,
+        },
+        importance: h.importance,
+        depth1_loaded: h.depth1_loaded,
+    }
 }
 
 // ── 最小 JSON 解析（避免引入 serde 依赖） ──

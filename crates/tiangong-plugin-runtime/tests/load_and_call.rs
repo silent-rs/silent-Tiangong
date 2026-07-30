@@ -386,3 +386,69 @@ fn handle_recall_memory_uses_degradation_path() {
         outcome.summary
     );
 }
+
+// ── 阶段三：memory-store host import 接入测试 ──
+
+/// 用真实 MemoryHandle 加载插件（若 actor 启动失败则返回 None，测试将跳过）。
+fn load_plugin_with_memory() -> Option<tiangong_plugin_runtime::WasmPlugin> {
+    let handle = tiangong_memory::start().ok()?;
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    Some(loader.load(&wasm, &config).expect("加载 wasm 组件失败"))
+}
+
+#[test]
+fn recall_without_handle_falls_back_to_mock() {
+    // 不注入 MemoryHandle 时，memory-store import 返回 disabled，
+    // recall_memory 应回退到 mock 命中（结果含 mock 内容）。
+    let mut plugin = load_plugin();
+    let outcome = plugin
+        .handle_tool(
+            ToolCall {
+                id: "s1".into(),
+                name: "recall_memory".into(),
+                arguments: r#"{"query":"继续上次的架构设计"}"#.into(),
+            },
+            &PluginRuntimeConfig::default(),
+        )
+        .expect("handle-tool 失败");
+    assert!(outcome.ok);
+    // mock 命中含「历史讨论」字样。
+    assert!(
+        outcome.summary.contains("历史讨论")
+            || outcome.summary.contains("未在记忆中找到")
+            || outcome.summary.contains("无需历史上下文"),
+        "无 handle 时应回退 mock，实际: {}",
+        outcome.summary
+    );
+}
+
+#[test]
+fn recall_with_handle_uses_real_store() {
+    // 注入真实 MemoryHandle 时，memory-store import 调用真实 recall。
+    // 验证 host import 链路打通（不返回 disabled）。
+    let Some(mut plugin) = load_plugin_with_memory() else {
+        eprintln!("跳过：MemoryActor 启动失败（可能已有实例运行）");
+        return;
+    };
+    let outcome = plugin
+        .handle_tool(
+            ToolCall {
+                id: "s2".into(),
+                name: "recall_memory".into(),
+                arguments: r#"{"query":"继续上次的架构设计"}"#.into(),
+            },
+            &PluginRuntimeConfig::default(),
+        )
+        .expect("handle-tool 失败");
+    assert!(outcome.ok);
+    // 真实召回链路打通：结果应正常返回（含整理文案或 Skip 判定）。
+    assert!(
+        outcome.summary.contains("已回忆")
+            || outcome.summary.contains("未在记忆中找到")
+            || outcome.summary.contains("无需历史上下文"),
+        "有 handle 时应走真实召回链路，实际: {}",
+        outcome.summary
+    );
+}

@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tiangong_memory::MemoryHandle;
 use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
 
@@ -26,20 +27,30 @@ use crate::host_state::HostState;
 /// WASM 组件加载器。
 ///
 /// 持有一个共享的 [`Engine`]（编译缓存复用）和一个用于实例化的 [`Linker`]。
-/// 阶段一 PoC 不提供任何 host import；后续阶段在此注入 storage / model 等 host 能力。
+/// 阶段三：可选注入 [`MemoryHandle`]，供 memory-store host import 查询真实记忆。
 pub struct WasmPluginLoader {
     engine: Engine,
     linker: Arc<Linker<HostState>>,
+    memory: Option<MemoryHandle>,
 }
 
-/// clock host import 的 host_getter：返回 HostState 自身的可变借用。
-fn host_clock_getter(state: &mut HostState) -> &mut HostState {
+/// host import 的 host_getter：返回 HostState 自身的可变借用（clock / memory-store 共用）。
+fn host_self_getter(state: &mut HostState) -> &mut HostState {
     state
 }
 
 impl WasmPluginLoader {
-    /// 以给定配置创建加载器。
-    pub fn new(_config: &PluginRuntimeConfig) -> Result<Self> {
+    /// 以给定配置创建加载器，不注入记忆句柄（memory-store import 返回 disabled）。
+    pub fn new(config: &PluginRuntimeConfig) -> Result<Self> {
+        Self::with_memory(config, None)
+    }
+
+    /// 以给定配置创建加载器，并注入记忆句柄。
+    /// `config` 当前仅用于保持 API 一致性（Engine 配置不依赖它），资源限制在 `load` 时生效。
+    pub fn with_memory(
+        _config: &PluginRuntimeConfig,
+        memory: Option<MemoryHandle>,
+    ) -> Result<Self> {
         let mut cfg = Config::new();
         cfg.consume_fuel(true);
         cfg.epoch_interruption(true);
@@ -55,12 +66,22 @@ impl WasmPluginLoader {
         // 接入 clock host import：HostState 已实现 clock::Host，经 HasSelf 暴露自身。
         crate::bindings::tiangong::plugin::clock::add_to_linker::<HostState, HasSelf<HostState>>(
             &mut linker,
-            host_clock_getter,
+            host_self_getter,
         )
         .map_err(|e| anyhow::anyhow!("接入 clock 失败: {e}"))?;
+        // 接入 memory-store host import：HostState 已实现 memory_store::Host。
+        crate::bindings::tiangong::plugin::memory_store::add_to_linker::<
+            HostState,
+            HasSelf<HostState>,
+        >(&mut linker, host_self_getter)
+        .map_err(|e| anyhow::anyhow!("接入 memory-store 失败: {e}"))?;
         let linker = Arc::new(linker);
 
-        Ok(Self { engine, linker })
+        Ok(Self {
+            engine,
+            linker,
+            memory,
+        })
     }
 
     /// 引擎句柄，供外部（如 epoch 心跳线程）调用 `increment_epoch`。
@@ -81,7 +102,7 @@ impl WasmPluginLoader {
             .memory_size(config.memory_limit)
             .build();
 
-        let mut store = Store::new(&self.engine, HostState::new(limits));
+        let mut store = Store::new(&self.engine, HostState::new(limits, self.memory.clone()));
         // 注册内存/表/实例上限：limiter 闭包返回 StoreLimits 的借用。
         store.limiter(|state: &mut HostState| state.limits_mut());
         // fuel 在每次工具调用前重置；实例化阶段也给足 fuel。

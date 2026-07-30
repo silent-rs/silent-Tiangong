@@ -137,8 +137,38 @@ interface plugin {
     ) -> result<string, plugin-error>;
 }
 
-/// WASM 插件 world：导入宿主时钟，导出 `plugin` 接口。
+/// 记忆存储接口（host import）。
+///
+/// WASM 组件经此查询宿主侧的真实记忆（BM25 粗召回，不走模型 rerank）。
+/// 阶段三仅提供召回读取；写入/反刍/管理 CRUD 在后续阶段接入。
+interface memory-store {
+    use plugin.{recall-hit};
+
+    /// 召回响应（对应宿主 `MemoryRecallResponse` 的简化子集）。
+    record recall-response {
+        content: string,
+        hits: list<recall-hit>,
+        used-llm: bool,
+    }
+
+    /// 存储错误。
+    variant memory-store-error {
+        message(string),
+        disabled,
+    }
+
+    /// 执行 BM25 粗召回（对应宿主 `MemoryHandle::recall`）。
+    /// `keywords` 由 WASM 内的规则规划产出，传给宿主组装为检索锚点。
+    recall: func(
+        query: string,
+        keywords: list<string>,
+        limit: u32,
+    ) -> result<recall-response, memory-store-error>;
+}
+
+/// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。
 world tiangong-plugin {
     import clock;
+    import memory-store;
     export plugin;
 }
