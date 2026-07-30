@@ -200,13 +200,18 @@ pub async fn restore_cron_jobs(ctx: Arc<dyn SchedulerContext>) {
         }
     };
 
+    // 捕获当前 tokio runtime 句柄：silent 调度器内部用 async-global-executor
+    //（独立线程池，无 tokio reactor）执行任务回调，回调里直接 await tokio 异步代码
+    // 会 panic（there is no reactor running）。这里把句柄捕获进闭包，回调被触发时
+    // 用 handle.spawn 把真正执行投递回 tokio runtime，回调自身立即返回。
+    let handle = tokio::runtime::Handle::current();
+
     let mut scheduler = silent::SCHEDULER.lock().await;
     for job in jobs {
         let schedule = match &job.schedule {
             Some(s) => s.clone(),
             None => continue,
         };
-        let job_clone = job.clone();
         let process_time = match schedule.try_into() {
             Ok(pt) => pt,
             Err(e) => {
@@ -214,27 +219,45 @@ pub async fn restore_cron_jobs(ctx: Arc<dyn SchedulerContext>) {
                 continue;
             }
         };
-        let ctx_clone = ctx.clone();
-        let task = silent::Task::create_with_action_async(
-            job.id.clone(),
-            process_time,
-            job.name.clone(),
-            Arc::new(move || {
-                let job = job_clone.clone();
-                let ctx = ctx_clone.clone();
-                Box::pin(async move {
-                    tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
-                    execute_job(ctx, job).await;
-                    Ok(())
-                })
-            }),
-        );
+        let task = build_cron_task(&job, process_time, ctx.clone(), &handle);
         if let Err(e) = scheduler.add_task(task) {
             tracing::warn!("注册定时任务失败 [{}]：{e}", job.id);
         } else {
             tracing::info!("已恢复定时任务：{} [{}]", job.name, job.id);
         }
     }
+}
+
+/// 构造一个 silent cron Task：到点被调度器调用时，把 `execute_job` 投递到 tokio runtime。
+///
+/// silent 的调度器用 async-global-executor 执行任务回调（非 tokio 线程池），
+/// 直接在回调里 await tokio 异步逻辑会因找不到 reactor 而 panic。这里捕获 tokio
+/// runtime 句柄，回调被触发时用 `Handle::spawn` 把执行转发回 tokio runtime，
+/// 回调立即返回，不阻塞调度器。
+fn build_cron_task(
+    job: &Job,
+    process_time: silent::ProcessTime,
+    ctx: Arc<dyn SchedulerContext>,
+    handle: &tokio::runtime::Handle,
+) -> silent::Task {
+    let job_clone = job.clone();
+    let ctx = ctx.clone();
+    let handle = handle.clone();
+    silent::Task::create_with_action_async(
+        job.id.clone(),
+        process_time,
+        job.name.clone(),
+        Arc::new(move || {
+            let job = job_clone.clone();
+            let ctx = ctx.clone();
+            let handle = handle.clone();
+            Box::pin(async move {
+                tracing::info!("定时任务触发：{} [{}]", job.name, job.id);
+                handle.spawn(async move { execute_job(ctx, job).await });
+                Ok(())
+            })
+        }),
+    )
 }
 
 /// 校验 schedule 字符串能否被调度器解析。

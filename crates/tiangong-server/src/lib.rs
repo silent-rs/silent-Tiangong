@@ -10,7 +10,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use silent::Scheduler;
 use silent::prelude::*;
 use tiangong_core::permission::TrustMode;
 use tiangong_scheduler::executor::SchedulerContext;
@@ -26,7 +25,6 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let _runtime_guard = runtime.enter();
 
     tracing::info!("正在初始化应用状态...");
     let mut app_state = tiangong_app_state::app_state::TiangongState::new();
@@ -56,15 +54,21 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let mut route = Route::new_root().append(api_routes);
     route.set_state(Some(configs));
 
-    // 初始化调度器，恢复已启用的 cron job
-    let scheduler_ctx = app.scheduler_context.clone();
-    tokio::spawn(async move {
-        tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
-        Scheduler::schedule(silent::SCHEDULER.clone()).await;
-    });
-
     tracing::info!("Server 启动：http://{addr}");
-    Server::new().bind(addr).run(route);
+
+    // 自建 runtime 并真正用 block_on 驱动：恢复定时任务与 HTTP 服务跑在同一个
+    // runtime 上。若只用 runtime.enter() 而不 block_on，spawn 的 future 永远不会被
+    // poll（恢复 cron job 不执行，SCHEDULER 为空，定时任务永不触发）；而
+    // Server::run 会另行创建独立 runtime 驱动 HTTP，两者互不相干。
+    runtime.block_on(async move {
+        // 先恢复已启用的 cron job 到全局 SCHEDULER，再启动 HTTP。silent 的
+        // Server::serve 内部会调用 ensure_scheduler_running() 拉起
+        // Scheduler::schedule 循环，从而真正按 cron 触发已注册的任务。
+        let scheduler_ctx = app.scheduler_context.clone();
+        tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
+
+        Server::new().bind(addr).serve(route).await;
+    });
 
     Ok(())
 }
