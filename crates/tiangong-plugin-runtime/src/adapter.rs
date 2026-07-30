@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tiangong_core::core::Plugin;
+use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -52,6 +53,28 @@ impl WasmPluginAdapter {
 impl Plugin for WasmPluginAdapter {
     fn id(&self) -> &str {
         self.id
+    }
+
+    /// CoreConfig 变更：序列化为 JSON 转发到 WASM 组件的 on-config-updated。
+    /// 序列化失败（不应发生）或 WASM 调用失败时仅记录 warning，不阻断 core 流程。
+    fn on_config_updated(&self, config: &CoreConfig) {
+        let config_json = match serde_json::to_string(config) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!("序列化 CoreConfig 失败，跳过 wasm 插件通知: {e}");
+                return;
+            }
+        };
+        let mut plugin = match self.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("wasm 插件锁中毒: {e}");
+                return;
+            }
+        };
+        if let Err(e) = plugin.on_config_updated(config_json) {
+            tracing::warn!("通知 wasm 插件配置变更失败: {e}");
+        }
     }
 }
 

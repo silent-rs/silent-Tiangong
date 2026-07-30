@@ -530,3 +530,32 @@ fn store_upsert_manual_memory_with_handle_returns_node() {
     assert_eq!(node["title"], "wasm 手动记忆");
     assert!(node["id"].is_string(), "应返回生成的 node id");
 }
+
+// ── 通用 config update 事件转发测试 ──
+
+#[test]
+fn on_config_updated_forwards_to_wasm() {
+    // CoreConfig 变更经 adapter 序列化为 JSON 转发到 wasm。
+    // 验证通用 config update 事件链路打通。
+    let mut plugin = load_plugin();
+    let config = tiangong_core::core_config::CoreConfig::default();
+    let config_json = serde_json::to_string(&config).expect("序列化 CoreConfig 失败");
+    // 经 loader 直接调用 wasm 的 on-config-updated 导出。
+    let result = plugin.on_config_updated(config_json);
+    assert!(result.is_ok(), "config 事件应成功转发: {:?}", result.err());
+}
+
+#[test]
+fn adapter_on_config_updated_does_not_panic() {
+    // 经 Plugin trait 的 on_config_updated 调用 adapter，
+    // 验证序列化 + 转发不会 panic（即使 wasm 内部实现是空操作）。
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+
+    let core_config = tiangong_core::core_config::CoreConfig::default();
+    // 不应 panic。
+    <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &core_config);
+}

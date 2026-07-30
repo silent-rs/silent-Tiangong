@@ -148,6 +148,12 @@ interface plugin {
     store-upsert-manual-memory: func(
         draft-json: string,
     ) -> result<string, plugin-error>;
+
+    // ── 通用生命周期事件 ──
+
+    /// CoreConfig 变更通知（对应宿主 `Plugin::on_config_updated`）。
+    /// `config-json` 为 CoreConfig 的 JSON 文本。插件据此感知配置变化。
+    on-config-updated: func(config-json: string) -> result<_, plugin-error>;
 }
 
 /// 记忆存储接口（host import）。

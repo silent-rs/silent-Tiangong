@@ -314,6 +314,16 @@ impl WasmPlugin {
             .map_err(plugin_err)
     }
 
+    /// 通知 WASM 组件 CoreConfig 变更（对应 `Plugin::on_config_updated`）。
+    /// `config_json` 为 CoreConfig 的 JSON 文本。
+    pub fn on_config_updated(&mut self, config_json: String) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_on_config_updated(&mut self.store, &config_json)
+            .map_err(|e| anyhow::anyhow!("on-config-updated 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 引擎句柄（测试与 epoch 心跳用）。
     pub fn engine(&self) -> &Engine {
         &self.engine

@@ -72,7 +72,7 @@ impl LlmConfig {
 }
 
 /// TiangongCore 运行所需的最小配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreConfig {
     /// LLM 模型端点配置
     pub llm: LlmConfig,

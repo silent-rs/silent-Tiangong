@@ -207,6 +207,17 @@ impl Guest for Component {
             }
         })
     }
+
+    fn on_config_updated(config_json: String) -> Result<(), PluginError> {
+        // 通用配置变更事件。memory 组件当前仅记录日志级别的影响，
+        // 真正的 memory 配置由宿主侧 MemoryConfig 独立管理。
+        // 解析失败不阻断（向前兼容：宿主可能传入插件不认识的字段）。
+        if config_json.trim().is_empty() {
+            return Ok(());
+        }
+        // 阶段性实现：确认能收到 config 事件即可。
+        Ok(())
+    }
 }
 
 fn tool_result_ok(summary: String) -> ToolResult {
