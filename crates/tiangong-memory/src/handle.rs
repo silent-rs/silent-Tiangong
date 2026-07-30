@@ -155,6 +155,19 @@ impl MemoryHandle {
         }
     }
 
+    /// 通用请求：按 IPC payload 分发到对应的 memory 操作。
+    ///
+    /// 供 WASM 桥接层使用——WASM 组件经 host import 传入 method + payload JSON，
+    /// host 反序列化为 [`MemoryIpcRequestPayload`] 后调本方法，由统一的
+    /// dispatcher（`handle_memory_request`）转发到具体能力。
+    /// Local/Remote 透明：Local 经 dispatcher 直接调本进程 actor，Remote 经 IPC 发到 sidecar。
+    pub async fn ipc_request(
+        &self,
+        payload: MemoryIpcRequestPayload,
+    ) -> anyhow::Result<MemoryIpcResponsePayload> {
+        crate::ipc::handle_memory_request(self.clone(), payload).await
+    }
+
     /// 运行时粗回忆：只使用本地全文搜索，避免触发 embedding/rerank/Memory LLM。
     pub async fn rough_recall(&self, context: RuntimeRecallContext) -> Vec<RecallHit> {
         match self.inner.as_ref() {

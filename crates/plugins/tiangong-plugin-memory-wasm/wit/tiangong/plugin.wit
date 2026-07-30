@@ -3,58 +3,38 @@ package tiangong:plugin;
 /// 宿主时钟接口（host import）。
 ///
 /// WASM 组件经此获取真实时间，替代宿主侧的 `chrono::Local::now()`。
-/// 阶段二仅提供时钟；LLM/embedding 等能力在后续阶段接入。
 interface clock {
     /// 返回自 UNIX epoch 起的毫秒数。
     now-millis: func() -> u64;
 }
 
+/// 记忆存储接口（host import）。
+///
+/// WASM 组件经此向 memory sidecar 发起请求。host 只暴露一个通用 request
+/// 方法，复用 sidecar 的全部 memory 操作（召回/写入/反刍/CRUD），避免在
+/// WIT 中逐个硬编码 memory 数据结构与操作。
+///
+/// `method` 对应 sidecar IPC 协议（MemoryIpcRequestPayload）的变体名；
+/// `payload` 为入参的 JSON 文本；返回结果序列化为 JSON 文本。
+interface memory-store {
+    /// 存储错误。
+    variant memory-store-error {
+        message(string),
+        disabled,
+    }
+
+    /// 通用请求：转发到 memory sidecar。
+    request: func(
+        method: string,
+        payload: string,
+    ) -> result<string, memory-store-error>;
+}
+
 /// 单文件 WASM 插件接口。
 ///
 /// 所有方法只传递有版本的结构化数据；JSON Schema / 模型参数等复杂对象
-/// 统一以 JSON 文本（string）承载，避免在 WIT 中表达任意 JSON Value。
+/// 统一以 JSON 文本（string）承载。
 interface plugin {
-    /// 记忆类型。
-    enum memory-kind {
-        episode,
-        entity,
-        decision,
-        evidence,
-    }
-
-    /// 检索策略。
-    variant search-strategy {
-        skip,
-        keyword,
-        semantic,
-        hybrid(f64),
-    }
-
-    /// 召回命中项，对齐宿主侧 `RecallHit`。
-    record recall-hit {
-        node-id: string,
-        title: string,
-        summary: string,
-        score: f64,
-        kind: memory-kind,
-        importance: f64,
-        depth1-loaded: bool,
-    }
-
-    /// 检索锚点，对齐宿主侧 `RecallAnchors`。
-    record recall-anchors {
-        query: string,
-        keywords: list<string>,
-        strategy: option<search-strategy>,
-    }
-
-    /// 规划后的召回，对齐宿主侧 `PlannedRecall`（阶段二不携带 usage）。
-    record planned-recall {
-        anchors: recall-anchors,
-        limit: u32,
-        used-llm: bool,
-    }
-
     /// 插件描述符，安装与日志展示用。
     record plugin-descriptor {
         id: string,
@@ -78,7 +58,7 @@ interface plugin {
         arguments: string,
     }
 
-    /// 工具执行结果，对应宿主侧 `ToolResult`（简化版，暂不含 execution 记录）。
+    /// 工具执行结果，对应宿主侧 `ToolResult`。
     record tool-result {
         ok: bool,
         summary: string,
@@ -87,7 +67,7 @@ interface plugin {
         exit-code: s32,
     }
 
-    /// 插件错误统一以可读文本返回，宿主侧据此记录与展示。
+    /// 插件错误统一以可读文本返回。
     variant plugin-error {
         message(string),
     }
@@ -107,117 +87,9 @@ interface plugin {
     /// 关闭插件，释放资源。
     shutdown: func() -> result<_, plugin-error>;
 
-    // ── 阶段二：下沉的纯逻辑导出 ──
-    //
-    // 以下方法在 WASM 内部以规则 fallback（无 LLM）实现，验证纯逻辑下沉。
-
-    /// 融合两路召回（BM25 + 语义），返回 topK。
-    /// `semantic-ratio` 取 0.0=偏关键词 .. 1.0=偏语义。
-    rerank-fuse: func(
-        bm25: list<recall-hit>,
-        semantic: list<recall-hit>,
-        semantic-ratio: f64,
-        limit: u32,
-    ) -> result<list<recall-hit>, plugin-error>;
-
-    /// 规则规划检索锚点（对应宿主 `fallback_plan`）。
-    plan-recall-fallback: func(
-        query: string,
-        reason: option<string>,
-        expected: list<string>,
-        context: list<string>,
-        limit: u32,
-    ) -> result<planned-recall, plugin-error>;
-
-    /// 规则整理召回结果为文本（对应宿主 `fallback_synthesis` 的简化版）。
-    synthesize-fallback: func(
-        query: string,
-        context: list<string>,
-        hits: list<recall-hit>,
-    ) -> result<string, plugin-error>;
-
-    /// 经 memory-store host import 写入事件记忆（验证写入链路）。
-    /// `episode-json` 为 Episode 的 JSON 文本；返回宿主写入结果。
-    store-write-episode: func(
-        episode-json: string,
-        workspace-id: option<string>,
-    ) -> result<_, plugin-error>;
-
-    /// 经 memory-store host import 新增/更新手动记忆（验证写入链路）。
-    /// 成功返回 MemoryNode 的 JSON 文本。
-    store-upsert-manual-memory: func(
-        draft-json: string,
-    ) -> result<string, plugin-error>;
-
-    // ── 通用生命周期事件 ──
-
     /// CoreConfig 变更通知（对应宿主 `Plugin::on_config_updated`）。
-    /// `config-json` 为 CoreConfig 的 JSON 文本。插件据此感知配置变化。
+    /// `config-json` 为 CoreConfig 的 JSON 文本。
     on-config-updated: func(config-json: string) -> result<_, plugin-error>;
-}
-
-/// 记忆存储接口（host import）。
-///
-/// WASM 组件经此查询与写入宿主侧的真实记忆。
-/// 召回走 BM25 粗召回（不走模型 rerank）；写入经 MemoryHandle 落库。
-/// 复杂入参（Episode/ManualMemoryDraft/MemoryCandidate）以 JSON 文本承载，
-/// 宿主侧 serde 反序列化，避免在 WIT 表达任意结构。
-interface memory-store {
-    use plugin.{recall-hit};
-
-    /// 召回响应（对应宿主 `MemoryRecallResponse` 的简化子集）。
-    record recall-response {
-        content: string,
-        hits: list<recall-hit>,
-        used-llm: bool,
-    }
-
-    /// 存储错误。
-    variant memory-store-error {
-        message(string),
-        disabled,
-    }
-
-    /// 三级注入级别（对应宿主 `InjectionLevel`）。
-    enum injection-level {
-        profile,
-        workspace,
-        session,
-    }
-
-    /// 执行 BM25 粗召回（对应宿主 `MemoryHandle::recall`）。
-    /// `keywords` 由 WASM 内的规则规划产出，传给宿主组装为检索锚点。
-    recall: func(
-        query: string,
-        keywords: list<string>,
-        limit: u32,
-    ) -> result<recall-response, memory-store-error>;
-
-    /// 写入事件记忆（fire-and-forget，对应宿主 `MemoryHandle::write_episode`）。
-    /// `episode-json` 为 Episode 的 JSON 文本。
-    write-episode: func(
-        episode-json: string,
-        workspace-id: option<string>,
-    ) -> result<_, memory-store-error>;
-
-    /// 更新三级注入文件（fire-and-forget，对应宿主 `MemoryHandle::update_injection`）。
-    update-injection: func(
-        level: injection-level,
-        target-id: string,
-        content: string,
-    ) -> result<_, memory-store-error>;
-
-    /// 提交记忆候选（fire-and-forget，对应宿主 `MemoryHandle::submit_memory_candidate`）。
-    /// `candidate-json` 为 MemoryCandidate 的 JSON 文本。
-    submit-memory-candidate: func(
-        candidate-json: string,
-    ) -> result<_, memory-store-error>;
-
-    /// 新增或更新手动记忆（对应宿主 `MemoryHandle::upsert_manual_memory`）。
-    /// `draft-json` 为 ManualMemoryDraft 的 JSON 文本；成功返回 MemoryNode 的 JSON 文本。
-    upsert-manual-memory: func(
-        draft-json: string,
-    ) -> result<string, memory-store-error>;
 }
 
 /// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。

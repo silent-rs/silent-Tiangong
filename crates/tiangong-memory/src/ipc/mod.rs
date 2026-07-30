@@ -262,7 +262,7 @@ async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -
     }
 }
 
-async fn handle_memory_request(
+pub async fn handle_memory_request(
     handle: MemoryHandle,
     payload: MemoryIpcRequestPayload,
 ) -> Result<MemoryIpcResponsePayload> {

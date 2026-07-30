@@ -4,28 +4,18 @@
 //! - WASI 上下文与资源表（满足 WASIp2 组件对基础接口的导入依赖）；
 //! - 内存/表/实例上限（[StoreLimits]）；
 //! - clock host import（提供真实时间）；
-//! - memory-store host import（经 [MemoryHandle] 查询真实记忆）。
-//!
-//! 阶段三：memory-store 的 recall 在独立多线程 tokio runtime 上 block_on
-//! 调用 [MemoryHandle] 的 async 方法，桥接 WASM 同步调用栈与宿主 async 存储。
+//! - memory-store host import（通用 request，经 [MemoryHandle] 转发到 sidecar）。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tiangong_memory::command::InjectionLevel as HostInjectionLevel;
-use tiangong_memory::types::{
-    Episode, ManualMemoryDraft, MemoryCandidate, MemoryKind as HostMemoryKind, RecallAnchors,
-    RecallHit as HostRecallHit,
-};
-use tiangong_memory::{MemoryHandle, SearchStrategy as HostSearchStrategy};
+use tiangong_memory::MemoryHandle;
+use tiangong_memory::ipc::protocol::{MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 use wasmtime::StoreLimits;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::tiangong::plugin::clock::Host as ClockHost;
-use crate::bindings::tiangong::plugin::memory_store::{
-    Host as MemoryStoreHost, InjectionLevel, MemoryStoreError, RecallHit, RecallResponse,
-};
-use crate::bindings::tiangong::plugin::plugin::MemoryKind;
+use crate::bindings::tiangong::plugin::memory_store::{Host as MemoryStoreHost, MemoryStoreError};
 
 /// WASM Store 的宿主侧状态。
 pub struct HostState {
@@ -80,119 +70,26 @@ impl ClockHost for HostState {
     }
 }
 
-/// memory-store host import：经 MemoryHandle 执行 BM25 粗召回。
+/// memory-store host import：通用 request，转发到 sidecar（经 MemoryHandle）。
 ///
-/// WASM 同步调用栈内，在多线程 runtime 上 block_on async 召回，阻塞当前线程
-/// 直到 Actor 返回。handle 缺失时返回 disabled，由 WASM 侧回退到 mock。
+/// WASM 传入的 `payload` 是 `MemoryIpcRequestPayload` 的 JSON 文本
+///（含 `method` 内部标签，如 `{"method":"recall",...}`）。host 反序列化后
+/// 经 `MemoryHandle::ipc_request` 分发到具体能力，结果序列化回 JSON。
+/// handle 缺失时返回 disabled。
 impl MemoryStoreHost for HostState {
-    fn recall(
-        &mut self,
-        query: String,
-        keywords: Vec<String>,
-        limit: u32,
-    ) -> Result<RecallResponse, MemoryStoreError> {
+    fn request(&mut self, method: String, payload: String) -> Result<String, MemoryStoreError> {
+        let _ = method; // method 已内含在 payload JSON 的 tag 中，保留参数仅为 WIT 契约清晰。
         let Some(handle) = self.memory.clone() else {
             return Err(MemoryStoreError::Disabled);
         };
-        let anchors = RecallAnchors {
-            query,
-            keywords,
-            strategy: Some(HostSearchStrategy::Keyword),
-        };
-        // 在多线程 runtime 上 block_on async 召回。
-        let hits = self
+        let request_payload: MemoryIpcRequestPayload = serde_json::from_str(&payload)
+            .map_err(|e| MemoryStoreError::Message(format!("解析 request payload 失败: {e}")))?;
+        let response: MemoryIpcResponsePayload = self
             .runtime
             .handle()
-            .block_on(async move { handle.recall(anchors, limit as usize).await });
-        Ok(RecallResponse {
-            content: String::new(),
-            hits: hits.into_iter().map(RecallHit::from).collect(),
-            used_llm: false,
-        })
-    }
-
-    fn write_episode(
-        &mut self,
-        episode_json: String,
-        workspace_id: Option<String>,
-    ) -> Result<(), MemoryStoreError> {
-        let Some(handle) = self.memory.clone() else {
-            return Err(MemoryStoreError::Disabled);
-        };
-        let episode: Episode = serde_json::from_str(&episode_json)
-            .map_err(|e| MemoryStoreError::Message(format!("解析 episode 失败: {e}")))?;
-        // write_episode 是同步 fire-and-forget（内部 try_send），可直接调用。
-        handle.write_episode(episode, workspace_id);
-        Ok(())
-    }
-
-    fn update_injection(
-        &mut self,
-        level: InjectionLevel,
-        target_id: String,
-        content: String,
-    ) -> Result<(), MemoryStoreError> {
-        let Some(handle) = self.memory.clone() else {
-            return Err(MemoryStoreError::Disabled);
-        };
-        let host_level = match level {
-            InjectionLevel::Profile => HostInjectionLevel::Profile,
-            InjectionLevel::Workspace => HostInjectionLevel::Workspace,
-            InjectionLevel::Session => HostInjectionLevel::Session,
-        };
-        handle.update_injection(host_level, target_id, content);
-        Ok(())
-    }
-
-    fn submit_memory_candidate(&mut self, candidate_json: String) -> Result<(), MemoryStoreError> {
-        let Some(handle) = self.memory.clone() else {
-            return Err(MemoryStoreError::Disabled);
-        };
-        let candidate: MemoryCandidate = serde_json::from_str(&candidate_json)
-            .map_err(|e| MemoryStoreError::Message(format!("解析 candidate 失败: {e}")))?;
-        handle.submit_memory_candidate(candidate);
-        Ok(())
-    }
-
-    fn upsert_manual_memory(&mut self, draft_json: String) -> Result<String, MemoryStoreError> {
-        let Some(handle) = self.memory.clone() else {
-            return Err(MemoryStoreError::Disabled);
-        };
-        let draft: ManualMemoryDraft = serde_json::from_str(&draft_json)
-            .map_err(|e| MemoryStoreError::Message(format!("解析 draft 失败: {e}")))?;
-        let node = self
-            .runtime
-            .handle()
-            .block_on(async move { handle.upsert_manual_memory(draft).await })
+            .block_on(async move { handle.ipc_request(request_payload).await })
             .map_err(|e| MemoryStoreError::Message(format!("{e}")))?;
-        serde_json::to_string(&node)
-            .map_err(|e| MemoryStoreError::Message(format!("序列化 memory-node 失败: {e}")))
-    }
-}
-
-/// 宿主侧 RecallHit → WIT RecallHit。
-impl From<HostRecallHit> for RecallHit {
-    fn from(h: HostRecallHit) -> Self {
-        Self {
-            node_id: h.node_id,
-            title: h.title,
-            summary: h.summary,
-            score: h.score,
-            kind: h.kind.into(),
-            importance: h.importance,
-            depth1_loaded: h.depth1_loaded,
-        }
-    }
-}
-
-/// 宿主侧 MemoryKind → WIT MemoryKind。
-impl From<HostMemoryKind> for MemoryKind {
-    fn from(k: HostMemoryKind) -> Self {
-        match k {
-            HostMemoryKind::Episode => Self::Episode,
-            HostMemoryKind::Entity => Self::Entity,
-            HostMemoryKind::Decision => Self::Decision,
-            HostMemoryKind::Evidence => Self::Evidence,
-        }
+        serde_json::to_string(&response)
+            .map_err(|e| MemoryStoreError::Message(format!("序列化 response 失败: {e}")))
     }
 }

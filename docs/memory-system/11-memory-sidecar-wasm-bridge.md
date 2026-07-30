@@ -171,39 +171,75 @@ pub struct SidecarArtifact {
 
 启动后通过 endpoint 文件（`~/.tiangong/memory/runtime/<service>.json`）发现 sidecar 的 TCP 端口，建立 Remote 模式的 MemoryHandle。
 
-### 5. WASM 桥接层
+### 5. WASM 桥接层（精简：只做桥接）
 
-WASM 组件的角色不变：**承载 memory 纯逻辑，经 host import 访问 sidecar**。
+WASM 组件**只做桥接**——不承载 memory 纯逻辑，不做内部编排。编排全部由 sidecar 完成（它有完整的 recall_context / rumination，还是带 LLM 的完整版）。
+
+#### 精简原则：一个通用 request 能力
+
+host 只暴露**一个通用 request 方法**，把全部 memory 操作代理给 sidecar，替代逐个硬编码的细碎 host 方法：
+
+```wit
+interface memory-store {
+    /// 通用请求：转发到 sidecar，复用其全部 20 个操作（零新增 WIT）。
+    /// method 对应 MemoryIpcRequestPayload 的变体名（如 "recall"、"write_episode"）。
+    /// payload 为对应入参的 JSON 文本；返回结果序列化为 JSON 文本。
+    request: func(
+        method: string,
+        payload: string,
+    ) -> result<string, memory-store-error>;
+}
+```
+
+WASM 用哪个操作，传对应 method + payload JSON 即可：
 
 ```
-WASM 组件（memory 逻辑）
-  │ recall_context 内部编排：
-  │   1. 规则规划（下沉的 fallback_plan）── 纯逻辑，WASM 内
-  │   2. 检索（memory-store.recall）── host import
-  │   3. 整理（下沉的 synthesize_fallback）── 纯逻辑，WASM 内
+WASM 组件（只做桥接）
+  │ request("recall_context", MemoryRecallRequest JSON)
+  │ request("run_enhanced_micro_rumination", EnhancedTurnResult JSON)
+  │ request("write_episode", Episode JSON)
+  │ ...
   │
-  │ 反刍编排（下沉后）：
-  │   1. 提取（规则或 llm.complete）── 混合
-  │   2. 查重（memory-store.recall）── host import
-  │   3. 写入（memory-store.write-episode）── host import
-  │   4. 关联（memory-store.upsert-relation）── host import
-  │   5. 注入（memory-store.update-injection）── host import
-  │
-  ▼ host import（memory-store）
+  ▼ host import（memory-store.request，唯一方法）
   │
 host_state（Core 进程）
-  │ block_on(MemoryHandle.recall/write/...)
+  │ 构造 MemoryIpcRequestPayload → block_on(MemoryHandle 发送)
   │ MemoryHandle = Remote 模式
   ▼
 TCP IPC（现有协议，endpoint 文件发现）
   │
 Memory Sidecar 进程
-  └── Actor → SQLite/tantivy/lancedb（原生，加密，完整能力）
+  └── Actor 完成完整编排（含 LLM/检索/存储）→ 返回结果
 ```
 
-**host import 的转发路径**：WASM 经 `memory-store.recall` → host_state 的 `block_on` → Remote 模式的 MemoryHandle → TCP IPC → sidecar 的 Actor → 原生存储。
+#### 砍掉的冗余
 
-这条路径在阶段三（memory-store recall）已经验证可行，只是 Remote 模式的目标从「同进程 Leader」变成「独立 sidecar 进程」，对 host_state 代码零改动（MemoryHandle 已经抽象了 Local/Remote）。
+| 砍掉的 | 原因 |
+|---|---|
+| memory-store.recall / write-episode / update-injection / submit-candidate / upsert-manual-memory | 全部由通用 request 替代，不再逐个硬编码 |
+| WASM 纯逻辑导出（rerank-fuse / plan-recall-fallback / synthesize-fallback） | sidecar 内部已有相同逻辑（且是带 LLM 的完整版） |
+| WASM 内的 rerank/anchor/synthesize/text_utils 模块 | 同上，编排不归 WASM |
+| injection-level 枚举、recall-hit/recall-response 等 record | 不再需要 WIT 表达 memory 数据结构，全走 JSON |
+
+#### 精简后的 WIT 全貌
+
+```wit
+interface clock { ... }            // 标准（或自定义时钟）
+
+interface memory-store {
+    variant memory-store-error { message(string), disabled, }
+    /// 通用请求，转发到 sidecar 的全部操作。
+    request: func(method: string, payload: string)
+        -> result<string, memory-store-error>;
+}
+
+interface plugin {
+    // 插件导出：describe / tool-specs / handle-tool / prompt-sections / shutdown / on-config-updated
+    // handle-tool 内部调 memory-store.request 完成召回，结果原样返回
+}
+```
+
+host_state 只需实现一个 `request` 方法（构造 payload → block_on → 返回 JSON），不再为每个 memory 操作写专门的反序列化 + block_on。
 
 ### 6. 配置注入
 
