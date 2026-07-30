@@ -1,10 +1,60 @@
 package tiangong:plugin;
 
+/// 宿主时钟接口（host import）。
+///
+/// WASM 组件经此获取真实时间，替代宿主侧的 `chrono::Local::now()`。
+/// 阶段二仅提供时钟；LLM/embedding 等能力在后续阶段接入。
+interface clock {
+    /// 返回自 UNIX epoch 起的毫秒数。
+    now-millis: func() -> u64;
+}
+
 /// 单文件 WASM 插件接口。
 ///
 /// 所有方法只传递有版本的结构化数据；JSON Schema / 模型参数等复杂对象
 /// 统一以 JSON 文本（string）承载，避免在 WIT 中表达任意 JSON Value。
 interface plugin {
+    /// 记忆类型。
+    enum memory-kind {
+        episode,
+        entity,
+        decision,
+        evidence,
+    }
+
+    /// 检索策略。
+    variant search-strategy {
+        skip,
+        keyword,
+        semantic,
+        hybrid(f64),
+    }
+
+    /// 召回命中项，对齐宿主侧 `RecallHit`。
+    record recall-hit {
+        node-id: string,
+        title: string,
+        summary: string,
+        score: f64,
+        kind: memory-kind,
+        importance: f64,
+        depth1-loaded: bool,
+    }
+
+    /// 检索锚点，对齐宿主侧 `RecallAnchors`。
+    record recall-anchors {
+        query: string,
+        keywords: list<string>,
+        strategy: option<search-strategy>,
+    }
+
+    /// 规划后的召回，对齐宿主侧 `PlannedRecall`（阶段二不携带 usage）。
+    record planned-recall {
+        anchors: recall-anchors,
+        limit: u32,
+        used-llm: bool,
+    }
+
     /// 插件描述符，安装与日志展示用。
     record plugin-descriptor {
         id: string,
@@ -56,9 +106,39 @@ interface plugin {
 
     /// 关闭插件，释放资源。
     shutdown: func() -> result<_, plugin-error>;
+
+    // ── 阶段二：下沉的纯逻辑导出 ──
+    //
+    // 以下方法在 WASM 内部以规则 fallback（无 LLM）实现，验证纯逻辑下沉。
+
+    /// 融合两路召回（BM25 + 语义），返回 topK。
+    /// `semantic-ratio` 取 0.0=偏关键词 .. 1.0=偏语义。
+    rerank-fuse: func(
+        bm25: list<recall-hit>,
+        semantic: list<recall-hit>,
+        semantic-ratio: f64,
+        limit: u32,
+    ) -> result<list<recall-hit>, plugin-error>;
+
+    /// 规则规划检索锚点（对应宿主 `fallback_plan`）。
+    plan-recall-fallback: func(
+        query: string,
+        reason: option<string>,
+        expected: list<string>,
+        context: list<string>,
+        limit: u32,
+    ) -> result<planned-recall, plugin-error>;
+
+    /// 规则整理召回结果为文本（对应宿主 `fallback_synthesis` 的简化版）。
+    synthesize-fallback: func(
+        query: string,
+        context: list<string>,
+        hits: list<recall-hit>,
+    ) -> result<string, plugin-error>;
 }
 
-/// WASM 插件 world：导出 `plugin` 接口。
+/// WASM 插件 world：导入宿主时钟，导出 `plugin` 接口。
 world tiangong-plugin {
+    import clock;
     export plugin;
 }

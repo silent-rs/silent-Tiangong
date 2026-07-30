@@ -12,11 +12,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
 
 use crate::bindings::TiangongPlugin;
-use crate::bindings::exports::tiangong::plugin::plugin::{PluginError, ToolCall as WitToolCall};
+use crate::bindings::exports::tiangong::plugin::plugin::{
+    MemoryKind as WitMemoryKind, PluginError, RecallHit as WitRecallHit,
+    SearchStrategy as WitSearchStrategy, ToolCall as WitToolCall,
+};
 use crate::config::PluginRuntimeConfig;
 use crate::host_state::HostState;
 
@@ -27,6 +30,11 @@ use crate::host_state::HostState;
 pub struct WasmPluginLoader {
     engine: Engine,
     linker: Arc<Linker<HostState>>,
+}
+
+/// clock host import 的 host_getter：返回 HostState 自身的可变借用。
+fn host_clock_getter(state: &mut HostState) -> &mut HostState {
+    state
 }
 
 impl WasmPluginLoader {
@@ -44,6 +52,12 @@ impl WasmPluginLoader {
         let mut linker = Linker::<HostState>::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|e| anyhow::anyhow!("接入 WASI 失败: {e}"))?;
+        // 接入 clock host import：HostState 已实现 clock::Host，经 HasSelf 暴露自身。
+        crate::bindings::tiangong::plugin::clock::add_to_linker::<HostState, HasSelf<HostState>>(
+            &mut linker,
+            host_clock_getter,
+        )
+        .map_err(|e| anyhow::anyhow!("接入 clock 失败: {e}"))?;
         let linker = Arc::new(linker);
 
         Ok(Self { engine, linker })
@@ -188,6 +202,74 @@ impl WasmPlugin {
         }
     }
 
+    // ── 阶段二：下沉的纯逻辑导出 ──
+
+    /// 融合两路召回（BM25 + 语义），返回 topK。
+    pub fn rerank_fuse(
+        &mut self,
+        bm25: Vec<FusedHit>,
+        semantic: Vec<FusedHit>,
+        semantic_ratio: f64,
+        limit: u32,
+    ) -> Result<Vec<FusedHit>> {
+        let wit_bm25: Vec<_> = bm25.into_iter().map(Into::into).collect();
+        let wit_sem: Vec<_> = semantic.into_iter().map(Into::into).collect();
+        let res = self
+            .instance
+            .tiangong_plugin_plugin()
+            .call_rerank_fuse(&mut self.store, &wit_bm25, &wit_sem, semantic_ratio, limit)
+            .map_err(|e| anyhow::anyhow!("rerank-fuse 调用失败: {e}"))?
+            .map_err(plugin_err)?;
+        Ok(res.into_iter().map(Into::into).collect())
+    }
+
+    /// 规则规划检索锚点（对应 WASM 内 fallback_plan）。
+    pub fn plan_recall_fallback(
+        &mut self,
+        query: String,
+        reason: Option<String>,
+        expected: Vec<String>,
+        context: Vec<String>,
+        limit: u32,
+    ) -> Result<PlannedRecall> {
+        let reason_ref = reason.as_deref();
+        let res = self
+            .instance
+            .tiangong_plugin_plugin()
+            .call_plan_recall_fallback(
+                &mut self.store,
+                &query,
+                reason_ref,
+                &expected,
+                &context,
+                limit,
+            )
+            .map_err(|e| anyhow::anyhow!("plan-recall-fallback 调用失败: {e}"))?
+            .map_err(plugin_err)?;
+        Ok(PlannedRecall {
+            query: res.anchors.query,
+            keywords: res.anchors.keywords,
+            strategy: res.anchors.strategy.map(Into::into),
+            limit: res.limit,
+            used_llm: res.used_llm,
+        })
+    }
+
+    /// 规则整理召回结果为文本（对应 WASM 内 fallback_synthesis）。
+    pub fn synthesize_fallback(
+        &mut self,
+        query: String,
+        context: Vec<String>,
+        hits: Vec<FusedHit>,
+    ) -> Result<String> {
+        let wit_hits: Vec<_> = hits.into_iter().map(Into::into).collect();
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_synthesize_fallback(&mut self.store, &query, &context, &wit_hits)
+            .map_err(|e| anyhow::anyhow!("synthesize-fallback 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 引擎句柄（测试与 epoch 心跳用）。
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -236,5 +318,119 @@ pub struct Outcome {
 fn plugin_err(e: PluginError) -> anyhow::Error {
     match e {
         PluginError::Message(m) => anyhow::anyhow!(m),
+    }
+}
+
+// ── 阶段二：下沉逻辑的 host 侧轻量类型 ──
+
+/// 记忆类型（镜像 WIT enum）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryKind {
+    Episode,
+    Entity,
+    Decision,
+    Evidence,
+}
+
+/// 检索策略（镜像 WIT variant）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchStrategy {
+    Skip,
+    Keyword,
+    Semantic,
+    Hybrid(f64),
+}
+
+/// 融合/召回命中项（镜像 WIT record）。
+#[derive(Debug, Clone)]
+pub struct FusedHit {
+    pub node_id: String,
+    pub title: String,
+    pub summary: String,
+    pub score: f64,
+    pub kind: MemoryKind,
+    pub importance: f64,
+    pub depth1_loaded: bool,
+}
+
+/// 规则规划产出（镜像 WASM 的 planned-recall）。
+#[derive(Debug, Clone)]
+pub struct PlannedRecall {
+    pub query: String,
+    pub keywords: Vec<String>,
+    pub strategy: Option<SearchStrategy>,
+    pub limit: u32,
+    pub used_llm: bool,
+}
+
+impl From<FusedHit> for WitRecallHit {
+    fn from(h: FusedHit) -> Self {
+        Self {
+            node_id: h.node_id,
+            title: h.title,
+            summary: h.summary,
+            score: h.score,
+            kind: h.kind.into(),
+            importance: h.importance,
+            depth1_loaded: h.depth1_loaded,
+        }
+    }
+}
+
+impl From<WitRecallHit> for FusedHit {
+    fn from(h: WitRecallHit) -> Self {
+        Self {
+            node_id: h.node_id,
+            title: h.title,
+            summary: h.summary,
+            score: h.score,
+            kind: h.kind.into(),
+            importance: h.importance,
+            depth1_loaded: h.depth1_loaded,
+        }
+    }
+}
+
+impl From<MemoryKind> for WitMemoryKind {
+    fn from(k: MemoryKind) -> Self {
+        match k {
+            MemoryKind::Episode => Self::Episode,
+            MemoryKind::Entity => Self::Entity,
+            MemoryKind::Decision => Self::Decision,
+            MemoryKind::Evidence => Self::Evidence,
+        }
+    }
+}
+
+impl From<WitMemoryKind> for MemoryKind {
+    fn from(k: WitMemoryKind) -> Self {
+        match k {
+            WitMemoryKind::Episode => Self::Episode,
+            WitMemoryKind::Entity => Self::Entity,
+            WitMemoryKind::Decision => Self::Decision,
+            WitMemoryKind::Evidence => Self::Evidence,
+        }
+    }
+}
+
+impl From<SearchStrategy> for WitSearchStrategy {
+    fn from(s: SearchStrategy) -> Self {
+        match s {
+            SearchStrategy::Skip => Self::Skip,
+            SearchStrategy::Keyword => Self::Keyword,
+            SearchStrategy::Semantic => Self::Semantic,
+            SearchStrategy::Hybrid(r) => Self::Hybrid(r),
+        }
+    }
+}
+
+impl From<WitSearchStrategy> for SearchStrategy {
+    fn from(s: WitSearchStrategy) -> Self {
+        match s {
+            WitSearchStrategy::Skip => Self::Skip,
+            WitSearchStrategy::Keyword => Self::Keyword,
+            WitSearchStrategy::Semantic => Self::Semantic,
+            WitSearchStrategy::Hybrid(r) => Self::Hybrid(r),
+        }
     }
 }

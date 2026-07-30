@@ -14,4 +14,7 @@ pub mod loader;
 
 pub use adapter::WasmPluginAdapter;
 pub use config::PluginRuntimeConfig;
-pub use loader::{Descriptor, Outcome, Spec, ToolCall, WasmPlugin, WasmPluginLoader};
+pub use loader::{
+    Descriptor, FusedHit, MemoryKind, Outcome, PlannedRecall, SearchStrategy, Spec, ToolCall,
+    WasmPlugin, WasmPluginLoader,
+};

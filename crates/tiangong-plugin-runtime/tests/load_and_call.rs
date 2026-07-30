@@ -14,7 +14,10 @@ use tiangong_core::core::Plugin;
 use tiangong_core::model::ToolCall as CoreToolCall;
 use tiangong_core::session::Session;
 use tiangong_core::tool_override::{ToolOverrideHandler, ToolSpecProvider};
-use tiangong_plugin_runtime::{PluginRuntimeConfig, ToolCall, WasmPluginAdapter, WasmPluginLoader};
+use tiangong_plugin_runtime::{
+    FusedHit, MemoryKind, PlannedRecall, PluginRuntimeConfig, SearchStrategy, ToolCall,
+    WasmPluginAdapter, WasmPluginLoader,
+};
 
 /// 定位示例 memory wasm 组件文件。
 fn memory_wasm_path() -> PathBuf {
@@ -192,4 +195,194 @@ fn adapter_integrates_with_core_plugin_trait() {
         .expect("handle 返回 None");
     assert!(result.ok);
     assert!(result.summary.contains("适配器测试"));
+}
+
+// ── 阶段二：纯逻辑下沉 + clock host import 测试 ──
+
+/// 加载一个可复用的 WASM 插件实例。
+fn load_plugin() -> tiangong_plugin_runtime::WasmPlugin {
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
+    loader.load(&wasm, &config).expect("加载 wasm 组件失败")
+}
+
+fn make_hit(node_id: &str, title: &str, score: f64, importance: f64) -> FusedHit {
+    FusedHit {
+        node_id: node_id.to_string(),
+        title: title.to_string(),
+        summary: format!("{title} 的摘要内容"),
+        score,
+        kind: MemoryKind::Episode,
+        importance,
+        depth1_loaded: false,
+    }
+}
+
+#[test]
+fn rerank_fuse_combines_bm25_and_semantic() {
+    let mut plugin = load_plugin();
+    // BM25 一路，semantic 一路，二者含一个共同命中（双命中应得奖励）。
+    let bm25 = vec![
+        make_hit("a", "命中A", 0.9, 0.5),
+        make_hit("b", "命中B", 0.5, 0.5),
+    ];
+    let semantic = vec![
+        make_hit("a", "命中A", 0.8, 0.5),
+        make_hit("c", "命中C", 0.6, 0.5),
+    ];
+
+    let fused = plugin
+        .rerank_fuse(bm25, semantic, 0.5, 10)
+        .expect("rerank-fuse 失败");
+
+    // 共同命中 A 应因双命中奖励排在最前。
+    assert_eq!(fused[0].node_id, "a", "双命中应排在最前");
+    assert!(fused.iter().any(|h| h.node_id == "b"));
+    assert!(fused.iter().any(|h| h.node_id == "c"));
+    // limit 生效。
+    assert!(fused.len() <= 3);
+}
+
+#[test]
+fn rerank_fuse_respects_limit() {
+    let mut plugin = load_plugin();
+    let bm25 = vec![
+        make_hit("a", "A", 0.9, 0.5),
+        make_hit("b", "B", 0.8, 0.5),
+        make_hit("d", "D", 0.7, 0.5),
+    ];
+    let fused = plugin
+        .rerank_fuse(bm25, vec![], 0.5, 2)
+        .expect("rerank-fuse 失败");
+    assert_eq!(fused.len(), 2, "应按 limit 截断");
+}
+
+#[test]
+fn plan_recall_fallback_extracts_history_reference_as_semantic() {
+    let mut plugin = load_plugin();
+    let planned: PlannedRecall = plugin
+        .plan_recall_fallback(
+            "继续用刚刚生成的图片".to_string(),
+            None,
+            vec!["media".to_string()],
+            vec![],
+            5,
+        )
+        .expect("plan-recall-fallback 失败");
+    assert_eq!(planned.strategy, Some(SearchStrategy::Semantic));
+    assert!(planned.keywords.iter().any(|k| k == "media"));
+    assert!(!planned.used_llm, "应使用规则路径");
+}
+
+#[test]
+fn plan_recall_fallback_extracts_file_path_as_keyword() {
+    let mut plugin = load_plugin();
+    let planned = plugin
+        .plan_recall_fallback(
+            "查看 /tmp/tiangong/output.png 的历史记录".to_string(),
+            None,
+            vec![],
+            vec![],
+            5,
+        )
+        .expect("plan-recall-fallback 失败");
+    assert_eq!(planned.strategy, Some(SearchStrategy::Keyword));
+    assert!(planned.keywords.iter().any(|k| k.contains("output.png")));
+}
+
+#[test]
+fn plan_recall_fallback_skips_plain_chitchat() {
+    let mut plugin = load_plugin();
+    let planned = plugin
+        .plan_recall_fallback("你好".to_string(), None, vec![], vec![], 5)
+        .expect("plan-recall-fallback 失败");
+    assert_eq!(planned.strategy, Some(SearchStrategy::Skip));
+    assert!(planned.query.is_empty());
+}
+
+#[test]
+fn synthesize_fallback_dedupes_and_formats() {
+    let mut plugin = load_plugin();
+    let hits = vec![
+        make_hit("h1", "历史讨论一", 0.9, 0.8),
+        make_hit("h2", "历史讨论二", 0.7, 0.5),
+    ];
+    let text = plugin
+        .synthesize_fallback("架构".to_string(), vec![], hits)
+        .expect("synthesize-fallback 失败");
+    assert!(text.contains("架构"), "应包含查询词");
+    assert!(text.contains("历史讨论一"));
+    assert!(text.contains("历史讨论二"));
+}
+
+#[test]
+fn synthesize_fallback_returns_message_when_no_hits() {
+    let mut plugin = load_plugin();
+    let text = plugin
+        .synthesize_fallback("不存在的内容".to_string(), vec![], vec![])
+        .expect("synthesize-fallback 失败");
+    assert!(text.contains("未在记忆中找到"));
+}
+
+#[test]
+fn clock_import_provides_real_time() {
+    // recall_memory 的结果摘要内含 host clock 注入的时间戳 t=<ms>。
+    // 比较它与宿主当前时间的接近程度，证明 clock host import 生效。
+    let mut plugin = load_plugin();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let outcome = plugin
+        .handle_tool(
+            ToolCall {
+                id: "c1".into(),
+                name: "recall_memory".into(),
+                arguments: r#"{"query":"时间测试"}"#.into(),
+            },
+            &PluginRuntimeConfig::default(),
+        )
+        .expect("handle-tool 失败");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // 从摘要中提取 t=<ms>。
+    let ts = outcome
+        .summary
+        .split("t=")
+        .nth(1)
+        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("摘要应包含 t=<ms> 时间戳");
+    assert!(
+        ts >= before && ts <= after,
+        "WASM 内时间戳 {ts} 应在宿主调用窗口 [{before}, {after}] 内"
+    );
+}
+
+#[test]
+fn handle_recall_memory_uses_degradation_path() {
+    // 阶段二：recall_memory 走 WASM 内降级路径，结果应含规则整理痕迹
+    //（不再是阶段一的纯 mock 占位文案）。
+    let mut plugin = load_plugin();
+    let outcome = plugin
+        .handle_tool(
+            ToolCall {
+                id: "c2".into(),
+                name: "recall_memory".into(),
+                arguments: r#"{"query":"继续上次的架构设计"}"#.into(),
+            },
+            &PluginRuntimeConfig::default(),
+        )
+        .expect("handle-tool 失败");
+    assert!(outcome.ok);
+    // 降级路径产出应包含「已回忆」整理文案或 Skip 判定，而非阶段一占位文案。
+    assert!(
+        outcome.summary.contains("已回忆") || outcome.summary.contains("无需历史上下文"),
+        "应走降级路径，实际: {}",
+        outcome.summary
+    );
 }
