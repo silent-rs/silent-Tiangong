@@ -232,6 +232,42 @@ impl WasmPlugin {
             .map_err(plugin_err)
     }
 
+    /// 会话就绪钩子。
+    pub fn on_session_ready(&mut self, session_json: String) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_on_session_ready(&mut self.store, &session_json)
+            .map_err(|e| anyhow::anyhow!("on-session-ready 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 轮次开始钩子。
+    pub fn on_turn_started(&mut self, session_json: String, turn_start_idx: u32) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_on_turn_started(&mut self.store, &session_json, turn_start_idx)
+            .map_err(|e| anyhow::anyhow!("on-turn-started 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 轮次结束钩子（触发 micro 反刍）。
+    pub fn on_turn_finished(&mut self, session_json: String, turn_start_idx: u32) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_on_turn_finished(&mut self.store, &session_json, turn_start_idx)
+            .map_err(|e| anyhow::anyhow!("on-turn-finished 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 会话结束钩子（触发 meso 反刍）。
+    pub fn on_session_ended(&mut self, session_json: String) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_on_session_ended(&mut self.store, &session_json)
+            .map_err(|e| anyhow::anyhow!("on-session-ended 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 引擎句柄（测试与 epoch 心跳用）。
     pub fn engine(&self) -> &Engine {
         &self.engine

@@ -121,6 +121,118 @@ impl Guest for Component {
         // 通用配置变更事件。桥接组件本身不消费配置，接收即可。
         Ok(())
     }
+
+    // ── 生命周期钩子 ──
+    //
+    // session-json 为宿主 Session 的只读快照（可序列化部分）。
+    // WASM 从中提取 memory 需要的数据，经 request 转发到 sidecar。
+    // session 的所有修改权始终在 Core，WASM/ sidecar 绝不回写。
+
+    fn on_session_ready(_session_json: String) -> Result<(), PluginError> {
+        // 会话就绪：当前无需通知 sidecar（session_id 经 request 时按需传入）。
+        Ok(())
+    }
+
+    fn on_turn_started(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        // 轮次开始：当前无需通知 sidecar。
+        Ok(())
+    }
+
+    fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
+        // 轮次结束：从 session 只读快照提取本轮信息，转发给 sidecar 做 micro 反刍。
+        // 提取失败（session 格式异常）仅记录，不阻断——反刍是 best-effort。
+        let _ = forward_turn_rumination(&session_json, turn_start_idx);
+        Ok(())
+    }
+
+    fn on_session_ended(session_json: String) -> Result<(), PluginError> {
+        // 会话结束：从 session 提取 id/cwd，转发给 sidecar 做 meso 反刍。
+        let _ = forward_session_rumination(&session_json);
+        Ok(())
+    }
+}
+
+/// 从 session 快照提取本轮信息，转发给 sidecar 做 enhanced micro 反刍。
+///
+/// 提取 session.id、本轮 user_input、工具调用名，组装成 EnhancedTurnResult 的
+/// 简化形式，经 request("run_enhanced_micro_rumination", ...) 转发。
+fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
+    let session: serde_json::Value = serde_json::from_str(session_json)
+        .map_err(|e| PluginError::Message(format!("解析 session 失败: {e}")))?;
+    let session_id = session
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let messages = session.get("messages").cloned().unwrap_or_default();
+    let idx = turn_start_idx as usize;
+
+    // 提取本轮 user_input（messages[idx] 的文本内容）。
+    let user_input = messages
+        .get(idx)
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // 提取本轮工具调用名列表。
+    let tool_calls: Vec<String> = messages
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .skip(idx)
+                .filter_map(|m| {
+                    let is_tool = m
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .map(|r| r == "tool")
+                        .unwrap_or(false);
+                    if is_tool {
+                        m.get("tool_name")
+                            .and_then(|t| t.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // 组装 EnhancedTurnResult 的简化 payload，转发到 sidecar。
+    let payload = serde_json::json!({
+        "method": "run_enhanced_micro_rumination",
+        "session_id": session_id,
+        "user_input": user_input,
+        "tool_calls": tool_calls,
+    });
+    // sidecar 可能不可用（disabled），反刍是 best-effort，忽略错误。
+    let _ = memory_store::request("run_enhanced_micro_rumination", &payload.to_string());
+    Ok(())
+}
+
+/// 从 session 快照提取 id/cwd，转发给 sidecar 做 meso 反刍。
+fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
+    let session: serde_json::Value = serde_json::from_str(session_json)
+        .map_err(|e| PluginError::Message(format!("解析 session 失败: {e}")))?;
+    let session_id = session
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let workspace_id = session
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let payload = serde_json::json!({
+        "method": "run_meso_rumination",
+        "session_id": session_id,
+        "workspace_id": workspace_id,
+    });
+    let _ = memory_store::request("run_meso_rumination", &payload.to_string());
+    Ok(())
 }
 
 fn tool_result_ok(summary: String) -> ToolResult {

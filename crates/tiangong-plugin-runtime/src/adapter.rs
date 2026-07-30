@@ -15,6 +15,7 @@ use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
+use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 use tokio::task;
@@ -74,6 +75,83 @@ impl Plugin for WasmPluginAdapter {
         };
         if let Err(e) = plugin.on_config_updated(config_json) {
             tracing::warn!("通知 wasm 插件配置变更失败: {e}");
+        }
+    }
+
+    /// 会话就绪：序列化 session 只读快照转发到 WASM。
+    fn on_session_ready(&self, session: &mut Session) {
+        self.forward_session_hook(session, |plugin, json| plugin.on_session_ready(json));
+    }
+
+    /// 轮次开始：序列化 session 转发。
+    fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
+        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
+            plugin.on_turn_started(json, idx)
+        });
+    }
+
+    /// 轮次结束：序列化 session 转发（WASM 内部触发 micro 反刍）。
+    fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
+        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
+            plugin.on_turn_finished(json, idx)
+        });
+    }
+
+    /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
+    fn on_session_ended(&self, session: &mut Session) {
+        self.forward_session_hook(session, |plugin, json| plugin.on_session_ended(json));
+    }
+}
+
+impl WasmPluginAdapter {
+    /// 序列化 session 只读快照，调用 WASM 钩子。失败仅 warn，不阻断 core。
+    fn forward_session_hook(
+        &self,
+        session: &Session,
+        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()>,
+    ) {
+        let json = match serde_json::to_string(session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 session 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        let mut plugin = match self.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("wasm 插件锁中毒: {e}");
+                return;
+            }
+        };
+        if let Err(e) = call(&mut plugin, json) {
+            tracing::warn!("wasm 生命周期钩子失败: {e}");
+        }
+    }
+
+    /// 同上，但带 turn_start_idx 参数。
+    fn forward_session_hook_with_idx(
+        &self,
+        session: &Session,
+        turn_start_idx: usize,
+        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()>,
+    ) {
+        let json = match serde_json::to_string(session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 session 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        let mut plugin = match self.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("wasm 插件锁中毒: {e}");
+                return;
+            }
+        };
+        if let Err(e) = call(&mut plugin, json, turn_start_idx as u32) {
+            tracing::warn!("wasm 生命周期钩子失败: {e}");
         }
     }
 }

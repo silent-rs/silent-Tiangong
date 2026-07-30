@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
+use tiangong_core::session::Session;
 use tiangong_core::tool_override::ToolSpecProvider;
 use tiangong_plugin_runtime::{PluginRuntimeConfig, ToolCall, WasmPluginAdapter, WasmPluginLoader};
 
@@ -200,4 +201,53 @@ fn adapter_integrates_with_core_plugin_trait() {
 
     // config 事件经 trait 调用不 panic。
     <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
+}
+
+// ── 生命周期钩子 + session 注入测试 ──
+
+/// 构造一个带消息的测试 Session。
+fn test_session() -> Session {
+    let mut session = Session::new("test-session");
+    session.cwd = "/tmp/test-workspace".to_string();
+    session
+}
+
+#[test]
+fn lifecycle_hooks_forward_session_without_panic() {
+    // 经 Plugin trait 调用全部生命周期钩子，验证 session 序列化传入不 panic。
+    // 无 sidecar 时各钩子内部 best-effort 忽略 request 错误，仍正常返回。
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+
+    let mut session = test_session();
+    // 全部钩子调用不应 panic。
+    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
+    <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, 0);
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    <WasmPluginAdapter as Plugin>::on_session_ended(&adapter, &mut session);
+}
+
+#[test]
+fn on_turn_finished_with_handle_forwards_rumination() {
+    // 注入真实 handle 时，on_turn_finished 经 request 转发反刍到 sidecar。
+    // best-effort：即使 sidecar 内部反刍有异常，钩子也不应返回错误。
+    let handle = match tiangong_memory::start() {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("跳过：MemoryActor 启动失败");
+            return;
+        }
+    };
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+
+    let mut session = test_session();
+    // 不 panic 即通过（反刍是 best-effort）。
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
 }

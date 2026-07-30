@@ -90,6 +90,29 @@ interface plugin {
     /// CoreConfig 变更通知（对应宿主 `Plugin::on_config_updated`）。
     /// `config-json` 为 CoreConfig 的 JSON 文本。
     on-config-updated: func(config-json: string) -> result<_, plugin-error>;
+
+    // ── 生命周期钩子 ──
+    // session-json 为宿主 Session 的 JSON 文本（可序列化部分）。
+    // 各钩子经 memory-store.request 转发到 sidecar 的对应能力。
+
+    /// 会话就绪（对应 `Plugin::on_session_ready`）。
+    on-session-ready: func(session-json: string) -> result<_, plugin-error>;
+
+    /// 轮次开始（对应 `Plugin::on_turn_started`）。
+    /// turn-start-idx 为本轮用户消息在 session.messages 中的起始索引。
+    on-turn-started: func(
+        session-json: string,
+        turn-start-idx: u32,
+    ) -> result<_, plugin-error>;
+
+    /// 轮次结束（对应 `Plugin::on_turn_finished`，触发 micro 反刍）。
+    on-turn-finished: func(
+        session-json: string,
+        turn-start-idx: u32,
+    ) -> result<_, plugin-error>;
+
+    /// 会话结束（对应 `Plugin::on_session_ended`，触发 meso 反刍）。
+    on-session-ended: func(session-json: string) -> result<_, plugin-error>;
 }
 
 /// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。
