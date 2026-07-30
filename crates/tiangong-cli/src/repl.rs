@@ -49,7 +49,14 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     });
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
-    let runtime = tokio::runtime::Runtime::new()?;
+    // 对齐 server 入口（tiangong-server/src/lib.rs）：多线程 runtime + enter()，
+    // 让主线程在整个 REPL 生命周期内持有 reactor guard。这样主循环里同步执行的
+    // deliver_to_core_if_live → on_config_updated → tokio::spawn 才能找到 reactor
+    // （见 issue #313）。Core 的 turn 循环仍由进程级共享 runtime 独立承载。
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let _runtime_guard = runtime.enter();
     let memory_handle =
         runtime.block_on(tiangong_memory::registry::init_memory_handle_for_process(
             config.generation(),
