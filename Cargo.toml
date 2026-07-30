@@ -36,6 +36,8 @@ members = [
     "crates/plugins/tiangong-plugin-mcp",
     "crates/plugins/tiangong-plugin-agent-team",
     "crates/plugins/tiangong-plugin-prompt",
+    "crates/plugins/tiangong-plugin-memory-wasm",
+    "crates/tiangong-plugin-runtime",
     "src-tauri",
 ]
 
@@ -73,6 +75,8 @@ tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
 tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
 tiangong-plugin-prompt = { path = "crates/plugins/tiangong-plugin-prompt" }
+tiangong-plugin-memory-wasm = { path = "crates/plugins/tiangong-plugin-memory-wasm" }
+tiangong-plugin-runtime = { path = "crates/tiangong-plugin-runtime" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
@@ -140,6 +144,16 @@ tracing-subscriber = "0.3"
 typed-builder = "0.23"
 wiremock = "0.6"
 wry = "=0.55.1"
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "component-model",
+    "parallel-compilation",
+    "pooling-allocator",
+    "cache",
+] }
+wasmtime-wasi = { version = "47", default-features = false }
+wit-bindgen = "0.46"
 zip = { version = "8", default-features = false }
 
 [patch.crates-io]

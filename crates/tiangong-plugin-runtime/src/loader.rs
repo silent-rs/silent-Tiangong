@@ -1,0 +1,240 @@
+//! WASM 组件加载器。
+//!
+//! 负责：
+//! - 创建开启 fuel + epoch 中断的 [`Engine`]；
+//! - 读取并编译单文件 `.wasm` Component；
+//! - 在资源受限的 [`Store`] 中实例化；
+//! - 返回可被宿主当作 `Plugin` 使用的 [`WasmPlugin`]。
+//!
+//! 阶段一 PoC 不实现热加载、版本快照与权限探测；每个 `.wasm` 文件实例化一次。
+
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::Result;
+use wasmtime::component::{Component, Linker};
+use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
+
+use crate::bindings::TiangongPlugin;
+use crate::bindings::exports::tiangong::plugin::plugin::{PluginError, ToolCall as WitToolCall};
+use crate::config::PluginRuntimeConfig;
+use crate::host_state::HostState;
+
+/// WASM 组件加载器。
+///
+/// 持有一个共享的 [`Engine`]（编译缓存复用）和一个用于实例化的 [`Linker`]。
+/// 阶段一 PoC 不提供任何 host import；后续阶段在此注入 storage / model 等 host 能力。
+pub struct WasmPluginLoader {
+    engine: Engine,
+    linker: Arc<Linker<HostState>>,
+}
+
+impl WasmPluginLoader {
+    /// 以给定配置创建加载器。
+    pub fn new(_config: &PluginRuntimeConfig) -> Result<Self> {
+        let mut cfg = Config::new();
+        cfg.consume_fuel(true);
+        cfg.epoch_interruption(true);
+        // cranelift 是默认后端，显式指定以保证优化。
+        cfg.strategy(wasmtime::Strategy::Cranelift);
+        let engine = Engine::new(&cfg).map_err(|e| anyhow::anyhow!("创建引擎失败: {e}"))?;
+
+        // 接入 WASI Preview 2：WASIp2 组件默认导入 poll 等基础接口，
+        // 需在 Linker 中提供实现（绑定到 HostState 的 WasiView）。
+        let mut linker = Linker::<HostState>::new(&engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+            .map_err(|e| anyhow::anyhow!("接入 WASI 失败: {e}"))?;
+        let linker = Arc::new(linker);
+
+        Ok(Self { engine, linker })
+    }
+
+    /// 引擎句柄，供外部（如 epoch 心跳线程）调用 `increment_epoch`。
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// 加载并实例化一个 `.wasm` Component，返回宿主侧 [`WasmPlugin`]。
+    pub fn load(&self, wasm_path: &Path, config: &PluginRuntimeConfig) -> Result<WasmPlugin> {
+        let bytes = std::fs::read(wasm_path).map_err(|e| {
+            anyhow::anyhow!("读取 wasm 组件失败 {path}: {e}", path = wasm_path.display())
+        })?;
+        let component = Component::new(&self.engine, bytes).map_err(|e| {
+            anyhow::anyhow!("编译 wasm 组件失败 {path}: {e}", path = wasm_path.display())
+        })?;
+
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(config.memory_limit)
+            .build();
+
+        let mut store = Store::new(&self.engine, HostState::new(limits));
+        // 注册内存/表/实例上限：limiter 闭包返回 StoreLimits 的借用。
+        store.limiter(|state: &mut HostState| state.limits_mut());
+        // fuel 在每次工具调用前重置；实例化阶段也给足 fuel。
+        // set_fuel 仅在未开启 consume_fuel 时返回 Err，此处配置已开启，故安全忽略。
+        let _ = store.set_fuel(config.fuel_limit);
+        // epoch：实例化阶段给一个宽裕的 deadline，避免初始化被误中断。
+        // 工具调用时再按 config.epoch_deadline_ticks() 重置为实际限制。
+        store.set_epoch_deadline(u64::MAX);
+
+        let instance = TiangongPlugin::instantiate(&mut store, &component, &self.linker)
+            .map_err(|e| anyhow::anyhow!("实例化 wasm 组件失败: {e}"))?;
+
+        Ok(WasmPlugin {
+            engine: self.engine.clone(),
+            #[allow(unused_variables)]
+            linker: self.linker.clone(),
+            instance,
+            store,
+        })
+    }
+}
+
+/// 宿主侧持有的已实例化 WASM 插件句柄。
+///
+/// 内部包含独立的 [`Store`]，每次工具调用在调用前重置 fuel 与 epoch deadline，
+/// 保证单次调用可被独立限制与终止。
+pub struct WasmPlugin {
+    engine: Engine,
+    #[allow(dead_code)]
+    linker: Arc<Linker<HostState>>,
+    instance: TiangongPlugin,
+    store: Store<HostState>,
+}
+
+impl WasmPlugin {
+    /// 插件描述符。
+    pub fn describe(&mut self) -> Result<Descriptor> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_describe(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("describe 调用失败: {e}"))?
+            .map_err(plugin_err)
+            .map(|d| Descriptor {
+                id: d.id,
+                name: d.name,
+                version: d.version,
+            })
+    }
+
+    /// 插件声明的工具规格（JSON Schema 仍为文本）。
+    pub fn tool_specs(&mut self) -> Result<Vec<Spec>> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_tool_specs(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("tool-specs 调用失败: {e}"))?
+            .map_err(plugin_err)
+            .map(|specs| {
+                specs
+                    .into_iter()
+                    .map(|s| Spec {
+                        name: s.name,
+                        description: s.description,
+                        input_schema: s.input_schema,
+                    })
+                    .collect()
+            })
+    }
+
+    /// 插件贡献的 prompt 段落。
+    pub fn prompt_sections(&mut self) -> Result<Vec<String>> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_prompt_sections(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("prompt-sections 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 在施加资源限制的前提下处理一次工具调用。
+    pub fn handle_tool(&mut self, call: ToolCall, limits: &PluginRuntimeConfig) -> Result<Outcome> {
+        // 单次调用前重置 fuel 与 epoch deadline。
+        // set_fuel 仅在未开启 consume_fuel 时返回 Err，配置已开启，安全忽略。
+        let _ = self.store.set_fuel(limits.fuel_limit);
+        self.store.set_epoch_deadline(limits.epoch_deadline_ticks());
+
+        let wit_call = WitToolCall {
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+        };
+
+        match self
+            .instance
+            .tiangong_plugin_plugin()
+            .call_handle_tool(&mut self.store, &wit_call)
+        {
+            Ok(Ok(res)) => Ok(Outcome {
+                ok: res.ok,
+                summary: res.summary,
+                stdout: res.stdout,
+                stderr: res.stderr,
+                exit_code: res.exit_code,
+            }),
+            Ok(Err(e)) => Err(plugin_err(e)),
+            Err(e) => Err(anyhow::anyhow!("handle-tool 调用失败: {e}")),
+        }
+    }
+
+    /// 关闭插件。
+    pub fn shutdown(&mut self) -> Result<()> {
+        match self
+            .instance
+            .tiangong_plugin_plugin()
+            .call_shutdown(&mut self.store)
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(plugin_err(e)),
+            Err(e) => Err(anyhow::anyhow!("shutdown 调用失败: {e}")),
+        }
+    }
+
+    /// 引擎句柄（测试与 epoch 心跳用）。
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// 暴露 store 的可变借用，用于测试断言（如剩余 fuel）。
+    pub fn store(&mut self) -> &mut Store<HostState> {
+        &mut self.store
+    }
+}
+
+/// 轻量工具调用入参，解耦宿主对 wasmtime 生成类型的依赖。
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// 描述符结果。
+#[derive(Debug)]
+pub struct Descriptor {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+}
+
+/// 工具规格结果（JSON Schema 仍为文本）。
+#[derive(Debug)]
+pub struct Spec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: String,
+}
+
+/// 工具调用结果。
+#[derive(Debug)]
+pub struct Outcome {
+    pub ok: bool,
+    pub summary: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+/// 把 WIT 层的 `plugin-error` 转为 anyhow。
+fn plugin_err(e: PluginError) -> anyhow::Error {
+    match e {
+        PluginError::Message(m) => anyhow::anyhow!(m),
+    }
+}

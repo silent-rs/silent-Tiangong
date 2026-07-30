@@ -1,0 +1,64 @@
+package tiangong:plugin;
+
+/// 单文件 WASM 插件接口。
+///
+/// 所有方法只传递有版本的结构化数据；JSON Schema / 模型参数等复杂对象
+/// 统一以 JSON 文本（string）承载，避免在 WIT 中表达任意 JSON Value。
+interface plugin {
+    /// 插件描述符，安装与日志展示用。
+    record plugin-descriptor {
+        id: string,
+        name: string,
+        version: string,
+    }
+
+    /// 工具规格，对应宿主侧 `ToolSpec`。
+    /// `input-schema` 为 JSON Schema 文本。
+    record tool-spec {
+        name: string,
+        description: string,
+        input-schema: string,
+    }
+
+    /// 一次工具调用请求，对应宿主侧 `ToolCall`。
+    /// `arguments` 为模型生成的参数 JSON 文本。
+    record tool-call {
+        id: string,
+        name: string,
+        arguments: string,
+    }
+
+    /// 工具执行结果，对应宿主侧 `ToolResult`（简化版，暂不含 execution 记录）。
+    record tool-result {
+        ok: bool,
+        summary: string,
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+    }
+
+    /// 插件错误统一以可读文本返回，宿主侧据此记录与展示。
+    variant plugin-error {
+        message(string),
+    }
+
+    /// 返回插件描述符。零权限探测阶段调用。
+    describe: func() -> result<plugin-descriptor, plugin-error>;
+
+    /// 返回插件声明的全部工具规格。
+    tool-specs: func() -> result<list<tool-spec>, plugin-error>;
+
+    /// 返回插件贡献的 prompt 段落（注入 system prompt）。
+    prompt-sections: func() -> result<list<string>, plugin-error>;
+
+    /// 处理一次工具调用，返回执行结果。
+    handle-tool: func(call: tool-call) -> result<tool-result, plugin-error>;
+
+    /// 关闭插件，释放资源。
+    shutdown: func() -> result<_, plugin-error>;
+}
+
+/// WASM 插件 world：导出 `plugin` 接口。
+world tiangong-plugin {
+    export plugin;
+}

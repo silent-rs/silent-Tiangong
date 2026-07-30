@@ -1,0 +1,13 @@
+[package]
+name = "tiangong-plugin-memory-wasm"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "Memory System 的 WASM 组件示例（阶段一 PoC，纯 mock 返回）"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { workspace = true }
