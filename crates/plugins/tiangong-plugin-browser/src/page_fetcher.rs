@@ -80,7 +80,7 @@ impl PageFetcher for BrowserPageFetcher {
                     response_tx
                 },
                 response_rx,
-                30
+                35
             );
             Some(resp)
         })

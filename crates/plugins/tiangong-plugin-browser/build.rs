@@ -7,6 +7,7 @@ const COMMANDS: &[&str] = &[
     "browser_eval",
     "browser_go_back",
     "browser_go_forward",
+    "browser_reload",
     "browser_tab_list",
     "browser_snapshot_tabs",
     "browser_switch_session",

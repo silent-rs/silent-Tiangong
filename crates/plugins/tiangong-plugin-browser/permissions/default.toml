@@ -10,6 +10,7 @@ permissions = [
     "allow-browser-eval",
     "allow-browser-go-back",
     "allow-browser-go-forward",
+    "allow-browser-reload",
     "allow-browser-set-zoom",
     "allow-browser-get-zoom",
     "allow-browser-reset-zoom",

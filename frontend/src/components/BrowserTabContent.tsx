@@ -41,9 +41,19 @@ interface TabHistory {
 
 interface BrowserPageEvent {
   session_id: string;
+  tab_id: string;
   url?: string;
   title?: string;
   text?: string;
+}
+
+interface BrowserNavigationEvent {
+  session_id: string;
+  tab_id: string;
+  navigation_id: number;
+  state: 'loading' | 'loaded' | 'failed';
+  url: string;
+  message?: string;
 }
 
 const DEFAULT_URL = 'about:blank';
@@ -218,8 +228,13 @@ export function BrowserTabContent({
 
   const handleReload = useCallback(async () => {
     if (!url) return;
-    await api.browserEval(sessionId, 'location.reload()').catch(console.error);
-  }, [url]);
+    try {
+      await api.browserTabSwitch(sessionId, tabId);
+      await api.browserReload(sessionId);
+    } catch (err) {
+      console.error('刷新失败：', err);
+    }
+  }, [sessionId, tabId, url]);
 
   const dismissAnnotationBeforeZoom = useCallback(async () => {
     if (!annotationActive) return;
@@ -459,6 +474,7 @@ export function BrowserTabContent({
   useEffect(() => {
     let unlistenTab: (() => void) | null = null;
     let unlistenPage: (() => void) | null = null;
+    let unlistenNavigation: (() => void) | null = null;
     let cancelled = false;
 
     const setup = async () => {
@@ -470,12 +486,25 @@ export function BrowserTabContent({
       unlistenPage = await listen('browser:page_loaded', (event) => {
         if (cancelled || !isActiveRef.current) return;
         const payload = event.payload as BrowserPageEvent;
-        if (payload?.session_id !== sessionId) return;
+        if (payload?.session_id !== sessionId || payload?.tab_id !== tabId) return;
         if (payload?.url) {
           setUrl(displayUrl(payload.url));
           publishMetadata(payload.url, payload.title);
         }
         void refreshTabHistory();
+      });
+      unlistenNavigation = await listen<BrowserNavigationEvent>('browser:navigation_state', (event) => {
+        if (cancelled) return;
+        const payload = event.payload;
+        if (payload.session_id !== sessionId || payload.tab_id !== tabId) return;
+        setUrl(displayUrl(payload.url));
+        publishMetadata(
+          payload.url,
+          payload.state === 'failed' ? '页面加载异常' : undefined,
+        );
+        if (payload.state !== 'loading') {
+          void refreshTabHistory();
+        }
       });
     };
 
@@ -484,8 +513,9 @@ export function BrowserTabContent({
       cancelled = true;
       unlistenTab?.();
       unlistenPage?.();
+      unlistenNavigation?.();
     };
-  }, [publishMetadata, refreshBackendTabState, refreshTabHistory, sessionId]);
+  }, [publishMetadata, refreshBackendTabState, refreshTabHistory, sessionId, tabId]);
 
   return (
     <div className={`h-full flex-col bg-background ${isActive ? 'flex' : 'hidden'}`}>

@@ -141,15 +141,26 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
-                let _ = manager.navigate_with_app(&app, &url);
+                let ticket = match manager.navigate_for_agent(&app, &url) {
+                    Ok(ticket) => ticket,
+                    Err(error) => {
+                        let _ = response_tx.send(BrowserResponse {
+                            ok: false,
+                            title: String::new(),
+                            content: String::new(),
+                            final_url: url_for_error,
+                            error: Some(error),
+                        });
+                        continue;
+                    }
+                };
                 let _ = app.emit(
                     "browser:tab_updated",
                     serde_json::json!({ "session_id": session_id }),
                 );
 
-                let should_navigate = false;
                 let result = tokio::task::spawn_blocking(move || {
-                    manager.fetch_page_content(&url, max_chars, should_navigate)
+                    manager.fetch_page_content(&url, max_chars, &ticket)
                 })
                 .await;
                 let response = result.unwrap_or(BrowserResponse {
@@ -175,7 +186,9 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
-                let _ = manager.navigate_with_app(&app, &url);
+                if let Err(error) = manager.navigate_for_agent(&app, &url) {
+                    warn!(%error, %session_id, %url, "browser open URL failed");
+                }
                 let _ = app.emit(
                     "browser:tab_updated",
                     serde_json::json!({ "session_id": session_id }),
@@ -216,6 +229,11 @@ pub async fn browser_command_handler(
                 };
                 let manager = BrowserManager::from_state(agent_state);
                 let snapshot = tokio::task::spawn_blocking(move || {
+                    if let Some(snapshot) = manager.get_snapshot() {
+                        if matches!(&snapshot.status, PageStatus::Loading | PageStatus::Error(_)) {
+                            return snapshot;
+                        }
+                    }
                     let events = manager.drain_events();
                     manager
                         .eval_with_result(

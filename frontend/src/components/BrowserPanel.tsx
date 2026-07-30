@@ -80,14 +80,24 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
 
   // 每个 tab 的浏览历史栈
   const [tabHistories, setTabHistories] = useState<Map<string, TabHistory>>(new Map());
-  // 导航意图标记
-  const navigationIntentRef = useRef<'new' | 'back' | 'forward' | null>(null);
   // 全局历史 Modal
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [globalHistoryEntries, setGlobalHistoryEntries] = useState<HistoryEntry[]>([]);
   const [globalHistoryOffset, setGlobalHistoryOffset] = useState(0);
   const [globalHistoryHasMore, setGlobalHistoryHasMore] = useState(true);
   const [globalHistoryLoading, setGlobalHistoryLoading] = useState(false);
+
+  const refreshTabHistory = useCallback(async (tabId: string) => {
+    const result = await api.browserTabHistory(sessionId, tabId);
+    setTabHistories((previous) => {
+      const next = new Map(previous);
+      next.set(tabId, {
+        entries: result.entries,
+        currentIndex: result.current_index,
+      });
+      return next;
+    });
+  }, [sessionId]);
 
   const refreshTabs = useCallback(async () => {
     try {
@@ -106,9 +116,10 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
         activeTabIdRef.current = activeId;
         setActiveTabId(activeId);
         browserOpenedRef.current = true;
+        void refreshTabHistory(activeId);
       }
     } catch { /* ignore */ }
-  }, [onClose]);
+  }, [onClose, refreshTabHistory, sessionId]);
 
   // 获取当前 tab 的历史
   const getCurrentHistory = useCallback((tabId: string | null): TabHistory => {
@@ -202,62 +213,21 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
         syncPosition();
       });
       unlistenPage = await listen('browser:page_loaded', (event) => {
+        const payload = event.payload as {
+          session_id?: string;
+          tab_id?: string;
+          url?: string;
+          title?: string;
+        };
+        if (payload.session_id !== sessionId) return;
+        if (payload.tab_id && payload.tab_id !== activeTabIdRef.current) return;
         refreshTabs();
-        const payload = event.payload as { url?: string; title?: string };
         if (payload?.url) {
           setUrl(payload.url);
         }
 
-        // 根据导航意图更新历史栈
-        const intent = navigationIntentRef.current;
-        navigationIntentRef.current = null;
-
-        const pageUrl = payload?.url;
-        const pageTitle = payload?.title ?? '';
-        if (!pageUrl || pageUrl.startsWith('about:')) return;
-
-        const tabId = activeTabIdRef.current;
-        if (!tabId) return;
-
-        setTabHistories(prev => {
-          const next = new Map(prev);
-          let history = next.get(tabId) ?? { entries: [], currentIndex: -1 };
-
-          if (intent === 'back' || intent === 'forward') {
-            // 后退/前进：查找匹配的 URL，移动索引
-            const direction = intent === 'back' ? -1 : 1;
-            const expectedIdx = history.currentIndex + direction;
-            if (expectedIdx >= 0 && expectedIdx < history.entries.length && history.entries[expectedIdx].url === pageUrl) {
-              history = { ...history, currentIndex: expectedIdx };
-            } else {
-              const foundIdx = history.entries.findIndex(e => e.url === pageUrl);
-              if (foundIdx >= 0) {
-                history = { ...history, currentIndex: foundIdx };
-              } else {
-                // 未找到匹配，按新导航处理
-                const entries = [
-                  ...history.entries.slice(0, history.currentIndex + 1),
-                  { url: pageUrl, title: pageTitle, timestamp: Date.now() },
-                ];
-                history = { entries, currentIndex: entries.length - 1 };
-              }
-            }
-          } else {
-            // 新导航：截断并追加
-            // 去重：URL 与最新条目相同时跳过
-            if (history.entries.length > 0 && history.entries[history.currentIndex]?.url === pageUrl) {
-              return prev;
-            }
-            const entries = [
-              ...history.entries.slice(0, history.currentIndex + 1),
-              { url: pageUrl, title: pageTitle, timestamp: Date.now() },
-            ];
-            history = { entries, currentIndex: entries.length - 1 };
-          }
-
-          next.set(tabId, history);
-          return next;
-        });
+        const tabId = payload.tab_id || activeTabIdRef.current;
+        if (tabId) void refreshTabHistory(tabId);
       });
     };
     setup();
@@ -266,7 +236,7 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
       unlistenTab?.();
       unlistenPage?.();
     };
-  }, [refreshTabs]);
+  }, [refreshTabHistory, refreshTabs, sessionId]);
 
   const syncPosition = useCallback(async () => {
     if (!containerRef.current) return;
@@ -303,8 +273,6 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
     const nextUrl = normalizeBrowserUrl(url);
     if (!nextUrl) return;
 
-    navigationIntentRef.current = 'new';
-
     try {
       if (containerRef.current) {
         const rect = containerRef.current.getBoundingClientRect();
@@ -319,19 +287,18 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
 
   const handleGoBack = useCallback(async () => {
     if (!activeTabId || !canGoBack(activeTabId)) return;
-    navigationIntentRef.current = 'back';
     await api.browserGoBack(sessionId, ).catch(console.error);
-  }, [activeTabId, canGoBack]);
+  }, [activeTabId, canGoBack, sessionId]);
 
   const handleGoForward = useCallback(async () => {
     if (!activeTabId || !canGoForward(activeTabId)) return;
-    navigationIntentRef.current = 'forward';
     await api.browserGoForward(sessionId, ).catch(console.error);
-  }, [activeTabId, canGoForward]);
+  }, [activeTabId, canGoForward, sessionId]);
 
   const handleReload = useCallback(async () => {
-    await api.browserEval(sessionId, 'location.reload()').catch(console.error);
-  }, []);
+    if (!url) return;
+    await api.browserReload(sessionId).catch(console.error);
+  }, [sessionId, url]);
 
   // 缩放前关闭批注：批注 canvas 是 webview 内 DOM，set_zoom 会等比缩放整个 webview，
   // 因此缩放前若批注处于激活状态则先关闭并清空，避免视觉错位；用户可在缩放后重新开启。
@@ -445,7 +412,6 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
 
   const handleTabSwitch = useCallback(async (tabId: string) => {
     try {
-      navigationIntentRef.current = null;
       await api.browserTabSwitch(sessionId, tabId);
       activeTabIdRef.current = tabId;
       setActiveTabId(tabId);
@@ -453,10 +419,11 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
       if (tab) {
         setUrl(tab.url === DEFAULT_URL ? '' : tab.url);
       }
+      await refreshTabHistory(tabId);
     } catch (err) {
       console.error('切换标签失败：', err);
     }
-  }, [tabs]);
+  }, [refreshTabHistory, sessionId, tabs]);
 
   const handleTabClose = useCallback(async (tabId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -476,7 +443,6 @@ export function BrowserPanel({ sessionId = '', initialUrl, currentUrl, onClose }
 
   // 从历史记录跳转（全局历史 Modal 使用：作为新导航）
   const handleHistoryJump = useCallback(async (targetUrl: string) => {
-    navigationIntentRef.current = 'new';
     setShowHistoryModal(false);
     try {
       if (!containerRef.current) return;

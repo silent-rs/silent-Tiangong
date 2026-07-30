@@ -13,6 +13,7 @@
 - `allow-browser-eval`
 - `allow-browser-go-back`
 - `allow-browser-go-forward`
+- `allow-browser-reload`
 - `allow-browser-set-zoom`
 - `allow-browser-get-zoom`
 - `allow-browser-reset-zoom`
@@ -371,6 +372,32 @@ Enables the browser_open_url command without any pre-configured scope.
 <td>
 
 Denies the browser_open_url command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:allow-browser-reload`
+
+</td>
+<td>
+
+Enables the browser_reload command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`tiangong-plugin-browser:deny-browser-reload`
+
+</td>
+<td>
+
+Denies the browser_reload command without any pre-configured scope.
 
 </td>
 </tr>

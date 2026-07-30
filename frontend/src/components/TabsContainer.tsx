@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, Plus, TerminalSquare, X } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
 import { api } from '@/api/tauri';
 import type { TabKind, TabState } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
@@ -89,7 +90,10 @@ export function TabsContainer({
   const hydratingSessionRef = useRef<string | null>(null);
   const hydratedSessionRef = useRef<string | null>(null);
   const persistTimerRef = useRef<number | null>(null);
+  const browserMergeRequestRef = useRef(0);
+  const terminalSessionIdRef = useRef('');
   const terminalSessionId = activeSessionId || newConversationId || '';
+  terminalSessionIdRef.current = terminalSessionId;
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? tabs[0] ?? null,
@@ -169,7 +173,9 @@ export function TabsContainer({
       try {
         const tabId = await api.browserTabNew(terminalSessionId, DEFAULT_BROWSER_URL);
         const nextTab = createLocalTab(kind, tabId);
-        const nextTabs = [...tabsRef.current, nextTab];
+        const nextTabs = tabsRef.current.some((tab) => tab.id === tabId)
+          ? tabsRef.current.map((tab) => tab.id === tabId ? nextTab : tab)
+          : [...tabsRef.current, nextTab];
         tabsRef.current = nextTabs;
         activeTabIdRef.current = nextTab.id;
         setTabs(nextTabs);
@@ -262,6 +268,46 @@ export function TabsContainer({
     }
   }, [terminalSessionId]);
 
+  const mergeBrowserRuntimeTabs = useCallback(async () => {
+    if (!terminalSessionId) return;
+    const requestedSessionId = terminalSessionId;
+    const requestId = ++browserMergeRequestRef.current;
+    const result = await api.browserTabList(requestedSessionId);
+    if (
+      requestId !== browserMergeRequestRef.current
+      || terminalSessionIdRef.current !== requestedSessionId
+    ) {
+      return;
+    }
+    const browserTabs = result.tabs.map(createBrowserTabFromBackend);
+    const browserIds = new Set(browserTabs.map((tab) => tab.id));
+    const backendById = new Map(browserTabs.map((tab) => [tab.id, tab]));
+    const currentTabs = tabsRef.current;
+    const retainedTabs = currentTabs
+      .filter((tab) => tab.kind !== 'browser' || browserIds.has(tab.id))
+      .map((tab) => {
+        if (tab.kind !== 'browser') return tab;
+        const backendTab = backendById.get(tab.id);
+        return backendTab ? { ...tab, title: backendTab.title, url: backendTab.url } : tab;
+      });
+    const retainedIds = new Set(retainedTabs.map((tab) => tab.id));
+    const addedTabs = browserTabs.filter((tab) => !retainedIds.has(tab.id));
+    const nextTabs = [...retainedTabs, ...addedTabs];
+
+    const currentActive = currentTabs.find((tab) => tab.id === activeTabIdRef.current);
+    let nextActiveId = activeTabIdRef.current;
+    if (result.active_tab_id && (!currentActive || currentActive.kind === 'browser')) {
+      nextActiveId = result.active_tab_id;
+    } else if (!nextTabs.some((tab) => tab.id === nextActiveId)) {
+      nextActiveId = nextTabs[0]?.id || '';
+    }
+
+    tabsRef.current = nextTabs;
+    activeTabIdRef.current = nextActiveId;
+    setTabs(nextTabs);
+    setActiveTabId(nextActiveId);
+  }, [terminalSessionId]);
+
 
 
   useEffect(() => {
@@ -271,6 +317,25 @@ export function TabsContainer({
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<{ session_id?: string }>('browser:tab_updated', (event) => {
+      if (cancelled || event.payload?.session_id !== terminalSessionId) return;
+      void mergeBrowserRuntimeTabs().catch(console.error);
+    }).then((cleanup) => {
+      if (cancelled) {
+        cleanup();
+      } else {
+        unlisten = cleanup;
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [mergeBrowserRuntimeTabs, terminalSessionId]);
 
   const persistTabsNow = useCallback(() => {
     if (persistTimerRef.current !== null) {

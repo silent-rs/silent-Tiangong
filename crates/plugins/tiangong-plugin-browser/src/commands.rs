@@ -62,7 +62,10 @@ pub async fn browser_navigate(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
     session_manager(&state, &session_id)?.navigate_with_app(&app, &url)?;
-    let _ = app.emit("browser:tab_updated", ());
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({ "session_id": session_id }),
+    );
     Ok(())
 }
 
@@ -110,17 +113,28 @@ pub async fn browser_hide(
 #[tauri::command]
 pub async fn browser_go_back(
     session_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    session_manager(&state, &session_id)?.go_back()
+    session_manager(&state, &session_id)?.go_back(&app)
 }
 
 #[tauri::command]
 pub async fn browser_go_forward(
     session_id: String,
+    app: AppHandle,
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
-    session_manager(&state, &session_id)?.go_forward()
+    session_manager(&state, &session_id)?.go_forward(&app)
+}
+
+#[tauri::command]
+pub async fn browser_reload(
+    session_id: String,
+    app: AppHandle,
+    state: State<'_, BrowserPluginState>,
+) -> Result<(), String> {
+    session_manager(&state, &session_id)?.reload(&app)
 }
 
 #[tauri::command]
@@ -192,7 +206,10 @@ pub async fn browser_tab_new(
     state: State<'_, BrowserPluginState>,
 ) -> Result<String, String> {
     let result = session_manager(&state, &session_id)?.tab_new(&app, &url);
-    let _ = app.emit("browser:tab_updated", ());
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({ "session_id": session_id }),
+    );
     result
 }
 
@@ -204,7 +221,10 @@ pub async fn browser_tab_switch(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
     session_manager(&state, &session_id)?.tab_switch(&tab_id)?;
-    let _ = app.emit("browser:tab_updated", ());
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
+    );
     Ok(())
 }
 
@@ -216,7 +236,10 @@ pub async fn browser_tab_close(
     state: State<'_, BrowserPluginState>,
 ) -> Result<(), String> {
     session_manager(&state, &session_id)?.tab_close(&tab_id)?;
-    let _ = app.emit("browser:tab_updated", ());
+    let _ = app.emit(
+        "browser:tab_updated",
+        serde_json::json!({ "session_id": session_id, "tab_id": tab_id }),
+    );
     Ok(())
 }
 

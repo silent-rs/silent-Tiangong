@@ -27,7 +27,7 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tokio::time::sleep;
 
 use crate::capability::PageFetcher;
-use crate::types::format_browser_events;
+use crate::types::{format_browser_events, PageStatus};
 
 /// 两次自动观察之间的最小间隔。
 const MIN_OBSERVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -178,6 +178,9 @@ impl BrowserWatcher {
                     return;
                 }
             };
+        if matches!(&snapshot.status, PageStatus::Loading | PageStatus::Error(_)) {
+            return;
+        }
         if snapshot.url.is_empty() {
             return;
         }

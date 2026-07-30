@@ -9,6 +9,19 @@ pub struct BrowserTab {
     pub id: String,
     pub url: String,
     pub title: String,
+    #[serde(default)]
+    pub source: BrowserTabSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_domain: Option<String>,
+}
+
+/// 标签创建来源。旧持久化数据没有该字段时按用户标签处理。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTabSource {
+    #[default]
+    User,
+    Agent,
 }
 
 /// 标签列表响应（包含活跃标签 ID）
@@ -37,11 +50,33 @@ pub struct BrowserOpenEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserPageLoadedEvent {
     pub session_id: String,
+    pub tab_id: String,
     #[serde(default)]
     pub title: String,
     pub url: String,
     #[serde(default)]
     pub text: String,
+}
+
+/// 页面导航状态。前端按会话和标签过滤，避免并发导航串台。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserNavigationStateKind {
+    Loading,
+    Loaded,
+    Failed,
+}
+
+/// 页面导航状态事件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserNavigationStateEvent {
+    pub session_id: String,
+    pub tab_id: String,
+    pub navigation_id: u64,
+    pub state: BrowserNavigationStateKind,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// 浏览器事件队列及其来源会话。
