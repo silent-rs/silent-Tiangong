@@ -101,6 +101,21 @@ impl Plugin for WasmPluginAdapter {
     fn on_session_ended(&self, session: &mut Session) {
         self.forward_session_hook(session, |plugin, json| plugin.on_session_ended(json));
     }
+
+    /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
+    fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        let ws = workspace.map(|p| p.to_string_lossy().to_string());
+        let mut plugin = match self.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("wasm 插件锁中毒: {e}");
+                return;
+            }
+        };
+        if let Err(e) = plugin.set_workspace(ws) {
+            tracing::warn!("wasm set_workspace 失败: {e}");
+        }
+    }
 }
 
 impl WasmPluginAdapter {
@@ -218,5 +233,22 @@ impl ToolOverrideHandler for WasmPluginAdapter {
     }
 }
 
-// PromptSectionProvider：阶段一示例插件不注入 prompt。
-impl PromptSectionProvider for WasmPluginAdapter {}
+// PromptSectionProvider：调 WASM 的 prompt-sections 导出，拉取三级记忆注入。
+impl PromptSectionProvider for WasmPluginAdapter {
+    fn prompt_sections(&self) -> Vec<String> {
+        let mut plugin = match self.inner.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("wasm 插件锁中毒: {e}");
+                return Vec::new();
+            }
+        };
+        match plugin.prompt_sections() {
+            Ok(sections) => sections,
+            Err(e) => {
+                tracing::warn!("wasm prompt_sections 失败: {e}");
+                Vec::new()
+            }
+        }
+    }
+}

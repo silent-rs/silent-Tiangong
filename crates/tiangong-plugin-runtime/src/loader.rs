@@ -222,6 +222,15 @@ impl WasmPlugin {
 
     // ── 通用生命周期 ──
 
+    /// 注入工作目录（对应 `Plugin::set_workspace`）。
+    pub fn set_workspace(&mut self, workspace: Option<String>) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_set_workspace(&mut self.store, workspace.as_deref())
+            .map_err(|e| anyhow::anyhow!("set-workspace 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 通知 WASM 组件 CoreConfig 变更（对应 `Plugin::on_config_updated`）。
     /// `config_json` 为 CoreConfig 的 JSON 文本。
     pub fn on_config_updated(&mut self, config_json: String) -> Result<()> {

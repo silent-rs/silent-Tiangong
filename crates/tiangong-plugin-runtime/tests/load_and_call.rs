@@ -13,7 +13,7 @@ use std::time::Duration;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
-use tiangong_core::tool_override::ToolSpecProvider;
+use tiangong_core::tool_override::{PromptSectionProvider, ToolSpecProvider};
 use tiangong_plugin_runtime::{PluginRuntimeConfig, ToolCall, WasmPluginAdapter, WasmPluginLoader};
 
 /// 定位示例 memory wasm 组件文件。
@@ -250,4 +250,49 @@ fn on_turn_finished_with_handle_forwards_rumination() {
     let mut session = test_session();
     // 不 panic 即通过（反刍是 best-effort）。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+}
+
+// ── set_workspace + prompt_sections 测试 ──
+
+#[test]
+fn prompt_sections_without_handle_returns_empty() {
+    // 无 handle 时，prompt_sections 应返回空（不注入），不报错。
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+
+    let sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
+    assert!(sections.is_empty(), "无 handle 时应返回空注入");
+}
+
+#[test]
+fn set_workspace_and_prompt_sections_flow() {
+    // set_workspace → on_session_ready → prompt_sections 完整流程。
+    // 注入真实 handle 时，prompt_sections 经 request 拉注入（可能为空，但不应报错）。
+    let handle = match tiangong_memory::start() {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("跳过：MemoryActor 启动失败");
+            return;
+        }
+    };
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+
+    // 注入 workspace 和 session。
+    <WasmPluginAdapter as Plugin>::set_workspace(
+        &adapter,
+        Some(std::path::Path::new("/tmp/test-ws")),
+    );
+    let mut session = test_session();
+    <WasmPluginAdapter as Plugin>::on_session_ready(&adapter, &mut session);
+
+    // prompt_sections 应能正常调用（返回注入段落或空）。
+    let _sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
+    // 不 panic 即通过。
 }

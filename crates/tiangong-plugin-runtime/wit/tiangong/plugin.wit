@@ -87,6 +87,10 @@ interface plugin {
     /// 关闭插件，释放资源。
     shutdown: func() -> result<_, plugin-error>;
 
+    /// 注入当前会话工作目录（对应宿主 `Plugin::set_workspace`）。
+    /// `workspace` 为目录路径文本，None 表示无有效工作目录。
+    set-workspace: func(workspace: option<string>) -> result<_, plugin-error>;
+
     /// CoreConfig 变更通知（对应宿主 `Plugin::on_config_updated`）。
     /// `config-json` 为 CoreConfig 的 JSON 文本。
     on-config-updated: func(config-json: string) -> result<_, plugin-error>;

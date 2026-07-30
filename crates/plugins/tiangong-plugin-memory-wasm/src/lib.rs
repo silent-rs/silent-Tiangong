@@ -20,7 +20,49 @@ use bindings::tiangong::plugin::memory_store;
 mod descriptor {
     pub const ID: &str = "memory";
     pub const NAME: &str = "Memory";
-    pub const VERSION: &str = "0.4.0";
+    pub const VERSION: &str = "0.5.0";
+}
+
+/// 全局状态缓存（WASM 单线程，RefCell 安全）。
+/// 存放 prompt_sections 拉注入所需的 session_id 和 workspace。
+mod state {
+    use std::cell::RefCell;
+
+    struct PluginState {
+        session_id: Option<String>,
+        workspace: Option<String>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<PluginState> = RefCell::new(PluginState {
+            session_id: None,
+            workspace: None,
+        });
+    }
+
+    pub fn set_session_id(id: Option<String>) {
+        STATE.with(|s| s.borrow_mut().session_id = id);
+    }
+
+    pub fn set_workspace(ws: Option<String>) {
+        STATE.with(|s| s.borrow_mut().workspace = ws);
+    }
+
+    pub fn session_id() -> Option<String> {
+        STATE.with(|s| s.borrow().session_id.clone())
+    }
+
+    /// workspace_id = workspace 路径的末尾目录名（与原生 memory 一致）。
+    pub fn workspace_id() -> Option<String> {
+        STATE.with(|s| {
+            s.borrow().workspace.as_ref().and_then(|ws| {
+                ws.rsplit('/')
+                    .next()
+                    .filter(|n| !n.is_empty())
+                    .map(String::from)
+            })
+        })
+    }
 }
 
 /// recall_memory 工具的 input_schema（JSON 文本）。
@@ -72,7 +114,29 @@ impl Guest for Component {
     }
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
-        Ok(Vec::new())
+        // 读缓存的状态，经 request 拉取三级记忆注入。
+        let session_id = state::session_id().unwrap_or_default();
+        let workspace_id = state::workspace_id();
+        let payload = serde_json::json!({
+            "method": "load_injection",
+            "session_id": session_id,
+            "workspace_id": workspace_id,
+        });
+        let sections = match memory_store::request("load_injection", &payload.to_string()) {
+            Ok(response_json) => {
+                // sidecar 返回 MemoryIpcResponsePayload::Injection { items: Vec<String> }。
+                serde_json::from_str::<serde_json::Value>(&response_json)
+                    .ok()
+                    .and_then(|v| v.get("items").cloned())
+                    .and_then(|items| serde_json::from_value(items).ok())
+                    .unwrap_or_default()
+            }
+            Err(_) => {
+                // sidecar 不可用时返回空（不注入），不阻断 prompt 装配。
+                Vec::new()
+            }
+        };
+        Ok(sections)
     }
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
@@ -117,6 +181,11 @@ impl Guest for Component {
         Ok(())
     }
 
+    fn set_workspace(workspace: Option<String>) -> Result<(), PluginError> {
+        state::set_workspace(workspace);
+        Ok(())
+    }
+
     fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
         // 通用配置变更事件。桥接组件本身不消费配置，接收即可。
         Ok(())
@@ -128,8 +197,12 @@ impl Guest for Component {
     // WASM 从中提取 memory 需要的数据，经 request 转发到 sidecar。
     // session 的所有修改权始终在 Core，WASM/ sidecar 绝不回写。
 
-    fn on_session_ready(_session_json: String) -> Result<(), PluginError> {
-        // 会话就绪：当前无需通知 sidecar（session_id 经 request 时按需传入）。
+    fn on_session_ready(session_json: String) -> Result<(), PluginError> {
+        // 会话就绪：从 session 快照提取 id 缓存，供 prompt_sections 拉注入用。
+        if let Ok(session) = serde_json::from_str::<serde_json::Value>(&session_json) {
+            let id = session.get("id").and_then(|v| v.as_str()).map(String::from);
+            state::set_session_id(id);
+        }
         Ok(())
     }
 
