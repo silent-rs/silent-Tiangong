@@ -9,6 +9,19 @@ pub struct BrowserTab {
     pub id: String,
     pub url: String,
     pub title: String,
+    #[serde(default)]
+    pub source: BrowserTabSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_domain: Option<String>,
+}
+
+/// 标签创建来源。旧持久化数据没有该字段时按用户标签处理。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserTabSource {
+    #[default]
+    User,
+    Agent,
 }
 
 /// 标签列表响应（包含活跃标签 ID）

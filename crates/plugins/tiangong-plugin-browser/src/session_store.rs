@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiangong_core::session::atomic_replace_file;
 
-use crate::types::BrowserTab;
+use crate::types::{BrowserTab, BrowserTabSource};
 
 /// 单个 session 的持久化浏览器状态。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -79,6 +79,8 @@ impl BrowserSessionStore {
                         .and_then(Value::as_str)
                         .unwrap_or("新标签页")
                         .to_string(),
+                    source: BrowserTabSource::User,
+                    agent_domain: None,
                 })
             })
             .collect::<Vec<_>>();
@@ -181,6 +183,8 @@ mod tests {
         let migrated = BrowserSessionStore::load_at(root.path(), session_id)?;
         assert_eq!(migrated.tabs.len(), 1);
         assert_eq!(migrated.tabs[0].url, "about:blank");
+        assert_eq!(migrated.tabs[0].source, BrowserTabSource::User);
+        assert!(migrated.tabs[0].agent_domain.is_none());
 
         BrowserSessionStore::save_at(root.path(), session_id, &BrowserSessionPersisted::default())?;
         BrowserSessionStore::migrate_legacy_value_at(root.path(), session_id, &legacy)?;

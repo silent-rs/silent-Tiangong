@@ -141,7 +141,7 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
-                let ticket = match manager.navigate_with_app(&app, &url) {
+                let ticket = match manager.navigate_for_agent(&app, &url) {
                     Ok(ticket) => ticket,
                     Err(error) => {
                         let _ = response_tx.send(BrowserResponse {
@@ -186,7 +186,7 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
-                if let Err(error) = manager.navigate_with_app(&app, &url) {
+                if let Err(error) = manager.navigate_for_agent(&app, &url) {
                     warn!(%error, %session_id, %url, "browser open URL failed");
                 }
                 let _ = app.emit(

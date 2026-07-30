@@ -10,11 +10,11 @@ use tauri::{
     WebviewUrl, Wry,
 };
 
-use crate::bridge::BRIDGE_SCRIPT;
+use crate::bridge::{BRIDGE_SCRIPT, DOCUMENT_STATE_SCRIPT, PAGE_SNAPSHOT_SCRIPT};
 use crate::types::{
     BrowserEvent, BrowserEventsEvent, BrowserNavigationStateEvent, BrowserNavigationStateKind,
-    BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabsSnapshot,
-    HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
+    BrowserPageLoadedEvent, BrowserPageSnapshot, BrowserResponse, BrowserTab, BrowserTabSource,
+    BrowserTabsSnapshot, HistoryEntry, PageStatus, TabHistoryResult, TabListResponse,
 };
 
 /// 规范化标识符用于 webview label（避免特殊字符）。
@@ -53,14 +53,43 @@ enum NavigationPhase {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavigationIntent {
+    Normal,
+    History { target_index: usize },
+    Reload,
+    Retry,
+    Restore,
+}
+
 #[derive(Debug, Clone)]
 struct TabNavigationState {
     navigation_id: u64,
     requested_url: String,
     started_url: Option<String>,
+    document_id: Option<String>,
+    superseded_document_ids: Vec<String>,
+    superseded_urls: Vec<String>,
     final_url: Option<String>,
+    history_index: Option<usize>,
     phase: NavigationPhase,
     internal_error_url: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct WebDocumentSnapshot {
+    #[serde(default)]
+    document_id: String,
+    #[serde(default)]
+    ready_state: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    internal_error: bool,
 }
 
 struct NavigationSignal {
@@ -80,7 +109,11 @@ fn navigation_signal(url: &str) -> Arc<NavigationSignal> {
             navigation_id: 0,
             requested_url: url.to_string(),
             started_url: None,
+            document_id: None,
+            superseded_document_ids: Vec::new(),
+            superseded_urls: Vec::new(),
             final_url: Some(url.to_string()),
+            history_index: None,
             phase: NavigationPhase::Loaded,
             internal_error_url: None,
         }),
@@ -92,6 +125,118 @@ fn navigation_signal(url: &str) -> Arc<NavigationSignal> {
 fn normalize_url_for_compare(url: &str) -> String {
     let s = url.trim_end_matches('/');
     s.to_string()
+}
+
+fn push_recent_unique(values: &mut Vec<String>, value: String) {
+    if value.is_empty() || values.iter().any(|item| item == &value) {
+        return;
+    }
+    values.push(value);
+    const MAX_RECENT_VALUES: usize = 16;
+    if values.len() > MAX_RECENT_VALUES {
+        values.drain(0..values.len() - MAX_RECENT_VALUES);
+    }
+}
+
+fn remember_superseded_navigation(navigation: &mut TabNavigationState) {
+    if let Some(document_id) = navigation.document_id.take() {
+        push_recent_unique(&mut navigation.superseded_document_ids, document_id);
+    }
+    let urls = [
+        Some(navigation.requested_url.clone()),
+        navigation.started_url.clone(),
+        navigation.final_url.clone(),
+    ];
+    for url in urls.into_iter().flatten() {
+        let normalized = normalize_url_for_compare(&url);
+        push_recent_unique(&mut navigation.superseded_urls, normalized);
+    }
+}
+
+fn parse_web_document_snapshot(result: &str) -> Option<WebDocumentSnapshot> {
+    serde_json::from_str(result).ok()
+}
+
+fn accept_loading_document(
+    navigation: &mut TabNavigationState,
+    observed_navigation_id: u64,
+    snapshot: &WebDocumentSnapshot,
+) -> bool {
+    if navigation.navigation_id != observed_navigation_id
+        || navigation.phase != NavigationPhase::Loading
+        || navigation.internal_error_url.as_deref() == Some(snapshot.url.as_str())
+        || navigation
+            .superseded_document_ids
+            .iter()
+            .any(|document_id| document_id == &snapshot.document_id)
+    {
+        return false;
+    }
+
+    let normalized_url = normalize_url_for_compare(&snapshot.url);
+    let matches_request = normalized_url == normalize_url_for_compare(&navigation.requested_url);
+    let is_superseded_url = navigation
+        .superseded_urls
+        .iter()
+        .any(|url| url == &normalized_url);
+    if navigation.document_id.is_none() && !matches_request && is_superseded_url {
+        return false;
+    }
+
+    if let Some(previous_document_id) = navigation.document_id.replace(snapshot.document_id.clone())
+    {
+        push_recent_unique(
+            &mut navigation.superseded_document_ids,
+            previous_document_id,
+        );
+    }
+    navigation.started_url = Some(snapshot.url.clone());
+    true
+}
+
+fn accepts_completed_document(
+    navigation: &TabNavigationState,
+    navigation_id: u64,
+    expected_document_id: &str,
+    snapshot: &WebDocumentSnapshot,
+) -> bool {
+    snapshot.document_id == expected_document_id
+        && snapshot.ready_state == "complete"
+        && !snapshot.url.is_empty()
+        && !snapshot.internal_error
+        && navigation.navigation_id == navigation_id
+        && navigation.phase == NavigationPhase::Loading
+        && navigation.document_id.as_deref() == Some(expected_document_id)
+        && navigation.started_url.as_deref().is_some_and(|url| {
+            normalize_url_for_compare(url) == normalize_url_for_compare(&snapshot.url)
+        })
+}
+
+fn agent_domain_for_url(url: &str) -> Result<String, String> {
+    let parsed = url
+        .parse::<Url>()
+        .map_err(|error| format!("URL 解析失败：{error}"))?;
+    let Some(host) = parsed.host_str() else {
+        return match parsed.scheme() {
+            "file" => Ok("file:".to_string()),
+            scheme => Err(format!("{scheme} 地址不包含可识别的主机名")),
+        };
+    };
+    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
+    Ok(psl::domain_str(&normalized_host)
+        .unwrap_or(&normalized_host)
+        .to_string())
+}
+
+fn agent_tab_id_for_domain(state: &BrowserState, agent_domain: &str) -> Option<String> {
+    state
+        .tabs
+        .iter()
+        .find(|tab| {
+            tab.source == BrowserTabSource::Agent
+                && tab.agent_domain.as_deref() == Some(agent_domain)
+        })
+        .map(|tab| tab.id.clone())
 }
 
 /// 浏览器 WebView 的共享状态
@@ -355,12 +500,14 @@ impl BrowserManager {
         state: Arc<Mutex<BrowserState>>,
         tab_id: &str,
         url: &str,
+        intent: NavigationIntent,
     ) -> Result<u64, String> {
         let (session_id, navigation_id) = {
             let mut state = state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.iter().any(|tab| tab.id == tab_id) {
                 return Err(format!("标签 {tab_id} 不存在"));
             }
+            let history_index = apply_tab_navigation_intent(&mut state, tab_id, url, intent)?;
 
             let signal = state
                 .navigation_signals
@@ -369,20 +516,23 @@ impl BrowserManager {
                 .clone();
             let navigation_id = {
                 let mut navigation = signal.state.lock().map_err(|e| e.to_string())?;
+                remember_superseded_navigation(&mut navigation);
                 navigation.navigation_id = navigation.navigation_id.wrapping_add(1).max(1);
                 navigation.requested_url = url.to_string();
                 navigation.started_url = None;
+                navigation.document_id = None;
                 navigation.final_url = None;
+                navigation.history_index = history_index;
                 navigation.phase = NavigationPhase::Loading;
                 navigation.internal_error_url = None;
                 navigation.navigation_id
             };
+            signal.cvar.notify_all();
 
             if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.url = url.to_string();
                 tab.title.clear();
             }
-            record_tab_navigation(&mut state, tab_id, url, None);
             state.latest_snapshots.insert(
                 tab_id.to_string(),
                 BrowserPageSnapshot {
@@ -528,14 +678,108 @@ impl BrowserManager {
         }
     }
 
-    fn finish_navigation_for_tab(
+    fn handle_page_load_started(
+        app: &AppHandle<Wry>,
+        state: Arc<Mutex<BrowserState>>,
+        tab_id: &str,
+        observed_navigation_id: u64,
+        event_url: &str,
+        snapshot: WebDocumentSnapshot,
+    ) {
+        if snapshot.document_id.is_empty() || snapshot.url.is_empty() || snapshot.internal_error {
+            return;
+        }
+        if !event_url.is_empty()
+            && normalize_url_for_compare(event_url) != normalize_url_for_compare(&snapshot.url)
+        {
+            return;
+        }
+
+        let begin_intent = {
+            let state = match state.lock() {
+                Ok(state) => state,
+                Err(error) => error.into_inner(),
+            };
+            let Some(signal) = state.navigation_signals.get(tab_id).cloned() else {
+                return;
+            };
+            let mut navigation = match signal.state.lock() {
+                Ok(navigation) => navigation,
+                Err(error) => error.into_inner(),
+            };
+            if navigation.phase == NavigationPhase::Loading {
+                accept_loading_document(&mut navigation, observed_navigation_id, &snapshot);
+                return;
+            }
+            if navigation.navigation_id != observed_navigation_id
+                || navigation.internal_error_url.as_deref() == Some(snapshot.url.as_str())
+                || navigation
+                    .superseded_document_ids
+                    .iter()
+                    .any(|document_id| document_id == &snapshot.document_id)
+            {
+                return;
+            }
+
+            match navigation.phase {
+                NavigationPhase::Loading => unreachable!(),
+                NavigationPhase::Failed => {
+                    Some((NavigationIntent::Retry, navigation.requested_url.clone()))
+                }
+                NavigationPhase::Loaded => {
+                    if navigation.document_id.as_deref() == Some(snapshot.document_id.as_str()) {
+                        return;
+                    }
+                    Some((NavigationIntent::Normal, snapshot.url.clone()))
+                }
+            }
+        };
+
+        let Some((intent, requested_url)) = begin_intent else {
+            return;
+        };
+        let Ok(navigation_id) =
+            Self::begin_navigation_for_tab(app, state.clone(), tab_id, &requested_url, intent)
+        else {
+            return;
+        };
+
+        let state = match state.lock() {
+            Ok(state) => state,
+            Err(error) => error.into_inner(),
+        };
+        let Some(signal) = state.navigation_signals.get(tab_id) else {
+            return;
+        };
+        let mut navigation = match signal.state.lock() {
+            Ok(navigation) => navigation,
+            Err(error) => error.into_inner(),
+        };
+        if navigation.navigation_id != navigation_id
+            || navigation.phase != NavigationPhase::Loading
+            || navigation
+                .superseded_document_ids
+                .iter()
+                .any(|document_id| document_id == &snapshot.document_id)
+        {
+            return;
+        }
+        navigation.started_url = Some(snapshot.url);
+        navigation.document_id = Some(snapshot.document_id);
+    }
+
+    fn complete_navigation_for_tab(
         app: &AppHandle<Wry>,
         state: Arc<Mutex<BrowserState>>,
         tab_id: &str,
         navigation_id: u64,
-        final_url: &str,
+        expected_document_id: &str,
+        snapshot: WebDocumentSnapshot,
     ) -> bool {
-        let session_id = {
+        let final_url = snapshot.url.clone();
+        let title = snapshot.title.clone();
+        let text = snapshot.text.clone();
+        let (session_id, shared, should_persist_history) = {
             let mut state = match state.lock() {
                 Ok(state) => state,
                 Err(error) => error.into_inner(),
@@ -547,26 +791,43 @@ impl BrowserManager {
                 Ok(navigation) => navigation,
                 Err(error) => error.into_inner(),
             };
-            if navigation.navigation_id != navigation_id
-                || navigation.phase != NavigationPhase::Loading
-            {
+            if !accepts_completed_document(
+                &navigation,
+                navigation_id,
+                expected_document_id,
+                &snapshot,
+            ) {
                 return false;
             }
+
             navigation.phase = NavigationPhase::Loaded;
-            navigation.final_url = Some(final_url.to_string());
+            navigation.final_url = Some(final_url.clone());
             navigation.internal_error_url = None;
+            let history_index = navigation.history_index;
             signal.cvar.notify_all();
             drop(navigation);
 
             if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                tab.url = final_url.to_string();
+                tab.url = final_url.clone();
+                if !title.is_empty() {
+                    tab.title = title.clone();
+                }
+            } else {
+                return false;
             }
+            update_tab_navigation_entry(
+                &mut state,
+                tab_id,
+                history_index,
+                &final_url,
+                Some(&title),
+            );
             state.latest_snapshots.insert(
                 tab_id.to_string(),
                 BrowserPageSnapshot {
-                    title: String::new(),
-                    url: final_url.to_string(),
-                    text: String::new(),
+                    title: title.clone(),
+                    url: final_url.clone(),
+                    text: text.clone(),
                     status: PageStatus::Loaded,
                     tabs: Vec::new(),
                     active_tab_id: None,
@@ -574,18 +835,46 @@ impl BrowserManager {
                 },
             );
             Self::persist_from_state(&state);
-            state.session_id.clone()
+
+            let shared = state.shared.clone();
+            let should_persist_history = is_recordable_history_url(&final_url);
+            if should_persist_history {
+                let mut history = shared
+                    .global_history
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                upsert_global_history(&mut history, &final_url, &title);
+            }
+            (state.session_id.clone(), shared, should_persist_history)
         };
 
+        if should_persist_history {
+            persist_global_history(&shared);
+        }
         let _ = app.emit(
             "browser:navigation_state",
             BrowserNavigationStateEvent {
-                session_id,
+                session_id: session_id.clone(),
                 tab_id: tab_id.to_string(),
                 navigation_id,
                 state: BrowserNavigationStateKind::Loaded,
-                url: final_url.to_string(),
+                url: final_url.clone(),
                 message: None,
+            },
+        );
+        let _ = app.emit(
+            "browser:tab_updated",
+            serde_json::json!({ "session_id": session_id.clone(), "tab_id": tab_id }),
+        );
+        let summary = text.chars().take(2000).collect();
+        let _ = app.emit(
+            "browser:page_loaded",
+            BrowserPageLoadedEvent {
+                session_id,
+                tab_id: tab_id.to_string(),
+                title,
+                url: final_url,
+                text: summary,
             },
         );
         true
@@ -598,6 +887,7 @@ impl BrowserManager {
         state: Arc<Mutex<BrowserState>>,
         tab_id: &str,
         url: &str,
+        intent: NavigationIntent,
         x: f64,
         y: f64,
         w: f64,
@@ -612,7 +902,8 @@ impl BrowserManager {
             let s = state.lock().unwrap_or_else(|e| e.into_inner());
             s.session_id.clone()
         };
-        let navigation_id = Self::begin_navigation_for_tab(app, state.clone(), tab_id, url)?;
+        let navigation_id =
+            Self::begin_navigation_for_tab(app, state.clone(), tab_id, url, intent)?;
         let parsed_url: Url = match url.parse() {
             Ok(url) => url,
             Err(error) => {
@@ -623,8 +914,6 @@ impl BrowserManager {
         let data_dir = browser_data_directory(&session_id);
         let label = webview_label(&session_id, tab_id);
         let tab_id_for_closure = tab_id.to_string();
-        let session_id_for_page_load = session_id.clone();
-
         // on_page_load 回调直接写入目标 session 的 state（不再经 app.state().manager() 串台）
         let state_clone_holder = state.clone();
         // 在 state_clone_holder 被 move 进 on_page_load 闭包前读出当前缩放，用于新建 webview 即时应用
@@ -646,7 +935,7 @@ impl BrowserManager {
                 let event_url = payload.url().to_string();
 
                 if payload.event() == PageLoadEvent::Started {
-                    let should_begin = {
+                    let observed_navigation_id = {
                         let state = match state_clone_holder.lock() {
                             Ok(state) => state,
                             Err(error) => error.into_inner(),
@@ -656,52 +945,44 @@ impl BrowserManager {
                         else {
                             return;
                         };
-                        let mut navigation = match signal.state.lock() {
+                        let navigation = match signal.state.lock() {
                             Ok(navigation) => navigation,
                             Err(error) => error.into_inner(),
                         };
                         if navigation.internal_error_url.as_deref() == Some(event_url.as_str()) {
                             return;
                         }
-                        if navigation.phase == NavigationPhase::Loading {
-                            if navigation.started_url.is_some()
-                                || normalize_url_for_compare(&navigation.requested_url)
-                                    == normalize_url_for_compare(&event_url)
-                            {
-                                navigation.started_url = Some(event_url.clone());
-                            }
-                            false
-                        } else {
-                            true
-                        }
+                        navigation.navigation_id
                     };
-                    if should_begin {
-                        if let Ok(navigation_id) = Self::begin_navigation_for_tab(
-                            &app_clone,
-                            state_clone_holder.clone(),
-                            &tab_id_for_closure,
-                            &event_url,
-                        ) {
-                            let state = match state_clone_holder.lock() {
-                                Ok(state) => state,
-                                Err(error) => error.into_inner(),
+
+                    let app_for_started = app_clone.clone();
+                    let state_for_started = state_clone_holder.clone();
+                    let tab_id_for_started = tab_id_for_closure.clone();
+                    let event_url_for_started = event_url.clone();
+                    if let Err(error) = webview.eval_with_callback(
+                        DOCUMENT_STATE_SCRIPT,
+                        move |result| {
+                            let Some(snapshot) = parse_web_document_snapshot(&result) else {
+                                debug!("browser started document state parse failed");
+                                return;
                             };
-                            if let Some(signal) =
-                                state.navigation_signals.get(&tab_id_for_closure)
-                            {
-                                if let Ok(mut navigation) = signal.state.lock() {
-                                    if navigation.navigation_id == navigation_id {
-                                        navigation.started_url = Some(event_url.clone());
-                                    }
-                                }
-                            }
-                        }
+                            Self::handle_page_load_started(
+                                &app_for_started,
+                                state_for_started.clone(),
+                                &tab_id_for_started,
+                                observed_navigation_id,
+                                &event_url_for_started,
+                                snapshot,
+                            );
+                        },
+                    ) {
+                        debug!(%error, "browser started document state read failed");
                     }
                     return;
                 }
 
                 if payload.event() == PageLoadEvent::Finished {
-                    let navigation_id = {
+                    let (navigation_id, expected_document_id) = {
                         let state = match state_clone_holder.lock() {
                             Ok(state) => state,
                             Err(error) => error.into_inner(),
@@ -720,122 +1001,42 @@ impl BrowserManager {
                         {
                             return;
                         }
-                        let expected_url = navigation
-                            .started_url
-                            .as_deref()
-                            .unwrap_or(&navigation.requested_url);
+                        let Some(expected_url) = navigation.started_url.as_deref() else {
+                            return;
+                        };
                         if normalize_url_for_compare(expected_url)
                             != normalize_url_for_compare(&event_url)
                         {
                             return;
                         }
-                        navigation.navigation_id
+                        let Some(document_id) = navigation.document_id.clone() else {
+                            return;
+                        };
+                        (navigation.navigation_id, document_id)
                     };
-                    if !Self::finish_navigation_for_tab(
-                        &app_clone,
-                        state_clone_holder.clone(),
-                        &tab_id_for_closure,
-                        navigation_id,
-                        &event_url,
-                    ) {
-                        return;
-                    }
 
-                    let state_clone2 = state_clone_holder.clone();
-                    let tab_id_in_closure = tab_id_for_closure.clone();
-                    let app_for_event = app_clone.clone();
-                    let session_id_for_event = session_id_for_page_load.clone();
-                    let final_url_for_callback = event_url.clone();
-                    let _ = webview.eval_with_callback(
-                        "window.__tiangong_bridge.getFullText(12000)",
+                    let state_for_finished = state_clone_holder.clone();
+                    let tab_id_for_finished = tab_id_for_closure.clone();
+                    let app_for_finished = app_clone.clone();
+                    if let Err(error) = webview.eval_with_callback(
+                        PAGE_SNAPSHOT_SCRIPT,
                         move |result| {
-                            if let Ok(data) =
-                                serde_json::from_str::<serde_json::Value>(&result)
-                            {
-                                let title = data["title"].as_str().unwrap_or("").to_string();
-                                let page_url = data["url"]
-                                    .as_str()
-                                    .filter(|url| !url.is_empty())
-                                    .unwrap_or(&final_url_for_callback)
-                                    .to_string();
-                                let text = data["text"].as_str().unwrap_or("").to_string();
-                                let snapshot = BrowserPageSnapshot {
-                                    title: title.clone(),
-                                    url: page_url.clone(),
-                                    text: text.clone(),
-                                    status: PageStatus::Loaded,
-                                    tabs: Vec::new(),
-                                    active_tab_id: None,
-                                    events: Vec::new(),
-                                };
-                                let mut updated_current_navigation = false;
-                                if let Ok(mut state) = state_clone2.lock() {
-                                    let is_current = state
-                                        .navigation_signals
-                                        .get(&tab_id_in_closure)
-                                        .and_then(|signal| signal.state.lock().ok())
-                                        .is_some_and(|navigation| {
-                                            navigation.navigation_id == navigation_id
-                                                && navigation.phase == NavigationPhase::Loaded
-                                        });
-                                    if !is_current {
-                                        return;
-                                    }
-                                    updated_current_navigation = true;
-                                    state
-                                        .latest_snapshots
-                                        .insert(tab_id_in_closure.clone(), snapshot);
-                                    if let Some(tab) =
-                                        state.tabs.iter_mut().find(|t| t.id == tab_id_in_closure)
-                                    {
-                                        tab.url = page_url.clone();
-                                        if !title.is_empty() {
-                                            tab.title = title.clone();
-                                        }
-                                        // 页面加载完成更新了 tab url/title，走统一过滤持久化
-                                        Self::persist_from_state(&state);
-                                    }
-                                    let shared = state.shared.clone();
-                                    // 记录浏览历史（用实际加载的 tab，而非全局 active——避免多 session 并发加载串台）
-                                    let should_persist = if is_recordable_history_url(&page_url) {
-                                            record_tab_navigation(
-                                                &mut state,
-                                                &tab_id_in_closure,
-                                                &page_url,
-                                                Some(&title),
-                                            );
-                                            // 写入全局历史（去重：移到末尾并更新时间戳）
-                                            let mut history = shared
-                                                .global_history
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
-                                            upsert_global_history(&mut history, &page_url, &title);
-                                            true
-                                        } else {
-                                            false
-                                    };
-                                    drop(state);
-                                    if should_persist {
-                                        persist_global_history(&shared);
-                                    }
-                                }
-                                if !updated_current_navigation {
-                                    return;
-                                }
-                                let summary: String = text.chars().take(2000).collect();
-                                let _ = app_for_event.emit(
-                                    "browser:page_loaded",
-                                    BrowserPageLoadedEvent {
-                                        session_id: session_id_for_event.clone(),
-                                        tab_id: tab_id_in_closure.clone(),
-                                        title,
-                                        url: page_url,
-                                        text: summary,
-                                    },
-                                );
-                            }
+                            let Some(snapshot) = parse_web_document_snapshot(&result) else {
+                                debug!("browser finished page snapshot parse failed");
+                                return;
+                            };
+                            Self::complete_navigation_for_tab(
+                                &app_for_finished,
+                                state_for_finished.clone(),
+                                &tab_id_for_finished,
+                                navigation_id,
+                                &expected_document_id,
+                                snapshot,
+                            );
                         },
-                    );
+                    ) {
+                        debug!(%error, "browser finished page snapshot read failed");
+                    }
                     let _ = webview.eval("window.__tiangong_bridge.observer.start()");
                 }
             });
@@ -871,24 +1072,18 @@ impl BrowserManager {
         let existing_action = {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
             if !state.tabs.is_empty() {
-                let matching_id = state
+                let target_id = state
+                    .active_tab_id
+                    .clone()
+                    .ok_or_else(|| "当前没有可用标签".to_string())?;
+                let current_url = state
                     .tabs
                     .iter()
-                    .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
-                    .map(|tab| tab.id.clone());
-                let target_id = matching_id
-                    .clone()
-                    .or_else(|| state.active_tab_id.clone())
-                    .ok_or_else(|| "当前没有可用标签".to_string())?;
-
-                if state.active_tab_id.as_deref() != Some(&target_id) {
-                    if let Some(old_id) = &state.active_tab_id {
-                        if let Some(old_webview) = state.webviews.get(old_id) {
-                            let _ = old_webview.set_position(LogicalPosition::new(-10000, -10000));
-                        }
-                    }
-                    state.active_tab_id = Some(target_id.clone());
-                }
+                    .find(|tab| tab.id == target_id)
+                    .map(|tab| tab.url.as_str())
+                    .unwrap_or_default();
+                let same_url =
+                    normalize_url_for_compare(current_url) == normalize_url_for_compare(url);
                 if let Some(webview) = state.webviews.get(&target_id) {
                     let _ = webview.set_position(LogicalPosition::new(x, y));
                     let _ = webview.set_size(LogicalSize::new(w, h));
@@ -900,20 +1095,26 @@ impl BrowserManager {
                 Some((
                     target_id.clone(),
                     !state.webviews.contains_key(&target_id) && url != "about:blank",
-                    matching_id.is_none() && state.webviews.contains_key(&target_id),
+                    !same_url && state.webviews.contains_key(&target_id),
+                    if same_url {
+                        NavigationIntent::Restore
+                    } else {
+                        NavigationIntent::Normal
+                    },
                 ))
             } else {
                 None
             }
         };
 
-        if let Some((tab_id, should_create, should_navigate)) = existing_action {
+        if let Some((tab_id, should_create, should_navigate, intent)) = existing_action {
             if should_create {
                 let webview = Self::create_webview_for_tab(
                     app,
                     self.state.clone(),
                     &tab_id,
                     url,
+                    intent,
                     x,
                     y,
                     w,
@@ -943,6 +1144,8 @@ impl BrowserManager {
                 id: tab_id.clone(),
                 url: url.to_string(),
                 title: String::new(),
+                source: BrowserTabSource::User,
+                agent_domain: None,
             });
             state.active_tab_id = Some(tab_id.clone());
             state.browser_rect = (x, y, w, h);
@@ -952,8 +1155,17 @@ impl BrowserManager {
         }
 
         if !is_blank {
-            let webview =
-                Self::create_webview_for_tab(app, self.state.clone(), &tab_id, url, x, y, w, h)?;
+            let webview = Self::create_webview_for_tab(
+                app,
+                self.state.clone(),
+                &tab_id,
+                url,
+                NavigationIntent::Normal,
+                x,
+                y,
+                w,
+                h,
+            )?;
             if let Ok(mut state) = self.state.lock() {
                 state.webviews.insert(tab_id.clone(), webview);
             }
@@ -1006,7 +1218,7 @@ impl BrowserManager {
                     if !visible.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
-                    let (active_tab_id, current_url) = {
+                    let (active_tab_id, navigation_id, current_url) = {
                         let s = match state.lock() {
                             Ok(s) => s,
                             Err(e) => e.into_inner(),
@@ -1014,18 +1226,16 @@ impl BrowserManager {
                         let Some(active_tab_id) = s.active_tab_id.clone() else {
                             continue;
                         };
-                        if tab_navigation_phase(&s, &active_tab_id)
-                            != Some(NavigationPhase::Loaded)
-                        {
+                        let Some(navigation_id) = loaded_navigation_id(&s, &active_tab_id) else {
                             continue;
-                        }
+                        };
                         match s.webviews.get(&active_tab_id) {
                             Some(wv) => {
                                 no_webview_ticks = 0;
                                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     wv.url()
                                 })) {
-                                    Ok(Ok(u)) => (active_tab_id, u.to_string()),
+                                    Ok(Ok(u)) => (active_tab_id, navigation_id, u.to_string()),
                                     _ => continue,
                                 }
                             }
@@ -1045,8 +1255,7 @@ impl BrowserManager {
                             Err(e) => e.into_inner(),
                         };
                         if s.active_tab_id.as_deref() != Some(active_tab_id.as_str())
-                            || tab_navigation_phase(&s, &active_tab_id)
-                                != Some(NavigationPhase::Loaded)
+                            || loaded_navigation_id(&s, &active_tab_id) != Some(navigation_id)
                         {
                             continue;
                         }
@@ -1125,8 +1334,8 @@ impl BrowserManager {
                                             };
                                             state.active_tab_id.as_deref()
                                                 == Some(active_tab_id.as_str())
-                                                && tab_navigation_phase(&state, &active_tab_id)
-                                                    == Some(NavigationPhase::Loaded)
+                                                && loaded_navigation_id(&state, &active_tab_id)
+                                                    == Some(navigation_id)
                                         };
                                         if !still_loaded {
                                             continue;
@@ -1192,20 +1401,57 @@ impl BrowserManager {
     }
 
     pub fn go_back(&self, app: &AppHandle<Wry>) -> Result<(), String> {
-        let target_url = self
+        let (target_index, target_url) = self
             .history_target(-1)
             .ok_or_else(|| "当前标签没有可后退的页面".to_string())?;
-        self.navigate(app, &target_url).map(|_| ())
+        self.navigate_with_intent(app, &target_url, NavigationIntent::History { target_index })
+            .map(|_| ())
     }
 
     pub fn go_forward(&self, app: &AppHandle<Wry>) -> Result<(), String> {
-        let target_url = self
+        let (target_index, target_url) = self
             .history_target(1)
             .ok_or_else(|| "当前标签没有可前进的页面".to_string())?;
-        self.navigate(app, &target_url).map(|_| ())
+        self.navigate_with_intent(app, &target_url, NavigationIntent::History { target_index })
+            .map(|_| ())
     }
 
-    fn history_target(&self, offset: isize) -> Option<String> {
+    pub fn reload(&self, app: &AppHandle<Wry>) -> Result<(), String> {
+        let (url, intent) = {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let tab_id = state
+                .active_tab_id
+                .as_ref()
+                .ok_or_else(|| "当前没有可用标签".to_string())?;
+            let url = state
+                .tab_history_indices
+                .get(tab_id)
+                .and_then(|index| {
+                    state
+                        .tab_histories
+                        .get(tab_id)
+                        .and_then(|entries| entries.get(*index))
+                })
+                .map(|entry| entry.url.clone())
+                .or_else(|| {
+                    state
+                        .tabs
+                        .iter()
+                        .find(|tab| &tab.id == tab_id)
+                        .map(|tab| tab.url.clone())
+                })
+                .ok_or_else(|| "当前标签没有可重新加载的地址".to_string())?;
+            let intent = if tab_navigation_phase(&state, tab_id) == Some(NavigationPhase::Failed) {
+                NavigationIntent::Retry
+            } else {
+                NavigationIntent::Reload
+            };
+            (url, intent)
+        };
+        self.navigate_with_intent(app, &url, intent).map(|_| ())
+    }
+
+    fn history_target(&self, offset: isize) -> Option<(usize, String)> {
         let state = self.state.lock().ok()?;
         let tab_id = state.active_tab_id.as_ref()?;
         let entries = state.tab_histories.get(tab_id)?;
@@ -1216,7 +1462,7 @@ impl BrowserManager {
         }
         entries
             .get(target_index as usize)
-            .map(|entry| entry.url.clone())
+            .map(|entry| (target_index as usize, entry.url.clone()))
     }
 
     pub fn set_position(&self, x: f64, y: f64) -> Result<(), String> {
@@ -1322,6 +1568,15 @@ impl BrowserManager {
         app: &AppHandle<Wry>,
         url: &str,
     ) -> Result<NavigationTicket, String> {
+        self.navigate_with_intent(app, url, NavigationIntent::Normal)
+    }
+
+    fn navigate_with_intent(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+        intent: NavigationIntent,
+    ) -> Result<NavigationTicket, String> {
         let (tab_id, webview) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
             let tab_id = state
@@ -1335,7 +1590,8 @@ impl BrowserManager {
                 .ok_or_else(|| "当前标签尚未创建 WebView".to_string())?;
             (tab_id, webview)
         };
-        let navigation_id = Self::begin_navigation_for_tab(app, self.state.clone(), &tab_id, url)?;
+        let navigation_id =
+            Self::begin_navigation_for_tab(app, self.state.clone(), &tab_id, url, intent)?;
         let parsed_url: Url = match url.parse() {
             Ok(url) => url,
             Err(error) => {
@@ -1362,19 +1618,13 @@ impl BrowserManager {
         }
     }
 
-    /// 导航到 URL，自动处理所有场景：
-    /// 1. 浏览器未打开 → 在屏幕外创建 WebView，等待前端设置正确位置
-    /// 2. 已有匹配 URL 的标签 → 切换到该标签
-    /// 3. 当前活跃标签无 WebView → 创建 WebView
-    /// 4. 正常导航当前活跃 WebView
+    /// 用户导航始终作用于当前标签；相同地址不会触发跨标签复用。
     pub(crate) fn navigate_with_app(
         &self,
         app: &AppHandle<Wry>,
         url: &str,
     ) -> Result<NavigationTicket, String> {
-        // Agent 主动导航时恢复可见状态，使数据读取路径可用
         self.set_visible(true);
-        // 场景 1：浏览器完全未打开 → 在屏幕外创建，前端会通过 set_position 设置正确位置
         if !self.is_open() {
             if let Some((_, _, w, h)) = default_browser_rect(app) {
                 self.open(app, url, -10000.0, -10000.0, w, h)?;
@@ -1385,83 +1635,91 @@ impl BrowserManager {
             return Err("无法确定浏览器位置".to_string());
         }
 
-        let (matching_tab_id, active_id, rect) = {
+        let (tab_id, needs_create, rect) = {
             let state = self.state.lock().map_err(|e| e.to_string())?;
-
-            // 场景 2：检查已有匹配 URL 的标签
-            let matching = state
-                .tabs
-                .iter()
-                .find(|t| normalize_url_for_compare(&t.url) == normalize_url_for_compare(url))
-                .map(|t| t.id.clone());
-
-            (matching, state.active_tab_id.clone(), state.browser_rect)
+            let tab_id = state
+                .active_tab_id
+                .clone()
+                .ok_or_else(|| "当前没有可用标签".to_string())?;
+            (
+                tab_id.clone(),
+                !state.webviews.contains_key(&tab_id),
+                state.browser_rect,
+            )
         };
 
-        // 场景 2：切换到已有标签
-        if let Some(matching_id) = matching_tab_id {
-            let was_active;
-            let needs_create;
-            let should_retry;
+        if needs_create {
+            if url == "about:blank" {
+                return Err("空白标签无需创建 WebView".to_string());
+            }
+            let webview = Self::create_webview_for_tab(
+                app,
+                self.state.clone(),
+                &tab_id,
+                url,
+                NavigationIntent::Normal,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+            )?;
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            was_active = state.active_tab_id.as_deref() == Some(&matching_id);
-            if state.active_tab_id.as_deref() != Some(&matching_id) {
-                if let Some(old_id) = &state.active_tab_id {
-                    if let Some(old_wv) = state.webviews.get(old_id) {
-                        let _ = old_wv.set_position(LogicalPosition::new(-10000, -10000));
-                    }
-                }
-                if let Some(new_wv) = state.webviews.get(&matching_id) {
-                    let _ = new_wv.set_position(LogicalPosition::new(rect.0, rect.1));
-                    let _ = new_wv.set_size(LogicalSize::new(rect.2, rect.3));
-                }
-                state.active_tab_id = Some(matching_id.clone());
-            }
-            needs_create = !state.webviews.contains_key(&matching_id) && url != "about:blank";
-            should_retry =
-                tab_navigation_phase(&state, &matching_id) == Some(NavigationPhase::Failed);
+            state.webviews.insert(tab_id.clone(), webview);
             drop(state);
-
-            if needs_create {
-                let webview = Self::create_webview_for_tab(
-                    app,
-                    self.state.clone(),
-                    &matching_id,
-                    url,
-                    rect.0,
-                    rect.1,
-                    rect.2,
-                    rect.3,
-                )?;
-                let mut state = self.state.lock().map_err(|e| e.to_string())?;
-                state.webviews.insert(matching_id.clone(), webview);
-                drop(state);
-                self.start_url_poll(app, url);
-                self.start_event_poll(app);
-                return self
-                    .navigation_ticket_for_tab(&matching_id)
-                    .ok_or_else(|| "浏览器导航状态未初始化".to_string());
-            }
-            if was_active || should_retry {
-                return self.navigate(app, url);
-            }
+            self.start_url_poll(app, url);
+            self.start_event_poll(app);
             return self
-                .navigation_ticket_for_tab(&matching_id)
+                .navigation_ticket_for_tab(&tab_id)
                 .ok_or_else(|| "浏览器导航状态未初始化".to_string());
         }
 
-        // 场景 3：活跃标签无 WebView，创建一个
-        if let Some(tab_id) = active_id {
-            let needs_create = {
+        self.navigate(app, url)
+    }
+
+    /// Agent 按主域名复用自己的工作标签，不占用用户标签。
+    pub(crate) fn navigate_for_agent(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+    ) -> Result<NavigationTicket, String> {
+        self.set_visible(true);
+        let agent_domain = agent_domain_for_url(url)?;
+        let (agent_tab_id, rect, has_tabs) = {
+            let state = self.state.lock().map_err(|e| e.to_string())?;
+            let matching_tab = agent_tab_id_for_domain(&state, &agent_domain);
+            (matching_tab, state.browser_rect, !state.tabs.is_empty())
+        };
+
+        if let Some(tab_id) = agent_tab_id {
+            self.tab_switch(&tab_id)?;
+            let (needs_create, intent) = {
                 let state = self.state.lock().map_err(|e| e.to_string())?;
-                !state.webviews.contains_key(&tab_id)
+                let retry = state
+                    .navigation_signals
+                    .get(&tab_id)
+                    .and_then(|signal| signal.state.lock().ok())
+                    .is_some_and(|navigation| {
+                        navigation.phase == NavigationPhase::Failed
+                            && normalize_url_for_compare(&navigation.requested_url)
+                                == normalize_url_for_compare(url)
+                    });
+                (
+                    !state.webviews.contains_key(&tab_id),
+                    if retry {
+                        NavigationIntent::Retry
+                    } else {
+                        NavigationIntent::Normal
+                    },
+                )
             };
+
             if needs_create {
                 let webview = Self::create_webview_for_tab(
                     app,
                     self.state.clone(),
                     &tab_id,
                     url,
+                    intent,
                     rect.0,
                     rect.1,
                     rect.2,
@@ -1469,11 +1727,6 @@ impl BrowserManager {
                 )?;
                 let mut state = self.state.lock().map_err(|e| e.to_string())?;
                 state.webviews.insert(tab_id.clone(), webview);
-                // 确保 WebView 在显示区内
-                if let Some(wv) = state.webviews.get(&tab_id) {
-                    let _ = wv.set_position(LogicalPosition::new(rect.0, rect.1));
-                    let _ = wv.set_size(LogicalSize::new(rect.2, rect.3));
-                }
                 drop(state);
                 self.start_url_poll(app, url);
                 self.start_event_poll(app);
@@ -1481,10 +1734,34 @@ impl BrowserManager {
                     .navigation_ticket_for_tab(&tab_id)
                     .ok_or_else(|| "浏览器导航状态未初始化".to_string());
             }
+
+            return self.navigate_with_intent(app, url, intent);
         }
 
-        // 场景 4：正常导航
-        self.navigate(app, url)
+        let rect_override = if rect.2 > 0.0 && rect.3 > 0.0 {
+            None
+        } else {
+            let (x, y, w, h) =
+                default_browser_rect(app).ok_or_else(|| "无法确定浏览器位置".to_string())?;
+            Some({
+                if has_tabs {
+                    (x, y, w, h)
+                } else {
+                    (-10000.0, -10000.0, w, h)
+                }
+            })
+        };
+        let tab_id = self.tab_new_with_source(
+            app,
+            url,
+            BrowserTabSource::Agent,
+            Some(agent_domain),
+            rect_override,
+        )?;
+        self.start_url_poll(app, url);
+        self.start_event_poll(app);
+        self.navigation_ticket_for_tab(&tab_id)
+            .ok_or_else(|| "浏览器导航状态未初始化".to_string())
     }
 
     fn navigation_ticket_for_tab(&self, tab_id: &str) -> Option<NavigationTicket> {
@@ -1639,9 +1916,7 @@ impl BrowserManager {
             };
             state.navigation_signals.get(&ticket.tab_id).cloned()
         };
-        let Some(signal) = signal else {
-            return None;
-        };
+        let signal = signal?;
         let start = std::time::Instant::now();
         let mut navigation = match signal.state.lock() {
             Ok(g) => g,
@@ -1854,6 +2129,7 @@ impl BrowserManager {
                     self.state.clone(),
                     &tab.id,
                     &tab.url,
+                    NavigationIntent::Restore,
                     rect.0,
                     rect.1,
                     rect.2,
@@ -1922,6 +2198,7 @@ impl BrowserManager {
                 self.state.clone(),
                 &tab.id,
                 &tab.url,
+                NavigationIntent::Restore,
                 rect.0,
                 rect.1,
                 rect.2,
@@ -2021,6 +2298,17 @@ impl BrowserManager {
     }
 
     pub fn tab_new(&self, app: &AppHandle<Wry>, url: &str) -> Result<String, String> {
+        self.tab_new_with_source(app, url, BrowserTabSource::User, None, None)
+    }
+
+    fn tab_new_with_source(
+        &self,
+        app: &AppHandle<Wry>,
+        url: &str,
+        source: BrowserTabSource,
+        agent_domain: Option<String>,
+        rect_override: Option<(f64, f64, f64, f64)>,
+    ) -> Result<String, String> {
         let tab_id = scru128::new().to_string();
         let is_blank = url == "about:blank";
 
@@ -2032,27 +2320,19 @@ impl BrowserManager {
                     let _ = old_wv.set_position(LogicalPosition::new(-10000, -10000));
                 }
             }
-            let rect = state.browser_rect;
+            let rect = rect_override.unwrap_or(state.browser_rect);
+            if rect_override.is_some() {
+                state.browser_rect = rect;
+            }
             state
                 .navigation_signals
                 .insert(tab_id.clone(), navigation_signal(url));
-            // 初始化标签页历史（排除 about: 页面）
-            if !url.starts_with("about:") {
-                let entry = HistoryEntry {
-                    url: url.to_string(),
-                    title: url.to_string(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                };
-                state.tab_histories.insert(tab_id.clone(), vec![entry]);
-                state.tab_history_indices.insert(tab_id.clone(), 0);
-            }
             state.tabs.push(BrowserTab {
                 id: tab_id.clone(),
                 url: url.to_string(),
                 title: String::new(),
+                source,
+                agent_domain,
             });
             state.active_tab_id = Some(tab_id.clone());
             rect
@@ -2066,6 +2346,7 @@ impl BrowserManager {
                 self.state.clone(),
                 &tab_id,
                 url,
+                NavigationIntent::Normal,
                 rect.0,
                 rect.1,
                 rect.2,
@@ -2207,61 +2488,6 @@ impl BrowserManager {
         }
     }
 
-    /// 记录 URL 访问到活跃标签历史和全局历史
-    pub fn record_history(&self, url: &str, title: &str) {
-        let shared = {
-            let mut state = match self.state.lock() {
-                Ok(s) => s,
-                Err(e) => e.into_inner(),
-            };
-            let entry = HistoryEntry {
-                url: url.to_string(),
-                title: if title.is_empty() {
-                    url.to_string()
-                } else {
-                    title.to_string()
-                },
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            };
-
-            // 写入活跃标签历史
-            let active_id = state.active_tab_id.clone();
-            if let Some(ref aid) = active_id {
-                let tab_entries = state.tab_histories.entry(aid.clone()).or_default();
-                // 去重：与最新条目 URL 相同时跳过
-                if tab_entries.last().map(|e| e.url.as_str()) != Some(url) {
-                    tab_entries.push(entry.clone());
-                    // 标签历史上限 200 条
-                    if tab_entries.len() > 200 {
-                        let keep_from = tab_entries.len() - 160;
-                        tab_entries.drain(0..keep_from);
-                    }
-                }
-            }
-            // 更新标签历史索引
-            if let Some(ref aid) = active_id {
-                let idx = state
-                    .tab_histories
-                    .get(aid)
-                    .map(|te| te.len() - 1)
-                    .unwrap_or(0);
-                state.tab_history_indices.insert(aid.clone(), idx);
-            }
-            state.shared.clone()
-        };
-        {
-            let mut history = shared
-                .global_history
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            upsert_global_history(&mut history, url, title);
-        }
-        persist_global_history(&shared);
-    }
-
     /// 获取标签页浏览历史
     pub fn get_tab_history(&self, tab_id: Option<&str>) -> Option<TabHistoryResult> {
         let state = self.state.lock().ok()?;
@@ -2363,52 +2589,116 @@ fn tab_navigation_phase(state: &BrowserState, tab_id: &str) -> Option<Navigation
     Some(navigation.phase)
 }
 
+fn loaded_navigation_id(state: &BrowserState, tab_id: &str) -> Option<u64> {
+    let signal = state.navigation_signals.get(tab_id)?;
+    let navigation = signal.state.lock().ok()?;
+    (navigation.phase == NavigationPhase::Loaded).then_some(navigation.navigation_id)
+}
+
 fn is_recordable_history_url(url: &str) -> bool {
     !url.is_empty() && !url.starts_with("about:") && !url.starts_with("data:")
 }
 
-fn record_tab_navigation(state: &mut BrowserState, tab_id: &str, url: &str, title: Option<&str>) {
-    if !is_recordable_history_url(url) {
-        return;
-    }
-    let timestamp = std::time::SystemTime::now()
+fn history_timestamp() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64;
-    let title = title.filter(|title| !title.is_empty()).unwrap_or(url);
-    let existing_position = state
-        .tab_histories
-        .get(tab_id)
-        .and_then(|entries| entries.iter().position(|entry| entry.url == url));
+        .as_millis() as u64
+}
 
-    if let Some(position) = existing_position {
-        if let Some(entry) = state
-            .tab_histories
-            .get_mut(tab_id)
-            .and_then(|entries| entries.get_mut(position))
-        {
-            entry.title = title.to_string();
-            entry.timestamp = timestamp;
-        }
-        state
-            .tab_history_indices
-            .insert(tab_id.to_string(), position);
-        return;
+fn append_tab_navigation(
+    state: &mut BrowserState,
+    tab_id: &str,
+    url: &str,
+    title: Option<&str>,
+) -> Option<usize> {
+    if !is_recordable_history_url(url) {
+        return None;
     }
-
+    let title = title.filter(|title| !title.is_empty()).unwrap_or(url);
     let current_index = state.tab_history_indices.get(tab_id).copied();
     let entries = state.tab_histories.entry(tab_id.to_string()).or_default();
-    if let Some(index) = current_index {
+    if let Some(index) = current_index.filter(|index| *index < entries.len()) {
         entries.truncate(index.saturating_add(1));
     }
     entries.push(HistoryEntry {
         url: url.to_string(),
         title: title.to_string(),
-        timestamp,
+        timestamp: history_timestamp(),
     });
-    state
-        .tab_history_indices
-        .insert(tab_id.to_string(), entries.len().saturating_sub(1));
+    if entries.len() > 200 {
+        let remove_count = entries.len().saturating_sub(160);
+        entries.drain(0..remove_count);
+    }
+    let index = entries.len().saturating_sub(1);
+    state.tab_history_indices.insert(tab_id.to_string(), index);
+    Some(index)
+}
+
+fn apply_tab_navigation_intent(
+    state: &mut BrowserState,
+    tab_id: &str,
+    url: &str,
+    intent: NavigationIntent,
+) -> Result<Option<usize>, String> {
+    match intent {
+        NavigationIntent::Normal => Ok(append_tab_navigation(state, tab_id, url, None)),
+        NavigationIntent::History { target_index } => {
+            let entries = state
+                .tab_histories
+                .get(tab_id)
+                .ok_or_else(|| "当前标签没有导航记录".to_string())?;
+            if entries.get(target_index).is_none() {
+                return Err("目标导航记录不存在".to_string());
+            }
+            state
+                .tab_history_indices
+                .insert(tab_id.to_string(), target_index);
+            Ok(Some(target_index))
+        }
+        NavigationIntent::Reload | NavigationIntent::Retry | NavigationIntent::Restore => {
+            let current_index = state
+                .tab_history_indices
+                .get(tab_id)
+                .copied()
+                .filter(|index| {
+                    state
+                        .tab_histories
+                        .get(tab_id)
+                        .is_some_and(|entries| *index < entries.len())
+                });
+            Ok(current_index.or_else(|| append_tab_navigation(state, tab_id, url, None)))
+        }
+    }
+}
+
+fn update_tab_navigation_entry(
+    state: &mut BrowserState,
+    tab_id: &str,
+    history_index: Option<usize>,
+    url: &str,
+    title: Option<&str>,
+) {
+    if !is_recordable_history_url(url) {
+        return;
+    }
+    let index = history_index.or_else(|| append_tab_navigation(state, tab_id, url, title));
+    let Some(index) = index else {
+        return;
+    };
+    let Some(entry) = state
+        .tab_histories
+        .get_mut(tab_id)
+        .and_then(|entries| entries.get_mut(index))
+    else {
+        return;
+    };
+    entry.url = url.to_string();
+    if let Some(title) = title.filter(|title| !title.is_empty()) {
+        entry.title = title.to_string();
+    }
+    entry.timestamp = history_timestamp();
+    state.tab_history_indices.insert(tab_id.to_string(), index);
 }
 
 fn escape_html(value: &str) -> String {
@@ -2670,6 +2960,8 @@ mod tests {
             id: id.to_string(),
             url: url.to_string(),
             title: title.to_string(),
+            source: BrowserTabSource::User,
+            agent_domain: None,
         }
     }
 
@@ -2742,5 +3034,256 @@ mod tests {
         assert!(state.tabs.is_empty());
         assert!(!state.tab_histories.contains_key("t1"));
         assert!(!state.navigation_signals.contains_key("t1"));
+    }
+
+    #[test]
+    fn tab_history_keeps_repeated_visits_and_truncates_forward_branch() {
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![tab("t1", "about:blank", "")];
+        state.active_tab_id = Some("t1".to_string());
+
+        apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/a",
+            NavigationIntent::Normal,
+        )
+        .unwrap();
+        apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/b",
+            NavigationIntent::Normal,
+        )
+        .unwrap();
+        apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/a",
+            NavigationIntent::Normal,
+        )
+        .unwrap();
+
+        let urls: Vec<&str> = state.tab_histories["t1"]
+            .iter()
+            .map(|entry| entry.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/a"
+            ]
+        );
+        assert_eq!(state.tab_history_indices["t1"], 2);
+
+        apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/b",
+            NavigationIntent::History { target_index: 1 },
+        )
+        .unwrap();
+        apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/d",
+            NavigationIntent::Normal,
+        )
+        .unwrap();
+
+        let urls: Vec<&str> = state.tab_histories["t1"]
+            .iter()
+            .map(|entry| entry.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/a",
+                "https://example.com/b",
+                "https://example.com/d"
+            ]
+        );
+        assert_eq!(state.tab_history_indices["t1"], 2);
+    }
+
+    #[test]
+    fn reload_retry_and_redirect_update_current_history_entry_only() {
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        state.tabs = vec![tab("t1", "about:blank", "")];
+        state.active_tab_id = Some("t1".to_string());
+        let index = apply_tab_navigation_intent(
+            &mut state,
+            "t1",
+            "https://example.com/start",
+            NavigationIntent::Normal,
+        )
+        .unwrap();
+
+        assert_eq!(
+            apply_tab_navigation_intent(
+                &mut state,
+                "t1",
+                "https://example.com/start",
+                NavigationIntent::Reload,
+            )
+            .unwrap(),
+            index
+        );
+        assert_eq!(
+            apply_tab_navigation_intent(
+                &mut state,
+                "t1",
+                "https://example.com/start",
+                NavigationIntent::Retry,
+            )
+            .unwrap(),
+            index
+        );
+        update_tab_navigation_entry(
+            &mut state,
+            "t1",
+            index,
+            "https://example.com/final",
+            Some("最终页面"),
+        );
+
+        assert_eq!(state.tab_histories["t1"].len(), 1);
+        assert_eq!(state.tab_history_indices["t1"], 0);
+        assert_eq!(
+            state.tab_histories["t1"][0].url,
+            "https://example.com/final"
+        );
+        assert_eq!(state.tab_histories["t1"][0].title, "最终页面");
+    }
+
+    #[test]
+    fn agent_tabs_are_grouped_by_registrable_domain_and_never_match_user_tabs() {
+        assert_eq!(
+            agent_domain_for_url("https://docs.example.co.uk/a").unwrap(),
+            "example.co.uk"
+        );
+        assert_eq!(
+            agent_domain_for_url("https://api.example.co.uk/b").unwrap(),
+            "example.co.uk"
+        );
+        assert_eq!(
+            agent_domain_for_url("http://localhost:8080/a").unwrap(),
+            "localhost"
+        );
+
+        let manager = BrowserManager::new();
+        let mut state = manager.state.lock().unwrap();
+        let mut user_tab = tab("user", "https://docs.example.com", "用户标签");
+        user_tab.agent_domain = Some("example.com".to_string());
+        let mut agent_tab = tab("agent", "https://api.example.com", "Agent 标签");
+        agent_tab.source = BrowserTabSource::Agent;
+        agent_tab.agent_domain = Some("example.com".to_string());
+        state.tabs = vec![user_tab, agent_tab];
+
+        assert_eq!(
+            agent_tab_id_for_domain(&state, "example.com").as_deref(),
+            Some("agent")
+        );
+        assert_eq!(agent_tab_id_for_domain(&state, "github.com"), None);
+    }
+
+    fn loading_navigation(requested_url: &str, navigation_id: u64) -> TabNavigationState {
+        TabNavigationState {
+            navigation_id,
+            requested_url: requested_url.to_string(),
+            started_url: None,
+            document_id: None,
+            superseded_document_ids: Vec::new(),
+            superseded_urls: Vec::new(),
+            final_url: None,
+            history_index: Some(0),
+            phase: NavigationPhase::Loading,
+            internal_error_url: None,
+        }
+    }
+
+    fn document_snapshot(document_id: &str, ready_state: &str, url: &str) -> WebDocumentSnapshot {
+        WebDocumentSnapshot {
+            document_id: document_id.to_string(),
+            ready_state: ready_state.to_string(),
+            url: url.to_string(),
+            title: String::new(),
+            text: String::new(),
+            internal_error: false,
+        }
+    }
+
+    #[test]
+    fn loading_navigation_rejects_superseded_document_and_accepts_redirect() {
+        let mut navigation = loading_navigation("https://example.com/b", 2);
+        navigation
+            .superseded_document_ids
+            .push("document-a".to_string());
+        navigation
+            .superseded_urls
+            .push("https://example.com/a".to_string());
+
+        let stale = document_snapshot("document-a", "complete", "https://example.com/a");
+        assert!(!accept_loading_document(&mut navigation, 2, &stale));
+        assert!(navigation.document_id.is_none());
+
+        let redirect = document_snapshot("document-c", "loading", "https://example.com/c");
+        assert!(accept_loading_document(&mut navigation, 2, &redirect));
+        assert_eq!(navigation.document_id.as_deref(), Some("document-c"));
+        assert_eq!(
+            navigation.started_url.as_deref(),
+            Some("https://example.com/c")
+        );
+    }
+
+    #[test]
+    fn loading_navigation_rejects_unknown_document_at_superseded_url() {
+        let mut navigation = loading_navigation("https://example.com/b", 2);
+        navigation
+            .superseded_urls
+            .push("https://example.com/a".to_string());
+        let stale = document_snapshot("unknown-document-a", "complete", "https://example.com/a");
+
+        assert!(!accept_loading_document(&mut navigation, 2, &stale));
+        assert!(navigation.document_id.is_none());
+    }
+
+    #[test]
+    fn completion_requires_current_complete_document() {
+        let mut navigation = loading_navigation("https://example.com/b", 2);
+        navigation.started_url = Some("https://example.com/final".to_string());
+        navigation.document_id = Some("document-b".to_string());
+
+        let loading = document_snapshot("document-b", "interactive", "https://example.com/final");
+        assert!(!accepts_completed_document(
+            &navigation,
+            2,
+            "document-b",
+            &loading,
+        ));
+
+        let complete = document_snapshot("document-b", "complete", "https://example.com/final");
+        assert!(accepts_completed_document(
+            &navigation,
+            2,
+            "document-b",
+            &complete,
+        ));
+        assert!(!accepts_completed_document(
+            &navigation,
+            1,
+            "document-b",
+            &complete,
+        ));
+        assert!(!accepts_completed_document(
+            &navigation,
+            2,
+            "document-a",
+            &complete,
+        ));
     }
 }

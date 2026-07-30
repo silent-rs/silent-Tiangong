@@ -1186,6 +1186,9 @@ export const api = {
   browserGoForward: (sessionId: string): Promise<void> =>
     invoke('plugin:browser|browser_go_forward', { sessionId }),
 
+  browserReload: (sessionId: string): Promise<void> =>
+    invoke('plugin:browser|browser_reload', { sessionId }),
+
   browserSetZoom: (sessionId: string, scale: number): Promise<number> =>
     invoke('plugin:browser|browser_set_zoom', { sessionId, scale }),
 

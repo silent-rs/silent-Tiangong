@@ -228,8 +228,13 @@ export function BrowserTabContent({
 
   const handleReload = useCallback(async () => {
     if (!url) return;
-    await navigateToUrl(url);
-  }, [navigateToUrl, url]);
+    try {
+      await api.browserTabSwitch(sessionId, tabId);
+      await api.browserReload(sessionId);
+    } catch (err) {
+      console.error('刷新失败：', err);
+    }
+  }, [sessionId, tabId, url]);
 
   const dismissAnnotationBeforeZoom = useCallback(async () => {
     if (!annotationActive) return;

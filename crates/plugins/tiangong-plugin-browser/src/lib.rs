@@ -7,7 +7,7 @@ use tauri::{
 use tokio::sync::mpsc;
 
 use crate::handler::browser_command_handler;
-use crate::manager::BrowserManager;
+use crate::manager::{BrowserManager, NavigationIntent};
 use crate::session_registry::BrowserSessionRegistry;
 use crate::types::{BrowserCommand, BrowserTabsSnapshot};
 
@@ -132,6 +132,7 @@ impl BrowserPluginState {
                     new_state.clone(),
                     &tab.id,
                     &tab.url,
+                    NavigationIntent::Restore,
                     rect.0,
                     rect.1,
                     rect.2,
@@ -173,6 +174,7 @@ pub fn init() -> TauriPlugin<Wry> {
             commands::browser_eval,
             commands::browser_go_back,
             commands::browser_go_forward,
+            commands::browser_reload,
             commands::browser_set_zoom,
             commands::browser_get_zoom,
             commands::browser_reset_zoom,

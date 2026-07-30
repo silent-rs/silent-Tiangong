@@ -1,4 +1,17 @@
 (function() {
+    if (!window.__tiangong_document_id) {
+        var documentId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        try {
+            Object.defineProperty(window, '__tiangong_document_id', {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: documentId
+            });
+        } catch(e) {
+            window.__tiangong_document_id = documentId;
+        }
+    }
     if (window.__tiangong_bridge_loaded) return;
     window.__tiangong_bridge_loaded = true;
 
