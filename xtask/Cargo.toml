@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "辅助构建任务：wasm 组件构建与部署"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

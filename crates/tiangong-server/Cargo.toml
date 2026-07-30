@@ -18,6 +18,7 @@ tiangong-plugin-generate-video = { workspace = true }
 tiangong-plugin-text-to-speech = { workspace = true }
 tiangong-plugin-speech-to-text = { workspace = true }
 tiangong-plugin-memory = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-scheduler = { workspace = true }
 tiangong-plugin-task = { workspace = true }
 tiangong-plugin-analyze-attachment = { workspace = true }

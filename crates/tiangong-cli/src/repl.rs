@@ -226,6 +226,13 @@ fn build_cli_plugins(
     plugins.extend(tiangong_plugin_memory::default_plugins(
         memory_handle.clone(),
     ));
+    // 尝试加载 wasm memory 插件（与原生并存；文件不存在时优雅降级）。
+    if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
+        &storage_root,
+        memory_handle.clone(),
+    ) {
+        plugins.push(wasm_memory);
+    }
     plugins.extend(tiangong_plugin_fetch::default_plugins());
     plugins.extend(tiangong_plugin_command::default_plugins());
     // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。

@@ -10474,6 +10474,7 @@ dependencies = [
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
+ "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
@@ -10548,6 +10549,7 @@ dependencies = [
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
+ "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
@@ -11091,6 +11093,7 @@ dependencies = [
  "tiangong-plugin-mcp",
  "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
+ "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
@@ -13288,6 +13291,10 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
+
+[[package]]
+name = "xtask"
+version = "0.0.0"
 
 [[package]]
 name = "xxhash-rust"

@@ -39,6 +39,7 @@ members = [
     "crates/plugins/tiangong-plugin-memory-wasm",
     "crates/tiangong-plugin-runtime",
     "src-tauri",
+    "xtask",
 ]
 
 [workspace.package]

@@ -419,6 +419,13 @@ impl ServerCoreManager {
             plugins.extend(tiangong_plugin_memory::default_plugins(
                 memory_handle.clone(),
             ));
+            // 尝试加载 wasm memory 插件（与原生并存；文件不存在时优雅降级）。
+            if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
+                &storage_root,
+                memory_handle.clone(),
+            ) {
+                plugins.push(wasm_memory);
+            }
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时

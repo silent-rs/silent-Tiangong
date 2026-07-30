@@ -110,6 +110,13 @@ impl DesktopCoreFactory {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
         plugins.push(tiangong_plugin_memory::build_plugin(memory_handle.clone()));
+        // 尝试加载 wasm memory 插件（与原生并存；文件不存在时优雅降级）。
+        if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
+            &self.storage_root,
+            memory_handle.clone(),
+        ) {
+            plugins.push(wasm_memory);
+        }
         // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
         // 能真正执行任务（execute_job）。
         plugins.push(tiangong_plugin_scheduler::build_plugin(

@@ -11,6 +11,7 @@ pub mod bindings;
 pub mod config;
 pub mod host_state;
 pub mod loader;
+pub mod registry;
 
 pub use adapter::WasmPluginAdapter;
 pub use config::PluginRuntimeConfig;
