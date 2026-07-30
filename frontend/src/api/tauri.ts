@@ -240,6 +240,8 @@ export interface StreamEvent {
   count?: number;
   holder_agent_label?: string | null;
   path?: string;
+  /** title_changed 事件携带的新标题。 */
+  title?: string;
 }
 
 export interface SessionStreamEvent {

@@ -235,6 +235,8 @@ pub enum StreamEvent {
         #[serde(default)]
         count: usize,
     },
+    /// 会话标题变更（标题生成完成 / 用户编辑）。消费线程据此 emit sessions_updated。
+    TitleChanged { title: String },
 }
 
 fn is_false(value: &bool) -> bool {

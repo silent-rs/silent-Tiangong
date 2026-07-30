@@ -48,7 +48,7 @@ function SearchButton() {
 }
 
 export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOpenTerminal }: StatusPanelProps) {
-  const { activeSessionId, isNewConversation, sessions, loadSessions, startNewConversation, updateAvailable, setPendingSettingsTab } = useStore();
+  const { activeSessionId, isNewConversation, sessions, startNewConversation, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -134,8 +134,8 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
 
     if (finalTitle !== currentTitle) {
       try {
+        // 标题更新由 Core 发 title_changed 事件驱动前端刷新，不再整表 loadSessions。
         await api.updateSessionTitle(finalTitle);
-        await loadSessions();
       } catch (e) {
         console.error('保存标题失败:', e);
       }

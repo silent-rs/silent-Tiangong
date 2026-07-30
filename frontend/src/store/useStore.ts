@@ -558,7 +558,13 @@ function applyEventToSessionView(
   let streamingReasoningContent = current.streamingReasoningContent;
   let currentPlan = current.currentPlan;
 
-  if (event.type !== 'done' && event.type !== 'error' && runStatus === 'idle') {
+  // title_changed 是纯通知事件，不改变对话运行状态（自动/手动标题变更都会发）。
+  if (
+    event.type !== 'done'
+    && event.type !== 'error'
+    && event.type !== 'title_changed'
+    && runStatus === 'idle'
+  ) {
     runStatus = 'executing';
   }
 
@@ -1790,10 +1796,25 @@ export const useStore = create<AppState>((set, get) => ({
     const sessionRunStatuses = { ...previousStatuses };
     let currentCache: SessionViewCache | null = null;
     let refreshCurrentAgents = false;
+    // 标题变更直接更新内存中的会话标题，不触发整表 sessions_updated 刷新。
+    let sessions = state.sessions;
+    let titleChanged = false;
 
     for (const envelope of events) {
       const sessionId = envelope.session_id;
       const event = envelope.event;
+      // title_changed：直接改对应会话标题，不进入会话视图状态机。
+      if (event.type === 'title_changed' && typeof event.title === 'string') {
+        const idx = sessions.findIndex((s) => s.id === sessionId);
+        if (idx >= 0 && sessions[idx].title !== event.title) {
+          if (!titleChanged) {
+            sessions = sessions.slice();
+            titleChanged = true;
+          }
+          sessions[idx] = { ...sessions[idx], title: event.title };
+        }
+        continue;
+      }
       const targetsCurrent = !!currentSessionId && sessionId === currentSessionId;
       const initial = sessionViewCaches.get(sessionId)
         || (targetsCurrent
@@ -1835,6 +1856,7 @@ export const useStore = create<AppState>((set, get) => ({
           ? parseAgentsFromMessages(currentCache.messages)
           : state.agents,
       } : {}),
+      ...(titleChanged ? { sessions } : {}),
       sessionRunStatuses,
     });
 

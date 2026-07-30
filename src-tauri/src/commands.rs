@@ -29,6 +29,7 @@ fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::pro
     command
 }
 
+#[allow(dead_code)]
 fn done_event_keeps_turn_running(
     event: &tiangong_types::StreamEvent,
     has_pending_turn: bool,
@@ -586,8 +587,11 @@ pub async fn update_session_title(
     if active_session_id != session_id {
         return Err("活动会话已切换，请重新修改标题".to_string());
     }
-    crate::session_ops::update_title(&state.core_manager, &session_id, title)
-        .map_err(|error| error.to_string())?;
+    // 统一经 CoreManager（有 live Core 时委托 Core 走 turn 安全写入，否则直写盘）。
+    // 标题变更通知由 Core 统一发 TitleChanged 事件，前端据此更新，不再 emit sessions_updated。
+    state
+        .core_manager
+        .set_core_title(&session_id, title, false)?;
     Ok(())
 }
 
@@ -978,6 +982,13 @@ pub(crate) fn start_stream_consumer(
                 continue;
             }
 
+            // 标题变更：通知类事件，不触碰消息投递临界区，只转发流事件。
+            // 前端收到 title_changed 后直接更新内存中对应会话标题，无需整表刷新。
+            if matches!(&session_event, StreamEvent::TitleChanged { .. }) {
+                emit_session_stream_event(&app, &session_id, &session_event);
+                continue;
+            }
+
             let event_lock = app_state.session_send_lock(&session_id);
             let _event_guard = rt.block_on(event_lock.lock_owned());
             if !app_state.core_manager.has_live_core(&session_id) {
@@ -1050,32 +1061,6 @@ pub(crate) fn start_stream_consumer(
                 let final_sid = sid.clone();
                 let completed_remote_message_id = app_state.remote_turn_owner(&final_sid);
 
-                let title_provider =
-                    rt.block_on(app.state::<TiangongApp>().with_state_read(|core_state| {
-                        if done_event_keeps_turn_running(
-                            &event,
-                            crate::state_ops::has_pending_turn(core_state, &final_sid),
-                        ) {
-                            return Ok(None);
-                        }
-                        let models = &core_state.config.models;
-                        Ok(Some(
-                            models
-                                .resolve_slot(tiangong_llm::models_config::RoutingSlot::Lite)
-                                .or_else(|| {
-                                    models.resolve_slot(
-                                        tiangong_llm::models_config::RoutingSlot::Chat,
-                                    )
-                                })
-                                .map(tiangong_llm::ModelEndpoint::from_resolved)
-                                .unwrap_or_default(),
-                        ))
-                    }));
-                // 标题输入的单次磁盘读取不持有 TiangongState 锁，不影响会话切换。
-                let title_task =
-                    crate::session_ops::title_generation_input(&app_state.core_manager, &final_sid)
-                        .zip(title_provider.ok().flatten());
-
                 if let Some(message_id) = completed_remote_message_id {
                     rt.block_on(crate::embedded_server::complete_remote_turn_from_stream(
                         app.state::<TiangongApp>().inner(),
@@ -1086,47 +1071,8 @@ pub(crate) fn start_stream_consumer(
 
                 emit_session_stream_event(&app, &final_sid, &event);
                 let _ = app.emit("sessions_updated", &());
-
-                // 异步生成标题（不阻塞消费线程）
-                if let Some((input, provider_config)) = title_task {
-                    let app_for_title = app.clone();
-                    let sid_for_title = final_sid.clone();
-                    let rt2 = rt.clone();
-                    thread::spawn(move || {
-                        let client =
-                            tiangong_core::model::SingleProviderClient::new(provider_config);
-                        if let Ok(t) = client.complete_lite(&input) {
-                            let clean = t.trim().trim_matches('"').to_string();
-                            if !clean.is_empty() {
-                                let app_state = app_for_title.state::<TiangongApp>();
-                                let title_lock = app_state.session_send_lock(&sid_for_title);
-                                let _title_guard = rt2.block_on(title_lock.lock_owned());
-                                let title_is_still_default = app_state
-                                    .core_manager
-                                    .list_session_metadata()
-                                    .into_iter()
-                                    .find(|metadata| metadata.id == sid_for_title)
-                                    .is_some_and(|metadata| {
-                                        metadata.title == "新对话"
-                                            || metadata.title.starts_with("会话 ")
-                                    });
-                                if !title_is_still_default {
-                                    return;
-                                }
-                                if crate::session_ops::update_title(
-                                    &app_state.core_manager,
-                                    &sid_for_title,
-                                    clean,
-                                )
-                                .is_err()
-                                {
-                                    return;
-                                }
-                                let _ = app_for_title.emit("sessions_updated", &());
-                            }
-                        }
-                    });
-                }
+                // 标题生成已在 send_message_inner 投递后并行启动（与 chat turn 同时跑），
+                // 完成后经 Command::SetTitle 投递给 turn task 安全写入，此处不再串行处理。
                 // 不 break — 消费线程继续运行，等待下一轮消息的 StreamEvent
             }
         }
