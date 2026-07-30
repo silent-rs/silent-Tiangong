@@ -135,12 +135,27 @@ interface plugin {
         context: list<string>,
         hits: list<recall-hit>,
     ) -> result<string, plugin-error>;
+
+    /// 经 memory-store host import 写入事件记忆（验证写入链路）。
+    /// `episode-json` 为 Episode 的 JSON 文本；返回宿主写入结果。
+    store-write-episode: func(
+        episode-json: string,
+        workspace-id: option<string>,
+    ) -> result<_, plugin-error>;
+
+    /// 经 memory-store host import 新增/更新手动记忆（验证写入链路）。
+    /// 成功返回 MemoryNode 的 JSON 文本。
+    store-upsert-manual-memory: func(
+        draft-json: string,
+    ) -> result<string, plugin-error>;
 }
 
 /// 记忆存储接口（host import）。
 ///
-/// WASM 组件经此查询宿主侧的真实记忆（BM25 粗召回，不走模型 rerank）。
-/// 阶段三仅提供召回读取；写入/反刍/管理 CRUD 在后续阶段接入。
+/// WASM 组件经此查询与写入宿主侧的真实记忆。
+/// 召回走 BM25 粗召回（不走模型 rerank）；写入经 MemoryHandle 落库。
+/// 复杂入参（Episode/ManualMemoryDraft/MemoryCandidate）以 JSON 文本承载，
+/// 宿主侧 serde 反序列化，避免在 WIT 表达任意结构。
 interface memory-store {
     use plugin.{recall-hit};
 
@@ -157,6 +172,13 @@ interface memory-store {
         disabled,
     }
 
+    /// 三级注入级别（对应宿主 `InjectionLevel`）。
+    enum injection-level {
+        profile,
+        workspace,
+        session,
+    }
+
     /// 执行 BM25 粗召回（对应宿主 `MemoryHandle::recall`）。
     /// `keywords` 由 WASM 内的规则规划产出，传给宿主组装为检索锚点。
     recall: func(
@@ -164,6 +186,32 @@ interface memory-store {
         keywords: list<string>,
         limit: u32,
     ) -> result<recall-response, memory-store-error>;
+
+    /// 写入事件记忆（fire-and-forget，对应宿主 `MemoryHandle::write_episode`）。
+    /// `episode-json` 为 Episode 的 JSON 文本。
+    write-episode: func(
+        episode-json: string,
+        workspace-id: option<string>,
+    ) -> result<_, memory-store-error>;
+
+    /// 更新三级注入文件（fire-and-forget，对应宿主 `MemoryHandle::update_injection`）。
+    update-injection: func(
+        level: injection-level,
+        target-id: string,
+        content: string,
+    ) -> result<_, memory-store-error>;
+
+    /// 提交记忆候选（fire-and-forget，对应宿主 `MemoryHandle::submit_memory_candidate`）。
+    /// `candidate-json` 为 MemoryCandidate 的 JSON 文本。
+    submit-memory-candidate: func(
+        candidate-json: string,
+    ) -> result<_, memory-store-error>;
+
+    /// 新增或更新手动记忆（对应宿主 `MemoryHandle::upsert_manual_memory`）。
+    /// `draft-json` 为 ManualMemoryDraft 的 JSON 文本；成功返回 MemoryNode 的 JSON 文本。
+    upsert-manual-memory: func(
+        draft-json: string,
+    ) -> result<string, memory-store-error>;
 }
 
 /// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。

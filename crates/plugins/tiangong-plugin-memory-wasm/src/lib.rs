@@ -185,6 +185,28 @@ impl Guest for Component {
     ) -> Result<String, PluginError> {
         Ok(synthesize::fallback_synthesize(&query, &context, &hits))
     }
+
+    fn store_write_episode(
+        episode_json: String,
+        workspace_id: Option<String>,
+    ) -> Result<(), PluginError> {
+        // 经 memory-store host import 写入；宿主无 handle 时返回 disabled，转为 plugin-error。
+        memory_store::write_episode(&episode_json, workspace_id.as_deref()).map_err(|e| match e {
+            memory_store::MemoryStoreError::Message(m) => PluginError::Message(m),
+            memory_store::MemoryStoreError::Disabled => {
+                PluginError::Message("memory-store 未注入 handle".to_string())
+            }
+        })
+    }
+
+    fn store_upsert_manual_memory(draft_json: String) -> Result<String, PluginError> {
+        memory_store::upsert_manual_memory(&draft_json).map_err(|e| match e {
+            memory_store::MemoryStoreError::Message(m) => PluginError::Message(m),
+            memory_store::MemoryStoreError::Disabled => {
+                PluginError::Message("memory-store 未注入 handle".to_string())
+            }
+        })
+    }
 }
 
 fn tool_result_ok(summary: String) -> ToolResult {

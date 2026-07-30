@@ -452,3 +452,81 @@ fn recall_with_handle_uses_real_store() {
         outcome.summary
     );
 }
+
+// ── 写入 host import 测试（阶段四第一步） ──
+
+/// 构造一个合法的 Episode JSON 文本（字段对齐 tiangong_memory::types::Episode）。
+fn episode_json(title: &str, summary: &str) -> String {
+    serde_json::json!({
+        "id": format!("test-ep-{title}"),
+        "session_id": "test-session",
+        "memory_type": "factual",
+        "title": title,
+        "summary": summary,
+        "outcome": "success",
+        "keywords": ["wasm", title],
+        "tool_calls": [],
+        "importance": 0.8,
+        "created_at": "2026-07-30T12:00:00"
+    })
+    .to_string()
+}
+
+#[test]
+fn store_write_episode_without_handle_returns_error() {
+    // 无 handle 时，经 WASM 调 memory-store.write-episode 应返回错误（disabled）。
+    let mut plugin = load_plugin();
+    let result = plugin.store_write_episode(episode_json("无Handle", "不应写入"), None);
+    assert!(result.is_err(), "无 handle 时写入应失败");
+}
+
+#[test]
+fn store_upsert_manual_memory_without_handle_returns_error() {
+    let mut plugin = load_plugin();
+    let draft = serde_json::json!({
+        "title": "手动记忆",
+        "summary": "测试用",
+        "importance": 0.5
+    })
+    .to_string();
+    let result = plugin.store_upsert_manual_memory(draft);
+    assert!(result.is_err(), "无 handle 时 upsert 应失败");
+}
+
+#[test]
+fn store_write_episode_with_handle_persists() {
+    // 注入真实 handle 时，经 WASM → memory-store host import 写入 episode。
+    // write-episode 是 fire-and-forget（同步 try_send），写入后立即返回 Ok。
+    let Some(mut plugin) = load_plugin_with_memory() else {
+        eprintln!("跳过：MemoryActor 启动失败（可能已有实例运行）");
+        return;
+    };
+    let result = plugin.store_write_episode(
+        episode_json("写入测试", "经 WASM host import 写入的事件记忆"),
+        None,
+    );
+    assert!(result.is_ok(), "有 handle 时写入应成功: {:?}", result.err());
+}
+
+#[test]
+fn store_upsert_manual_memory_with_handle_returns_node() {
+    // 注入真实 handle 时，upsert 返回 MemoryNode 的 JSON 文本。
+    let Some(mut plugin) = load_plugin_with_memory() else {
+        eprintln!("跳过：MemoryActor 启动失败（可能已有实例运行）");
+        return;
+    };
+    let draft = serde_json::json!({
+        "title": "wasm 手动记忆",
+        "summary": "经 host import upsert 的手动记忆",
+        "keywords": ["wasm", "host-import"],
+        "importance": 0.7
+    })
+    .to_string();
+    let node_json = plugin
+        .store_upsert_manual_memory(draft)
+        .expect("upsert 应成功");
+    // 返回的应是合法 JSON，且含 title 字段。
+    let node: serde_json::Value = serde_json::from_str(&node_json).expect("返回应为合法 JSON");
+    assert_eq!(node["title"], "wasm 手动记忆");
+    assert!(node["id"].is_string(), "应返回生成的 node id");
+}

@@ -11,8 +11,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tiangong_memory::command::InjectionLevel as HostInjectionLevel;
 use tiangong_memory::types::{
-    MemoryKind as HostMemoryKind, RecallAnchors, RecallHit as HostRecallHit,
+    Episode, ManualMemoryDraft, MemoryCandidate, MemoryKind as HostMemoryKind, RecallAnchors,
+    RecallHit as HostRecallHit,
 };
 use tiangong_memory::{MemoryHandle, SearchStrategy as HostSearchStrategy};
 use wasmtime::StoreLimits;
@@ -21,7 +23,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::tiangong::plugin::clock::Host as ClockHost;
 use crate::bindings::tiangong::plugin::memory_store::{
-    Host as MemoryStoreHost, MemoryStoreError, RecallHit, RecallResponse,
+    Host as MemoryStoreHost, InjectionLevel, MemoryStoreError, RecallHit, RecallResponse,
 };
 use crate::bindings::tiangong::plugin::plugin::MemoryKind;
 
@@ -107,6 +109,64 @@ impl MemoryStoreHost for HostState {
             hits: hits.into_iter().map(RecallHit::from).collect(),
             used_llm: false,
         })
+    }
+
+    fn write_episode(
+        &mut self,
+        episode_json: String,
+        workspace_id: Option<String>,
+    ) -> Result<(), MemoryStoreError> {
+        let Some(handle) = self.memory.clone() else {
+            return Err(MemoryStoreError::Disabled);
+        };
+        let episode: Episode = serde_json::from_str(&episode_json)
+            .map_err(|e| MemoryStoreError::Message(format!("解析 episode 失败: {e}")))?;
+        // write_episode 是同步 fire-and-forget（内部 try_send），可直接调用。
+        handle.write_episode(episode, workspace_id);
+        Ok(())
+    }
+
+    fn update_injection(
+        &mut self,
+        level: InjectionLevel,
+        target_id: String,
+        content: String,
+    ) -> Result<(), MemoryStoreError> {
+        let Some(handle) = self.memory.clone() else {
+            return Err(MemoryStoreError::Disabled);
+        };
+        let host_level = match level {
+            InjectionLevel::Profile => HostInjectionLevel::Profile,
+            InjectionLevel::Workspace => HostInjectionLevel::Workspace,
+            InjectionLevel::Session => HostInjectionLevel::Session,
+        };
+        handle.update_injection(host_level, target_id, content);
+        Ok(())
+    }
+
+    fn submit_memory_candidate(&mut self, candidate_json: String) -> Result<(), MemoryStoreError> {
+        let Some(handle) = self.memory.clone() else {
+            return Err(MemoryStoreError::Disabled);
+        };
+        let candidate: MemoryCandidate = serde_json::from_str(&candidate_json)
+            .map_err(|e| MemoryStoreError::Message(format!("解析 candidate 失败: {e}")))?;
+        handle.submit_memory_candidate(candidate);
+        Ok(())
+    }
+
+    fn upsert_manual_memory(&mut self, draft_json: String) -> Result<String, MemoryStoreError> {
+        let Some(handle) = self.memory.clone() else {
+            return Err(MemoryStoreError::Disabled);
+        };
+        let draft: ManualMemoryDraft = serde_json::from_str(&draft_json)
+            .map_err(|e| MemoryStoreError::Message(format!("解析 draft 失败: {e}")))?;
+        let node = self
+            .runtime
+            .handle()
+            .block_on(async move { handle.upsert_manual_memory(draft).await })
+            .map_err(|e| MemoryStoreError::Message(format!("{e}")))?;
+        serde_json::to_string(&node)
+            .map_err(|e| MemoryStoreError::Message(format!("序列化 memory-node 失败: {e}")))
     }
 }
 

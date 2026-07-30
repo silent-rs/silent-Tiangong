@@ -291,6 +291,29 @@ impl WasmPlugin {
             .map_err(plugin_err)
     }
 
+    /// 经 WASM 组件调 memory-store host import 写入事件记忆（验证写入链路）。
+    pub fn store_write_episode(
+        &mut self,
+        episode_json: String,
+        workspace_id: Option<String>,
+    ) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_store_write_episode(&mut self.store, &episode_json, workspace_id.as_deref())
+            .map_err(|e| anyhow::anyhow!("store-write-episode 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 经 WASM 组件调 memory-store host import 新增/更新手动记忆。
+    /// 成功返回 MemoryNode 的 JSON 文本。
+    pub fn store_upsert_manual_memory(&mut self, draft_json: String) -> Result<String> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_store_upsert_manual_memory(&mut self.store, &draft_json)
+            .map_err(|e| anyhow::anyhow!("store-upsert-manual-memory 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 引擎句柄（测试与 epoch 心跳用）。
     pub fn engine(&self) -> &Engine {
         &self.engine
