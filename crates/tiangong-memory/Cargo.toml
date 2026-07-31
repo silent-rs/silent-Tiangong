@@ -8,6 +8,7 @@ license = "Apache-2.0"
 default = []
 
 [dependencies]
+tiangong-plugin-runtime = { workspace = true }
 tokio = { workspace = true, features = [
     "sync",
     "time",

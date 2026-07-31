@@ -8,7 +8,6 @@ license = "Apache-2.0"
 tiangong-core = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-llm = { workspace = true }
-tiangong-memory = { workspace = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 anyhow = { workspace = true }

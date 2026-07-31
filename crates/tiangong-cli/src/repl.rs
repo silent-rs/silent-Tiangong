@@ -224,10 +224,13 @@ fn build_cli_plugins(
         plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
     }
     // memory 插件：试迁移阶段只用 WASM 版（加载失败则无 memory 能力）。
-    if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
-        &storage_root,
-        memory_handle.clone(),
-    ) {
+    let sidecar = memory_handle.clone().map(|h| {
+        std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
+            as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
+    });
+    if let Some(wasm_memory) =
+        tiangong_plugin_runtime::registry::load_memory_wasm_plugin(&storage_root, sidecar)
+    {
         plugins.push(wasm_memory);
     }
     plugins.extend(tiangong_plugin_fetch::default_plugins());
@@ -263,9 +266,13 @@ fn build_cli_plugins(
                 child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
             // 子 Core memory：试迁移阶段只用 WASM 版。
+            let child_sidecar = memory_handle.clone().map(|h| {
+                std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
+                    as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
+            });
             if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
                 &storage_root,
-                memory_handle.clone(),
+                child_sidecar,
             ) {
                 child_plugins.push(wasm_memory);
             }

@@ -10733,6 +10733,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-runtime",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10923,6 +10924,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-memory-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tiangong-plugin-memory-wasm"
 version = "0.13.4"
 dependencies = [
@@ -10947,7 +10956,6 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-memory",
  "tokio",
  "tracing",
  "wasmtime",

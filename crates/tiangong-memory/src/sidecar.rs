@@ -120,3 +120,38 @@ impl Default for MemorySidecarManager {
         Self::new()
     }
 }
+
+/// Memory sidecar 连接实现（通用 SidecarConnection trait）。
+///
+/// 包装 MemoryHandle，将 WASM 插件的 sidecar.invoke 转发到
+/// MemoryHandle::ipc_request。入口侧构造后注入给 plugin-runtime。
+pub struct MemorySidecarConnection {
+    handle: crate::MemoryHandle,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl MemorySidecarConnection {
+    pub fn new(handle: crate::MemoryHandle) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("创建 sidecar 连接 runtime 失败");
+        Self { handle, runtime }
+    }
+}
+
+impl tiangong_plugin_runtime::SidecarConnection for MemorySidecarConnection {
+    fn invoke(&self, payload: &str) -> anyhow::Result<String> {
+        use crate::ipc::protocol::{MemoryIpcRequestPayload, MemoryIpcResponsePayload};
+
+        let request: MemoryIpcRequestPayload = serde_json::from_str(payload)
+            .map_err(|e| anyhow::anyhow!("解析 sidecar 请求失败: {e}"))?;
+        let handle = self.handle.clone();
+        let response: MemoryIpcResponsePayload = self
+            .runtime
+            .handle()
+            .block_on(async move { handle.ipc_request(request).await })?;
+        serde_json::to_string(&response)
+            .map_err(|e| anyhow::anyhow!("序列化 sidecar 响应失败: {e}"))
+    }
+}

@@ -19,7 +19,16 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
-use bindings::tiangong::plugin::memory_store;
+use bindings::tiangong::plugin::sidecar;
+
+/// 向 sidecar 发送请求：把 method 和 payload 合并成一个 JSON 传给 sidecar.invoke。
+fn sidecar_call(
+    method: &str,
+    payload: &serde_json::Value,
+) -> Result<String, sidecar::SidecarError> {
+    let envelope = serde_json::json!({ "method": method, "payload": payload });
+    sidecar::invoke(&envelope.to_string())
+}
 
 mod descriptor {
     pub const ID: &str = "memory";
@@ -136,7 +145,7 @@ impl Guest for Component {
             "session_id": session_id,
             "workspace_id": workspace_id,
         });
-        let sections = match memory_store::request("load_injection", &payload.to_string()) {
+        let sections = match sidecar_call("load_injection", &payload) {
             Ok(response_json) => {
                 // sidecar 返回 MemoryIpcResponsePayload::Injection { items: Vec<String> }。
                 serde_json::from_str::<serde_json::Value>(&response_json)
@@ -172,7 +181,7 @@ impl Guest for Component {
             "limit": parse_u32_field(&call.arguments, "limit").unwrap_or(5),
         });
 
-        match memory_store::request("recall_context", &request_payload.to_string()) {
+        match sidecar_call("recall_context", &request_payload) {
             Ok(response_json) => {
                 // sidecar 返回的 MemoryIpcResponsePayload::RecallContext JSON，
                 // 从中取 content 字段作为摘要。
@@ -182,10 +191,10 @@ impl Guest for Component {
                     .unwrap_or_else(|| response_json.clone());
                 Ok(tool_result_ok(content))
             }
-            Err(memory_store::MemoryStoreError::Disabled) => Ok(tool_result_ok(
+            Err(sidecar::SidecarError::Unavailable) => Ok(tool_result_ok(
                 "记忆系统未启用（memory sidecar 未连接）。".to_string(),
             )),
-            Err(memory_store::MemoryStoreError::Message(m)) => {
+            Err(sidecar::SidecarError::Message(m)) => {
                 Ok(tool_result_ok(format!("记忆查询失败：{m}")))
             }
         }
@@ -292,11 +301,11 @@ impl UiGuest for Component {
 }
 
 fn request_memory_host(method: &str, payload: &str) -> Result<String, PluginError> {
-    memory_store::request(method, payload).map_err(|error| match error {
-        memory_store::MemoryStoreError::Disabled => {
-            PluginError::Message("Memory 未启用".to_string())
-        }
-        memory_store::MemoryStoreError::Message(message) => PluginError::Message(message),
+    let payload_val =
+        serde_json::from_str::<serde_json::Value>(payload).unwrap_or(serde_json::Value::Null);
+    sidecar_call(method, &payload_val).map_err(|error| match error {
+        sidecar::SidecarError::Unavailable => PluginError::Message("Memory 未启用".to_string()),
+        sidecar::SidecarError::Message(message) => PluginError::Message(message),
     })
 }
 
@@ -381,7 +390,7 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
         "tool_calls": tool_calls,
     });
     // sidecar 可能不可用（disabled），反刍是 best-effort，忽略错误。
-    let _ = memory_store::request("run_enhanced_micro_rumination", &payload.to_string());
+    let _ = sidecar_call("run_enhanced_micro_rumination", &payload);
     Ok(())
 }
 
@@ -405,7 +414,7 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
         "session_id": session_id,
         "workspace_id": workspace_id,
     });
-    let _ = memory_store::request("run_meso_rumination", &payload.to_string());
+    let _ = sidecar_call("run_meso_rumination", &payload);
     Ok(())
 }
 

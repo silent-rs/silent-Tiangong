@@ -8,23 +8,21 @@ interface clock {
     now-millis: func() -> u64;
 }
 
-/// 记忆存储接口（host import）。
+/// 通用 sidecar 接口（host import）。
 ///
-/// WASM 组件经此向 memory sidecar 发起请求。host 只暴露一个通用 request
-/// 方法，复用 sidecar 的全部 memory 操作（召回/写入/反刍/CRUD），避免在
-/// WIT 中逐个硬编码 memory 数据结构与操作。
-interface memory-store {
-    /// 存储错误。
-    variant memory-store-error {
+/// WASM 组件经此向绑定的 sidecar 发送请求。Host 根据当前 WASM 实例自动
+/// 路由到对应的 sidecar 进程，不理解业务负载内容。
+interface sidecar {
+    /// sidecar 错误。
+    variant sidecar-error {
         message(string),
-        disabled,
+        unavailable,
     }
 
-    /// 通用请求：转发到 memory sidecar。
-    request: func(
-        method: string,
+    /// 通用调用：转发原始负载到绑定的 sidecar，返回原始响应。
+    invoke: func(
         payload: string,
-    ) -> result<string, memory-store-error>;
+    ) -> result<string, sidecar-error>;
 }
 
 /// Core 使用的插件能力（工具 / 注入 / 生命周期钩子）。
@@ -166,7 +164,7 @@ interface plugin-ui {
 /// 导入宿主能力（时钟、记忆存储），导出 Core 接口（plugin）和 UI 接口（plugin-ui）。
 world tiangong-plugin {
     import clock;
-    import memory-store;
+    import sidecar;
     export plugin;
     export plugin-ui;
 }
