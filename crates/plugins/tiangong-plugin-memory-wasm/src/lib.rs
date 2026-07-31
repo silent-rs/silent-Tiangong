@@ -24,7 +24,7 @@ use bindings::tiangong::plugin::memory_store;
 mod descriptor {
     pub const ID: &str = "memory";
     pub const NAME: &str = "Memory";
-    pub const VERSION: &str = "0.5.0";
+    pub const VERSION: &str = "0.6.0";
 }
 
 /// 全局状态缓存（WASM 单线程，RefCell 安全）。
@@ -38,10 +38,10 @@ mod state {
     }
 
     thread_local! {
-        static STATE: RefCell<PluginState> = RefCell::new(PluginState {
+        static STATE: RefCell<PluginState> = const { RefCell::new(PluginState {
             session_id: None,
             workspace: None,
-        });
+        }) };
     }
 
     pub fn set_session_id(id: Option<String>) {
@@ -97,108 +97,15 @@ const RECALL_MEMORY_INPUT_SCHEMA: &str = r#"{
 
 const RECALL_MEMORY_DESCRIPTION: &str = "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。";
 
-/// memory 设置页的完整 HTML（内联 CSS + JS，单文件嵌入 WASM）。
-/// 页面经 postMessage 与天工通信，读写配置经 handle-view-message。
-const MEMORY_SETTINGS_HTML: &str = r#"<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>记忆配置</title>
-<style>
-  body { font-family: system-ui, sans-serif; padding: 16px; margin: 0; color: #1a1a1a; background: #fff; }
-  h2 { margin: 0 0 16px; font-size: 18px; }
-  .field { margin-bottom: 14px; }
-  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; }
-  input { width: 100%; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
-  input:focus { outline: none; border-color: #6366f1; }
-  .help { font-size: 11px; color: #888; margin-top: 3px; }
-  button { padding: 8px 18px; background: #6366f1; color: #fff; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
-  button:hover { background: #5558e3; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .saved { color: #16a34a; font-size: 12px; margin-left: 10px; }
-</style>
-</head>
-<body>
-<h2>记忆系统配置</h2>
-<div class="field">
-  <label>记忆 LLM 模型 key</label>
-  <input id="model_key" placeholder="留空则用规则 fallback">
-  <div class="help">主模型配置中的模型 key（留空则不走 LLM，用规则提取）</div>
-</div>
-<div class="field">
-  <label>向量模型 key</label>
-  <input id="embedding_key" placeholder="留空则只用关键词检索">
-  <div class="help">语义检索用的 embedding 模型 key</div>
-</div>
-<div class="field">
-  <label>重排模型 key</label>
-  <input id="rerank_key" placeholder="留空则不重排">
-  <div class="help">召回结果重排模型 key</div>
-</div>
-<div class="field">
-  <label>向量模式</label>
-  <input id="vector_mode" placeholder="auto">
-  <div class="help">auto / disabled / embedded_lancedb</div>
-</div>
-<div style="margin-top: 20px;">
-  <button id="save" onclick="save()">保存</button>
-  <span id="saved" class="saved" style="display:none">已保存</span>
-</div>
-<script>
-// 初始化：加载现有配置
-async function init() {
-  try {
-    const config = await callHost('get_config', '');
-    const values = JSON.parse(config || '{}');
-    for (const [key, input] of Object.entries({
-      model_key: 'model_key', embedding_key: 'embedding_key',
-      rerank_key: 'rerank_key', vector_mode: 'vector_mode'
-    })) {
-      const el = document.getElementById(input);
-      if (el && values[key] !== undefined) el.value = values[key];
-    }
-  } catch(e) { console.error('加载配置失败', e); }
-}
+const MEMORY_PAGE_TEMPLATE: &str = include_str!("memory.html");
+const MEMORY_PAGE_CSS: &str = include_str!("memory.css");
+const MEMORY_PAGE_JS: &str = include_str!("memory.js");
 
-async function save() {
-  const btn = document.getElementById('save');
-  btn.disabled = true;
-  const config = JSON.stringify({
-    model_key: document.getElementById('model_key').value,
-    embedding_key: document.getElementById('embedding_key').value,
-    rerank_key: document.getElementById('rerank_key').value,
-    vector_mode: document.getElementById('vector_mode').value
-  });
-  try {
-    await callHost('set_config', config);
-    const saved = document.getElementById('saved');
-    saved.style.display = 'inline';
-    setTimeout(() => saved.style.display = 'none', 2000);
-  } catch(e) { console.error('保存失败', e); }
-  btn.disabled = false;
+fn memory_settings_html() -> String {
+    MEMORY_PAGE_TEMPLATE
+        .replace("/*__MEMORY_CSS__*/", MEMORY_PAGE_CSS)
+        .replace("/*__MEMORY_JS__*/", MEMORY_PAGE_JS)
 }
-
-// 经 postMessage 与天工通信
-function callHost(method, payload) {
-  return new Promise((resolve, reject) => {
-    const id = Math.random().toString(36);
-    const handler = (e) => {
-      if (e.data && e.data.id === id) {
-        window.removeEventListener('message', handler);
-        if (e.data.error) reject(new Error(e.data.error));
-        else resolve(e.data.result);
-      }
-    };
-    window.addEventListener('message', handler);
-    window.parent.postMessage({ type: 'plugin_call', id, method, payload }, '*');
-  });
-}
-
-init();
-</script>
-</body>
-</html>"#;
 
 /// WASM 桥接组件（无状态）。
 struct Component;
@@ -353,31 +260,69 @@ impl UiGuest for Component {
             )));
         }
         Ok(ViewResponse {
-            html: MEMORY_SETTINGS_HTML.to_string(),
+            html: memory_settings_html(),
         })
     }
 
     fn get_view_resource(path: String) -> Result<ResourceResponse, PluginError> {
-        Err(PluginError::Message(format!("无此资源: {path}")))
+        match path.as_str() {
+            "memory.css" => Ok(ResourceResponse {
+                data: MEMORY_PAGE_CSS.as_bytes().to_vec(),
+                mime: "text/css; charset=utf-8".to_string(),
+            }),
+            "memory.js" => Ok(ResourceResponse {
+                data: MEMORY_PAGE_JS.as_bytes().to_vec(),
+                mime: "text/javascript; charset=utf-8".to_string(),
+            }),
+            _ => Err(PluginError::Message(format!("无此资源: {path}"))),
+        }
     }
 
     fn handle_view_message(
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        match request.method.as_str() {
-            "get_config" => {
-                let content = std::fs::read_to_string("config.json").unwrap_or_default();
-                Ok(ViewMessageResponse { payload: content })
-            }
-            "set_config" => {
-                std::fs::write("config.json", &request.payload)
-                    .map_err(|e| PluginError::Message(format!("写入配置失败: {e}")))?;
-                Ok(ViewMessageResponse {
-                    payload: "ok".to_string(),
-                })
-            }
+        let payload = match request.method.as_str() {
+            "bootstrap" => request_memory_host("ui.memory.config.get", "{}"),
+            "save_config" => request_memory_host("ui.memory.config.set", &request.payload),
+            "memory_request" => forward_memory_ui_request(&request.payload),
             other => Err(PluginError::Message(format!("未知消息: {other}"))),
+        }?;
+        Ok(ViewMessageResponse { payload })
+    }
+}
+
+fn request_memory_host(method: &str, payload: &str) -> Result<String, PluginError> {
+    memory_store::request(method, payload).map_err(|error| match error {
+        memory_store::MemoryStoreError::Disabled => {
+            PluginError::Message("Memory 未启用".to_string())
         }
+        memory_store::MemoryStoreError::Message(message) => PluginError::Message(message),
+    })
+}
+
+fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
+    let method = serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .map(String::from)
+        })
+        .ok_or_else(|| PluginError::Message("Memory 页面请求缺少 method".to_string()))?;
+    match method.as_str() {
+        "list_nodes"
+        | "count_nodes"
+        | "list_relations"
+        | "list_relations_batch"
+        | "upsert_manual_memory"
+        | "set_node_status"
+        | "upsert_relation"
+        | "delete_relation"
+        | "recall" => request_memory_host("ui.memory.request", payload),
+        _ => Err(PluginError::Message(format!(
+            "Memory 页面不支持请求: {method}"
+        ))),
     }
 }
 

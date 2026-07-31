@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { ReactNode } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -15,7 +14,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
-import type { McpServer, Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, MemoryConfigView } from '@/api/tauri';
+import type { McpServer, Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { IndexManagementSettings } from './index/IndexManagementSettings';
@@ -408,7 +407,7 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
 // LLM 设置组件（三层架构：Providers / Models / Routing）
 // ============================================================================
 
-type LLMSubTab = 'providers' | 'routing' | 'memory';
+type LLMSubTab = 'providers' | 'routing';
 
 function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [subTab, setSubTab] = useState<LLMSubTab>('providers');
@@ -497,7 +496,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
     <div className="flex flex-col h-full">
       {/* 子标签栏 — 固定不动 */}
       <div className="flex gap-1 shrink-0 p-4 pb-0">
-        {(['providers', 'routing', 'memory'] as const).map((tab) => (
+        {(['providers', 'routing'] as const).map((tab) => (
           <button
             key={tab}
             className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
@@ -507,7 +506,7 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
             }`}
             onClick={() => setSubTab(tab)}
           >
-            {tab === 'providers' ? '模型' : tab === 'routing' ? '路由' : '记忆设置'}
+            {tab === 'providers' ? '模型' : '路由'}
           </button>
         ))}
       </div>
@@ -520,231 +519,10 @@ function LLMSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Save
         {subTab === 'routing' && (
           <RoutingSection config={modelsConfig} onChange={handleChange} />
         )}
-        {subTab === 'memory' && (
-          <MemorySettings
-            modelsConfig={modelsConfig}
-            onSaveStatusChange={onSaveStatusChange}
-          />
-        )}
       </div>
     </div>
   );
 }
-
-// ============================================================================
-// Memory 设置组件（独立模型配置）
-// ============================================================================
-
-function MemorySettings({
-  modelsConfig,
-  onSaveStatusChange,
-}: {
-  modelsConfig: ModelsConfigView;
-  onSaveStatusChange: (status: SaveStatus) => void;
-}) {
-  const [config, setConfig] = useState<MemoryConfigView>({ vector_mode: 'auto' });
-  const [isLoading, setIsLoading] = useState(false);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { showError } = useToast();
-
-  const loadConfig = async () => {
-    setIsLoading(true);
-    try {
-      const cfg = await api.getMemoryConfig();
-      setConfig({ ...cfg, vector_mode: cfg.vector_mode || 'auto' });
-    } catch (error) {
-      console.error('加载 Memory 配置失败:', error);
-      showError('加载失败', '无法加载 Memory 配置');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
-
-  const autoSave = useCallback(async (nextConfig: MemoryConfigView) => {
-    onSaveStatusChange('saving');
-    try {
-      await api.setMemoryConfig(nextConfig);
-      onSaveStatusChange('saved');
-      setTimeout(() => onSaveStatusChange('idle'), 2000);
-    } catch (error) {
-      console.error('保存 Memory 配置失败:', error);
-      onSaveStatusChange('error');
-      showError('保存失败', '无法保存 Memory 配置');
-    }
-  }, [onSaveStatusChange, showError]);
-
-  const handleChange = useCallback((nextConfig: MemoryConfigView) => {
-    setConfig(nextConfig);
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = setTimeout(() => autoSave(nextConfig), 500);
-  }, [autoSave]);
-
-  useEffect(() => {
-    return () => {
-      if (saveTimerRef.current) {
-        clearTimeout(saveTimerRef.current);
-      }
-    };
-  }, []);
-
-  const modelKeysFor = (acceptedCapabilities: string[]) =>
-    Object.entries(modelsConfig.models)
-      .filter(([, model]) => {
-        if (model.capabilities.length === 0) return true;
-        return acceptedCapabilities.some((capability) => model.capabilities.includes(capability));
-      })
-      .map(([key]) => key);
-
-  const modelLabel = (modelKey: string) => {
-    const model = modelsConfig.models[modelKey];
-    if (!model) return modelKey;
-    return `${model.provider} / ${model.model}`;
-  };
-
-  const setModelKey = (
-    key: 'model_key' | 'embedding_key' | 'rerank_key',
-    modelKey: string | undefined,
-  ) => {
-    handleChange({ ...config, [key]: modelKey });
-  };
-
-  const embeddingDimension = config.embedding_key
-    ? Number(modelsConfig.models[config.embedding_key]?.options?.dimension || 0)
-    : 0;
-
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-8">
-        <Loader2 className="w-6 h-6 animate-spin text-primary mr-2" />
-        <span className="text-sm text-muted-foreground">加载 Memory 配置中...</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <MemoryModelSelectSection
-        title="记忆文本模型"
-        description="片段提取、回忆规划和结果整理使用的文本模型"
-        selectedKey={config.model_key}
-        candidates={modelKeysFor(['chat', 'lite'])}
-        modelLabel={modelLabel}
-        onChange={(modelKey) => setModelKey('model_key', modelKey)}
-      />
-
-      <MemoryModelSelectSection
-        title="记忆嵌入模型"
-        description="语义检索和向量索引使用的嵌入模型"
-        selectedKey={config.embedding_key}
-        candidates={modelKeysFor(['embedding'])}
-        modelLabel={modelLabel}
-        onChange={(modelKey) => setModelKey('embedding_key', modelKey)}
-        footer={
-          config.embedding_key ? (
-            <div className={`text-xs ${embeddingDimension > 0 ? 'text-muted-foreground' : 'text-destructive'}`}>
-              {embeddingDimension > 0
-                ? `当前维度：${embeddingDimension}`
-                : '选中的嵌入模型缺少 options.dimension，请先在模型页补齐。'}
-            </div>
-          ) : null
-        }
-      />
-
-      <MemoryModelSelectSection
-        title="记忆重排模型"
-        description="召回结果精排模型，当前保存为独立配置供后续召回链路消费"
-        selectedKey={config.rerank_key}
-        candidates={modelKeysFor(['rerank'])}
-        modelLabel={modelLabel}
-        onChange={(modelKey) => setModelKey('rerank_key', modelKey)}
-      />
-
-      <Card>
-        <CardContent className="p-4 space-y-3">
-          <div>
-            <h4 className="text-sm font-medium">向量模式</h4>
-            <p className="text-xs text-muted-foreground mt-1">
-              控制语义检索使用内置向量索引、外部 Qdrant 或完全关闭。
-            </p>
-          </div>
-          <Select
-            value={config.vector_mode || 'auto'}
-            onValueChange={(value) => handleChange({ ...config, vector_mode: value })}
-          >
-            <SelectTrigger className="w-60 h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">自动</SelectItem>
-              <SelectItem value="embedded">内置向量索引</SelectItem>
-              <SelectItem value="external_qdrant">外部 Qdrant</SelectItem>
-              <SelectItem value="disabled">禁用向量层</SelectItem>
-            </SelectContent>
-          </Select>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function MemoryModelSelectSection({
-  title,
-  description,
-  selectedKey,
-  candidates,
-  modelLabel,
-  onChange,
-  footer,
-}: {
-  title: string;
-  description: string;
-  selectedKey?: string;
-  candidates: string[];
-  modelLabel: (modelKey: string) => string;
-  onChange: (modelKey: string | undefined) => void;
-  footer?: ReactNode;
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4 space-y-3">
-        <div>
-          <h4 className="text-sm font-medium">{title}</h4>
-          <p className="text-xs text-muted-foreground mt-1">{description}</p>
-        </div>
-        {candidates.length > 0 ? (
-          <Select
-            value={selectedKey || '__none__'}
-            onValueChange={(value) => onChange(value === '__none__' ? undefined : value)}
-          >
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue placeholder="选择模型" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__none__">-- 未配置 --</SelectItem>
-              {candidates.map((modelKey) => (
-                <SelectItem key={modelKey} value={modelKey}>
-                  {modelLabel(modelKey)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        ) : (
-          <div className="text-xs text-muted-foreground">
-            请先在模型页添加对应能力的模型。
-          </div>
-        )}
-        {footer}
-      </CardContent>
-    </Card>
-  );
-}
-
 
 // ---------------------------------------------------------------------------
 // 预设供应商

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>记忆</title>
+  <style>/*__MEMORY_CSS__*/</style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="title-block">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div>
+          <h1>记忆</h1>
+          <div id="runtime-status" class="runtime-status">正在连接</div>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="记忆设置视图">
+        <button class="tab active" type="button" data-tab="data">数据预览</button>
+        <button class="tab" type="button" data-tab="config">模型配置</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="view-data" class="page-view active">
+        <div class="stats-grid" aria-label="记忆统计">
+          <div class="stat-card">
+            <span>总计</span>
+            <strong id="stat-total">0</strong>
+            <small id="stat-loaded">已加载 0</small>
+          </div>
+          <div class="stat-card stat-active">
+            <span>活跃</span>
+            <strong id="stat-active">0</strong>
+            <small>当前可召回</small>
+          </div>
+          <div class="stat-card stat-week">
+            <span>本周新增</span>
+            <strong id="stat-week">0</strong>
+            <small>最近 7 天</small>
+          </div>
+          <div class="stat-card stat-relations">
+            <span>关联数</span>
+            <strong id="stat-relations">0</strong>
+            <small>当前已加载</small>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <label class="search-field">
+            <span class="sr-only">搜索记忆</span>
+            <input id="search-input" type="search" placeholder="搜索标题、内容或关键词" autocomplete="off">
+          </label>
+          <label class="compact-field">
+            <span class="sr-only">状态筛选</span>
+            <select id="status-filter">
+              <option value="active">活跃</option>
+              <option value="archived">归档</option>
+            </select>
+          </label>
+          <div class="segmented" aria-label="预览方式">
+            <button class="segment active" type="button" data-mode="graph">图谱</button>
+            <button class="segment" type="button" data-mode="list">列表</button>
+          </div>
+          <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">↻</button>
+          <button id="recall-open" class="secondary-button" type="button">召回测试</button>
+        </div>
+
+        <div class="memory-workspace">
+          <section class="preview-panel" aria-label="记忆数据预览">
+            <div id="graph-view" class="preview-view active">
+              <div class="panel-heading graph-heading">
+                <div class="heading-copy">
+                  <strong id="graph-title">Memory 图谱</strong>
+                  <span id="graph-meta">0 个节点 · 0 条连接</span>
+                </div>
+                <div class="graph-actions">
+                  <button id="graph-load-more" class="small-button hidden" type="button">加载更多</button>
+                  <button id="graph-zoom-out" class="icon-button small" type="button" title="缩小" aria-label="缩小">−</button>
+                  <button id="graph-fit" class="icon-button small" type="button" title="适应画布" aria-label="适应画布">◎</button>
+                  <button id="graph-zoom-in" class="icon-button small" type="button" title="放大" aria-label="放大">+</button>
+                </div>
+              </div>
+              <div class="graph-stage">
+                <svg id="memory-graph" viewBox="0 0 1000 560" role="img" aria-label="记忆关系图谱">
+                  <defs>
+                    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+                    </marker>
+                  </defs>
+                  <g id="graph-content"></g>
+                </svg>
+                <div id="graph-empty" class="empty-state hidden">暂无匹配记忆</div>
+              </div>
+            </div>
+
+            <div id="list-view" class="preview-view">
+              <div class="panel-heading list-heading">
+                <label class="check-label">
+                  <input id="select-all" type="checkbox">
+                  <span id="list-meta">0 / 0 · 已选 0</span>
+                </label>
+                <button id="bulk-status" class="small-button" type="button" disabled>批量归档</button>
+              </div>
+              <div id="memory-list" class="memory-list"></div>
+              <div class="pagination">
+                <span id="page-meta">第 1 / 1 页</span>
+                <div>
+                  <button id="page-prev" class="icon-button small" type="button" title="上一页" aria-label="上一页">‹</button>
+                  <button id="page-next" class="icon-button small" type="button" title="下一页" aria-label="下一页">›</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="preview-loading" class="loading-cover hidden" aria-live="polite">
+              <span class="spinner"></span>
+              <span>加载中</span>
+            </div>
+          </section>
+
+          <aside class="inspector">
+            <section class="tool-panel">
+              <div class="tool-heading">
+                <h2>手动附加 / 调整</h2>
+                <button id="new-memory" class="small-button" type="button">+ 新增</button>
+              </div>
+              <form id="memory-form" class="form-stack">
+                <input id="memory-id" type="hidden">
+                <label>
+                  <span>类型</span>
+                  <select id="memory-type"></select>
+                </label>
+                <label>
+                  <span>标题</span>
+                  <input id="memory-title" type="text" maxlength="200" placeholder="记忆标题" required>
+                </label>
+                <label>
+                  <span>内容</span>
+                  <textarea id="memory-summary" rows="5" placeholder="需要长期保存或修正的记忆内容" required></textarea>
+                </label>
+                <label>
+                  <span>关键词</span>
+                  <input id="memory-keywords" type="text" placeholder="用逗号分隔">
+                </label>
+                <label>
+                  <span>重要度 <output id="importance-output">0.6</output></span>
+                  <input id="memory-importance" type="range" min="0" max="1" step="0.1" value="0.6">
+                </label>
+                <button id="save-memory" class="primary-button full" type="submit">保存记忆</button>
+              </form>
+            </section>
+
+            <section class="tool-panel">
+              <div class="tool-heading">
+                <h2>记忆关联</h2>
+              </div>
+              <form id="relation-form" class="form-stack relation-form">
+                <label>
+                  <span>目标记忆</span>
+                  <select id="relation-target" disabled>
+                    <option value="">选择关联目标</option>
+                  </select>
+                </label>
+                <label>
+                  <span>关系</span>
+                  <select id="relation-kind" disabled></select>
+                </label>
+                <label>
+                  <span>备注</span>
+                  <input id="relation-note" type="text" maxlength="300" placeholder="关联备注" disabled>
+                </label>
+                <button id="save-relation" class="secondary-button full" type="submit" disabled>保存关联</button>
+              </form>
+              <div id="relation-list" class="relation-list"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section id="view-config" class="page-view config-view">
+        <form id="config-form" class="config-form">
+          <div class="config-row">
+            <div>
+              <label for="config-model">记忆文本模型</label>
+              <span>片段提取、回忆规划、结果整理</span>
+            </div>
+            <select id="config-model"></select>
+          </div>
+          <div class="config-row">
+            <div>
+              <label for="config-embedding">记忆嵌入模型</label>
+              <span id="embedding-meta">语义检索和向量索引</span>
+            </div>
+            <select id="config-embedding"></select>
+          </div>
+          <div class="config-row">
+            <div>
+              <label for="config-rerank">记忆重排模型</label>
+              <span>召回结果精排</span>
+            </div>
+            <select id="config-rerank"></select>
+          </div>
+          <div class="config-row">
+            <div>
+              <label for="config-vector-mode">向量模式</label>
+              <span>语义检索存储方式</span>
+            </div>
+            <select id="config-vector-mode">
+              <option value="auto">自动</option>
+              <option value="embedded_lance_db">内置 LanceDB</option>
+              <option value="disabled">禁用向量层</option>
+            </select>
+          </div>
+          <div class="config-footer">
+            <span id="config-status" role="status"></span>
+            <button id="save-config" class="primary-button" type="submit">保存配置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <div id="recall-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="recall-title">
+    <div class="modal-panel">
+      <div class="modal-heading">
+        <h2 id="recall-title">召回测试</h2>
+        <button id="recall-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <form id="recall-form" class="recall-form">
+        <input id="recall-query" type="search" placeholder="输入要测试的回忆问题" autocomplete="off">
+        <button id="recall-run" class="primary-button" type="submit">测试</button>
+      </form>
+      <div id="recall-results" class="recall-results"></div>
+    </div>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script>/*__MEMORY_JS__*/</script>
+</body>
+</html>

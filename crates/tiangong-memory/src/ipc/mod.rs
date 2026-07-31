@@ -340,6 +340,10 @@ pub async fn handle_memory_request(
             handle.delete_relation(relation_id).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::Reconfigure { config } => {
+            handle.reconfigure(config.to_options()).await?;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
         MemoryIpcRequestPayload::UpdateInjection {
             level,
             target_id,

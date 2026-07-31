@@ -75,7 +75,18 @@ impl MemoryHandle {
                 .await
                 .with_context(|| "等待 Memory 热更新任务失败")?
             }
-            HandleInner::Remote { .. } => Err(anyhow!("远程 MemoryHandle 暂不支持配置热更新")),
+            HandleInner::Remote { .. } => {
+                let config = crate::MemoryConfig::from_options(&options);
+                match self
+                    .send_remote_request(MemoryIpcRequestPayload::Reconfigure { config })
+                    .await?
+                {
+                    MemoryIpcResponsePayload::Ack => Ok(()),
+                    other => Err(anyhow!(
+                        "Memory IPC reconfigure 返回了非预期响应: {other:?}"
+                    )),
+                }
+            }
         }
     }
 

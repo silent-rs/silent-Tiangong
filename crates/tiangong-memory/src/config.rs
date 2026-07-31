@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tiangong_llm::models_config::{ModelEntry, ModelsConfig, ResolvedModel, RoutingSlot};
 use tiangong_llm::{
     EmbeddingEndpointConfig, LlmEndpointConfig, ProviderProtocol, RerankEndpointConfig,
 };
@@ -27,6 +28,32 @@ pub struct MemoryConfig {
     pub rerank: Option<MemoryRerankConfig>,
     #[serde(default)]
     pub vector_mode: MemoryVectorMode,
+}
+
+/// Memory 设置页保存的模型选择。
+///
+/// 页面只接触主模型配置中的 key；端点地址和密钥在宿主侧解析，避免暴露给 iframe。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfigSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_key: Option<String>,
+    #[serde(default = "default_vector_mode_selection")]
+    pub vector_mode: String,
+}
+
+impl Default for MemoryConfigSelection {
+    fn default() -> Self {
+        Self {
+            model_key: None,
+            embedding_key: None,
+            rerank_key: None,
+            vector_mode: default_vector_mode_selection(),
+        }
+    }
 }
 
 impl Default for MemoryConfig {
@@ -126,6 +153,10 @@ impl Default for MemoryRerankConfig {
 
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+fn default_vector_mode_selection() -> String {
+    "auto".to_string()
 }
 
 pub fn default_memory_config_path() -> PathBuf {
@@ -289,6 +320,228 @@ impl MemoryConfig {
         }
 
         options.with_vector_mode(self.vector_mode)
+    }
+
+    /// 将已解析的运行参数转换为可通过 IPC 传递的配置。
+    pub fn from_options(options: &MemoryOptions) -> Self {
+        Self {
+            model: options.model.as_ref().map(|model| MemoryLlmConfig {
+                provider_key: model.source_provider.clone(),
+                base_url: model.base_url.clone(),
+                api_key: model.api_key.clone(),
+                model: model.model.clone(),
+                protocol: model.protocol,
+                timeout_ms: duration_millis(model.timeout),
+            }),
+            embedding: options
+                .embedding
+                .as_ref()
+                .map(|embedding| MemoryEmbeddingConfig {
+                    provider_key: None,
+                    base_url: embedding.base_url.clone(),
+                    api_key: embedding.api_key.clone(),
+                    model: embedding.model.clone(),
+                    protocol: embedding.protocol,
+                    timeout_ms: duration_millis(embedding.timeout),
+                    dimension: embedding.dimension,
+                }),
+            rerank: options.rerank.as_ref().map(|rerank| MemoryRerankConfig {
+                provider_key: None,
+                base_url: rerank.base_url.clone(),
+                api_key: rerank.api_key.clone(),
+                model: rerank.model.clone(),
+                protocol: rerank.protocol,
+                timeout_ms: duration_millis(rerank.timeout),
+            }),
+            vector_mode: options.vector_mode,
+        }
+    }
+}
+
+impl MemoryConfigSelection {
+    pub fn from_memory(config: &MemoryConfig, models: &ModelsConfig) -> Self {
+        Self {
+            model_key: config.model.as_ref().and_then(|endpoint| {
+                find_model_key(
+                    models,
+                    &endpoint.base_url,
+                    &endpoint.model,
+                    endpoint.protocol,
+                )
+            }),
+            embedding_key: config.embedding.as_ref().and_then(|endpoint| {
+                find_model_key(
+                    models,
+                    &endpoint.base_url,
+                    &endpoint.model,
+                    endpoint.protocol,
+                )
+            }),
+            rerank_key: config.rerank.as_ref().and_then(|endpoint| {
+                find_model_key(
+                    models,
+                    &endpoint.base_url,
+                    &endpoint.model,
+                    endpoint.protocol,
+                )
+            }),
+            vector_mode: vector_mode_key(config.vector_mode).to_string(),
+        }
+    }
+
+    pub fn to_memory(&self, models: &ModelsConfig) -> Result<MemoryConfig> {
+        Ok(MemoryConfig {
+            model: selected_key(&self.model_key)
+                .map(|key| resolve_memory_llm(models, key))
+                .transpose()?,
+            embedding: selected_key(&self.embedding_key)
+                .map(|key| resolve_memory_embedding(models, key))
+                .transpose()?,
+            rerank: selected_key(&self.rerank_key)
+                .map(|key| resolve_memory_rerank(models, key))
+                .transpose()?,
+            vector_mode: parse_vector_mode(&self.vector_mode),
+        })
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn selected_key(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn resolved_model_by_key(models: &ModelsConfig, model_key: &str) -> Result<ResolvedModel> {
+    if let Some(slot) = RoutingSlot::from_key(model_key)
+        && let Some(resolved) = models.resolve_slot(slot)
+    {
+        return Ok(resolved);
+    }
+
+    let resolve_entry = |entry: &ModelEntry| {
+        let provider = models.providers.get(&entry.provider)?;
+        Some(ResolvedModel {
+            provider: entry.provider.clone(),
+            base_url: provider.base_url.clone(),
+            api_key: ModelsConfig::resolve_api_key(&provider.api_key),
+            timeout_ms: provider.timeout_ms,
+            protocol: provider.protocol,
+            context_window: entry.context_window,
+            model: entry.model.clone(),
+            options: entry.options.clone(),
+        })
+    };
+
+    if let Some(entry) = models.models.get(model_key) {
+        return resolve_entry(entry)
+            .ok_or_else(|| anyhow::anyhow!("模型 {model_key} 引用的 Provider 不存在"));
+    }
+
+    models
+        .routing
+        .values()
+        .find_map(|entry| {
+            (entry.model == model_key)
+                .then(|| resolve_entry(entry))
+                .flatten()
+        })
+        .ok_or_else(|| anyhow::anyhow!("模型不存在：{model_key}"))
+}
+
+fn resolve_memory_llm(models: &ModelsConfig, model_key: &str) -> Result<MemoryLlmConfig> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    Ok(MemoryLlmConfig {
+        provider_key: Some(resolved.provider),
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+    })
+}
+
+fn resolve_memory_embedding(
+    models: &ModelsConfig,
+    model_key: &str,
+) -> Result<MemoryEmbeddingConfig> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    let dimension = resolved
+        .options
+        .get("dimension")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("Embedding 模型 {model_key} 缺少 options.dimension"))?;
+    Ok(MemoryEmbeddingConfig {
+        provider_key: Some(resolved.provider),
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+        dimension,
+    })
+}
+
+fn resolve_memory_rerank(models: &ModelsConfig, model_key: &str) -> Result<MemoryRerankConfig> {
+    let resolved = resolved_model_by_key(models, model_key)?;
+    Ok(MemoryRerankConfig {
+        provider_key: Some(resolved.provider),
+        base_url: resolved.base_url,
+        api_key: resolved.api_key,
+        model: resolved.model,
+        protocol: resolved.protocol,
+        timeout_ms: resolved.timeout_ms,
+    })
+}
+
+fn find_model_key(
+    models: &ModelsConfig,
+    base_url: &str,
+    model_name: &str,
+    protocol: ProviderProtocol,
+) -> Option<String> {
+    models
+        .models
+        .iter()
+        .find_map(|(key, entry)| {
+            let provider = models.providers.get(&entry.provider)?;
+            (provider.base_url == base_url
+                && provider.protocol == protocol
+                && entry.model == model_name)
+                .then(|| key.clone())
+        })
+        .or_else(|| {
+            models.routing.iter().find_map(|(slot, entry)| {
+                let provider = models.providers.get(&entry.provider)?;
+                (provider.base_url == base_url
+                    && provider.protocol == protocol
+                    && entry.model == model_name)
+                    .then(|| slot.key().to_string())
+            })
+        })
+}
+
+fn vector_mode_key(mode: MemoryVectorMode) -> &'static str {
+    match mode {
+        MemoryVectorMode::Auto => "auto",
+        MemoryVectorMode::Disabled => "disabled",
+        MemoryVectorMode::EmbeddedLanceDb => "embedded_lance_db",
+    }
+}
+
+fn parse_vector_mode(value: &str) -> MemoryVectorMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" => MemoryVectorMode::Disabled,
+        "embedded" | "lancedb" | "embedded_lancedb" | "embedded_lance_db" => {
+            MemoryVectorMode::EmbeddedLanceDb
+        }
+        _ => MemoryVectorMode::Auto,
     }
 }
 

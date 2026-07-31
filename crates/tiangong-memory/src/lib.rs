@@ -15,7 +15,6 @@
 pub mod command;
 pub mod config;
 pub mod election;
-pub mod gui_api;
 pub mod handle;
 pub mod ipc;
 pub mod registry;
@@ -37,9 +36,9 @@ mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
 pub use config::{
-    MemoryConfig, MemoryEmbeddingConfig, MemoryLlmConfig, MemoryRerankConfig,
-    default_memory_config_path, disable_memory, disable_memory_at, enable_memory, enable_memory_at,
-    is_memory_disabled, memory_disabled_marker_path,
+    MemoryConfig, MemoryConfigSelection, MemoryEmbeddingConfig, MemoryLlmConfig,
+    MemoryRerankConfig, default_memory_config_path, disable_memory, disable_memory_at,
+    enable_memory, enable_memory_at, is_memory_disabled, memory_disabled_marker_path,
 };
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,

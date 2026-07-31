@@ -105,6 +105,9 @@ pub enum MemoryIpcRequestPayload {
     DeleteRelation {
         relation_id: String,
     },
+    Reconfigure {
+        config: crate::MemoryConfig,
+    },
     UpdateInjection {
         level: InjectionLevel,
         target_id: String,
