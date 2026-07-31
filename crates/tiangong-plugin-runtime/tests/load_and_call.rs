@@ -8,13 +8,48 @@
 //! 本测试默认指向 workspace target 目录下的 debug 产物。
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::session::Session;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolSpecProvider};
-use tiangong_plugin_runtime::{PluginRuntimeConfig, ToolCall, WasmPluginAdapter, WasmPluginLoader};
+use tiangong_plugin_runtime::{
+    PluginRuntimeConfig, SidecarConnection, ToolCall, WasmPluginAdapter, WasmPluginLoader,
+};
+
+#[derive(Default)]
+struct MockMemorySidecar {
+    operations: Mutex<Vec<String>>,
+}
+
+impl MockMemorySidecar {
+    fn called(&self, operation: &str) -> bool {
+        self.operations
+            .lock()
+            .map(|operations| operations.iter().any(|item| item == operation))
+            .unwrap_or(false)
+    }
+}
+
+impl SidecarConnection for MockMemorySidecar {
+    fn invoke(&self, operation: &str, _payload: &str) -> anyhow::Result<String> {
+        self.operations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("模拟 sidecar 调用记录已损坏"))?
+            .push(operation.to_string());
+        let response = match operation {
+            "recall_context" => serde_json::json!({
+                "kind": "recall_context",
+                "response": {"content": "模拟记忆结果"}
+            }),
+            "load_injection" => serde_json::json!({"kind": "injection", "items": []}),
+            _ => serde_json::json!({"kind": "ack"}),
+        };
+        Ok(serde_json::to_string(&response)?)
+    }
+}
 
 /// 定位示例 memory wasm 组件文件。
 fn memory_wasm_path() -> PathBuf {
@@ -142,18 +177,12 @@ fn handle_recall_memory_without_handle_returns_disabled() {
 }
 
 #[test]
-fn handle_recall_memory_with_handle_uses_sidecar() {
-    // 注入真实 MemoryHandle 时，经 request 转发到 sidecar，返回真实结果或空。
-    let handle = match tiangong_memory::start() {
-        Ok(h) => h,
-        Err(_) => {
-            eprintln!("跳过：MemoryActor 启动失败（可能已有实例运行）");
-            return;
-        }
-    };
+fn handle_recall_memory_with_connection_uses_sidecar() {
+    let sidecar = Arc::new(MockMemorySidecar::default());
     let wasm = ensure_wasm_or_skip();
     let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
 
     let outcome = plugin
@@ -170,9 +199,10 @@ fn handle_recall_memory_with_handle_uses_sidecar() {
     // 有 handle 时应正常返回（不再含"未启用"降级提示）。
     assert!(
         !outcome.summary.contains("未启用"),
-        "有 handle 时不应降级，实际: {}",
+        "有 sidecar 时不应降级，实际: {}",
         outcome.summary
     );
+    assert!(sidecar.called("recall_context"));
 }
 
 #[test]
@@ -231,25 +261,19 @@ fn lifecycle_hooks_forward_session_without_panic() {
 }
 
 #[test]
-fn on_turn_finished_with_handle_forwards_rumination() {
-    // 注入真实 handle 时，on_turn_finished 经 request 转发反刍到 sidecar。
-    // best-effort：即使 sidecar 内部反刍有异常，钩子也不应返回错误。
-    let handle = match tiangong_memory::start() {
-        Ok(h) => h,
-        Err(_) => {
-            eprintln!("跳过：MemoryActor 启动失败");
-            return;
-        }
-    };
+fn on_turn_finished_with_connection_forwards_rumination() {
+    let sidecar = Arc::new(MockMemorySidecar::default());
     let wasm = ensure_wasm_or_skip();
     let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = WasmPluginAdapter::new(plugin, config);
 
     let mut session = test_session();
     // 不 panic 即通过（反刍是 best-effort）。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    assert!(sidecar.called("run_enhanced_micro_rumination"));
 }
 
 // ── set_workspace + prompt_sections 测试 ──
@@ -270,17 +294,11 @@ fn prompt_sections_without_handle_returns_empty() {
 #[test]
 fn set_workspace_and_prompt_sections_flow() {
     // set_workspace → on_session_ready → prompt_sections 完整流程。
-    // 注入真实 handle 时，prompt_sections 经 request 拉注入（可能为空，但不应报错）。
-    let handle = match tiangong_memory::start() {
-        Ok(h) => h,
-        Err(_) => {
-            eprintln!("跳过：MemoryActor 启动失败");
-            return;
-        }
-    };
+    let sidecar = Arc::new(MockMemorySidecar::default());
     let wasm = ensure_wasm_or_skip();
     let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::with_memory(&config, Some(handle)).expect("创建加载器失败");
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = WasmPluginAdapter::new(plugin, config);
 
@@ -294,5 +312,5 @@ fn set_workspace_and_prompt_sections_flow() {
 
     // prompt_sections 应能正常调用（返回注入段落或空）。
     let _sections = <WasmPluginAdapter as PromptSectionProvider>::prompt_sections(&adapter);
-    // 不 panic 即通过。
+    assert!(sidecar.called("load_injection"));
 }

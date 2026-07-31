@@ -2,10 +2,8 @@
 //!
 //! 提供分层记忆管理、三级 Injection 注入、Episode 写入与渐进式召回。
 //!
-//! # 使用方式
-//!
-//! 各入口（GUI、CLI、Server）在启动时调用 [`start`] 获取 [`MemoryHandle`]，
-//! 然后将 Handle 显式传给上层运行时。
+//! 本 crate 只在 Memory sidecar 进程内启动 Actor、存储与 IPC 服务。
+//! App、CLI、Server 通过 WASM 插件运行时访问 sidecar，不直接依赖本 crate。
 //!
 //! ```no_run
 //! let handle = tiangong_memory::start().expect("Memory 系统启动失败");
@@ -17,8 +15,6 @@ pub mod config;
 pub mod election;
 pub mod handle;
 pub mod ipc;
-pub mod registry;
-pub mod sidecar;
 pub mod types;
 
 mod actor;
@@ -47,7 +43,6 @@ pub use election::{
 };
 pub use handle::MemoryHandle;
 pub use options::{MemoryOptions, MemoryVectorMode};
-pub use sidecar::{MemorySidecarConnection, MemorySidecarManager};
 pub use types::*;
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）

@@ -1,4 +1,4 @@
-package tiangong:plugin;
+package tiangong:plugin@0.1.0;
 
 /// 宿主时钟接口（host import）。
 ///
@@ -19,8 +19,9 @@ interface sidecar {
         unavailable,
     }
 
-    /// 通用调用：转发原始负载到绑定的 sidecar，返回原始响应。
+    /// 通用调用：运行时封装协议后转发操作名和 JSON 负载。
     invoke: func(
+        operation: string,
         payload: string,
     ) -> result<string, sidecar-error>;
 }

@@ -123,15 +123,15 @@ fn run_gui() {
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
 
-            // 预加载 WASM 插件到全局注册表（供设置页 UI 在会话创建前就能查询 contributions）。
-            // 会话创建时 build_plugins 会再次加载并注入到 Core，这里只确保全局表有数据。
+            // 预加载 WASM 插件到全局注册表，供设置页在会话创建前查询贡献。
             {
                 let storage_root = tiangong_config::io::storage_root();
-                let _ =
-                    tiangong_plugin_runtime::registry::load_memory_wasm_plugin(&storage_root, None);
+                drop(tiangong_plugin_runtime::registry::load_installed_plugins(
+                    &storage_root,
+                ));
             }
 
-            // 全部插件（browser/terminal/fs/index/memory/scheduler）均由 ensure_core
+            // 全部插件均由 ensure_core
             // 创建 Core 时现场 build_plugin() 构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
             // 此处只做 setup 阶段的初始化（不构造插件实例）。

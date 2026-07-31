@@ -188,7 +188,18 @@ pub fn is_leader_alive(info: &LeaderInfo) -> bool {
             Err(_) => return false,
         };
     let elapsed = chrono::Local::now().naive_local() - heartbeat;
-    elapsed.num_seconds() <= HEARTBEAT_TIMEOUT_SECS
+    elapsed.num_seconds() <= HEARTBEAT_TIMEOUT_SECS && process_is_alive(info.pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // SAFETY: 信号 0 只检查进程是否存在，不会向目标进程发送信号。
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
 }
 
 /// 选举或连接到现有 leader。

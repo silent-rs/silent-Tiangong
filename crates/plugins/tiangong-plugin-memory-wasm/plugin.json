@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "memory",
+  "version": "0.6.0",
+  "wasm": "tiangong_plugin_memory_wasm.wasm",
+  "sidecar": {
+    "binary": "tiangong-memory-sidecar",
+    "endpoint": "memory/runtime/memory.json",
+    "log": "plugins/memory/sidecar.log"
+  }
+}

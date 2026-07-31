@@ -5,9 +5,8 @@
 //! `execute_memory_recall_tool` + engine.rs 内的工具名拦截分支），现作为插件工具暴露。
 //!
 //! 运行时上下文通过以下方式获取：
-//! - **构造注入**：入口层先经 `tiangong_memory::registry::init_memory_handle_for_process`
-//!   初始化 MemoryHandle，再传入 `MemoryPlugin::new` / `build_plugin`。记忆系统未启用
-//!   时为 `None`，工具执行降级为「未启用」提示。
+//! - **构造注入**：调用方显式提供 MemoryHandle。当前 App、CLI、Server 已改用
+//!   WASM 插件与 sidecar，不再注册本原生插件。
 //! - [`Plugin::set_feedback_tx`]：复用 worker 命令通道，通过
 //!   [`PluginFeedbackTx::send_stream_event`] 转发 `MemoryRecallStart` / `Progress` /
 //!   `Done` 流事件（不进入对话历史，纯 UI 反馈）。
@@ -32,8 +31,7 @@ use tiangong_core::core::Plugin;
 
 /// 构造记忆召回插件实例，返回 `Arc<dyn Plugin>` 供入口注册。
 ///
-/// `memory_handle` 由入口层经 `tiangong_memory::registry::init_memory_handle_for_process`
-/// 初始化后传入。`None` 表示记忆系统未启用（插件降级为「未启用」提示）。
+/// `memory_handle` 由调用方显式传入。`None` 表示记忆系统未启用。
 pub fn build_plugin(memory_handle: Option<tiangong_memory::MemoryHandle>) -> Arc<dyn Plugin> {
     Arc::new(MemoryPlugin::new(memory_handle))
 }

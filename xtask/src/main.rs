@@ -1,8 +1,8 @@
 //! xtask：辅助构建任务。
 //!
 //! 提供 `build-wasm` 和 `build-sidecar` 子命令：
-//! - build-wasm：构建 memory wasm 组件并部署到 `~/.tiangong/plugins/`
-//! - build-sidecar：构建 memory sidecar 二进制并部署到 `~/.tiangong/memory-sidecar/`
+//! - build-wasm：构建 memory wasm 组件并部署到插件包目录
+//! - build-sidecar：构建 memory sidecar 二进制并部署到同一插件包目录
 //!
 //! 用法：
 //! ```sh
@@ -16,6 +16,8 @@ use std::process::Command;
 const WASM_CRATE: &str = "tiangong-plugin-memory-wasm";
 const WASM_TARGET: &str = "wasm32-wasip2";
 const WASM_ARTIFACT: &str = "tiangong_plugin_memory_wasm.wasm";
+const PLUGIN_ID: &str = "memory";
+const PLUGIN_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory-wasm/plugin.json";
 
 const SIDECAR_CRATE: &str = "tiangong-memory-sidecar";
 const SIDECAR_ARTIFACT: &str = "tiangong-memory-sidecar";
@@ -49,8 +51,8 @@ fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
     eprintln!("用法: cargo run -p xtask -- <子命令>\n");
     eprintln!("子命令:");
-    eprintln!("  build-wasm      构建 memory wasm 组件并部署到 ~/.tiangong/plugins/");
-    eprintln!("  build-sidecar   构建 memory sidecar 二进制并部署到 ~/.tiangong/memory-sidecar/");
+    eprintln!("  build-wasm      构建 memory wasm 组件并部署到插件包目录");
+    eprintln!("  build-sidecar   构建 memory sidecar 二进制并部署到插件包目录");
     eprintln!("  help            显示本帮助");
 }
 
@@ -94,17 +96,18 @@ fn build_wasm() -> std::io::Result<()> {
         file_size(&artifact)?
     );
 
-    // 3. 拷贝到 storage_root/plugins/。
-    let dest_dir = storage_root().join("plugins");
+    // 3. 拷贝到插件包目录，并同步运行时清单。
+    let dest_dir = plugin_dest_dir();
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(WASM_ARTIFACT);
     std::fs::copy(&artifact, &dest)?;
+    deploy_manifest(&workspace_root, &dest_dir)?;
     eprintln!("[xtask] 已部署到: {}", dest.display());
 
     Ok(())
 }
 
-/// 构建 memory sidecar 二进制并部署到 storage_root/memory-sidecar/。
+/// 构建 memory sidecar 二进制并部署到插件包目录。
 fn build_sidecar() -> std::io::Result<()> {
     let workspace_root = workspace_root();
     eprintln!("[xtask] workspace 根目录: {}", workspace_root.display());
@@ -137,11 +140,12 @@ fn build_sidecar() -> std::io::Result<()> {
         file_size(&artifact)?
     );
 
-    // 3. 拷贝到 storage_root/memory-sidecar/。
-    let dest_dir = storage_root().join("memory-sidecar");
+    // 3. 拷贝到插件包目录，并同步运行时清单。
+    let dest_dir = plugin_dest_dir();
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(format!("{SIDECAR_ARTIFACT}{exe}"));
     std::fs::copy(&artifact, &dest)?;
+    deploy_manifest(&workspace_root, &dest_dir)?;
 
     // Unix 设置可执行权限。
     #[cfg(unix)]
@@ -168,6 +172,17 @@ fn storage_root() -> PathBuf {
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join(".tiangong")
+}
+
+fn plugin_dest_dir() -> PathBuf {
+    storage_root().join("plugins").join(PLUGIN_ID)
+}
+
+fn deploy_manifest(workspace_root: &Path, dest_dir: &Path) -> std::io::Result<()> {
+    let source = workspace_root.join(PLUGIN_MANIFEST);
+    let dest = dest_dir.join("plugin.json");
+    std::fs::copy(source, dest)?;
+    Ok(())
 }
 
 /// 用户主目录（兼容 HOME / USERPROFILE / HOMEDRIVE+HOMEPATH）。

@@ -11,7 +11,7 @@ tiangong-llm = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
 tiangong-plugin-mcp = { workspace = true }
 tiangong-config = { workspace = true }
-tiangong-memory = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-bots = { workspace = true }

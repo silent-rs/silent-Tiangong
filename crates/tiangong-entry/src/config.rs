@@ -2,7 +2,6 @@ use anyhow::{Result, anyhow};
 
 use tiangong_config::io::custom_prompt_path;
 use tiangong_config::{default_tiangong_dir, load_server_config, load_tiangong_config};
-use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::{ConfigArgs, ConfigSubcommand};
 
@@ -65,7 +64,6 @@ fn print_overview() {
     let app_config = load_tiangong_config();
     let models = &app_config.models;
     let server = &app_config.server;
-    let memory = MemoryConfig::load_or_default();
 
     // 模型
     let chat_model = models
@@ -94,17 +92,26 @@ fn print_overview() {
     println!("默认工作区：{}", app_config.workspace_dir);
 
     // Memory
-    let memory_model = memory
-        .model
-        .as_ref()
-        .map(|m| m.model.clone())
-        .unwrap_or_else(|| "未配置".to_string());
-    let memory_state = if is_memory_disabled() {
-        "已禁用"
-    } else {
-        "已启用"
-    };
-    println!("Memory：   {memory_state}，LLM={memory_model}");
+    match crate::memory::query_status() {
+        Ok(status) => {
+            let memory_state = if status
+                .get("disabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "已禁用"
+            } else {
+                "已启用"
+            };
+            let memory_model = status
+                .get("llm")
+                .and_then(|value| value.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("未配置");
+            println!("Memory：   {memory_state}，LLM={memory_model}");
+        }
+        Err(error) => println!("Memory：   sidecar 不可用（{error}）"),
+    }
 
     // MCP（直接读 mcp.json 的 servers 数组长度）
     let mcp_count = count_json_entries(&root.join("mcp.json"), "servers").unwrap_or(0);
@@ -157,14 +164,16 @@ fn validate() -> Result<()> {
         issues.push("server.json 端口为 0".to_string());
     }
 
-    // Memory 配置
-    let memory = MemoryConfig::load_or_default();
-    if let Some(m) = &memory.model
-        && (m.base_url.trim().is_empty()
-            || m.api_key.trim().is_empty()
-            || m.model.trim().is_empty())
-    {
-        issues.push("memory LLM 端点配置不完整".to_string());
+    match crate::memory::test_config() {
+        Ok(result) => {
+            if let Some(memory_issues) = result.get("issues").and_then(serde_json::Value::as_array)
+            {
+                issues.extend(memory_issues.iter().filter_map(|issue| {
+                    issue.as_str().map(|message| format!("Memory: {message}"))
+                }));
+            }
+        }
+        Err(error) => issues.push(format!("Memory sidecar 不可用: {error}")),
     }
 
     if issues.is_empty() {

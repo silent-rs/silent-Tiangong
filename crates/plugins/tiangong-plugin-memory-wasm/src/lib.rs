@@ -4,9 +4,9 @@
 //! 全部 memory 处理由 memory sidecar 完成（含 LLM/检索/存储的完整能力）。
 //!
 //! 工作方式：
-//! - handle-tool(recall_memory) 时，经 memory-store.request host import
+//! - handle-tool(recall_memory) 时，经通用 sidecar host import
 //!   把请求转发到 sidecar，结果原样返回。
-//! - sidecar 不可用（无 handle）时，返回降级提示。
+//! - sidecar 不可用时，返回明确提示。
 //!
 //! 见 issue #321 / RFC docs/memory-system/11-memory-sidecar-wasm-bridge.md。
 
@@ -21,13 +21,14 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use bindings::tiangong::plugin::sidecar;
 
-/// 向 sidecar 发送请求：把 method 和 payload 合并成一个 JSON 传给 sidecar.invoke。
+/// 向绑定的 sidecar 发送 Memory 业务操作；通用协议由运行时封装。
 fn sidecar_call(
-    method: &str,
+    operation: &str,
     payload: &serde_json::Value,
 ) -> Result<String, sidecar::SidecarError> {
-    let envelope = serde_json::json!({ "method": method, "payload": payload });
-    sidecar::invoke(&envelope.to_string())
+    let encoded = serde_json::to_string(payload)
+        .map_err(|error| sidecar::SidecarError::Message(format!("序列化请求失败: {error}")))?;
+    sidecar::invoke(operation, &encoded)
 }
 
 mod descriptor {
@@ -141,7 +142,6 @@ impl Guest for Component {
         let session_id = state::session_id().unwrap_or_default();
         let workspace_id = state::workspace_id();
         let payload = serde_json::json!({
-            "method": "load_injection",
             "session_id": session_id,
             "workspace_id": workspace_id,
         });
@@ -171,14 +171,15 @@ impl Guest for Component {
         }
 
         // 桥接：把 recall_memory 的参数包成 MemoryRecallRequest，
-        // 经 memory-store.request 转发到 sidecar 的 recall_context 完整编排。
+        // 经通用 sidecar 接口转发到 recall_context 完整编排。
         let request_payload = serde_json::json!({
-            "method": "recall_context",
-            "query": parse_query(&call.arguments).unwrap_or_default(),
-            "reason": parse_string_field(&call.arguments, "reason"),
-            "expected": parse_string_array(&call.arguments, "expected"),
-            "context": [],
-            "limit": parse_u32_field(&call.arguments, "limit").unwrap_or(5),
+            "request": {
+                "query": parse_query(&call.arguments).unwrap_or_default(),
+                "reason": parse_string_field(&call.arguments, "reason"),
+                "expected": parse_string_array(&call.arguments, "expected"),
+                "context": [],
+                "limit": parse_u32_field(&call.arguments, "limit").unwrap_or(5),
+            }
         });
 
         match sidecar_call("recall_context", &request_payload) {
@@ -187,7 +188,12 @@ impl Guest for Component {
                 // 从中取 content 字段作为摘要。
                 let content = serde_json::from_str::<serde_json::Value>(&response_json)
                     .ok()
-                    .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                    .and_then(|v| {
+                        v.get("response")
+                            .and_then(|response| response.get("content"))
+                            .and_then(|content| content.as_str())
+                            .map(String::from)
+                    })
                     .unwrap_or_else(|| response_json.clone());
                 Ok(tool_result_ok(content))
             }
@@ -384,10 +390,18 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
 
     // 组装 EnhancedTurnResult 的简化 payload，转发到 sidecar。
     let payload = serde_json::json!({
-        "method": "run_enhanced_micro_rumination",
-        "session_id": session_id,
-        "user_input": user_input,
-        "tool_calls": tool_calls,
+        "turn_result": {
+            "session_id": session_id,
+            "turn_id": format!("turn-{turn_start_idx}"),
+            "had_tool_calls": !tool_calls.is_empty(),
+            "user_input": user_input.clone(),
+            "summary": user_input,
+            "tool_calls": tool_calls,
+            "artifacts": [],
+            "workspace_id": state::workspace_id(),
+            "memory_candidates": [],
+            "turn_messages": [],
+        }
     });
     // sidecar 可能不可用（disabled），反刍是 best-effort，忽略错误。
     let _ = sidecar_call("run_enhanced_micro_rumination", &payload);
@@ -410,7 +424,6 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
         .to_string();
 
     let payload = serde_json::json!({
-        "method": "run_meso_rumination",
         "session_id": session_id,
         "workspace_id": workspace_id,
     });

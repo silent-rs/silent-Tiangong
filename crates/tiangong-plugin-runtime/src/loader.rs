@@ -82,6 +82,20 @@ impl WasmPluginLoader {
 
     /// 加载并实例化一个 `.wasm` Component，返回宿主侧 [`WasmPlugin`]。
     pub fn load(&self, wasm_path: &Path, config: &PluginRuntimeConfig) -> Result<WasmPlugin> {
+        let plugin_id = wasm_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("plugin");
+        self.load_for_plugin(wasm_path, config, plugin_id)
+    }
+
+    /// 使用清单中的插件 ID 加载并实例化一个 `.wasm` Component。
+    pub fn load_for_plugin(
+        &self,
+        wasm_path: &Path,
+        config: &PluginRuntimeConfig,
+        plugin_id: &str,
+    ) -> Result<WasmPlugin> {
         let bytes = std::fs::read(wasm_path).map_err(|e| {
             anyhow::anyhow!("读取 wasm 组件失败 {path}: {e}", path = wasm_path.display())
         })?;
@@ -95,7 +109,7 @@ impl WasmPluginLoader {
 
         let mut store = Store::new(
             &self.engine,
-            HostState::new(limits, self.sidecar.clone(), "memory".to_string()),
+            HostState::new(limits, self.sidecar.clone(), plugin_id.to_string()),
         );
         // 注册内存/表/实例上限：limiter 闭包返回 StoreLimits 的借用。
         store.limiter(|state: &mut HostState| state.limits_mut());

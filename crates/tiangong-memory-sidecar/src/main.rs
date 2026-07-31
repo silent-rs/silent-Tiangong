@@ -36,9 +36,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("memory sidecar 已成为 Leader，开始服务");
             // 阻塞等待终止信号（Ctrl+C / SIGTERM）。
             // ManagedMemory 持有 actor + IPC bridge + 心跳，Drop 时自动清理。
-            tokio::signal::ctrl_c()
-                .await
-                .map_err(|e| anyhow::anyhow!("等待终止信号失败: {e}"))?;
+            wait_for_shutdown_signal().await?;
             tracing::info!("收到终止信号，memory sidecar 退出");
         }
         LeaderState::Follower { pid } => {
@@ -48,5 +46,23 @@ async fn main() -> anyhow::Result<()> {
 
     // managed Drop：停心跳、删 endpoint 文件、释放 leader.lock
     drop(managed);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }

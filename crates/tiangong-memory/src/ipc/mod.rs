@@ -18,6 +18,11 @@ use protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse, MemoryIpcRequestPayload,
     MemoryIpcResponsePayload,
 };
+use serde::Serialize;
+use tiangong_plugin_runtime::protocol::{
+    ErrorCode as PluginErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION,
+    Request as PluginRequest, Response as PluginResponse, ServiceStatus,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -249,17 +254,236 @@ async fn run_memory_bridge(
 async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -> Result<()> {
     loop {
         let request = connection.read_request().await?;
-        let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
-            .with_context(|| "解析 Memory IPC 请求载荷失败")?;
-        let response_payload = handle_memory_request(handle.clone(), payload).await?;
+        let response_payload = if request.payload.get("protocol_version").is_some() {
+            let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload) {
+                Ok(plugin_request) => handle_plugin_request(handle.clone(), plugin_request).await,
+                Err(error) => PluginResponse::error(
+                    "unknown",
+                    PluginErrorCode::BadRequest,
+                    format!("解析插件 sidecar 请求失败: {error}"),
+                    false,
+                ),
+            };
+            serde_json::to_value(plugin_response).with_context(|| "序列化插件 sidecar 响应失败")?
+        } else {
+            let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory IPC 请求载荷失败")?;
+            serde_json::to_value(handle_memory_request(handle.clone(), payload).await?)
+                .with_context(|| "序列化 Memory IPC 响应载荷失败")?
+        };
         connection
             .write_response(IpcResponse {
                 request_id: request.request_id,
-                payload: serde_json::to_value(response_payload)
-                    .with_context(|| "序列化 Memory IPC 响应载荷失败")?,
+                payload: response_payload,
             })
             .await?;
     }
+}
+
+#[derive(Serialize)]
+struct MemoryUiBootstrap {
+    config: crate::MemoryConfigSelection,
+    models: Vec<MemoryUiModel>,
+    disabled: bool,
+}
+
+#[derive(Serialize)]
+struct MemoryUiModel {
+    key: String,
+    provider: String,
+    model: String,
+    capabilities: Vec<String>,
+    dimension: Option<usize>,
+}
+
+async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> PluginResponse {
+    let request_id = request.request_id.clone();
+    if request.protocol_version != PROTOCOL_VERSION {
+        return PluginResponse::error(
+            request_id,
+            PluginErrorCode::ProtocolMismatch,
+            format!(
+                "Memory 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
+                request.protocol_version
+            ),
+            false,
+        );
+    }
+    if crate::is_memory_disabled()
+        && !matches!(
+            request.operation.as_str(),
+            HANDSHAKE_OPERATION
+                | "enable"
+                | "disable"
+                | "status"
+                | "test"
+                | "ui.memory.config.get"
+                | "ui.memory.config.set"
+        )
+    {
+        return PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceDisabled,
+            "Memory 已禁用",
+            false,
+        );
+    }
+
+    match dispatch_plugin_request(handle, request).await {
+        Ok(payload) => PluginResponse::success(request_id, payload),
+        Err(error) => PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceError,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+async fn dispatch_plugin_request(
+    handle: MemoryHandle,
+    request: PluginRequest,
+) -> Result<serde_json::Value> {
+    match request.operation.as_str() {
+        HANDSHAKE_OPERATION => serde_json::to_value(HandshakeResponse {
+            plugin_id: "memory".to_string(),
+            plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+            sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            instance_id: format!("memory-sidecar-{}", std::process::id()),
+            status: ServiceStatus::Ready,
+        })
+        .with_context(|| "序列化 Memory 握手响应失败"),
+        "ui.memory.config.get" => memory_ui_bootstrap(),
+        "ui.memory.config.set" => {
+            let selection: crate::MemoryConfigSelection =
+                serde_json::from_value(request.payload)
+                    .with_context(|| "解析 Memory 页面配置失败")?;
+            let models =
+                tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+            let config = selection.to_memory(&models)?;
+            config.save()?;
+            handle.reconfigure(config.to_options()).await?;
+            Ok(serde_json::json!({"ok": true}))
+        }
+        "ui.memory.request" => {
+            let memory_request: MemoryIpcRequestPayload =
+                serde_json::from_value(request.payload)
+                    .with_context(|| "解析 Memory 页面请求失败")?;
+            serde_json::to_value(handle_memory_request(handle, memory_request).await?)
+                .with_context(|| "序列化 Memory 页面响应失败")
+        }
+        "enable" => {
+            crate::enable_memory()?;
+            Ok(serde_json::json!({"ok": true, "disabled": false}))
+        }
+        "disable" => {
+            crate::disable_memory()?;
+            Ok(serde_json::json!({"ok": true, "disabled": true}))
+        }
+        "status" => memory_status(),
+        "test" => memory_config_test(),
+        operation => {
+            let mut payload = request.payload;
+            let object = payload
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("Memory 请求 payload 必须是 JSON 对象"))?;
+            object.insert(
+                "method".to_string(),
+                serde_json::Value::String(operation.to_string()),
+            );
+            let memory_request: MemoryIpcRequestPayload = serde_json::from_value(payload)
+                .with_context(|| format!("解析 Memory {operation} 请求失败"))?;
+            serde_json::to_value(handle_memory_request(handle, memory_request).await?)
+                .with_context(|| format!("序列化 Memory {operation} 响应失败"))
+        }
+    }
+}
+
+fn memory_ui_bootstrap() -> Result<serde_json::Value> {
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+    let config = crate::MemoryConfig::load_or_default();
+    let selection = crate::MemoryConfigSelection::from_memory(&config, &models);
+    let mut model_entries = models
+        .models
+        .iter()
+        .map(|(key, entry)| MemoryUiModel {
+            key: key.clone(),
+            provider: entry.provider.clone(),
+            model: entry.model.clone(),
+            capabilities: entry
+                .capabilities
+                .iter()
+                .map(|capability| capability.key().to_string())
+                .collect(),
+            dimension: entry
+                .options
+                .get("dimension")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok()),
+        })
+        .collect::<Vec<_>>();
+    model_entries.sort_by(|left, right| left.key.cmp(&right.key));
+    serde_json::to_value(MemoryUiBootstrap {
+        config: selection,
+        models: model_entries,
+        disabled: crate::is_memory_disabled(),
+    })
+    .with_context(|| "序列化 Memory 页面配置失败")
+}
+
+fn memory_status() -> Result<serde_json::Value> {
+    let config = crate::MemoryConfig::load_or_default();
+    Ok(serde_json::json!({
+        "disabled": crate::is_memory_disabled(),
+        "vector_mode": format!("{:?}", config.vector_mode),
+        "llm": config.model.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+        "embedding": config.embedding.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "dimension": model.dimension,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+        "rerank": config.rerank.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+    }))
+}
+
+fn memory_config_test() -> Result<serde_json::Value> {
+    let config = crate::MemoryConfig::load_or_default();
+    let mut issues = Vec::new();
+    match &config.model {
+        Some(model) if endpoint_configured(&model.base_url, &model.api_key, &model.model) => {}
+        Some(_) => issues.push("LLM 端点配置不完整".to_string()),
+        None => issues.push("未配置 LLM 端点".to_string()),
+    }
+    if let Some(model) = &config.embedding {
+        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
+            issues.push("Embedding 端点配置不完整".to_string());
+        } else if model.dimension == 0 {
+            issues.push("Embedding 向量维度未设置".to_string());
+        }
+    }
+    if let Some(model) = &config.rerank
+        && !endpoint_configured(&model.base_url, &model.api_key, &model.model)
+    {
+        issues.push("Rerank 端点配置不完整".to_string());
+    }
+    Ok(serde_json::json!({
+        "ok": issues.is_empty(),
+        "issues": issues,
+    }))
+}
+
+fn endpoint_configured(base_url: &str, api_key: &str, model: &str) -> bool {
+    !base_url.trim().is_empty() && !api_key.trim().is_empty() && !model.trim().is_empty()
 }
 
 pub async fn handle_memory_request(

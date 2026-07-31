@@ -48,7 +48,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         )
     });
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
-    // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
     // 对齐 server 入口（tiangong-server/src/lib.rs）：多线程 runtime + enter()，
     // 让主线程在整个 REPL 生命周期内持有 reactor guard。这样主循环里同步执行的
     // deliver_to_core_if_live → on_config_updated → tokio::spawn 才能找到 reactor
@@ -57,11 +56,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         .enable_all()
         .build()?;
     let _runtime_guard = runtime.enter();
-    let memory_handle =
-        runtime.block_on(tiangong_memory::registry::init_memory_handle_for_process(
-            config.generation(),
-            tiangong_memory::ProcessType::Cli,
-        ));
     let default_trust_mode = trust_mode.unwrap_or(state.config.default_trust_mode);
     let mut reader = InputReader::new();
 
@@ -132,7 +126,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             build_cli_plugins(
                 &storage_root,
                 &state.config.models,
-                memory_handle.clone(),
                 &skill_plugin,
                 &mcp_plugin,
                 &index_manager,
@@ -175,14 +168,12 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
             tracing::warn!(%session_id, %error, "终止 Core 失败");
         }
     }
-    tiangong_memory::registry::shutdown_memory_registry_blocking();
     Ok(())
 }
 
 fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
-    memory_handle: Option<tiangong_memory::MemoryHandle>,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
     mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
     index_manager: &std::sync::Arc<tiangong_plugin_index::IndexManager>,
@@ -223,16 +214,9 @@ fn build_cli_plugins(
     if let Some(ep) = stt_endpoint.clone() {
         plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
     }
-    // memory 插件：试迁移阶段只用 WASM 版（加载失败则无 memory 能力）。
-    let sidecar = memory_handle.clone().map(|h| {
-        std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-            as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-    });
-    if let Some(wasm_memory) =
-        tiangong_plugin_runtime::registry::load_memory_wasm_plugin(&storage_root, sidecar)
-    {
-        plugins.push(wasm_memory);
-    }
+    plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
+        &storage_root,
+    ));
     plugins.extend(tiangong_plugin_fetch::default_plugins());
     plugins.extend(tiangong_plugin_command::default_plugins());
     // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。
@@ -265,17 +249,9 @@ fn build_cli_plugins(
             if let Some(ep) = stt_endpoint.clone() {
                 child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
-            // 子 Core memory：试迁移阶段只用 WASM 版。
-            let child_sidecar = memory_handle.clone().map(|h| {
-                std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-                    as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-            });
-            if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
+            child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
-                child_sidecar,
-            ) {
-                child_plugins.push(wasm_memory);
-            }
+            ));
             child_plugins.extend(tiangong_plugin_fetch::default_plugins());
             child_plugins.extend(tiangong_plugin_command::default_plugins());
             // 子 Core 同样不注册 scheduler 插件，与主 Core 一致。

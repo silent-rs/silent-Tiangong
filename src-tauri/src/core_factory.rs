@@ -19,7 +19,7 @@ use tiangong_scheduler::executor::SchedulerContext;
 /// 与 `TiangongApp` 共享以下句柄（同一实例，dual-ownership 语义不变）：
 /// - `app_handle`：Tauri 句柄（setup 阶段注入；构造时尚未就绪）
 /// - `skill_plugin` / `mcp_plugin`：管理插件句柄（core 拿 clone 做 LLM 工具）
-/// - `config`：全局 CoreConfigProvider（取 generation 用于 memory handle 初始化）
+/// - `config`：全局 CoreConfigProvider
 /// - `storage_root`：会话文件根
 /// - `index_manager`：工作区索引单例（issue #259，跨 Core 共享底层索引缓存与扫描状态）
 /// - `scheduler_context`：调度器执行上下文（让 Agent 手动触发定时任务能真正执行）
@@ -45,12 +45,6 @@ impl DesktopCoreFactory {
         models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
         use tracing::{info, warn};
-
-        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
-            self.config.generation(),
-            tiangong_memory::ProcessType::Gui,
-        )
-        .await;
 
         let storage_root = self.storage_root.clone();
         let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
@@ -109,23 +103,10 @@ impl DesktopCoreFactory {
         if let Some(ep) = stt_endpoint.clone() {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
-        // memory 插件：试迁移阶段只用 WASM 版（加载失败则无 memory 能力）。
-        info!(
-            "准备加载 WASM memory 插件，storage_root={}",
-            self.storage_root.display()
-        );
-        let sidecar = memory_handle.clone().map(|h| {
-            std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-                as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-        });
-        if let Some(wasm_memory) =
-            tiangong_plugin_runtime::registry::load_memory_wasm_plugin(&self.storage_root, sidecar)
-        {
-            info!("WASM memory 插件加载成功，已注册");
-            plugins.push(wasm_memory);
-        } else {
-            warn!("WASM memory 插件加载失败或不存在");
-        }
+        let wasm_plugins =
+            tiangong_plugin_runtime::registry::load_installed_plugins(&self.storage_root);
+        info!(count = wasm_plugins.len(), "已加载 WASM 插件");
+        plugins.extend(wasm_plugins);
         // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
         // 能真正执行任务（execute_job）。
         plugins.push(tiangong_plugin_scheduler::build_plugin(
@@ -174,19 +155,9 @@ impl DesktopCoreFactory {
                 if let Some(ep) = stt_endpoint.clone() {
                     child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                 }
-                // 子 Core memory：试迁移阶段只用 WASM 版。
-                let child_sidecar = memory_handle.clone().map(|h| {
-                    std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-                        as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-                });
-                if let Some(wasm_memory) =
-                    tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
-                        &storage_root,
-                        child_sidecar,
-                    )
-                {
-                    child_plugins.push(wasm_memory);
-                }
+                child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
+                    &storage_root,
+                ));
                 // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。
                 child_plugins.push(tiangong_plugin_scheduler::build_plugin(
                     scheduler_context.clone(),

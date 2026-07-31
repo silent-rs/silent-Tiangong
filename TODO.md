@@ -4,8 +4,8 @@
 
 - [x] 定义并构建单文件 WASM Component，提供插件描述、工具、Prompt、生命周期和设置页接口。
 - [x] 引入 Wasmtime Component Model，并设置 fuel、内存限制和 epoch deadline 配置骨架。
-- [x] 通过通用 host request 把 Memory 调用转发到真实 MemoryHandle。
-- [x] 增加 Memory sidecar 二进制和启动管理，sidecar 不可用时保留进程内降级。
+- [x] 通过通用 sidecar 接口把 Memory 调用转发到独立进程。
+- [x] 增加 Memory sidecar 二进制和启动管理，移除进程内降级。
 - [x] Desktop、CLI、Server 三入口加载同一 Memory WASM 制品。
 - [x] 前端根据插件 contribution 动态显示 Memory 设置入口，并从 WASM 内存中加载页面。
 - [x] 移除原有硬编码 Memory 设置入口，试迁移阶段由 WASM 插件接管 Memory 工具与提示注入。
@@ -14,18 +14,18 @@
 
 - [x] 修复未完成代码导致的插件运行时编译失败。
 - [x] 统一插件加载、配置、生命周期、工具、Prompt 和页面调用的执行边界，避免异步环境内嵌套运行崩溃。
-- [x] Memory host request 使用全进程共享运行环境，不再为每个插件实例创建一组工作线程。
+- [x] 多个 Memory WASM 实例复用同一 sidecar 连接和进程。
 - [x] 插件调用异常由边界转换为普通错误，不直接导致宿主进程退出。
 - [x] 重新构建 WASM 制品并通过现有插件运行时验证。
 - [x] 通过 Desktop、CLI、Server Rust 检查与前端正式构建。
-- [x] 启动 Desktop，确认插件预加载注册且无运行时崩溃，正常退出后无残留进程和端口。
+- [x] 启动 Desktop，确认插件预加载和 sidecar 自动启动；退出后 App 与 Vite 无残留，独立 sidecar 保持服务。
 - [x] 使用真实浏览器验证插件设置一级入口、内嵌页面、配置读取与保存消息桥接；原生窗口自动点击仍受系统权限限制。
 
 ### 当前任务完成标准
 
 - 工作区能够正常编译，WASM 制品能够重新生成并加载。
 - 创建会话、构建系统提示、调用记忆、轮次结束和打开插件设置页均不再触发运行时崩溃。
-- 多个插件实例共用 Memory host 运行环境，不随会话数成倍创建工作线程。
+- 多个插件实例共用同一 Memory sidecar，不随会话数重复启动进程。
 - 现有插件运行时验证、三入口检查和前端正式构建通过。
 
 ## 当前任务：Memory 插件 UI 完整迁移
@@ -35,7 +35,7 @@
 - [x] 将分页或增量加载、刷新和召回测试迁入 WASM 插件页面。
 - [x] 将手工记忆新增编辑、单条与批量归档恢复迁入 WASM 插件页面。
 - [x] 将记忆关系查看、新增和删除迁入 WASM 插件页面。
-- [x] 页面数据操作统一经插件消息和 Memory host request 完成，宿主不增加 Memory 专用页面逻辑。
+- [x] 页面数据操作统一经插件消息和通用 sidecar 接口完成，宿主不增加 Memory 专用页面逻辑。
 - [x] 移除宿主中已被插件页面替代的 Memory 专用界面代码和直接调用入口。
 - [x] 重新构建 Memory WASM，并只验证 Memory 相关检查与完整页面流程。
 
@@ -54,44 +54,44 @@
 - [ ] 完成通用右侧 Plugin Tab、页面版本绑定、关闭清理和重启恢复。
 - [ ] 补齐插件配置与 Secret 独立命名空间，以及页面资源和消息的完整限制。
 - [ ] 将 Memory 的提取、整理和反刍编排逐步下沉到 WASM，使 sidecar 最终只保留原子存储能力。
-- [ ] 移除 Core 对原生 Memory 插件和具体 Memory crate 的静态业务依赖。
+- [x] 移除 Core 对原生 Memory 插件和具体 Memory crate 的静态业务依赖。
 - [ ] 完成单文件插件安装、启用、停用、升级、回滚、哈希和签名校验。
 
 # WASM 插件架构重构（方案二）
 
-核心原则：App 管生命周期，Host 管连接和外部资源，WASM 管插件调用协议，sidecar 管完整业务。
+核心原则：WASM 插件运行时是 App 始终启用的基础能力，不设置 `host` feature；App 只加载插件，`tiangong-plugin-runtime` 管通用协议、制品发现、连接和生命周期，WASM 定义业务操作，sidecar 承载完整业务。
 
 ## 阶段一：协议和基础结构
 
-- [ ] 更新 `PLAN.md`，补充 WASM 与 sidecar 架构规划。
-- [ ] 更新 `TODO.md`，按独立任务拆分重构工作。
-- [ ] 建立共享 Memory 私有协议 crate（`tiangong-plugin-memory-protocol`），含请求/响应结构、错误码、协议版本、握手结构，能编译到 WASM。
-- [ ] 给 WIT 增加版本号（`package tiangong:plugin@0.1.0`）。
-- [ ] 增加通用 sidecar WIT interface（`sidecar` 或 `companion`），含请求/响应结构和通用错误类型。
-- [ ] 删除 WIT 中的 `memory-store` interface 和 world 中的 `import memory-store`。
-- [ ] 统一 WIT 来源为单一事实源（共享目录或构建时复制），消除两份副本。
-- [ ] 定义插件 sidecar 清单格式（插件 ID、版本、WASM 路径、sidecar 信息、多平台二进制、权限声明）。
+- [x] 更新 `PLAN.md`，补充 WASM 与 sidecar 架构规划。
+- [x] 更新 `TODO.md`，按独立任务拆分重构工作。
+- [x] 在 `tiangong-plugin-runtime` 内建立通用 sidecar 请求/响应、错误、握手和传输协议，不包含 Memory 业务类型。
+- [x] 给 WIT 增加版本号（`package tiangong:plugin@0.1.0`）。
+- [x] 增加通用 sidecar WIT interface（`sidecar` 或 `companion`），含请求/响应结构和通用错误类型。
+- [x] 删除 WIT 中的 `memory-store` interface 和 world 中的 `import memory-store`。
+- [x] 统一 WIT 来源为单一事实源，消除两份副本。
+- [x] 定义插件制品清单格式（插件 ID、版本、WASM 路径和 sidecar 启动信息），由运行时自动发现。
 
 ### 阶段一完成标准
 
 - Host 能识别带 sidecar 的插件。
-- Memory WASM 与 sidecar 使用同一套请求结构。
+- Memory WASM 只调用通用 WIT，协议封装和响应校验由运行时完成。
 - 通用 WIT 中不再出现 Memory。
 
 ## 阶段二：通用 sidecar 管理
 
-- [ ] 从 `MemorySidecarManager` 抽象出通用插件 sidecar 管理器，不依赖 Memory crate。
+- [x] 实现通用插件 sidecar 管理器，不依赖 Memory crate，也不提供 Memory 专用便捷函数。
 - [ ] 实现插件 sidecar 安装（解包、平台选择、完整性验证、权限设置）。
-- [ ] 实现启动和真实健康检查（协议握手，不只检查 endpoint 文件）。
-- [ ] 实现认证（每次启动生成短期凭据）。
-- [ ] 实现请求转发（原始字节、请求 ID 匹配）。
+- [x] 实现启动和真实健康检查（协议握手，不只检查 endpoint 文件）。
+- [x] 实现认证（每次启动生成短期凭据）。
+- [x] 实现请求转发（通用 JSON 负载、请求 ID 匹配）。
 - [ ] 实现超时、大小限制、并发限制。
 - [ ] 实现崩溃检测和有限重启（退避策略、连续失败禁用）。
 - [ ] 实现日志收集（写入插件私有目录、轮转、脱敏）。
 
 ### 阶段二完成标准
 
-- App 能启动 Memory 插件配套 sidecar。
+- App 通过通用插件加载触发配套 sidecar 启动，入口代码不知道 Memory 制品路径和协议。
 - WASM 能通过通用接口完成一次私有协议调用。
 - Host 不解析 Memory 请求内容。
 - sidecar 崩溃后能明确返回错误或恢复。
@@ -114,12 +114,12 @@
 
 ## 阶段四：Memory 迁移
 
-- [ ] Memory WASM 改用通用 sidecar 接口替换 `memory-store.request`。
+- [x] Memory WASM 改用通用 sidecar 接口，业务操作名和负载只存在于 Memory 插件与 sidecar。
 - [ ] Memory sidecar 改用 Host 模型代理替换直接模型调用。
 - [ ] 修复会话和工作区上下文（显式携带 session_id、workspace_id、turn_id）。
 - [ ] 修复 Micro/Meso 反刍请求（提供完整轮次数据）。
-- [ ] Memory UI 改走新链路。
-- [ ] 配置只保存逻辑模型键，不保存 API Key / Base URL。
+- [x] Memory UI 改走新链路。
+- [x] 配置只保存逻辑模型键，不保存 API Key / Base URL。
 - [ ] 验证召回、写入、反刍和管理页面。
 
 ### 阶段四完成标准
@@ -132,17 +132,18 @@
 
 ## 阶段五：清理旧链路
 
-- [ ] 删除 Memory Host 专用接口和 `HostState` 中的 Memory 依赖。
-- [ ] 删除直接 Memory Handle 注入和进程内 Actor 降级。
-- [ ] 删除旧 GUI 和 Tauri 命令。
-- [ ] 删除重复 WIT 和 sidecar 直接模型调用。
+- [x] 删除 Memory Host 专用接口、独立 Memory 协议 crate 和 `HostState` 中的 Memory 依赖。
+- [x] 删除直接 Memory Handle 注入和进程内 Actor 降级。
+- [x] 删除三入口中的 Memory 专用加载、启动和进程内降级逻辑。
+- [x] 删除重复 WIT。
+- [ ] 将 sidecar 直接模型调用迁移到 Host 模型代理。
 - [ ] 删除旧配置读取路径和完整 `CoreConfig` / Session JSON 注入。
 
 ### 阶段五完成标准
 
-- 全仓不存在旧调用路径。
+- 全仓不存在旧调用路径，App、CLI、Server 入口不存在 `load_memory_*` 或 `memory_sidecar_*` 调用。
 - Desktop、CLI、Server 都走统一插件链路。
-- Rust 全工作区检查通过，前端构建通过。
+- Memory 相关检查、三入口编译和依赖检查通过。
 
 # #250 移动端控制 / 通讯网关 TODO
 

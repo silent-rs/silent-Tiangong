@@ -335,13 +335,6 @@ impl ServerCoreManager {
 
         let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
 
-        // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
-        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
-            self.core_manager.config().generation(),
-            tiangong_memory::ProcessType::Server,
-        )
-        .await;
-
         let _config_guard = self.config_update_lock.lock().await;
 
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
@@ -416,16 +409,9 @@ impl ServerCoreManager {
             if let Some(ep) = stt_endpoint.clone() {
                 plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
-            // memory 插件：试迁移阶段只用 WASM 版（加载失败则无 memory 能力）。
-            let sidecar = memory_handle.clone().map(|h| {
-                std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-                    as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-            });
-            if let Some(wasm_memory) =
-                tiangong_plugin_runtime::registry::load_memory_wasm_plugin(&storage_root, sidecar)
-            {
-                plugins.push(wasm_memory);
-            }
+            plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
+                &storage_root,
+            ));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
@@ -468,19 +454,9 @@ impl ServerCoreManager {
                     if let Some(ep) = stt_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                     }
-                    // 子 Core memory：试迁移阶段只用 WASM 版。
-                    let child_sidecar = memory_handle.clone().map(|h| {
-                        std::sync::Arc::new(tiangong_memory::MemorySidecarConnection::new(h))
-                            as std::sync::Arc<dyn tiangong_plugin_runtime::SidecarConnection>
-                    });
-                    if let Some(wasm_memory) =
-                        tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
-                            &storage_root,
-                            child_sidecar,
-                        )
-                    {
-                        child_plugins.push(wasm_memory);
-                    }
+                    child_plugins.extend(
+                        tiangong_plugin_runtime::registry::load_installed_plugins(&storage_root),
+                    );
                     child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());
                     // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。

@@ -75,16 +75,16 @@ impl ClockHost for HostState {
 
 /// sidecar host import：通用字节转发。
 ///
-/// WASM 组件经 `sidecar.invoke(payload)` 调用，Host 转发给绑定的
-/// SidecarConnection（入口侧注入），不理解业务负载内容。
+/// WASM 组件经 `sidecar.invoke(operation, payload)` 调用，Host 负责通用协议封装，
+/// 不理解操作名与负载的业务含义。
 impl SidecarHost for HostState {
-    fn invoke(&mut self, payload: String) -> Result<String, SidecarError> {
+    fn invoke(&mut self, operation: String, payload: String) -> Result<String, SidecarError> {
         let Some(conn) = self.sidecar.clone() else {
             return Err(SidecarError::Unavailable);
         };
         // 在独立 OS 线程上执行，避免 tokio worker 线程嵌套。
         std::thread::scope(|s| {
-            s.spawn(move || conn.invoke(&payload))
+            s.spawn(move || conn.invoke(&operation, &payload))
                 .join()
                 .map_err(|e| SidecarError::Message(format!("sidecar 线程异常: {e:?}")))?
                 .map_err(|e| SidecarError::Message(format!("{e}")))

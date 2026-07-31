@@ -10463,7 +10463,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-media-archive",
- "tiangong-memory",
  "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
@@ -10472,7 +10471,6 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
- "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",
@@ -10537,7 +10535,6 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-memory",
  "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
@@ -10547,7 +10544,6 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
- "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
@@ -10658,8 +10654,8 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-memory",
  "tiangong-plugin-mcp",
+ "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
  "tiangong-server",
  "tokio",
@@ -10731,7 +10727,6 @@ dependencies = [
  "tantivy",
  "tempfile",
  "tiangong-config",
- "tiangong-core",
  "tiangong-llm",
  "tiangong-plugin-runtime",
  "tiangong-types",
@@ -10924,14 +10919,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-memory-protocol"
-version = "0.13.4"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "tiangong-plugin-memory-wasm"
 version = "0.13.4"
 dependencies = [
@@ -10951,11 +10938,10 @@ name = "tiangong-plugin-runtime"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "libc",
  "serde",
  "serde_json",
- "tiangong-config",
  "tiangong-core",
- "tiangong-llm",
  "tokio",
  "tracing",
  "wasmtime",
@@ -11102,7 +11088,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-media",
  "tiangong-media-archive",
- "tiangong-memory",
  "tiangong-plugin-agent-team",
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
@@ -11112,7 +11097,6 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
- "tiangong-plugin-memory",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",
