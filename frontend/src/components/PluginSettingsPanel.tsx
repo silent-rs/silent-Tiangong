@@ -96,7 +96,7 @@ export function PluginSettingsPanel() {
  * 本组件收到后调 api.pluginCall 转发到 WASM，再把结果 postMessage 回 iframe。
  * 天工不关心消息内容，只做透传。
  */
-function PluginIframe({ pluginId, html }: { pluginId: string; html: string }) {
+export function PluginIframe({ pluginId, html }: { pluginId: string; html: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {

@@ -22,7 +22,8 @@ import { IndexManagementSettings } from './index/IndexManagementSettings';
 import { AutomationSettings } from './automation/AutomationSettings';
 import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
-import { PluginSettingsPanel } from './PluginSettingsPanel';
+import { PluginIframe } from './PluginSettingsPanel';
+import { type PluginContributionEntry } from '../api/tauri';
 
 const appWindow = getCurrentWindow();
 
@@ -72,8 +73,18 @@ export function SettingsDialog() {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('agent');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  const [pluginContributions, setPluginContributions] = useState<PluginContributionEntry[]>([]);
   const pendingSettingsTab = useStore((s) => s.pendingSettingsTab);
   const setPendingSettingsTab = useStore((s) => s.setPendingSettingsTab);
+
+  // 加载插件 contributions（有 has-view 的才显示设置页入口）。
+  useEffect(() => {
+    if (open && pluginContributions.length === 0) {
+      api.listPluginContributions()
+        .then((entries) => setPluginContributions(entries.filter((e) => e.has_view)))
+        .catch(() => {});
+    }
+  }, [open, pluginContributions.length]);
 
   // 响应外部触发打开设置页
   useEffect(() => {
@@ -163,10 +174,12 @@ export function SettingsDialog() {
                   <BotIcon className="w-4 h-4 mr-2" />
                   移动端控制
                 </TabsTrigger>
-                <TabsTrigger value="plugins" className="w-full justify-start px-3 py-2">
-                  <Puzzle className="w-4 h-4 mr-2" />
-                  插件
-                </TabsTrigger>
+                {pluginContributions.map((entry) => (
+                  <TabsTrigger key={`plugin:${entry.plugin_id}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-start px-3 py-2">
+                    <Puzzle className="w-4 h-4 mr-2" />
+                    {entry.title}
+                  </TabsTrigger>
+                ))}
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
@@ -209,9 +222,11 @@ export function SettingsDialog() {
               <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <BotPanel />
               </TabsContent>
-              <TabsContent value="plugins" className="m-0 flex-1 min-h-0 overflow-hidden">
-                <PluginSettingsPanel />
-              </TabsContent>
+              {pluginContributions.map((entry) => (
+                <TabsContent key={`plugin:${entry.plugin_id}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex-1 min-h-0 overflow-hidden">
+                  <PluginView contribution={entry} />
+                </TabsContent>
+              ))}
               <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AppUpdateSettings />
               </TabsContent>
@@ -2501,6 +2516,25 @@ function formatBytes(value: number) {
     unitIndex += 1;
   }
   return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+/// 插件设置页视图：选中时才加载 HTML，用 iframe 渲染。
+function PluginView({ contribution }: { contribution: PluginContributionEntry }) {
+  const [html, setHtml] = useState<string>('');
+
+  useEffect(() => {
+    if (!html) {
+      api.pluginOpenView(contribution.plugin_id, contribution.contribution_id)
+        .then(setHtml)
+        .catch(() => setHtml('<p style="padding:16px;color:#888">页面加载失败</p>'));
+    }
+  }, [contribution, html]);
+
+  if (!html) {
+    return <div className="p-4 text-sm text-muted-foreground">加载中…</div>;
+  }
+
+  return <PluginIframe pluginId={contribution.plugin_id} html={html} />;
 }
 
 function AppUpdateSettings() {
