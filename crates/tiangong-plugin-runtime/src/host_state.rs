@@ -5,6 +5,8 @@
 //! - 内存/表/实例上限（[StoreLimits]）；
 //! - clock host import（提供真实时间）；
 //! - memory-store host import（通用 request，经 [MemoryHandle] 转发到 sidecar）。
+//!
+//! 插件读写自己的配置经 WASI filesystem（host preopen plugins 目录），不在此处理。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,7 +32,7 @@ pub struct HostState {
 
 impl HostState {
     pub fn new(limits: StoreLimits, memory: Option<MemoryHandle>) -> Self {
-        let wasi = WasiCtxBuilder::new().build();
+        let wasi = build_wasi_ctx();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -71,14 +73,9 @@ impl ClockHost for HostState {
 }
 
 /// memory-store host import：通用 request，转发到 sidecar（经 MemoryHandle）。
-///
-/// WASM 传入的 `payload` 是 `MemoryIpcRequestPayload` 的 JSON 文本
-///（含 `method` 内部标签，如 `{"method":"recall",...}`）。host 反序列化后
-/// 经 `MemoryHandle::ipc_request` 分发到具体能力，结果序列化回 JSON。
-/// handle 缺失时返回 disabled。
 impl MemoryStoreHost for HostState {
     fn request(&mut self, method: String, payload: String) -> Result<String, MemoryStoreError> {
-        let _ = method; // method 已内含在 payload JSON 的 tag 中，保留参数仅为 WIT 契约清晰。
+        let _ = method;
         let Some(handle) = self.memory.clone() else {
             return Err(MemoryStoreError::Disabled);
         };
@@ -92,4 +89,39 @@ impl MemoryStoreHost for HostState {
         serde_json::to_string(&response)
             .map_err(|e| MemoryStoreError::Message(format!("序列化 response 失败: {e}")))
     }
+}
+
+/// 构建 WASI 上下文，preopen 插件配置目录供 WASM 组件用 std::fs 读写自己的配置。
+fn build_wasi_ctx() -> WasiCtx {
+    let mut builder = WasiCtxBuilder::new();
+    // preopen ~/.tiangong/plugins/memory/ 目录，映射为 WASM 内的当前目录。
+    // 插件用 std::fs::read_to_string("config.json") 读写自己的配置。
+    let plugin_config_dir = plugin_config_dir();
+    let _ = std::fs::create_dir_all(&plugin_config_dir);
+    if let Err(e) = builder.preopened_dir(
+        &plugin_config_dir,
+        ".",
+        wasmtime_wasi::DirPerms::all(),
+        wasmtime_wasi::FilePerms::all(),
+    ) {
+        tracing::debug!("preopen 插件配置目录失败（插件配置读写将不可用）: {e}");
+    }
+    builder.build()
+}
+
+/// 插件配置目录：~/.tiangong/plugins/memory/
+fn plugin_config_dir() -> std::path::PathBuf {
+    fn user_home() -> Option<std::path::PathBuf> {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return Some(std::path::PathBuf::from(home));
+        }
+        std::env::var_os("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+    user_home()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join(".tiangong")
+        .join("plugins")
+        .join("memory")
 }

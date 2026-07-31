@@ -1350,19 +1350,19 @@ export const api = {
   terminalTabClose: (sessionId: string, tabId: string): Promise<void> =>
     invoke('plugin:terminal|terminal_tab_close', { sessionId, tabId }),
 
-  // ── 插件设置页贡献（WASM 插件动态 UI）──
+  // ── 插件 UI 桥接（WASM 插件动态 UI）──
+  // 天工只提供通用桥接，不处理具体插件业务。
 
   listPluginContributions: (): Promise<PluginContributionEntry[]> =>
     invoke('list_plugin_contributions'),
 
-  getPluginConfigSchema: (pluginId: string): Promise<string> =>
-    invoke('get_plugin_config_schema', { pluginId }),
+  /// 按需获取插件页面 HTML（用户点击进入时才调用）。
+  pluginOpenView: (pluginId: string, contributionId: string): Promise<string> =>
+    invoke('plugin_open_view', { pluginId, contributionId }),
 
-  getPluginConfig: (pluginId: string): Promise<string> =>
-    invoke('get_plugin_config', { pluginId }),
-
-  setPluginConfig: (pluginId: string, configJson: string): Promise<void> =>
-    invoke('set_plugin_config', { pluginId, configJson }),
+  /// 通用桥接：转发到 WASM 的 handle-view-message。
+  pluginCall: (pluginId: string, method: string, payload: string): Promise<string> =>
+    invoke('plugin_call', { pluginId, method, payload }),
 };
 
 /// 插件设置页贡献项。
@@ -1373,19 +1373,6 @@ export interface PluginContributionEntry {
   description: string;
   icon: string;
   group: string;
-}
-
-/// 插件配置字段 schema（由后端声明，前端动态渲染表单）。
-export interface PluginConfigField {
-  key: string;
-  label: string;
-  type: 'string' | 'secret' | 'integer' | 'boolean';
-  required?: boolean;
-  default?: unknown;
-  help?: string;
-}
-
-/// 插件配置 schema。
-export interface PluginConfigSchema {
-  fields: PluginConfigField[];
+  /// 是否有可渲染的配置页面。
+  has_view: boolean;
 }

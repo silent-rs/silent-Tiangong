@@ -127,19 +127,46 @@ interface plugin {
         description: string,
         icon: string,
         group: string,
+        /// 是否有可渲染的配置页面（有则天工在设置页显示入口，点击时调 open-view）。
+        has-view: bool,
     }
 
     /// 声明插件贡献的设置页入口列表。
     contributions: func() -> result<list<contribution>, plugin-error>;
 
-    /// 返回配置表单 schema 的 JSON 文本（字段定义，供前端动态渲染表单）。
-    get-config-schema: func() -> result<string, plugin-error>;
+    // ── 内嵌 Web UI ──
+    // 插件把完整前端页面（HTML/CSS/JS）嵌入 WASM，经这些方法输出给天工渲染。
 
-    /// 返回当前配置值的 JSON 文本。
-    get-config: func() -> result<string, plugin-error>;
+    /// open-view 返回的页面入口 HTML。
+    record view-response {
+        html: string,
+    }
 
-    /// 保存配置（`config-json` 为配置值的 JSON 文本）。
-    set-config: func(config-json: string) -> result<_, plugin-error>;
+    /// 资源响应（HTML/CSS/JS/图片等字节）。
+    record resource-response {
+        data: list<u8>,
+        mime: string,
+    }
+
+    /// 页面消息请求（iframe → 插件）。
+    record view-message-request {
+        method: string,
+        payload: string,
+    }
+
+    /// 页面消息响应（插件 → iframe）。
+    record view-message-response {
+        payload: string,
+    }
+
+    /// 打开页面，返回入口 HTML。
+    open-view: func(contribution-id: string) -> result<view-response, plugin-error>;
+
+    /// 获取页面资源（CSS/JS/图片等）。
+    get-view-resource: func(path: string) -> result<resource-response, plugin-error>;
+
+    /// 处理页面消息（iframe 与插件双向通信）。
+    handle-view-message: func(request: view-message-request) -> result<view-message-response, plugin-error>;
 }
 
 /// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。

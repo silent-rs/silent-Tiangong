@@ -4694,7 +4694,12 @@ pub async fn resolve_model_context_window(
     Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
 }
 
-// ── 插件设置页贡献（WASM 插件动态 UI）──
+// ── 插件 UI 桥接（WASM 插件动态 UI）──
+//
+// 天工只提供通用桥接，不处理具体插件业务：
+// - list_plugin_contributions：列出插件声明（含是否有页面）
+// - plugin_open_view：按需获取插件页面 HTML（天工只当容器，不处理内容）
+// - plugin_call：通用桥接，转发到 WASM 的 handle-view-message
 
 /// 列出所有已加载 WASM 插件的设置页贡献。
 #[tauri::command]
@@ -4712,30 +4717,33 @@ pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>,
                     description: c.description,
                     icon: c.icon,
                     group: c.group,
+                    has_view: c.has_view,
                 })
         })
         .collect())
 }
 
-/// 获取指定插件的配置表单 schema（JSON 文本）。
+/// 按需获取插件页面 HTML（用户点击进入时才调用）。
 #[tauri::command]
-pub async fn get_plugin_config_schema(plugin_id: String) -> Result<String, String> {
-    tiangong_plugin_runtime::registry::get_config_schema(&plugin_id)
-        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无配置 schema"))
+pub async fn plugin_open_view(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::open_view(&plugin_id, &contribution_id)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无页面"))
 }
 
-/// 获取指定插件的当前配置（JSON 文本）。
+/// 通用桥接：转发到 WASM 的 handle-view-message。
+/// iframe 内的 JS 经 postMessage → 前端 → 本命令 → WASM。
+/// 天工不关心 method/payload 含义，只做透传。
 #[tauri::command]
-pub async fn get_plugin_config(plugin_id: String) -> Result<String, String> {
-    tiangong_plugin_runtime::registry::get_config(&plugin_id)
-        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无配置"))
-}
-
-/// 保存指定插件的配置。
-#[tauri::command]
-pub async fn set_plugin_config(plugin_id: String, config_json: String) -> Result<(), String> {
-    tiangong_plugin_runtime::registry::set_config(&plugin_id, config_json)
-        .ok_or_else(|| format!("插件 {plugin_id} 未加载或保存配置失败"))
+pub async fn plugin_call(
+    plugin_id: String,
+    method: String,
+    payload: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::handle_view_message(&plugin_id, &method, &payload)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或处理消息失败"))
 }
 
 /// 插件设置页贡献项（传给前端）。
@@ -4747,4 +4755,5 @@ pub struct PluginContributionEntry {
     pub description: String,
     pub icon: String,
     pub group: String,
+    pub has_view: bool,
 }

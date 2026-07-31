@@ -294,35 +294,48 @@ impl WasmPlugin {
                 description: c.description,
                 icon: c.icon,
                 group: c.group,
+                has_view: c.has_view,
             })
             .collect())
     }
 
-    /// 配置表单 schema（JSON 文本）。
-    pub fn get_config_schema(&mut self) -> Result<String> {
-        self.instance
+    /// 打开页面，返回入口 HTML。
+    pub fn open_view(&mut self, contribution_id: String) -> Result<String> {
+        Ok(self
+            .instance
             .tiangong_plugin_plugin()
-            .call_get_config_schema(&mut self.store)
-            .map_err(|e| anyhow::anyhow!("get-config-schema 调用失败: {e}"))?
-            .map_err(plugin_err)
+            .call_open_view(&mut self.store, &contribution_id)
+            .map_err(|e| anyhow::anyhow!("open-view 调用失败: {e}"))?
+            .map_err(plugin_err)?
+            .html)
     }
 
-    /// 当前配置值（JSON 文本）。
-    pub fn get_config(&mut self) -> Result<String> {
-        self.instance
+    /// 获取页面资源（返回字节 + MIME）。
+    pub fn get_view_resource(&mut self, path: String) -> Result<(Vec<u8>, String)> {
+        let res = self
+            .instance
             .tiangong_plugin_plugin()
-            .call_get_config(&mut self.store)
-            .map_err(|e| anyhow::anyhow!("get-config 调用失败: {e}"))?
-            .map_err(plugin_err)
+            .call_get_view_resource(&mut self.store, &path)
+            .map_err(|e| anyhow::anyhow!("get-view-resource 调用失败: {e}"))?
+            .map_err(plugin_err)?;
+        Ok((res.data, res.mime))
     }
 
-    /// 保存配置。
-    pub fn set_config(&mut self, config_json: String) -> Result<()> {
-        self.instance
+    /// 处理页面消息（iframe ↔ 插件双向通信）。
+    pub fn handle_view_message(&mut self, method: String, payload: String) -> Result<String> {
+        Ok(self
+            .instance
             .tiangong_plugin_plugin()
-            .call_set_config(&mut self.store, &config_json)
-            .map_err(|e| anyhow::anyhow!("set-config 调用失败: {e}"))?
-            .map_err(plugin_err)
+            .call_handle_view_message(
+                &mut self.store,
+                &crate::bindings::exports::tiangong::plugin::plugin::ViewMessageRequest {
+                    method,
+                    payload,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("handle-view-message 调用失败: {e}"))?
+            .map_err(plugin_err)?
+            .payload)
     }
 
     /// 引擎句柄（测试与 epoch 心跳用）。
@@ -377,6 +390,7 @@ pub struct Contribution {
     pub description: String,
     pub icon: String,
     pub group: String,
+    pub has_view: bool,
 }
 
 /// 把 WIT 层的 `plugin-error` 转为 anyhow。

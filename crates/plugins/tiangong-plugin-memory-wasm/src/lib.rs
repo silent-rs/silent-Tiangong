@@ -13,7 +13,8 @@
 mod bindings;
 
 use bindings::exports::tiangong::plugin::plugin::{
-    Contribution, Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
+    Contribution, Guest, PluginDescriptor, PluginError, ResourceResponse, ToolCall, ToolResult,
+    ToolSpec, ViewMessageRequest, ViewMessageResponse, ViewResponse,
 };
 use bindings::tiangong::plugin::memory_store;
 
@@ -93,22 +94,108 @@ const RECALL_MEMORY_INPUT_SCHEMA: &str = r#"{
 
 const RECALL_MEMORY_DESCRIPTION: &str = "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。";
 
-/// memory 设置页的配置 schema（JSON），供前端动态渲染表单。
-/// 字段对应 MemoryConfig 的 LLM/embedding/rerank 端点配置。
-const MEMORY_CONFIG_SCHEMA: &str = r#"{
-  "fields": [
-    {"key": "llm.model", "label": "记忆 LLM 模型", "type": "string", "required": false, "help": "记忆反刍使用的 LLM 模型名（留空则用规则 fallback）"},
-    {"key": "llm.base_url", "label": "记忆 LLM 地址", "type": "string", "required": false},
-    {"key": "llm.api_key", "label": "记忆 LLM 密钥", "type": "secret", "required": false},
-    {"key": "embedding.model", "label": "向量模型", "type": "string", "required": false, "help": "语义检索用的 embedding 模型"},
-    {"key": "embedding.base_url", "label": "向量模型地址", "type": "string", "required": false},
-    {"key": "embedding.api_key", "label": "向量模型密钥", "type": "secret", "required": false},
-    {"key": "embedding.dimension", "label": "向量维度", "type": "integer", "required": false, "default": 1024},
-    {"key": "rerank.model", "label": "重排模型", "type": "string", "required": false},
-    {"key": "rerank.base_url", "label": "重排模型地址", "type": "string", "required": false},
-    {"key": "rerank.api_key", "label": "重排模型密钥", "type": "secret", "required": false}
-  ]
-}"#;
+/// memory 设置页的完整 HTML（内联 CSS + JS，单文件嵌入 WASM）。
+/// 页面经 postMessage 与天工通信，读写配置经 handle-view-message。
+const MEMORY_SETTINGS_HTML: &str = r#"<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>记忆配置</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 16px; margin: 0; color: #1a1a1a; background: #fff; }
+  h2 { margin: 0 0 16px; font-size: 18px; }
+  .field { margin-bottom: 14px; }
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px; font-size: 13px; box-sizing: border-box; }
+  input:focus { outline: none; border-color: #6366f1; }
+  .help { font-size: 11px; color: #888; margin-top: 3px; }
+  button { padding: 8px 18px; background: #6366f1; color: #fff; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #5558e3; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .saved { color: #16a34a; font-size: 12px; margin-left: 10px; }
+</style>
+</head>
+<body>
+<h2>记忆系统配置</h2>
+<div class="field">
+  <label>记忆 LLM 模型 key</label>
+  <input id="model_key" placeholder="留空则用规则 fallback">
+  <div class="help">主模型配置中的模型 key（留空则不走 LLM，用规则提取）</div>
+</div>
+<div class="field">
+  <label>向量模型 key</label>
+  <input id="embedding_key" placeholder="留空则只用关键词检索">
+  <div class="help">语义检索用的 embedding 模型 key</div>
+</div>
+<div class="field">
+  <label>重排模型 key</label>
+  <input id="rerank_key" placeholder="留空则不重排">
+  <div class="help">召回结果重排模型 key</div>
+</div>
+<div class="field">
+  <label>向量模式</label>
+  <input id="vector_mode" placeholder="auto">
+  <div class="help">auto / disabled / embedded_lancedb</div>
+</div>
+<div style="margin-top: 20px;">
+  <button id="save" onclick="save()">保存</button>
+  <span id="saved" class="saved" style="display:none">已保存</span>
+</div>
+<script>
+// 初始化：加载现有配置
+async function init() {
+  try {
+    const config = await callHost('get_config', '');
+    const values = JSON.parse(config || '{}');
+    for (const [key, input] of Object.entries({
+      model_key: 'model_key', embedding_key: 'embedding_key',
+      rerank_key: 'rerank_key', vector_mode: 'vector_mode'
+    })) {
+      const el = document.getElementById(input);
+      if (el && values[key] !== undefined) el.value = values[key];
+    }
+  } catch(e) { console.error('加载配置失败', e); }
+}
+
+async function save() {
+  const btn = document.getElementById('save');
+  btn.disabled = true;
+  const config = JSON.stringify({
+    model_key: document.getElementById('model_key').value,
+    embedding_key: document.getElementById('embedding_key').value,
+    rerank_key: document.getElementById('rerank_key').value,
+    vector_mode: document.getElementById('vector_mode').value
+  });
+  try {
+    await callHost('set_config', config);
+    const saved = document.getElementById('saved');
+    saved.style.display = 'inline';
+    setTimeout(() => saved.style.display = 'none', 2000);
+  } catch(e) { console.error('保存失败', e); }
+  btn.disabled = false;
+}
+
+// 经 postMessage 与天工通信
+function callHost(method, payload) {
+  return new Promise((resolve, reject) => {
+    const id = Math.random().toString(36);
+    const handler = (e) => {
+      if (e.data && e.data.id === id) {
+        window.removeEventListener('message', handler);
+        if (e.data.error) reject(new Error(e.data.error));
+        else resolve(e.data.result);
+      }
+    };
+    window.addEventListener('message', handler);
+    window.parent.postMessage({ type: 'plugin_call', id, method, payload }, '*');
+  });
+}
+
+init();
+</script>
+</body>
+</html>"#;
 
 /// WASM 桥接组件（无状态）。
 struct Component;
@@ -250,27 +337,46 @@ impl Guest for Component {
             description: "记忆系统配置（模型端点、向量检索等）".to_string(),
             icon: "brain".to_string(),
             group: "plugins".to_string(),
+            has_view: true,
         }])
     }
 
-    fn get_config_schema() -> Result<String, PluginError> {
-        // 返回 memory 配置字段的 schema（JSON），供前端动态渲染表单。
-        // 字段对应 MemoryConfig（LLM/embedding/rerank 端点配置）。
-        Ok(MEMORY_CONFIG_SCHEMA.to_string())
+    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
+        if contribution_id != "memory" {
+            return Err(PluginError::Message(format!(
+                "未知的 contribution: {contribution_id}"
+            )));
+        }
+        Ok(ViewResponse {
+            html: MEMORY_SETTINGS_HTML.to_string(),
+        })
     }
 
-    fn get_config() -> Result<String, PluginError> {
-        // 经 request 向 sidecar 读取当前 memory 配置。
-        // sidecar 暂无专用「读配置」IPC 操作，返回空配置占位。
-        // 后续可在 MemoryIpcRequestPayload 加 load_config 操作。
-        Ok(serde_json::json!({}).to_string())
+    fn get_view_resource(path: String) -> Result<ResourceResponse, PluginError> {
+        // memory 设置页是单文件内联 HTML，无额外资源。
+        // 如需 CSS/JS/图标分离，可在此按 path 返回对应资源。
+        Err(PluginError::Message(format!("无此资源: {path}")))
     }
 
-    fn set_config(_config_json: String) -> Result<(), PluginError> {
-        // 经 request 向 sidecar 保存 memory 配置。
-        // sidecar 暂无专用「写配置」IPC 操作，当前为空操作。
-        // 后续可在 MemoryIpcRequestPayload 加 save_config 操作。
-        Ok(())
+    fn handle_view_message(
+        request: ViewMessageRequest,
+    ) -> Result<ViewMessageResponse, PluginError> {
+        match request.method.as_str() {
+            "get_config" => {
+                // 经 WASI filesystem 读取自己的配置。
+                let content = std::fs::read_to_string("config.json").unwrap_or_default();
+                Ok(ViewMessageResponse { payload: content })
+            }
+            "set_config" => {
+                // 经 WASI filesystem 写入自己的配置。
+                std::fs::write("config.json", &request.payload)
+                    .map_err(|e| PluginError::Message(format!("写入配置失败: {e}")))?;
+                Ok(ViewMessageResponse {
+                    payload: "ok".to_string(),
+                })
+            }
+            other => Err(PluginError::Message(format!("未知消息: {other}"))),
+        }
     }
 }
 

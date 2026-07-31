@@ -49,27 +49,30 @@ pub fn list_contributions() -> Vec<(String, Vec<Contribution>)> {
 }
 
 /// 查询指定插件的配置 schema（JSON 文本）。
-pub fn get_config_schema(plugin_id: &str) -> Option<String> {
+/// 打开插件页面，返回入口 HTML。
+pub fn open_view(plugin_id: &str, contribution_id: &str) -> Option<String> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
     let mut plugin = plugin.lock().ok()?;
-    plugin.get_config_schema().ok()
+    plugin.open_view(contribution_id.to_string()).ok()
 }
 
-/// 查询指定插件的当前配置（JSON 文本）。
-pub fn get_config(plugin_id: &str) -> Option<String> {
+/// 获取插件页面资源（字节 + MIME）。
+pub fn get_view_resource(plugin_id: &str, path: &str) -> Option<(Vec<u8>, String)> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
     let mut plugin = plugin.lock().ok()?;
-    plugin.get_config().ok()
+    plugin.get_view_resource(path.to_string()).ok()
 }
 
-/// 保存指定插件的配置。
-pub fn set_config(plugin_id: &str, config_json: String) -> Option<()> {
+/// 处理插件页面消息（iframe ↔ 插件双向通信）。
+pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Option<String> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
     let mut plugin = plugin.lock().ok()?;
-    plugin.set_config(config_json).ok()
+    plugin
+        .handle_view_message(method.to_string(), payload.to_string())
+        .ok()
 }
 
 /// 从 `storage_root/plugins/` 加载 memory wasm 插件。
