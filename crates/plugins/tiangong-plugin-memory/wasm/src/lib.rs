@@ -28,7 +28,7 @@ use tiangong_plugin_memory_protocol::recall::{
 use tiangong_plugin_memory_protocol::rumination::{
     EnhancedTurnResult, MemoryCandidate, RunEnhancedMicroRumination,
     RunEnhancedMicroRuminationRequest, RunMesoRumination, RunMesoRuminationRequest, TurnArtifact,
-    TurnArtifactKind, TurnMessage,
+    TurnArtifactKind, TurnMessage, TurnStatus,
 };
 use tiangong_plugin_memory_protocol::ui::{self, UiRequest};
 use tiangong_plugin_memory_protocol::{Empty, MemoryOperation};
@@ -411,10 +411,25 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
         .map(|m| extract_message_text(m))
         .unwrap_or_else(|| user_input.clone());
 
-    // 只读工具不生成候选（避免 recall_memory 结果回写为新记忆）。
-    const READONLY_TOOLS: &[&str] = &["recall_memory", "list_memory_nodes", "count_memory_nodes"];
+    // 工具来源分类：用于 Memory 分析层判断哪些结果可能值得记录。
+    fn classify_tool_source(name: &str) -> String {
+        match name {
+            "recall_memory" | "list_memory_nodes" | "count_memory_nodes" => {
+                "memory_recall".to_string()
+            }
+            "read_file" | "list_files" | "search_files" => "file_read".to_string(),
+            "write_file" | "replace_in_file" | "apply_patch" => "file_write".to_string(),
+            "run_command" | "cargo_test" => "command".to_string(),
+            "web_fetch" | "generate_image" | "generate_video" => "media_generation".to_string(),
+            _ => "other".to_string(),
+        }
+    }
 
-    // 提取产物和候选。
+    // Memory 查询工具返回的是已有记忆，标记为 recalled_context。
+    const MEMORY_QUERY_TOOLS: &[&str] =
+        &["recall_memory", "list_memory_nodes", "count_memory_nodes"];
+
+    // 提取产物和候选——所有工具都传递，由 Memory 系统统一判断。
     let mut artifacts = Vec::new();
     let mut memory_candidates = Vec::new();
 
@@ -424,6 +439,8 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
             let is_error = m.tool_result_is_error;
             let tool_name = m.tool_name.clone().unwrap_or_default();
             let tc_id = m.tool_call_id.as_deref();
+            let is_recall = MEMORY_QUERY_TOOLS.contains(&tool_name.as_str());
+            let tool_source = classify_tool_source(&tool_name);
 
             // 通过 tool_call_id 从调用参数中补充提取 path/url。
             let mut file_path = None;
@@ -445,7 +462,7 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
                 url = url.or(u);
             }
 
-            // 产物
+            // 产物：所有工具结果都传递（包括召回结果，标记 is_recalled_context）。
             if !text.is_empty() {
                 artifacts.push(TurnArtifact {
                     kind: if url.is_some() {
@@ -464,22 +481,23 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
                     url: url.clone(),
                     path: file_path.clone(),
                     summary: Some(truncate(&text, 200)),
+                    is_recalled_context: is_recall,
                 });
             }
 
-            // 候选：排除只读工具（避免 recall_memory 结果回写）
-            if !READONLY_TOOLS.contains(&tool_name.as_str()) {
-                memory_candidates.push(MemoryCandidate {
-                    tool_name: tool_name.clone(),
-                    step_index: step,
-                    hint: truncate(&text, 500),
-                    suggested_kinds: Vec::new(),
-                    file_path,
-                    url,
-                    result_summary: Some(truncate(&text, 200)),
-                    success: !is_error,
-                });
-            }
+            // 候选：所有工具都传递，Memory 分析层根据 tool_source / is_recalled_context 判断。
+            memory_candidates.push(MemoryCandidate {
+                tool_name: tool_name.clone(),
+                step_index: step,
+                hint: truncate(&text, 500),
+                suggested_kinds: Vec::new(),
+                file_path,
+                url,
+                result_summary: Some(truncate(&text, 200)),
+                success: !is_error,
+                tool_source: Some(tool_source),
+                is_recalled_context: is_recall,
+            });
         }
 
         // 从 Assistant 消息中提取媒体产物。
@@ -493,17 +511,31 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
                         url: Some(url.clone()),
                         path: None,
                         summary: None,
+                        is_recalled_context: false,
                     });
                 }
             }
         }
     }
 
+    // 轮次状态：从最后一条消息的 turn_status 推断。
+    let turn_status = turn_messages
+        .iter()
+        .rev()
+        .find_map(|m| m.turn_status.as_ref())
+        .map(|s| match s {
+            tiangong_types::TurnStatus::Success => TurnStatus::Completed,
+            tiangong_types::TurnStatus::Failed => TurnStatus::Failed,
+            tiangong_types::TurnStatus::Cancelled => TurnStatus::Cancelled,
+        })
+        .unwrap_or_default();
+
     let request = RunEnhancedMicroRuminationRequest {
         turn_result: EnhancedTurnResult {
             session_id: session.id,
             turn_id: format!("turn-{turn_start_idx}"),
             had_tool_calls: !tool_calls.is_empty(),
+            turn_status,
             user_input,
             summary,
             tool_calls,

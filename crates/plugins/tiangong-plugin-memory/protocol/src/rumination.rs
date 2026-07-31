@@ -5,6 +5,19 @@ use crate::{Ack, MemoryOperation};
 pub const RUN_ENHANCED_MICRO_OPERATION: &str = "run_enhanced_micro_rumination";
 pub const RUN_MESO_OPERATION: &str = "run_meso_rumination";
 
+/// 轮次执行状态。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStatus {
+    /// 轮次正常完成。
+    #[default]
+    Completed,
+    /// 轮次被用户取消。
+    Cancelled,
+    /// 轮次因错误结束。
+    Failed,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnArtifactKind {
@@ -27,6 +40,9 @@ pub struct TurnArtifact {
     pub path: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// 标记是否为召回的已有记忆上下文（非新产物）。
+    #[serde(default)]
+    pub is_recalled_context: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +69,12 @@ pub struct MemoryCandidate {
     #[serde(default)]
     pub result_summary: Option<String>,
     pub success: bool,
+    /// 工具来源分类（如 "memory_recall"、"file_operation"），供 Memory 分析层判断。
+    #[serde(default)]
+    pub tool_source: Option<String>,
+    /// 标记是否为召回的已有记忆（不应作为新记忆写入）。
+    #[serde(default)]
+    pub is_recalled_context: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +88,9 @@ pub struct EnhancedTurnResult {
     pub session_id: String,
     pub turn_id: String,
     pub had_tool_calls: bool,
+    /// 轮次执行状态。
+    #[serde(default)]
+    pub turn_status: TurnStatus,
     #[serde(default)]
     pub user_input: String,
     pub summary: String,
