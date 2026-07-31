@@ -157,27 +157,17 @@ pub(crate) async fn process_enhanced_micro(
     workspace_id: Option<&str>,
     model: Option<&LlmEndpointConfig>,
 ) -> Result<()> {
-    let turn_result = TurnResult {
-        session_id: enhanced.session_id.clone(),
-        turn_id: enhanced.turn_id.clone(),
-        had_tool_calls: enhanced.had_tool_calls,
-        user_input: enhanced.user_input.clone(),
-        summary: enhanced.summary.clone(),
-        tool_calls: enhanced.tool_calls.clone(),
-        artifacts: enhanced.artifacts.clone(),
-        workspace_id: enhanced.workspace_id.clone(),
-    };
-
-    if enhanced.memory_candidates.is_empty() {
-        return process_micro(store, &turn_result, workspace_id, model).await;
-    }
+    // 统一入口：不再根据 memory_candidates 是否为空分流到旧路径。
+    // 所有轮次都走统一的多类型提取，由模型或保守规则判断是否需要记录。
 
     tracing::debug!(
         candidate_count = enhanced.memory_candidates.len(),
-        "增强版 Micro 反刍：执行多类型提取"
+        turn_status = ?enhanced.turn_status,
+        had_tool_calls = enhanced.had_tool_calls,
+        "增强版 Micro 反刍：统一分析入口"
     );
 
-    // 1. 多类型提取（由 Memory LLM 判断或规则 fallback）
+    // 1. 多类型提取（由 Memory LLM 判断或保守 fallback）
     let extraction = writer::extract_multi_type_memories_with_model(enhanced, model).await;
 
     // 2. 去重写入 Episode
@@ -221,7 +211,16 @@ pub(crate) async fn process_enhanced_micro(
         }
     }
 
-    // 5. 跨类型关联
+    // 5. 写入 Evidence（补齐之前缺失的持久化）
+    let mut written_evidence_ids = Vec::new();
+    for evidence in &extraction.evidences {
+        match store.write_evidence(evidence.clone(), workspace_id) {
+            Ok(id) => written_evidence_ids.push(id),
+            Err(e) => tracing::warn!("Evidence 写入失败: {}", e),
+        }
+    }
+
+    // 6. 跨类型关联
     link_written_memories(
         store,
         &written_episode_ids,
@@ -229,7 +228,7 @@ pub(crate) async fn process_enhanced_micro(
         &written_decision_ids,
     );
 
-    // 6. 更新 Session Injection
+    // 7. 更新 Session Injection
     let recent = store.recent_episodes_for_session(workspace_id, &enhanced.session_id, 3);
     if !recent.is_empty() {
         let content = build_session_injection(&recent, &enhanced.session_id);
