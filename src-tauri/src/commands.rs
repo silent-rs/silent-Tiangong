@@ -4595,6 +4595,117 @@ pub async fn list_plugins(
     .map_err(|error| format!("读取插件状态失败: {error}"))
 }
 
+/// 从 OSS 静态目录读取当前平台可安装的插件。
+#[tauri::command]
+pub async fn list_available_plugins(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_plugin_runtime::artifacts::AvailablePlugin>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+        .map_err(|error| error.to_string())?;
+    repository
+        .list_available(&storage_root)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn download_and_install_plugin(
+    storage_root: std::path::PathBuf,
+    plugin_id: String,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+        .map_err(|error| error.to_string())?;
+    let staged = repository
+        .download(&storage_root, &plugin_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::install_staged_plugin(&storage_root, staged.path())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("安装插件任务失败: {error}"))?
+}
+
+/// 从 OSS 下载并安装插件。
+#[tauri::command]
+pub async fn install_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    download_and_install_plugin(storage_root, plugin_id).await
+}
+
+/// 从 OSS 下载并升级插件，运行时负责失败恢复和本地回滚版本保留。
+#[tauri::command]
+pub async fn upgrade_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    download_and_install_plugin(storage_root, plugin_id).await
+}
+
+/// 启用或停用已安装插件。
+#[tauri::command]
+pub async fn set_plugin_enabled(
+    plugin_id: String,
+    enabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::set_plugin_enabled(&storage_root, &plugin_id, enabled)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("切换插件状态任务失败: {error}"))?
+}
+
+/// 回滚到本地保留的上一个插件版本。
+#[tauri::command]
+pub async fn rollback_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::rollback_plugin(&storage_root, &plugin_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("回滚插件任务失败: {error}"))?
+}
+
+/// 卸载插件，可选择保留插件数据。
+#[tauri::command]
+pub async fn uninstall_plugin(
+    plugin_id: String,
+    keep_data: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::uninstall_plugin(&storage_root, &plugin_id, keep_data)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("卸载插件任务失败: {error}"))?
+}
+
 /// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
 #[tauri::command]
 pub async fn reload_plugin(

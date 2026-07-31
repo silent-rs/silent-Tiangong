@@ -17,6 +17,8 @@ const PLUGIN_ROOT: &str = "crates/plugins/tiangong-plugin-memory";
 const PLUGIN_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory/plugin.json";
 const PROTOCOL_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory/protocol/Cargo.toml";
 const RUNTIME_MANIFEST: &str = "crates/tiangong-plugin-runtime/Cargo.toml";
+const PLUGIN_DIST: &str = "target/plugin-dist";
+const DEFAULT_OSS_BASE_URL: &str = "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com";
 const PRESERVED_DIRS: [&str; 3] = ["runtime", "logs", "data"];
 
 fn main() {
@@ -127,9 +129,134 @@ fn build_plugin(plugin: &str) -> io::Result<()> {
 
     eprintln!("[xtask] WASM sha256: {}", sha256(&staged_wasm)?);
     eprintln!("[xtask] sidecar sha256: {}", sha256(&staged_sidecar)?);
+    generate_oss_distribution(&workspace_root, &staging)?;
     deploy_atomically(&staging, &destination)?;
     eprintln!("[xtask] Memory 插件已部署到: {}", destination.display());
     Ok(())
+}
+
+fn generate_oss_distribution(workspace_root: &Path, plugin: &Path) -> io::Result<()> {
+    let manifest_path = plugin.join("plugin.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
+        .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
+    let platform = current_platform_key();
+    let dist_root = workspace_root.join(PLUGIN_DIST);
+    let release_root = dist_root.join("plugins").join(PLUGIN_ID).join(version);
+    let platform_root = release_root.join(&platform);
+    let index_root = dist_root.join("plugins-index");
+    std::fs::create_dir_all(&platform_root)?;
+    std::fs::create_dir_all(index_root.join("fragments"))?;
+
+    let dist_manifest = release_root.join("plugin.json");
+    let dist_wasm = release_root.join(WASM_ARTIFACT);
+    let dist_sidecar = platform_root.join(format!(
+        "{SIDECAR_ARTIFACT}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::copy(&manifest_path, &dist_manifest)?;
+    std::fs::copy(plugin.join(WASM_ARTIFACT), &dist_wasm)?;
+    std::fs::copy(
+        plugin.join(format!(
+            "{SIDECAR_ARTIFACT}{}",
+            std::env::consts::EXE_SUFFIX
+        )),
+        &dist_sidecar,
+    )?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dist_sidecar, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    let manifest_checksum = format!("sha256:{}", sha256(&dist_manifest)?);
+    let wasm_checksum = format!("sha256:{}", sha256(&dist_wasm)?);
+    let sidecar_checksum = format!("sha256:{}", sha256(&dist_sidecar)?);
+    let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
+        .trim_end_matches('/')
+        .to_string();
+    let release_url = format!("{base_url}/plugins/{PLUGIN_ID}/{version}");
+    let release = serde_json::json!({
+        "id": PLUGIN_ID,
+        "name": "Memory",
+        "version": version,
+        "description": "对话记忆、召回与数据管理",
+        "manifest": {
+            "url": format!("{release_url}/plugin.json"),
+            "checksum": manifest_checksum,
+        },
+        "wasm": {
+            "url": format!("{release_url}/{WASM_ARTIFACT}"),
+            "checksum": wasm_checksum,
+        },
+        "sidecars": {
+            platform.clone(): {
+                "url": format!(
+                    "{release_url}/{platform}/{SIDECAR_ARTIFACT}{}",
+                    std::env::consts::EXE_SUFFIX
+                ),
+                "checksum": sidecar_checksum,
+            }
+        }
+    });
+    write_json(
+        &index_root.join("catalog.json"),
+        &serde_json::json!({"version": 1, "plugins": [release.clone()]}),
+    )?;
+    write_json(
+        &index_root
+            .join("fragments")
+            .join(format!("{PLUGIN_ID}-{platform}.json")),
+        &release,
+    )?;
+
+    let checksums = format!(
+        "{}  plugin.json\n{}  {}\n{}  {}/{}{}\n",
+        sha256(&dist_manifest)?,
+        sha256(&dist_wasm)?,
+        WASM_ARTIFACT,
+        sha256(&dist_sidecar)?,
+        platform,
+        SIDECAR_ARTIFACT,
+        std::env::consts::EXE_SUFFIX,
+    );
+    std::fs::write(
+        release_root.join(format!("SHA256SUMS-{platform}")),
+        checksums,
+    )?;
+    eprintln!("[xtask] OSS 制品已生成: {}", dist_root.display());
+    Ok(())
+}
+
+fn write_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
+    let mut content = serde_json::to_vec_pretty(value)
+        .map_err(|error| invalid_data(format!("生成 {} 失败: {error}", path.display())))?;
+    content.push(b'\n');
+    std::fs::write(path, content)
+}
+
+fn current_platform_key() -> String {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "unknown"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        "unknown"
+    };
+    format!("{os}-{arch}")
 }
 
 fn validate_versions(workspace_root: &Path) -> io::Result<()> {

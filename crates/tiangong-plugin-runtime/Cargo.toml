@@ -17,3 +17,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 libc = { workspace = true }
+reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
+futures-util = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+semver = { workspace = true }
+scru128 = { workspace = true }

@@ -8,6 +8,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
@@ -36,6 +37,7 @@ pub struct WasmPluginAdapter {
     /// 反馈通道（每 turn 注入），供 handle 发送流事件。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
+    enabled: AtomicBool,
 }
 
 #[derive(Clone, Default)]
@@ -49,6 +51,14 @@ struct ReloadContext {
 
 impl WasmPluginAdapter {
     pub fn new(plugin: WasmPlugin, config: PluginRuntimeConfig) -> Self {
+        Self::new_with_enabled(plugin, config, true)
+    }
+
+    pub(crate) fn new_with_enabled(
+        plugin: WasmPlugin,
+        config: PluginRuntimeConfig,
+        enabled: bool,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(plugin));
         let id_string = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
             .map(|d| d.id)
@@ -59,7 +69,16 @@ impl WasmPluginAdapter {
             config,
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
+            enabled: AtomicBool::new(enabled),
         }
+    }
+
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
     }
 
     /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
@@ -74,7 +93,11 @@ impl WasmPluginAdapter {
     pub(crate) fn prepare_replacement(
         &self,
         mut plugin: WasmPlugin,
+        activate: bool,
     ) -> anyhow::Result<Arc<Mutex<WasmPlugin>>> {
+        if !activate {
+            return Ok(Arc::new(Mutex::new(plugin)));
+        }
         let context = self
             .context
             .lock()
@@ -131,6 +154,9 @@ impl Plugin for WasmPluginAdapter {
         if let Ok(mut context) = self.context.lock() {
             context.config_json = Some(config_json.clone());
         }
+        if !self.is_enabled() {
+            return;
+        }
         if let Err(e) =
             self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
         {
@@ -167,6 +193,9 @@ impl Plugin for WasmPluginAdapter {
         let ws = workspace.map(|p| p.to_string_lossy().to_string());
         if let Ok(mut context) = self.context.lock() {
             context.workspace = ws.clone();
+        }
+        if !self.is_enabled() {
+            return;
         }
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws)) {
             tracing::warn!("wasm set_workspace 失败: {e}");
@@ -214,6 +243,9 @@ impl WasmPluginAdapter {
         if let Ok(mut context) = self.context.lock() {
             context.session_json = Some(json.clone());
         }
+        if !self.is_enabled() {
+            return;
+        }
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
         }
@@ -236,6 +268,9 @@ impl WasmPluginAdapter {
         if let Ok(mut context) = self.context.lock() {
             context.session_json = Some(json.clone());
         }
+        if !self.is_enabled() {
+            return;
+        }
         let idx = turn_start_idx as u32;
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
@@ -246,6 +281,9 @@ impl WasmPluginAdapter {
 // ToolSpecProvider：返回插件声明的工具规格。
 impl ToolSpecProvider for WasmPluginAdapter {
     fn tool_specs(&self) -> Vec<ToolSpec> {
+        if !self.is_enabled() {
+            return Vec::new();
+        }
         match self.call_wasm_off_runtime(WasmPlugin::tool_specs) {
             Ok(specs) => specs
                 .into_iter()
@@ -271,6 +309,9 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         _session: &mut tiangong_core::session::Session,
         _actor_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+        if !self.is_enabled() {
+            return Box::pin(async { None });
+        }
         let arguments = serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
         let wit_call = crate::loader::ToolCall {
             id: call.id.clone(),
@@ -301,6 +342,9 @@ impl ToolOverrideHandler for WasmPluginAdapter {
 // PromptSectionProvider：调 WASM 的 prompt-sections 导出，拉取三级记忆注入。
 impl PromptSectionProvider for WasmPluginAdapter {
     fn prompt_sections(&self) -> Vec<String> {
+        if !self.is_enabled() {
+            return Vec::new();
+        }
         match self.call_wasm_off_runtime(WasmPlugin::prompt_sections) {
             Ok(sections) => sections,
             Err(e) => {

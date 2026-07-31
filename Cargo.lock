@@ -10936,9 +10936,15 @@ name = "tiangong-plugin-runtime"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "futures-util",
+ "hex",
  "libc",
+ "reqwest 0.13.4",
+ "scru128",
+ "semver",
  "serde",
  "serde_json",
+ "sha2",
  "tiangong-core",
  "tokio",
  "tracing",

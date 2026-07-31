@@ -4,6 +4,7 @@
 //! sidecar 的通用协议和运行管理。
 
 pub mod adapter;
+pub mod artifacts;
 pub mod bindings;
 pub mod config;
 mod execution;

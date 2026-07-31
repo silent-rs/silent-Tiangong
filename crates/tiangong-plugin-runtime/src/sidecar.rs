@@ -160,9 +160,21 @@ impl ProcessSidecarConnection {
 
         let deadline = Instant::now() + self.config.start_timeout;
         loop {
-            if self.health_check().is_ok() {
-                tracing::info!(plugin_id = %self.config.plugin_id, "插件 sidecar 已就绪");
-                return Ok(());
+            match self.health_check() {
+                Ok(()) => {
+                    tracing::info!(plugin_id = %self.config.plugin_id, "插件 sidecar 已就绪");
+                    return Ok(());
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<SidecarInvokeError>()
+                        .is_some_and(|error| {
+                            matches!(error, SidecarInvokeError::ProtocolMismatch(_))
+                        }) =>
+                {
+                    return Err(error);
+                }
+                Err(_) => {}
             }
             if Instant::now() >= deadline {
                 return Err(SidecarInvokeError::Timeout).with_context(|| {
@@ -226,6 +238,68 @@ impl ProcessSidecarConnection {
 
     pub fn is_running(&self) -> bool {
         self.health_check().is_ok()
+    }
+
+    /// 停止当前插件对应的 sidecar。插件身份握手失败时不终止进程，避免误伤其他服务。
+    pub fn stop(&self) -> Result<()> {
+        let endpoint = match load_endpoint(&self.config.endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(error)
+                if error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        match self.verify_plugin_identity() {
+            Ok(()) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<SidecarInvokeError>()
+                    .is_some_and(|error| matches!(error, SidecarInvokeError::Unavailable(_))) =>
+            {
+                let _ = std::fs::remove_file(&self.config.endpoint);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+
+        terminate_process(endpoint.pid)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let same_process = load_endpoint(&self.config.endpoint)
+                .map(|current| current.pid == endpoint.pid)
+                .unwrap_or(false);
+            if !same_process {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&self.config.endpoint);
+        Ok(())
+    }
+
+    fn verify_plugin_identity(&self) -> Result<()> {
+        let payload = self
+            .invoke_protocol_once(
+                HANDSHAKE_OPERATION,
+                serde_json::json!({"plugin_id": self.config.plugin_id}),
+            )
+            .map_err(classify_transport_error)?;
+        let handshake: HandshakeResponse =
+            serde_json::from_value(payload).with_context(|| "解析 sidecar 握手响应失败")?;
+        if handshake.plugin_id != self.config.plugin_id {
+            bail!(
+                "sidecar 插件标识不匹配，拒绝停止进程: expected={}, actual={}",
+                self.config.plugin_id,
+                handshake.plugin_id
+            );
+        }
+        Ok(())
     }
 
     fn spawn(&self) -> Result<()> {
@@ -443,6 +517,40 @@ fn write_frame(stream: &mut TcpStream, frame: &IpcFrame) -> Result<()> {
         .write_all(b"\n")
         .with_context(|| "写入 sidecar 请求失败")?;
     stream.flush().with_context(|| "刷新 sidecar 请求失败")
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<()> {
+    let pid = i32::try_from(pid).with_context(|| "sidecar PID 超出系统范围")?;
+    // SAFETY: kill 只向已通过握手确认的 sidecar PID 发送 SIGTERM。
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error).with_context(|| format!("停止 sidecar 进程失败: pid={pid}"))
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<()> {
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .with_context(|| format!("停止 sidecar 进程失败: pid={pid}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("停止 sidecar 进程失败: pid={pid}, status={status}")
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process(_pid: u32) -> Result<()> {
+    bail!("当前平台不支持停止 sidecar 进程")
 }
 
 #[cfg(unix)]

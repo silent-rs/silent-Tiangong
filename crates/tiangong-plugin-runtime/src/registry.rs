@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use semver::Version;
 use serde::Serialize;
 use tiangong_core::core::Plugin;
 
@@ -19,11 +20,15 @@ static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
+const DISABLED_MARKER: &str = ".disabled";
+const ROLLBACK_DIR: &str = ".rollback";
+const PRESERVED_ENTRIES: [&str; 3] = ["runtime", "logs", "data"];
 
 #[derive(Clone)]
 struct InstalledPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
+    enabled: bool,
 }
 
 struct LoadedPlugin {
@@ -36,6 +41,7 @@ struct LoadedPlugin {
     instances: Vec<Weak<WasmPluginAdapter>>,
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     last_error: Option<String>,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -46,6 +52,8 @@ pub struct PluginStatus {
     pub loaded_version: Option<String>,
     pub state: String,
     pub generation: u64,
+    pub enabled: bool,
+    pub can_rollback: bool,
     pub has_sidecar: bool,
     pub sidecar_running: bool,
     pub last_error: Option<String>,
@@ -122,21 +130,35 @@ pub fn list_plugins(storage_root: &Path) -> Vec<PluginStatus> {
                         loaded.sidecar.clone(),
                         loaded.last_error.clone(),
                         loaded.ui_plugin.is_some(),
+                        loaded.enabled,
+                        loaded.directory.clone(),
                     )
                 });
-                (item.manifest, status)
+                (item, status)
             })
             .collect::<Vec<_>>()
     };
 
     let mut statuses = snapshots
         .into_iter()
-        .map(|(manifest, loaded)| {
-            let (descriptor, generation, sidecar, last_error, has_ui) = loaded.unwrap_or_default();
+        .map(|(installed, loaded)| {
+            let manifest = installed.manifest;
+            let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = loaded
+                .unwrap_or((
+                    None,
+                    0,
+                    None,
+                    None,
+                    false,
+                    installed.enabled,
+                    installed.directory,
+                ));
             let sidecar_running = sidecar
                 .as_ref()
                 .is_some_and(|connection| connection.is_running());
-            let state = if !has_ui {
+            let state = if !enabled {
+                "disabled"
+            } else if !has_ui {
                 "error"
             } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
                 "degraded"
@@ -153,6 +175,8 @@ pub fn list_plugins(storage_root: &Path) -> Vec<PluginStatus> {
                 loaded_version: descriptor.map(|value| value.version),
                 state: state.to_string(),
                 generation,
+                enabled,
+                can_rollback: rollback_directory(&directory, &manifest.id).is_dir(),
                 has_sidecar: manifest.sidecar.is_some(),
                 sidecar_running,
                 last_error,
@@ -183,7 +207,9 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
-    if let Some(connection) = &sidecar {
+    if installed.enabled
+        && let Some(connection) = &sidecar
+    {
         connection.ensure_running()?;
     }
 
@@ -221,13 +247,16 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
             adapter.runtime_config(),
         )?;
         let adapter = adapter.clone();
-        let replacement =
-            crate::execution::run_outside_tokio(move || adapter.prepare_replacement(plugin))?;
+        let activate = installed.enabled;
+        let replacement = crate::execution::run_outside_tokio(move || {
+            adapter.prepare_replacement(plugin, activate)
+        })?;
         replacements.push(replacement);
     }
 
     for (adapter, replacement) in instances.iter().zip(replacements) {
         adapter.replace_inner(replacement);
+        adapter.set_enabled(installed.enabled);
     }
 
     let mut plugins = loaded_plugins()
@@ -245,6 +274,7 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.instances = instances.iter().map(Arc::downgrade).collect();
     loaded.sidecar = sidecar;
     loaded.last_error = None;
+    loaded.enabled = installed.enabled;
     tracing::info!(
         plugin_id = %installed.manifest.id,
         generation = next_generation,
@@ -262,6 +292,9 @@ pub fn invoke_sidecar(
     payload: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if !installed.enabled {
+        bail!("插件 {plugin_id} 已停用");
+    }
     let connection = sidecar_connection(storage_root, &installed, false)?;
     let payload = serde_json::to_string(&payload).with_context(|| "序列化插件请求失败")?;
     let response = connection.invoke(operation, &payload)?;
@@ -277,6 +310,9 @@ pub fn list_contributions() -> Vec<(String, u64, Vec<Contribution>)> {
         plugins
             .iter()
             .filter_map(|(id, loaded)| {
+                if !loaded.enabled {
+                    return None;
+                }
                 loaded
                     .ui_plugin
                     .as_ref()
@@ -320,12 +356,9 @@ pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Opti
 }
 
 fn ui_plugin(plugin_id: &str) -> Option<Arc<Mutex<WasmPlugin>>> {
-    loaded_plugins()
-        .lock()
-        .ok()?
-        .get(plugin_id)?
-        .ui_plugin
-        .clone()
+    let plugins = loaded_plugins().lock().ok()?;
+    let loaded = plugins.get(plugin_id)?;
+    loaded.enabled.then(|| loaded.ui_plugin.clone()).flatten()
 }
 
 /// 从指定路径加载 WASM 插件，供运行时集成测试使用。
@@ -358,11 +391,12 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         Ok(connection) => (connection, None),
         Err(error) => (None, Some(error.to_string())),
     };
-    if let Some(connection) = &sidecar {
-        if let Err(error) = connection.ensure_running() {
-            tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
-            last_error = Some(error.to_string());
-        }
+    if installed.enabled
+        && let Some(connection) = &sidecar
+        && let Err(error) = connection.ensure_running()
+    {
+        tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
+        last_error = Some(error.to_string());
     }
 
     let load_result = read_wasm_bytes(&installed).and_then(|bytes| {
@@ -389,6 +423,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 instances: Vec::new(),
                 sidecar,
                 last_error,
+                enabled: installed.enabled,
             }
         }
         Err(error) => {
@@ -403,19 +438,21 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 instances: Vec::new(),
                 sidecar,
                 last_error: Some(error.to_string()),
+                enabled: installed.enabled,
             }
         }
     }
 }
 
 fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
-    let (manifest, bytes, sidecar) = {
+    let (manifest, bytes, sidecar, enabled) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
             loaded.manifest.clone(),
             loaded.wasm_bytes.clone()?,
             loaded.sidecar.clone(),
+            loaded.enabled,
         )
     };
     let (plugin, _) =
@@ -427,9 +464,10 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
                 return None;
             }
         };
-    let adapter = Arc::new(WasmPluginAdapter::new(
+    let adapter = Arc::new(WasmPluginAdapter::new_with_enabled(
         plugin,
         PluginRuntimeConfig::default(),
+        enabled,
     ));
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.get_mut(plugin_id)
@@ -485,7 +523,7 @@ fn set_last_error(plugin_id: &str, error: String) {
 }
 
 fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<PluginStatus> {
-    let (descriptor, generation, sidecar, last_error, has_ui) = {
+    let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(&manifest.id)?;
         (
@@ -494,12 +532,16 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
             loaded.sidecar.clone(),
             loaded.last_error.clone(),
             loaded.ui_plugin.is_some(),
+            loaded.enabled,
+            loaded.directory.clone(),
         )
     };
     let sidecar_running = sidecar
         .as_ref()
         .is_some_and(|connection| connection.is_running());
-    let state = if !has_ui {
+    let state = if !enabled {
+        "disabled"
+    } else if !has_ui {
         "error"
     } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
         "degraded"
@@ -516,10 +558,618 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
         loaded_version: descriptor.map(|value| value.version),
         state: state.to_string(),
         generation,
+        enabled,
+        can_rollback: rollback_directory(&directory, &manifest.id).is_dir(),
         has_sidecar: manifest.sidecar.is_some(),
         sidecar_running,
         last_error,
     })
+}
+
+/// 将已下载并校验的临时目录安装为新插件，或升级现有插件。
+pub fn install_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<PluginStatus> {
+    preload_installed_plugins(storage_root);
+    let _operation = LOAD_OPERATION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    let staged = validate_staged_plugin(storage_root, staged_path)?;
+    let destination = plugin_directory(storage_root, &staged.manifest.id);
+    let current = discover_installed_plugins(storage_root)
+        .into_iter()
+        .find(|installed| installed.manifest.id == staged.manifest.id);
+
+    if let Some(current) = current {
+        if current.directory != destination {
+            bail!(
+                "插件 {} 安装目录与 ID 不一致: {}",
+                current.manifest.id,
+                current.directory.display()
+            );
+        }
+        ensure_newer_version(&current.manifest, &staged.manifest)?;
+        replace_installed_plugin(storage_root, staged_path, &current, staged.manifest)
+    } else {
+        install_new_plugin(storage_root, staged_path, staged.manifest)
+    }
+}
+
+/// 启用或停用插件，并立即同步所有存活 Core 实例。
+pub fn set_plugin_enabled(
+    storage_root: &Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<PluginStatus> {
+    preload_installed_plugins(storage_root);
+    let _operation = LOAD_OPERATION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if installed.enabled == enabled {
+        return list_plugin_status_without_preload(&installed.manifest)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"));
+    }
+
+    let marker = installed.directory.join(DISABLED_MARKER);
+    if enabled {
+        remove_file_if_exists(&marker)?;
+        let mut enabled_plugin = installed.clone();
+        enabled_plugin.enabled = true;
+        if let Err(error) = reload_plugin_inner(storage_root, &enabled_plugin) {
+            create_disabled_marker(&marker)?;
+            set_last_error(plugin_id, error.to_string());
+            return Err(error).with_context(|| format!("启用插件 {plugin_id} 失败"));
+        }
+    } else {
+        create_disabled_marker(&marker)?;
+        let (instances, sidecar) = {
+            let mut plugins = loaded_plugins()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+            let loaded = plugins
+                .get_mut(plugin_id)
+                .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 尚未加载"))?;
+            loaded.enabled = false;
+            loaded.last_error = None;
+            let instances = loaded
+                .instances
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            (instances, loaded.sidecar.clone())
+        };
+        for adapter in &instances {
+            adapter.set_enabled(false);
+        }
+        if let Some(connection) = sidecar
+            && let Err(error) = connection.stop()
+        {
+            for adapter in &instances {
+                adapter.set_enabled(true);
+            }
+            if let Ok(mut plugins) = loaded_plugins().lock()
+                && let Some(loaded) = plugins.get_mut(plugin_id)
+            {
+                loaded.enabled = true;
+                loaded.last_error = Some(error.to_string());
+            }
+            remove_file_if_exists(&marker)?;
+            return Err(error).with_context(|| format!("停用插件 {plugin_id} 失败"));
+        }
+    }
+
+    let mut refreshed = installed;
+    refreshed.enabled = enabled;
+    list_plugin_status_without_preload(&refreshed.manifest)
+        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 状态丢失"))
+}
+
+/// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
+pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
+    preload_installed_plugins(storage_root);
+    let _operation = LOAD_OPERATION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    let current = find_installed_plugin(storage_root, plugin_id)?;
+    let rollback = rollback_directory(&current.directory, plugin_id);
+    if !rollback.is_dir() {
+        bail!("插件 {plugin_id} 没有可回滚版本");
+    }
+
+    stop_loaded_sidecar(plugin_id)?;
+    let transaction = transaction_directory(storage_root, "rollback")?;
+    swap_with_rollback(&current.directory, &rollback, &transaction, current.enabled)?;
+
+    let rolled_back = find_installed_plugin(storage_root, plugin_id)?;
+    if let Err(error) = reload_plugin_inner(storage_root, &rolled_back) {
+        let _ = stop_connection_for_directory(&current.directory);
+        let restore_transaction = transaction_directory(storage_root, "rollback-restore")?;
+        let restore_result = swap_with_rollback(
+            &current.directory,
+            &rollback,
+            &restore_transaction,
+            current.enabled,
+        )
+        .and_then(|()| reload_plugin_inner(storage_root, &current));
+        if let Err(restore_error) = restore_result {
+            bail!("回滚插件 {plugin_id} 失败: {error}; 恢复当前版本失败: {restore_error}");
+        }
+        set_last_error(plugin_id, error.to_string());
+        return Err(error).with_context(|| format!("回滚插件 {plugin_id} 失败"));
+    }
+
+    list_plugin_status_without_preload(&rolled_back.manifest)
+        .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 回滚后状态丢失"))
+}
+
+/// 卸载插件。保留数据时，安装目录中只留下 data 目录。
+pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
+    preload_installed_plugins(storage_root);
+    let _operation = LOAD_OPERATION
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
+    let expected = plugin_directory(storage_root, plugin_id);
+    if installed.directory != expected {
+        bail!(
+            "插件 {plugin_id} 安装目录与 ID 不一致: {}",
+            installed.directory.display()
+        );
+    }
+    stop_loaded_sidecar(plugin_id)?;
+
+    let removed = transaction_directory(storage_root, "uninstall")?;
+    std::fs::rename(&installed.directory, &removed)
+        .with_context(|| format!("移动待卸载插件目录失败: {}", installed.directory.display()))?;
+    let uninstall_result = if keep_data {
+        preserve_only_data(&removed, &installed.directory)
+    } else {
+        remove_directory_if_exists(&removed)
+    };
+    if let Err(error) = uninstall_result {
+        let restore_result = (|| {
+            remove_directory_if_exists(&installed.directory)?;
+            std::fs::rename(&removed, &installed.directory)
+                .with_context(|| format!("恢复插件目录失败: {}", installed.directory.display()))?;
+            reload_plugin_inner(storage_root, &installed)
+        })();
+        if let Err(restore_error) = restore_result {
+            bail!("卸载插件 {plugin_id} 失败: {error}; 恢复插件失败: {restore_error}");
+        }
+        return Err(error).with_context(|| format!("卸载插件 {plugin_id} 失败"));
+    }
+
+    let rollback = rollback_directory(&installed.directory, plugin_id);
+    if let Err(error) = remove_directory_if_exists(&rollback) {
+        tracing::warn!(path = %rollback.display(), %error, "插件已卸载，但清理回滚目录失败");
+    }
+    remove_sidecar_connection(&installed.directory);
+    if let Ok(mut plugins) = loaded_plugins().lock()
+        && let Some(loaded) = plugins.remove(plugin_id)
+    {
+        for adapter in loaded
+            .instances
+            .into_iter()
+            .filter_map(|item| item.upgrade())
+        {
+            adapter.set_enabled(false);
+        }
+    }
+    Ok(())
+}
+
+fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<InstalledPlugin> {
+    let transactions = plugins_directory(storage_root).join(".transactions");
+    if staged_path.parent() != Some(transactions.as_path()) {
+        bail!("插件临时目录不在受管事务目录中: {}", staged_path.display());
+    }
+    ensure_directory(staged_path)?;
+    let manifest = PluginManifest::load(&staged_path.join(MANIFEST_FILE))?;
+    let installed = InstalledPlugin {
+        directory: staged_path.to_path_buf(),
+        manifest,
+        enabled: true,
+    };
+    let result = (|| {
+        let wasm_bytes = Arc::new(read_wasm_bytes(&installed)?);
+        let sidecar = resolve_sidecar(storage_root, &installed, true)?;
+        if let Some(sidecar_manifest) = &installed.manifest.sidecar {
+            let binary = sidecar_binary_path(staged_path, &sidecar_manifest.binary)?;
+            if !binary.is_file() {
+                bail!("插件 sidecar 制品不存在: {}", binary.display());
+            }
+        }
+        instantiate_snapshot(
+            wasm_bytes,
+            &installed.manifest,
+            sidecar,
+            PluginRuntimeConfig::default(),
+        )?;
+        Ok(())
+    })();
+    remove_sidecar_connection(staged_path);
+    result?;
+    Ok(installed)
+}
+
+fn install_new_plugin(
+    storage_root: &Path,
+    staged_path: &Path,
+    manifest: PluginManifest,
+) -> Result<PluginStatus> {
+    let destination = plugin_directory(storage_root, &manifest.id);
+    let retained = if destination.exists() {
+        validate_retained_data_directory(&destination)?;
+        let retained = transaction_directory(storage_root, "retained-data")?;
+        std::fs::rename(&destination, &retained)?;
+        if let Err(error) = move_entry(&retained, staged_path, "data") {
+            let _ = std::fs::rename(&retained, &destination);
+            return Err(error);
+        }
+        Some(retained)
+    } else {
+        None
+    };
+
+    if let Err(error) = std::fs::rename(staged_path, &destination) {
+        if let Some(retained) = &retained {
+            let _ = move_entry(staged_path, retained, "data");
+            let _ = std::fs::rename(retained, &destination);
+        }
+        return Err(error).with_context(|| format!("安装插件 {} 失败", manifest.id));
+    }
+
+    let installed = InstalledPlugin {
+        directory: destination.clone(),
+        manifest: manifest.clone(),
+        enabled: true,
+    };
+    let loaded = load_plugin_record(storage_root, installed);
+    if loaded.ui_plugin.is_none() || loaded.last_error.is_some() {
+        let error = loaded
+            .last_error
+            .unwrap_or_else(|| "WASM 插件加载失败".to_string());
+        let _ = stop_connection_for_directory(&destination);
+        std::fs::rename(&destination, staged_path)?;
+        if let Some(retained) = &retained {
+            move_entry(staged_path, retained, "data")?;
+            std::fs::rename(retained, &destination)?;
+        }
+        bail!("安装插件 {} 失败: {error}", manifest.id);
+    }
+    loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+        .insert(manifest.id.clone(), loaded);
+    if let Some(retained) = retained
+        && let Err(error) = remove_directory_if_exists(&retained)
+    {
+        tracing::warn!(path = %retained.display(), %error, "插件已安装，但清理数据迁移目录失败");
+    }
+    list_plugin_status_without_preload(&manifest)
+        .ok_or_else(|| anyhow::anyhow!("插件 {} 安装后状态丢失", manifest.id))
+}
+
+fn replace_installed_plugin(
+    storage_root: &Path,
+    staged_path: &Path,
+    current: &InstalledPlugin,
+    manifest: PluginManifest,
+) -> Result<PluginStatus> {
+    stop_loaded_sidecar(&current.manifest.id)?;
+    let rollback = rollback_directory(&current.directory, &current.manifest.id);
+    if let Some(parent) = rollback.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let saved_rollback = if rollback.exists() {
+        let saved = transaction_directory(storage_root, "previous-rollback")?;
+        std::fs::rename(&rollback, &saved)?;
+        Some(saved)
+    } else {
+        None
+    };
+
+    let switch_result = (|| {
+        std::fs::rename(&current.directory, &rollback)?;
+        move_preserved_entries(&rollback, staged_path)?;
+        set_disabled_marker(staged_path, !current.enabled)?;
+        std::fs::rename(staged_path, &current.directory)?;
+        Ok::<_, anyhow::Error>(())
+    })();
+    if let Err(error) = switch_result {
+        let _ = restore_upgrade_directories(staged_path, &current.directory, &rollback);
+        let _ = restore_saved_rollback(&rollback, saved_rollback.as_deref());
+        let _ = reload_plugin_inner(storage_root, current);
+        return Err(error).with_context(|| format!("切换插件 {} 目录失败", current.manifest.id));
+    }
+
+    let upgraded = InstalledPlugin {
+        directory: current.directory.clone(),
+        manifest: manifest.clone(),
+        enabled: current.enabled,
+    };
+    if let Err(error) = reload_plugin_inner(storage_root, &upgraded) {
+        let _ = stop_connection_for_directory(&current.directory);
+        let restore_result =
+            restore_upgrade_directories(staged_path, &current.directory, &rollback)
+                .and_then(|()| restore_saved_rollback(&rollback, saved_rollback.as_deref()))
+                .and_then(|()| reload_plugin_inner(storage_root, current));
+        if let Err(restore_error) = restore_result {
+            bail!(
+                "升级插件 {} 失败: {error}; 恢复旧版本失败: {restore_error}",
+                current.manifest.id
+            );
+        }
+        set_last_error(&current.manifest.id, error.to_string());
+        return Err(error).with_context(|| format!("升级插件 {} 失败", current.manifest.id));
+    }
+    if let Some(saved) = saved_rollback
+        && let Err(error) = remove_directory_if_exists(&saved)
+    {
+        tracing::warn!(path = %saved.display(), %error, "插件已升级，但清理旧回滚目录失败");
+    }
+    list_plugin_status_without_preload(&manifest)
+        .ok_or_else(|| anyhow::anyhow!("插件 {} 升级后状态丢失", manifest.id))
+}
+
+fn restore_upgrade_directories(staged: &Path, destination: &Path, rollback: &Path) -> Result<()> {
+    if destination.exists() {
+        std::fs::rename(destination, staged)?;
+    }
+    if PRESERVED_ENTRIES
+        .iter()
+        .any(|entry| staged.join(entry).exists())
+    {
+        move_preserved_entries(staged, rollback)?;
+    }
+    if rollback.exists() {
+        std::fs::rename(rollback, destination)?;
+    }
+    Ok(())
+}
+
+fn restore_saved_rollback(rollback: &Path, saved: Option<&Path>) -> Result<()> {
+    if let Some(saved) = saved
+        && saved.exists()
+    {
+        std::fs::rename(saved, rollback)?;
+    }
+    Ok(())
+}
+
+fn swap_with_rollback(
+    destination: &Path,
+    rollback: &Path,
+    transaction: &Path,
+    enabled: bool,
+) -> Result<()> {
+    std::fs::rename(destination, transaction)?;
+    if let Err(error) = std::fs::rename(rollback, destination) {
+        let _ = std::fs::rename(transaction, destination);
+        return Err(error.into());
+    }
+    if let Err(error) = move_preserved_entries(transaction, destination) {
+        let _ = std::fs::rename(destination, rollback);
+        let _ = std::fs::rename(transaction, destination);
+        return Err(error);
+    }
+    if let Err(error) = set_disabled_marker(destination, !enabled) {
+        let _ = move_preserved_entries(destination, transaction);
+        let _ = std::fs::rename(destination, rollback);
+        let _ = std::fs::rename(transaction, destination);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(transaction, rollback) {
+        let _ = move_preserved_entries(destination, transaction);
+        let _ = std::fs::rename(destination, rollback);
+        let _ = std::fs::rename(transaction, destination);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn preserve_only_data(source: &Path, destination: &Path) -> Result<()> {
+    let data = source.join("data");
+    std::fs::create_dir_all(destination)?;
+    if data.exists() {
+        std::fs::rename(&data, destination.join("data"))?;
+    } else {
+        std::fs::create_dir_all(destination.join("data"))?;
+    }
+    if let Err(error) = remove_directory_if_exists(source) {
+        tracing::warn!(path = %source.display(), %error, "插件已卸载并保留数据，但清理旧制品失败");
+    }
+    Ok(())
+}
+
+fn validate_retained_data_directory(path: &Path) -> Result<()> {
+    ensure_directory(path)?;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_name() != "data" || !entry.file_type()?.is_dir() {
+            bail!("插件目录已存在且不是可恢复的数据目录: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn ensure_newer_version(current: &PluginManifest, next: &PluginManifest) -> Result<()> {
+    let current_version = Version::parse(&current.version)
+        .with_context(|| format!("当前插件 {} 版本无效", current.id))?;
+    let next_version =
+        Version::parse(&next.version).with_context(|| format!("插件 {} 新版本无效", next.id))?;
+    if next_version <= current_version {
+        bail!(
+            "插件 {} 可安装版本 {} 不高于当前版本 {}",
+            current.id,
+            next.version,
+            current.version
+        );
+    }
+    Ok(())
+}
+
+fn move_preserved_entries(source: &Path, destination: &Path) -> Result<()> {
+    for entry in PRESERVED_ENTRIES {
+        remove_directory_if_exists(&destination.join(entry))?;
+    }
+
+    let mut moved = Vec::new();
+    for entry in PRESERVED_ENTRIES {
+        let source_entry = source.join(entry);
+        if !source_entry.exists() {
+            continue;
+        }
+        let destination_entry = destination.join(entry);
+        if let Err(error) = std::fs::rename(&source_entry, &destination_entry) {
+            for moved_entry in moved.into_iter().rev() {
+                let _ = std::fs::rename(destination.join(moved_entry), source.join(moved_entry));
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "迁移插件目录失败: {} -> {}",
+                    source_entry.display(),
+                    destination_entry.display()
+                )
+            });
+        }
+        moved.push(entry);
+    }
+    Ok(())
+}
+
+fn move_entry(source: &Path, destination: &Path, entry: &str) -> Result<()> {
+    let source = source.join(entry);
+    if !source.exists() {
+        return Ok(());
+    }
+    let destination = destination.join(entry);
+    remove_directory_if_exists(&destination)?;
+    std::fs::rename(&source, &destination).with_context(|| {
+        format!(
+            "迁移插件目录失败: {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn set_disabled_marker(directory: &Path, disabled: bool) -> Result<()> {
+    let marker = directory.join(DISABLED_MARKER);
+    if disabled {
+        create_disabled_marker(&marker)
+    } else {
+        remove_file_if_exists(&marker)
+    }
+}
+
+fn create_disabled_marker(path: &Path) -> Result<()> {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("创建插件停用标记失败: {}", path.display()))
+        }
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("删除文件失败: {}", path.display())),
+    }
+}
+
+fn ensure_directory(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("读取目录失败: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("路径不是受管目录: {}", path.display());
+    }
+    Ok(())
+}
+
+fn remove_directory_if_exists(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("拒绝删除符号链接目录: {}", path.display())
+        }
+        Ok(_) => std::fs::remove_dir_all(path)
+            .with_context(|| format!("删除目录失败: {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("读取目录失败: {}", path.display())),
+    }
+}
+
+fn transaction_directory(storage_root: &Path, label: &str) -> Result<PathBuf> {
+    let root = plugins_directory(storage_root).join(".transactions");
+    std::fs::create_dir_all(&root)?;
+    Ok(root.join(format!("{}-{label}", scru128::new())))
+}
+
+fn plugins_directory(storage_root: &Path) -> PathBuf {
+    storage_root.join("plugins")
+}
+
+fn plugin_directory(storage_root: &Path, plugin_id: &str) -> PathBuf {
+    plugins_directory(storage_root).join(plugin_id)
+}
+
+fn rollback_directory(directory: &Path, plugin_id: &str) -> PathBuf {
+    directory
+        .parent()
+        .unwrap_or(directory)
+        .join(ROLLBACK_DIR)
+        .join(plugin_id)
+}
+
+fn sidecar_binary_path(directory: &Path, binary: &Path) -> Result<PathBuf> {
+    let mut path = directory.join(binary);
+    if !std::env::consts::EXE_SUFFIX.is_empty() {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("sidecar 文件名无效"))?;
+        if !file_name.ends_with(std::env::consts::EXE_SUFFIX) {
+            path.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
+        }
+    }
+    Ok(path)
+}
+
+fn stop_loaded_sidecar(plugin_id: &str) -> Result<()> {
+    let sidecar = loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?
+        .get(plugin_id)
+        .and_then(|loaded| loaded.sidecar.clone());
+    if let Some(sidecar) = sidecar {
+        sidecar.stop()?;
+    }
+    Ok(())
+}
+
+fn stop_connection_for_directory(directory: &Path) -> Result<()> {
+    let connection = sidecar_connections()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件 sidecar 连接表已损坏"))?
+        .get(directory)
+        .cloned();
+    if let Some(connection) = connection {
+        connection.stop()?;
+    }
+    remove_sidecar_connection(directory);
+    Ok(())
+}
+
+fn remove_sidecar_connection(directory: &Path) {
+    if let Ok(mut connections) = sidecar_connections().lock() {
+        connections.remove(directory);
+    }
 }
 
 fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
@@ -537,10 +1187,14 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
     manifest_paths
         .into_iter()
         .filter_map(|path| match PluginManifest::load(&path) {
-            Ok(manifest) => Some(InstalledPlugin {
-                directory: path.parent()?.to_path_buf(),
-                manifest,
-            }),
+            Ok(manifest) => {
+                let directory = path.parent()?.to_path_buf();
+                Some(InstalledPlugin {
+                    enabled: !directory.join(DISABLED_MARKER).is_file(),
+                    directory,
+                    manifest,
+                })
+            }
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "忽略无效插件清单");
                 None

@@ -1236,6 +1236,23 @@ export const api = {
 
   listPlugins: (): Promise<PluginStatus[]> => invoke('list_plugins'),
 
+  listAvailablePlugins: (): Promise<AvailablePlugin[]> => invoke('list_available_plugins'),
+
+  installPlugin: (pluginId: string): Promise<PluginStatus> =>
+    invoke('install_plugin', { pluginId }),
+
+  upgradePlugin: (pluginId: string): Promise<PluginStatus> =>
+    invoke('upgrade_plugin', { pluginId }),
+
+  setPluginEnabled: (pluginId: string, enabled: boolean): Promise<PluginStatus> =>
+    invoke('set_plugin_enabled', { pluginId, enabled }),
+
+  rollbackPlugin: (pluginId: string): Promise<PluginStatus> =>
+    invoke('rollback_plugin', { pluginId }),
+
+  uninstallPlugin: (pluginId: string, keepData: boolean): Promise<void> =>
+    invoke('uninstall_plugin', { pluginId, keepData }),
+
   reloadPlugin: (pluginId: string): Promise<PluginStatus> =>
     invoke('reload_plugin', { pluginId }),
 
@@ -1266,9 +1283,21 @@ export interface PluginStatus {
   name: string;
   manifest_version: string;
   loaded_version: string | null;
-  state: 'loaded' | 'degraded' | 'error';
+  state: 'loaded' | 'disabled' | 'degraded' | 'error';
   generation: number;
+  enabled: boolean;
+  can_rollback: boolean;
   has_sidecar: boolean;
   sidecar_running: boolean;
   last_error: string | null;
+}
+
+export interface AvailablePlugin {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  supported: boolean;
+  installed_version: string | null;
+  update_available: boolean;
 }
