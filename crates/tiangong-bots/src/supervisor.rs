@@ -215,7 +215,7 @@ fn spawn_child(artifact_path: &PathBuf, env: &BTreeMap<String, String>) -> Resul
     }
     paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
-    tiangong_types::process::configure_tokio_no_window(&mut cmd);
+    tiangong_toolkit::configure_tokio_no_window(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

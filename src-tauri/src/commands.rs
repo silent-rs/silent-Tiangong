@@ -18,16 +18,7 @@ use crate::workspace_tabs::{
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
-#[allow(unused_mut)]
-fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
+use tiangong_toolkit::configure_tokio_no_window;
 
 #[allow(dead_code)]
 fn done_event_keeps_turn_running(
@@ -1981,7 +1972,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
     {
         let mut command = tokio::process::Command::new("afplay");
         command.arg(&file_path);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await
@@ -1995,7 +1986,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
             "-c",
             &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
         ]);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await
@@ -2006,7 +1997,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
     {
         let mut command = tokio::process::Command::new("aplay");
         command.arg(&file_path);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await

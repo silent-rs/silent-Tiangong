@@ -10481,6 +10481,7 @@ dependencies = [
  "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-server",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "toml 1.1.3+spec-1.1.0",
@@ -10516,6 +10517,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tempfile",
+ "tiangong-toolkit",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10921,6 +10923,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-plugin-memory-protocol",
+ "tiangong-types",
  "wit-bindgen 0.46.0",
 ]
 
@@ -10946,6 +10949,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tiangong-core",
+ "tiangong-types",
  "tokio",
  "tracing",
  "wasmtime",
@@ -11005,6 +11009,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiangong-core",
+ "tiangong-toolkit",
  "tiangong-types",
  "tracing",
 ]
@@ -11120,6 +11125,7 @@ version = "0.13.4"
 dependencies = [
  "anyhow",
  "tiangong-types",
+ "tokio",
 ]
 
 [[package]]
@@ -11130,7 +11136,6 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

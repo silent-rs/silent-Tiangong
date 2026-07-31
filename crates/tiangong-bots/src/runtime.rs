@@ -550,7 +550,7 @@ async fn describe_artifact(artifact_path: &Path) -> Result<BotDescription> {
     paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
     cmd.arg("--describe");
-    tiangong_types::process::configure_tokio_no_window(&mut cmd);
+    tiangong_toolkit::configure_tokio_no_window(&mut cmd);
     let output = cmd
         .output()
         .await
@@ -665,7 +665,7 @@ async fn run_management_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    tiangong_types::process::configure_tokio_no_window(&mut command);
+    tiangong_toolkit::configure_tokio_no_window(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("启动 Bot 管理命令失败：{command_label}"))?;

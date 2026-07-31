@@ -7,6 +7,7 @@ description = "天工通讯网关——bot 制品下载、进程监督与配置�
 
 [dependencies]
 tiangong-types = { workspace = true }
+tiangong-toolkit = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
 tokio = { workspace = true, features = [
     "process",

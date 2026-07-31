@@ -227,16 +227,17 @@ impl WasmPluginAdapter {
         call_wasm_off_runtime(self.current_inner(), call)
     }
 
-    /// 序列化 session 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
+    /// 序列化 PluginSession 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
     fn forward_session_hook(
         &self,
         session: &Session,
         call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let json = match serde_json::to_string(session) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
-                tracing::warn!("序列化 session 失败，跳过 wasm 钩子: {e}");
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
                 return;
             }
         };
@@ -258,10 +259,11 @@ impl WasmPluginAdapter {
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
     ) {
-        let json = match serde_json::to_string(session) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
             Err(e) => {
-                tracing::warn!("序列化 session 失败，跳过 wasm 钩子: {e}");
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
                 return;
             }
         };

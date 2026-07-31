@@ -6,7 +6,7 @@
 pub mod attachment;
 pub mod event;
 pub mod message;
-pub mod process;
+pub mod plugin_session;
 pub mod remote;
 pub mod session;
 pub mod status;
@@ -23,7 +23,7 @@ pub use message::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
     MessageToolCall, TurnStatus, now_text,
 };
-pub use process::{configure_no_window, configure_tokio_no_window};
+pub use plugin_session::PluginSession;
 pub use remote::{IncomingMessage, MessageContent, OutgoingMessage, RemoteRole};
 pub use session::Session;
 pub use status::RunStatus;

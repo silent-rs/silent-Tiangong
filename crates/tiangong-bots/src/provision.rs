@@ -104,7 +104,7 @@ async fn execute(artifact_path: &Path, command: &str, input: Option<Vec<u8>>) ->
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    tiangong_types::process::configure_tokio_no_window(&mut process);
+    tiangong_toolkit::configure_tokio_no_window(&mut process);
 
     let mut child = process
         .spawn()

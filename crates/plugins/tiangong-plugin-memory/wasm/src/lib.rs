@@ -220,10 +220,9 @@ impl Guest for Component {
     // session 的所有修改权始终在 Core，WASM/ sidecar 绝不回写。
 
     fn on_session_ready(session_json: String) -> Result<(), PluginError> {
-        // 会话就绪：从 session 快照提取 id 缓存，供 prompt_sections 拉注入用。
-        if let Ok(session) = serde_json::from_str::<serde_json::Value>(&session_json) {
-            let id = session.get("id").and_then(|v| v.as_str()).map(String::from);
-            state::set_session_id(id);
+        // 会话就绪：从 PluginSession 提取 id 缓存，供 prompt_sections 拉注入用。
+        if let Ok(session) = serde_json::from_str::<tiangong_types::PluginSession>(&session_json) {
+            state::set_session_id(Some(session.id));
         }
         Ok(())
     }
@@ -355,47 +354,31 @@ fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
 /// 提取 session.id、本轮 user_input、工具调用名，组装成 EnhancedTurnResult 的
 /// 简化形式，经类型化 sidecar client 转发。
 fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
-    let session: serde_json::Value = serde_json::from_str(session_json)
-        .map_err(|e| PluginError::Message(format!("解析 session 失败: {e}")))?;
-    let session_id = session
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let messages = session.get("messages").cloned().unwrap_or_default();
+    let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
+        .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
+    let session_id = session.id.clone();
     let idx = turn_start_idx as usize;
+    let messages = &session.messages;
 
     // 提取本轮 user_input（messages[idx] 的文本内容）。
+    // Message.content 是 Vec<ContentBlock>，需要遍历提取 Text 块。
     let user_input = messages
         .get(idx)
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(extract_message_text)
+        .unwrap_or_default();
 
     // 提取本轮工具调用名列表。
     let tool_calls: Vec<String> = messages
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .skip(idx)
-                .filter_map(|m| {
-                    let is_tool = m
-                        .get("role")
-                        .and_then(|r| r.as_str())
-                        .map(|r| r == "tool")
-                        .unwrap_or(false);
-                    if is_tool {
-                        m.get("tool_name")
-                            .and_then(|t| t.as_str())
-                            .map(String::from)
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+        .iter()
+        .skip(idx)
+        .filter_map(|m| {
+            if matches!(m.role, tiangong_types::MessageRole::Tool) {
+                m.tool_name.clone()
+            } else {
+                None
+            }
         })
-        .unwrap_or_default();
+        .collect();
 
     let request = RunEnhancedMicroRuminationRequest {
         turn_result: EnhancedTurnResult {
@@ -418,25 +401,29 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
 
 /// 从 session 快照提取 id/cwd，转发给 sidecar 做 meso 反刍。
 fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
-    let session: serde_json::Value = serde_json::from_str(session_json)
-        .map_err(|e| PluginError::Message(format!("解析 session 失败: {e}")))?;
-    let session_id = session
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let workspace_id = session
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
+        .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
 
     let request = RunMesoRuminationRequest {
-        session_id,
-        workspace_id,
+        session_id: session.id,
+        workspace_id: session.cwd,
     };
     let _ = sidecar_client::invoke::<RunMesoRumination>(&request);
     Ok(())
+}
+
+/// 从 Message 的 ContentBlock 列表中提取文本内容。
+/// Message.content 是 Vec<ContentBlock>，需要遍历 Text 块拼接。
+fn extract_message_text(message: &tiangong_types::Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            tiangong_types::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 fn tool_result_ok(summary: String) -> ToolResult {

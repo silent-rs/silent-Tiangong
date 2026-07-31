@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tiangong-plugin-memory-protocol = { workspace = true }
+tiangong-types = { workspace = true }
 wit-bindgen = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
