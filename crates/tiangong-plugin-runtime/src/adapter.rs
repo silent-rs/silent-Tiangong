@@ -1,11 +1,10 @@
 //! WASM 插件 → 进程内 `Plugin` trait 适配器。
 //!
 //! [`WasmPluginAdapter`] 包装一个已实例化的 [`WasmPlugin`]，使其能被宿主当作
-//! 原生插件注册。Wasmtime 的调用是同步阻塞的（CPU 密集），适配器通过
-//! `spawn_blocking` 把单次工具调用移出异步运行时，避免阻塞 executor。
+//! 原生插件注册。Wasmtime 的调用是同步阻塞的；适配器统一把处于 Tokio
+//! runtime 内的调用转移到普通 OS 线程，避免 wasmtime-wasi 嵌套 `block_on`。
 //!
-//! 阶段一 PoC：插件描述 / 工具规格 / 工具调用经此适配器；prompt 段落与生命周期
-//! 钩子暂用默认空实现（示例 memory 插件不注入 prompt、不订阅生命周期）。
+//! 当前已转发插件描述、工具规格、工具调用、Prompt 段落和生命周期钩子。
 
 use std::future::Future;
 use std::pin::Pin;
@@ -31,24 +30,21 @@ use crate::loader::WasmPlugin;
 pub struct WasmPluginAdapter {
     inner: Arc<Mutex<WasmPlugin>>,
     config: PluginRuntimeConfig,
-    /// 插件 id，构造期确定后不变。泄漏为 'static 以满足 `Plugin::id -> &str`。
-    id: &'static str,
+    /// 插件 id，构造期确定后不变。
+    id: String,
     /// 反馈通道（每 turn 注入），供 handle 发送流事件。
     feedback_tx: std::sync::RwLock<Option<PluginFeedbackTx>>,
 }
 
 impl WasmPluginAdapter {
-    pub fn new(mut plugin: WasmPlugin, config: PluginRuntimeConfig) -> Self {
-        let id_string = plugin
-            .describe()
+    pub fn new(plugin: WasmPlugin, config: PluginRuntimeConfig) -> Self {
+        let inner = Arc::new(Mutex::new(plugin));
+        let id_string = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
             .map(|d| d.id)
             .unwrap_or_else(|_| "wasm-unknown".to_string());
-        // describe 已消耗一次调用，handle 会重置 fuel，无需处理。
-        let id: &'static str = Box::leak(id_string.into_boxed_str());
-        let _ = &mut plugin;
         Self {
-            inner: Arc::new(Mutex::new(plugin)),
-            id,
+            inner,
+            id: id_string,
             config,
             feedback_tx: std::sync::RwLock::new(None),
         }
@@ -62,7 +58,7 @@ impl WasmPluginAdapter {
 
 impl Plugin for WasmPluginAdapter {
     fn id(&self) -> &str {
-        self.id
+        &self.id
     }
 
     /// 注入反馈通道（每 turn 注入），缓存供 handle 发送流事件。
@@ -82,14 +78,9 @@ impl Plugin for WasmPluginAdapter {
                 return;
             }
         };
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return;
-            }
-        };
-        if let Err(e) = plugin.on_config_updated(config_json) {
+        if let Err(e) =
+            self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
+        {
             tracing::warn!("通知 wasm 插件配置变更失败: {e}");
         }
     }
@@ -121,25 +112,29 @@ impl Plugin for WasmPluginAdapter {
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         let ws = workspace.map(|p| p.to_string_lossy().to_string());
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return;
-            }
-        };
-        if let Err(e) = plugin.set_workspace(ws) {
+        if let Err(e) = self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws)) {
             tracing::warn!("wasm set_workspace 失败: {e}");
         }
     }
 }
 
 impl WasmPluginAdapter {
-    /// 序列化 session 只读快照，调用 WASM 钩子。失败仅 warn，不阻断 core。
+    /// 在 Tokio runtime 外执行 WASM 调用，避免 wasmtime-wasi 嵌套 block_on。
+    fn call_wasm_off_runtime<R>(
+        &self,
+        call: impl FnOnce(&mut WasmPlugin) -> anyhow::Result<R> + Send,
+    ) -> anyhow::Result<R>
+    where
+        R: Send,
+    {
+        call_wasm_off_runtime(self.inner.clone(), call)
+    }
+
+    /// 序列化 session 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
     fn forward_session_hook(
         &self,
         session: &Session,
-        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()>,
+        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
         let json = match serde_json::to_string(session) {
             Ok(j) => j,
@@ -148,14 +143,7 @@ impl WasmPluginAdapter {
                 return;
             }
         };
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return;
-            }
-        };
-        if let Err(e) = call(&mut plugin, json) {
+        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
         }
     }
@@ -165,7 +153,7 @@ impl WasmPluginAdapter {
         &self,
         session: &Session,
         turn_start_idx: usize,
-        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()>,
+        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
     ) {
         let json = match serde_json::to_string(session) {
             Ok(j) => j,
@@ -174,14 +162,8 @@ impl WasmPluginAdapter {
                 return;
             }
         };
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return;
-            }
-        };
-        if let Err(e) = call(&mut plugin, json, turn_start_idx as u32) {
+        let idx = turn_start_idx as u32;
+        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
         }
     }
@@ -190,14 +172,7 @@ impl WasmPluginAdapter {
 // ToolSpecProvider：返回插件声明的工具规格。
 impl ToolSpecProvider for WasmPluginAdapter {
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return Vec::new();
-            }
-        };
-        match plugin.tool_specs() {
+        match self.call_wasm_off_runtime(WasmPlugin::tool_specs) {
             Ok(specs) => specs
                 .into_iter()
                 .map(|s| ToolSpec {
@@ -232,11 +207,11 @@ impl ToolOverrideHandler for WasmPluginAdapter {
         let config = self.config.clone();
         Box::pin(async move {
             let result = task::spawn_blocking(move || {
-                let mut plugin = inner.lock().ok()?;
-                plugin.handle_tool(wit_call, &config).ok()
+                call_wasm_off_runtime(inner, move |plugin| plugin.handle_tool(wit_call, &config))
             })
             .await
-            .ok()??;
+            .ok()?
+            .ok()?;
             Some(ToolResult {
                 ok: result.ok,
                 summary: result.summary,
@@ -252,14 +227,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
 // PromptSectionProvider：调 WASM 的 prompt-sections 导出，拉取三级记忆注入。
 impl PromptSectionProvider for WasmPluginAdapter {
     fn prompt_sections(&self) -> Vec<String> {
-        let mut plugin = match self.inner.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::error!("wasm 插件锁中毒: {e}");
-                return Vec::new();
-            }
-        };
-        match plugin.prompt_sections() {
+        match self.call_wasm_off_runtime(WasmPlugin::prompt_sections) {
             Ok(sections) => sections,
             Err(e) => {
                 tracing::warn!("wasm prompt_sections 失败: {e}");
@@ -267,4 +235,19 @@ impl PromptSectionProvider for WasmPluginAdapter {
             }
         }
     }
+}
+
+pub(crate) fn call_wasm_off_runtime<R>(
+    inner: Arc<Mutex<WasmPlugin>>,
+    call: impl FnOnce(&mut WasmPlugin) -> anyhow::Result<R> + Send,
+) -> anyhow::Result<R>
+where
+    R: Send,
+{
+    crate::execution::run_outside_tokio(move || {
+        let mut plugin = inner
+            .lock()
+            .map_err(|e| anyhow::anyhow!("wasm 插件锁中毒: {e}"))?;
+        call(&mut plugin)
+    })
 }

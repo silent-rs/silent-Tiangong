@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tiangong_core::core::Plugin;
 use tiangong_memory::MemoryHandle;
 
-use crate::adapter::WasmPluginAdapter;
+use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
 use crate::loader::{Contribution, WasmPlugin, WasmPluginLoader};
 
@@ -37,43 +37,54 @@ fn register_plugin(id: String, plugin: Arc<Mutex<WasmPlugin>>) {
 
 /// 收集所有已加载 WASM 插件的设置页贡献。
 pub fn list_contributions() -> Vec<(String, Vec<Contribution>)> {
-    let Ok(table) = loaded_plugins().lock() else {
-        return Vec::new();
+    let entries = {
+        let Ok(table) = loaded_plugins().lock() else {
+            return Vec::new();
+        };
+        table
+            .iter()
+            .map(|(id, plugin)| (id.clone(), plugin.clone()))
+            .collect::<Vec<_>>()
     };
-    table
+    entries
         .iter()
         .filter_map(|(id, plugin)| {
-            let mut plugin = plugin.lock().ok()?;
-            plugin.contributions().ok().map(|c| (id.clone(), c))
+            call_wasm_off_runtime(plugin.clone(), WasmPlugin::contributions)
+                .ok()
+                .map(|contributions| (id.clone(), contributions))
         })
         .collect()
 }
 
-/// 查询指定插件的配置 schema（JSON 文本）。
 /// 打开插件页面，返回入口 HTML。
 pub fn open_view(plugin_id: &str, contribution_id: &str) -> Option<String> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
-    let mut plugin = plugin.lock().ok()?;
-    plugin.open_view(contribution_id.to_string()).ok()
+    drop(table);
+    let contribution_id = contribution_id.to_string();
+    call_wasm_off_runtime(plugin, move |plugin| plugin.open_view(contribution_id)).ok()
 }
 
 /// 获取插件页面资源（字节 + MIME）。
 pub fn get_view_resource(plugin_id: &str, path: &str) -> Option<(Vec<u8>, String)> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
-    let mut plugin = plugin.lock().ok()?;
-    plugin.get_view_resource(path.to_string()).ok()
+    drop(table);
+    let path = path.to_string();
+    call_wasm_off_runtime(plugin, move |plugin| plugin.get_view_resource(path)).ok()
 }
 
 /// 处理插件页面消息（iframe ↔ 插件双向通信）。
 pub fn handle_view_message(plugin_id: &str, method: &str, payload: &str) -> Option<String> {
     let table = loaded_plugins().lock().ok()?;
     let plugin = table.get(plugin_id)?.clone();
-    let mut plugin = plugin.lock().ok()?;
-    plugin
-        .handle_view_message(method.to_string(), payload.to_string())
-        .ok()
+    drop(table);
+    let method = method.to_string();
+    let payload = payload.to_string();
+    call_wasm_off_runtime(plugin, move |plugin| {
+        plugin.handle_view_message(method, payload)
+    })
+    .ok()
 }
 
 /// 从 `storage_root/plugins/` 加载 memory wasm 插件。
@@ -98,6 +109,23 @@ pub fn load_memory_wasm_plugin(
 
 /// 从指定路径加载 wasm 插件（测试用）。
 pub fn load_wasm_plugin_at(
+    wasm_path: &Path,
+    memory_handle: Option<MemoryHandle>,
+) -> Option<Arc<dyn Plugin>> {
+    let wasm_path = wasm_path.to_path_buf();
+    match crate::execution::run_outside_tokio(move || {
+        load_wasm_plugin_at_inner(&wasm_path, memory_handle)
+            .ok_or_else(|| anyhow::anyhow!("WASM 插件加载失败"))
+    }) {
+        Ok(plugin) => Some(plugin),
+        Err(e) => {
+            tracing::warn!("加载 wasm 插件失败: {e}");
+            None
+        }
+    }
+}
+
+fn load_wasm_plugin_at_inner(
     wasm_path: &Path,
     memory_handle: Option<MemoryHandle>,
 ) -> Option<Arc<dyn Plugin>> {

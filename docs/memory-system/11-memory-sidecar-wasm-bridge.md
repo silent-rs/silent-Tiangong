@@ -1,8 +1,8 @@
 # Memory Sidecar + WASM 桥接架构
 
-> 状态：草案（RFC）
+> 状态：试实现中
 > 关联：#301（WASM 插件平台）、#321（memory WASM 化）
-> 日期：2026-07-30
+> 日期：2026-07-31
 
 ## 背景与动机
 
@@ -20,7 +20,7 @@ memory system 的 WASM 化推进到「纯逻辑下沉 + 读写 host import」后
 
 - memory 作为**独立 sidecar 进程**运行，承载全部存储（SQLite/tantivy/lancedb）原生运行
 - sidecar 二进制由项目构建，支持**下载地址获取 + 自动启动**
-- **WASM 插件做桥接**：承载 memory 的纯逻辑（规划/提取/整理/反刍编排），经 host request 向 sidecar 发起存储请求
+- **WASM 插件当前做桥接**：经 host request 向 sidecar 发起请求；后续再分阶段承载规划、提取、整理与反刍编排
 - Core（CLI/Server/Desktop）作为 sidecar 的客户端，复用现有 TCP IPC
 - 不退化任何现有能力（加密、全文检索、向量检索全部保留）
 
@@ -68,7 +68,7 @@ memory system 的 WASM 化推进到「纯逻辑下沉 + 读写 host import」后
 | 角色 | 位置 | 职责 |
 |---|---|---|
 | **Core** | 主进程 | 业务编排、模型调用、会话管理；持有 MemorySidecarManager（下载/启动/监控 sidecar） |
-| **WASM 组件** | Core 进程内（Wasmtime 沙箱） | memory 纯逻辑：检索规划、结果整理、反刍编排、规则提取。经 host import 间接访问 sidecar |
+| **WASM 组件** | Core 进程内（Wasmtime 沙箱） | 当前转发工具、Prompt 与生命周期请求；后续逐步接管检索规划、结果整理、反刍编排和规则提取 |
 | **Memory Sidecar** | 独立进程 | 存储与 memory 业务编排（SQLite/tantivy/lancedb + Actor）。原生运行，无 wasm 限制 |
 
 ## 详细设计
@@ -273,7 +273,7 @@ sidecar 是独立的编译 crate（`bots/memory-sidecar/` 或 `crates/tiangong-m
 | Leader 选举 + 心跳 | `tiangong-memory/election/` | **直接复用**，sidecar 当 Leader |
 | MemoryActor + 存储 | `tiangong-memory/actor.rs` + store | **直接复用**，sidecar 内起 actor |
 | memory-store host import | `tiangong-plugin-runtime/host_state.rs` | **零改动**，MemoryHandle 已抽象 Local/Remote |
-| WASM 纯逻辑 | `tiangong-plugin-memory-wasm/` | **已有**，规划/提取/整理/反刍编排 |
+| WASM 桥接组件 | `tiangong-plugin-memory-wasm/` | **已有**，转发工具、Prompt、生命周期和设置页请求 |
 
 **结论**：核心机制 80% 可复用。新增工作主要是 `MemorySidecarManager`（参照 BotRuntime 写一个 memory 版本）和 sidecar 的 `main.rs`（极简入口）。
 
@@ -310,7 +310,7 @@ sidecar 是独立的编译 crate（`bots/memory-sidecar/` 或 `crates/tiangong-m
 
 1. memory sidecar 作为独立进程运行，承载全部存储（原生，无 wasm 限制）
 2. 复用现有 TCP IPC + 文件选举 + token 鉴权（协议不变）
-3. WASM 组件承载纯逻辑，经 host import 间接访问 sidecar（host 管理连接）
+3. WASM 组件当前通过 host import 桥接 sidecar，后续再逐步承载纯逻辑
 4. 参照 bots 机制实现下载/启动/监控（MemorySidecarManager）
 5. 过渡可降级到进程内 actor，保证不中断现有功能
 6. 核心机制 80% 可复用，主要新增工作是 Manager + sidecar 入口

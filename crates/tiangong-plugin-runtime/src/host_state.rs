@@ -8,6 +8,7 @@
 //!
 //! 插件读写自己的配置经 WASI filesystem（host preopen plugins 目录），不在此处理。
 
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tiangong_memory::MemoryHandle;
@@ -26,23 +27,16 @@ pub struct HostState {
     table: ResourceTable,
     /// 记忆句柄，None 时 memory-store import 返回 disabled。
     memory: Option<MemoryHandle>,
-    /// 用于 block_on MemoryHandle async 方法的多线程 runtime。
-    runtime: tokio::runtime::Runtime,
 }
 
 impl HostState {
     pub fn new(limits: StoreLimits, memory: Option<MemoryHandle>) -> Self {
         let wasi = build_wasi_ctx();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("创建多线程 tokio runtime 失败");
         Self {
             limits,
             wasi,
             table: ResourceTable::new(),
             memory,
-            runtime,
         }
     }
 
@@ -81,19 +75,28 @@ impl MemoryStoreHost for HostState {
         };
         let request_payload: MemoryIpcRequestPayload = serde_json::from_str(&payload)
             .map_err(|e| MemoryStoreError::Message(format!("解析 request payload 失败: {e}")))?;
-        // 在独立 OS 线程上 block_on，避免 tokio worker 线程嵌套 panic。
-        let runtime_handle = self.runtime.handle().clone();
-        let response: MemoryIpcResponsePayload = std::thread::scope(|s| {
-            s.spawn(move || {
-                runtime_handle.block_on(async move { handle.ipc_request(request_payload).await })
-            })
-            .join()
-            .map_err(|e| MemoryStoreError::Message(format!("IPC 请求线程异常: {e:?}")))?
-            .map_err(|e| MemoryStoreError::Message(format!("{e}")))
-        })?;
+        let response: MemoryIpcResponsePayload = crate::execution::run_outside_tokio(move || {
+            memory_runtime()?.block_on(async move { handle.ipc_request(request_payload).await })
+        })
+        .map_err(|e| MemoryStoreError::Message(e.to_string()))?;
         serde_json::to_string(&response)
             .map_err(|e| MemoryStoreError::Message(format!("序列化 response 失败: {e}")))
     }
+}
+
+/// 全部 WASM 实例共用一个 runtime，避免每个会话创建一组 Tokio worker 线程。
+fn memory_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("创建 memory host runtime 失败: {e}"))
 }
 
 /// 构建 WASI 上下文，preopen 插件配置目录供 WASM 组件用 std::fs 读写自己的配置。
