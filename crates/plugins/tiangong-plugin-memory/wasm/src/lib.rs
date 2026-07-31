@@ -26,8 +26,9 @@ use tiangong_plugin_memory_protocol::recall::{
     Recall, RecallContext, RecallContextRequest, RecallQuery, RecallRequest,
 };
 use tiangong_plugin_memory_protocol::rumination::{
-    EnhancedTurnResult, RunEnhancedMicroRumination, RunEnhancedMicroRuminationRequest,
-    RunMesoRumination, RunMesoRuminationRequest,
+    EnhancedTurnResult, MemoryCandidate, RunEnhancedMicroRumination,
+    RunEnhancedMicroRuminationRequest, RunMesoRumination, RunMesoRuminationRequest, TurnArtifact,
+    TurnArtifactKind, TurnMessage,
 };
 use tiangong_plugin_memory_protocol::ui::{self, UiRequest};
 use tiangong_plugin_memory_protocol::{Empty, MemoryOperation};
@@ -351,50 +352,134 @@ fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
 
 /// 从 session 快照提取本轮信息，转发给 sidecar 做 enhanced micro 反刍。
 ///
-/// 提取 session.id、本轮 user_input、工具调用名，组装成 EnhancedTurnResult 的
-/// 简化形式，经类型化 sidecar client 转发。
+/// 从 PluginSession 提取本轮完整内容，组装成 EnhancedTurnResult 转发给 sidecar。
+///
+/// 提取内容：
+/// - 用户输入文本
+/// - 助手最终回复作为 summary
+/// - Assistant 消息中的 tool_calls
+/// - Tool 消息的结果正文、是否失败
+/// - 文件路径、URL、媒体等产物
+/// - 本轮完整 turn_messages
+/// - 基于工具结果生成 memory_candidates
 fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
         .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
-    let session_id = session.id.clone();
+
     let idx = turn_start_idx as usize;
     let messages = &session.messages;
 
-    // 提取本轮 user_input（messages[idx] 的文本内容）。
-    // Message.content 是 Vec<ContentBlock>，需要遍历提取 Text 块。
-    let user_input = messages
-        .get(idx)
-        .map(extract_message_text)
-        .unwrap_or_default();
+    // 校验起点索引和角色。
+    let start_msg = match messages.get(idx) {
+        Some(m) if matches!(m.role, tiangong_types::MessageRole::User) => m,
+        _ => {
+            tracing_warn(&format!(
+                "turn_start_idx={idx} 不存在或不是用户消息，跳过反刍"
+            ));
+            return Ok(());
+        }
+    };
 
-    // 提取本轮工具调用名列表。
-    let tool_calls: Vec<String> = messages
+    let user_input = extract_message_text(start_msg);
+    let turn_messages = &messages[idx..];
+
+    // 提取工具调用名（来自 Assistant 消息的 tool_calls 字段）。
+    let tool_calls: Vec<String> = turn_messages
         .iter()
-        .skip(idx)
-        .filter_map(|m| {
-            if matches!(m.role, tiangong_types::MessageRole::Tool) {
-                m.tool_name.clone()
-            } else {
-                None
-            }
-        })
+        .flat_map(|m| m.tool_calls.iter().map(|c| c.name.clone()))
         .collect();
+
+    // 提取助手最终回复作为 summary。
+    let summary = turn_messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, tiangong_types::MessageRole::Assistant))
+        .map(extract_message_text)
+        .unwrap_or_else(|| user_input.clone());
+
+    // 提取产物和候选。
+    let mut artifacts = Vec::new();
+    let mut memory_candidates = Vec::new();
+
+    for (step, m) in turn_messages.iter().enumerate() {
+        if matches!(m.role, tiangong_types::MessageRole::Tool) {
+            let text = extract_message_text(m);
+            let is_error = m.tool_result_is_error;
+            let tool_name = m.tool_name.clone().unwrap_or_default();
+            let (file_path, url) = extract_paths_and_urls(&text);
+
+            // 产物
+            if !text.is_empty() {
+                artifacts.push(TurnArtifact {
+                    kind: if url.is_some() {
+                        TurnArtifactKind::Media
+                    } else if file_path.is_some() {
+                        TurnArtifactKind::File
+                    } else {
+                        TurnArtifactKind::ToolResult
+                    },
+                    tool_name: Some(tool_name.clone()),
+                    title: Some(
+                        format!("{} {}", tool_name, if is_error { "失败" } else { "" })
+                            .trim()
+                            .to_string(),
+                    ),
+                    url: url.clone(),
+                    path: file_path.clone(),
+                    summary: Some(truncate(&text, 200)),
+                });
+            }
+
+            // 候选
+            memory_candidates.push(MemoryCandidate {
+                tool_name: tool_name.clone(),
+                step_index: step,
+                hint: truncate(&text, 500),
+                suggested_kinds: Vec::new(),
+                file_path,
+                url,
+                result_summary: Some(truncate(&text, 200)),
+                success: !is_error,
+            });
+        }
+
+        // 从 Assistant 消息中提取媒体产物。
+        if matches!(m.role, tiangong_types::MessageRole::Assistant) {
+            for block in &m.content {
+                if let tiangong_types::ContentBlock::Media { url, title, .. } = block {
+                    artifacts.push(TurnArtifact {
+                        kind: TurnArtifactKind::Media,
+                        tool_name: None,
+                        title: title.clone(),
+                        url: Some(url.clone()),
+                        path: None,
+                        summary: None,
+                    });
+                }
+            }
+        }
+    }
 
     let request = RunEnhancedMicroRuminationRequest {
         turn_result: EnhancedTurnResult {
-            session_id,
+            session_id: session.id,
             turn_id: format!("turn-{turn_start_idx}"),
             had_tool_calls: !tool_calls.is_empty(),
-            user_input: user_input.clone(),
-            summary: user_input,
+            user_input,
+            summary,
             tool_calls,
-            artifacts: Vec::new(),
+            artifacts,
             workspace_id: state::workspace_id(),
-            memory_candidates: Vec::new(),
-            turn_messages: Vec::new(),
+            memory_candidates,
+            turn_messages: turn_messages
+                .iter()
+                .map(|m| TurnMessage {
+                    role: format!("{:?}", m.role).to_lowercase(),
+                    content: extract_message_text(m),
+                })
+                .collect(),
         },
     };
-    // sidecar 可能不可用（disabled），反刍是 best-effort，忽略错误。
     let _ = sidecar_client::invoke::<RunEnhancedMicroRumination>(&request);
     Ok(())
 }
@@ -406,7 +491,8 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
 
     let request = RunMesoRuminationRequest {
         session_id: session.id,
-        workspace_id: session.cwd,
+        // 使用统一的 workspace_id 生成逻辑，与 Micro 保持一致。
+        workspace_id: workspace_id_from_cwd(&session.cwd),
     };
     let _ = sidecar_client::invoke::<RunMesoRumination>(&request);
     Ok(())
@@ -425,6 +511,51 @@ fn extract_message_text(message: &tiangong_types::Message) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
+
+/// 截断字符串到指定字符数。
+fn truncate(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect::<String>() + "…"
+}
+
+/// 从文本中提取文件路径和 URL。
+fn extract_paths_and_urls(text: &str) -> (Option<String>, Option<String>) {
+    let url = text
+        .find("https://")
+        .or_else(|| text.find("http://"))
+        .map(|start| {
+            let rest = &text[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | ','))
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        });
+
+    let path = text
+        .find("/Users/")
+        .or_else(|| text.find("/home/"))
+        .or_else(|| text.find("/tmp/"))
+        .or_else(|| text.find("./"))
+        .map(|start| {
+            let rest = &text[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | ','))
+                .unwrap_or(rest.len());
+            rest[..end].to_string()
+        });
+
+    (path, url)
+}
+
+/// 统一的工作区 ID 生成：取 cwd 的末尾目录名。
+fn workspace_id_from_cwd(cwd: &str) -> String {
+    cwd.rsplit('/').next().unwrap_or(cwd).to_string()
+}
+
+/// WASM 内简易日志（无 tracing，直接忽略）。
+fn tracing_warn(_msg: &str) {}
 
 fn tool_result_ok(summary: String) -> ToolResult {
     ToolResult {
