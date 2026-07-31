@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tiangong_core::core::Plugin;
+use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::session::Session;
@@ -32,6 +33,8 @@ pub struct WasmPluginAdapter {
     config: PluginRuntimeConfig,
     /// 插件 id，构造期确定后不变。泄漏为 'static 以满足 `Plugin::id -> &str`。
     id: &'static str,
+    /// 反馈通道（每 turn 注入），供 handle 发送流事件。
+    feedback_tx: std::sync::RwLock<Option<PluginFeedbackTx>>,
 }
 
 impl WasmPluginAdapter {
@@ -47,6 +50,7 @@ impl WasmPluginAdapter {
             inner: Arc::new(Mutex::new(plugin)),
             id,
             config,
+            feedback_tx: std::sync::RwLock::new(None),
         }
     }
 
@@ -59,6 +63,13 @@ impl WasmPluginAdapter {
 impl Plugin for WasmPluginAdapter {
     fn id(&self) -> &str {
         self.id
+    }
+
+    /// 注入反馈通道（每 turn 注入），缓存供 handle 发送流事件。
+    fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
+        if let Ok(mut guard) = self.feedback_tx.write() {
+            *guard = Some(tx);
+        }
     }
 
     /// CoreConfig 变更：序列化为 JSON 转发到 WASM 组件的 on-config-updated。

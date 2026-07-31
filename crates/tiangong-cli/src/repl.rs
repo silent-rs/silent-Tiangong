@@ -223,10 +223,7 @@ fn build_cli_plugins(
     if let Some(ep) = stt_endpoint.clone() {
         plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
     }
-    plugins.extend(tiangong_plugin_memory::default_plugins(
-        memory_handle.clone(),
-    ));
-    // 尝试加载 wasm memory 插件（与原生并存；文件不存在时优雅降级）。
+    // memory 插件：试迁移阶段只用 WASM 版（加载失败则无 memory 能力）。
     if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
         &storage_root,
         memory_handle.clone(),
@@ -265,9 +262,13 @@ fn build_cli_plugins(
             if let Some(ep) = stt_endpoint.clone() {
                 child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
-            child_plugins.extend(tiangong_plugin_memory::default_plugins(
+            // 子 Core memory：试迁移阶段只用 WASM 版。
+            if let Some(wasm_memory) = tiangong_plugin_runtime::registry::load_memory_wasm_plugin(
+                &storage_root,
                 memory_handle.clone(),
-            ));
+            ) {
+                child_plugins.push(wasm_memory);
+            }
             child_plugins.extend(tiangong_plugin_fetch::default_plugins());
             child_plugins.extend(tiangong_plugin_command::default_plugins());
             // 子 Core 同样不注册 scheduler 插件，与主 Core 一致。
