@@ -4629,6 +4629,28 @@ async fn download_and_install_plugin(
     .map_err(|error| format!("安装插件任务失败: {error}"))?
 }
 
+/// 从用户选择的本地完整目录导入插件。
+#[tauri::command]
+pub async fn import_local_plugin(
+    path: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let staged = tiangong_plugin_runtime::artifacts::stage_local_plugin(
+            &storage_root,
+            std::path::Path::new(&path),
+        )
+        .map_err(|error| error.to_string())?;
+        tiangong_plugin_runtime::registry::import_staged_plugin(&storage_root, staged.path())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("导入本地插件任务失败: {error}"))?
+}
+
 /// 从 OSS 下载并安装插件。
 #[tauri::command]
 pub async fn install_plugin(

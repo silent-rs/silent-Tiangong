@@ -428,6 +428,7 @@ fn run_gui() {
             tiangong_app::commands::list_plugin_contributions,
             tiangong_app::commands::list_plugins,
             tiangong_app::commands::list_available_plugins,
+            tiangong_app::commands::import_local_plugin,
             tiangong_app::commands::install_plugin,
             tiangong_app::commands::upgrade_plugin,
             tiangong_app::commands::set_plugin_enabled,

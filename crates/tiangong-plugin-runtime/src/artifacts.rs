@@ -69,9 +69,38 @@ impl Drop for StagedPlugin {
         if let Err(error) = std::fs::remove_dir_all(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::warn!(path = %self.path.display(), %error, "清理插件下载临时目录失败");
+            tracing::warn!(path = %self.path.display(), %error, "清理插件临时目录失败");
         }
     }
+}
+
+/// 将用户选择的本地完整插件目录复制到受管事务目录。
+pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPlugin> {
+    ensure_source_directory(source)?;
+    let source_manifest = source.join(MANIFEST_FILE);
+    ensure_regular_file(&source_manifest, "插件清单")?;
+    let manifest = PluginManifest::load(&source_manifest)?;
+    Version::parse(&manifest.version)
+        .with_context(|| format!("本地插件 {} 版本不是有效语义版本", manifest.id))?;
+
+    let staged = create_staged_plugin(storage_root)?;
+    copy_regular_file(
+        &source_manifest,
+        &staged.path.join(MANIFEST_FILE),
+        "插件清单",
+    )?;
+    copy_local_artifact(source, manifest.wasm_binary(), &staged.path, "WASM 制品")?;
+
+    if let Some(sidecar) = &manifest.sidecar {
+        let binary = with_executable_suffix(&sidecar.binary)?;
+        let destination = copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
+        set_executable(&destination)?;
+    }
+
+    for directory in ["runtime", "logs", "data"] {
+        std::fs::create_dir_all(staged.path.join(directory))?;
+    }
+    Ok(staged)
 }
 
 pub struct PluginRepository {
@@ -153,15 +182,7 @@ impl PluginRepository {
         storage_root: &Path,
         release: &PluginRelease,
     ) -> Result<StagedPlugin> {
-        let transaction_id = scru128::new().to_string();
-        let path = storage_root
-            .join("plugins")
-            .join(TRANSACTIONS_DIR)
-            .join(transaction_id);
-        ensure_not_symlink(&path)?;
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("创建插件下载临时目录失败: {}", path.display()))?;
-        let staged = StagedPlugin { path };
+        let staged = create_staged_plugin(storage_root)?;
 
         let manifest_path = staged.path.join(MANIFEST_FILE);
         validate_artifact_file_name(&release.manifest.url, MANIFEST_FILE)?;
@@ -198,19 +219,7 @@ impl PluginRepository {
                 let artifact = release.sidecars.get(&platform).ok_or_else(|| {
                     anyhow!("插件 {} 没有当前平台 {platform} 的 sidecar", release.id)
                 })?;
-                let mut sidecar_path = staged.path.join(&sidecar.binary);
-                if !std::env::consts::EXE_SUFFIX.is_empty()
-                    && !sidecar_path
-                        .to_string_lossy()
-                        .ends_with(std::env::consts::EXE_SUFFIX)
-                {
-                    let file_name = sidecar_path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .ok_or_else(|| anyhow!("sidecar 文件名无效"))?;
-                    sidecar_path
-                        .set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
-                }
+                let sidecar_path = staged.path.join(with_executable_suffix(&sidecar.binary)?);
                 let sidecar_name = sidecar_path
                     .file_name()
                     .and_then(|value| value.to_str())
@@ -284,6 +293,94 @@ impl PluginRepository {
         }
         Ok(())
     }
+}
+
+fn create_staged_plugin(storage_root: &Path) -> Result<StagedPlugin> {
+    let root = storage_root.join("plugins").join(TRANSACTIONS_DIR);
+    ensure_not_symlink(&root)?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("创建插件事务目录失败: {}", root.display()))?;
+    let path = root.join(scru128::new().to_string());
+    std::fs::create_dir(&path)
+        .with_context(|| format!("创建插件临时目录失败: {}", path.display()))?;
+    Ok(StagedPlugin { path })
+}
+
+fn copy_local_artifact(
+    source_root: &Path,
+    relative_path: &Path,
+    destination_root: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let source = resolve_local_artifact(source_root, relative_path, label)?;
+    let destination = destination_root.join(relative_path);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建{label}目录失败: {}", parent.display()))?;
+    }
+    copy_regular_file(&source, &destination, label)?;
+    Ok(destination)
+}
+
+fn resolve_local_artifact(
+    source_root: &Path,
+    relative_path: &Path,
+    label: &str,
+) -> Result<PathBuf> {
+    let mut source = source_root.to_path_buf();
+    for component in relative_path.components() {
+        source.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&source)
+            .with_context(|| format!("读取{label}失败: {}", source.display()))?;
+        if metadata.file_type().is_symlink() {
+            bail!("{label}路径不能包含符号链接: {}", source.display());
+        }
+    }
+    ensure_regular_file(&source, label)?;
+    Ok(source)
+}
+
+fn copy_regular_file(source: &Path, destination: &Path, label: &str) -> Result<()> {
+    std::fs::copy(source, destination).with_context(|| {
+        format!(
+            "复制{label}失败: {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn ensure_source_directory(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("读取本地插件目录失败: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("本地插件路径必须是实际目录: {}", path.display());
+    }
+    Ok(())
+}
+
+fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("读取{label}失败: {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("{label}必须是实际文件: {}", path.display());
+    }
+    Ok(())
+}
+
+fn with_executable_suffix(path: &Path) -> Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    if !std::env::consts::EXE_SUFFIX.is_empty() {
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow!("sidecar 文件名无效"))?;
+        if !file_name.ends_with(std::env::consts::EXE_SUFFIX) {
+            path.set_file_name(format!("{file_name}{}", std::env::consts::EXE_SUFFIX));
+        }
+    }
+    Ok(path)
 }
 
 fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {

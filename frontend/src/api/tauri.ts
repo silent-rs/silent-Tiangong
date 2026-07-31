@@ -1238,6 +1238,9 @@ export const api = {
 
   listAvailablePlugins: (): Promise<AvailablePlugin[]> => invoke('list_available_plugins'),
 
+  importLocalPlugin: (path: string): Promise<PluginStatus> =>
+    invoke('import_local_plugin', { path }),
+
   installPlugin: (pluginId: string): Promise<PluginStatus> =>
     invoke('install_plugin', { pluginId }),
 

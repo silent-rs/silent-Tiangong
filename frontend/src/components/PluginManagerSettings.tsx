@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowUpCircle,
+  BookOpen,
   CheckCircle2,
   Download,
+  FolderInput,
   Loader2,
   RefreshCw,
   RotateCw,
   Trash2,
   Undo2,
 } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
 import {
   api,
   type AvailablePlugin,
@@ -39,6 +42,7 @@ type Props = {
 type Operation =
   | 'enable'
   | 'disable'
+  | 'import'
   | 'install'
   | 'reload'
   | 'upgrade'
@@ -56,6 +60,9 @@ const stateLabel: Record<PluginStatus['state'], string> = {
   degraded: '运行异常',
   error: '加载失败',
 };
+
+const PLUGIN_DEVELOPMENT_DOC_URL =
+  'https://github.com/silent-rs/silent-Tiangong/blob/main/docs/plugin-development.md';
 
 export function PluginManagerSettings({ onContributionsChanged }: Props) {
   const [plugins, setPlugins] = useState<PluginStatus[]>([]);
@@ -163,6 +170,33 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
     );
   };
 
+  const importLocal = async () => {
+    let selected: string | string[] | null;
+    try {
+      selected = await open({
+        directory: true,
+        multiple: false,
+        title: '选择本地插件目录',
+      });
+    } catch (error) {
+      showError('选择失败', String(error));
+      return;
+    }
+    if (typeof selected !== 'string') return;
+
+    setActiveOperation({ pluginId: 'local', operation: 'import' });
+    try {
+      const plugin = await api.importLocalPlugin(selected);
+      await finishOperation();
+      showSuccess('插件已导入', `${plugin.name} ${plugin.manifest_version}`);
+    } catch (error) {
+      showError('导入失败', String(error));
+      await refresh();
+    } finally {
+      setActiveOperation(null);
+    }
+  };
+
   const upgrade = async (plugin: PluginStatus) => {
     const release = availableById.get(plugin.id);
     await runOperation(
@@ -209,14 +243,38 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
               {plugins.length} 个已安装，{available.length} 个可用
             </p>
           </div>
-          <IconAction
-            label="刷新插件目录和状态"
-            onClick={() => void refresh()}
-            disabled={loading || isBusy}
-            className="ml-auto"
-          >
-            <RefreshCw className={loading ? 'animate-spin' : ''} />
-          </IconAction>
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-8 w-8" asChild>
+                  <a
+                    href={PLUGIN_DEVELOPMENT_DOC_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="打开插件开发文档"
+                  >
+                    <BookOpen />
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>插件开发文档</TooltipContent>
+            </Tooltip>
+            <IconAction
+              label="导入本地插件"
+              onClick={() => void importLocal()}
+              disabled={loading || isBusy}
+              working={activeOperation?.operation === 'import'}
+            >
+              <FolderInput />
+            </IconAction>
+            <IconAction
+              label="刷新插件目录和状态"
+              onClick={() => void refresh()}
+              disabled={loading || isBusy}
+            >
+              <RefreshCw className={loading ? 'animate-spin' : ''} />
+            </IconAction>
+          </div>
         </div>
 
         <Tabs defaultValue="installed" className="flex min-h-0 flex-1 flex-col">
@@ -517,6 +575,7 @@ function operationLabel(operation: Operation) {
   const labels: Record<Operation, string> = {
     enable: '启用',
     disable: '停用',
+    import: '导入',
     install: '安装',
     reload: '热加载',
     upgrade: '升级',

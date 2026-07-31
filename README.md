@@ -270,6 +270,7 @@ yarn --cwd frontend dev
 
 ## 文档
 
+- [WASM 插件开发指南](docs/plugin-development.md)
 - [CLI 配置指南](docs/cli-configuration-guide.md)
 - [Server API](docs/server-api.md)
 - [Linux 服务器部署指南](docs/linux-server-deployment.md)

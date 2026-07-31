@@ -568,6 +568,19 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
 
 /// 将已下载并校验的临时目录安装为新插件，或升级现有插件。
 pub fn install_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<PluginStatus> {
+    install_staged_plugin_inner(storage_root, staged_path, false)
+}
+
+/// 导入用户选择的本地插件；允许同版本重新导入，但不允许降级。
+pub fn import_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<PluginStatus> {
+    install_staged_plugin_inner(storage_root, staged_path, true)
+}
+
+fn install_staged_plugin_inner(
+    storage_root: &Path,
+    staged_path: &Path,
+    allow_same_version: bool,
+) -> Result<PluginStatus> {
     preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
@@ -586,7 +599,7 @@ pub fn install_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<
                 current.directory.display()
             );
         }
-        ensure_newer_version(&current.manifest, &staged.manifest)?;
+        ensure_installable_version(&current.manifest, &staged.manifest, allow_same_version)?;
         replace_installed_plugin(storage_root, staged_path, &current, staged.manifest)
     } else {
         install_new_plugin(storage_root, staged_path, staged.manifest)
@@ -992,12 +1005,24 @@ fn validate_retained_data_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_newer_version(current: &PluginManifest, next: &PluginManifest) -> Result<()> {
+fn ensure_installable_version(
+    current: &PluginManifest,
+    next: &PluginManifest,
+    allow_same_version: bool,
+) -> Result<()> {
     let current_version = Version::parse(&current.version)
         .with_context(|| format!("当前插件 {} 版本无效", current.id))?;
     let next_version =
         Version::parse(&next.version).with_context(|| format!("插件 {} 新版本无效", next.id))?;
-    if next_version <= current_version {
+    if next_version < current_version {
+        bail!(
+            "插件 {} 导入版本 {} 低于当前版本 {}",
+            current.id,
+            next.version,
+            current.version
+        );
+    }
+    if !allow_same_version && next_version == current_version {
         bail!(
             "插件 {} 可安装版本 {} 不高于当前版本 {}",
             current.id,
