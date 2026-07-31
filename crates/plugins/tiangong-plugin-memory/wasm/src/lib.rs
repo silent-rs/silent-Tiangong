@@ -11,6 +11,7 @@
 //! 见 issue #321 / RFC docs/memory-system/11-memory-sidecar-wasm-bridge.md。
 
 mod bindings;
+mod sidecar_client;
 
 use bindings::exports::tiangong::plugin::plugin::{
     Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
@@ -19,22 +20,33 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
-use bindings::tiangong::plugin::sidecar;
-
-/// 向绑定的 sidecar 发送 Memory 业务操作；通用协议由运行时封装。
-fn sidecar_call(
-    operation: &str,
-    payload: &serde_json::Value,
-) -> Result<String, sidecar::SidecarError> {
-    let encoded = serde_json::to_string(payload)
-        .map_err(|error| sidecar::SidecarError::Message(format!("序列化请求失败: {error}")))?;
-    sidecar::invoke(operation, &encoded)
-}
+use serde::Deserialize;
+use tiangong_plugin_memory_protocol::injection::{LoadInjection, LoadInjectionRequest};
+use tiangong_plugin_memory_protocol::recall::{
+    Recall, RecallContext, RecallContextRequest, RecallQuery, RecallRequest,
+};
+use tiangong_plugin_memory_protocol::rumination::{
+    EnhancedTurnResult, RunEnhancedMicroRumination, RunEnhancedMicroRuminationRequest,
+    RunMesoRumination, RunMesoRuminationRequest,
+};
+use tiangong_plugin_memory_protocol::ui::{self, UiRequest};
+use tiangong_plugin_memory_protocol::{Empty, MemoryOperation};
 
 mod descriptor {
-    pub const ID: &str = "memory";
+    pub const ID: &str = tiangong_plugin_memory_protocol::PLUGIN_ID;
     pub const NAME: &str = "Memory";
-    pub const VERSION: &str = "0.6.0";
+    pub const VERSION: &str = tiangong_plugin_memory_protocol::PLUGIN_VERSION;
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RecallToolArguments {
+    query: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    expected: Vec<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// 全局状态缓存（WASM 单线程，RefCell 安全）。
@@ -141,19 +153,12 @@ impl Guest for Component {
         // 读缓存的状态，经 request 拉取三级记忆注入。
         let session_id = state::session_id().unwrap_or_default();
         let workspace_id = state::workspace_id();
-        let payload = serde_json::json!({
-            "session_id": session_id,
-            "workspace_id": workspace_id,
-        });
-        let sections = match sidecar_call("load_injection", &payload) {
-            Ok(response_json) => {
-                // sidecar 返回 MemoryIpcResponsePayload::Injection { items: Vec<String> }。
-                serde_json::from_str::<serde_json::Value>(&response_json)
-                    .ok()
-                    .and_then(|v| v.get("items").cloned())
-                    .and_then(|items| serde_json::from_value(items).ok())
-                    .unwrap_or_default()
-            }
+        let request = LoadInjectionRequest {
+            session_id,
+            workspace_id,
+        };
+        let sections = match sidecar_client::invoke::<LoadInjection>(&request) {
+            Ok(response) => response.items,
             Err(_) => {
                 // sidecar 不可用时返回空（不注入），不阻断 prompt 装配。
                 Vec::new()
@@ -170,39 +175,27 @@ impl Guest for Component {
             )));
         }
 
-        // 桥接：把 recall_memory 的参数包成 MemoryRecallRequest，
-        // 经通用 sidecar 接口转发到 recall_context 完整编排。
-        let request_payload = serde_json::json!({
-            "request": {
-                "query": parse_query(&call.arguments).unwrap_or_default(),
-                "reason": parse_string_field(&call.arguments, "reason"),
-                "expected": parse_string_array(&call.arguments, "expected"),
-                "context": [],
-                "limit": parse_u32_field(&call.arguments, "limit").unwrap_or(5),
-            }
-        });
+        let arguments =
+            serde_json::from_str::<RecallToolArguments>(&call.arguments).map_err(|error| {
+                PluginError::Message(format!("解析 recall_memory 参数失败: {error}"))
+            })?;
+        let request = RecallContextRequest {
+            request: RecallQuery {
+                query: arguments.query,
+                reason: arguments.reason,
+                expected: arguments.expected,
+                context: Vec::new(),
+                limit: arguments.limit.unwrap_or(5),
+            },
+        };
 
-        match sidecar_call("recall_context", &request_payload) {
-            Ok(response_json) => {
-                // sidecar 返回的 MemoryIpcResponsePayload::RecallContext JSON，
-                // 从中取 content 字段作为摘要。
-                let content = serde_json::from_str::<serde_json::Value>(&response_json)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("response")
-                            .and_then(|response| response.get("content"))
-                            .and_then(|content| content.as_str())
-                            .map(String::from)
-                    })
-                    .unwrap_or_else(|| response_json.clone());
-                Ok(tool_result_ok(content))
-            }
-            Err(sidecar::SidecarError::Unavailable) => Ok(tool_result_ok(
+        match sidecar_client::invoke::<RecallContext>(&request) {
+            Ok(result) => Ok(tool_result_ok(result.response.content)),
+            Err(sidecar_client::ClientError::NotConfigured)
+            | Err(sidecar_client::ClientError::Unavailable(_)) => Ok(tool_result_ok(
                 "记忆系统未启用（memory sidecar 未连接）。".to_string(),
             )),
-            Err(sidecar::SidecarError::Message(m)) => {
-                Ok(tool_result_ok(format!("记忆查询失败：{m}")))
-            }
+            Err(error) => Ok(tool_result_ok(format!("记忆查询失败：{error}"))),
         }
     }
 
@@ -297,8 +290,14 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
-            "bootstrap" => request_memory_host("ui.memory.config.get", "{}"),
-            "save_config" => request_memory_host("ui.memory.config.set", &request.payload),
+            "bootstrap" => invoke_for_ui::<ui::GetConfig>(&Empty {}),
+            "save_config" => {
+                let selection = serde_json::from_str::<ui::MemorySelection>(&request.payload)
+                    .map_err(|error| {
+                        PluginError::Message(format!("解析 Memory 配置失败: {error}"))
+                    })?;
+                invoke_for_ui::<ui::SetConfig>(&selection)
+            }
             "memory_request" => forward_memory_ui_request(&request.payload),
             other => Err(PluginError::Message(format!("未知消息: {other}"))),
         }?;
@@ -306,45 +305,55 @@ impl UiGuest for Component {
     }
 }
 
-fn request_memory_host(method: &str, payload: &str) -> Result<String, PluginError> {
-    let payload_val =
-        serde_json::from_str::<serde_json::Value>(payload).unwrap_or(serde_json::Value::Null);
-    sidecar_call(method, &payload_val).map_err(|error| match error {
-        sidecar::SidecarError::Unavailable => PluginError::Message("Memory 未启用".to_string()),
-        sidecar::SidecarError::Message(message) => PluginError::Message(message),
-    })
+fn invoke_for_ui<O>(request: &O::Request) -> Result<String, PluginError>
+where
+    O: MemoryOperation,
+    O::Response: serde::Serialize,
+{
+    let response = sidecar_client::invoke::<O>(request)
+        .map_err(|error| PluginError::Message(error.to_string()))?;
+    serde_json::to_string(&response)
+        .map_err(|error| PluginError::Message(format!("序列化 {} 响应失败: {error}", O::NAME)))
 }
 
 fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
-    let method = serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("method")
-                .and_then(|method| method.as_str())
-                .map(String::from)
-        })
-        .ok_or_else(|| PluginError::Message("Memory 页面请求缺少 method".to_string()))?;
-    match method.as_str() {
-        "list_nodes"
-        | "count_nodes"
-        | "list_relations"
-        | "list_relations_batch"
-        | "upsert_manual_memory"
-        | "set_node_status"
-        | "upsert_relation"
-        | "delete_relation"
-        | "recall" => request_memory_host("ui.memory.request", payload),
-        _ => Err(PluginError::Message(format!(
-            "Memory 页面不支持请求: {method}"
-        ))),
+    let request = serde_json::from_str::<UiRequest>(payload)
+        .map_err(|error| PluginError::Message(format!("解析 Memory 页面请求失败: {error}")))?;
+    match request {
+        UiRequest::ListNodes { query } => {
+            invoke_for_ui::<ui::ListNodes>(&ui::ListNodesRequest { query })
+        }
+        UiRequest::CountNodes { query } => {
+            invoke_for_ui::<ui::CountNodes>(&ui::CountNodesRequest { query })
+        }
+        UiRequest::ListRelations { node_id } => {
+            invoke_for_ui::<ui::ListRelations>(&ui::ListRelationsRequest { node_id })
+        }
+        UiRequest::ListRelationsBatch { node_ids } => {
+            invoke_for_ui::<ui::ListRelationsBatch>(&ui::ListRelationsBatchRequest { node_ids })
+        }
+        UiRequest::UpsertManualMemory { draft } => {
+            invoke_for_ui::<ui::UpsertManualMemory>(&ui::UpsertManualMemoryRequest { draft })
+        }
+        UiRequest::SetNodeStatus { node_id, status } => {
+            invoke_for_ui::<ui::SetNodeStatus>(&ui::SetNodeStatusRequest { node_id, status })
+        }
+        UiRequest::UpsertRelation { draft } => {
+            invoke_for_ui::<ui::UpsertRelation>(&ui::UpsertRelationRequest { draft })
+        }
+        UiRequest::DeleteRelation { relation_id } => {
+            invoke_for_ui::<ui::DeleteRelation>(&ui::DeleteRelationRequest { relation_id })
+        }
+        UiRequest::Recall { anchors, limit } => {
+            invoke_for_ui::<Recall>(&RecallRequest { anchors, limit })
+        }
     }
 }
 
 /// 从 session 快照提取本轮信息，转发给 sidecar 做 enhanced micro 反刍。
 ///
 /// 提取 session.id、本轮 user_input、工具调用名，组装成 EnhancedTurnResult 的
-/// 简化形式，经 request("run_enhanced_micro_rumination", ...) 转发。
+/// 简化形式，经类型化 sidecar client 转发。
 fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: serde_json::Value = serde_json::from_str(session_json)
         .map_err(|e| PluginError::Message(format!("解析 session 失败: {e}")))?;
@@ -388,23 +397,22 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
         })
         .unwrap_or_default();
 
-    // 组装 EnhancedTurnResult 的简化 payload，转发到 sidecar。
-    let payload = serde_json::json!({
-        "turn_result": {
-            "session_id": session_id,
-            "turn_id": format!("turn-{turn_start_idx}"),
-            "had_tool_calls": !tool_calls.is_empty(),
-            "user_input": user_input.clone(),
-            "summary": user_input,
-            "tool_calls": tool_calls,
-            "artifacts": [],
-            "workspace_id": state::workspace_id(),
-            "memory_candidates": [],
-            "turn_messages": [],
-        }
-    });
+    let request = RunEnhancedMicroRuminationRequest {
+        turn_result: EnhancedTurnResult {
+            session_id,
+            turn_id: format!("turn-{turn_start_idx}"),
+            had_tool_calls: !tool_calls.is_empty(),
+            user_input: user_input.clone(),
+            summary: user_input,
+            tool_calls,
+            artifacts: Vec::new(),
+            workspace_id: state::workspace_id(),
+            memory_candidates: Vec::new(),
+            turn_messages: Vec::new(),
+        },
+    };
     // sidecar 可能不可用（disabled），反刍是 best-effort，忽略错误。
-    let _ = sidecar_call("run_enhanced_micro_rumination", &payload);
+    let _ = sidecar_client::invoke::<RunEnhancedMicroRumination>(&request);
     Ok(())
 }
 
@@ -423,11 +431,11 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
         .unwrap_or("")
         .to_string();
 
-    let payload = serde_json::json!({
-        "session_id": session_id,
-        "workspace_id": workspace_id,
-    });
-    let _ = sidecar_call("run_meso_rumination", &payload);
+    let request = RunMesoRuminationRequest {
+        session_id,
+        workspace_id,
+    };
+    let _ = sidecar_client::invoke::<RunMesoRumination>(&request);
     Ok(())
 }
 
@@ -439,73 +447,6 @@ fn tool_result_ok(summary: String) -> ToolResult {
         stderr: String::new(),
         exit_code: 0,
     }
-}
-
-// ── 最小 JSON 解析（从工具参数中取字段） ──
-
-fn parse_query(arguments: &str) -> Option<String> {
-    parse_string_field(arguments, "query")
-}
-
-fn parse_string_field(arguments: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\"");
-    let idx = arguments.find(&key)?;
-    let after_key = &arguments[idx + key.len()..];
-    let colon = after_key.find(':')?;
-    let after_colon = &after_key[colon + 1..];
-    let quote = after_colon.find('"')?;
-    let value_start = quote + 1;
-    let value_rest = &after_colon[value_start..];
-    let end_quote = value_rest.find('"')?;
-    Some(value_rest[..end_quote].to_string())
-}
-
-fn parse_u32_field(arguments: &str, field: &str) -> Option<u32> {
-    let key = format!("\"{field}\"");
-    let idx = arguments.find(&key)?;
-    let after_key = &arguments[idx + key.len()..];
-    let colon = after_key.find(':')?;
-    let after_colon = &after_key[colon + 1..];
-    let digits: String = after_colon
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().ok()
-}
-
-fn parse_string_array(arguments: &str, field: &str) -> Vec<String> {
-    let key = format!("\"{field}\"");
-    let Some(idx) = arguments.find(&key) else {
-        return Vec::new();
-    };
-    let after_key = &arguments[idx + key.len()..];
-    let Some(open) = after_key.find('[') else {
-        return Vec::new();
-    };
-    let rest = &after_key[open + 1..];
-    let close = rest.find(']').unwrap_or(rest.len());
-    let body = &rest[..close];
-    let mut out = Vec::new();
-    let mut chars = body.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        if c == '"' {
-            chars.next();
-            let mut s = String::new();
-            for cc in chars.by_ref() {
-                if cc == '"' {
-                    break;
-                }
-                s.push(cc);
-            }
-            if !s.is_empty() {
-                out.push(s);
-            }
-        } else {
-            chars.next();
-        }
-    }
-    out
 }
 
 bindings::export!(Component with_types_in bindings);

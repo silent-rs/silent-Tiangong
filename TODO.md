@@ -46,12 +46,33 @@
 - 宿主设置页只负责动态入口、iframe 容器和通用消息转发，不解析 Memory 业务数据。
 - Memory WASM 制品、插件运行时验证和 Memory 页面真实浏览器流程通过。
 
+## 当前任务：Memory 插件归档与动态热加载
+
+- [x] 将 Memory WASM、sidecar、私有协议和 `plugin.json` 统一整理到 `crates/plugins/tiangong-plugin-memory/`。
+- [x] 删除未使用的进程内原生 Memory 插件和旧目录引用，三个子目录继续作为根 Workspace 的独立成员。
+- [x] 建立只依赖序列化库的 Memory 私有协议，集中定义业务版本、操作名称、请求、响应和业务错误。
+- [x] WASM 与 sidecar 共同依赖私有协议，调用负载不再重复携带操作名称，App 不依赖私有协议。
+- [x] 清单运行文件路径由插件 ID 固定生成，不允许插件自定义 endpoint 和日志路径。
+- [x] 提供 `cargo run -p xtask -- build-plugin memory`，一次构建并部署完整插件包。
+- [x] 运行时提供插件状态查询与动态热加载；新版本完成实例化后再替换，失败时保留旧实例。
+- [x] 设置中增加插件管理页面，显示插件版本、运行状态和 sidecar 信息，并支持刷新与热加载。
+- [x] 热加载后刷新插件贡献页面，当前存活 Core 后续调用切换到新实例。
+- [x] 只执行 Memory、插件运行时、桌面入口和设置页相关验证。
+
+### 当前任务完成标准
+
+- Memory 插件三部分和清单位于同一目录，旧目录及未使用原生插件已清理。
+- 私有协议可同时通过本机与 `wasm32-wasip2` 编译，WASM 与 sidecar 请求类型一致。
+- 一次构建命令生成并部署完整插件，运行目录不会越过自身插件目录。
+- 设置页可查看 Memory 插件并完成真实热加载，加载失败不会中断当前可用版本。
+- 现有会话和插件页面在热加载后使用新实例，Memory 配置与数据页面仍可正常打开。
+
 ## 后续阶段
 
 - [ ] 实现零权限探测、授权实例化和权限扩大确认。
 - [ ] 启动 epoch 心跳并验证墙钟超时，补齐 host request 超时与取消传播。
-- [ ] 实现不可变版本快照、热加载、旧调用排空和失败保留旧版本。
-- [ ] 完成通用右侧 Plugin Tab、页面版本绑定、关闭清理和重启恢复。
+- [ ] 完成不可变版本快照、旧调用排空、页面版本绑定、关闭清理和重启恢复。
+- [ ] 完成通用右侧 Plugin Tab。
 - [ ] 补齐插件配置与 Secret 独立命名空间，以及页面资源和消息的完整限制。
 - [ ] 将 Memory 的提取、整理和反刍编排逐步下沉到 WASM，使 sidecar 最终只保留原子存储能力。
 - [x] 移除 Core 对原生 Memory 插件和具体 Memory crate 的静态业务依赖。
@@ -71,6 +92,7 @@
 - [x] 删除 WIT 中的 `memory-store` interface 和 world 中的 `import memory-store`。
 - [x] 统一 WIT 来源为单一事实源，消除两份副本。
 - [x] 定义插件制品清单格式（插件 ID、版本、WASM 路径和 sidecar 启动信息），由运行时自动发现。
+- [x] 在 Memory 插件目录恢复私有协议 crate，集中维护业务操作和数据结构。
 
 ### 阶段一完成标准
 
@@ -115,6 +137,7 @@
 ## 阶段四：Memory 迁移
 
 - [x] Memory WASM 改用通用 sidecar 接口，业务操作名和负载只存在于 Memory 插件与 sidecar。
+- [x] Memory WASM 与 sidecar 改为共同依赖插件私有协议，不再分别维护操作字符串与负载结构。
 - [ ] Memory sidecar 改用 Host 模型代理替换直接模型调用。
 - [ ] 修复会话和工作区上下文（显式携带 session_id、workspace_id、turn_id）。
 - [ ] 修复 Micro/Meso 反刍请求（提供完整轮次数据）。

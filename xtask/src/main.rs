@@ -1,165 +1,299 @@
-//! xtask：辅助构建任务。
-//!
-//! 提供 `build-wasm` 和 `build-sidecar` 子命令：
-//! - build-wasm：构建 memory wasm 组件并部署到插件包目录
-//! - build-sidecar：构建 memory sidecar 二进制并部署到同一插件包目录
-//!
-//! 用法：
-//! ```sh
-//! cargo run -p xtask -- build-wasm
-//! cargo run -p xtask -- build-sidecar
-//! ```
+//! 天工辅助构建任务。
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
+const PROTOCOL_CRATE: &str = "tiangong-plugin-memory-protocol";
 const WASM_CRATE: &str = "tiangong-plugin-memory-wasm";
 const WASM_TARGET: &str = "wasm32-wasip2";
 const WASM_ARTIFACT: &str = "tiangong_plugin_memory_wasm.wasm";
-const PLUGIN_ID: &str = "memory";
-const PLUGIN_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory-wasm/plugin.json";
-
-const SIDECAR_CRATE: &str = "tiangong-memory-sidecar";
+const SIDECAR_CRATE: &str = "tiangong-plugin-memory-sidecar";
 const SIDECAR_ARTIFACT: &str = "tiangong-memory-sidecar";
+const PLUGIN_ID: &str = "memory";
+const PLUGIN_ROOT: &str = "crates/plugins/tiangong-plugin-memory";
+const PLUGIN_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory/plugin.json";
+const PROTOCOL_MANIFEST: &str = "crates/plugins/tiangong-plugin-memory/protocol/Cargo.toml";
+const RUNTIME_MANIFEST: &str = "crates/tiangong-plugin-runtime/Cargo.toml";
+const PRESERVED_DIRS: [&str; 3] = ["runtime", "logs", "data"];
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().map(String::as_str).unwrap_or("help");
-    match cmd {
-        "build-wasm" => {
-            if let Err(e) = build_wasm() {
-                eprintln!("build-wasm 失败: {e}");
-                std::process::exit(1);
-            }
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let result = match args.as_slice() {
+        [command, plugin] if command == "build-plugin" => build_plugin(plugin),
+        [command] if command == "build-wasm" || command == "build-sidecar" => {
+            eprintln!("[xtask] {command} 已合并到 build-plugin memory");
+            build_plugin(PLUGIN_ID)
         }
-        "build-sidecar" => {
-            if let Err(e) = build_sidecar() {
-                eprintln!("build-sidecar 失败: {e}");
-                std::process::exit(1);
-            }
-        }
-        "help" | "--help" | "-h" => print_help(),
-        other => {
-            eprintln!("未知子命令: {other}");
+        [command] if command == "help" || command == "--help" || command == "-h" => {
             print_help();
-            std::process::exit(1);
+            Ok(())
         }
+        [] => {
+            print_help();
+            Ok(())
+        }
+        _ => {
+            print_help();
+            Err(invalid_input("参数无效"))
+        }
+    };
+
+    if let Err(error) = result {
+        eprintln!("xtask 失败: {error}");
+        std::process::exit(1);
     }
 }
 
 fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
-    eprintln!("用法: cargo run -p xtask -- <子命令>\n");
-    eprintln!("子命令:");
-    eprintln!("  build-wasm      构建 memory wasm 组件并部署到插件包目录");
-    eprintln!("  build-sidecar   构建 memory sidecar 二进制并部署到插件包目录");
-    eprintln!("  help            显示本帮助");
+    eprintln!("用法: cargo run -p xtask -- build-plugin memory");
 }
 
-/// 构建 wasm 组件并拷贝到 storage_root/plugins/。
-fn build_wasm() -> std::io::Result<()> {
-    let workspace_root = workspace_root();
-    eprintln!("[xtask] workspace 根目录: {}", workspace_root.display());
+fn build_plugin(plugin: &str) -> io::Result<()> {
+    if plugin != PLUGIN_ID {
+        return Err(invalid_input(format!("暂不支持插件: {plugin}")));
+    }
 
-    // 1. 构建 wasm 组件（release）。
-    eprintln!("[xtask] 构建 {WASM_CRATE}（target={WASM_TARGET}, profile=release）...");
-    let status = Command::new(env_var_or("CARGO", "cargo"))
-        .current_dir(&workspace_root)
-        .args([
+    let workspace_root = workspace_root();
+    validate_versions(&workspace_root)?;
+
+    eprintln!("[xtask] 检查 Memory 私有协议（native）...");
+    run_cargo(&workspace_root, &["check", "-p", PROTOCOL_CRATE])?;
+    eprintln!("[xtask] 检查 Memory 私有协议（{WASM_TARGET}）...");
+    run_cargo(
+        &workspace_root,
+        &["check", "-p", PROTOCOL_CRATE, "--target", WASM_TARGET],
+    )?;
+    eprintln!("[xtask] 构建 Memory WASM...");
+    run_cargo(
+        &workspace_root,
+        &[
             "build",
             "-p",
             WASM_CRATE,
             "--target",
             WASM_TARGET,
             "--release",
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("cargo build wasm 退出码非零"));
-    }
+        ],
+    )?;
+    eprintln!("[xtask] 构建 Memory sidecar...");
+    run_cargo(
+        &workspace_root,
+        &["build", "-p", SIDECAR_CRATE, "--release"],
+    )?;
 
-    // 2. 定位构建产物。
-    let artifact = workspace_root
+    let wasm = workspace_root
         .join("target")
         .join(WASM_TARGET)
         .join("release")
         .join(WASM_ARTIFACT);
-    if !artifact.exists() {
-        return Err(std::io::Error::other(format!(
-            "未找到 wasm 产物: {}",
-            artifact.display()
-        )));
-    }
-    eprintln!(
-        "[xtask] 构建产物: {} ({} 字节)",
-        artifact.display(),
-        file_size(&artifact)?
-    );
+    let sidecar = workspace_root.join("target").join("release").join(format!(
+        "{SIDECAR_ARTIFACT}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    require_file(&wasm)?;
+    require_file(&sidecar)?;
 
-    // 3. 拷贝到插件包目录，并同步运行时清单。
-    let dest_dir = plugin_dest_dir();
-    std::fs::create_dir_all(&dest_dir)?;
-    let dest = dest_dir.join(WASM_ARTIFACT);
-    std::fs::copy(&artifact, &dest)?;
-    deploy_manifest(&workspace_root, &dest_dir)?;
-    eprintln!("[xtask] 已部署到: {}", dest.display());
+    let plugins_dir = storage_root().join("plugins");
+    std::fs::create_dir_all(&plugins_dir)?;
+    let staging = plugins_dir.join(format!(".{PLUGIN_ID}-staging-{}", std::process::id()));
+    let destination = plugins_dir.join(PLUGIN_ID);
+    remove_dir_if_exists(&staging)?;
+    std::fs::create_dir_all(&staging)?;
 
-    Ok(())
-}
-
-/// 构建 memory sidecar 二进制并部署到插件包目录。
-fn build_sidecar() -> std::io::Result<()> {
-    let workspace_root = workspace_root();
-    eprintln!("[xtask] workspace 根目录: {}", workspace_root.display());
-
-    // 1. 构建 sidecar 二进制（release）。
-    eprintln!("[xtask] 构建 {SIDECAR_CRATE}（profile=release）...");
-    let status = Command::new(env_var_or("CARGO", "cargo"))
-        .current_dir(&workspace_root)
-        .args(["build", "-p", SIDECAR_CRATE, "--release"])
-        .status()?;
-    if !status.success() {
-        return Err(std::io::Error::other("cargo build sidecar 退出码非零"));
+    let staged_wasm = staging.join(WASM_ARTIFACT);
+    let staged_sidecar = staging.join(format!(
+        "{SIDECAR_ARTIFACT}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    std::fs::copy(&wasm, &staged_wasm)?;
+    std::fs::copy(&sidecar, &staged_sidecar)?;
+    std::fs::copy(
+        workspace_root.join(PLUGIN_MANIFEST),
+        staging.join("plugin.json"),
+    )?;
+    for directory in PRESERVED_DIRS {
+        std::fs::create_dir_all(staging.join(directory))?;
     }
 
-    // 2. 定位构建产物（带平台可执行后缀）。
-    let exe = std::env::consts::EXE_SUFFIX;
-    let artifact = workspace_root
-        .join("target")
-        .join("release")
-        .join(format!("{SIDECAR_ARTIFACT}{exe}"));
-    if !artifact.exists() {
-        return Err(std::io::Error::other(format!(
-            "未找到 sidecar 产物: {}",
-            artifact.display()
-        )));
-    }
-    eprintln!(
-        "[xtask] 构建产物: {} ({} 字节)",
-        artifact.display(),
-        file_size(&artifact)?
-    );
-
-    // 3. 拷贝到插件包目录，并同步运行时清单。
-    let dest_dir = plugin_dest_dir();
-    std::fs::create_dir_all(&dest_dir)?;
-    let dest = dest_dir.join(format!("{SIDECAR_ARTIFACT}{exe}"));
-    std::fs::copy(&artifact, &dest)?;
-    deploy_manifest(&workspace_root, &dest_dir)?;
-
-    // Unix 设置可执行权限。
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::set_permissions(&staged_sidecar, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    eprintln!("[xtask] 已部署到: {}", dest.display());
-
+    eprintln!("[xtask] WASM sha256: {}", sha256(&staged_wasm)?);
+    eprintln!("[xtask] sidecar sha256: {}", sha256(&staged_sidecar)?);
+    deploy_atomically(&staging, &destination)?;
+    eprintln!("[xtask] Memory 插件已部署到: {}", destination.display());
     Ok(())
 }
 
-/// workspace 根目录：xtask crate 在 workspace 根下的 xtask/，上溯一级。
+fn validate_versions(workspace_root: &Path) -> io::Result<()> {
+    let workspace = read_toml(&workspace_root.join("Cargo.toml"))?;
+    let workspace_version = workspace
+        .get("workspace")
+        .and_then(|value| value.get("package"))
+        .and_then(|value| value.get("version"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| invalid_data("无法读取 workspace.package.version"))?;
+
+    let manifest_path = workspace_root.join(PLUGIN_MANIFEST);
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
+        .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
+    let manifest_version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
+    if manifest_version != workspace_version {
+        return Err(invalid_data(format!(
+            "插件版本不一致: workspace={workspace_version}, plugin.json={manifest_version}"
+        )));
+    }
+
+    let protocol = read_toml(&workspace_root.join(PROTOCOL_MANIFEST))?;
+    let business_protocol = protocol
+        .get("package")
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("tiangong"))
+        .and_then(|value| value.get("business-protocol"))
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| invalid_data("Memory Protocol 缺少 business-protocol 元数据"))?;
+    let manifest_business_protocol = manifest
+        .get("sidecar")
+        .and_then(|value| value.get("business_protocol"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| invalid_data("plugin.json 缺少 sidecar.business_protocol"))?;
+    if u64::try_from(business_protocol).ok() != Some(manifest_business_protocol) {
+        return Err(invalid_data(format!(
+            "Memory 业务协议版本不一致: protocol={business_protocol}, plugin.json={manifest_business_protocol}"
+        )));
+    }
+
+    let runtime = read_toml(&workspace_root.join(RUNTIME_MANIFEST))?;
+    let transport_protocol = runtime
+        .get("package")
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("tiangong"))
+        .and_then(|value| value.get("transport-protocol"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| invalid_data("插件运行时缺少 transport-protocol 元数据"))?;
+    let manifest_transport_protocol = manifest
+        .get("sidecar")
+        .and_then(|value| value.get("transport_protocol"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("plugin.json 缺少 sidecar.transport_protocol"))?;
+    if transport_protocol != manifest_transport_protocol {
+        return Err(invalid_data(format!(
+            "sidecar transport 版本不一致: runtime={transport_protocol}, plugin.json={manifest_transport_protocol}"
+        )));
+    }
+
+    let wasm_binary = manifest
+        .get("wasm")
+        .and_then(|value| value.get("binary"))
+        .and_then(serde_json::Value::as_str);
+    let sidecar_binary = manifest
+        .get("sidecar")
+        .and_then(|value| value.get("binary"))
+        .and_then(serde_json::Value::as_str);
+    if wasm_binary != Some(WASM_ARTIFACT) || sidecar_binary != Some(SIDECAR_ARTIFACT) {
+        return Err(invalid_data("plugin.json 制品名称与构建产物不一致"));
+    }
+
+    let plugin_root = workspace_root.join(PLUGIN_ROOT);
+    require_file(&plugin_root.join("wasm/Cargo.toml"))?;
+    require_file(&plugin_root.join("sidecar/Cargo.toml"))?;
+    require_file(&plugin_root.join("protocol/Cargo.toml"))?;
+    Ok(())
+}
+
+fn deploy_atomically(staging: &Path, destination: &Path) -> io::Result<()> {
+    if !destination.exists() {
+        return std::fs::rename(staging, destination);
+    }
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| invalid_input("插件安装目录缺少父目录"))?;
+    let backup = parent.join(format!(".{PLUGIN_ID}-backup-{}", std::process::id()));
+    remove_dir_if_exists(&backup)?;
+    std::fs::rename(destination, &backup)?;
+
+    let result = (|| {
+        for directory in PRESERVED_DIRS {
+            let staged = staging.join(directory);
+            let preserved = backup.join(directory);
+            if preserved.exists() {
+                remove_dir_if_exists(&staged)?;
+                std::fs::rename(preserved, staged)?;
+            }
+        }
+        std::fs::rename(staging, destination)
+    })();
+
+    if let Err(error) = result {
+        for directory in PRESERVED_DIRS {
+            let staged = staging.join(directory);
+            let preserved = backup.join(directory);
+            if staged.exists() && !preserved.exists() {
+                let _ = std::fs::rename(staged, preserved);
+            }
+        }
+        let _ = std::fs::rename(&backup, destination);
+        return Err(error);
+    }
+
+    remove_dir_if_exists(&backup)
+}
+
+fn run_cargo(workspace_root: &Path, args: &[&str]) -> io::Result<()> {
+    let status = Command::new(env_var_or("CARGO", "cargo"))
+        .current_dir(workspace_root)
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "cargo {} 执行失败",
+            args.join(" ")
+        )))
+    }
+}
+
+fn read_toml(path: &Path) -> io::Result<toml::Value> {
+    let content = std::fs::read_to_string(path)?;
+    toml::from_str(&content)
+        .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", path.display())))
+}
+
+fn require_file(path: &Path) -> io::Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("文件不存在: {}", path.display()),
+        ))
+    }
+}
+
+fn remove_dir_if_exists(path: &Path) -> io::Result<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn sha256(path: &Path) -> io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -167,39 +301,26 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-/// 天工存储根目录（`~/.tiangong`），与 tiangong-config::io::storage_root 一致。
 fn storage_root() -> PathBuf {
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join(".tiangong")
 }
 
-fn plugin_dest_dir() -> PathBuf {
-    storage_root().join("plugins").join(PLUGIN_ID)
-}
-
-fn deploy_manifest(workspace_root: &Path, dest_dir: &Path) -> std::io::Result<()> {
-    let source = workspace_root.join(PLUGIN_MANIFEST);
-    let dest = dest_dir.join("plugin.json");
-    std::fs::copy(source, dest)?;
-    Ok(())
-}
-
-/// 用户主目录（兼容 HOME / USERPROFILE / HOMEDRIVE+HOMEPATH）。
 fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(home));
     }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(profile));
     }
-    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
-    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
+    let drive = std::env::var_os("HOMEDRIVE").filter(|value| !value.is_empty());
+    let path = std::env::var_os("HOMEPATH").filter(|value| !value.is_empty());
     match (drive, path) {
         (Some(drive), Some(path)) => {
-            let mut buf = PathBuf::from(drive);
-            buf.push(path);
-            Some(buf)
+            let mut buffer = PathBuf::from(drive);
+            buffer.push(path);
+            Some(buffer)
         }
         _ => None,
     }
@@ -209,6 +330,10 @@ fn env_var_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-fn file_size(path: &Path) -> std::io::Result<u64> {
-    Ok(std::fs::metadata(path)?.len())
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }

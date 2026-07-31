@@ -8,6 +8,7 @@ license = "Apache-2.0"
 default = []
 
 [dependencies]
+tiangong-plugin-memory-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-config = { workspace = true }
 tokio = { workspace = true, features = [

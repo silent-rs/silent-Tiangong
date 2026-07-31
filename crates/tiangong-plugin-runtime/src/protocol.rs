@@ -100,6 +100,10 @@ pub struct HandshakeResponse {
     pub plugin_version: String,
     pub sidecar_version: String,
     pub protocol_version: String,
+    #[serde(default)]
+    pub business_protocol: u32,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub instance_id: String,
     pub status: ServiceStatus,
 }

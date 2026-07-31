@@ -15,14 +15,18 @@ interface clock {
 interface sidecar {
     /// sidecar 错误。
     variant sidecar-error {
-        message(string),
-        unavailable,
+        not-configured,
+        unavailable(string),
+        timeout,
+        permission-denied,
+        protocol-mismatch(string),
+        internal(string),
     }
 
     /// 通用调用：运行时封装协议后转发操作名和 JSON 负载。
     invoke: func(
         operation: string,
-        payload: string,
+        payload-json: string,
     ) -> result<string, sidecar-error>;
 }
 

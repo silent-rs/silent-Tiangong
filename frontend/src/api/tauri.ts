@@ -1234,6 +1234,11 @@ export const api = {
   listPluginContributions: (): Promise<PluginContributionEntry[]> =>
     invoke('list_plugin_contributions'),
 
+  listPlugins: (): Promise<PluginStatus[]> => invoke('list_plugins'),
+
+  reloadPlugin: (pluginId: string): Promise<PluginStatus> =>
+    invoke('reload_plugin', { pluginId }),
+
   /// 按需获取插件页面 HTML（用户点击进入时才调用）。
   pluginOpenView: (pluginId: string, contributionId: string): Promise<string> =>
     invoke('plugin_open_view', { pluginId, contributionId }),
@@ -1246,6 +1251,7 @@ export const api = {
 /// 插件设置页贡献项。
 export interface PluginContributionEntry {
   plugin_id: string;
+  generation: number;
   contribution_id: string;
   title: string;
   description: string;
@@ -1253,4 +1259,16 @@ export interface PluginContributionEntry {
   group: string;
   /// 是否有可渲染的配置页面。
   has_view: boolean;
+}
+
+export interface PluginStatus {
+  id: string;
+  name: string;
+  manifest_version: string;
+  loaded_version: string | null;
+  state: 'loaded' | 'degraded' | 'error';
+  generation: number;
+  has_sidecar: boolean;
+  sidecar_running: boolean;
+  last_error: string | null;
 }

@@ -533,20 +533,7 @@ fn ensure_memory_runtime_dir() -> Result<()> {
 }
 
 fn memory_base_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
+    crate::paths::memory_data_dir()
 }
 
 #[cfg(test)]

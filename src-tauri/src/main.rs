@@ -123,18 +123,14 @@ fn run_gui() {
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
 
-            // 预加载 WASM 插件到全局注册表，供设置页在会话创建前查询贡献。
+            // 预加载 WASM 插件的 UI 实例，Core 实例仍在创建会话时独立构造。
             {
                 let storage_root = tiangong_config::io::storage_root();
-                drop(tiangong_plugin_runtime::registry::load_installed_plugins(
-                    &storage_root,
-                ));
+                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
             }
 
-            // 全部插件均由 ensure_core
-            // 创建 Core 时现场 build_plugin() 构造，确保每个 Core 持有独立实例
+            // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
-            // 此处只做 setup 阶段的初始化（不构造插件实例）。
 
             // 将 workspace 目录设为系统 PTY 默认 cwd（独立于插件实例化的全局状态）。
             let app_handle = app.handle().clone();
@@ -430,6 +426,8 @@ fn run_gui() {
             tiangong_app::commands::edit_and_resend,
             tiangong_app::commands::respond_approval,
             tiangong_app::commands::list_plugin_contributions,
+            tiangong_app::commands::list_plugins,
+            tiangong_app::commands::reload_plugin,
             tiangong_app::commands::plugin_open_view,
             tiangong_app::commands::plugin_call,
             tiangong_app::commands::get_trust_mode,

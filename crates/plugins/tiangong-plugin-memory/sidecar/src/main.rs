@@ -23,7 +23,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    tracing::info!("memory sidecar 启动中...");
+    tracing::info!(
+        business_protocol = tiangong_plugin_memory_protocol::MEMORY_PROTOCOL_VERSION,
+        "memory sidecar 启动中..."
+    );
 
     // 加载 memory 配置（模型端点、embedding 等）。
     let options = MemoryConfig::load_or_default().to_options();

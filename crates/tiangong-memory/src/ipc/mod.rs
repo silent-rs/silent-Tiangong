@@ -14,11 +14,18 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use plugin_ui::{CONFIG_GET_OPERATION, CONFIG_SET_OPERATION};
 use protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse, MemoryIpcRequestPayload,
     MemoryIpcResponsePayload,
 };
-use serde::Serialize;
+use tiangong_plugin_memory_protocol::control::{
+    DISABLE_OPERATION, ENABLE_OPERATION, STATUS_OPERATION, TEST_OPERATION,
+};
+use tiangong_plugin_memory_protocol::{
+    injection as plugin_injection, recall as plugin_recall, rumination as plugin_rumination,
+    ui as plugin_ui,
+};
 use tiangong_plugin_runtime::protocol::{
     ErrorCode as PluginErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION,
     Request as PluginRequest, Response as PluginResponse, ServiceStatus,
@@ -280,22 +287,6 @@ async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -
     }
 }
 
-#[derive(Serialize)]
-struct MemoryUiBootstrap {
-    config: crate::MemoryConfigSelection,
-    models: Vec<MemoryUiModel>,
-    disabled: bool,
-}
-
-#[derive(Serialize)]
-struct MemoryUiModel {
-    key: String,
-    provider: String,
-    model: String,
-    capabilities: Vec<String>,
-    dimension: Option<usize>,
-}
-
 async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> PluginResponse {
     let request_id = request.request_id.clone();
     if request.protocol_version != PROTOCOL_VERSION {
@@ -313,12 +304,12 @@ async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> 
         && !matches!(
             request.operation.as_str(),
             HANDSHAKE_OPERATION
-                | "enable"
-                | "disable"
-                | "status"
-                | "test"
-                | "ui.memory.config.get"
-                | "ui.memory.config.set"
+                | ENABLE_OPERATION
+                | DISABLE_OPERATION
+                | STATUS_OPERATION
+                | TEST_OPERATION
+                | CONFIG_GET_OPERATION
+                | CONFIG_SET_OPERATION
         )
     {
         return PluginResponse::error(
@@ -346,56 +337,44 @@ async fn dispatch_plugin_request(
 ) -> Result<serde_json::Value> {
     match request.operation.as_str() {
         HANDSHAKE_OPERATION => serde_json::to_value(HandshakeResponse {
-            plugin_id: "memory".to_string(),
-            plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+            plugin_id: tiangong_plugin_memory_protocol::PLUGIN_ID.to_string(),
+            plugin_version: tiangong_plugin_memory_protocol::PLUGIN_VERSION.to_string(),
             sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
+            business_protocol: tiangong_plugin_memory_protocol::MEMORY_PROTOCOL_VERSION,
+            capabilities: vec!["memory".to_string()],
             instance_id: format!("memory-sidecar-{}", std::process::id()),
             status: ServiceStatus::Ready,
         })
         .with_context(|| "序列化 Memory 握手响应失败"),
-        "ui.memory.config.get" => memory_ui_bootstrap(),
-        "ui.memory.config.set" => {
-            let selection: crate::MemoryConfigSelection =
-                serde_json::from_value(request.payload)
-                    .with_context(|| "解析 Memory 页面配置失败")?;
+        CONFIG_GET_OPERATION => memory_ui_bootstrap(),
+        CONFIG_SET_OPERATION => {
+            let selection: plugin_ui::MemorySelection = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory 页面配置失败")?;
+            let selection: crate::MemoryConfigSelection = transcode(selection)?;
             let models =
                 tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
             let config = selection.to_memory(&models)?;
             config.save()?;
             handle.reconfigure(config.to_options()).await?;
-            Ok(serde_json::json!({"ok": true}))
+            serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
+                .with_context(|| "序列化 Memory 配置保存响应失败")
         }
-        "ui.memory.request" => {
-            let memory_request: MemoryIpcRequestPayload =
-                serde_json::from_value(request.payload)
-                    .with_context(|| "解析 Memory 页面请求失败")?;
-            serde_json::to_value(handle_memory_request(handle, memory_request).await?)
-                .with_context(|| "序列化 Memory 页面响应失败")
-        }
-        "enable" => {
+        ENABLE_OPERATION => {
             crate::enable_memory()?;
             Ok(serde_json::json!({"ok": true, "disabled": false}))
         }
-        "disable" => {
+        DISABLE_OPERATION => {
             crate::disable_memory()?;
             Ok(serde_json::json!({"ok": true, "disabled": true}))
         }
-        "status" => memory_status(),
-        "test" => memory_config_test(),
+        STATUS_OPERATION => memory_status(),
+        TEST_OPERATION => memory_config_test(),
         operation => {
-            let mut payload = request.payload;
-            let object = payload
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("Memory 请求 payload 必须是 JSON 对象"))?;
-            object.insert(
-                "method".to_string(),
-                serde_json::Value::String(operation.to_string()),
-            );
-            let memory_request: MemoryIpcRequestPayload = serde_json::from_value(payload)
-                .with_context(|| format!("解析 Memory {operation} 请求失败"))?;
-            serde_json::to_value(handle_memory_request(handle, memory_request).await?)
-                .with_context(|| format!("序列化 Memory {operation} 响应失败"))
+            let memory_request = decode_plugin_memory_request(operation, &request.payload)?
+                .ok_or_else(|| anyhow!("不支持的 Memory 操作: {operation}"))?;
+            let response = handle_memory_request(handle, memory_request).await?;
+            encode_plugin_memory_response(operation, response)
         }
     }
 }
@@ -407,7 +386,7 @@ fn memory_ui_bootstrap() -> Result<serde_json::Value> {
     let mut model_entries = models
         .models
         .iter()
-        .map(|(key, entry)| MemoryUiModel {
+        .map(|(key, entry)| plugin_ui::MemoryUiModel {
             key: key.clone(),
             provider: entry.provider.clone(),
             model: entry.model.clone(),
@@ -424,12 +403,178 @@ fn memory_ui_bootstrap() -> Result<serde_json::Value> {
         })
         .collect::<Vec<_>>();
     model_entries.sort_by(|left, right| left.key.cmp(&right.key));
-    serde_json::to_value(MemoryUiBootstrap {
-        config: selection,
+    serde_json::to_value(plugin_ui::MemoryBootstrap {
+        config: transcode(selection)?,
         models: model_entries,
         disabled: crate::is_memory_disabled(),
     })
     .with_context(|| "序列化 Memory 页面配置失败")
+}
+
+fn decode_plugin_memory_request(
+    operation: &str,
+    payload: &serde_json::Value,
+) -> Result<Option<MemoryIpcRequestPayload>> {
+    let request = match operation {
+        plugin_injection::LOAD_OPERATION => {
+            let request: plugin_injection::LoadInjectionRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::LoadInjection {
+                session_id: request.session_id,
+                workspace_id: request.workspace_id,
+            }
+        }
+        plugin_recall::RECALL_OPERATION => {
+            let request: plugin_recall::RecallRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::Recall {
+                anchors: transcode(request.anchors)?,
+                limit: request.limit,
+            }
+        }
+        plugin_recall::RECALL_CONTEXT_OPERATION => {
+            let request: plugin_recall::RecallContextRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RecallContext {
+                request: transcode(request.request)?,
+            }
+        }
+        plugin_rumination::RUN_ENHANCED_MICRO_OPERATION => {
+            let request: plugin_rumination::RunEnhancedMicroRuminationRequest =
+                decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunEnhancedMicroRumination {
+                turn_result: transcode(request.turn_result)?,
+            }
+        }
+        plugin_rumination::RUN_MESO_OPERATION => {
+            let request: plugin_rumination::RunMesoRuminationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunMesoRumination {
+                session_id: request.session_id,
+                workspace_id: request.workspace_id,
+            }
+        }
+        plugin_ui::LIST_NODES_OPERATION => {
+            let request: plugin_ui::ListNodesRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListNodes {
+                query: transcode(request.query)?,
+            }
+        }
+        plugin_ui::COUNT_NODES_OPERATION => {
+            let request: plugin_ui::CountNodesRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::CountNodes {
+                query: transcode(request.query)?,
+            }
+        }
+        plugin_ui::LIST_RELATIONS_OPERATION => {
+            let request: plugin_ui::ListRelationsRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListRelations {
+                node_id: request.node_id,
+            }
+        }
+        plugin_ui::LIST_RELATIONS_BATCH_OPERATION => {
+            let request: plugin_ui::ListRelationsBatchRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListRelationsBatch {
+                node_ids: request.node_ids,
+            }
+        }
+        plugin_ui::UPSERT_MANUAL_MEMORY_OPERATION => {
+            let request: plugin_ui::UpsertManualMemoryRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::UpsertManualMemory {
+                draft: transcode(request.draft)?,
+            }
+        }
+        plugin_ui::SET_NODE_STATUS_OPERATION => {
+            let request: plugin_ui::SetNodeStatusRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::SetNodeStatus {
+                node_id: request.node_id,
+                status: transcode(request.status)?,
+            }
+        }
+        plugin_ui::UPSERT_RELATION_OPERATION => {
+            let request: plugin_ui::UpsertRelationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::UpsertRelation {
+                draft: transcode(request.draft)?,
+            }
+        }
+        plugin_ui::DELETE_RELATION_OPERATION => {
+            let request: plugin_ui::DeleteRelationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::DeleteRelation {
+                relation_id: request.relation_id,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(request))
+}
+
+fn encode_plugin_memory_response(
+    operation: &str,
+    response: MemoryIpcResponsePayload,
+) -> Result<serde_json::Value> {
+    let value = match (operation, response) {
+        (plugin_injection::LOAD_OPERATION, MemoryIpcResponsePayload::Injection { items }) => {
+            serde_json::to_value(plugin_injection::LoadInjectionResponse { items })?
+        }
+        (plugin_recall::RECALL_OPERATION, MemoryIpcResponsePayload::Recall { hits }) => {
+            let hits: Vec<plugin_recall::RecallHit> = transcode(hits)?;
+            serde_json::to_value(plugin_recall::RecallResponse { hits })?
+        }
+        (
+            plugin_recall::RECALL_CONTEXT_OPERATION,
+            MemoryIpcResponsePayload::RecallContext { response },
+        ) => {
+            let response: plugin_recall::RecallContextResponse = transcode(response)?;
+            serde_json::to_value(plugin_recall::RecallContextResult { response })?
+        }
+        (
+            plugin_rumination::RUN_ENHANCED_MICRO_OPERATION | plugin_rumination::RUN_MESO_OPERATION,
+            MemoryIpcResponsePayload::Ack,
+        ) => serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())?,
+        (plugin_ui::LIST_NODES_OPERATION, MemoryIpcResponsePayload::Nodes { items }) => {
+            let items: Vec<plugin_ui::MemoryNode> = transcode(items)?;
+            serde_json::to_value(plugin_ui::NodesResponse { items })?
+        }
+        (plugin_ui::COUNT_NODES_OPERATION, MemoryIpcResponsePayload::NodeCount { count }) => {
+            serde_json::to_value(plugin_ui::NodeCountResponse { count })?
+        }
+        (
+            plugin_ui::LIST_RELATIONS_OPERATION | plugin_ui::LIST_RELATIONS_BATCH_OPERATION,
+            MemoryIpcResponsePayload::Relations { items },
+        ) => {
+            let items: Vec<plugin_ui::MemoryRelation> = transcode(items)?;
+            serde_json::to_value(plugin_ui::RelationsResponse { items })?
+        }
+        (plugin_ui::UPSERT_MANUAL_MEMORY_OPERATION, MemoryIpcResponsePayload::Node { item }) => {
+            let item: plugin_ui::MemoryNode = transcode(item)?;
+            serde_json::to_value(plugin_ui::NodeResponse { item })?
+        }
+        (
+            plugin_ui::SET_NODE_STATUS_OPERATION | plugin_ui::DELETE_RELATION_OPERATION,
+            MemoryIpcResponsePayload::Ack,
+        ) => serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())?,
+        (plugin_ui::UPSERT_RELATION_OPERATION, MemoryIpcResponsePayload::Relation { item }) => {
+            let item: plugin_ui::MemoryRelation = transcode(item)?;
+            serde_json::to_value(plugin_ui::RelationResponse { item })?
+        }
+        (_, response) => {
+            bail!("Memory {operation} 返回了不匹配的响应: {response:?}")
+        }
+    };
+    Ok(value)
+}
+
+fn decode<T>(payload: &serde_json::Value, operation: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(payload.clone())
+        .with_context(|| format!("解析 Memory {operation} 请求失败"))
+}
+
+fn transcode<T, U>(value: T) -> Result<U>
+where
+    T: serde::Serialize,
+    U: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(serde_json::to_value(value)?)
+        .with_context(|| "转换 Memory 插件协议类型失败")
 }
 
 fn memory_status() -> Result<serde_json::Value> {
@@ -663,6 +808,11 @@ impl IpcConnection {
 }
 
 pub fn endpoint_path(service: &str) -> Result<PathBuf> {
+    if let Some(path) =
+        std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
     let base = runtime_dir()?;
     Ok(base.join(format!("{service}.json")))
 }

@@ -1208,10 +1208,7 @@ fn db_file_path() -> PathBuf {
 }
 
 fn memory_base_path() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
+    crate::paths::memory_data_dir()
 }
 
 fn home_dir() -> Option<PathBuf> {

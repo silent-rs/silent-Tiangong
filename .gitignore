@@ -14,7 +14,7 @@ node_modules
 src-tauri/create_skill/
 .workers
 *.mp4
-.playwright-mcp
+.playwright*
 src-tauri/gen/schemas/
 crates/tiangong-plugin-browser/permissions/schemas/
 AGENTS.md

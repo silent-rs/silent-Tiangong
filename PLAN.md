@@ -10,21 +10,22 @@
 - 桌面端使用 Tauri，前端使用 React、TypeScript 与现有 shadcn/ui 风格组件。
 - WASM 插件运行时是天工 App 的基础能力，始终编译启用，不使用 Cargo feature 切换宿主能力。
 - 插件平台逐步迁移到单文件 WASM Component；Core 保留 Agent Loop，具体能力通过受限的宿主接口接入。
-- Memory 采用 WASM 插件与独立 sidecar 组合运行，App、CLI、Server 不再链接或启动进程内 Memory。
+- Memory 采用 WASM、独立 sidecar 与插件私有协议组成的完整插件，App、CLI、Server 不再链接或启动进程内 Memory。
 - 三方 IM 通过独立 bot 制品接入，由天工负责下载、配置、启动和监控；bot 通过 Server API 与天工通信。
 - 配置 schema、平台专属授权流程及扫码所得凭证均由 bot 制品负责，天工只负责通用命令调用和状态展示。
 
 ## WASM 插件 / Sidecar 架构
 
-插件由 WASM 组件与配套 sidecar 共同组成完整能力：
+插件由 WASM 组件、配套 sidecar 与插件私有协议共同组成完整能力：
 
-- **WASM 与 sidecar 共同组成完整插件**，插件包支持携带多平台 sidecar 二进制。
+- **WASM、sidecar 与私有协议共同组成完整插件**，三者统一组织、构建和发布，插件包支持携带多平台 sidecar 二进制。
 - **插件运行时统一负责 sidecar 发现、启动、健康检查和路由**，App 入口只加载已安装插件；崩溃退避与统一关闭按后续任务补齐。
 - **通用 sidecar 协议、制品清单和路由均定义在 `tiangong-plugin-runtime`**，不得在 App 入口增加具体插件分支。
 - **WASM 通过通用 Host 接口调用自己的 sidecar**，运行时根据当前 WASM 实例自动路由，WASM 不传插件 ID 或地址。
 - **Sidecar 后续通过 Host 模型代理调用外部模型**，不直接持有模型密钥或 URL。
 - **Host 不理解插件业务协议**，只封装并转发通用 JSON 负载。
-- **通用插件协议不得依赖 Memory 专用结构**；Memory 只在 WASM 与 sidecar 内维护业务操作名和负载，不再建立独立协议 crate。
+- **通用插件协议不得依赖 Memory 专用结构**；Memory 私有协议由插件目录内的轻量 crate 维护，WASM 与 sidecar 共同依赖，App 不依赖。
+- **设置页提供通用插件管理入口**，能够查看已安装插件并动态热加载；新实例加载失败时继续使用旧实例。
 - 目标模型调用链：Memory WASM → Host sidecar transport → Memory Sidecar → Host LLM Proxy → LLM / Embedding / Rerank 服务。
 - 配置 schema、平台专属授权流程及扫码所得凭证均由 bot 制品负责，天工只负责通用命令调用和状态展示。
 
@@ -48,7 +49,7 @@
 
 当前聚焦 Issue #250 与 Issue #270。飞书、微信和 QQ bot 制品，以及运行管理、展示名称、配置删除、日志查看、升级、天工服务配置自动注入、扫码授权、Bot ID 路径安全、入站图片转发、本地文件回传、运行状态一致性及开发模式退出链路均已完成；三端 Bot 已具备 MCP 文本、图片和文件推送能力，由 Bot 自动维护并授权主动发过消息的多目标清单，MCP 注册和注销绑定到 Bot 的启动与停止流程，三个独立 Bot 工程也已纳入 CI 检查。
 
-Issue #301 与 #321 已进入试开发：WASM 组件加载、内嵌设置页和运行稳定性修复已经落地，现有 Memory 模型配置与数据管理页面已迁入 WASM 插件 UI。Core 解耦已完成：通用协议、插件发现和 sidecar 路由已收归插件运行时，App、CLI、Server 入口已移除 Memory 专用加载与进程内降级；热加载、权限探测、右侧通用 Tab、安装升级和模型代理仍按后续独立任务推进。
+Issue #301 与 #321 已进入试开发：WASM 组件加载、内嵌设置页和运行稳定性修复已经落地，现有 Memory 模型配置与数据管理页面已迁入 WASM 插件 UI。Core 解耦已完成：通用协议、插件发现和 sidecar 路由已收归插件运行时，App、CLI、Server 入口已移除 Memory 专用加载与进程内降级。Memory 的 WASM、sidecar、私有协议和清单现已统一归档与构建，设置页可查看插件状态并动态热加载；权限探测、安装升级和模型代理仍按后续独立任务推进。
 
 
 ## 跨平台嵌入浏览器凭据能力（验证阶段）

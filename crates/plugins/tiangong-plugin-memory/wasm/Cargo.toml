@@ -3,12 +3,14 @@ name = "tiangong-plugin-memory-wasm"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
-description = "Memory System 的 WASM 桥接组件（经 memory-store request 转发到 sidecar）"
+description = "Memory 插件的 WASM 组件"
 publish = false
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+tiangong-plugin-memory-protocol = { workspace = true }
 wit-bindgen = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

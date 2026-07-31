@@ -22,6 +22,7 @@ mod db;
 mod injection;
 mod llm_metrics;
 mod options;
+mod paths;
 mod recall;
 mod recall_anchor;
 mod recall_context;

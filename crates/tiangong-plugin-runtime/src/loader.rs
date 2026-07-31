@@ -99,9 +99,24 @@ impl WasmPluginLoader {
         let bytes = std::fs::read(wasm_path).map_err(|e| {
             anyhow::anyhow!("读取 wasm 组件失败 {path}: {e}", path = wasm_path.display())
         })?;
-        let component = Component::new(&self.engine, bytes).map_err(|e| {
-            anyhow::anyhow!("编译 wasm 组件失败 {path}: {e}", path = wasm_path.display())
-        })?;
+        self.load_bytes_for_plugin(&bytes, config, plugin_id)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "加载 wasm 组件失败 {path}: {error}",
+                    path = wasm_path.display()
+                )
+            })
+    }
+
+    /// 从同一份不可变字节快照创建实例，供动态热加载批量替换使用。
+    pub fn load_bytes_for_plugin(
+        &self,
+        bytes: &[u8],
+        config: &PluginRuntimeConfig,
+        plugin_id: &str,
+    ) -> Result<WasmPlugin> {
+        let component = Component::new(&self.engine, bytes)
+            .map_err(|e| anyhow::anyhow!("编译 wasm 组件失败: {e}"))?;
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(config.memory_limit)
@@ -368,7 +383,7 @@ pub struct ToolCall {
 }
 
 /// 描述符结果。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Descriptor {
     pub id: String,
     pub name: String,

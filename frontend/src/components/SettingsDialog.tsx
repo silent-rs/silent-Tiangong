@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, HardDrive, Clock, Bot as BotIcon } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, HardDrive, Clock, Bot as BotIcon, Package } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -22,6 +22,7 @@ import { AutomationSettings } from './automation/AutomationSettings';
 import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
 import { PluginIframe } from './PluginSettingsPanel';
+import { PluginManagerSettings } from './PluginManagerSettings';
 import { type PluginContributionEntry } from '../api/tauri';
 
 const appWindow = getCurrentWindow();
@@ -139,59 +140,63 @@ export function SettingsDialog() {
           </header>
 
           <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 overflow-hidden flex">
-            <aside className="w-60 shrink-0 border-r bg-muted/30 flex flex-col">
+            <aside className="w-14 sm:w-60 shrink-0 border-r bg-muted/30 flex flex-col">
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2 pt-4">
-                <TabsTrigger value="agent" className="w-full justify-start px-3 py-2">
-                  <ShieldCheck className="w-4 h-4 mr-2" />
-                  智能体
+                <TabsTrigger value="agent" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <ShieldCheck className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">智能体</span>
                 </TabsTrigger>
-                <TabsTrigger value="llm" className="w-full justify-start px-3 py-2">
-                  <Settings className="w-4 h-4 mr-2" />
-                  模型配置
+                <TabsTrigger value="llm" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Settings className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">模型配置</span>
                 </TabsTrigger>
-                <TabsTrigger value="index" className="w-full justify-start px-3 py-2">
-                  <HardDrive className="w-4 h-4 mr-2" />
-                  索引管理
+                <TabsTrigger value="index" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <HardDrive className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">索引管理</span>
                 </TabsTrigger>
-                <TabsTrigger value="mcp" className="w-full justify-start px-3 py-2">
-                  <Server className="w-4 h-4 mr-2" />
-                  MCP
+                <TabsTrigger value="mcp" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Server className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">MCP</span>
                 </TabsTrigger>
-                <TabsTrigger value="skill" className="w-full justify-start px-3 py-2">
-                  <Puzzle className="w-4 h-4 mr-2" />
-                  Skills
+                <TabsTrigger value="skill" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Puzzle className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">Skills</span>
                 </TabsTrigger>
-                <TabsTrigger value="server" className="w-full justify-start px-3 py-2">
-                  <Globe className="w-4 h-4 mr-2" />
-                  Server
+                <TabsTrigger value="server" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Globe className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">Server</span>
                 </TabsTrigger>
-                <TabsTrigger value="automation" className="w-full justify-start px-3 py-2">
-                  <Clock className="w-4 h-4 mr-2" />
-                  定时任务
+                <TabsTrigger value="automation" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Clock className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">定时任务</span>
                 </TabsTrigger>
-                <TabsTrigger value="bots" className="w-full justify-start px-3 py-2">
-                  <BotIcon className="w-4 h-4 mr-2" />
-                  移动端控制
+                <TabsTrigger value="bots" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <BotIcon className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">移动端控制</span>
+                </TabsTrigger>
+                <TabsTrigger value="plugin-manager" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Package className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">插件管理</span>
                 </TabsTrigger>
                 {pluginContributions.map((entry) => (
-                  <TabsTrigger key={`plugin:${entry.plugin_id}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-start px-3 py-2">
-                    <Puzzle className="w-4 h-4 mr-2" />
-                    {entry.title}
+                  <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                    <Puzzle className="w-4 h-4 sm:mr-2" />
+                    <span className="sr-only sm:not-sr-only">{entry.title}</span>
                   </TabsTrigger>
                 ))}
-                <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
-                  <Info className="w-4 h-4 mr-2" />
-                  关于与更新
+                <TabsTrigger value="about" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <Info className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">关于与更新</span>
                 </TabsTrigger>
               </TabsList>
               <div className="border-t p-2">
                 <Button
                   variant="ghost"
-                  className="w-full justify-start"
+                  className="w-full justify-center px-0 sm:justify-start sm:px-4"
                   onClick={() => setOpen(false)}
                 >
-                  <X className="w-4 h-4 mr-2" />
-                  退出设置
+                  <X className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">退出设置</span>
                 </Button>
               </div>
             </aside>
@@ -221,8 +226,11 @@ export function SettingsDialog() {
               <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <BotPanel />
               </TabsContent>
+              <TabsContent value="plugin-manager" className="m-0 flex-1 min-h-0 overflow-hidden">
+                <PluginManagerSettings onContributionsChanged={setPluginContributions} />
+              </TabsContent>
               {pluginContributions.map((entry) => (
-                <TabsContent key={`plugin:${entry.plugin_id}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex-1 min-h-0 overflow-hidden">
+                <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex-1 min-h-0 overflow-hidden">
                   <PluginView contribution={entry} />
                 </TabsContent>
               ))}
@@ -2301,12 +2309,19 @@ function PluginView({ contribution }: { contribution: PluginContributionEntry })
   const [html, setHtml] = useState<string>('');
 
   useEffect(() => {
-    if (!html) {
-      api.pluginOpenView(contribution.plugin_id, contribution.contribution_id)
-        .then(setHtml)
-        .catch(() => setHtml('<p style="padding:16px;color:#888">页面加载失败</p>'));
-    }
-  }, [contribution, html]);
+    let active = true;
+    setHtml('');
+    api.pluginOpenView(contribution.plugin_id, contribution.contribution_id)
+      .then((page) => {
+        if (active) setHtml(page);
+      })
+      .catch(() => {
+        if (active) setHtml('<p style="padding:16px;color:#888">页面加载失败</p>');
+      });
+    return () => {
+      active = false;
+    };
+  }, [contribution.plugin_id, contribution.contribution_id, contribution.generation]);
 
   if (!html) {
     return <div className="p-4 text-sm text-muted-foreground">加载中…</div>;

@@ -13,12 +13,40 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::protocol::{
-    HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcEndpoint, IpcFrame, IpcRequest,
+    ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcEndpoint, IpcFrame, IpcRequest,
     PROTOCOL_VERSION, Request, Response,
 };
 
 const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const PLUGIN_ID_ENV: &str = "TIANGONG_PLUGIN_ID";
+pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
+pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
+pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
+
+#[derive(Debug)]
+pub enum SidecarInvokeError {
+    Unavailable(String),
+    Timeout,
+    PermissionDenied,
+    ProtocolMismatch(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for SidecarInvokeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) => write!(formatter, "sidecar 不可用: {message}"),
+            Self::Timeout => formatter.write_str("sidecar 请求超时"),
+            Self::PermissionDenied => formatter.write_str("sidecar 权限不足"),
+            Self::ProtocolMismatch(message) => write!(formatter, "sidecar 协议不兼容: {message}"),
+            Self::Internal(message) => write!(formatter, "sidecar 内部错误: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for SidecarInvokeError {}
 
 /// 通用 sidecar 连接：运行时负责协议封装，调用方只提供操作名和 JSON 负载。
 pub trait SidecarConnection: Send + Sync {
@@ -29,9 +57,13 @@ pub trait SidecarConnection: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SidecarConfig {
     pub plugin_id: String,
+    pub plugin_version: String,
     pub binary: PathBuf,
     pub endpoint: PathBuf,
     pub log: PathBuf,
+    pub data_dir: PathBuf,
+    pub transport_protocol: String,
+    pub business_protocol: u32,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
 }
@@ -39,18 +71,40 @@ pub struct SidecarConfig {
 impl SidecarConfig {
     pub fn new(
         plugin_id: impl Into<String>,
+        plugin_version: impl Into<String>,
         binary: impl Into<PathBuf>,
         endpoint: impl Into<PathBuf>,
         log: impl Into<PathBuf>,
+        data_dir: impl Into<PathBuf>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
+            plugin_version: plugin_version.into(),
             binary: binary.into(),
             endpoint: endpoint.into(),
             log: log.into(),
+            data_dir: data_dir.into(),
+            transport_protocol: PROTOCOL_VERSION.to_string(),
+            business_protocol: 0,
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
+    }
+
+    pub fn with_protocols(
+        mut self,
+        transport_protocol: impl Into<String>,
+        business_protocol: u32,
+    ) -> Self {
+        self.transport_protocol = transport_protocol.into();
+        self.business_protocol = business_protocol;
+        self
+    }
+
+    pub fn with_timeouts(mut self, start_timeout: Duration, request_timeout: Duration) -> Self {
+        self.start_timeout = start_timeout;
+        self.request_timeout = request_timeout;
+        self
     }
 }
 
@@ -69,16 +123,36 @@ impl ProcessSidecarConnection {
     }
 
     pub fn ensure_running(&self) -> Result<()> {
-        if self.health_check().is_ok() {
-            return Ok(());
+        match self.health_check() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<SidecarInvokeError>()
+                    .is_some_and(|error| {
+                        matches!(error, SidecarInvokeError::ProtocolMismatch(_))
+                    }) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
         }
 
         let _guard = self
             .start_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("sidecar 启动锁已损坏"))?;
-        if self.health_check().is_ok() {
-            return Ok(());
+        match self.health_check() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<SidecarInvokeError>()
+                    .is_some_and(|error| {
+                        matches!(error, SidecarInvokeError::ProtocolMismatch(_))
+                    }) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
         }
 
         let _ = std::fs::remove_file(&self.config.endpoint);
@@ -91,37 +165,67 @@ impl ProcessSidecarConnection {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                bail!(
-                    "等待插件 {} sidecar 就绪超时，日志：{}",
-                    self.config.plugin_id,
-                    self.config.log.display()
-                );
+                return Err(SidecarInvokeError::Timeout).with_context(|| {
+                    format!(
+                        "等待插件 {} sidecar 就绪超时，日志：{}",
+                        self.config.plugin_id,
+                        self.config.log.display()
+                    )
+                });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
     pub fn health_check(&self) -> Result<()> {
-        let payload = self.invoke_protocol_once(
-            HANDSHAKE_OPERATION,
-            serde_json::json!({"plugin_id": self.config.plugin_id}),
-        )?;
+        if self.config.transport_protocol != PROTOCOL_VERSION {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "清单 transport 版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
+                self.config.transport_protocol
+            ))
+            .into());
+        }
+        let payload = self
+            .invoke_protocol_once(
+                HANDSHAKE_OPERATION,
+                serde_json::json!({"plugin_id": self.config.plugin_id}),
+            )
+            .map_err(classify_transport_error)?;
         let handshake: HandshakeResponse =
             serde_json::from_value(payload).with_context(|| "解析 sidecar 握手响应失败")?;
         if handshake.plugin_id != self.config.plugin_id {
-            bail!(
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "sidecar 插件标识不匹配: expected={}, actual={}",
-                self.config.plugin_id,
-                handshake.plugin_id
-            );
+                self.config.plugin_id, handshake.plugin_id
+            ))
+            .into());
+        }
+        if handshake.plugin_version != self.config.plugin_version {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "sidecar 插件版本不匹配: expected={}, actual={}",
+                self.config.plugin_version, handshake.plugin_version
+            ))
+            .into());
         }
         if handshake.protocol_version != PROTOCOL_VERSION {
-            bail!(
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
                 "sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                 handshake.protocol_version
-            );
+            ))
+            .into());
+        }
+        if handshake.business_protocol != self.config.business_protocol {
+            return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                "sidecar 业务协议版本不匹配: expected={}, actual={}",
+                self.config.business_protocol, handshake.business_protocol
+            ))
+            .into());
         }
         Ok(())
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.health_check().is_ok()
     }
 
     fn spawn(&self) -> Result<()> {
@@ -132,6 +236,16 @@ impl ProcessSidecarConnection {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建 sidecar 日志目录失败: {}", parent.display()))?;
         }
+        if let Some(parent) = self.config.endpoint.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建 sidecar 运行目录失败: {}", parent.display()))?;
+        }
+        std::fs::create_dir_all(&self.config.data_dir).with_context(|| {
+            format!(
+                "创建 sidecar 数据目录失败: {}",
+                self.config.data_dir.display()
+            )
+        })?;
         let stdout = OpenOptions::new()
             .create(true)
             .append(true)
@@ -145,7 +259,11 @@ impl ProcessSidecarConnection {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stderr(Stdio::from(stderr))
+            .env(PLUGIN_ID_ENV, &self.config.plugin_id)
+            .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
+            .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
+            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
         configure_detached(&mut command);
 
         let mut child = command
@@ -208,10 +326,11 @@ impl ProcessSidecarConnection {
                 let response: Response = serde_json::from_value(response.payload)
                     .with_context(|| "解析 sidecar 协议响应失败")?;
                 if response.protocol_version != PROTOCOL_VERSION {
-                    bail!(
+                    return Err(SidecarInvokeError::ProtocolMismatch(format!(
                         "sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
                         response.protocol_version
-                    );
+                    ))
+                    .into());
                 }
                 if response.request_id != request_id {
                     bail!(
@@ -220,12 +339,21 @@ impl ProcessSidecarConnection {
                     );
                 }
                 if !response.success {
-                    bail!(
-                        "{}",
-                        response
-                            .error_message
-                            .unwrap_or_else(|| "sidecar 请求失败".to_string())
-                    );
+                    let message = response
+                        .error_message
+                        .unwrap_or_else(|| "sidecar 请求失败".to_string());
+                    let error = match response.error_code {
+                        Some(ErrorCode::Timeout) => SidecarInvokeError::Timeout,
+                        Some(ErrorCode::PermissionDenied) => SidecarInvokeError::PermissionDenied,
+                        Some(ErrorCode::ProtocolMismatch) => {
+                            SidecarInvokeError::ProtocolMismatch(message)
+                        }
+                        Some(ErrorCode::Unavailable | ErrorCode::ServiceDisabled) => {
+                            SidecarInvokeError::Unavailable(message)
+                        }
+                        _ => SidecarInvokeError::Internal(message),
+                    };
+                    return Err(error.into());
                 }
                 Ok(response.payload.unwrap_or(serde_json::Value::Null))
             }
@@ -241,10 +369,43 @@ impl ProcessSidecarConnection {
 
 impl SidecarConnection for ProcessSidecarConnection {
     fn invoke(&self, operation: &str, payload: &str) -> Result<String> {
-        self.ensure_running()?;
+        self.ensure_running().map_err(|error| {
+            if error.downcast_ref::<SidecarInvokeError>().is_some() {
+                error
+            } else {
+                SidecarInvokeError::Unavailable(error.to_string()).into()
+            }
+        })?;
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
-        let response = self.invoke_protocol_once(operation, payload)?;
+        let response = self
+            .invoke_protocol_once(operation, payload)
+            .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+}
+
+fn classify_transport_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<SidecarInvokeError>().is_some() {
+        return error;
+    }
+
+    let io_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+    match io_error.map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {
+            SidecarInvokeError::Timeout.into()
+        }
+        Some(
+            std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof,
+        ) => SidecarInvokeError::Unavailable(error.to_string()).into(),
+        _ => SidecarInvokeError::Internal(error.to_string()).into(),
     }
 }
 

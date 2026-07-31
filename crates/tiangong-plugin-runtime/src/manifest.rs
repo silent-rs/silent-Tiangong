@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::protocol::PROTOCOL_VERSION;
+
 pub const MANIFEST_FILE: &str = "plugin.json";
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -13,19 +15,32 @@ pub struct PluginManifest {
     pub schema_version: u32,
     pub id: String,
     pub version: String,
-    pub wasm: PathBuf,
+    pub wasm: WasmManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar: Option<SidecarManifest>,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WasmManifest {
+    Detailed { binary: PathBuf },
+    Legacy(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarManifest {
     /// 相对插件目录的可执行文件名，不包含平台可执行后缀。
     pub binary: PathBuf,
-    /// 相对 storage root 的 endpoint 文件。
-    pub endpoint: PathBuf,
-    /// 相对 storage root 的日志文件。
-    pub log: PathBuf,
+    #[serde(default = "default_transport_protocol")]
+    pub transport_protocol: String,
+    #[serde(default)]
+    pub business_protocol: u32,
+    #[serde(default = "default_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
 }
 
 impl PluginManifest {
@@ -54,14 +69,43 @@ impl PluginManifest {
         {
             bail!("插件清单包含无效 ID: {}", self.id);
         }
-        validate_relative_path(&self.wasm, "wasm")?;
+        if self.version.trim().is_empty() {
+            bail!("插件 {} 清单版本为空", self.id);
+        }
+        validate_relative_path(self.wasm_binary(), "wasm.binary")?;
         if let Some(sidecar) = &self.sidecar {
             validate_relative_path(&sidecar.binary, "sidecar.binary")?;
-            validate_relative_path(&sidecar.endpoint, "sidecar.endpoint")?;
-            validate_relative_path(&sidecar.log, "sidecar.log")?;
+            if sidecar.transport_protocol.trim().is_empty() {
+                bail!("插件 {} sidecar transport 版本为空", self.id);
+            }
+            if sidecar.startup_timeout_ms == 0 || sidecar.request_timeout_ms == 0 {
+                bail!("插件 {} sidecar 超时时间必须大于 0", self.id);
+            }
         }
         Ok(())
     }
+
+    pub fn wasm_binary(&self) -> &Path {
+        match &self.wasm {
+            WasmManifest::Detailed { binary } | WasmManifest::Legacy(binary) => binary,
+        }
+    }
+
+    pub fn has_permission(&self, permission: &str) -> bool {
+        self.permissions.iter().any(|item| item == permission)
+    }
+}
+
+fn default_transport_protocol() -> String {
+    PROTOCOL_VERSION.to_string()
+}
+
+const fn default_startup_timeout_ms() -> u64 {
+    15_000
+}
+
+const fn default_request_timeout_ms() -> u64 {
+    30_000
 }
 
 fn validate_relative_path(path: &Path, field: &str) -> Result<()> {

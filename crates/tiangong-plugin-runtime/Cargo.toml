@@ -4,6 +4,9 @@ version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
 
+[package.metadata.tiangong]
+transport-protocol = "0.1.0"
+
 [dependencies]
 tiangong-core = { workspace = true }
 wasmtime = { workspace = true }

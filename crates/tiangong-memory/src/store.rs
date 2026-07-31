@@ -869,22 +869,9 @@ fn decision_to_node(decision: &Decision, workspace_id: Option<&str>) -> MemoryNo
 }
 
 fn memory_base_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
+    crate::paths::memory_data_dir()
 }
 
 fn default_vector_mode() -> MemoryVectorMode {
     MemoryVectorMode::EmbeddedLanceDb
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
 }

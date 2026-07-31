@@ -8,13 +8,14 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
+use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
@@ -28,12 +29,22 @@ use crate::loader::WasmPlugin;
 /// 注意：Wasmtime 的 Store 要求 `Send`（Engine 编译产物可跨线程），故
 /// `Arc<Mutex<WasmPlugin>>` 可用于 `spawn_blocking`。
 pub struct WasmPluginAdapter {
-    inner: Arc<Mutex<WasmPlugin>>,
+    inner: RwLock<Arc<Mutex<WasmPlugin>>>,
     config: PluginRuntimeConfig,
     /// 插件 id，构造期确定后不变。
     id: String,
     /// 反馈通道（每 turn 注入），供 handle 发送流事件。
-    feedback_tx: std::sync::RwLock<Option<PluginFeedbackTx>>,
+    feedback_tx: RwLock<Option<PluginFeedbackTx>>,
+    context: Mutex<ReloadContext>,
+}
+
+#[derive(Clone, Default)]
+struct ReloadContext {
+    workspace: Option<String>,
+    config_json: Option<String>,
+    session_json: Option<String>,
+    trust_mode: Option<TrustMode>,
+    exec_env: std::collections::BTreeMap<String, String>,
 }
 
 impl WasmPluginAdapter {
@@ -43,16 +54,55 @@ impl WasmPluginAdapter {
             .map(|d| d.id)
             .unwrap_or_else(|_| "wasm-unknown".to_string());
         Self {
-            inner,
+            inner: RwLock::new(inner),
             id: id_string,
             config,
-            feedback_tx: std::sync::RwLock::new(None),
+            feedback_tx: RwLock::new(None),
+            context: Mutex::new(ReloadContext::default()),
         }
     }
 
     /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
     pub fn inner_handle(&self) -> Arc<Mutex<WasmPlugin>> {
-        self.inner.clone()
+        self.current_inner()
+    }
+
+    pub(crate) fn runtime_config(&self) -> PluginRuntimeConfig {
+        self.config.clone()
+    }
+
+    pub(crate) fn prepare_replacement(
+        &self,
+        mut plugin: WasmPlugin,
+    ) -> anyhow::Result<Arc<Mutex<WasmPlugin>>> {
+        let context = self
+            .context
+            .lock()
+            .map_err(|_| anyhow::anyhow!("wasm 插件上下文锁已损坏"))?
+            .clone();
+        if let Some(config_json) = context.config_json {
+            plugin.on_config_updated(config_json)?;
+        }
+        plugin.set_workspace(context.workspace)?;
+        if let Some(session_json) = context.session_json {
+            plugin.on_session_ready(session_json)?;
+        }
+        Ok(Arc::new(Mutex::new(plugin)))
+    }
+
+    pub(crate) fn replace_inner(&self, replacement: Arc<Mutex<WasmPlugin>>) {
+        let mut current = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = replacement;
+    }
+
+    fn current_inner(&self) -> Arc<Mutex<WasmPlugin>> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -78,6 +128,9 @@ impl Plugin for WasmPluginAdapter {
                 return;
             }
         };
+        if let Ok(mut context) = self.context.lock() {
+            context.config_json = Some(config_json.clone());
+        }
         if let Err(e) =
             self.call_wasm_off_runtime(move |plugin| plugin.on_config_updated(config_json))
         {
@@ -112,8 +165,23 @@ impl Plugin for WasmPluginAdapter {
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         let ws = workspace.map(|p| p.to_string_lossy().to_string());
+        if let Ok(mut context) = self.context.lock() {
+            context.workspace = ws.clone();
+        }
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws)) {
             tracing::warn!("wasm set_workspace 失败: {e}");
+        }
+    }
+
+    fn set_trust_mode(&self, trust: TrustMode) {
+        if let Ok(mut context) = self.context.lock() {
+            context.trust_mode = Some(trust);
+        }
+    }
+
+    fn set_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut context) = self.context.lock() {
+            context.exec_env = env;
         }
     }
 }
@@ -127,7 +195,7 @@ impl WasmPluginAdapter {
     where
         R: Send,
     {
-        call_wasm_off_runtime(self.inner.clone(), call)
+        call_wasm_off_runtime(self.current_inner(), call)
     }
 
     /// 序列化 session 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
@@ -143,6 +211,9 @@ impl WasmPluginAdapter {
                 return;
             }
         };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
         }
@@ -162,6 +233,9 @@ impl WasmPluginAdapter {
                 return;
             }
         };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
         let idx = turn_start_idx as u32;
         if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!("wasm 生命周期钩子失败: {e}");
@@ -203,7 +277,7 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             name: call.name.clone(),
             arguments,
         };
-        let inner = self.inner.clone();
+        let inner = self.current_inner();
         let config = self.config.clone();
         Box::pin(async move {
             let result = task::spawn_blocking(move || {

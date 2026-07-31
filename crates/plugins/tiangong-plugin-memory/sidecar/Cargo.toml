@@ -1,5 +1,5 @@
 [package]
-name = "tiangong-memory-sidecar"
+name = "tiangong-plugin-memory-sidecar"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tiangong-memory = { workspace = true }
+tiangong-plugin-memory-protocol = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time"] }
 tracing = { workspace = true }

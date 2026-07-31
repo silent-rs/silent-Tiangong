@@ -4563,11 +4563,12 @@ pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>,
     let entries = tiangong_plugin_runtime::registry::list_contributions();
     Ok(entries
         .into_iter()
-        .flat_map(|(plugin_id, contributions)| {
+        .flat_map(|(plugin_id, generation, contributions)| {
             contributions
                 .into_iter()
                 .map(move |c| PluginContributionEntry {
                     plugin_id: plugin_id.clone(),
+                    generation,
                     contribution_id: c.id,
                     title: c.title,
                     description: c.description,
@@ -4577,6 +4578,38 @@ pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>,
                 })
         })
         .collect())
+}
+
+/// 列出已安装插件、当前加载版本和 sidecar 状态。
+#[tauri::command]
+pub async fn list_plugins(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_plugin_runtime::registry::PluginStatus>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::list_plugins(&storage_root)
+    })
+    .await
+    .map_err(|error| format!("读取插件状态失败: {error}"))
+}
+
+/// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
+#[tauri::command]
+pub async fn reload_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::reload_plugin(&storage_root, &plugin_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("热加载插件失败: {error}"))?
 }
 
 /// 按需获取插件页面 HTML（用户点击进入时才调用）。
@@ -4606,6 +4639,7 @@ pub async fn plugin_call(
 #[derive(serde::Serialize)]
 pub struct PluginContributionEntry {
     pub plugin_id: String,
+    pub generation: u64,
     pub contribution_id: String,
     pub title: String,
     pub description: String,

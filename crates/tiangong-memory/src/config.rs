@@ -160,7 +160,7 @@ fn default_vector_mode_selection() -> String {
 }
 
 pub fn default_memory_config_path() -> PathBuf {
-    storage_root().join("memory").join("config.json")
+    crate::paths::memory_data_dir().join("config.json")
 }
 
 /// Memory 禁用标记文件路径：~/.tiangong/memory/.disabled
@@ -169,7 +169,7 @@ pub fn default_memory_config_path() -> PathBuf {
 /// MemoryConfig 无顶层 enabled 字段，改用此标记文件存在性表示禁用，
 /// 不破坏 MemoryConfig 结构、不丢失端点配置。
 pub fn memory_disabled_marker_path() -> PathBuf {
-    storage_root().join("memory").join(".disabled")
+    crate::paths::memory_data_dir().join(".disabled")
 }
 
 /// 判断 Memory 是否被显式禁用（标记文件存在即禁用）。
@@ -203,22 +203,6 @@ pub fn enable_memory_at(path: &Path) -> Result<()> {
         return Ok(());
     }
     fs::remove_file(path).with_context(|| format!("删除禁用标记失败：{}", path.display()))
-}
-
-fn user_home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
-}
-
-fn storage_root() -> PathBuf {
-    user_home_dir()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .join(".tiangong")
 }
 
 fn resolve_api_key(value: &str) -> String {
