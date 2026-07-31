@@ -18,6 +18,8 @@ pub struct PluginSession {
     pub title: String,
     /// 工作目录。
     pub cwd: String,
+    /// 工作区标识（由宿主生成的平台无关 ID，通常取 cwd 的末尾目录名）。
+    pub workspace_id: String,
     /// 父会话 ID（子 Agent 时存在）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,

@@ -354,36 +354,50 @@ fn forward_memory_ui_request(payload: &str) -> Result<String, PluginError> {
 ///
 /// 从 PluginSession 提取本轮完整内容，组装成 EnhancedTurnResult 转发给 sidecar。
 ///
-/// 提取内容：
-/// - 用户输入文本
-/// - 助手最终回复作为 summary
-/// - Assistant 消息中的 tool_calls
-/// - Tool 消息的结果正文、是否失败
-/// - 文件路径、URL、媒体等产物
-/// - 本轮完整 turn_messages
-/// - 基于工具结果生成 memory_candidates
+/// 排除规则：
+/// - CompressedResume 消息不算轮次起点
+/// - model_excluded 消息不进入任何提取
+/// - recall_memory 等只读工具结果不生成候选（避免召回结果回写）
 fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<(), PluginError> {
     let session: tiangong_types::PluginSession = serde_json::from_str(session_json)
         .map_err(|e| PluginError::Message(format!("解析 PluginSession 失败: {e}")))?;
 
     let idx = turn_start_idx as usize;
-    let messages = &session.messages;
+    let all_messages = &session.messages;
 
-    // 校验起点索引和角色。
-    let start_msg = match messages.get(idx) {
-        Some(m) if matches!(m.role, tiangong_types::MessageRole::User) => m,
+    // 校验起点：必须是 User 且非 CompressedResume。
+    let start_msg = match all_messages.get(idx) {
+        Some(m)
+            if matches!(m.role, tiangong_types::MessageRole::User)
+                && !matches!(m.phase, tiangong_types::MessagePhase::CompressedResume) =>
+        {
+            m
+        }
         _ => {
-            tracing_warn(&format!(
-                "turn_start_idx={idx} 不存在或不是用户消息，跳过反刍"
-            ));
             return Ok(());
         }
     };
 
     let user_input = extract_message_text(start_msg);
-    let turn_messages = &messages[idx..];
 
-    // 提取工具调用名（来自 Assistant 消息的 tool_calls 字段）。
+    // 过滤本轮消息：排除 model_excluded。
+    let turn_messages: Vec<&tiangong_types::Message> = all_messages[idx..]
+        .iter()
+        .filter(|m| !m.model_excluded)
+        .collect();
+
+    // 建立工具调用表：tool_call_id → (tool_name, arguments JSON)。
+    // 用于从调用参数中提取 path 等信息，并关联 Tool 结果。
+    use std::collections::HashMap;
+    let mut call_table: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+    for m in &turn_messages {
+        for tc in &m.tool_calls {
+            let args = tc.arguments.clone();
+            call_table.insert(tc.id.clone(), (tc.name.clone(), args));
+        }
+    }
+
+    // 提取工具调用名。
     let tool_calls: Vec<String> = turn_messages
         .iter()
         .flat_map(|m| m.tool_calls.iter().map(|c| c.name.clone()))
@@ -394,8 +408,11 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
         .iter()
         .rev()
         .find(|m| matches!(m.role, tiangong_types::MessageRole::Assistant))
-        .map(extract_message_text)
+        .map(|m| extract_message_text(m))
         .unwrap_or_else(|| user_input.clone());
+
+    // 只读工具不生成候选（避免 recall_memory 结果回写为新记忆）。
+    const READONLY_TOOLS: &[&str] = &["recall_memory", "list_memory_nodes", "count_memory_nodes"];
 
     // 提取产物和候选。
     let mut artifacts = Vec::new();
@@ -406,7 +423,27 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
             let text = extract_message_text(m);
             let is_error = m.tool_result_is_error;
             let tool_name = m.tool_name.clone().unwrap_or_default();
-            let (file_path, url) = extract_paths_and_urls(&text);
+            let tc_id = m.tool_call_id.as_deref();
+
+            // 通过 tool_call_id 从调用参数中补充提取 path/url。
+            let mut file_path = None;
+            let mut url = None;
+            if let Some(id) = tc_id {
+                if let Some((_, args)) = call_table.get(id) {
+                    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                        file_path = Some(p.to_string());
+                    }
+                    if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
+                        url = Some(u.to_string());
+                    }
+                }
+            }
+            // 参数里没有就从结果正文补充。
+            if file_path.is_none() || url.is_none() {
+                let (fp, u) = extract_paths_and_urls(&text);
+                file_path = file_path.or(fp);
+                url = url.or(u);
+            }
 
             // 产物
             if !text.is_empty() {
@@ -430,17 +467,19 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
                 });
             }
 
-            // 候选
-            memory_candidates.push(MemoryCandidate {
-                tool_name: tool_name.clone(),
-                step_index: step,
-                hint: truncate(&text, 500),
-                suggested_kinds: Vec::new(),
-                file_path,
-                url,
-                result_summary: Some(truncate(&text, 200)),
-                success: !is_error,
-            });
+            // 候选：排除只读工具（避免 recall_memory 结果回写）
+            if !READONLY_TOOLS.contains(&tool_name.as_str()) {
+                memory_candidates.push(MemoryCandidate {
+                    tool_name: tool_name.clone(),
+                    step_index: step,
+                    hint: truncate(&text, 500),
+                    suggested_kinds: Vec::new(),
+                    file_path,
+                    url,
+                    result_summary: Some(truncate(&text, 200)),
+                    success: !is_error,
+                });
+            }
         }
 
         // 从 Assistant 消息中提取媒体产物。
@@ -469,7 +508,7 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
             summary,
             tool_calls,
             artifacts,
-            workspace_id: state::workspace_id(),
+            workspace_id: Some(session.workspace_id.clone()),
             memory_candidates,
             turn_messages: turn_messages
                 .iter()
@@ -491,8 +530,7 @@ fn forward_session_rumination(session_json: &str) -> Result<(), PluginError> {
 
     let request = RunMesoRuminationRequest {
         session_id: session.id,
-        // 使用统一的 workspace_id 生成逻辑，与 Micro 保持一致。
-        workspace_id: workspace_id_from_cwd(&session.cwd),
+        workspace_id: session.workspace_id,
     };
     let _ = sidecar_client::invoke::<RunMesoRumination>(&request);
     Ok(())
@@ -547,11 +585,6 @@ fn extract_paths_and_urls(text: &str) -> (Option<String>, Option<String>) {
         });
 
     (path, url)
-}
-
-/// 统一的工作区 ID 生成：取 cwd 的末尾目录名。
-fn workspace_id_from_cwd(cwd: &str) -> String {
-    cwd.rsplit('/').next().unwrap_or(cwd).to_string()
 }
 
 /// WASM 内简易日志（无 tracing，直接忽略）。

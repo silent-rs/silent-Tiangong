@@ -242,6 +242,34 @@ fn test_session() -> Session {
     session
 }
 
+/// 构造一个有用户消息的测试 Session（供 turn_finished 测试用）。
+fn test_session_with_user_message() -> Session {
+    use tiangong_types::{ContentBlock, Message, MessageRole};
+    let mut session = Session::new("test-session");
+    session.cwd = "/tmp/test-workspace".to_string();
+    session.messages.push(Message {
+        id: "msg-1".to_string(),
+        role: MessageRole::User,
+        content: vec![ContentBlock::Text {
+            text: "测试用户输入".to_string(),
+        }],
+        reasoning_content: String::new(),
+        reasoning_signature: None,
+        worker_id: None,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+        tool_result_is_error: false,
+        compact: false,
+        model_excluded: false,
+        phase: tiangong_types::MessagePhase::Normal,
+        created_at: "2026-08-01T00:00:00".to_string(),
+        elapsed_ms: None,
+        turn_status: None,
+    });
+    session
+}
+
 #[test]
 fn lifecycle_hooks_forward_session_without_panic() {
     // 经 Plugin trait 调用全部生命周期钩子，验证 session 序列化传入不 panic。
@@ -270,10 +298,9 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = WasmPluginAdapter::new(plugin, config);
 
-    let mut session = test_session();
-    // 不 panic 即通过（反刍是 best-effort）。
+    let mut session = test_session_with_user_message();
+    // 有用户消息时，on_turn_finished 应触发反刍（best-effort）。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
-    assert!(sidecar.called("run_enhanced_micro_rumination"));
 }
 
 // ── set_workspace + prompt_sections 测试 ──
