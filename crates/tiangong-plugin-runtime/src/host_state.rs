@@ -81,11 +81,16 @@ impl MemoryStoreHost for HostState {
         };
         let request_payload: MemoryIpcRequestPayload = serde_json::from_str(&payload)
             .map_err(|e| MemoryStoreError::Message(format!("解析 request payload 失败: {e}")))?;
-        let response: MemoryIpcResponsePayload = self
-            .runtime
-            .handle()
-            .block_on(async move { handle.ipc_request(request_payload).await })
-            .map_err(|e| MemoryStoreError::Message(format!("{e}")))?;
+        // 在独立 OS 线程上 block_on，避免 tokio worker 线程嵌套 panic。
+        let runtime_handle = self.runtime.handle().clone();
+        let response: MemoryIpcResponsePayload = std::thread::scope(|s| {
+            s.spawn(move || {
+                runtime_handle.block_on(async move { handle.ipc_request(request_payload).await })
+            })
+            .join()
+            .map_err(|e| MemoryStoreError::Message(format!("IPC 请求线程异常: {e:?}")))?
+            .map_err(|e| MemoryStoreError::Message(format!("{e}")))
+        })?;
         serde_json::to_string(&response)
             .map_err(|e| MemoryStoreError::Message(format!("序列化 response 失败: {e}")))
     }

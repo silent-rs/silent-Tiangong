@@ -163,13 +163,13 @@ export function SettingsDialog() {
                   <BotIcon className="w-4 h-4 mr-2" />
                   移动端控制
                 </TabsTrigger>
+                <TabsTrigger value="plugins" className="w-full justify-start px-3 py-2">
+                  <Puzzle className="w-4 h-4 mr-2" />
+                  插件
+                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-start px-3 py-2">
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
-                </TabsTrigger>
-                <TabsTrigger value="plugins" className="w-full justify-start px-3 py-2">
-                  <Info className="w-4 h-4 mr-2" />
-                  插件
                 </TabsTrigger>
               </TabsList>
               <div className="border-t p-2">
@@ -209,11 +209,11 @@ export function SettingsDialog() {
               <TabsContent value="bots" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <BotPanel />
               </TabsContent>
-              <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
-                <AppUpdateSettings />
-              </TabsContent>
               <TabsContent value="plugins" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <PluginSettingsPanel />
+              </TabsContent>
+              <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <AppUpdateSettings />
               </TabsContent>
             </div>
           </Tabs>
