@@ -144,8 +144,38 @@ impl tiangong_plugin_runtime::SidecarConnection for MemorySidecarConnection {
     fn invoke(&self, payload: &str) -> anyhow::Result<String> {
         use crate::ipc::protocol::{MemoryIpcRequestPayload, MemoryIpcResponsePayload};
 
-        let request: MemoryIpcRequestPayload = serde_json::from_str(payload)
-            .map_err(|e| anyhow::anyhow!("解析 sidecar 请求失败: {e}"))?;
+        // WASM 组件发送的信封格式：{"method": "...", "payload": {...}}
+        // 需要解包：把 payload 的内容合并到顶层，让它匹配 MemoryIpcRequestPayload
+        //（后者用 #[serde(tag = "method")]，期望 method 和业务字段在同一个 JSON 对象里）。
+        let envelope: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|e| anyhow::anyhow!("解析 sidecar 信封失败: {e}"))?;
+
+        // 构造 MemoryIpcRequestPayload 兼容的 JSON：method 从信封取，其余从 payload 取。
+        let method = envelope
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let inner = envelope
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+
+        // 合并：以 inner 为基础，把 method 写进去（确保 tag 正确）。
+        let mut merged = if inner.is_object() {
+            inner
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = merged.as_object_mut() {
+            obj.insert(
+                "method".to_string(),
+                serde_json::Value::String(method.to_string()),
+            );
+        }
+
+        let request: MemoryIpcRequestPayload = serde_json::from_value(merged)
+            .map_err(|e| anyhow::anyhow!("解析 MemoryIpcRequestPayload 失败: {e}"))?;
+
         let handle = self.handle.clone();
         let response: MemoryIpcResponsePayload = self
             .runtime
