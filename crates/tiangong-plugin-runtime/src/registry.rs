@@ -30,6 +30,7 @@ fn loaded_plugins() -> &'static Mutex<HashMap<String, Arc<Mutex<WasmPlugin>>>> {
 /// 注册一个已加载的 WASM 插件到全局表。
 fn register_plugin(id: String, plugin: Arc<Mutex<WasmPlugin>>) {
     if let Ok(mut table) = loaded_plugins().lock() {
+        tracing::info!("WASM 插件已注册: {id}");
         table.insert(id, plugin);
     }
 }
@@ -89,10 +90,7 @@ pub fn load_memory_wasm_plugin(
 ) -> Option<Arc<dyn Plugin>> {
     let wasm_path = storage_root.join("plugins").join(MEMORY_WASM_FILE);
     if !wasm_path.exists() {
-        tracing::debug!(
-            "memory wasm 插件不存在（{}），跳过 wasm 加载，使用原生 memory 插件",
-            wasm_path.display()
-        );
+        tracing::info!("memory wasm 插件不存在（{}），跳过", wasm_path.display());
         return None;
     }
     load_wasm_plugin_at(&wasm_path, memory_handle)
