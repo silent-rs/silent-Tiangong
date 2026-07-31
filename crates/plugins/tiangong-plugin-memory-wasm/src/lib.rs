@@ -13,8 +13,11 @@
 mod bindings;
 
 use bindings::exports::tiangong::plugin::plugin::{
-    Contribution, Guest, PluginDescriptor, PluginError, ResourceResponse, ToolCall, ToolResult,
-    ToolSpec, ViewMessageRequest, ViewMessageResponse, ViewResponse,
+    Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
+};
+use bindings::exports::tiangong::plugin::plugin_ui::{
+    Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
+    ViewResponse,
 };
 use bindings::tiangong::plugin::memory_store;
 
@@ -327,9 +330,11 @@ impl Guest for Component {
         let _ = forward_session_rumination(&session_json);
         Ok(())
     }
+}
 
-    // ── UI 贡献：设置页 ──
+// ── UI 能力（plugin-ui 接口），独立于 Core 使用的 plugin 接口 ──
 
+impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
         Ok(vec![Contribution {
             id: "memory".to_string(),
@@ -353,8 +358,6 @@ impl Guest for Component {
     }
 
     fn get_view_resource(path: String) -> Result<ResourceResponse, PluginError> {
-        // memory 设置页是单文件内联 HTML，无额外资源。
-        // 如需 CSS/JS/图标分离，可在此按 path 返回对应资源。
         Err(PluginError::Message(format!("无此资源: {path}")))
     }
 
@@ -363,12 +366,10 @@ impl Guest for Component {
     ) -> Result<ViewMessageResponse, PluginError> {
         match request.method.as_str() {
             "get_config" => {
-                // 经 WASI filesystem 读取自己的配置。
                 let content = std::fs::read_to_string("config.json").unwrap_or_default();
                 Ok(ViewMessageResponse { payload: content })
             }
             "set_config" => {
-                // 经 WASI filesystem 写入自己的配置。
                 std::fs::write("config.json", &request.payload)
                     .map_err(|e| PluginError::Message(format!("写入配置失败: {e}")))?;
                 Ok(ViewMessageResponse {

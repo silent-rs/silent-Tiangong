@@ -283,7 +283,7 @@ impl WasmPlugin {
     pub fn contributions(&mut self) -> Result<Vec<Contribution>> {
         Ok(self
             .instance
-            .tiangong_plugin_plugin()
+            .tiangong_plugin_plugin_ui()
             .call_contributions(&mut self.store)
             .map_err(|e| anyhow::anyhow!("contributions 调用失败: {e}"))?
             .map_err(plugin_err)?
@@ -303,7 +303,7 @@ impl WasmPlugin {
     pub fn open_view(&mut self, contribution_id: String) -> Result<String> {
         Ok(self
             .instance
-            .tiangong_plugin_plugin()
+            .tiangong_plugin_plugin_ui()
             .call_open_view(&mut self.store, &contribution_id)
             .map_err(|e| anyhow::anyhow!("open-view 调用失败: {e}"))?
             .map_err(plugin_err)?
@@ -314,7 +314,7 @@ impl WasmPlugin {
     pub fn get_view_resource(&mut self, path: String) -> Result<(Vec<u8>, String)> {
         let res = self
             .instance
-            .tiangong_plugin_plugin()
+            .tiangong_plugin_plugin_ui()
             .call_get_view_resource(&mut self.store, &path)
             .map_err(|e| anyhow::anyhow!("get-view-resource 调用失败: {e}"))?
             .map_err(plugin_err)?;
@@ -325,10 +325,10 @@ impl WasmPlugin {
     pub fn handle_view_message(&mut self, method: String, payload: String) -> Result<String> {
         Ok(self
             .instance
-            .tiangong_plugin_plugin()
+            .tiangong_plugin_plugin_ui()
             .call_handle_view_message(
                 &mut self.store,
-                &crate::bindings::exports::tiangong::plugin::plugin::ViewMessageRequest {
+                &crate::bindings::exports::tiangong::plugin::plugin_ui::ViewMessageRequest {
                     method,
                     payload,
                 },

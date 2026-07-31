@@ -13,9 +13,6 @@ interface clock {
 /// WASM 组件经此向 memory sidecar 发起请求。host 只暴露一个通用 request
 /// 方法，复用 sidecar 的全部 memory 操作（召回/写入/反刍/CRUD），避免在
 /// WIT 中逐个硬编码 memory 数据结构与操作。
-///
-/// `method` 对应 sidecar IPC 协议（MemoryIpcRequestPayload）的变体名；
-/// `payload` 为入参的 JSON 文本；返回结果序列化为 JSON 文本。
 interface memory-store {
     /// 存储错误。
     variant memory-store-error {
@@ -30,11 +27,16 @@ interface memory-store {
     ) -> result<string, memory-store-error>;
 }
 
-/// 单文件 WASM 插件接口。
+/// Core 使用的插件能力（工具 / 注入 / 生命周期钩子）。
 ///
-/// 所有方法只传递有版本的结构化数据；JSON Schema / 模型参数等复杂对象
-/// 统一以 JSON 文本（string）承载。
+/// 这是 WASM 插件能力的子集，Core 通过 Plugin trait 只消费这些方法。
+/// UI 相关能力（页面/配置）在 plugin-ui 接口中独立声明。
 interface plugin {
+    /// 插件错误统一以可读文本返回。
+    variant plugin-error {
+        message(string),
+    }
+
     /// 插件描述符，安装与日志展示用。
     record plugin-descriptor {
         id: string,
@@ -67,12 +69,7 @@ interface plugin {
         exit-code: s32,
     }
 
-    /// 插件错误统一以可读文本返回。
-    variant plugin-error {
-        message(string),
-    }
-
-    /// 返回插件描述符。零权限探测阶段调用。
+    /// 返回插件描述符。
     describe: func() -> result<plugin-descriptor, plugin-error>;
 
     /// 返回插件声明的全部工具规格。
@@ -87,38 +84,37 @@ interface plugin {
     /// 关闭插件，释放资源。
     shutdown: func() -> result<_, plugin-error>;
 
-    /// 注入当前会话工作目录（对应宿主 `Plugin::set_workspace`）。
-    /// `workspace` 为目录路径文本，None 表示无有效工作目录。
+    /// 注入当前会话工作目录。
     set-workspace: func(workspace: option<string>) -> result<_, plugin-error>;
 
-    /// CoreConfig 变更通知（对应宿主 `Plugin::on_config_updated`）。
-    /// `config-json` 为 CoreConfig 的 JSON 文本。
+    /// CoreConfig 变更通知。
     on-config-updated: func(config-json: string) -> result<_, plugin-error>;
 
-    // ── 生命周期钩子 ──
-    // session-json 为宿主 Session 的 JSON 文本（可序列化部分）。
-    // 各钩子经 memory-store.request 转发到 sidecar 的对应能力。
-
-    /// 会话就绪（对应 `Plugin::on_session_ready`）。
+    /// 会话就绪。
     on-session-ready: func(session-json: string) -> result<_, plugin-error>;
 
-    /// 轮次开始（对应 `Plugin::on_turn_started`）。
-    /// turn-start-idx 为本轮用户消息在 session.messages 中的起始索引。
+    /// 轮次开始。
     on-turn-started: func(
         session-json: string,
         turn-start-idx: u32,
     ) -> result<_, plugin-error>;
 
-    /// 轮次结束（对应 `Plugin::on_turn_finished`，触发 micro 反刍）。
+    /// 轮次结束（触发 micro 反刍）。
     on-turn-finished: func(
         session-json: string,
         turn-start-idx: u32,
     ) -> result<_, plugin-error>;
 
-    /// 会话结束（对应 `Plugin::on_session_ended`，触发 meso 反刍）。
+    /// 会话结束（触发 meso 反刍）。
     on-session-ended: func(session-json: string) -> result<_, plugin-error>;
+}
 
-    // ── UI 贡献：设置页 ──
+/// UI 使用的插件能力（设置页面 / 配置 / 双向通信）。
+///
+/// 这是 WASM 插件能力的子集，独立于 Core 使用的 plugin 接口。
+/// 天工设置页经这些方法获取插件页面并桥接通信。
+interface plugin-ui {
+    use plugin.{plugin-error};
 
     /// 设置页贡献项。
     record contribution {
@@ -127,15 +123,9 @@ interface plugin {
         description: string,
         icon: string,
         group: string,
-        /// 是否有可渲染的配置页面（有则天工在设置页显示入口，点击时调 open-view）。
+        /// 是否有可渲染的配置页面。
         has-view: bool,
     }
-
-    /// 声明插件贡献的设置页入口列表。
-    contributions: func() -> result<list<contribution>, plugin-error>;
-
-    // ── 内嵌 Web UI ──
-    // 插件把完整前端页面（HTML/CSS/JS）嵌入 WASM，经这些方法输出给天工渲染。
 
     /// open-view 返回的页面入口 HTML。
     record view-response {
@@ -159,6 +149,9 @@ interface plugin {
         payload: string,
     }
 
+    /// 声明插件贡献的设置页入口列表。
+    contributions: func() -> result<list<contribution>, plugin-error>;
+
     /// 打开页面，返回入口 HTML。
     open-view: func(contribution-id: string) -> result<view-response, plugin-error>;
 
@@ -169,9 +162,11 @@ interface plugin {
     handle-view-message: func(request: view-message-request) -> result<view-message-response, plugin-error>;
 }
 
-/// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。
+/// WASM 插件 world。
+/// 导入宿主能力（时钟、记忆存储），导出 Core 接口（plugin）和 UI 接口（plugin-ui）。
 world tiangong-plugin {
     import clock;
     import memory-store;
     export plugin;
+    export plugin-ui;
 }
