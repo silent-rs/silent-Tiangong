@@ -244,6 +244,8 @@ tiangong doctor                          # 环境诊断
 
 ## 开发
 
+开发或本地调试 WASM 插件前，请先阅读 [WASM 插件开发指南](docs/plugin-development.md)，了解插件目录、清单、构建、sidecar 接入和本地导入流程。
+
 ```bash
 # Rust 检查
 cargo check --workspace
