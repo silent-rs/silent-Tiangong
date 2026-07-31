@@ -117,6 +117,29 @@ interface plugin {
 
     /// 会话结束（对应 `Plugin::on_session_ended`，触发 meso 反刍）。
     on-session-ended: func(session-json: string) -> result<_, plugin-error>;
+
+    // ── UI 贡献：设置页 ──
+
+    /// 设置页贡献项。
+    record contribution {
+        id: string,
+        title: string,
+        description: string,
+        icon: string,
+        group: string,
+    }
+
+    /// 声明插件贡献的设置页入口列表。
+    contributions: func() -> result<list<contribution>, plugin-error>;
+
+    /// 返回配置表单 schema 的 JSON 文本（字段定义，供前端动态渲染表单）。
+    get-config-schema: func() -> result<string, plugin-error>;
+
+    /// 返回当前配置值的 JSON 文本。
+    get-config: func() -> result<string, plugin-error>;
+
+    /// 保存配置（`config-json` 为配置值的 JSON 文本）。
+    set-config: func(config-json: string) -> result<_, plugin-error>;
 }
 
 /// WASM 插件 world：导入宿主时钟与记忆存储，导出 `plugin` 接口。

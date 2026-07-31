@@ -277,6 +277,54 @@ impl WasmPlugin {
             .map_err(plugin_err)
     }
 
+    // ── UI 贡献：设置页 ──
+
+    /// 插件贡献的设置页入口列表。
+    pub fn contributions(&mut self) -> Result<Vec<Contribution>> {
+        Ok(self
+            .instance
+            .tiangong_plugin_plugin()
+            .call_contributions(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("contributions 调用失败: {e}"))?
+            .map_err(plugin_err)?
+            .into_iter()
+            .map(|c| Contribution {
+                id: c.id,
+                title: c.title,
+                description: c.description,
+                icon: c.icon,
+                group: c.group,
+            })
+            .collect())
+    }
+
+    /// 配置表单 schema（JSON 文本）。
+    pub fn get_config_schema(&mut self) -> Result<String> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_get_config_schema(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("get-config-schema 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 当前配置值（JSON 文本）。
+    pub fn get_config(&mut self) -> Result<String> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_get_config(&mut self.store)
+            .map_err(|e| anyhow::anyhow!("get-config 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
+    /// 保存配置。
+    pub fn set_config(&mut self, config_json: String) -> Result<()> {
+        self.instance
+            .tiangong_plugin_plugin()
+            .call_set_config(&mut self.store, &config_json)
+            .map_err(|e| anyhow::anyhow!("set-config 调用失败: {e}"))?
+            .map_err(plugin_err)
+    }
+
     /// 引擎句柄（测试与 epoch 心跳用）。
     pub fn engine(&self) -> &Engine {
         &self.engine
@@ -319,6 +367,16 @@ pub struct Outcome {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+}
+
+/// 设置页贡献项（镜像 WIT record）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Contribution {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    pub group: String,
 }
 
 /// 把 WIT 层的 `plugin-error` 转为 anyhow。

@@ -4693,3 +4693,58 @@ pub async fn resolve_model_context_window(
         .await?;
     Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
 }
+
+// ── 插件设置页贡献（WASM 插件动态 UI）──
+
+/// 列出所有已加载 WASM 插件的设置页贡献。
+#[tauri::command]
+pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>, String> {
+    let entries = tiangong_plugin_runtime::registry::list_contributions();
+    Ok(entries
+        .into_iter()
+        .flat_map(|(plugin_id, contributions)| {
+            contributions
+                .into_iter()
+                .map(move |c| PluginContributionEntry {
+                    plugin_id: plugin_id.clone(),
+                    contribution_id: c.id,
+                    title: c.title,
+                    description: c.description,
+                    icon: c.icon,
+                    group: c.group,
+                })
+        })
+        .collect())
+}
+
+/// 获取指定插件的配置表单 schema（JSON 文本）。
+#[tauri::command]
+pub async fn get_plugin_config_schema(plugin_id: String) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::get_config_schema(&plugin_id)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无配置 schema"))
+}
+
+/// 获取指定插件的当前配置（JSON 文本）。
+#[tauri::command]
+pub async fn get_plugin_config(plugin_id: String) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::get_config(&plugin_id)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无配置"))
+}
+
+/// 保存指定插件的配置。
+#[tauri::command]
+pub async fn set_plugin_config(plugin_id: String, config_json: String) -> Result<(), String> {
+    tiangong_plugin_runtime::registry::set_config(&plugin_id, config_json)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或保存配置失败"))
+}
+
+/// 插件设置页贡献项（传给前端）。
+#[derive(serde::Serialize)]
+pub struct PluginContributionEntry {
+    pub plugin_id: String,
+    pub contribution_id: String,
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    pub group: String,
+}

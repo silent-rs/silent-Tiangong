@@ -23,6 +23,7 @@ import { IndexManagementSettings } from './index/IndexManagementSettings';
 import { AutomationSettings } from './automation/AutomationSettings';
 import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
+import { PluginSettingsPanel } from './PluginSettingsPanel';
 
 const appWindow = getCurrentWindow();
 
@@ -171,6 +172,10 @@ export function SettingsDialog() {
                   <Info className="w-4 h-4 mr-2" />
                   关于与更新
                 </TabsTrigger>
+                <TabsTrigger value="plugins" className="w-full justify-start px-3 py-2">
+                  <Info className="w-4 h-4 mr-2" />
+                  插件
+                </TabsTrigger>
               </TabsList>
               <div className="border-t p-2">
                 <Button
@@ -214,6 +219,9 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="about" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <AppUpdateSettings />
+              </TabsContent>
+              <TabsContent value="plugins" className="m-0 flex-1 min-h-0 overflow-hidden">
+                <PluginSettingsPanel />
               </TabsContent>
             </div>
           </Tabs>

@@ -2,19 +2,75 @@
 //!
 //! 供三入口（CLI/Server/Desktop）在插件拼装时加载单文件 WASM memory 插件。
 //! 加载失败（文件缺失、实例化错误）时优雅降级返回 None，不影响原生插件。
+//!
+//! 加载成功的插件同时注册到全局表，供 Tauri 命令查询 contributions / config。
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tiangong_core::core::Plugin;
 use tiangong_memory::MemoryHandle;
 
 use crate::adapter::WasmPluginAdapter;
 use crate::config::PluginRuntimeConfig;
-use crate::loader::WasmPluginLoader;
+use crate::loader::{Contribution, WasmPlugin, WasmPluginLoader};
 
 /// memory wasm 组件的固定文件名（由 xtask build-wasm 部署）。
 const MEMORY_WASM_FILE: &str = "tiangong_plugin_memory_wasm.wasm";
+
+/// 全局已加载的 WASM 插件注册表（plugin_id → WasmPlugin 句柄）。
+/// 供 Tauri 命令查询 contributions / config。
+static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, Arc<Mutex<WasmPlugin>>>>> = OnceLock::new();
+
+fn loaded_plugins() -> &'static Mutex<HashMap<String, Arc<Mutex<WasmPlugin>>>> {
+    LOADED_PLUGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 注册一个已加载的 WASM 插件到全局表。
+fn register_plugin(id: String, plugin: Arc<Mutex<WasmPlugin>>) {
+    if let Ok(mut table) = loaded_plugins().lock() {
+        table.insert(id, plugin);
+    }
+}
+
+/// 收集所有已加载 WASM 插件的设置页贡献。
+pub fn list_contributions() -> Vec<(String, Vec<Contribution>)> {
+    let Ok(table) = loaded_plugins().lock() else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter_map(|(id, plugin)| {
+            let mut plugin = plugin.lock().ok()?;
+            plugin.contributions().ok().map(|c| (id.clone(), c))
+        })
+        .collect()
+}
+
+/// 查询指定插件的配置 schema（JSON 文本）。
+pub fn get_config_schema(plugin_id: &str) -> Option<String> {
+    let table = loaded_plugins().lock().ok()?;
+    let plugin = table.get(plugin_id)?.clone();
+    let mut plugin = plugin.lock().ok()?;
+    plugin.get_config_schema().ok()
+}
+
+/// 查询指定插件的当前配置（JSON 文本）。
+pub fn get_config(plugin_id: &str) -> Option<String> {
+    let table = loaded_plugins().lock().ok()?;
+    let plugin = table.get(plugin_id)?.clone();
+    let mut plugin = plugin.lock().ok()?;
+    plugin.get_config().ok()
+}
+
+/// 保存指定插件的配置。
+pub fn set_config(plugin_id: &str, config_json: String) -> Option<()> {
+    let table = loaded_plugins().lock().ok()?;
+    let plugin = table.get(plugin_id)?.clone();
+    let mut plugin = plugin.lock().ok()?;
+    plugin.set_config(config_json).ok()
+}
 
 /// 从 `storage_root/plugins/` 加载 memory wasm 插件。
 ///
@@ -59,5 +115,8 @@ pub fn load_wasm_plugin_at(
             return None;
         }
     };
-    Some(Arc::new(WasmPluginAdapter::new(plugin, config)) as Arc<dyn Plugin>)
+    let adapter = WasmPluginAdapter::new(plugin, config);
+    // 注册到全局表，供 Tauri 命令查询 contributions/config。
+    register_plugin(adapter.id().to_string(), adapter.inner_handle());
+    Some(Arc::new(adapter) as Arc<dyn Plugin>)
 }

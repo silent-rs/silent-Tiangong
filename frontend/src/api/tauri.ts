@@ -1349,4 +1349,43 @@ export const api = {
 
   terminalTabClose: (sessionId: string, tabId: string): Promise<void> =>
     invoke('plugin:terminal|terminal_tab_close', { sessionId, tabId }),
+
+  // ── 插件设置页贡献（WASM 插件动态 UI）──
+
+  listPluginContributions: (): Promise<PluginContributionEntry[]> =>
+    invoke('list_plugin_contributions'),
+
+  getPluginConfigSchema: (pluginId: string): Promise<string> =>
+    invoke('get_plugin_config_schema', { pluginId }),
+
+  getPluginConfig: (pluginId: string): Promise<string> =>
+    invoke('get_plugin_config', { pluginId }),
+
+  setPluginConfig: (pluginId: string, configJson: string): Promise<void> =>
+    invoke('set_plugin_config', { pluginId, configJson }),
 };
+
+/// 插件设置页贡献项。
+export interface PluginContributionEntry {
+  plugin_id: string;
+  contribution_id: string;
+  title: string;
+  description: string;
+  icon: string;
+  group: string;
+}
+
+/// 插件配置字段 schema（由后端声明，前端动态渲染表单）。
+export interface PluginConfigField {
+  key: string;
+  label: string;
+  type: 'string' | 'secret' | 'integer' | 'boolean';
+  required?: boolean;
+  default?: unknown;
+  help?: string;
+}
+
+/// 插件配置 schema。
+export interface PluginConfigSchema {
+  fields: PluginConfigField[];
+}

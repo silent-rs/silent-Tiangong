@@ -49,6 +49,11 @@ impl WasmPluginAdapter {
             config,
         }
     }
+
+    /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
+    pub fn inner_handle(&self) -> Arc<Mutex<WasmPlugin>> {
+        self.inner.clone()
+    }
 }
 
 impl Plugin for WasmPluginAdapter {

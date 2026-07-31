@@ -13,7 +13,7 @@
 mod bindings;
 
 use bindings::exports::tiangong::plugin::plugin::{
-    Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
+    Contribution, Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
 };
 use bindings::tiangong::plugin::memory_store;
 
@@ -92,6 +92,23 @@ const RECALL_MEMORY_INPUT_SCHEMA: &str = r#"{
 }"#;
 
 const RECALL_MEMORY_DESCRIPTION: &str = "按需回忆历史上下文、跨会话结果、之前的工具输出或生成产物。用户提到刚刚、刚才、上次、之前、那个、继续、这张图、生成的图片等历史指代时，应先调用此工具。";
+
+/// memory 设置页的配置 schema（JSON），供前端动态渲染表单。
+/// 字段对应 MemoryConfig 的 LLM/embedding/rerank 端点配置。
+const MEMORY_CONFIG_SCHEMA: &str = r#"{
+  "fields": [
+    {"key": "llm.model", "label": "记忆 LLM 模型", "type": "string", "required": false, "help": "记忆反刍使用的 LLM 模型名（留空则用规则 fallback）"},
+    {"key": "llm.base_url", "label": "记忆 LLM 地址", "type": "string", "required": false},
+    {"key": "llm.api_key", "label": "记忆 LLM 密钥", "type": "secret", "required": false},
+    {"key": "embedding.model", "label": "向量模型", "type": "string", "required": false, "help": "语义检索用的 embedding 模型"},
+    {"key": "embedding.base_url", "label": "向量模型地址", "type": "string", "required": false},
+    {"key": "embedding.api_key", "label": "向量模型密钥", "type": "secret", "required": false},
+    {"key": "embedding.dimension", "label": "向量维度", "type": "integer", "required": false, "default": 1024},
+    {"key": "rerank.model", "label": "重排模型", "type": "string", "required": false},
+    {"key": "rerank.base_url", "label": "重排模型地址", "type": "string", "required": false},
+    {"key": "rerank.api_key", "label": "重排模型密钥", "type": "secret", "required": false}
+  ]
+}"#;
 
 /// WASM 桥接组件（无状态）。
 struct Component;
@@ -221,6 +238,38 @@ impl Guest for Component {
     fn on_session_ended(session_json: String) -> Result<(), PluginError> {
         // 会话结束：从 session 提取 id/cwd，转发给 sidecar 做 meso 反刍。
         let _ = forward_session_rumination(&session_json);
+        Ok(())
+    }
+
+    // ── UI 贡献：设置页 ──
+
+    fn contributions() -> Result<Vec<Contribution>, PluginError> {
+        Ok(vec![Contribution {
+            id: "memory".to_string(),
+            title: "记忆".to_string(),
+            description: "记忆系统配置（模型端点、向量检索等）".to_string(),
+            icon: "brain".to_string(),
+            group: "plugins".to_string(),
+        }])
+    }
+
+    fn get_config_schema() -> Result<String, PluginError> {
+        // 返回 memory 配置字段的 schema（JSON），供前端动态渲染表单。
+        // 字段对应 MemoryConfig（LLM/embedding/rerank 端点配置）。
+        Ok(MEMORY_CONFIG_SCHEMA.to_string())
+    }
+
+    fn get_config() -> Result<String, PluginError> {
+        // 经 request 向 sidecar 读取当前 memory 配置。
+        // sidecar 暂无专用「读配置」IPC 操作，返回空配置占位。
+        // 后续可在 MemoryIpcRequestPayload 加 load_config 操作。
+        Ok(serde_json::json!({}).to_string())
+    }
+
+    fn set_config(_config_json: String) -> Result<(), PluginError> {
+        // 经 request 向 sidecar 保存 memory 配置。
+        // sidecar 暂无专用「写配置」IPC 操作，当前为空操作。
+        // 后续可在 MemoryIpcRequestPayload 加 save_config 操作。
         Ok(())
     }
 }
