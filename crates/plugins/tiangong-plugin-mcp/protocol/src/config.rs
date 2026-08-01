@@ -8,18 +8,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// 用户在配置里声明的传输模式（Auto 由 sidecar 根据字段推断）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransportMode {
+    #[default]
     Auto,
     Stdio,
     Http,
-}
-
-impl Default for McpTransportMode {
-    fn default() -> Self {
-        McpTransportMode::Auto
-    }
 }
 
 /// 解析后的实际传输模式（仅 sidecar 内部使用，不序列化进 mcp.json）。

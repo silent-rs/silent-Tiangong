@@ -14,7 +14,6 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
-use serde::Deserialize;
 use tiangong_plugin_mcp_protocol::capability::Reconfigure;
 use tiangong_plugin_mcp_protocol::config::{RegisterMcpServerRequest, UpdateConfigEntryRequest};
 use tiangong_plugin_mcp_protocol::management::{
@@ -27,9 +26,7 @@ use tiangong_plugin_mcp_protocol::query::{
 use tiangong_plugin_mcp_protocol::tool::{
     ExecuteTool, ExecuteToolRequest, ExecuteToolResponse, ListTools, ListToolsResponse,
 };
-use tiangong_plugin_mcp_protocol::{
-    Empty, McpOperation, MessageResponse, NameFilterRequest, PLUGIN_ID, PLUGIN_VERSION,
-};
+use tiangong_plugin_mcp_protocol::{Empty, McpOperation, MessageResponse, NameFilterRequest};
 
 mod descriptor {
     pub const ID: &str = tiangong_plugin_mcp_protocol::PLUGIN_ID;
@@ -182,7 +179,7 @@ impl Guest for Component {
     }
 }
 
-use tiangong_plugin_mcp_protocol::capability::{RECONFIGURE_OPERATION, ReconfigureRequest};
+use tiangong_plugin_mcp_protocol::capability::ReconfigureRequest;
 
 impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {

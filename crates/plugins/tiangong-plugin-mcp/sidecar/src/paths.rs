@@ -43,6 +43,7 @@ pub fn default_mcp_capability_cache_path() -> PathBuf {
 }
 
 /// MCP 依赖锁路径：`~/.tiangong/skills/mcp-lock.json`（与 skills 存储同目录）。
+#[allow(dead_code)]
 pub fn default_mcp_lock_path() -> PathBuf {
     storage_root().join("skills").join("mcp-lock.json")
 }

@@ -90,6 +90,7 @@ impl McpCapabilityIndex {
     }
 
     /// 把当前实例的 capability index 持久化到磁盘。
+    #[allow(dead_code)]
     pub fn persist_cache(&self, cache_path: &Path) -> Result<()> {
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)
@@ -160,6 +161,7 @@ impl McpCapabilityIndex {
     }
 
     /// 请求后台调度器线程停止（plugin drop 时调用，避免线程泄漏）。
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);

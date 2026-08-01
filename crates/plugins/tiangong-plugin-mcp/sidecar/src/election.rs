@@ -82,6 +82,7 @@ impl ManagedMcp {
             .clone()
     }
 
+    #[allow(dead_code)]
     pub fn is_leader(&self) -> bool {
         matches!(self.state(), LeaderState::Leader)
     }
@@ -277,7 +278,7 @@ fn write_leader_info(info: &LeaderInfo, path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn leader_info_temp_path(path: &PathBuf) -> PathBuf {
+fn leader_info_temp_path(path: &std::path::Path) -> PathBuf {
     let seq = LEADER_INFO_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let file_name = path
         .file_name()
@@ -352,10 +353,10 @@ fn mcp_runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir).join("runtime");
     }
-    if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|v| !v.is_empty()) {
-        if let Some(parent) = PathBuf::from(dir).parent() {
-            return parent.to_path_buf();
-        }
+    if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|v| !v.is_empty())
+        && let Some(parent) = PathBuf::from(dir).parent()
+    {
+        return parent.to_path_buf();
     }
     home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

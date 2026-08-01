@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tiangong_plugin_runtime::protocol::{
-    ErrorCode as PluginErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, IpcAuth, IpcEndpoint,
-    IpcFrame, IpcRequest, IpcResponse, PROTOCOL_VERSION, Request as PluginRequest,
-    Response as PluginResponse, ServiceStatus,
+    ErrorCode as PluginErrorCode, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse,
+    Request as PluginRequest, Response as PluginResponse,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};

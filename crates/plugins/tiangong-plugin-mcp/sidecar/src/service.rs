@@ -28,7 +28,6 @@ use tiangong_plugin_runtime::protocol::{
 };
 
 use crate::capability::McpCapabilityIndex;
-use crate::client::McpClient;
 use crate::execution::{McpFunctionTarget, build_targets, execute_tool, list_tools_response};
 use crate::paths::{default_mcp_capability_cache_path, default_mcp_config_path};
 use crate::validate::{describe_mcp_servers, summarize_mcp_servers, validate_mcp_config};
@@ -77,6 +76,7 @@ impl McpService {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     fn targets_snapshot(&self) -> std::collections::HashMap<String, McpFunctionTarget> {
         self.mcp_targets
             .read()
@@ -250,10 +250,10 @@ impl McpService {
             tiangong_plugin_mcp_protocol::capability::RECONFIGURE_OPERATION => {
                 let req: tiangong_plugin_mcp_protocol::capability::ReconfigureRequest =
                     serde_json::from_value(payload)?;
-                if let Some(ws) = req.workspace {
-                    if let Ok(mut guard) = self.workspace.write() {
-                        *guard = Some(PathBuf::from(ws));
-                    }
+                if let Some(ws) = req.workspace
+                    && let Ok(mut guard) = self.workspace.write()
+                {
+                    *guard = Some(PathBuf::from(ws));
                 }
                 self.reconfigure();
                 Ok(serde_json::to_value(
