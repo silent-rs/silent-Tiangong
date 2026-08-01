@@ -113,6 +113,26 @@
     target.classList.toggle('error', isError);
   }
 
+  function setHostMask(visible, color) {
+    if (!hostChannel) return;
+    window.parent.postMessage({
+      type: 'plugin_host_mask',
+      channel: hostChannel,
+      visible,
+      ...(color ? { color } : {}),
+    }, '*');
+  }
+
+  function syncHostMask() {
+    const modal = [byId('server-modal'), byId('remove-modal')]
+      .find((element) => !element.classList.contains('hidden'));
+    if (!modal) {
+      setHostMask(false);
+      return;
+    }
+    setHostMask(true, window.getComputedStyle(modal).backgroundColor);
+  }
+
   function setLoading(loading) {
     state.loading = loading;
     byId('loading-state').classList.toggle('hidden', !loading);
@@ -316,11 +336,13 @@
     byId('remove-message').textContent = `确定删除 MCP 服务器“${server.name}”吗？`;
     lastRemoveFocus = document.activeElement;
     byId('remove-modal').classList.remove('hidden');
+    syncHostMask();
     window.setTimeout(() => byId('remove-cancel').focus(), 0);
   }
 
   function closeRemoveModal() {
     byId('remove-modal').classList.add('hidden');
+    syncHostMask();
     state.removingName = null;
     lastRemoveFocus?.focus?.();
     lastRemoveFocus = null;
@@ -396,11 +418,13 @@
     }
     lastModalFocus = document.activeElement;
     byId('server-modal').classList.remove('hidden');
+    syncHostMask();
     window.setTimeout(() => byId(server ? 'server-transport' : 'server-name').focus(), 0);
   }
 
   function closeModal() {
     byId('server-modal').classList.add('hidden');
+    syncHostMask();
     state.editingName = null;
     byId('form-error').textContent = '';
     lastModalFocus?.focus?.();

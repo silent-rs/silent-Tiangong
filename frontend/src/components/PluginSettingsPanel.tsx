@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { api, type PluginContributionEntry } from '../api/tauri';
 import { useResolvedTheme } from '../hooks/useTheme';
+import { usePluginMask } from '../hooks/usePluginMask';
 
 /**
  * 插件设置面板：通用 iframe 容器。
@@ -138,6 +139,7 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const theme = useResolvedTheme();
   const channel = useMemo(() => crypto.randomUUID(), [pluginId, html]);
+  const maskColor = usePluginMask(iframeRef, channel);
 
   const sendHostContext = useCallback(() => {
     iframeRef.current?.contentWindow?.postMessage(hostContext(theme, channel), '*');
@@ -185,13 +187,23 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
   }, [channel, pluginId]);
 
   return (
-    <iframe
-      ref={iframeRef}
-      title="plugin-settings"
-      srcDoc={html}
-      className="w-full h-full border-0"
-      sandbox="allow-scripts"
-      onLoad={sendHostContext}
-    />
+    <>
+      {maskColor && (
+        <div
+          aria-hidden="true"
+          data-plugin-host-mask
+          className="fixed inset-0 z-[90]"
+          style={{ backgroundColor: maskColor }}
+        />
+      )}
+      <iframe
+        ref={iframeRef}
+        title="plugin-settings"
+        srcDoc={html}
+        className={`w-full h-full border-0 ${maskColor ? 'relative z-[91]' : ''}`}
+        sandbox="allow-scripts"
+        onLoad={sendHostContext}
+      />
+    </>
   );
 }
