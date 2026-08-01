@@ -27,6 +27,12 @@ crates="$(
       printf '%s\n' "tiangong-plugin-memory-sidecar"
     elif [[ "$f" == crates/plugins/tiangong-plugin-memory/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-wasm"
+    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/protocol/* ]]; then
+      printf '%s\n' "tiangong-plugin-mcp-protocol"
+    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/sidecar/* ]]; then
+      printf '%s\n' "tiangong-plugin-mcp-sidecar"
+    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/wasm/* ]]; then
+      printf '%s\n' "tiangong-plugin-mcp-wasm"
     elif [[ "$f" == crates/plugins/*/* ]]; then
       rest="${f#crates/plugins/}"
       printf '%s\n' "${rest%%/*}"
