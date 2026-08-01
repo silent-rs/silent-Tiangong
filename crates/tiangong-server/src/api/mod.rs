@@ -42,7 +42,7 @@ impl ServerAppContext {
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
-        storage_root: std::path::PathBuf,
+        _storage_root: std::path::PathBuf,
     ) -> Self {
         let config = core_manager.config().clone();
         // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。

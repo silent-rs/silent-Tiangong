@@ -6,12 +6,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use tiangong_plugin_mcp_protocol::config::{
-    McpConfig, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
-    RegisterMcpServerRequest,
+    McpServerConfig, McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
 };
 use tiangong_plugin_mcp_protocol::management::{
-    RemoveServerRequest, SERVER_REMOVE_OPERATION, SERVER_SET_ENABLED_OPERATION,
-    SERVER_UPDATE_OPERATION, ServersResponse, SetEnabledRequest, UpdateServerRequest,
+    RemoveServerRequest, SERVER_REMOVE_OPERATION, SERVER_SET_ENABLED_OPERATION, ServersResponse,
+    SetEnabledRequest,
 };
 use tiangong_plugin_mcp_protocol::query::TextResponse;
 use tiangong_plugin_mcp_protocol::{MessageResponse, NameFilterRequest};

@@ -2407,7 +2407,7 @@ fn mcp_invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json:
 
 /// 获取 MCP 服务器列表
 #[tauri::command]
-pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
+pub async fn get_mcp_servers(_state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
     let servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
         serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
             mcp_invoke("mcp.server.list", serde_json::json!({}))?,
@@ -2420,7 +2420,7 @@ pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpSer
 /// 获取 MCP 服务器健康状态
 #[tauri::command]
 pub async fn get_mcp_health(
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let response: tiangong_plugin_mcp_protocol::query::HealthResponse =
         serde_json::from_value(mcp_invoke("mcp.server.health", serde_json::json!({}))?)
@@ -2434,7 +2434,7 @@ pub async fn get_mcp_health(
 
 /// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
 #[tauri::command]
-pub async fn probe_mcp_server(name: String, state: State<'_, TiangongApp>) -> Result<(), String> {
+pub async fn probe_mcp_server(name: String, _state: State<'_, TiangongApp>) -> Result<(), String> {
     mcp_invoke(
         "mcp.server.probe",
         serde_json::to_value(tiangong_plugin_mcp_protocol::query::ServerNameRequest { name })
@@ -2833,7 +2833,7 @@ fn bot_mcp_registration_request(
 
 /// 查询当前 MCP server 列表（经 sidecar 通道）。
 fn list_mcp_servers_via_sidecar(
-    state: &TiangongApp,
+    _state: &TiangongApp,
 ) -> Result<Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig>, String> {
     serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(mcp_invoke(
         "mcp.server.list",

@@ -206,7 +206,7 @@ fn check_memory(report: &mut DoctorReport) {
 
 fn check_mcp(report: &mut DoctorReport) {
     // 经 sidecar 通道读取 MCP server 列表。
-    let count = match tiangong_plugin_runtime::registry::invoke_sidecar(
+    let count = tiangong_plugin_runtime::registry::invoke_sidecar(
         &tiangong_config::io::storage_root(),
         "mcp",
         "mcp.server.list",
@@ -216,10 +216,8 @@ fn check_mcp(report: &mut DoctorReport) {
         let resp: tiangong_plugin_mcp_protocol::management::ServersResponse =
             serde_json::from_value(v)?;
         Ok(resp.servers.len())
-    }) {
-        Ok(count) => count,
-        Err(_) => 0,
-    };
+    })
+    .unwrap_or(0);
     if count == 0 {
         report.warn("MCP 配置", "0 个服务");
     } else {
