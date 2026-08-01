@@ -244,7 +244,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 
 | 顺序 | 插件 | 下沉内容 | 关键设计点 |
 |---|---|---|---|
-| 1 | **mcp** #325 | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 子进程/网络/线程/管理 API 四类耦合；`Arc<McpPlugin>` 被入口层直接持有的管理通道需重设计为 host 代理。工程量最大。 |
+| 1 | ~~**mcp** #325~~ ✅ | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 已完成。三子 crate（protocol/sidecar/wasm）+ 四入口管理 API 经 invoke_sidecar + 原生 crate 已删除。 |
 | 2 | **fetch** #326 | 网络栈（reqwest 阻塞式）+ HTML 解析（scraper）+ DNS + 落盘 | reqwest 阻塞客户端独占线程与 runtime，是硬卡点；逻辑封闭、无 GUI 回路，改造相对干净。 |
 | 3 | **index** #327 | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 复用 Memory 单例模式：原「进程内 Arc 共享」改为「全机一个 sidecar 进程」，跨会话共享索引与扫描去重原样保留，且消除多入口磁盘锁冲突。sidecar 单例选举由自身实现（复用 memory 选举代码）。 |
 | 4 | **scheduler** #328 | cron 调度 + JobStore + 任务去重 + 执行记录 | 与 Memory 契合度最高：wasm 给 Agent 提供任务 CRUD 工具，sidecar 长驻跑调度。**触发回路不经 WIT**——到点 sidecar 直接 HTTP 调本机 server 的 `POST /api/v1/messages` 投递消息（与 Bot/webhook 同链路），无需扩反向回调。鉴权用 host 启动时注入的短期凭证。 |
@@ -271,11 +271,12 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 |---|---|---|
 | 14 | **prompt** #338 | 纯字符串注入 + config 缓存，零副作用，现有 WIT 全覆盖。与 Memory 形成「轻/重」两端对照。 |
 
-## 已完成（1 个）
+## 已完成（2 个）
 
 | 插件 | 模式 |
 |---|---|
 | **memory** | wasm 桥接 + 原生 sidecar（重型样板） |
+| **mcp** | wasm 桥接 + 原生 sidecar（#325，四类耦合，工程量最大） |
 
 ## 共同约定
 
