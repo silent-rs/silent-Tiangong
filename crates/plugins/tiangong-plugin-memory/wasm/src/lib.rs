@@ -12,24 +12,24 @@
 
 mod bindings;
 mod sidecar_client;
+mod turn_extract;
 
 use bindings::exports::tiangong::plugin::plugin::{
-    Guest, PluginDescriptor, PluginError, ToolCall, ToolResult, ToolSpec,
+    Guest, PluginDescriptor, PluginError, ToolCall, ToolExecutionRecord, ToolResult, ToolSpec,
 };
 use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
 use serde::Deserialize;
+use tiangong_plugin_memory_protocol::control::Reconfigure;
 use tiangong_plugin_memory_protocol::injection::{LoadInjection, LoadInjectionRequest};
 use tiangong_plugin_memory_protocol::recall::{
     Recall, RecallContext, RecallContextRequest, RecallQuery, RecallRequest,
 };
 use tiangong_plugin_memory_protocol::rumination::{
-    EnhancedTurnResult, MemoryCandidate, RunEnhancedMicroRumination,
-    RunEnhancedMicroRuminationRequest, RunMesoRumination, RunMesoRuminationRequest,
-    RunMetaRumination, RunMetaRuminationRequest, TurnArtifact, TurnArtifactKind, TurnMessage,
-    TurnStatus,
+    RunEnhancedMicroRumination, RunEnhancedMicroRuminationRequest, RunMesoRumination,
+    RunMesoRuminationRequest, RunMetaRumination, RunMetaRuminationRequest, TurnStatus,
 };
 use tiangong_plugin_memory_protocol::ui::{self, UiRequest};
 use tiangong_plugin_memory_protocol::{Empty, MemoryOperation};
@@ -223,9 +223,18 @@ impl Guest for Component {
             )));
         }
 
-        // 每轮只召回一次（与原生版本一致）。
+        let started = bindings::tiangong::plugin::clock::now_millis();
         if state::recall_attempted() {
-            return Ok(tool_result_ok("本轮已执行过记忆召回。".to_string()));
+            emit_skip_events();
+            return Ok(recall_tool_result(
+                true,
+                "本轮已完成回忆，跳过重复调用",
+                "recall_memory 本轮已经执行过，回忆结果已经注入当前上下文。请直接基于已有回忆结果完成用户原始目标，不要再次调用 recall_memory。".to_string(),
+                String::new(),
+                0,
+                vec!["duplicate-recall".to_string()],
+                started,
+            ));
         }
         state::mark_recall_attempted();
 
@@ -233,68 +242,103 @@ impl Guest for Component {
             serde_json::from_str::<RecallToolArguments>(&call.arguments).map_err(|error| {
                 PluginError::Message(format!("解析 recall_memory 参数失败: {error}"))
             })?;
-
-        // query 为空时回退到最近一条用户消息（与原生版本一致）。
-        let query = if arguments.query.is_empty() {
-            state::last_session()
-                .as_ref()
-                .and_then(|s| {
-                    s.messages
-                        .iter()
-                        .rev()
-                        .find(|m| matches!(m.role, tiangong_types::MessageRole::User))
-                        .map(extract_message_text)
-                })
-                .unwrap_or_default()
-        } else {
-            arguments.query
-        };
-
-        // 从缓存 session 构建召回上下文（最近 30 条消息，与原生版本一致）。
-        let context: Vec<String> = state::last_session()
-            .map(|s| {
-                s.messages
+        let fallback_query = state::last_session()
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .messages
                     .iter()
                     .rev()
-                    .take(30)
-                    .rev()
-                    .filter(|m| !matches!(m.role, tiangong_types::MessageRole::System))
-                    .map(|m| {
-                        let role = format!("{:?}", m.role).to_lowercase();
-                        let text = extract_message_text(m);
-                        format!("{role}: {text}")
-                    })
-                    .collect()
+                    .find(|message| matches!(message.role, tiangong_types::MessageRole::User))
+                    .map(extract_message_text)
             })
             .unwrap_or_default();
+        let query = arguments.query.trim();
+        let query = if query.is_empty() {
+            fallback_query
+        } else {
+            query.to_string()
+        };
+        if query.is_empty() {
+            emit_skip_events();
+            return Ok(recall_tool_result(
+                false,
+                "缺少回忆查询",
+                String::new(),
+                "recall_memory.query is empty".to_string(),
+                1,
+                Vec::new(),
+                started,
+            ));
+        }
 
+        let context = state::last_session()
+            .map(|session| build_recall_context(&session))
+            .unwrap_or_default();
         let request = RecallContextRequest {
             request: RecallQuery {
-                query,
-                reason: arguments.reason,
-                expected: arguments.expected,
+                query: query.clone(),
+                reason: arguments
+                    .reason
+                    .map(|reason| reason.trim().to_string())
+                    .filter(|reason| !reason.is_empty()),
+                expected: arguments
+                    .expected
+                    .into_iter()
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect(),
                 context,
-                limit: arguments.limit.unwrap_or(5),
+                limit: arguments.limit.unwrap_or(5).clamp(1, 10),
             },
         };
+        emit_stream_event(&tiangong_types::StreamEvent::MemoryRecallStart {
+            strategy: "auto".to_string(),
+        });
 
         match sidecar_client::invoke::<RecallContext>(&request) {
-            Ok(result) => Ok(tool_result_ok(result.response.content)),
+            Ok(result) => {
+                let hits = result
+                    .response
+                    .hits
+                    .iter()
+                    .map(|hit| tiangong_types::MemoryRecallHitSummary {
+                        title: hit.title.clone(),
+                        summary: hit.summary.clone(),
+                        score: hit.score,
+                    })
+                    .collect::<Vec<_>>();
+                emit_stream_event(&tiangong_types::StreamEvent::MemoryRecallDone {
+                    hit_count: hits.len(),
+                    hits,
+                });
+                Ok(assemble_recall_result(result.response, query, started))
+            }
             Err(sidecar_client::ClientError::NotConfigured)
-            | Err(sidecar_client::ClientError::Unavailable(_)) => Ok(ToolResult {
-                ok: false,
-                summary: "记忆系统未启用（memory sidecar 未连接）。".to_string(),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 1,
-            }),
-            Err(error) => Ok(ToolResult {
-                ok: false,
-                summary: format!("记忆查询失败：{error}"),
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 1,
-            }),
+            | Err(sidecar_client::ClientError::Unavailable(_)) => {
+                emit_done_empty();
+                Ok(recall_tool_result(
+                    false,
+                    "记忆系统未启用",
+                    String::new(),
+                    "memory disabled".to_string(),
+                    1,
+                    Vec::new(),
+                    started,
+                ))
+            }
+            Err(error) => {
+                emit_done_empty();
+                Ok(recall_tool_result(
+                    false,
+                    "记忆查询失败",
+                    String::new(),
+                    error.to_string(),
+                    1,
+                    vec![query],
+                    started,
+                ))
+            }
         }
     }
 
@@ -308,7 +352,8 @@ impl Guest for Component {
     }
 
     fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
-        // 通用配置变更事件。桥接组件本身不消费配置，接收即可。
+        // Core 配置事件只作为重新读取 Memory 配置的触发器。
+        let _ = sidecar_client::invoke::<Reconfigure>(&Empty {});
         Ok(())
     }
 
@@ -486,178 +531,23 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
     };
 
     let user_input = extract_message_text(start_msg);
-
-    // 过滤本轮消息：排除 model_excluded。
-    let turn_messages: Vec<&tiangong_types::Message> = all_messages[idx..]
+    let messages = all_messages[idx..]
         .iter()
-        .filter(|m| !m.model_excluded)
-        .collect();
-
-    // 建立工具调用表：tool_call_id → (tool_name, arguments JSON)。
-    // 用于从调用参数中提取 path 等信息，并关联 Tool 结果。
-    use std::collections::HashMap;
-    let mut call_table: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-    for m in &turn_messages {
-        for tc in &m.tool_calls {
-            let args = tc.arguments.clone();
-            call_table.insert(tc.id.clone(), (tc.name.clone(), args));
-        }
-    }
-
-    // 提取工具调用名。
-    let tool_calls: Vec<String> = turn_messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter().map(|c| c.name.clone()))
-        .collect();
-
-    // 提取助手最终回复作为 summary。
-    let summary = turn_messages
+        .filter(|message| !message.model_excluded)
+        .collect::<Vec<_>>();
+    let turn_status = messages
         .iter()
         .rev()
-        .find(|m| matches!(m.role, tiangong_types::MessageRole::Assistant))
-        .map(|m| extract_message_text(m))
-        .unwrap_or_else(|| user_input.clone());
-
-    // 工具来源分类：用于 Memory 分析层判断哪些结果可能值得记录。
-    fn classify_tool_source(name: &str) -> String {
-        match name {
-            "recall_memory" | "list_memory_nodes" | "count_memory_nodes" => {
-                "memory_recall".to_string()
-            }
-            "read_file" | "list_files" | "search_files" => "file_read".to_string(),
-            "write_file" | "replace_in_file" | "apply_patch" => "file_write".to_string(),
-            "run_command" | "cargo_test" => "command".to_string(),
-            "web_fetch" | "generate_image" | "generate_video" => "media_generation".to_string(),
-            _ => "other".to_string(),
-        }
-    }
-
-    // Memory 查询工具返回的是已有记忆，标记为 recalled_context。
-    const MEMORY_QUERY_TOOLS: &[&str] =
-        &["recall_memory", "list_memory_nodes", "count_memory_nodes"];
-
-    // 提取产物和候选——所有工具都传递，由 Memory 系统统一判断。
-    let mut artifacts = Vec::new();
-    let mut memory_candidates = Vec::new();
-
-    for (step, m) in turn_messages.iter().enumerate() {
-        if matches!(m.role, tiangong_types::MessageRole::Tool) {
-            let text = extract_message_text(m);
-            let is_error = m.tool_result_is_error;
-            let tool_name = m.tool_name.clone().unwrap_or_default();
-            let tc_id = m.tool_call_id.as_deref();
-            let is_recall = MEMORY_QUERY_TOOLS.contains(&tool_name.as_str());
-            let tool_source = classify_tool_source(&tool_name);
-
-            // 通过 tool_call_id 从调用参数中补充提取 path/url。
-            let mut file_path = None;
-            let mut url = None;
-            if let Some(id) = tc_id
-                && let Some((_, args)) = call_table.get(id)
-            {
-                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                    file_path = Some(p.to_string());
-                }
-                if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
-                    url = Some(u.to_string());
-                }
-            }
-            // 参数里没有就从结果正文补充。
-            if file_path.is_none() || url.is_none() {
-                let (fp, u) = extract_paths_and_urls(&text);
-                file_path = file_path.or(fp);
-                url = url.or(u);
-            }
-
-            // 产物：所有工具结果都传递（包括召回结果，标记 is_recalled_context）。
-            if !text.is_empty() {
-                artifacts.push(TurnArtifact {
-                    kind: if url.is_some() {
-                        TurnArtifactKind::Media
-                    } else if file_path.is_some() {
-                        TurnArtifactKind::File
-                    } else {
-                        TurnArtifactKind::ToolResult
-                    },
-                    tool_name: Some(tool_name.clone()),
-                    title: Some(
-                        format!("{} {}", tool_name, if is_error { "失败" } else { "" })
-                            .trim()
-                            .to_string(),
-                    ),
-                    url: url.clone(),
-                    path: file_path.clone(),
-                    summary: Some(truncate(&text, 200)),
-                    is_recalled_context: is_recall,
-                });
-            }
-
-            // 候选：所有工具都传递，Memory 分析层根据 tool_source / is_recalled_context 判断。
-            memory_candidates.push(MemoryCandidate {
-                tool_name: tool_name.clone(),
-                step_index: step,
-                hint: truncate(&text, 500),
-                suggested_kinds: Vec::new(),
-                file_path,
-                url,
-                result_summary: Some(truncate(&text, 200)),
-                success: !is_error,
-                tool_source: Some(tool_source),
-                is_recalled_context: is_recall,
-            });
-        }
-
-        // 从 Assistant 消息中提取媒体产物。
-        if matches!(m.role, tiangong_types::MessageRole::Assistant) {
-            for block in &m.content {
-                if let tiangong_types::ContentBlock::Media { url, title, .. } = block {
-                    artifacts.push(TurnArtifact {
-                        kind: TurnArtifactKind::Media,
-                        tool_name: None,
-                        title: title.clone(),
-                        url: Some(url.clone()),
-                        path: None,
-                        summary: None,
-                        is_recalled_context: false,
-                    });
-                }
-            }
-        }
-    }
-
-    // 轮次状态：从最后一条消息的 turn_status 推断。
-    let turn_status = turn_messages
-        .iter()
-        .rev()
-        .find_map(|m| m.turn_status.as_ref())
-        .map(|s| match s {
+        .find_map(|message| message.turn_status.as_ref())
+        .map(|status| match status {
             tiangong_types::TurnStatus::Success => TurnStatus::Completed,
             tiangong_types::TurnStatus::Failed => TurnStatus::Failed,
             tiangong_types::TurnStatus::Cancelled => TurnStatus::Cancelled,
         })
         .unwrap_or_default();
-
-    let request = RunEnhancedMicroRuminationRequest {
-        turn_result: EnhancedTurnResult {
-            session_id: session.id,
-            turn_id: format!("turn-{turn_start_idx}"),
-            had_tool_calls: !tool_calls.is_empty(),
-            turn_status,
-            user_input,
-            summary,
-            tool_calls,
-            artifacts,
-            workspace_id: Some(session.workspace_id.clone()),
-            memory_candidates,
-            turn_messages: turn_messages
-                .iter()
-                .map(|m| TurnMessage {
-                    role: format!("{:?}", m.role).to_lowercase(),
-                    content: extract_message_text(m),
-                })
-                .collect(),
-        },
-    };
+    let turn_result =
+        turn_extract::build_turn_memory_result(&session, &messages, &user_input, turn_status);
+    let request = RunEnhancedMicroRuminationRequest { turn_result };
     let _ = sidecar_client::invoke::<RunEnhancedMicroRumination>(&request);
     Ok(())
 }
@@ -689,54 +579,134 @@ fn extract_message_text(message: &tiangong_types::Message) -> String {
         .join("")
 }
 
-/// 截断字符串到指定字符数。
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
+fn emit_stream_event(event: &tiangong_types::StreamEvent) {
+    if let Ok(json) = serde_json::to_string(event) {
+        bindings::tiangong::plugin::feedback::emit_stream_event(&json);
     }
-    s.chars().take(max_chars).collect::<String>() + "…"
 }
 
-/// 从文本中提取文件路径和 URL。
-fn extract_paths_and_urls(text: &str) -> (Option<String>, Option<String>) {
-    let url = text
-        .find("https://")
-        .or_else(|| text.find("http://"))
-        .map(|start| {
-            let rest = &text[start..];
-            let end = rest
-                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | ','))
-                .unwrap_or(rest.len());
-            rest[..end].to_string()
-        });
-
-    let path = text
-        .find("/Users/")
-        .or_else(|| text.find("/home/"))
-        .or_else(|| text.find("/tmp/"))
-        .or_else(|| text.find("./"))
-        .map(|start| {
-            let rest = &text[start..];
-            let end = rest
-                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | ']' | ','))
-                .unwrap_or(rest.len());
-            rest[..end].to_string()
-        });
-
-    (path, url)
+fn emit_done_empty() {
+    emit_stream_event(&tiangong_types::StreamEvent::MemoryRecallDone {
+        hit_count: 0,
+        hits: Vec::new(),
+    });
 }
 
-/// WASM 内简易日志（无 tracing，直接忽略）。
-#[allow(dead_code)]
-fn tracing_warn(_msg: &str) {}
+fn emit_skip_events() {
+    emit_stream_event(&tiangong_types::StreamEvent::MemoryRecallStart {
+        strategy: "skip".to_string(),
+    });
+    emit_done_empty();
+}
 
-fn tool_result_ok(summary: String) -> ToolResult {
+fn build_recall_context(session: &tiangong_types::PluginSession) -> Vec<String> {
+    let mut items = session
+        .messages
+        .iter()
+        .rev()
+        .filter_map(|message| {
+            let role = match message.role {
+                tiangong_types::MessageRole::User => "user",
+                tiangong_types::MessageRole::Assistant => "assistant",
+                tiangong_types::MessageRole::System => return None,
+                tiangong_types::MessageRole::Tool => message.tool_name.as_deref().unwrap_or("tool"),
+            };
+            let content = compact_memory_text(&message.text_content(), 900);
+            (!content.is_empty()).then(|| format!("{role}: {content}"))
+        })
+        .take(30)
+        .collect::<Vec<_>>();
+    items.reverse();
+    items
+}
+
+fn compact_memory_text(text: &str, max_chars: usize) -> String {
+    let normalized = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut clipped = normalized.chars().take(max_chars).collect::<String>();
+    clipped.push_str("...");
+    clipped
+}
+
+fn assemble_recall_result(
+    response: tiangong_plugin_memory_protocol::recall::RecallContextResponse,
+    query: String,
+    started: u64,
+) -> ToolResult {
+    if response.hits.is_empty() {
+        let stdout = if response.content.trim().is_empty() {
+            format!("未找到与「{query}」相关的历史记忆。")
+        } else {
+            response.content
+        };
+        return recall_tool_result(
+            true,
+            "未找到相关记忆",
+            format!(
+                "recall_memory 已完成，但没有可用的增量历史记忆。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。\n\n{stdout}"
+            ),
+            String::new(),
+            0,
+            vec![query],
+            started,
+        );
+    }
+
+    let stdout = if response.content.trim().is_empty() {
+        "没有发现当前上下文之外的增量记忆。".to_string()
+    } else {
+        response.content
+    };
+    let header = if stdout
+        .trim()
+        .starts_with("没有发现当前上下文之外的增量记忆")
+    {
+        "recall_memory 已完成，结果如下。请基于当前上下文继续完成用户原始目标；不要再次调用 recall_memory。"
+    } else {
+        "recall_memory 已完成。以下是可直接使用的回忆结果，请基于这些内容继续完成用户原始目标；不要再次调用 recall_memory，除非用户提出新的历史查询。"
+    };
+    recall_tool_result(
+        true,
+        format!("命中 {} 条相关记忆并完成整理", response.hits.len()),
+        format!("{header}\n\n{stdout}"),
+        String::new(),
+        0,
+        vec![query],
+        started,
+    )
+}
+
+fn recall_tool_result(
+    ok: bool,
+    summary: impl Into<String>,
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    args: Vec<String>,
+    started: u64,
+) -> ToolResult {
+    let summary = summary.into();
     ToolResult {
-        ok: true,
-        summary,
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: 0,
+        ok,
+        summary: summary.clone(),
+        stdout,
+        stderr,
+        exit_code,
+        execution: Some(ToolExecutionRecord {
+            tool_name: "recall_memory".to_string(),
+            args,
+            duration_ms: bindings::tiangong::plugin::clock::now_millis().saturating_sub(started),
+            ok,
+            exit_code,
+            summary,
+        }),
     }
 }
 

@@ -30,6 +30,11 @@ interface sidecar {
     ) -> result<string, sidecar-error>;
 }
 
+interface feedback {
+    /// 向当前 turn 发送一个通用 StreamEvent JSON。
+    emit-stream-event: func(event-json: string);
+}
+
 /// Core 使用的插件能力（工具 / 注入 / 生命周期钩子）。
 ///
 /// 这是 WASM 插件能力的子集，Core 通过 Plugin trait 只消费这些方法。
@@ -63,6 +68,15 @@ interface plugin {
         arguments: string,
     }
 
+    record tool-execution-record {
+        tool-name: string,
+        args: list<string>,
+        duration-ms: u64,
+        ok: bool,
+        exit-code: s32,
+        summary: string,
+    }
+
     /// 工具执行结果，对应宿主侧 `ToolResult`。
     record tool-result {
         ok: bool,
@@ -70,6 +84,7 @@ interface plugin {
         stdout: string,
         stderr: string,
         exit-code: s32,
+        execution: option<tool-execution-record>,
     }
 
     /// 返回插件描述符。
@@ -170,6 +185,7 @@ interface plugin-ui {
 world tiangong-plugin {
     import clock;
     import sidecar;
+    import feedback;
     export plugin;
     export plugin-ui;
 }

@@ -21,31 +21,72 @@ use tiangong_plugin_runtime::{
 
 #[derive(Default)]
 struct MockMemorySidecar {
-    operations: Mutex<Vec<String>>,
+    calls: Mutex<Vec<(String, serde_json::Value)>>,
 }
 
 impl MockMemorySidecar {
     fn called(&self, operation: &str) -> bool {
-        self.operations
+        self.calls
             .lock()
-            .map(|operations| operations.iter().any(|item| item == operation))
+            .map(|calls| calls.iter().any(|(item, _)| item == operation))
             .unwrap_or(false)
+    }
+
+    fn payload(&self, operation: &str) -> serde_json::Value {
+        self.calls
+            .lock()
+            .ok()
+            .and_then(|calls| {
+                calls
+                    .iter()
+                    .rev()
+                    .find(|(item, _)| item == operation)
+                    .map(|(_, payload)| payload.clone())
+            })
+            .unwrap_or(serde_json::Value::Null)
     }
 }
 
 impl SidecarConnection for MockMemorySidecar {
-    fn invoke(&self, operation: &str, _payload: &str) -> anyhow::Result<String> {
-        self.operations
+    fn invoke(&self, operation: &str, payload: &str) -> anyhow::Result<String> {
+        self.invoke_with_progress(operation, payload, &mut |_| {})
+    }
+
+    fn invoke_with_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        on_progress: &mut dyn FnMut(String),
+    ) -> anyhow::Result<String> {
+        let payload = serde_json::from_str(payload)?;
+        self.calls
             .lock()
             .map_err(|_| anyhow::anyhow!("模拟 sidecar 调用记录已损坏"))?
-            .push(operation.to_string());
+            .push((operation.to_string(), payload));
         let response = match operation {
-            "recall_context" => serde_json::json!({
-                "kind": "recall_context",
-                "response": {"content": "模拟记忆结果"}
-            }),
-            "load_injection" => serde_json::json!({"kind": "injection", "items": []}),
-            _ => serde_json::json!({"kind": "ack"}),
+            "recall_context" => {
+                on_progress(serde_json::to_string(
+                    &tiangong_types::StreamEvent::MemoryRecallProgress {
+                        phase: "检索中".to_string(),
+                    },
+                )?);
+                serde_json::json!({
+                    "response": {
+                        "content": "模拟记忆结果",
+                        "hits": [{
+                            "node_id": "node-1",
+                            "title": "历史结果",
+                            "summary": "模拟摘要",
+                            "score": 0.9,
+                            "kind": "episode",
+                            "importance": 0.8,
+                            "depth1_loaded": false
+                        }]
+                    }
+                })
+            }
+            "load_injection" => serde_json::json!({"items": []}),
+            _ => serde_json::json!({}),
         };
         Ok(serde_json::to_string(&response)?)
     }
@@ -167,7 +208,9 @@ fn handle_recall_memory_without_handle_returns_disabled() {
             &config,
         )
         .expect("handle-tool 失败");
-    assert!(outcome.ok);
+    assert!(!outcome.ok);
+    assert_eq!(outcome.exit_code, 1);
+    assert!(outcome.execution.is_some());
     // 无 handle 时应返回降级提示。
     assert!(
         outcome.summary.contains("未启用") || outcome.summary.contains("失败"),
@@ -196,6 +239,10 @@ fn handle_recall_memory_with_connection_uses_sidecar() {
         )
         .expect("handle-tool 失败");
     assert!(outcome.ok);
+    assert_eq!(outcome.summary, "命中 1 条相关记忆并完成整理");
+    let execution = outcome.execution.expect("应保留工具执行记录");
+    assert_eq!(execution.tool_name, "recall_memory");
+    assert_eq!(execution.args, vec!["测试查询"]);
     // 有 handle 时应正常返回（不再含"未启用"降级提示）。
     assert!(
         !outcome.summary.contains("未启用"),
@@ -207,14 +254,17 @@ fn handle_recall_memory_with_connection_uses_sidecar() {
 
 #[test]
 fn on_config_updated_forwards_to_wasm() {
+    let sidecar = Arc::new(MockMemorySidecar::default());
     let wasm = ensure_wasm_or_skip();
     let config = PluginRuntimeConfig::default();
-    let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
 
     let core_config = CoreConfig::default();
     let config_json = serde_json::to_string(&core_config).expect("序列化失败");
     assert!(plugin.on_config_updated(config_json).is_ok());
+    assert!(sidecar.called("reconfigure"));
 }
 
 #[test]
@@ -301,6 +351,33 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     let mut session = test_session_with_user_message();
     // 有用户消息时，on_turn_finished 应触发反刍（best-effort）。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    assert!(sidecar.called("run_enhanced_micro_rumination"));
+    let payload = sidecar.payload("run_enhanced_micro_rumination");
+    let turn = &payload["turn_result"];
+    assert_eq!(turn["session_id"], session.id);
+    assert_eq!(turn["workspace_id"], "test-workspace");
+    assert_eq!(turn["user_input"], "测试用户输入");
+    assert_eq!(turn["turn_messages"][0]["role"], "user");
+    assert_eq!(turn["turn_id"].as_str().map(str::len), Some(25));
+}
+
+#[test]
+fn every_tenth_turn_forwards_meta_rumination() {
+    let sidecar = Arc::new(MockMemorySidecar::default());
+    let wasm = ensure_wasm_or_skip();
+    let config = PluginRuntimeConfig::default();
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = WasmPluginAdapter::new(plugin, config);
+    let mut session = test_session_with_user_message();
+
+    for _ in 0..9 {
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    }
+    assert!(!sidecar.called("run_meta_rumination"));
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    assert!(sidecar.called("run_meta_rumination"));
 }
 
 // ── set_workspace + prompt_sections 测试 ──

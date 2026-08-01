@@ -21,6 +21,34 @@ WASM Component
 - 天工只负责加载、资源限制、sidecar 进程管理和消息转发，不理解插件业务负载。
 - WASM 与 sidecar 之间的私有业务协议由插件自己维护。
 
+## WASM Runtime 公共中立约束
+
+`tiangong-plugin-runtime` 是所有插件共享的基础设施，后续开发必须保持公共、中立和业务无关。Runtime 只能提供任意插件都能复用的加载、隔离、资源限制、生命周期转发、通用反馈、sidecar 传输和制品管理能力。
+
+禁止在 Runtime、公共 WIT 或通用 sidecar 协议中加入：
+
+- 具体插件 ID、工具名、操作名或基于插件身份的条件分支；
+- 具体插件的请求、响应、事件、配置和数据结构；
+- 具体插件的数据目录、兼容路径、迁移规则或生命周期策略；
+- 仅为某个插件服务的便捷方法、错误码、状态字段或特殊传输流程；
+- 对 JSON 业务负载内容的解析、改写、筛选或语义判断。
+
+单个插件需要的功能必须放在以下位置之一：
+
+- 插件 WASM：工具行为、提示词、生命周期编排和宿主通用能力调用；
+- 插件私有协议：WASM 与 sidecar 共用的业务操作、请求和响应；
+- 插件 sidecar：数据库、原生库、业务处理和插件自己的兼容逻辑。
+
+确需扩展 Runtime 时，改动必须同时满足：
+
+1. 不知道调用方是哪一个插件也能正确工作；
+2. 接口和实现不引用任何具体插件的名称或类型；
+3. 至少能合理服务两类不同插件，而不是把单插件逻辑包装成“通用”接口；
+4. Runtime 只转发不透明负载或通用数据，不解释业务含义；
+5. 新能力有独立的通用测试，插件自己的行为测试留在插件目录。
+
+代码审查发现单插件需求进入 Runtime 时，应退回插件侧实现。不得以临时兼容、示例插件或当前只有一个使用方为理由增加特化处理。
+
 ## 开发环境
 
 当前仓库使用 Rust 2024 edition，WASM 目标为 `wasm32-wasip2`：
@@ -138,6 +166,7 @@ wit_bindgen::generate!({
 
 - `clock.now-millis`：读取真实时间。
 - `sidecar.invoke`：向当前插件绑定的 sidecar 转发操作名和 JSON。
+- `feedback.emit-stream-event`：向当前 turn 发送通用 `StreamEvent` JSON；Runtime 只验证公共事件结构，不理解具体插件业务。
 
 完整实现可参考 [Memory WASM](../crates/plugins/tiangong-plugin-memory/wasm/src/lib.rs) 和它的 [绑定入口](../crates/plugins/tiangong-plugin-memory/wasm/src/bindings.rs)。
 

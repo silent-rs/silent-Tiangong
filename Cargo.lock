@@ -10920,6 +10920,7 @@ dependencies = [
 name = "tiangong-plugin-memory-wasm"
 version = "0.13.4"
 dependencies = [
+ "scru128",
  "serde",
  "serde_json",
  "tiangong-plugin-memory-protocol",

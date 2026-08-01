@@ -16,8 +16,11 @@ use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::tiangong::plugin::clock::Host as ClockHost;
+use crate::bindings::tiangong::plugin::feedback::Host as FeedbackHost;
 use crate::bindings::tiangong::plugin::sidecar::{Host as SidecarHost, SidecarError};
 use crate::sidecar::{SidecarConnection, SidecarInvokeError};
+use tiangong_core::core::plugin::PluginFeedbackTx;
+use tiangong_types::StreamEvent;
 
 /// WASM Store 的宿主侧状态。
 pub struct HostState {
@@ -26,6 +29,8 @@ pub struct HostState {
     table: ResourceTable,
     /// sidecar 连接（通用，由入口侧注入）。None 时 invoke 返回 unavailable。
     sidecar: Option<Arc<dyn SidecarConnection>>,
+    /// 当前 turn 的插件反馈通道。
+    feedback: Option<PluginFeedbackTx>,
     /// 插件 ID（构造时用于 preopen 插件配置目录）。
     #[allow(dead_code)]
     plugin_id: String,
@@ -43,6 +48,7 @@ impl HostState {
             wasi,
             table: ResourceTable::new(),
             sidecar,
+            feedback: None,
             plugin_id,
         }
     }
@@ -50,6 +56,10 @@ impl HostState {
     /// 提供对内部限制器的可变借用，供 `Store::limiter` 闭包返回。
     pub fn limits_mut(&mut self) -> &mut StoreLimits {
         &mut self.limits
+    }
+
+    pub fn set_feedback(&mut self, feedback: PluginFeedbackTx) {
+        self.feedback = Some(feedback);
     }
 }
 
@@ -73,6 +83,18 @@ impl ClockHost for HostState {
     }
 }
 
+impl FeedbackHost for HostState {
+    fn emit_stream_event(&mut self, event_json: String) {
+        let Some(feedback) = &self.feedback else {
+            return;
+        };
+        match serde_json::from_str::<StreamEvent>(&event_json) {
+            Ok(event) => feedback.send_stream_event(event),
+            Err(error) => tracing::warn!(%error, "wasm 插件反馈事件解析失败"),
+        }
+    }
+}
+
 /// sidecar host import：通用 JSON 转发。
 ///
 /// WASM 组件经 `sidecar.invoke(operation, payload)` 调用，Host 负责通用协议封装，
@@ -83,11 +105,23 @@ impl SidecarHost for HostState {
             return Err(SidecarError::NotConfigured);
         };
         // 在独立 OS 线程上执行，避免 tokio worker 线程嵌套。
+        let feedback = self.feedback.clone();
         std::thread::scope(|s| {
-            s.spawn(move || conn.invoke(&operation, &payload))
-                .join()
-                .map_err(|e| SidecarError::Internal(format!("sidecar 线程异常: {e:?}")))?
-                .map_err(map_sidecar_error)
+            s.spawn(move || {
+                let mut on_progress = |event_json: String| {
+                    let Some(feedback) = &feedback else {
+                        return;
+                    };
+                    match serde_json::from_str::<StreamEvent>(&event_json) {
+                        Ok(event) => feedback.send_stream_event(event),
+                        Err(error) => tracing::warn!(%error, "sidecar 进度事件解析失败"),
+                    }
+                };
+                conn.invoke_with_progress(&operation, &payload, &mut on_progress)
+            })
+            .join()
+            .map_err(|e| SidecarError::Internal(format!("sidecar 线程异常: {e:?}")))?
+            .map_err(map_sidecar_error)
         })
     }
 }

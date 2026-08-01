@@ -18,7 +18,7 @@ use tiangong_core::core_config::CoreConfig;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::Session;
-use tiangong_core::tool::ToolResult;
+use tiangong_core::tool::{ToolExecutionRecord, ToolResult};
 use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
 use tokio::task;
 
@@ -103,6 +103,11 @@ impl WasmPluginAdapter {
             .lock()
             .map_err(|_| anyhow::anyhow!("wasm 插件上下文锁已损坏"))?
             .clone();
+        if let Ok(feedback) = self.feedback_tx.read()
+            && let Some(feedback) = feedback.clone()
+        {
+            plugin.set_feedback(feedback);
+        }
         if let Some(config_json) = context.config_json {
             plugin.on_config_updated(config_json)?;
         }
@@ -137,7 +142,13 @@ impl Plugin for WasmPluginAdapter {
     /// 注入反馈通道（每 turn 注入），缓存供 handle 发送流事件。
     fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
         if let Ok(mut guard) = self.feedback_tx.write() {
-            *guard = Some(tx);
+            *guard = Some(tx.clone());
+        }
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| {
+            plugin.set_feedback(tx);
+            Ok(())
+        }) {
+            tracing::warn!(%error, "注入 wasm 插件反馈通道失败");
         }
     }
 
@@ -335,7 +346,14 @@ impl ToolOverrideHandler for WasmPluginAdapter {
                 stdout: result.stdout,
                 stderr: result.stderr,
                 exit_code: result.exit_code,
-                execution: None,
+                execution: result.execution.map(|execution| ToolExecutionRecord {
+                    tool_name: execution.tool_name,
+                    args: execution.args,
+                    duration_ms: execution.duration_ms,
+                    ok: execution.ok,
+                    exit_code: execution.exit_code,
+                    summary: execution.summary,
+                }),
             })
         })
     }

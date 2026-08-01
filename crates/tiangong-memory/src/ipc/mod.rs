@@ -263,7 +263,14 @@ async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -
         let request = connection.read_request().await?;
         let response_payload = if request.payload.get("protocol_version").is_some() {
             let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload) {
-                Ok(plugin_request) => handle_plugin_request(handle.clone(), plugin_request).await,
+                Ok(plugin_request) => {
+                    handle_plugin_request_with_connection(
+                        handle.clone(),
+                        plugin_request,
+                        &mut connection,
+                    )
+                    .await
+                }
                 Err(error) => PluginResponse::error(
                     "unknown",
                     PluginErrorCode::BadRequest,
@@ -287,7 +294,11 @@ async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -
     }
 }
 
-async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> PluginResponse {
+async fn handle_plugin_request_with_connection(
+    handle: MemoryHandle,
+    request: PluginRequest,
+    connection: &mut IpcConnection,
+) -> PluginResponse {
     let request_id = request.request_id.clone();
     if request.protocol_version != PROTOCOL_VERSION {
         return PluginResponse::error(
@@ -310,6 +321,7 @@ async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> 
                 | TEST_OPERATION
                 | CONFIG_GET_OPERATION
                 | CONFIG_SET_OPERATION
+                | tiangong_plugin_memory_protocol::control::RECONFIGURE_OPERATION
         )
     {
         return PluginResponse::error(
@@ -319,7 +331,110 @@ async fn handle_plugin_request(handle: MemoryHandle, request: PluginRequest) -> 
             false,
         );
     }
+    if request.operation != plugin_recall::RECALL_CONTEXT_OPERATION {
+        return dispatch_checked_plugin_request(handle, request).await;
+    }
 
+    let recall: plugin_recall::RecallContextRequest =
+        match decode(&request.payload, plugin_recall::RECALL_CONTEXT_OPERATION) {
+            Ok(request) => request,
+            Err(error) => {
+                return PluginResponse::error(
+                    request_id,
+                    PluginErrorCode::BadRequest,
+                    error.to_string(),
+                    false,
+                );
+            }
+        };
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut memory_request: crate::types::MemoryRecallRequest = match transcode(recall.request) {
+        Ok(request) => request,
+        Err(error) => {
+            return PluginResponse::error(
+                request_id,
+                PluginErrorCode::BadRequest,
+                error.to_string(),
+                false,
+            );
+        }
+    };
+    memory_request.progress = Some(Arc::new(move |phase| {
+        let event = tiangong_types::StreamEvent::MemoryRecallProgress {
+            phase: phase.to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = progress_tx.send(json);
+        }
+    }));
+
+    let recall_task = tokio::spawn(async move { handle.recall_context(memory_request).await });
+    tokio::pin!(recall_task);
+    let response = loop {
+        tokio::select! {
+            Some(message) = progress_rx.recv() => {
+                if let Err(error) = connection.write_progress(&request_id, message).await {
+                    return PluginResponse::error(
+                        request_id,
+                        PluginErrorCode::ServiceError,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            }
+            result = &mut recall_task => {
+                while let Ok(message) = progress_rx.try_recv() {
+                    if let Err(error) = connection.write_progress(&request_id, message).await {
+                        return PluginResponse::error(
+                            request_id,
+                            PluginErrorCode::ServiceError,
+                            error.to_string(),
+                            false,
+                        );
+                    }
+                }
+                break result;
+            },
+        }
+    };
+
+    match response {
+        Ok(response) => {
+            let response: plugin_recall::RecallContextResponse = match transcode(response) {
+                Ok(response) => response,
+                Err(error) => {
+                    return PluginResponse::error(
+                        request_id,
+                        PluginErrorCode::ServiceError,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            };
+            match serde_json::to_value(plugin_recall::RecallContextResult { response }) {
+                Ok(payload) => PluginResponse::success(request_id, payload),
+                Err(error) => PluginResponse::error(
+                    request_id,
+                    PluginErrorCode::ServiceError,
+                    error.to_string(),
+                    false,
+                ),
+            }
+        }
+        Err(error) => PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceError,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+async fn dispatch_checked_plugin_request(
+    handle: MemoryHandle,
+    request: PluginRequest,
+) -> PluginResponse {
+    let request_id = request.request_id.clone();
     match dispatch_plugin_request(handle, request).await {
         Ok(payload) => PluginResponse::success(request_id, payload),
         Err(error) => PluginResponse::error(
@@ -359,6 +474,14 @@ async fn dispatch_plugin_request(
             handle.reconfigure(config.to_options()).await?;
             serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
                 .with_context(|| "序列化 Memory 配置保存响应失败")
+        }
+        tiangong_plugin_memory_protocol::control::RECONFIGURE_OPERATION => {
+            let _: tiangong_plugin_memory_protocol::Empty = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory 重载配置请求失败")?;
+            let config = crate::MemoryConfig::load_or_default();
+            handle.reconfigure(config.to_options()).await?;
+            serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
+                .with_context(|| "序列化 Memory 重载配置响应失败")
         }
         ENABLE_OPERATION => {
             crate::enable_memory()?;
@@ -450,6 +573,10 @@ fn decode_plugin_memory_request(
                 workspace_id: request.workspace_id,
             }
         }
+        plugin_rumination::RUN_META_OPERATION => {
+            let _: plugin_rumination::RunMetaRuminationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunMetaRumination
+        }
         plugin_ui::LIST_NODES_OPERATION => {
             let request: plugin_ui::ListNodesRequest = decode(payload, operation)?;
             MemoryIpcRequestPayload::ListNodes {
@@ -524,7 +651,9 @@ fn encode_plugin_memory_response(
             serde_json::to_value(plugin_recall::RecallContextResult { response })?
         }
         (
-            plugin_rumination::RUN_ENHANCED_MICRO_OPERATION | plugin_rumination::RUN_MESO_OPERATION,
+            plugin_rumination::RUN_ENHANCED_MICRO_OPERATION
+            | plugin_rumination::RUN_MESO_OPERATION
+            | plugin_rumination::RUN_META_OPERATION,
             MemoryIpcResponsePayload::Ack,
         ) => serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())?,
         (plugin_ui::LIST_NODES_OPERATION, MemoryIpcResponsePayload::Nodes { items }) => {
@@ -605,26 +734,46 @@ fn memory_config_test() -> Result<serde_json::Value> {
     let config = crate::MemoryConfig::load_or_default();
     let mut issues = Vec::new();
     match &config.model {
-        Some(model) if endpoint_configured(&model.base_url, &model.api_key, &model.model) => {}
+        Some(model) if endpoint_configured(&model.base_url, &model.api_key, &model.model) => {
+            push_secret_issue(&mut issues, "LLM", &model.api_key);
+        }
         Some(_) => issues.push("LLM 端点配置不完整".to_string()),
         None => issues.push("未配置 LLM 端点".to_string()),
     }
     if let Some(model) = &config.embedding {
         if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
             issues.push("Embedding 端点配置不完整".to_string());
-        } else if model.dimension == 0 {
-            issues.push("Embedding 向量维度未设置".to_string());
+        } else {
+            push_secret_issue(&mut issues, "Embedding", &model.api_key);
         }
     }
-    if let Some(model) = &config.rerank
-        && !endpoint_configured(&model.base_url, &model.api_key, &model.model)
-    {
-        issues.push("Rerank 端点配置不完整".to_string());
+    if let Some(model) = &config.rerank {
+        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
+            issues.push("Rerank 端点配置不完整".to_string());
+        } else {
+            push_secret_issue(&mut issues, "Rerank", &model.api_key);
+        }
     }
     Ok(serde_json::json!({
         "ok": issues.is_empty(),
         "issues": issues,
     }))
+}
+
+fn push_secret_issue(issues: &mut Vec<String>, label: &str, value: &str) {
+    let trimmed = value.trim();
+    let Some(inner) = trimmed
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return;
+    };
+    let variable = inner.trim();
+    if variable.is_empty() {
+        issues.push(format!("{label} 端点密钥环境变量名称为空"));
+    } else if std::env::var(variable).is_err() {
+        issues.push(format!("{label} 端点密钥环境变量 {variable} 未设置"));
+    }
 }
 
 fn endpoint_configured(base_url: &str, api_key: &str, model: &str) -> bool {
@@ -774,6 +923,14 @@ impl IpcConnection {
 
     pub async fn write_response(&mut self, response: IpcResponse) -> Result<()> {
         self.write_frame(&IpcFrame::Response(response)).await
+    }
+
+    pub async fn write_progress(&mut self, request_id: &str, message: String) -> Result<()> {
+        self.write_frame(&IpcFrame::Progress {
+            request_id: request_id.to_string(),
+            message,
+        })
+        .await
     }
 
     async fn write_frame(&mut self, frame: &IpcFrame) -> Result<()> {

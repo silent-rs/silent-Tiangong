@@ -51,6 +51,16 @@ impl std::error::Error for SidecarInvokeError {}
 /// 通用 sidecar 连接：运行时负责协议封装，调用方只提供操作名和 JSON 负载。
 pub trait SidecarConnection: Send + Sync {
     fn invoke(&self, operation: &str, payload: &str) -> Result<String>;
+
+    fn invoke_with_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        let _ = on_progress;
+        self.invoke(operation, payload)
+    }
 }
 
 /// 一个插件 sidecar 的本地运行配置。
@@ -366,6 +376,15 @@ impl ProcessSidecarConnection {
         operation: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        self.invoke_protocol_once_with_progress(operation, payload, &mut |_| {})
+    }
+
+    fn invoke_protocol_once_with_progress(
+        &self,
+        operation: &str,
+        payload: serde_json::Value,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<serde_json::Value> {
         let endpoint = load_endpoint(&self.config.endpoint)?;
         let mut stream = connect(&endpoint, self.config.request_timeout)?;
         write_frame(
@@ -386,63 +405,87 @@ impl ProcessSidecarConnection {
             }),
         )?;
 
-        let mut line = String::new();
-        BufReader::new(stream)
-            .read_line(&mut line)
-            .with_context(|| "读取 sidecar 响应失败")?;
-        if line.is_empty() {
-            bail!("sidecar 在返回响应前关闭连接");
-        }
-        match serde_json::from_str::<IpcFrame>(line.trim_end())
-            .with_context(|| "解析 sidecar 响应帧失败")?
-        {
-            IpcFrame::Response(response) if response.request_id == request_id => {
-                let response: Response = serde_json::from_value(response.payload)
-                    .with_context(|| "解析 sidecar 协议响应失败")?;
-                if response.protocol_version != PROTOCOL_VERSION {
-                    return Err(SidecarInvokeError::ProtocolMismatch(format!(
-                        "sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
-                        response.protocol_version
-                    ))
-                    .into());
-                }
-                if response.request_id != request_id {
-                    bail!(
-                        "sidecar 协议响应编号不匹配: expected={request_id}, actual={}",
-                        response.request_id
-                    );
-                }
-                if !response.success {
-                    let message = response
-                        .error_message
-                        .unwrap_or_else(|| "sidecar 请求失败".to_string());
-                    let error = match response.error_code {
-                        Some(ErrorCode::Timeout) => SidecarInvokeError::Timeout,
-                        Some(ErrorCode::PermissionDenied) => SidecarInvokeError::PermissionDenied,
-                        Some(ErrorCode::ProtocolMismatch) => {
-                            SidecarInvokeError::ProtocolMismatch(message)
-                        }
-                        Some(ErrorCode::Unavailable | ErrorCode::ServiceDisabled) => {
-                            SidecarInvokeError::Unavailable(message)
-                        }
-                        _ => SidecarInvokeError::Internal(message),
-                    };
-                    return Err(error.into());
-                }
-                Ok(response.payload.unwrap_or(serde_json::Value::Null))
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .with_context(|| "读取 sidecar 响应失败")?;
+            if line.is_empty() {
+                bail!("sidecar 在返回响应前关闭连接");
             }
-            IpcFrame::Response(response) => bail!(
-                "sidecar 响应编号不匹配: expected={request_id}, actual={}",
-                response.request_id
-            ),
-            IpcFrame::Error { message } => bail!("sidecar 返回错误: {message}"),
-            _ => bail!("sidecar 返回了无效响应帧"),
+            match serde_json::from_str::<IpcFrame>(line.trim_end())
+                .with_context(|| "解析 sidecar 响应帧失败")?
+            {
+                IpcFrame::Progress {
+                    request_id: progress_request_id,
+                    message,
+                } if progress_request_id == request_id => on_progress(message),
+                IpcFrame::Progress {
+                    request_id: progress_request_id,
+                    ..
+                } => bail!(
+                    "sidecar 进度编号不匹配: expected={request_id}, actual={progress_request_id}"
+                ),
+                IpcFrame::Response(response) if response.request_id == request_id => {
+                    let response: Response = serde_json::from_value(response.payload)
+                        .with_context(|| "解析 sidecar 协议响应失败")?;
+                    if response.protocol_version != PROTOCOL_VERSION {
+                        return Err(SidecarInvokeError::ProtocolMismatch(format!(
+                            "sidecar 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
+                            response.protocol_version
+                        ))
+                        .into());
+                    }
+                    if response.request_id != request_id {
+                        bail!(
+                            "sidecar 协议响应编号不匹配: expected={request_id}, actual={}",
+                            response.request_id
+                        );
+                    }
+                    if !response.success {
+                        let message = response
+                            .error_message
+                            .unwrap_or_else(|| "sidecar 请求失败".to_string());
+                        let error = match response.error_code {
+                            Some(ErrorCode::Timeout) => SidecarInvokeError::Timeout,
+                            Some(ErrorCode::PermissionDenied) => {
+                                SidecarInvokeError::PermissionDenied
+                            }
+                            Some(ErrorCode::ProtocolMismatch) => {
+                                SidecarInvokeError::ProtocolMismatch(message)
+                            }
+                            Some(ErrorCode::Unavailable | ErrorCode::ServiceDisabled) => {
+                                SidecarInvokeError::Unavailable(message)
+                            }
+                            _ => SidecarInvokeError::Internal(message),
+                        };
+                        return Err(error.into());
+                    }
+                    return Ok(response.payload.unwrap_or(serde_json::Value::Null));
+                }
+                IpcFrame::Response(response) => bail!(
+                    "sidecar 响应编号不匹配: expected={request_id}, actual={}",
+                    response.request_id
+                ),
+                IpcFrame::Error { message } => bail!("sidecar 返回错误: {message}"),
+                _ => bail!("sidecar 返回了无效响应帧"),
+            }
         }
     }
 }
 
 impl SidecarConnection for ProcessSidecarConnection {
     fn invoke(&self, operation: &str, payload: &str) -> Result<String> {
+        self.invoke_with_progress(operation, payload, &mut |_| {})
+    }
+
+    fn invoke_with_progress(
+        &self,
+        operation: &str,
+        payload: &str,
+        on_progress: &mut dyn FnMut(String),
+    ) -> Result<String> {
         self.ensure_running().map_err(|error| {
             if error.downcast_ref::<SidecarInvokeError>().is_some() {
                 error
@@ -452,7 +495,7 @@ impl SidecarConnection for ProcessSidecarConnection {
         })?;
         let payload = serde_json::from_str(payload).with_context(|| "sidecar 请求不是有效 JSON")?;
         let response = self
-            .invoke_protocol_once(operation, payload)
+            .invoke_protocol_once_with_progress(operation, payload, on_progress)
             .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
     }

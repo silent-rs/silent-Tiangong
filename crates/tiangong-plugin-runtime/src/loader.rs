@@ -66,6 +66,11 @@ impl WasmPluginLoader {
             host_self_getter,
         )
         .map_err(|e| anyhow::anyhow!("接入 sidecar 失败: {e}"))?;
+        crate::bindings::tiangong::plugin::feedback::add_to_linker::<HostState, HasSelf<HostState>>(
+            &mut linker,
+            host_self_getter,
+        )
+        .map_err(|e| anyhow::anyhow!("接入 feedback 失败: {e}"))?;
         let linker = Arc::new(linker);
 
         Ok(Self {
@@ -161,6 +166,10 @@ pub struct WasmPlugin {
 }
 
 impl WasmPlugin {
+    pub fn set_feedback(&mut self, feedback: tiangong_core::core::plugin::PluginFeedbackTx) {
+        self.store.data_mut().set_feedback(feedback);
+    }
+
     /// 插件描述符。
     pub fn describe(&mut self) -> Result<Descriptor> {
         self.instance
@@ -227,6 +236,14 @@ impl WasmPlugin {
                 stdout: res.stdout,
                 stderr: res.stderr,
                 exit_code: res.exit_code,
+                execution: res.execution.map(|execution| OutcomeExecution {
+                    tool_name: execution.tool_name,
+                    args: execution.args,
+                    duration_ms: execution.duration_ms,
+                    ok: execution.ok,
+                    exit_code: execution.exit_code,
+                    summary: execution.summary,
+                }),
             }),
             Ok(Err(e)) => Err(plugin_err(e)),
             Err(e) => Err(anyhow::anyhow!("handle-tool 调用失败: {e}")),
@@ -406,6 +423,17 @@ pub struct Outcome {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub execution: Option<OutcomeExecution>,
+}
+
+#[derive(Debug)]
+pub struct OutcomeExecution {
+    pub tool_name: String,
+    pub args: Vec<String>,
+    pub duration_ms: u64,
+    pub ok: bool,
+    pub exit_code: i32,
+    pub summary: String,
 }
 
 /// 设置页贡献项（镜像 WIT record）。

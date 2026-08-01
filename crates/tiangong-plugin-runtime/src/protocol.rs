@@ -149,6 +149,7 @@ pub struct IpcAuth {
 pub enum IpcFrame {
     Auth(IpcAuth),
     Request(IpcRequest),
+    Progress { request_id: String, message: String },
     Response(IpcResponse),
     Error { message: String },
 }

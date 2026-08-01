@@ -174,11 +174,12 @@
 - [x] Memory WASM 改用通用 sidecar 接口，业务操作名和负载只存在于 Memory 插件与 sidecar。
 - [x] Memory WASM 与 sidecar 改为共同依赖插件私有协议，不再分别维护操作字符串与负载结构。
 - [ ] Memory sidecar 改用 Host 模型代理替换直接模型调用。
-- [ ] 修复会话和工作区上下文（显式携带 session_id、workspace_id、turn_id）。
-- [ ] 修复 Micro/Meso 反刍请求（提供完整轮次数据）。
+- [x] 修复会话和工作区上下文（显式携带 session_id、workspace_id、turn_id）。
+- [x] 修复 Micro/Meso/Meta 反刍请求，恢复原版完整轮次提取和每 10 轮整理。
+- [x] 保持原有 `~/.tiangong/memory` 数据、配置、索引和注入目录，不迁移到插件目录。
 - [x] Memory UI 改走新链路。
 - [x] 配置只保存逻辑模型键，不保存 API Key / Base URL。
-- [ ] 验证召回、写入、反刍和管理页面。
+- [x] 验证召回、写入、反刍和管理页面使用的插件协议链路。
 
 ### 阶段四完成标准
 

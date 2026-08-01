@@ -6,11 +6,13 @@ pub const ENABLE_OPERATION: &str = "enable";
 pub const DISABLE_OPERATION: &str = "disable";
 pub const STATUS_OPERATION: &str = "status";
 pub const TEST_OPERATION: &str = "test";
+pub const RECONFIGURE_OPERATION: &str = "reconfigure";
 
 pub struct Enable;
 pub struct Disable;
 pub struct Status;
 pub struct Test;
+pub struct Reconfigure;
 
 impl MemoryOperation for Enable {
     const NAME: &'static str = ENABLE_OPERATION;
@@ -34,6 +36,12 @@ impl MemoryOperation for Test {
     const NAME: &'static str = TEST_OPERATION;
     type Request = Empty;
     type Response = TestResponse;
+}
+
+impl MemoryOperation for Reconfigure {
+    const NAME: &'static str = RECONFIGURE_OPERATION;
+    type Request = Empty;
+    type Response = Ack;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
