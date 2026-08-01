@@ -56,7 +56,7 @@ export function PluginSettingsPanel() {
   }
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full min-h-0 min-w-0 overflow-hidden">
       {/* 左侧：插件列表 */}
       <div className="w-48 border-r pr-2 space-y-1">
         {contributions.map((entry) => (
@@ -75,7 +75,7 @@ export function PluginSettingsPanel() {
       </div>
 
       {/* 右侧：插件页面（iframe 容器） */}
-      <div className="flex-1 min-w-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {selected && html ? (
           <PluginIframe
             pluginId={selected.plugin_id}
@@ -187,7 +187,7 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
   }, [channel, pluginId]);
 
   return (
-    <>
+    <div className="flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden">
       {maskColor && (
         <div
           aria-hidden="true"
@@ -200,10 +200,10 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
         ref={iframeRef}
         title="plugin-settings"
         srcDoc={html}
-        className={`w-full h-full border-0 ${maskColor ? 'relative z-[91]' : ''}`}
+        className={`block min-h-0 min-w-0 w-full flex-1 border-0 ${maskColor ? 'relative z-[91]' : ''}`}
         sandbox="allow-scripts"
         onLoad={sendHostContext}
       />
-    </>
+    </div>
   );
 }

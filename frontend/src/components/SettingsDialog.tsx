@@ -104,7 +104,7 @@ export function SettingsDialog() {
             </span>
           </header>
 
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 overflow-hidden flex">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
             <aside className="w-14 sm:w-60 shrink-0 border-r bg-muted/30 flex flex-col">
               <TabsList className="h-auto w-full flex-1 flex-col items-stretch justify-start rounded-none bg-transparent p-2 pt-4">
                 <TabsTrigger value="agent" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
@@ -162,7 +162,7 @@ export function SettingsDialog() {
               </div>
             </aside>
 
-            <div className="min-w-0 flex-1 flex flex-col overflow-hidden">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
               <TabsContent value="agent" className="m-0 flex-1 min-h-0 overflow-hidden flex flex-col">
                 <AgentSettings onSaveStatusChange={setSaveStatus} />
               </TabsContent>
@@ -188,7 +188,7 @@ export function SettingsDialog() {
                 <PluginManagerSettings onContributionsChanged={setPluginContributions} />
               </TabsContent>
               {pluginContributions.map((entry) => (
-                <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex-1 min-h-0 overflow-hidden">
+                <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                   <PluginView contribution={entry} />
                 </TabsContent>
               ))}
@@ -1844,7 +1844,11 @@ function PluginView({ contribution }: { contribution: PluginContributionEntry })
     return <div className="p-4 text-sm text-muted-foreground">加载中…</div>;
   }
 
-  return <PluginIframe pluginId={contribution.plugin_id} html={html} />;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <PluginIframe pluginId={contribution.plugin_id} html={html} />
+    </div>
+  );
 }
 
 function AppUpdateSettings() {
