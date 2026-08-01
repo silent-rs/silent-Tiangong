@@ -449,21 +449,18 @@ fn extract_keywords(text: &str) -> Vec<String> {
 // ── 多类型记忆提取 ──
 
 const MULTI_TYPE_EXTRACTION_SYSTEM: &str = "\
-你是独立记忆系统的多类型记忆提取器。根据一个对话轮次的完整执行结果，判断哪些内容值得长期记忆。
+你是独立记忆系统的多类型记忆提取器。根据一个对话轮次的执行结果，判断哪些内容值得记忆并提取为结构化记忆。
 
-判断原则：
-- 普通查询、目录浏览和临时输出通常不记录。
-- 用户稳定偏好、约束和长期事实可以记录。
-- 成功完成的任务可以形成经验。
-- 失败本身不一定记录，但失败原因和有效修正方法可以记录。
-- 取消且没有有效结论的轮次通常不记录。
-- recall_memory 返回的是已有记忆上下文（is_recalled_context=true），不能直接作为新记忆复制。如果用户基于旧记忆产生了新决定，只记录新决定。
-- 已存在的相同事实不重复创建。
-- 文件和网址只有在构成成果或证据时才记录。
-- 如果本轮确实不需要记录任何内容，返回所有数组为空。
-
-输出要求：
+要求：
 - 只输出 JSON 对象，不要 Markdown，不要解释。
+- 仔细判断每条工具结果是否值得记忆：纯信息查询（天气、翻译、简单问答）和日常只读操作（ls、cat、pwd、read_file）不值得记忆。
+- 值得记忆的信号包括：文件修改、架构/实现决策、构建测试结果、关键发现、用户偏好表达。
+- 工具使用经验值得记忆：包括工具调用失败后的修正过程、成功发现的有效调用方式、skill 的正确使用方法。这些应提取为 memory_type=\"skill\" 的 Episode。
+- 用户透露的个人信息（所在城市、常用语言、偏好设置等）值得记忆为 user_preference 类型。
+- episodes: 每个值得记忆的事件提取一个 Episode。没有值得记忆的事件时返回空数组。
+- entities: 发现的稳定实体（项目、模块、文档、服务）才提取，不要把临时搜索结果当实体。
+- decisions: 有明确的架构/实现/产品取舍时才提取 Decision，必须包含 chosen 和 reasons。
+- evidences: 有文件产物或工具结果摘要时提取 Evidence。
 
 JSON 格式：
 {
@@ -500,7 +497,6 @@ JSON 格式：
       \"title\": \"...\",
       \"summary\": \"...\",
       \"file_path\": \"...\",
-      \"url\": \"...\",
       \"source_tool\": \"...\"
     }
   ]
@@ -770,55 +766,19 @@ fn parse_entity_type(raw: Option<&str>) -> crate::types::EntityType {
     }
 }
 
-/// 规则 fallback：未配置 Memory LLM 时的保守规则。
-///
-/// 规则（宁可不记录）：
-/// - 取消轮次不写入
-/// - 纯聊天不自动写入
-/// - recall_memory 等 Memory 查询结果（is_recalled_context）不写入
-/// - 只读工具（file_read/memory_recall）不自动写入
-/// - 失败轮次默认不写入，除非有明确产物
-/// - 明确产生文件、网址或完成操作时，生成基础 Episode
+/// 规则 fallback：未配置 Memory LLM 时只提取 Episode（恢复原生行为）。
 fn extract_multi_type_fallback(
     turn_result: &TurnResult,
     enhanced: &EnhancedTurnResult,
 ) -> ExtractionOutput {
-    // 取消轮次不写入。
-    if matches!(enhanced.turn_status, crate::types::TurnStatus::Cancelled) {
-        return ExtractionOutput::default();
-    }
+    let episodes = if !enhanced.memory_candidates.is_empty() {
+        extract_episode(turn_result).into_iter().collect()
+    } else {
+        Vec::new()
+    };
 
-    // 过滤候选：排除召回上下文和只读工具。
-    let writeable_candidates: Vec<_> = enhanced
+    let evidences: Vec<_> = enhanced
         .memory_candidates
-        .iter()
-        .filter(|c| {
-            !c.is_recalled_context
-                && c.tool_source.as_deref() != Some("memory_recall")
-                && c.tool_source.as_deref() != Some("file_read")
-        })
-        .collect();
-
-    // 没有可写候选时：
-    // - 纯聊天（无工具调用）不自动写入
-    // - 失败轮次无产物不写入
-    if writeable_candidates.is_empty() {
-        return ExtractionOutput::default();
-    }
-
-    // 失败轮次：只有明确成功操作才记录。
-    if matches!(enhanced.turn_status, crate::types::TurnStatus::Failed) {
-        let has_success = writeable_candidates.iter().any(|c| c.success);
-        if !has_success {
-            return ExtractionOutput::default();
-        }
-    }
-
-    // 生成基础 Episode（仅来自可写候选）。
-    let episodes = extract_episode(turn_result).into_iter().collect();
-
-    // 生成 Evidence（仅有 path/url 的可写候选）。
-    let evidences: Vec<_> = writeable_candidates
         .iter()
         .filter(|c| c.file_path.is_some() || c.url.is_some())
         .map(|c| Evidence {

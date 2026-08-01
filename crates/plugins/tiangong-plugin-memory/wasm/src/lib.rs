@@ -51,19 +51,26 @@ struct RecallToolArguments {
 }
 
 /// 全局状态缓存（WASM 单线程，RefCell 安全）。
-/// 存放 prompt_sections 拉注入所需的 session_id 和 workspace。
+/// 存放 prompt_sections 拉注入所需的 session_id 和 workspace，
+/// 以及 handle-tool 构建召回 context 所需的上一个 PluginSession 快照。
 mod state {
     use std::cell::RefCell;
 
     struct PluginState {
         session_id: Option<String>,
         workspace: Option<String>,
+        /// 上一次 on_turn_started / on_session_ready 收到的 PluginSession 快照。
+        last_session: Option<tiangong_types::PluginSession>,
+        /// 本轮是否已经召回过（每轮只召回一次）。
+        recall_attempted: bool,
     }
 
     thread_local! {
         static STATE: RefCell<PluginState> = const { RefCell::new(PluginState {
             session_id: None,
             workspace: None,
+            last_session: None,
+            recall_attempted: false,
         }) };
     }
 
@@ -75,11 +82,21 @@ mod state {
         STATE.with(|s| s.borrow_mut().workspace = ws);
     }
 
+    pub fn set_last_session(session: tiangong_types::PluginSession) {
+        STATE.with(|s| {
+            s.borrow_mut().session_id = Some(session.id.clone());
+            s.borrow_mut().last_session = Some(session);
+        });
+    }
+
+    pub fn last_session() -> Option<tiangong_types::PluginSession> {
+        STATE.with(|s| s.borrow().last_session.clone())
+    }
+
     pub fn session_id() -> Option<String> {
         STATE.with(|s| s.borrow().session_id.clone())
     }
 
-    /// workspace_id = workspace 路径的末尾目录名（与原生 memory 一致）。
     pub fn workspace_id() -> Option<String> {
         STATE.with(|s| {
             s.borrow().workspace.as_ref().and_then(|ws| {
@@ -89,6 +106,21 @@ mod state {
                     .map(String::from)
             })
         })
+    }
+
+    /// 标记本轮已召回。
+    pub fn mark_recall_attempted() {
+        STATE.with(|s| s.borrow_mut().recall_attempted = true);
+    }
+
+    /// 重置本轮召回标志（在 on_turn_started 时调用）。
+    pub fn reset_recall_attempted() {
+        STATE.with(|s| s.borrow_mut().recall_attempted = false);
+    }
+
+    /// 本轮是否已经召回过。
+    pub fn recall_attempted() -> bool {
+        STATE.with(|s| s.borrow().recall_attempted)
     }
 }
 
@@ -176,16 +208,57 @@ impl Guest for Component {
             )));
         }
 
+        // 每轮只召回一次（与原生版本一致）。
+        if state::recall_attempted() {
+            return Ok(tool_result_ok("本轮已执行过记忆召回。".to_string()));
+        }
+        state::mark_recall_attempted();
+
         let arguments =
             serde_json::from_str::<RecallToolArguments>(&call.arguments).map_err(|error| {
                 PluginError::Message(format!("解析 recall_memory 参数失败: {error}"))
             })?;
+
+        // query 为空时回退到最近一条用户消息（与原生版本一致）。
+        let query = if arguments.query.is_empty() {
+            state::last_session()
+                .as_ref()
+                .and_then(|s| {
+                    s.messages
+                        .iter()
+                        .rev()
+                        .find(|m| matches!(m.role, tiangong_types::MessageRole::User))
+                        .map(extract_message_text)
+                })
+                .unwrap_or_default()
+        } else {
+            arguments.query
+        };
+
+        // 从缓存 session 构建召回上下文（最近 30 条消息，与原生版本一致）。
+        let context: Vec<String> = state::last_session()
+            .map(|s| {
+                s.messages
+                    .iter()
+                    .rev()
+                    .take(30)
+                    .rev()
+                    .filter(|m| !matches!(m.role, tiangong_types::MessageRole::System))
+                    .map(|m| {
+                        let role = format!("{:?}", m.role).to_lowercase();
+                        let text = extract_message_text(m);
+                        format!("{role}: {text}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let request = RecallContextRequest {
             request: RecallQuery {
-                query: arguments.query,
+                query,
                 reason: arguments.reason,
                 expected: arguments.expected,
-                context: Vec::new(),
+                context,
                 limit: arguments.limit.unwrap_or(5),
             },
         };
@@ -193,10 +266,20 @@ impl Guest for Component {
         match sidecar_client::invoke::<RecallContext>(&request) {
             Ok(result) => Ok(tool_result_ok(result.response.content)),
             Err(sidecar_client::ClientError::NotConfigured)
-            | Err(sidecar_client::ClientError::Unavailable(_)) => Ok(tool_result_ok(
-                "记忆系统未启用（memory sidecar 未连接）。".to_string(),
-            )),
-            Err(error) => Ok(tool_result_ok(format!("记忆查询失败：{error}"))),
+            | Err(sidecar_client::ClientError::Unavailable(_)) => Ok(ToolResult {
+                ok: false,
+                summary: "记忆系统未启用（memory sidecar 未连接）。".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            }),
+            Err(error) => Ok(ToolResult {
+                ok: false,
+                summary: format!("记忆查询失败：{error}"),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 1,
+            }),
         }
     }
 
@@ -221,15 +304,19 @@ impl Guest for Component {
     // session 的所有修改权始终在 Core，WASM/ sidecar 绝不回写。
 
     fn on_session_ready(session_json: String) -> Result<(), PluginError> {
-        // 会话就绪：从 PluginSession 提取 id 缓存，供 prompt_sections 拉注入用。
+        // 会话就绪：缓存 PluginSession 供 handle-tool 构建 context 和 prompt_sections 拉注入。
         if let Ok(session) = serde_json::from_str::<tiangong_types::PluginSession>(&session_json) {
-            state::set_session_id(Some(session.id));
+            state::set_last_session(session);
         }
         Ok(())
     }
 
-    fn on_turn_started(_session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
-        // 轮次开始：当前无需通知 sidecar。
+    fn on_turn_started(session_json: String, _turn_start_idx: u32) -> Result<(), PluginError> {
+        // 轮次开始：更新 session 缓存 + 重置本轮召回标志。
+        if let Ok(session) = serde_json::from_str::<tiangong_types::PluginSession>(&session_json) {
+            state::set_last_session(session);
+        }
+        state::reset_recall_attempted();
         Ok(())
     }
 
