@@ -113,7 +113,6 @@ pub struct EmbeddedServerDependencies {
     pub config: tiangong_core::core_config::CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
     pub scheduler_context: Arc<dyn SchedulerContext>,
-    pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     pub event_bus: Arc<EventBus>,
 }
 
@@ -130,7 +129,6 @@ pub fn run_embedded(
         config,
         core_backend,
         scheduler_context,
-        mcp_plugin,
         event_bus,
     } = dependencies;
     let app = Arc::new(ServerAppContext::with_backend(
@@ -139,7 +137,6 @@ pub fn run_embedded(
         event_bus.clone(),
         core_backend,
         scheduler_context,
-        mcp_plugin,
     ));
 
     tracing::info!("构建嵌入式 Server 路由...");

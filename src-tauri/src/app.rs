@@ -50,7 +50,6 @@ pub struct TiangongApp {
     /// MCP 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具（动态 MCP 工具
     /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
     /// set_enabled/probe/health）。
-    pub mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
     /// bot 移动端控制配置存储（读写 `~/.tiangong/bots/bots.json`）。
     pub bot_store: std::sync::Arc<tiangong_bots::BotStore>,
     /// bot 运行时——制品下载、进程监督与启停。
@@ -180,9 +179,6 @@ impl TiangongApp {
         let skill_plugin = std::sync::Arc::new(
             tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
         );
-        let mcp_plugin = std::sync::Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-            storage_root.clone(),
-        ));
         // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
         // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
         let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
@@ -204,7 +200,6 @@ impl TiangongApp {
         let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
             skill_plugin: skill_plugin.clone(),
-            mcp_plugin: mcp_plugin.clone(),
             config: config.clone(),
             storage_root: storage_root.clone(),
             index_manager: index_manager.clone(),
@@ -223,7 +218,6 @@ impl TiangongApp {
             scheduler_context,
             scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
             skill_plugin,
-            mcp_plugin,
             bot_store,
             bot_runtime,
             desktop_lock,
@@ -972,7 +966,6 @@ impl TiangongApp {
                 config: self.config.clone(),
                 core_backend,
                 scheduler_context: self.create_scheduler_context(),
-                mcp_plugin: self.mcp_plugin.clone(),
                 event_bus,
             },
         )

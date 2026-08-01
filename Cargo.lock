@@ -10470,7 +10470,6 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
@@ -10547,7 +10546,6 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
@@ -10659,7 +10657,6 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-plugin-mcp",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
@@ -10875,23 +10872,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tantivy",
- "tempfile",
- "tiangong-core",
- "tiangong-toolkit",
- "tiangong-types",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tiangong-plugin-mcp"
-version = "0.13.4"
-dependencies = [
- "anyhow",
- "http",
- "rmcp",
- "serde",
- "serde_json",
  "tempfile",
  "tiangong-core",
  "tiangong-toolkit",
@@ -11148,7 +11128,6 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
