@@ -1247,7 +1247,7 @@ fn resolve_sidecar(
 }
 
 fn sidecar_connection(
-    _storage_root: &Path,
+    storage_root: &Path,
     installed: &InstalledPlugin,
     refresh: bool,
 ) -> Result<Arc<ProcessSidecarConnection>> {
@@ -1282,6 +1282,7 @@ fn sidecar_connection(
         endpoint,
         log,
         data_dir,
+        storage_root,
     )
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
