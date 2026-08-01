@@ -50,6 +50,15 @@
     page: 1,
     graphLimit: GRAPH_INITIAL_LIMIT,
     graphScale: 1,
+    graphPanX: 0,
+    graphPanY: 0,
+    graphDragging: false,
+    graphDidDrag: false,
+    graphPointer: null,
+    hoveredNodeId: null,
+    relationTargetIndex: -1,
+    relationTargetMatches: [],
+    configLoaded: false,
     nodes: [],
     relations: [],
     selectedIds: new Set(),
@@ -71,6 +80,16 @@
 
   let requestSequence = 0;
   let searchTimer = null;
+  let configSaveTimer = null;
+  let configRevision = 0;
+  let configPending = false;
+  let configSaveQueue = Promise.resolve();
+  let hostChannel = null;
+  let hostReadyResolve;
+  let lastModalFocus = null;
+  const hostReady = new Promise((resolve) => {
+    hostReadyResolve = resolve;
+  });
 
   const byId = (id) => document.getElementById(id);
 
@@ -103,17 +122,47 @@
     return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
   }
 
-  function callHost(method, payload = '') {
+  function applyHostContext(context) {
+    if (hostChannel && context.channel !== hostChannel) return;
+    hostChannel = context.channel;
+    const root = document.documentElement;
+    root.dataset.theme = context.theme === 'dark' ? 'dark' : 'light';
+    Object.entries(context.tokens || {}).forEach(([name, value]) => {
+      if (typeof value === 'string' && value) {
+        root.style.setProperty(`--host-${name}`, value);
+      }
+    });
+    if (typeof context.fontFamily === 'string' && context.fontFamily) {
+      root.style.setProperty('--host-font-family', context.fontFamily);
+    }
+    hostReadyResolve?.();
+    hostReadyResolve = null;
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent || !event.data) return;
+    if (event.data.type === 'tiangong_host_context' && typeof event.data.channel === 'string') {
+      applyHostContext(event.data);
+    }
+  });
+  window.parent.postMessage({ type: 'plugin_host_ready' }, '*');
+
+  async function callHost(method, payload = '') {
+    if (!hostChannel) await hostReady;
     return new Promise((resolve, reject) => {
       const id = `memory-${Date.now()}-${++requestSequence}`;
+      const channel = hostChannel;
       const timeout = window.setTimeout(() => {
         window.removeEventListener('message', handler);
         reject(new Error('插件请求超时'));
       }, HOST_TIMEOUT_MS);
       const handler = (event) => {
-        if (event.source !== window.parent || !event.data || event.data.id !== id) {
-          return;
-        }
+        if (
+          event.source !== window.parent
+          || !event.data
+          || event.data.id !== id
+          || event.data.channel !== channel
+        ) return;
         window.clearTimeout(timeout);
         window.removeEventListener('message', handler);
         if (event.data.error) {
@@ -123,7 +172,7 @@
         }
       };
       window.addEventListener('message', handler);
-      window.parent.postMessage({ type: 'plugin_call', id, method, payload }, '*');
+      window.parent.postMessage({ type: 'plugin_call', channel, id, method, payload }, '*');
     });
   }
 
@@ -179,10 +228,37 @@
         vector_mode: bootstrap.config?.vector_mode || 'auto',
       };
       state.models = Array.isArray(bootstrap.models) ? bootstrap.models : [];
+      state.configLoaded = true;
       renderConfig();
+      byId('config-status').textContent = '';
+      setConfigControlsDisabled(false);
     } catch (error) {
       setRuntimeStatus('配置读取失败', true);
       showToast(`配置读取失败：${errorText(error)}`, 'error');
+    }
+  }
+
+  async function loadRelationsForNodes(nodes) {
+    if (nodes.length === 0) return [];
+    try {
+      const response = await memoryRequest({
+        method: 'list_relations_batch',
+        node_ids: nodes.map((node) => node.id),
+      });
+      return Array.isArray(response.items) ? response.items : [];
+    } catch {
+      const responses = await Promise.all(nodes.map(async (node) => {
+        try {
+          return await memoryRequest({ method: 'list_relations', node_id: node.id });
+        } catch {
+          return { items: [] };
+        }
+      }));
+      const relations = new Map();
+      responses.flatMap((response) => response.items || []).forEach((relation) => {
+        relations.set(relation.id, relation);
+      });
+      return [...relations.values()];
     }
   }
 
@@ -205,7 +281,7 @@
         }),
       ]);
       if (loadVersion !== state.loadVersion) {
-        return;
+        return null;
       }
 
       state.nodes = Array.isArray(nodesResponse.items) ? nodesResponse.items : [];
@@ -217,28 +293,22 @@
       );
 
       if (state.nodes.length > 0) {
-        const relationResponse = await memoryRequest({
-          method: 'list_relations_batch',
-          node_ids: state.nodes.map((node) => node.id),
-        });
-        if (loadVersion !== state.loadVersion) {
-          return;
-        }
-        state.relations = Array.isArray(relationResponse.items) ? relationResponse.items : [];
+        state.relations = await loadRelationsForNodes(state.nodes);
+        if (loadVersion !== state.loadVersion) return null;
       } else {
         state.relations = [];
       }
 
       setRuntimeStatus('已连接');
       renderData();
+      return true;
     } catch (error) {
       if (loadVersion === state.loadVersion) {
         setRuntimeStatus('连接失败', true);
         showToast(`无法加载记忆：${errorText(error)}`, 'error');
-        state.nodes = [];
-        state.relations = [];
-        renderData();
       }
+      if (loadVersion !== state.loadVersion) return null;
+      return false;
     } finally {
       if (loadVersion === state.loadVersion) {
         setPreviewLoading(false);
@@ -358,10 +428,15 @@
     graphContent.replaceChildren();
     graphContent.setAttribute(
       'transform',
-      `translate(500 280) scale(${state.graphScale}) translate(-500 -280)`,
+      `translate(${state.graphPanX} ${state.graphPanY}) translate(500 280) scale(${state.graphScale}) translate(-500 -280)`,
     );
 
     byId('graph-title').textContent = selected?.title || 'Memory 图谱';
+    byId('graph-edit-selected').classList.toggle('hidden', !selected);
+    byId('graph-status-selected').classList.toggle('hidden', !selected);
+    if (selected) {
+      byId('graph-status-selected').textContent = selected.status === 'active' ? '归档' : '恢复';
+    }
     byId('graph-meta').textContent = state.totalCount > state.nodes.length
       ? `已加载 ${state.nodes.length} / 共 ${state.totalCount} 个节点 · ${relations.length} 条连接`
       : `${state.nodes.length} 个节点 · ${relations.length} 条连接`;
@@ -375,6 +450,21 @@
     }
 
     const { positions, degrees } = graphLayout(state.nodes, relations);
+    const neighbors = new Set();
+    if (state.selectedNodeId) {
+      neighbors.add(state.selectedNodeId);
+      relations.forEach((relation) => {
+        if (relation.from_node_id === state.selectedNodeId) neighbors.add(relation.to_node_id);
+        if (relation.to_node_id === state.selectedNodeId) neighbors.add(relation.from_node_id);
+      });
+    }
+    const relationColors = {
+      contradicts: 'var(--danger)',
+      supersedes: 'var(--status-warning-color)',
+      depends_on: 'var(--status-info-color)',
+      caused_by: 'var(--status-error-color)',
+      supports: 'var(--status-success-color)',
+    };
     const labelLimit = state.nodes.length <= 18 ? state.nodes.length : state.nodes.length <= 50 ? 5 : 1;
     const labelIds = new Set(
       [...state.nodes]
@@ -392,15 +482,20 @@
       if (!from || !to) {
         return;
       }
-      const isStrong = ['contradicts', 'supersedes', 'depends_on', 'caused_by'].includes(relation.relation_kind);
+      const connected = !state.selectedNodeId
+        || relation.from_node_id === state.selectedNodeId
+        || relation.to_node_id === state.selectedNodeId;
       const line = svgElement('line', {
         x1: from.x,
         y1: from.y,
         x2: to.x,
         y2: to.y,
-        class: `graph-edge ${isStrong ? 'strong' : ''}`,
-        'stroke-width': Math.max(1, Math.min(3, Number(relation.weight || 1))),
-        opacity: state.nodes.length > 100 ? 0.38 : 0.58,
+        class: 'graph-edge',
+        stroke: relationColors[relation.relation_kind] || 'var(--border-strong)',
+        'stroke-width': connected && state.selectedNodeId
+          ? Math.max(2, Math.min(4, Number(relation.weight || 1) + 1))
+          : Math.max(1, Math.min(3, Number(relation.weight || 1))),
+        opacity: state.selectedNodeId ? (connected ? 0.9 : 0.12) : (state.nodes.length > 100 ? 0.38 : 0.58),
       });
       if (state.nodes.length <= 100) {
         line.setAttribute('marker-end', 'url(#arrow)');
@@ -419,7 +514,7 @@
       const degree = degrees.get(node.id) || 0;
       const radius = Math.min(28, 11 + degree * 1.4 + (selectedNode ? 4 : 0));
       const group = svgElement('g', {
-        class: `graph-node ${selectedNode ? 'selected' : ''}`,
+        class: `graph-node ${selectedNode ? 'selected' : ''} ${state.selectedNodeId && !neighbors.has(node.id) ? 'dimmed' : ''}`,
         transform: `translate(${position.x} ${position.y})`,
         'data-node-id': node.id,
         tabindex: '0',
@@ -432,6 +527,7 @@
       group.appendChild(svgElement('circle', {
         r: radius,
         fill: memoryColors[node.memory_type] || memoryColors.factual,
+        opacity: Math.max(0.45, Math.min(1, Number(node.importance || 0.5))),
       }));
       if (labelIds.has(node.id)) {
         const label = svgElement('text', { x: 0, y: radius + 17 });
@@ -507,7 +603,7 @@
     byId('memory-importance').value = String(state.draft.importance ?? 0.6);
     byId('importance-output').textContent = Number(state.draft.importance ?? 0.6).toFixed(1);
     const enabled = Boolean(state.draft.id);
-    byId('relation-target').disabled = !enabled;
+    byId('relation-target-search').disabled = !enabled;
     byId('relation-kind').disabled = !enabled;
     byId('relation-note').disabled = !enabled;
     byId('save-relation').disabled = !enabled;
@@ -633,18 +729,43 @@
     }
   }
 
-  function renderRelationTargets() {
-    const select = byId('relation-target');
-    const current = select.value;
-    const options = state.nodes
+  function relationSearchText(node) {
+    return [node.title, node.summary, node.memory_type, ...(node.keywords || [])]
+      .join(' ')
+      .toLocaleLowerCase('zh-CN');
+  }
+
+  function renderRelationTargets(open = false) {
+    const search = byId('relation-target-search');
+    const options = byId('relation-target-options');
+    const query = search.value.trim().toLocaleLowerCase('zh-CN');
+    state.relationTargetMatches = state.nodes
       .filter((node) => node.id !== state.draft.id)
+      .filter((node) => !query || relationSearchText(node).includes(query))
       .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'))
-      .map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(truncate(node.title, 48))}</option>`)
-      .join('');
-    select.innerHTML = `<option value="">选择关联目标</option>${options}`;
-    if (state.nodes.some((node) => node.id === current && node.id !== state.draft.id)) {
-      select.value = current;
-    }
+      .slice(0, 30);
+    state.relationTargetIndex = Math.min(
+      Math.max(state.relationTargetIndex, 0),
+      Math.max(0, state.relationTargetMatches.length - 1),
+    );
+    options.innerHTML = state.relationTargetMatches.length
+      ? state.relationTargetMatches.map((node, index) => `
+          <button type="button" role="option" aria-selected="${String(node.id === byId('relation-target').value)}" data-node-id="${escapeHtml(node.id)}" class="combobox-option ${index === state.relationTargetIndex ? 'active' : ''}">
+            <span>${escapeHtml(truncate(node.title, 56))}</span>
+            <small>${escapeHtml(memoryTypeLabel(node.memory_type))}</small>
+          </button>`).join('')
+      : '<div class="combobox-empty">没有匹配记忆</div>';
+    const visible = open && !search.disabled;
+    options.classList.toggle('hidden', !visible);
+    search.setAttribute('aria-expanded', String(visible));
+  }
+
+  function selectRelationTarget(nodeId) {
+    const node = state.nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    byId('relation-target').value = node.id;
+    byId('relation-target-search').value = node.title;
+    renderRelationTargets(false);
   }
 
   function renderRelations() {
@@ -696,6 +817,7 @@
         },
       });
       byId('relation-target').value = '';
+      byId('relation-target-search').value = '';
       byId('relation-note').value = '';
       await refreshRelations();
       showToast('关联已保存');
@@ -711,12 +833,12 @@
     if (!state.draft.id) {
       return;
     }
-    const [single, batch] = await Promise.all([
+    const [single, relations] = await Promise.all([
       memoryRequest({ method: 'list_relations', node_id: state.draft.id }),
-      memoryRequest({ method: 'list_relations_batch', node_ids: state.nodes.map((node) => node.id) }),
+      loadRelationsForNodes(state.nodes),
     ]);
     state.draftRelations = Array.isArray(single.items) ? single.items : [];
-    state.relations = Array.isArray(batch.items) ? batch.items : [];
+    state.relations = relations;
     renderRelations();
     renderGraph();
     renderStats();
@@ -732,16 +854,18 @@
     }
   }
 
-  function eligibleModels(capability) {
+  function eligibleModels(capabilities) {
+    const accepted = Array.isArray(capabilities) ? capabilities : [capabilities];
     return state.models.filter((model) => {
-      const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
-      return capabilities.length === 0 || capabilities.includes(capability);
+      const modelCapabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+      return modelCapabilities.length === 0
+        || accepted.some((capability) => modelCapabilities.includes(capability));
     });
   }
 
-  function fillModelSelect(id, capability, selectedKey) {
+  function fillModelSelect(id, capabilities, selectedKey) {
     const select = byId(id);
-    const candidates = eligibleModels(capability);
+    const candidates = eligibleModels(capabilities);
     const known = candidates.some((model) => model.key === selectedKey);
     const selectedMissing = selectedKey && !known
       ? `<option value="${escapeHtml(selectedKey)}">${escapeHtml(selectedKey)}（当前不可用）</option>`
@@ -753,7 +877,7 @@
   }
 
   function renderConfig() {
-    fillModelSelect('config-model', 'chat', state.config.model_key);
+    fillModelSelect('config-model', ['chat', 'lite'], state.config.model_key);
     fillModelSelect('config-embedding', 'embedding', state.config.embedding_key);
     fillModelSelect('config-rerank', 'rerank', state.config.rerank_key);
     byId('config-vector-mode').value = state.config.vector_mode || 'auto';
@@ -776,51 +900,139 @@
     }
   }
 
-  async function saveConfig(event) {
-    event.preventDefault();
-    const embeddingKey = byId('config-embedding').value || null;
-    const embedding = state.models.find((model) => model.key === embeddingKey);
-    if (embeddingKey && Number(embedding?.dimension || 0) <= 0) {
+  function setConfigControlsDisabled(disabled) {
+    ['config-model', 'config-embedding', 'config-rerank', 'config-vector-mode', 'save-config']
+      .forEach((id) => { byId(id).disabled = disabled; });
+  }
+
+  function currentConfig() {
+    return {
+      model_key: byId('config-model').value || null,
+      embedding_key: byId('config-embedding').value || null,
+      rerank_key: byId('config-rerank').value || null,
+      vector_mode: byId('config-vector-mode').value || 'auto',
+    };
+  }
+
+  function scheduleConfigSave() {
+    if (!state.configLoaded) return;
+    configRevision += 1;
+    configPending = true;
+    window.clearTimeout(configSaveTimer);
+    byId('config-status').textContent = '等待保存';
+    configSaveTimer = window.setTimeout(() => saveConfig(null, true), 500);
+  }
+
+  function flushConfigSave(durable = false) {
+    if (!configPending) return;
+    window.clearTimeout(configSaveTimer);
+    configSaveTimer = null;
+    const config = currentConfig();
+    const embedding = state.models.find((model) => model.key === config.embedding_key);
+    if (
+      durable
+      && hostChannel
+      && (!config.embedding_key || Number(embedding?.dimension || 0) > 0)
+    ) {
+      const id = `memory-flush-${Date.now()}-${++requestSequence}`;
+      window.parent.postMessage({
+        type: 'plugin_call',
+        channel: hostChannel,
+        id,
+        method: 'save_config',
+        payload: JSON.stringify(config),
+      }, '*');
+      state.config = config;
+      configRevision += 1;
+      configPending = false;
+      return;
+    }
+    void saveConfig(null, true);
+  }
+
+  async function saveConfig(event, automatic = false) {
+    event?.preventDefault();
+    window.clearTimeout(configSaveTimer);
+    configSaveTimer = null;
+    const config = currentConfig();
+    const embedding = state.models.find((model) => model.key === config.embedding_key);
+    if (config.embedding_key && Number(embedding?.dimension || 0) <= 0) {
+      const button = byId('save-config');
+      button.disabled = false;
+      button.textContent = '保存配置';
+      byId('config-status').textContent = '配置无效';
+      byId('config-status').classList.add('error');
       showToast('嵌入模型缺少向量维度', 'error');
       return;
     }
 
-    const config = {
-      model_key: byId('config-model').value || null,
-      embedding_key: embeddingKey,
-      rerank_key: byId('config-rerank').value || null,
-      vector_mode: byId('config-vector-mode').value || 'auto',
-    };
+    const revision = configRevision;
     const button = byId('save-config');
     const status = byId('config-status');
     button.disabled = true;
     button.textContent = '保存中';
     status.textContent = '正在应用';
     status.classList.remove('error');
-    try {
+
+    configSaveQueue = configSaveQueue.catch(() => {}).then(async () => {
+      if (revision !== configRevision) return;
       await callHost('save_config', JSON.stringify(config));
       state.config = config;
-      status.textContent = '已保存并生效';
+      if (revision === configRevision) configPending = false;
       setRuntimeStatus('已连接');
-      showToast('配置已保存');
-      await loadBootstrap();
+      if (!automatic) showToast('配置已保存');
+    });
+
+    try {
+      await configSaveQueue;
+      if (revision === configRevision) {
+        status.textContent = '已保存并生效';
+        status.classList.remove('error');
+      } else {
+        status.textContent = '等待保存';
+      }
     } catch (error) {
-      status.textContent = '保存失败';
+      status.textContent = '保存失败，正在重试';
       status.classList.add('error');
+      if (revision === configRevision) {
+        configSaveTimer = window.setTimeout(() => saveConfig(null, true), 1500);
+      }
       showToast(`保存失败：${errorText(error)}`, 'error');
     } finally {
-      button.disabled = false;
-      button.textContent = '保存配置';
+      if (revision === configRevision) {
+        button.disabled = false;
+        button.textContent = '保存配置';
+      }
     }
   }
 
   function openRecall() {
+    lastModalFocus = document.activeElement;
     byId('recall-modal').classList.remove('hidden');
     byId('recall-query').focus();
   }
 
   function closeRecall() {
     byId('recall-modal').classList.add('hidden');
+    lastModalFocus?.focus?.();
+    lastModalFocus = null;
+  }
+
+  function trapModalFocus(event) {
+    if (event.key !== 'Tab' || byId('recall-modal').classList.contains('hidden')) return;
+    const focusable = [...byId('recall-modal').querySelectorAll(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    )];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   async function runRecall(event) {
@@ -868,6 +1080,7 @@
   }
 
   function switchTab(tab) {
+    if (state.activeTab === 'config' && tab !== 'config') flushConfigSave();
     state.activeTab = tab;
     document.querySelectorAll('.tab').forEach((button) => {
       button.classList.toggle('active', button.dataset.tab === tab);
@@ -920,11 +1133,16 @@
       }
     });
     byId('status-filter').addEventListener('change', async (event) => {
+      const previousStatus = state.status;
       state.status = event.target.value;
       state.page = 1;
       state.graphLimit = GRAPH_INITIAL_LIMIT;
       state.selectedIds.clear();
-      await loadData();
+      const result = await loadData();
+      if (result === false) {
+        state.status = previousStatus;
+        event.target.value = previousStatus;
+      }
     });
     byId('refresh-button').addEventListener('click', loadData);
 
@@ -942,9 +1160,52 @@
     });
     byId('graph-fit').addEventListener('click', () => {
       state.graphScale = 1;
+      state.graphPanX = 0;
+      state.graphPanY = 0;
       renderGraph();
     });
-    byId('memory-graph').addEventListener('click', (event) => {
+    byId('graph-edit-selected').addEventListener('click', () => {
+      const selected = state.nodes.find((node) => node.id === state.selectedNodeId);
+      if (selected) editNode(selected);
+    });
+    byId('graph-status-selected').addEventListener('click', () => {
+      const selected = state.nodes.find((node) => node.id === state.selectedNodeId);
+      if (selected) setNodeStatus(selected, selected.status === 'active' ? 'archived' : 'active');
+    });
+    const graph = byId('memory-graph');
+    graph.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      state.graphScale = Math.max(0.5, Math.min(2.8, state.graphScale * (event.deltaY > 0 ? 0.9 : 1.1)));
+      renderGraph();
+    }, { passive: false });
+    graph.addEventListener('pointerdown', (event) => {
+      if (event.target.closest?.('.graph-node')) return;
+      state.graphDragging = true;
+      state.graphDidDrag = false;
+      state.graphPointer = { x: event.clientX, y: event.clientY };
+      graph.setPointerCapture(event.pointerId);
+      graph.classList.add('dragging');
+    });
+    graph.addEventListener('pointermove', (event) => {
+      if (!state.graphDragging || !state.graphPointer) return;
+      state.graphDidDrag = true;
+      state.graphPanX += event.clientX - state.graphPointer.x;
+      state.graphPanY += event.clientY - state.graphPointer.y;
+      state.graphPointer = { x: event.clientX, y: event.clientY };
+      renderGraph();
+    });
+    const stopGraphDrag = () => {
+      state.graphDragging = false;
+      state.graphPointer = null;
+      graph.classList.remove('dragging');
+    };
+    graph.addEventListener('pointerup', stopGraphDrag);
+    graph.addEventListener('pointercancel', stopGraphDrag);
+    graph.addEventListener('click', (event) => {
+      if (state.graphDidDrag) {
+        state.graphDidDrag = false;
+        return;
+      }
       const group = event.target.closest?.('.graph-node');
       const node = group ? state.nodes.find((item) => item.id === group.dataset.nodeId) : null;
       if (node) {
@@ -1018,6 +1279,40 @@
       byId('importance-output').textContent = Number(event.target.value).toFixed(1);
     });
     byId('relation-form').addEventListener('submit', saveRelation);
+    const relationSearch = byId('relation-target-search');
+    relationSearch.addEventListener('focus', () => {
+      state.relationTargetIndex = 0;
+      renderRelationTargets(true);
+    });
+    relationSearch.addEventListener('input', () => {
+      byId('relation-target').value = '';
+      state.relationTargetIndex = 0;
+      renderRelationTargets(true);
+    });
+    relationSearch.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        state.relationTargetIndex = Math.max(0, Math.min(
+          state.relationTargetMatches.length - 1,
+          state.relationTargetIndex + delta,
+        ));
+        renderRelationTargets(true);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const node = state.relationTargetMatches[state.relationTargetIndex];
+        if (node) selectRelationTarget(node.id);
+      } else if (event.key === 'Escape') {
+        renderRelationTargets(false);
+      }
+    });
+    byId('relation-target-options').addEventListener('click', (event) => {
+      const option = event.target.closest('.combobox-option');
+      if (option) selectRelationTarget(option.dataset.nodeId);
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (!event.target.closest('#relation-target-combobox')) renderRelationTargets(false);
+    });
     byId('relation-list').addEventListener('click', (event) => {
       const button = event.target.closest('.relation-delete');
       const item = button?.closest('.relation-item');
@@ -1026,8 +1321,13 @@
       }
     });
 
-    byId('config-form').addEventListener('submit', saveConfig);
-    byId('config-embedding').addEventListener('change', renderEmbeddingMeta);
+    byId('config-form').addEventListener('submit', (event) => saveConfig(event, false));
+    ['config-model', 'config-embedding', 'config-rerank', 'config-vector-mode'].forEach((id) => {
+      byId(id).addEventListener('change', () => {
+        if (id === 'config-embedding') renderEmbeddingMeta();
+        scheduleConfigSave();
+      });
+    });
 
     byId('recall-open').addEventListener('click', openRecall);
     byId('recall-close').addEventListener('click', closeRecall);
@@ -1037,7 +1337,12 @@
         closeRecall();
       }
     });
+    window.addEventListener('pagehide', () => flushConfigSave(true));
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushConfigSave(true);
+    });
     window.addEventListener('keydown', (event) => {
+      trapModalFocus(event);
       if (event.key === 'Escape' && !byId('recall-modal').classList.contains('hidden')) {
         closeRecall();
       }
@@ -1055,6 +1360,8 @@
 
   async function init() {
     populateFixedOptions();
+    byId('config-status').textContent = '正在加载配置';
+    setConfigControlsDisabled(true);
     bindEvents();
     updateEditor();
     byId('recall-results').innerHTML = '<div class="inline-empty">输入问题后开始测试</div>';

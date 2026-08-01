@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, HardDrive, Clock, Bot as BotIcon, Package } from 'lucide-react';
+import { Settings, Eye, EyeOff, Server, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, HardDrive, Clock, Bot as BotIcon, Package, Brain } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -67,6 +67,11 @@ function formatKeyValue(record?: Record<string, string>): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function contributionIcon(name: string) {
+  const Icon = name === 'brain' ? Brain : Puzzle;
+  return <Icon className="w-4 h-4 sm:mr-2" />;
 }
 
 export function SettingsDialog() {
@@ -180,7 +185,7 @@ export function SettingsDialog() {
                 </TabsTrigger>
                 {pluginContributions.map((entry) => (
                   <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
-                    <Puzzle className="w-4 h-4 sm:mr-2" />
+                    {contributionIcon(entry.icon)}
                     <span className="sr-only sm:not-sr-only">{entry.title}</span>
                   </TabsTrigger>
                 ))}

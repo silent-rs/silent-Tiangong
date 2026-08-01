@@ -10,7 +10,6 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="title-block">
-        <div class="brand-mark" aria-hidden="true">M</div>
         <div>
           <h1>记忆</h1>
           <div id="runtime-status" class="runtime-status">正在连接</div>
@@ -63,7 +62,9 @@
             <button class="segment active" type="button" data-mode="graph">图谱</button>
             <button class="segment" type="button" data-mode="list">列表</button>
           </div>
-          <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">↻</button>
+          <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8"/><path d="M20 4v4h-4"/></svg>
+          </button>
           <button id="recall-open" class="secondary-button" type="button">召回测试</button>
         </div>
 
@@ -76,10 +77,18 @@
                   <span id="graph-meta">0 个节点 · 0 条连接</span>
                 </div>
                 <div class="graph-actions">
+                  <button id="graph-edit-selected" class="small-button hidden" type="button">编辑</button>
+                  <button id="graph-status-selected" class="small-button hidden" type="button">归档</button>
                   <button id="graph-load-more" class="small-button hidden" type="button">加载更多</button>
-                  <button id="graph-zoom-out" class="icon-button small" type="button" title="缩小" aria-label="缩小">−</button>
-                  <button id="graph-fit" class="icon-button small" type="button" title="适应画布" aria-label="适应画布">◎</button>
-                  <button id="graph-zoom-in" class="icon-button small" type="button" title="放大" aria-label="放大">+</button>
+                  <button id="graph-zoom-out" class="icon-button small" type="button" title="缩小" aria-label="缩小">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 12h14"/></svg>
+                  </button>
+                  <button id="graph-fit" class="icon-button small" type="button" title="适应画布" aria-label="适应画布">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+                  </button>
+                  <button id="graph-zoom-in" class="icon-button small" type="button" title="放大" aria-label="放大">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                  </button>
                 </div>
               </div>
               <div class="graph-stage">
@@ -107,8 +116,12 @@
               <div class="pagination">
                 <span id="page-meta">第 1 / 1 页</span>
                 <div>
-                  <button id="page-prev" class="icon-button small" type="button" title="上一页" aria-label="上一页">‹</button>
-                  <button id="page-next" class="icon-button small" type="button" title="下一页" aria-label="下一页">›</button>
+                  <button id="page-prev" class="icon-button small" type="button" title="上一页" aria-label="上一页">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+                  </button>
+                  <button id="page-next" class="icon-button small" type="button" title="下一页" aria-label="下一页">
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                  </button>
                 </div>
               </div>
             </div>
@@ -158,9 +171,11 @@
               <form id="relation-form" class="form-stack relation-form">
                 <label>
                   <span>目标记忆</span>
-                  <select id="relation-target" disabled>
-                    <option value="">选择关联目标</option>
-                  </select>
+                  <div id="relation-target-combobox" class="combobox">
+                    <input id="relation-target-search" type="text" placeholder="搜索关联目标" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="relation-target-options" disabled>
+                    <input id="relation-target" type="hidden">
+                    <div id="relation-target-options" class="combobox-options hidden" role="listbox"></div>
+                  </div>
                 </label>
                 <label>
                   <span>关系</span>
@@ -225,7 +240,9 @@
     <div class="modal-panel">
       <div class="modal-heading">
         <h2 id="recall-title">召回测试</h2>
-        <button id="recall-close" class="icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        <button id="recall-close" class="icon-button" type="button" title="关闭" aria-label="关闭">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
       </div>
       <form id="recall-form" class="recall-form">
         <input id="recall-query" type="search" placeholder="输入要测试的回忆问题" autocomplete="off">

@@ -1,5 +1,6 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { api, type PluginContributionEntry } from '../api/tauri';
+import { useResolvedTheme } from '../hooks/useTheme';
 
 /**
  * 插件设置面板：通用 iframe 容器。
@@ -89,6 +90,43 @@ export function PluginSettingsPanel() {
   );
 }
 
+const HOST_TOKEN_NAMES = [
+  'background',
+  'foreground',
+  'card',
+  'card-foreground',
+  'muted',
+  'muted-foreground',
+  'accent',
+  'accent-foreground',
+  'primary',
+  'primary-foreground',
+  'destructive',
+  'border',
+  'input',
+  'ring',
+  'status-success',
+  'status-warning',
+  'status-error',
+  'status-info',
+  'radius',
+] as const;
+
+function hostContext(theme: 'light' | 'dark', channel: string) {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    type: 'tiangong_host_context',
+    channel,
+    theme,
+    tokens: Object.fromEntries(
+      HOST_TOKEN_NAMES.map((name) => [name, styles.getPropertyValue(`--${name}`).trim()]),
+    ),
+    fontFamily: getComputedStyle(document.body).fontFamily,
+  };
+}
+
+const pluginCallQueues = new Map<string, Promise<void>>();
+
 /**
  * 插件 iframe 容器 + postMessage 桥接。
  *
@@ -98,26 +136,53 @@ export function PluginSettingsPanel() {
  */
 export function PluginIframe({ pluginId, html }: { pluginId: string; html: string }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const theme = useResolvedTheme();
+  const channel = useMemo(() => crypto.randomUUID(), [pluginId, html]);
+
+  const sendHostContext = useCallback(() => {
+    iframeRef.current?.contentWindow?.postMessage(hostContext(theme, channel), '*');
+  }, [channel, theme]);
 
   useEffect(() => {
-    const handler = async (event: MessageEvent) => {
-      const { type, id, method, payload } = event.data || {};
-      if (type !== 'plugin_call') return;
+    sendHostContext();
+  }, [sendHostContext]);
 
-      try {
-        const result = await api.pluginCall(pluginId, method, payload || '');
-        iframeRef.current?.contentWindow?.postMessage({ id, result }, '*');
-      } catch (e) {
-        iframeRef.current?.contentWindow?.postMessage(
-          { id, error: String(e) },
-          '*',
-        );
-      }
+  useEffect(() => {
+    const source = iframeRef.current?.contentWindow;
+    if (!source) return;
+    const handler = (event: MessageEvent) => {
+      if (event.source !== source) return;
+      const data = event.data;
+      if (!data || data.type !== 'plugin_call' || data.channel !== channel) return;
+      const { id, method, payload } = data;
+      if (
+        typeof id !== 'string'
+        || typeof method !== 'string'
+        || typeof payload !== 'string'
+        || id.length > 200
+        || method.length > 100
+        || payload.length > 2_000_000
+      ) return;
+
+      const queue = pluginCallQueues.get(pluginId) ?? Promise.resolve();
+      pluginCallQueues.set(pluginId, queue.then(async () => {
+        try {
+          const result = await api.pluginCall(pluginId, method, payload);
+          source.postMessage({ id, channel, result }, '*');
+        } catch (e) {
+          source.postMessage(
+            { id, channel, error: String(e) },
+            '*',
+          );
+        }
+      }));
     };
 
     window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [pluginId]);
+    return () => {
+      window.setTimeout(() => window.removeEventListener('message', handler), 1000);
+    };
+  }, [channel, pluginId]);
 
   return (
     <iframe
@@ -126,6 +191,7 @@ export function PluginIframe({ pluginId, html }: { pluginId: string; html: strin
       srcDoc={html}
       className="w-full h-full border-0"
       sandbox="allow-scripts"
+      onLoad={sendHostContext}
     />
   );
 }
