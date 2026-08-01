@@ -28,6 +28,10 @@ use tiangong_plugin_mcp_protocol::tool::{
 };
 use tiangong_plugin_mcp_protocol::{Empty, McpOperation, MessageResponse, NameFilterRequest};
 
+const MCP_PAGE_TEMPLATE: &str = include_str!("mcp.html");
+const MCP_PAGE_CSS: &str = include_str!("mcp.css");
+const MCP_PAGE_JS: &str = include_str!("mcp.js");
+
 mod descriptor {
     pub const ID: &str = tiangong_plugin_mcp_protocol::PLUGIN_ID;
     pub const NAME: &str = "MCP";
@@ -193,18 +197,29 @@ impl UiGuest for Component {
         }])
     }
 
-    fn open_view(_contribution_id: String) -> Result<ViewResponse, PluginError> {
+    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
+        if contribution_id != "mcp-settings" {
+            return Err(plugin_err(format!(
+                "未知的 contribution: {contribution_id}"
+            )));
+        }
         Ok(ViewResponse {
             html: mcp_settings_html(),
         })
     }
 
-    fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {
-        // 单文件内联页面，无外部资源。
-        Ok(ResourceResponse {
-            data: Vec::new(),
-            mime: "text/plain".to_string(),
-        })
+    fn get_view_resource(path: String) -> Result<ResourceResponse, PluginError> {
+        match path.as_str() {
+            "mcp.css" => Ok(ResourceResponse {
+                data: MCP_PAGE_CSS.as_bytes().to_vec(),
+                mime: "text/css; charset=utf-8".to_string(),
+            }),
+            "mcp.js" => Ok(ResourceResponse {
+                data: MCP_PAGE_JS.as_bytes().to_vec(),
+                mime: "text/javascript; charset=utf-8".to_string(),
+            }),
+            _ => Err(plugin_err(format!("无此资源: {path}"))),
+        }
     }
 
     fn handle_view_message(
@@ -296,9 +311,9 @@ where
 
 /// 生成 MCP 管理页 HTML（单文件内联）。
 fn mcp_settings_html() -> String {
-    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>MCP 管理</title></head>\
-     <body><div id=\"app\">MCP 管理页面（请通过消息接口操作）</div></body></html>"
-        .to_string()
+    MCP_PAGE_TEMPLATE
+        .replace("/*__MCP_CSS__*/", MCP_PAGE_CSS)
+        .replace("/*__MCP_JS__*/", MCP_PAGE_JS)
 }
 
 /// WASM 内简易日志（经 feedback 通道发事件，当前实现暂作 no-op）。

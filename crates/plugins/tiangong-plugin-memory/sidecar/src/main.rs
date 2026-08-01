@@ -28,6 +28,12 @@ async fn main() -> anyhow::Result<()> {
         "memory sidecar 启动中..."
     );
 
+    if let Some(plugin_data_dir) =
+        std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|value| !value.is_empty())
+    {
+        tiangong_memory::recover_plugin_data_dir(std::path::Path::new(&plugin_data_dir))?;
+    }
+
     // 加载 memory 配置（模型端点、embedding 等）。
     let options = MemoryConfig::load_or_default().to_options();
 

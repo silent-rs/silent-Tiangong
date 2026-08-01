@@ -24,6 +24,7 @@ pub const PLUGIN_ID_ENV: &str = "TIANGONG_PLUGIN_ID";
 pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
 pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
+pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
 
 #[derive(Debug)]
 pub enum SidecarInvokeError {
@@ -72,6 +73,7 @@ pub struct SidecarConfig {
     pub endpoint: PathBuf,
     pub log: PathBuf,
     pub data_dir: PathBuf,
+    pub storage_root: PathBuf,
     pub transport_protocol: String,
     pub business_protocol: u32,
     pub start_timeout: Duration,
@@ -86,6 +88,7 @@ impl SidecarConfig {
         endpoint: impl Into<PathBuf>,
         log: impl Into<PathBuf>,
         data_dir: impl Into<PathBuf>,
+        storage_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
@@ -94,6 +97,7 @@ impl SidecarConfig {
             endpoint: endpoint.into(),
             log: log.into(),
             data_dir: data_dir.into(),
+            storage_root: storage_root.into(),
             transport_protocol: PROTOCOL_VERSION.to_string(),
             business_protocol: 0,
             start_timeout: DEFAULT_START_TIMEOUT,
@@ -347,7 +351,8 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_ID_ENV, &self.config.plugin_id)
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
-            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
+            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
+            .env(STORAGE_ROOT_ENV, &self.config.storage_root);
         configure_detached(&mut command);
 
         let mut child = command
