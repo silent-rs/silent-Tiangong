@@ -10471,6 +10471,7 @@ dependencies = [
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
  "tiangong-plugin-mcp",
+ "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",

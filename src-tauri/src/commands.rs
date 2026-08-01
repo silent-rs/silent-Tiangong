@@ -2027,8 +2027,21 @@ pub async fn get_mention_candidates(
 ) -> Result<Vec<MentionCandidate>, String> {
     // Skill + MCP servers + active tools 均由各自 plugin 自管，先读取快照。
     let skills = state.skill_plugin.installed_skills();
-    let mcp_servers = state.mcp_plugin.mcp_servers();
-    let active_tools = state.mcp_plugin.cached_active_tools();
+    let mcp_servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
+        serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
+            mcp_invoke("mcp.server.list", serde_json::json!({}))?,
+        )
+        .map_err(|e: serde_json::Error| e.to_string())?
+        .servers;
+    let active_tools: Vec<(String, usize)> =
+        serde_json::from_value::<tiangong_plugin_mcp_protocol::tool::ListToolsResponse>(
+            mcp_invoke("mcp.list_tools", serde_json::json!({}))?,
+        )
+        .map_err(|e: serde_json::Error| e.to_string())?
+        .servers
+        .into_iter()
+        .map(|entry| (entry.server, entry.tools.len()))
+        .collect();
     let mut candidates = Vec::new();
 
     // 已启用的 Skill（数据来自 skill plugin）
@@ -2053,7 +2066,7 @@ pub async fn get_mention_candidates(
             let tool_count = active_tools
                 .iter()
                 .find(|(name, _)| name == &server.name)
-                .map(|(_, tools)| tools.len())
+                .map(|(_, count)| *count)
                 .unwrap_or(0);
             candidates.push(MentionCandidate {
                 value: format!("@mcp:{}", server.name),
@@ -2385,15 +2398,23 @@ pub async fn set_session_cwd(
 // MCP 管理
 // ============================================================================
 
+/// 经运行时 sidecar 通道调用 MCP 插件操作（Desktop 入口）。
+fn mcp_invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Value, String> {
+    let storage_root = tiangong_config::io::storage_root();
+    tiangong_plugin_runtime::registry::invoke_sidecar(&storage_root, "mcp", operation, payload)
+        .map_err(|e| e.to_string())
+}
+
 /// 获取 MCP 服务器列表
 #[tauri::command]
 pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpServerView>, String> {
-    Ok(state
-        .mcp_plugin
-        .mcp_servers()
-        .iter()
-        .map(McpServerView::from_core)
-        .collect())
+    let servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
+        serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
+            mcp_invoke("mcp.server.list", serde_json::json!({}))?,
+        )
+        .map_err(|e: serde_json::Error| e.to_string())?
+        .servers;
+    Ok(servers.iter().map(McpServerView::from_core).collect())
 }
 
 /// 获取 MCP 服务器健康状态
@@ -2401,8 +2422,11 @@ pub async fn get_mcp_servers(state: State<'_, TiangongApp>) -> Result<Vec<McpSer
 pub async fn get_mcp_health(
     state: State<'_, TiangongApp>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let statuses = state.mcp_plugin.mcp_server_health_statuses();
-    statuses
+    let response: tiangong_plugin_mcp_protocol::query::HealthResponse =
+        serde_json::from_value(mcp_invoke("mcp.server.health", serde_json::json!({}))?)
+            .map_err(|e: serde_json::Error| e.to_string())?;
+    response
+        .statuses
         .into_iter()
         .map(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
         .collect()
@@ -2411,10 +2435,12 @@ pub async fn get_mcp_health(
 /// 探测单个 MCP 服务器（按 name），写回健康缓存。供前端添加/编辑/重试后刷新该行。
 #[tauri::command]
 pub async fn probe_mcp_server(name: String, state: State<'_, TiangongApp>) -> Result<(), String> {
-    state
-        .mcp_plugin
-        .probe_mcp_server(&name)
-        .map_err(|e| e.to_string())
+    mcp_invoke(
+        "mcp.server.probe",
+        serde_json::to_value(tiangong_plugin_mcp_protocol::query::ServerNameRequest { name })
+            .map_err(|e| e.to_string())?,
+    )?;
+    Ok(())
 }
 
 /// 注册 MCP 服务器
@@ -2431,7 +2457,7 @@ pub async fn register_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    use tiangong_plugin_mcp::{
+    use tiangong_plugin_mcp_protocol::config::{
         McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
     };
 
@@ -2471,14 +2497,14 @@ pub async fn register_mcp_server(
             env: env_vec,
         },
     };
-    // MCP 管理由 mcp plugin 自治（读写 ~/.tiangong/mcp.json），不经 TiangongState。
-    // core engine rebuild 由 plugin 的 on_engine_rebuilt 钩子触发 capability 重配。
-    let message = state
-        .mcp_plugin
-        .register_mcp_server(request)
-        .map_err(|e| e.to_string())?;
+    let response: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke(
+            "mcp.server.register",
+            serde_json::to_value(&request).map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     state.sync_core_config_from_state().await?;
-    Ok(message)
+    Ok(response.message)
 }
 
 /// 编辑 MCP 服务器（按 name 定位，name 自身不可改）
@@ -2495,9 +2521,10 @@ pub async fn update_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    use tiangong_plugin_mcp::{
+    use tiangong_plugin_mcp_protocol::config::{
         McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
     };
+    use tiangong_plugin_mcp_protocol::management::UpdateServerRequest;
 
     let transport = match transport
         .as_deref()
@@ -2521,27 +2548,31 @@ pub async fn update_mcp_server(
 
     let header_vec = headers.unwrap_or_default().into_iter().collect();
     let env_vec = env.unwrap_or_default().into_iter().collect();
-    let request = RegisterMcpServerRequest {
+    let request = UpdateServerRequest {
         name: name.clone(),
-        command,
-        args,
-        tags: vec![],
-        // enabled 由列表开关单独控制，编辑表单不覆盖；update_mcp_server 会保留原值
-        enabled: true,
-        options: RegisterMcpServerOptions {
-            transport,
-            endpoint,
-            auth_header,
-            headers: header_vec,
-            env: env_vec,
+        request: RegisterMcpServerRequest {
+            name: name.clone(),
+            command,
+            args,
+            tags: vec![],
+            enabled: true,
+            options: RegisterMcpServerOptions {
+                transport,
+                endpoint,
+                auth_header,
+                headers: header_vec,
+                env: env_vec,
+            },
         },
     };
-    let message = state
-        .mcp_plugin
-        .update_mcp_server(&name, request)
-        .map_err(|e| e.to_string())?;
+    let response: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke(
+            "mcp.server.update",
+            serde_json::to_value(&request).map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     state.sync_core_config_from_state().await?;
-    Ok(message)
+    Ok(response.message)
 }
 
 /// 移除 MCP 服务器
@@ -2550,12 +2581,15 @@ pub async fn remove_mcp_server(
     name: String,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let message = state
-        .mcp_plugin
-        .remove_mcp_server(&name)
-        .map_err(|e| e.to_string())?;
+    use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
+    let response: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke(
+            "mcp.server.remove",
+            serde_json::to_value(RemoveServerRequest { name }).map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     state.sync_core_config_from_state().await?;
-    Ok(message)
+    Ok(response.message)
 }
 
 /// 设置 MCP 服务器启用状态
@@ -2565,12 +2599,15 @@ pub async fn set_mcp_server_enabled(
     enabled: bool,
     state: State<'_, TiangongApp>,
 ) -> Result<String, String> {
-    let message = state
-        .mcp_plugin
-        .set_mcp_server_enabled(&name, enabled)
-        .map_err(|e| e.to_string())?;
+    use tiangong_plugin_mcp_protocol::management::SetEnabledRequest;
+    let response: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke(
+            "mcp.server.set_enabled",
+            serde_json::to_value(SetEnabledRequest { name, enabled }).map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     state.sync_core_config_from_state().await?;
-    Ok(message)
+    Ok(response.message)
 }
 
 // ============================================================================
@@ -2758,10 +2795,10 @@ pub async fn bot_delete_push_target(
 }
 
 fn bot_mcp_connection_matches(
-    existing: &tiangong_plugin_mcp::McpServerConfig,
+    existing: &tiangong_plugin_mcp_protocol::config::McpServerConfig,
     generated: &tiangong_bots::BotMcpConfig,
 ) -> bool {
-    use tiangong_plugin_mcp::ResolvedMcpTransport;
+    use tiangong_plugin_mcp_protocol::config::ResolvedMcpTransport;
 
     existing.resolved_transport() == ResolvedMcpTransport::Stdio
         && existing.command == generated.command
@@ -2776,8 +2813,8 @@ fn bot_mcp_connection_matches(
 fn bot_mcp_registration_request(
     generated: &tiangong_bots::BotMcpConfig,
     enabled: bool,
-) -> tiangong_plugin_mcp::RegisterMcpServerRequest {
-    use tiangong_plugin_mcp::{
+) -> tiangong_plugin_mcp_protocol::config::RegisterMcpServerRequest {
+    use tiangong_plugin_mcp_protocol::config::{
         McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
     };
 
@@ -2794,11 +2831,35 @@ fn bot_mcp_registration_request(
     }
 }
 
+/// 查询当前 MCP server 列表（经 sidecar 通道）。
+fn list_mcp_servers_via_sidecar(
+    state: &TiangongApp,
+) -> Result<Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig>, String> {
+    serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(mcp_invoke(
+        "mcp.server.list",
+        serde_json::json!({}),
+    )?)
+    .map_err(|e: serde_json::Error| e.to_string())
+    .map(|r| r.servers)
+}
+
+/// 经运行时 sidecar 通道调用 MCP 插件操作（&TiangongApp 重载，复用 mcp_invoke）。
+fn mcp_invoke_state(
+    _state: &TiangongApp,
+    operation: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    mcp_invoke(operation, payload)
+}
+
 /// 为支持 MCP 的 Bot 确保对应普通 MCP 已注册并启用。
 pub async fn ensure_bot_mcp_registered(
     id: &tiangong_bots::BotId,
     state: &TiangongApp,
 ) -> Result<Option<String>, String> {
+    use tiangong_plugin_mcp_protocol::management::{
+        SetEnabledRequest, SERVER_SET_ENABLED_OPERATION,
+    };
     let supports_mcp = state
         .bot_runtime
         .supports_mcp(id)
@@ -2815,9 +2876,7 @@ pub async fn ensure_bot_mcp_registered(
         .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
     let name = generated.name.clone();
 
-    if let Some(existing) = state
-        .mcp_plugin
-        .mcp_servers()
+    if let Some(existing) = list_mcp_servers_via_sidecar(state)?
         .into_iter()
         .find(|server| server.name == name)
     {
@@ -2825,43 +2884,63 @@ pub async fn ensure_bot_mcp_registered(
             return Err(format!("MCP 名称 {name} 已被其他配置占用，未自动覆盖"));
         }
         if !existing.enabled {
-            let message = state
-                .mcp_plugin
-                .set_mcp_server_enabled(&name, true)
-                .map_err(|error| error.to_string())?;
+            let response: tiangong_plugin_mcp_protocol::MessageResponse =
+                serde_json::from_value(mcp_invoke_state(
+                    state,
+                    SERVER_SET_ENABLED_OPERATION,
+                    serde_json::to_value(SetEnabledRequest {
+                        name: name.clone(),
+                        enabled: true,
+                    })
+                    .map_err(|e| e.to_string())?,
+                )?)
+                .map_err(|e: serde_json::Error| e.to_string())?;
             if let Err(sync_error) = state.sync_core_config_from_state().await {
-                let rollback = state
-                    .mcp_plugin
-                    .set_mcp_server_enabled(&name, false)
-                    .map(|_| "已恢复为停用".to_string())
-                    .unwrap_or_else(|error| format!("恢复停用失败：{error}"));
+                let rollback = mcp_invoke_state(
+                    state,
+                    SERVER_SET_ENABLED_OPERATION,
+                    serde_json::to_value(SetEnabledRequest {
+                        name: name.clone(),
+                        enabled: false,
+                    })
+                    .unwrap_or_default(),
+                )
+                .map(|_| "已恢复为停用".to_string())
+                .unwrap_or_else(|error| format!("恢复停用失败：{error}"));
                 return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
             }
-            return Ok(Some(message));
+            return Ok(Some(response.message));
         }
         return Ok(Some(format!("MCP 已注册：{name}")));
     }
 
     let request = bot_mcp_registration_request(&generated, generated.enabled);
-    let message = state
-        .mcp_plugin
-        .register_mcp_server(request)
-        .map_err(|error| error.to_string())?;
+    let response: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke_state(
+            state,
+            "mcp.server.register",
+            serde_json::to_value(&request).map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     if let Err(sync_error) = state.sync_core_config_from_state().await {
-        let rollback = state
-            .mcp_plugin
-            .remove_mcp_server(&name)
-            .map(|_| "已撤销 MCP 注册".to_string())
-            .unwrap_or_else(|error| format!("撤销 MCP 注册失败：{error}"));
+        use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
+        let rollback = mcp_invoke_state(
+            state,
+            "mcp.server.remove",
+            serde_json::to_value(RemoveServerRequest { name: name.clone() }).unwrap_or_default(),
+        )
+        .map(|_| "已撤销 MCP 注册".to_string())
+        .unwrap_or_else(|error| format!("撤销 MCP 注册失败：{error}"));
         return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
     }
-    Ok(Some(message))
+    Ok(Some(response.message))
 }
 
 async fn unregister_bot_mcp(
     id: &tiangong_bots::BotId,
     state: &TiangongApp,
 ) -> Result<bool, String> {
+    use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
     let supports_mcp = state
         .bot_runtime
         .supports_mcp(id)
@@ -2876,9 +2955,7 @@ async fn unregister_bot_mcp(
         .generate_mcp_config(id)
         .await
         .map_err(|error| format!("生成 Bot MCP 配置失败：{error}"))?;
-    let Some(existing) = state
-        .mcp_plugin
-        .mcp_servers()
+    let Some(existing) = list_mcp_servers_via_sidecar(state)?
         .into_iter()
         .find(|server| server.name == generated.name)
     else {
@@ -2888,16 +2965,25 @@ async fn unregister_bot_mcp(
         return Ok(false);
     }
 
-    state
-        .mcp_plugin
-        .remove_mcp_server(&generated.name)
-        .map_err(|error| error.to_string())?;
+    let _: tiangong_plugin_mcp_protocol::MessageResponse =
+        serde_json::from_value(mcp_invoke_state(
+            state,
+            "mcp.server.remove",
+            serde_json::to_value(RemoveServerRequest {
+                name: generated.name.clone(),
+            })
+            .map_err(|e| e.to_string())?,
+        )?)
+        .map_err(|e: serde_json::Error| e.to_string())?;
     if let Err(sync_error) = state.sync_core_config_from_state().await {
-        let rollback = state
-            .mcp_plugin
-            .register_mcp_server(bot_mcp_registration_request(&generated, existing.enabled))
-            .map(|_| "已恢复 MCP 注册".to_string())
-            .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"));
+        let request = bot_mcp_registration_request(&generated, existing.enabled);
+        let rollback = mcp_invoke_state(
+            state,
+            "mcp.server.register",
+            serde_json::to_value(&request).unwrap_or_default(),
+        )
+        .map(|_| "已恢复 MCP 注册".to_string())
+        .unwrap_or_else(|error| format!("恢复 MCP 注册失败：{error}"));
         return Err(format!("同步 MCP 配置失败：{sync_error}；{rollback}"));
     }
     Ok(true)
@@ -3353,10 +3439,17 @@ pub async fn remove_skill(id: String, state: State<'_, TiangongApp>) -> Result<S
         .skill_plugin
         .remove_skill(&id)
         .map_err(|e| e.to_string())?;
-    // 清理 plugin 报告的孤儿托管 MCP server（MCP 配置由 mcp plugin 自管）
+    // 清理 plugin 报告的孤儿托管 MCP server（经 sidecar 通道操作 MCP 插件）
     if !outcome.orphan_mcp_servers.is_empty() {
+        use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
         for orphan in &outcome.orphan_mcp_servers {
-            let _ = state.mcp_plugin.remove_mcp_server(orphan);
+            let _ = mcp_invoke(
+                "mcp.server.remove",
+                serde_json::to_value(RemoveServerRequest {
+                    name: orphan.clone(),
+                })
+                .unwrap_or_default(),
+            );
         }
     }
     state.sync_core_config_from_state().await?;
