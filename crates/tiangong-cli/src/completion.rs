@@ -124,11 +124,10 @@ pub fn complete(
     trigger: CompletionTrigger,
     prefix: &str,
     skill_plugin: &tiangong_plugin_skill::SkillPlugin,
-    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
 ) -> Vec<CompletionCandidate> {
     match trigger {
         CompletionTrigger::SlashCommand => complete_slash_commands(prefix),
-        CompletionTrigger::AtMention => complete_at_mentions(prefix, skill_plugin, mcp_plugin),
+        CompletionTrigger::AtMention => complete_at_mentions(prefix, skill_plugin),
     }
 }
 
@@ -147,7 +146,6 @@ fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
 fn complete_at_mentions(
     prefix: &str,
     skill_plugin: &tiangong_plugin_skill::SkillPlugin,
-    mcp_plugin: &tiangong_plugin_mcp::McpPlugin,
 ) -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
 
@@ -169,18 +167,30 @@ fn complete_at_mentions(
         }
     }
 
-    // @mcp: 提及补全（MCP servers 由 mcp plugin 自管）
-    for server in mcp_plugin.mcp_servers() {
-        if !server.enabled {
-            continue;
-        }
-        let label = format!("mcp:{}", server.name);
-        if label.starts_with(prefix) || server.name.starts_with(prefix) || prefix.is_empty() {
-            candidates.push(CompletionCandidate {
-                value: format!("@mcp:{}", server.name),
-                label: format!("@mcp:{}", server.name),
-                hint: format!("MCP - {}", server.name),
-            });
+    // @mcp: 提及补全（MCP servers 经 sidecar 通道拉取）
+    if let Ok(servers) = tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "mcp",
+        "mcp.server.list",
+        serde_json::json!({}),
+    )
+    .and_then(|v| {
+        let resp: tiangong_plugin_mcp_protocol::management::ServersResponse =
+            serde_json::from_value(v)?;
+        Ok(resp.servers)
+    }) {
+        for server in servers {
+            if !server.enabled {
+                continue;
+            }
+            let label = format!("mcp:{}", server.name);
+            if label.starts_with(prefix) || server.name.starts_with(prefix) || prefix.is_empty() {
+                candidates.push(CompletionCandidate {
+                    value: format!("@mcp:{}", server.name),
+                    label: format!("@mcp:{}", server.name),
+                    hint: format!("MCP - {}", server.name),
+                });
+            }
         }
     }
 

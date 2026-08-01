@@ -12,7 +12,6 @@ pub fn handle_command(
     config: &CoreConfigProvider,
     command: &str,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
-    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
 ) -> Result<bool> {
     let command = command.trim();
     let mut sync_core_config = false;
@@ -40,11 +39,11 @@ pub fn handle_command(
             sync_core_config = true;
         }
         "/mcp" => {
-            modal::mcp::open(mcp_plugin)?;
+            modal::mcp::open()?;
             sync_core_config = true;
         }
         "/skill" => {
-            modal::skill::open(state, skill_plugin, mcp_plugin)?;
+            modal::skill::open(state, skill_plugin)?;
             sync_core_config = true;
         }
         "/cancel" => {
@@ -55,7 +54,7 @@ pub fn handle_command(
             }
         }
         _ if command == "/config" || command.starts_with("/config ") => {
-            handle_config(state, command, mcp_plugin)?;
+            handle_config(state, command)?;
             sync_core_config = command
                 .trim_start_matches("/config")
                 .trim()
@@ -180,16 +179,18 @@ fn select_model(state: &mut TiangongState, model: &str) -> Result<()> {
     Ok(())
 }
 
-fn handle_config(
-    state: &mut TiangongState,
-    command: &str,
-    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
-) -> Result<()> {
+fn handle_config(state: &mut TiangongState, command: &str) -> Result<()> {
     let args = command.trim_start_matches("/config").trim();
 
     if args.is_empty() || args == "show" {
-        // agent_config_summary 已随 MCP 脱离移除，此处展示 MCP 摘要 + trust_mode。
-        let mcp = mcp_plugin.config_snapshot_public();
+        // 经 sidecar 通道拉取 MCP 配置快照。
+        let mcp: tiangong_plugin_mcp_protocol::config::McpConfig =
+            serde_json::from_value(tiangong_plugin_runtime::registry::invoke_sidecar(
+                &tiangong_config::io::storage_root(),
+                "mcp",
+                "mcp.config.snapshot",
+                serde_json::json!({}),
+            )?)?;
         output::print_info(&format!(
             "mcp.enabled={}, mcp.timeout_ms={}, mcp.servers={}, trust_mode={:?}",
             mcp.enabled,
@@ -201,7 +202,6 @@ fn handle_config(
     }
 
     if args == "validate" {
-        // validate_agent_config 已删除：历史上始终返回 Ok，直接提示通过即可。
         output::print_status("配置校验通过");
         return Ok(());
     }
@@ -219,9 +219,18 @@ fn handle_config(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .ok_or_else(|| anyhow!("缺少配置值"))?;
-        // MCP 配置项（mcp.enabled / mcp.timeout_ms）由 mcp plugin 自管。
-        let message = mcp_plugin.update_mcp_config_entry(key, value)?;
-        output::print_status(&message);
+        use tiangong_plugin_mcp_protocol::config::UpdateConfigEntryRequest;
+        let response: tiangong_plugin_mcp_protocol::MessageResponse =
+            serde_json::from_value(tiangong_plugin_runtime::registry::invoke_sidecar(
+                &tiangong_config::io::storage_root(),
+                "mcp",
+                "mcp.config.update_entry",
+                serde_json::to_value(UpdateConfigEntryRequest {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })?,
+            )?)?;
+        output::print_status(&response.message);
         return Ok(());
     }
 

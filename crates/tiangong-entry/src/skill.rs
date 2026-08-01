@@ -39,11 +39,21 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
         }
         SkillSubcommand::Remove { id } => {
             let outcome = skill_plugin.remove_skill(&id)?;
-            // 清理孤儿托管 MCP server（MCP 配置由 mcp plugin 自管）
+            // 清理孤儿托管 MCP server（经 sidecar 通道操作 MCP 插件）
             if !outcome.orphan_mcp_servers.is_empty() {
-                let mcp_plugin = tiangong_plugin_mcp::McpPlugin::new();
+                use tiangong_plugin_mcp_protocol::management::{
+                    RemoveServerRequest, SERVER_REMOVE_OPERATION,
+                };
                 for orphan in &outcome.orphan_mcp_servers {
-                    let _ = mcp_plugin.remove_mcp_server(orphan);
+                    let _ = tiangong_plugin_runtime::registry::invoke_sidecar(
+                        &tiangong_config::io::storage_root(),
+                        "mcp",
+                        SERVER_REMOVE_OPERATION,
+                        serde_json::to_value(RemoveServerRequest {
+                            name: orphan.clone(),
+                        })
+                        .unwrap_or_default(),
+                    );
                 }
             }
             println!("{}", outcome.message);

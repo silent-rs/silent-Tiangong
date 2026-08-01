@@ -16,9 +16,14 @@ use tiangong_bots::{
     BotId, BotMcpConfig, BotRuntime, BotStore, InvalidBotId, ProgressFn, ProvisionStatus,
     RegisterBotRequest, UpdateBotRequest,
 };
-use tiangong_plugin_mcp::{
-    McpPlugin, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
-    RegisterMcpServerRequest, ResolvedMcpTransport,
+use tiangong_plugin_mcp_protocol::MessageResponse;
+use tiangong_plugin_mcp_protocol::config::{
+    McpServerConfig, McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
+    ResolvedMcpTransport,
+};
+use tiangong_plugin_mcp_protocol::management::{
+    RemoveServerRequest, SERVER_REMOVE_OPERATION, SERVER_SET_ENABLED_OPERATION, ServersResponse,
+    SetEnabledRequest,
 };
 
 use crate::args::{BotArgs, BotSubcommand};
@@ -693,6 +698,24 @@ fn bot_spawn_daemon(bot: &tiangong_bots::BotConfig) -> Result<()> {
 // 启动支持 MCP 的 bot 后需把其声明的出站能力注册为普通 stdio MCP，
 // 否则 Agent 无法调用该 bot 的工具。停止/删除时反向注销，避免遗留。
 
+/// 经运行时 sidecar 通道调用 MCP 插件操作。
+fn mcp_invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Value> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "mcp",
+        operation,
+        payload,
+    )
+}
+
+/// 查询当前所有 MCP server 配置。
+fn list_mcp_servers() -> Result<Vec<McpServerConfig>> {
+    let response: ServersResponse =
+        serde_json::from_value(mcp_invoke("mcp.server.list", serde_json::json!({}))?)
+            .map_err(|error| anyhow!("解析 MCP server 列表失败: {error}"))?;
+    Ok(response.servers)
+}
+
 /// 把 Bot 声明的出站能力注册为普通 stdio MCP（写 `~/.tiangong/mcp.json`）。
 ///
 /// 不支持 MCP 的 bot 静默跳过；注册失败仅打印警告，不阻断 bot 启动主流程。
@@ -701,10 +724,8 @@ async fn ensure_bot_mcp_registered(runtime: &BotRuntime, id: &BotId) -> Result<(
         return Ok(());
     }
     let generated = runtime.generate_mcp_config(id).await?;
-    let mcp_plugin = McpPlugin::new();
 
-    if let Some(existing) = mcp_plugin
-        .mcp_servers()
+    if let Some(existing) = list_mcp_servers()?
         .into_iter()
         .find(|server| server.name == generated.name)
     {
@@ -715,7 +736,14 @@ async fn ensure_bot_mcp_registered(runtime: &BotRuntime, id: &BotId) -> Result<(
             ));
         }
         if !existing.enabled {
-            mcp_plugin.set_mcp_server_enabled(&generated.name, true)?;
+            let _: MessageResponse = serde_json::from_value(mcp_invoke(
+                SERVER_SET_ENABLED_OPERATION,
+                serde_json::to_value(SetEnabledRequest {
+                    name: generated.name.clone(),
+                    enabled: true,
+                })?,
+            )?)
+            .map_err(|error| anyhow!("解析启停响应失败: {error}"))?;
             println!("✅ 已启用 MCP：{}", generated.name);
         } else {
             println!("✅ MCP 已注册：{}", generated.name);
@@ -723,7 +751,12 @@ async fn ensure_bot_mcp_registered(runtime: &BotRuntime, id: &BotId) -> Result<(
         return Ok(());
     }
 
-    mcp_plugin.register_mcp_server(bot_mcp_registration_request(&generated, generated.enabled))?;
+    let request = bot_mcp_registration_request(&generated, generated.enabled);
+    let _: MessageResponse = serde_json::from_value(mcp_invoke(
+        "mcp.server.register",
+        serde_json::to_value(&request)?,
+    )?)
+    .map_err(|error| anyhow!("解析注册响应失败: {error}"))?;
     println!(
         "✅ 已注册 MCP：{}（Agent 现可调用该 Bot 的工具）",
         generated.name
@@ -739,9 +772,7 @@ async fn unregister_bot_mcp(runtime: &BotRuntime, id: &BotId) -> Result<bool> {
         return Ok(false);
     }
     let generated = runtime.generate_mcp_config(id).await?;
-    let mcp_plugin = McpPlugin::new();
-    let Some(existing) = mcp_plugin
-        .mcp_servers()
+    let Some(existing) = list_mcp_servers()?
         .into_iter()
         .find(|server| server.name == generated.name)
     else {
@@ -750,7 +781,13 @@ async fn unregister_bot_mcp(runtime: &BotRuntime, id: &BotId) -> Result<bool> {
     if !bot_mcp_connection_matches(&existing, &generated) {
         return Ok(false);
     }
-    mcp_plugin.remove_mcp_server(&generated.name)?;
+    let _: MessageResponse = serde_json::from_value(mcp_invoke(
+        SERVER_REMOVE_OPERATION,
+        serde_json::to_value(RemoveServerRequest {
+            name: generated.name,
+        })?,
+    )?)
+    .map_err(|error| anyhow!("解析删除响应失败: {error}"))?;
     Ok(true)
 }
 

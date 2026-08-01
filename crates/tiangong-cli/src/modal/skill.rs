@@ -7,19 +7,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use tiangong_app_state::app_state::TiangongState;
-use tiangong_plugin_mcp::McpPlugin;
 use tiangong_plugin_skill::SkillPlugin;
 
 /// 打开 Skill 管理 modal
 ///
 /// `state` 仅用于变更后触发 config 同步；skill 数据读写全部经 `skill_plugin`。
-/// 删除 skill 后产生的孤儿 MCP server 经 `mcp_plugin` 清理。
+/// 删除 skill 后产生的孤儿 MCP server 经 sidecar 通道清理。
 /// Skill 创建请在主对话中让 Agent 用文件工具完成（见 prompt 段落指引）。
-pub fn open(
-    _state: &mut TiangongState,
-    skill_plugin: &Arc<SkillPlugin>,
-    mcp_plugin: &Arc<McpPlugin>,
-) -> Result<()> {
+pub fn open(_state: &mut TiangongState, skill_plugin: &Arc<SkillPlugin>) -> Result<()> {
     let mut selected: usize = 0;
     let mut query = String::new();
     let mut status = "空格 启/禁用 | Backspace 删除 | Esc 返回".to_string();
@@ -131,7 +126,17 @@ pub fn open(
                                     Ok(outcome) => {
                                         // 清理 plugin 报告的孤儿托管 MCP server
                                         for orphan in &outcome.orphan_mcp_servers {
-                                            let _ = mcp_plugin.remove_mcp_server(orphan);
+                                            let _ = tiangong_plugin_runtime::registry::invoke_sidecar(
+                                                &tiangong_config::io::storage_root(),
+                                                "mcp",
+                                                tiangong_plugin_mcp_protocol::management::SERVER_REMOVE_OPERATION,
+                                                serde_json::to_value(
+                                                    tiangong_plugin_mcp_protocol::management::RemoveServerRequest {
+                                                        name: orphan.clone(),
+                                                    },
+                                                )
+                                                .unwrap_or_default(),
+                                            );
                                         }
                                         status = outcome.message;
                                         selected = selected.saturating_sub(1);

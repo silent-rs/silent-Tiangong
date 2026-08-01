@@ -72,7 +72,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let input = {
             reader.read_line(&prompt, |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, &skill_plugin, &mcp_plugin)
+                    completion::complete(trigger, &prefix, &skill_plugin)
                 } else {
                     Vec::new()
                 }
@@ -93,8 +93,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin, &mcp_plugin)
-            {
+            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin) {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {

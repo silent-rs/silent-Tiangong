@@ -4,10 +4,31 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use tiangong_plugin_mcp::{McpPlugin, RegisterMcpServerOptions, RegisterMcpServerRequest};
+use tiangong_plugin_mcp_protocol::MessageResponse;
+use tiangong_plugin_mcp_protocol::config::{RegisterMcpServerOptions, RegisterMcpServerRequest};
+use tiangong_plugin_mcp_protocol::management::{
+    RemoveServerRequest, SERVER_REMOVE_OPERATION, SERVER_SET_ENABLED_OPERATION, ServersResponse,
+    SetEnabledRequest,
+};
+
+/// 经运行时 sidecar 通道调用 MCP 插件操作。
+fn mcp_invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Value> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "mcp",
+        operation,
+        payload,
+    )
+}
+
+fn list_servers() -> Result<Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig>> {
+    let response: ServersResponse =
+        serde_json::from_value(mcp_invoke("mcp.server.list", serde_json::json!({}))?)?;
+    Ok(response.servers)
+}
 
 /// 打开 MCP 管理 modal
-pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
+pub fn open() -> Result<()> {
     let mut selected: usize = 0;
     let mut query = String::new();
     let mut add_input: Option<String> = None;
@@ -16,7 +37,7 @@ pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
 
     super::run_modal(|terminal| {
         loop {
-            let servers = mcp_plugin.mcp_servers();
+            let servers = list_servers().unwrap_or_default();
             let matched: Vec<usize> = servers
                 .iter()
                 .enumerate()
@@ -118,7 +139,7 @@ pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
                         }
                         KeyCode::Enter => {
                             if let Some(raw) = add_input.take() {
-                                match parse_and_add_mcp(mcp_plugin, &raw) {
+                                match parse_and_add_mcp(&raw) {
                                     Ok(msg) => status = msg,
                                     Err(err) => status = format!("新增失败：{err}"),
                                 }
@@ -151,7 +172,17 @@ pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
                         if let Some(&si) = matched.get(selected) {
                             let name = servers[si].name.clone();
                             let new_enabled = !servers[si].enabled;
-                            match mcp_plugin.set_mcp_server_enabled(&name, new_enabled) {
+                            match mcp_invoke(
+                                SERVER_SET_ENABLED_OPERATION,
+                                serde_json::to_value(SetEnabledRequest {
+                                    name,
+                                    enabled: new_enabled,
+                                })?,
+                            )
+                            .and_then(|v| {
+                                let resp: MessageResponse = serde_json::from_value(v)?;
+                                Ok(resp.message)
+                            }) {
                                 Ok(msg) => status = msg,
                                 Err(err) => status = format!("操作失败：{err}"),
                             }
@@ -165,7 +196,14 @@ pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
                     KeyCode::Backspace => {
                         if let Some(&si) = matched.get(selected) {
                             let name = servers[si].name.clone();
-                            match mcp_plugin.remove_mcp_server(&name) {
+                            match mcp_invoke(
+                                SERVER_REMOVE_OPERATION,
+                                serde_json::to_value(RemoveServerRequest { name })?,
+                            )
+                            .and_then(|v| {
+                                let resp: MessageResponse = serde_json::from_value(v)?;
+                                Ok(resp.message)
+                            }) {
                                 Ok(msg) => {
                                     status = msg;
                                     selected = selected.saturating_sub(1);
@@ -190,7 +228,7 @@ pub fn open(mcp_plugin: &McpPlugin) -> Result<()> {
     })
 }
 
-fn parse_and_add_mcp(mcp_plugin: &McpPlugin, raw: &str) -> Result<String> {
+fn parse_and_add_mcp(raw: &str) -> Result<String> {
     let parts: Vec<&str> = raw.split_whitespace().collect();
     if parts.len() < 2 {
         return Err(anyhow::anyhow!("至少需要 <name> <command>"));
@@ -199,12 +237,17 @@ fn parse_and_add_mcp(mcp_plugin: &McpPlugin, raw: &str) -> Result<String> {
     let command = parts[1].to_string();
     let args: Vec<String> = parts[2..].iter().map(|s| s.to_string()).collect();
 
-    mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
+    let request = RegisterMcpServerRequest {
         name,
         command,
         args,
         tags: Vec::new(),
         enabled: true,
         options: RegisterMcpServerOptions::default(),
-    })
+    };
+    let response: MessageResponse = serde_json::from_value(mcp_invoke(
+        "mcp.server.register",
+        serde_json::to_value(&request)?,
+    )?)?;
+    Ok(response.message)
 }
