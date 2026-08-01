@@ -27,8 +27,9 @@ use tiangong_plugin_memory_protocol::recall::{
 };
 use tiangong_plugin_memory_protocol::rumination::{
     EnhancedTurnResult, MemoryCandidate, RunEnhancedMicroRumination,
-    RunEnhancedMicroRuminationRequest, RunMesoRumination, RunMesoRuminationRequest, TurnArtifact,
-    TurnArtifactKind, TurnMessage, TurnStatus,
+    RunEnhancedMicroRuminationRequest, RunMesoRumination, RunMesoRuminationRequest,
+    RunMetaRumination, RunMetaRuminationRequest, TurnArtifact, TurnArtifactKind, TurnMessage,
+    TurnStatus,
 };
 use tiangong_plugin_memory_protocol::ui::{self, UiRequest};
 use tiangong_plugin_memory_protocol::{Empty, MemoryOperation};
@@ -63,6 +64,8 @@ mod state {
         last_session: Option<tiangong_types::PluginSession>,
         /// 本轮是否已经召回过（每轮只召回一次）。
         recall_attempted: bool,
+        /// per-session 轮次计数（每 10 轮触发 Meta 反刍）。
+        turn_count: u32,
     }
 
     thread_local! {
@@ -71,9 +74,11 @@ mod state {
             workspace: None,
             last_session: None,
             recall_attempted: false,
+            turn_count: 0,
         }) };
     }
 
+    #[allow(dead_code)]
     pub fn set_session_id(id: Option<String>) {
         STATE.with(|s| s.borrow_mut().session_id = id);
     }
@@ -121,6 +126,16 @@ mod state {
     /// 本轮是否已经召回过。
     pub fn recall_attempted() -> bool {
         STATE.with(|s| s.borrow().recall_attempted)
+    }
+
+    /// 递增轮次计数并返回是否应该触发 Meta 反刍（每 10 轮）。
+    pub fn increment_turn_and_check_meta() -> bool {
+        const META_INTERVAL: u32 = 10;
+        STATE.with(|s| {
+            let mut st = s.borrow_mut();
+            st.turn_count += 1;
+            st.turn_count.is_multiple_of(META_INTERVAL)
+        })
     }
 }
 
@@ -322,8 +337,13 @@ impl Guest for Component {
 
     fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
         // 轮次结束：从 session 只读快照提取本轮信息，转发给 sidecar 做 micro 反刍。
-        // 提取失败（session 格式异常）仅记录，不阻断——反刍是 best-effort。
         let _ = forward_turn_rumination(&session_json, turn_start_idx);
+
+        // 每 10 轮触发 Meta 反刍（与原生版本一致）。
+        if state::increment_turn_and_check_meta() {
+            let _ =
+                sidecar_client::invoke::<RunMetaRumination>(&RunMetaRuminationRequest::default());
+        }
         Ok(())
     }
 
@@ -532,14 +552,14 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
             // 通过 tool_call_id 从调用参数中补充提取 path/url。
             let mut file_path = None;
             let mut url = None;
-            if let Some(id) = tc_id {
-                if let Some((_, args)) = call_table.get(id) {
-                    if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                        file_path = Some(p.to_string());
-                    }
-                    if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
-                        url = Some(u.to_string());
-                    }
+            if let Some(id) = tc_id
+                && let Some((_, args)) = call_table.get(id)
+            {
+                if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                    file_path = Some(p.to_string());
+                }
+                if let Some(u) = args.get("url").and_then(|v| v.as_str()) {
+                    url = Some(u.to_string());
                 }
             }
             // 参数里没有就从结果正文补充。
@@ -707,6 +727,7 @@ fn extract_paths_and_urls(text: &str) -> (Option<String>, Option<String>) {
 }
 
 /// WASM 内简易日志（无 tracing，直接忽略）。
+#[allow(dead_code)]
 fn tracing_warn(_msg: &str) {}
 
 fn tool_result_ok(summary: String) -> ToolResult {

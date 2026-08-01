@@ -131,3 +131,16 @@ pub struct RunMesoRuminationRequest {
     pub session_id: String,
     pub workspace_id: String,
 }
+
+pub const RUN_META_OPERATION: &str = "run_meta_rumination";
+
+pub struct RunMetaRumination;
+
+impl MemoryOperation for RunMetaRumination {
+    const NAME: &'static str = RUN_META_OPERATION;
+    type Request = RunMetaRuminationRequest;
+    type Response = Ack;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunMetaRuminationRequest {}
