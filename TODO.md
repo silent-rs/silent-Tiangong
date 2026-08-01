@@ -222,6 +222,73 @@
 - Desktop、CLI、Server 都走统一插件链路。
 - Memory 相关检查、三入口编译和依赖检查通过。
 
+# 后续插件 WASM 化排期
+
+Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难到易」推进，并明确区分哪些插件可改造、哪些必须保留原生。
+
+判断依据是每个插件的耦合点：wasm 沙箱无文件系统/网络/子进程/mmap/系统句柄；所有重能力下沉到独立原生 sidecar 进程，wasm 只做无状态桥接；现有 host import 只有 `clock` / `sidecar.invoke` / `feedback.emit-stream-event` 三项。
+
+## 一、必须保留原生（3 个）
+
+这些插件持有 host 进程内的 GUI/系统句柄，或就是 host 运行时自身，无法下沉到 sidecar，也无 headless 替代方案。
+
+| 插件 | 卡死点 |
+|---|---|
+| **agent-team** | 在 turn 内反向构造完整 `TiangongCore` 跑子 Agent，外加每个子 Agent 独占一个 OS 线程。wasm 由 host 加载，不能反向实例化 host Core，是 host 运行时自身的能力。 |
+| **terminal** | 强依赖 PTY 系统句柄（`portable-pty`/`vte`/`libc`），且输出经 Tauri 事件直连前端 xterm 面板。PTY 搬不进沙箱，回显链路离不开 host 界面。 |
+| **browser** | 整个插件就是操作内嵌 WebView 标签页，外加 25 个前端命令、Tauri `unstable` 句柄。GUI 句柄无法跨进程，headless sidecar 接管不了。 |
+
+## 二、可 WASM 化，需配原生 sidecar（7 个，从难到易）
+
+照搬 Memory 的「wasm 桥接 + 原生 sidecar」模板，重能力整体下沉到独立进程。sidecar 的单例选举由各 sidecar 自行实现（可直接复用 memory 现有选举代码，但作为 sidecar 自身职责，不在 app 层抽取共享依赖），app 只按 `plugin.json` 启动 sidecar、不参与其内部选举。
+
+| 顺序 | 插件 | 下沉内容 | 关键设计点 |
+|---|---|---|---|
+| 1 | **mcp** #325 | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 子进程/网络/线程/管理 API 四类耦合；`Arc<McpPlugin>` 被入口层直接持有的管理通道需重设计为 host 代理。工程量最大。 |
+| 2 | **fetch** #326 | 网络栈（reqwest 阻塞式）+ HTML 解析（scraper）+ DNS + 落盘 | reqwest 阻塞客户端独占线程与 runtime，是硬卡点；逻辑封闭、无 GUI 回路，改造相对干净。 |
+| 3 | **index** #327 | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 复用 Memory 单例模式：原「进程内 Arc 共享」改为「全机一个 sidecar 进程」，跨会话共享索引与扫描去重原样保留，且消除多入口磁盘锁冲突。sidecar 单例选举由自身实现（复用 memory 选举代码）。 |
+| 4 | **scheduler** #328 | cron 调度 + JobStore + 任务去重 + 执行记录 | 与 Memory 契合度最高：wasm 给 Agent 提供任务 CRUD 工具，sidecar 长驻跑调度。**触发回路不经 WIT**——到点 sidecar 直接 HTTP 调本机 server 的 `POST /api/v1/messages` 投递消息（与 Bot/webhook 同链路），无需扩反向回调。鉴权用 host 启动时注入的短期凭证。 |
+| 5 | **task** #329 | 子进程 spawn + 任务注册表 | 任务列表当前被 GUI/Tauri 直接读取，sidecar 化后需解决注册表跨边界一致性。 |
+| 6 | **fs** #330 | `std::fs` 全套 + 进程级全局锁表 | 走 sidecar。文件读写虽可由 WASI 承接，但走 sidecar 的真正理由是**锁表需跨 wasm 实例全局共享**（主/子 Agent 写同一文件互斥）：wasm 实例间内存隔离，锁表只能落在所有实例共享的 sidecar 进程内；路径解析（动态工作区 + FullTrust 越界）随之一起下沉，避免为 fs 专用定制 WIT host import。 |
+| 7 | **command** #331 | 子进程 spawn（tokio process） | 最简单的 sidecar：校验与拆分进 wasm，仅 spawn 下沉，无 GUI 纠葛。 |
+
+## 三、可 WASM 化，轻量（6 个，待 Host 模型代理）
+
+这组插件层是纯编排，不直接持密钥（统一经 `tiangong-llm` + `tiangong-config`，真正网络调用在 core 侧）。需等「方案二·阶段三 Host 模型代理」落地，由 host 代发模型请求、解析密钥。
+
+| 顺序 | 插件 | 卡点 | 前置 |
+|---|---|---|---|
+| 8 | **skill** #332 | 文件读写 + 环境变量 + 管理 API 被直调 + exec_env 回传 | 配小 sidecar，管理接口重新经插件页面暴露（不依赖模型代理） |
+| 9 | **analyze-attachment** #333 | 多模态模型调用 | 等 Host 模型代理 |
+| 10 | **generate-image** #334 | 模型 + 图片归档落盘 | 等 Host 模型代理 + 媒体归档接口 |
+| 11 | **text-to-speech** #336 | 模型 + 音频写入 | 等 Host 模型代理 + 媒体写入接口 |
+| 12 | **speech-to-text** #337 | 模型 + 音频读取 | 等 Host 模型代理 + 媒体读取接口 |
+| 13 | **generate-video** #335 | 模型 | 等 Host 模型代理（无本地落盘，最简单的媒体类） |
+
+## 四、最易，立即可做（1 个）
+
+| 顺序 | 插件 | 说明 |
+|---|---|---|
+| 14 | **prompt** #338 | 纯字符串注入 + config 缓存，零副作用，现有 WIT 全覆盖。与 Memory 形成「轻/重」两端对照。 |
+
+## 已完成（1 个）
+
+| 插件 | 模式 |
+|---|---|
+| **memory** | wasm 桥接 + 原生 sidecar（重型样板） |
+
+## 共同约定
+
+- 每个重型插件按 Memory 模板建立私有协议 crate（业务操作名 + 请求/响应），wasm 与 sidecar 共同依赖，App 不依赖。
+- sidecar 的单例选举（Leader 互斥 + 心跳 + IPC）由各 sidecar 自身实现，app 只按 `plugin.json` 启动 sidecar、不参与其内部选举。各 sidecar 可直接复用 memory 现有选举代码，但作为 sidecar 的自有职责，不在 app 层抽取共享 crate。
+
+## 完成标准
+
+- 必须原生的 3 个插件长期保留，不纳入 WASM 化排期。
+- 每个 sidecar 插件迁移后，三入口均能加载该 WASM 制品，原有能力不回退，重能力下沉到独立进程。
+- 轻量插件等 Host 模型代理落地后再迁，密钥由 host 解析，不进 wasm/sidecar。
+- 每完成一个插件，更新本节状态并补充对应模板说明。
+
 # #250 移动端控制 / 通讯网关 TODO
 
 ## Bot MCP 主动推送
