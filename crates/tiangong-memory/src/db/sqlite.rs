@@ -7,9 +7,9 @@ use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use crate::types::{
-    Decision, Entity, EntityType, Episode, ExpandedMemory, MemoryCognitiveType, MemoryKind,
-    MemoryNode, MemoryRelation, MemoryRelationDraft, MemoryRelationKind, MemoryScopeType,
-    MemoryStatus, RecallHit,
+    Decision, Entity, EntityType, Episode, Evidence, ExpandedMemory, MemoryCognitiveType,
+    MemoryKind, MemoryNode, MemoryRelation, MemoryRelationDraft, MemoryRelationKind,
+    MemoryScopeType, MemoryStatus, RecallHit,
 };
 
 use super::schema;
@@ -269,6 +269,46 @@ impl MemoryDb {
                 ],
             )
             .with_context(|| "写入 decisions 失败")?;
+
+        Ok(())
+    }
+
+    /// 写入 Evidence（memory_node + evidence 扩展表）。
+    pub(crate) fn insert_evidence(
+        &self,
+        id: &str,
+        evidence: &Evidence,
+        workspace_id: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Local::now().naive_local().to_string();
+        let keywords = serde_json::to_string(&Vec::<String>::new())?;
+        let evidence_path = evidence
+            .file_path
+            .as_ref()
+            .or(evidence.url.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO memory_nodes
+             (id, kind, memory_type, scope_type, scope_id, title, summary, keywords, importance,
+              confidence, status, source, usage_count, created_at, updated_at)
+             VALUES (?1, 'evidence', 'factual', 'workspace', ?2, ?3, ?4, ?5, 0.5, 0.0, 'active', ?6, 0, ?7, ?7)",
+            rusqlite::params![
+                id,
+                workspace_id,
+                evidence.title,
+                evidence.summary,
+                keywords,
+                evidence.source_tool,
+                now,
+            ],
+        )?;
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO evidence (id, evidence_path, byte_size) VALUES (?1, ?2, 0)",
+            rusqlite::params![id, evidence_path],
+        )?;
 
         Ok(())
     }
@@ -1208,10 +1248,7 @@ fn db_file_path() -> PathBuf {
 }
 
 fn memory_base_path() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
+    crate::paths::memory_data_dir()
 }
 
 fn home_dir() -> Option<PathBuf> {

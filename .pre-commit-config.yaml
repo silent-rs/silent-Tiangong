@@ -39,6 +39,7 @@ repos:
         entry: bash scripts/pre-commit-affected-crates.sh check
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        require_serial: true
         stages: [pre-push]
       - id: cargo-clippy-crates
         name: cargo clippy (changed crates)
@@ -46,6 +47,7 @@ repos:
         entry: bash scripts/pre-commit-affected-crates.sh clippy
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        require_serial: true
         stages: [pre-push]
       - id: cargo-nextest-crates
         name: cargo nextest (changed crates)
@@ -53,6 +55,7 @@ repos:
         entry: bash scripts/pre-commit-affected-crates.sh nextest
         language: system
         files: (\.rs$|Cargo\.toml$|Cargo\.lock$|\.cargo/.*\.toml$)
+        require_serial: true
         stages: [pre-push]
       - id: frontend-build
         name: yarn build (frontend)

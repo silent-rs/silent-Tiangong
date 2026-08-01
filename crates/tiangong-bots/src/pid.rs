@@ -39,7 +39,7 @@ pub fn process_alive(pid: u32) -> bool {
 pub fn process_alive(pid: u32) -> bool {
     // Desktop 模式下高频调用（health/is_running 轮询），必须抑制控制台窗口闪现（issue #290）。
     let mut cmd = Command::new("tasklist");
-    tiangong_types::process::configure_no_window(&mut cmd);
+    tiangong_toolkit::configure_no_window(&mut cmd);
     cmd.args(["/FI", &format!("PID eq {pid}"), "/NH"]);
     cmd.output()
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
@@ -84,7 +84,7 @@ pub fn send_terminate(pid: u32) -> Result<()> {
     // WM_CLOSE，对独立后台 bot 几乎无效，导致 bot 长期无法停止（issue #290）。
     // 与 supervisor 路径的 `child.kill()`（= TerminateProcess，强制终止）对齐，使用 /F。
     let mut cmd = Command::new("taskkill");
-    tiangong_types::process::configure_no_window(&mut cmd);
+    tiangong_toolkit::configure_no_window(&mut cmd);
     let output = cmd
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()
@@ -152,7 +152,7 @@ pub fn spawn_detached(
     paths::ensure_executable_paths_safe(bot_id)?;
     paths::reject_symlink(artifact_path, "Bot 制品")?;
     let mut cmd = Command::new(artifact_path);
-    tiangong_types::process::configure_no_window(&mut cmd);
+    tiangong_toolkit::configure_no_window(&mut cmd);
 
     let log_path = paths::bot_log_path(bot_id);
     if let Some(parent) = log_path.parent() {
@@ -312,7 +312,7 @@ fn send_kill(pid: u32) -> Result<()> {
 #[cfg(not(unix))]
 fn send_kill(pid: u32) -> Result<()> {
     let mut cmd = Command::new("taskkill");
-    tiangong_types::process::configure_no_window(&mut cmd);
+    tiangong_toolkit::configure_no_window(&mut cmd);
     let output = cmd
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output()

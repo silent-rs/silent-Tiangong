@@ -123,10 +123,14 @@ fn run_gui() {
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
 
-            // 全部插件（browser/terminal/fs/index/memory/scheduler）均由 ensure_core
-            // 创建 Core 时现场 build_plugin() 构造，确保每个 Core 持有独立实例
+            // 预加载 WASM 插件的 UI 实例，Core 实例仍在创建会话时独立构造。
+            {
+                let storage_root = tiangong_config::io::storage_root();
+                tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);
+            }
+
+            // Core 插件仍由 ensure_core 现场构造，确保每个 Core 持有独立实例
             //（隔离 per-session 状态如 workspace / recall_attempted / turn_count）。
-            // 此处只做 setup 阶段的初始化（不构造插件实例）。
 
             // 将 workspace 目录设为系统 PTY 默认 cwd（独立于插件实例化的全局状态）。
             let app_handle = app.handle().clone();
@@ -410,17 +414,6 @@ fn run_gui() {
             tiangong_app::commands::stop_server,
             tiangong_app::commands::get_models_config,
             tiangong_app::commands::set_models_config,
-            tiangong_app::commands::get_memory_config,
-            tiangong_app::commands::set_memory_config,
-            tiangong_app::commands::list_memory_nodes,
-            tiangong_app::commands::count_memory_nodes,
-            tiangong_app::commands::upsert_manual_memory,
-            tiangong_app::commands::set_memory_node_status,
-            tiangong_app::commands::list_memory_relations,
-            tiangong_app::commands::list_memory_relations_batch,
-            tiangong_app::commands::upsert_memory_relation,
-            tiangong_app::commands::delete_memory_relation,
-            tiangong_app::commands::test_memory_recall,
             tiangong_app::commands::list_workspace_indexes,
             tiangong_app::commands::delete_workspace_index,
             tiangong_app::commands::rebuild_workspace_index,
@@ -432,6 +425,18 @@ fn run_gui() {
             tiangong_app::commands::append_message,
             tiangong_app::commands::edit_and_resend,
             tiangong_app::commands::respond_approval,
+            tiangong_app::commands::list_plugin_contributions,
+            tiangong_app::commands::list_plugins,
+            tiangong_app::commands::list_available_plugins,
+            tiangong_app::commands::import_local_plugin,
+            tiangong_app::commands::install_plugin,
+            tiangong_app::commands::upgrade_plugin,
+            tiangong_app::commands::set_plugin_enabled,
+            tiangong_app::commands::rollback_plugin,
+            tiangong_app::commands::uninstall_plugin,
+            tiangong_app::commands::reload_plugin,
+            tiangong_app::commands::plugin_open_view,
+            tiangong_app::commands::plugin_call,
             tiangong_app::commands::get_trust_mode,
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_default_trust_mode,

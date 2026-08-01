@@ -1,29 +1,50 @@
-use anyhow::{Result, anyhow};
-
-use tiangong_llm::models_config::{ModelCapability, ModelsConfig, ProviderConfig};
-use tiangong_memory::{
-    MemoryConfig, MemoryEmbeddingConfig, MemoryLlmConfig, MemoryRerankConfig, disable_memory,
-    enable_memory, is_memory_disabled,
-};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::args::{MemoryArgs, MemoryConfigSubcommand, MemorySubcommand};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct MemorySelection {
+    pub model_key: Option<String>,
+    pub embedding_key: Option<String>,
+    pub rerank_key: Option<String>,
+    #[serde(default = "default_vector_mode")]
+    pub vector_mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MemoryUiModel {
+    pub key: String,
+    pub provider: String,
+    pub model: String,
+    pub capabilities: Vec<String>,
+    pub dimension: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MemoryBootstrap {
+    pub config: MemorySelection,
+    pub models: Vec<MemoryUiModel>,
+    #[serde(default)]
+    pub disabled: bool,
+}
 
 pub(crate) fn run_memory_command(args: MemoryArgs) -> Result<()> {
     match args.command {
         MemorySubcommand::Config { command } => run_config(command),
         MemorySubcommand::Configure => super::configure::run_memory_configure(),
         MemorySubcommand::Enable => {
-            enable_memory()?;
+            set_enabled(true)?;
             println!("Memory 已启用");
             Ok(())
         }
         MemorySubcommand::Disable => {
-            disable_memory()?;
+            set_enabled(false)?;
             println!("Memory 已禁用");
             Ok(())
         }
         MemorySubcommand::Status => {
-            print_status();
+            print_status(&query_status()?);
             Ok(())
         }
         MemorySubcommand::Test => test_memory(),
@@ -31,11 +52,8 @@ pub(crate) fn run_memory_command(args: MemoryArgs) -> Result<()> {
 }
 
 fn run_config(command: MemoryConfigSubcommand) -> Result<()> {
-    let config = MemoryConfig::load_or_default();
     match command {
-        MemoryConfigSubcommand::Show => {
-            print_config(&config);
-        }
+        MemoryConfigSubcommand::Show => print_selection(&load_bootstrap()?),
         MemoryConfigSubcommand::Set {
             llm,
             embedding,
@@ -44,339 +62,148 @@ fn run_config(command: MemoryConfigSubcommand) -> Result<()> {
             if llm.is_none() && embedding.is_none() && rerank.is_none() {
                 return Err(anyhow!("请至少指定 --llm / --embedding / --rerank 之一"));
             }
-            let mut config = config;
-            let models =
-                tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
-
-            if let Some(name) = llm {
-                config.model = Some(resolve_to_llm_endpoint(&name, &models)?);
+            let mut bootstrap = load_bootstrap()?;
+            if let Some(key) = llm {
+                validate_model_key(&bootstrap, &key, "chat")?;
+                bootstrap.config.model_key = Some(key);
             }
-            if let Some(name) = embedding {
-                config.embedding = Some(resolve_to_embedding_endpoint(&name, &models)?);
+            if let Some(key) = embedding {
+                validate_model_key(&bootstrap, &key, "embedding")?;
+                bootstrap.config.embedding_key = Some(key);
             }
-            if let Some(name) = rerank {
-                config.rerank = Some(resolve_to_rerank_endpoint(&name, &models)?);
+            if let Some(key) = rerank {
+                validate_model_key(&bootstrap, &key, "rerank")?;
+                bootstrap.config.rerank_key = Some(key);
             }
-            config.save()?;
+            save_selection(&bootstrap.config)?;
             println!("Memory 配置已更新");
         }
     }
     Ok(())
 }
 
-/// 从 models.json 引用模型，构建 Memory LLM 端点配置。
-///
-/// Memory LLM 用于记忆反刍/总结，要求 chat 能力（embedding/rerank 模型
-/// 不适合做文本总结，会被 lookup_model_for_llm 拒绝）。
-fn resolve_to_llm_endpoint(model_name: &str, models: &ModelsConfig) -> Result<MemoryLlmConfig> {
-    let (provider_name, provider, model_id) = lookup_model_for_llm(models, model_name)?;
-    Ok(MemoryLlmConfig {
-        provider_key: Some(provider_name),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: model_id,
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-    })
+pub(crate) fn load_bootstrap() -> Result<MemoryBootstrap> {
+    serde_json::from_value(invoke("ui.memory.config.get", serde_json::json!({}))?)
+        .with_context(|| "解析 Memory 配置响应失败")
 }
 
-/// 从 models.json 引用模型，构建 Memory Embedding 端点配置。
-fn resolve_to_embedding_endpoint(
-    model_name: &str,
-    models: &ModelsConfig,
-) -> Result<MemoryEmbeddingConfig> {
-    let (provider_name, provider, model_id) =
-        lookup_model_with_capability(models, model_name, ModelCapability::Embedding)?;
-    Ok(MemoryEmbeddingConfig {
-        provider_key: Some(provider_name),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: model_id,
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-        dimension: 0,
-    })
+pub(crate) fn save_selection(selection: &MemorySelection) -> Result<()> {
+    invoke("ui.memory.config.set", serde_json::to_value(selection)?)?;
+    Ok(())
 }
 
-/// 从 models.json 引用模型，构建 Memory Rerank 端点配置。
-fn resolve_to_rerank_endpoint(
-    model_name: &str,
-    models: &ModelsConfig,
-) -> Result<MemoryRerankConfig> {
-    let (provider_name, provider, model_id) =
-        lookup_model_with_capability(models, model_name, ModelCapability::Rerank)?;
-    Ok(MemoryRerankConfig {
-        provider_key: Some(provider_name),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: model_id,
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-    })
+pub(crate) fn set_enabled(enabled: bool) -> Result<()> {
+    let operation = if enabled { "enable" } else { "disable" };
+    invoke(operation, serde_json::json!({}))?;
+    Ok(())
 }
 
-/// 在 models.json 注册表中查找模型，返回 (provider_name, provider_config, model_id)。
-/// 在 models.json 注册表中查找模型，返回 (provider_name, provider_config, model_id)。
-fn lookup_model_entry<'a>(
-    models: &'a ModelsConfig,
-    name: &str,
-) -> Result<(&'a str, &'a ProviderConfig, &'a str)> {
-    let entry = models.models.get(name).ok_or_else(|| {
-        anyhow!("模型 {name} 不存在于 models.json，请先 `tiangong model add-model {name} ...`")
-    })?;
-    let provider = models
-        .providers
-        .get(&entry.provider)
-        .ok_or_else(|| anyhow!("模型 {name} 的 provider {} 不存在", entry.provider))?;
-    Ok((&entry.provider, provider, &entry.model))
+pub(crate) fn query_status() -> Result<serde_json::Value> {
+    invoke("status", serde_json::json!({}))
 }
 
-/// 查找模型并校验其具备指定 capability。
-fn lookup_model_with_capability(
-    models: &ModelsConfig,
-    name: &str,
-    expected: ModelCapability,
-) -> Result<(String, ProviderConfig, String)> {
-    let (provider_name, provider, model_id) = lookup_model_entry(models, name)?;
-    let entry = &models.models[name];
-    if !entry.capabilities.contains(&expected) {
-        let current = if entry.capabilities.is_empty() {
-            "无".to_string()
-        } else {
-            entry
-                .capabilities
-                .iter()
-                .map(|c| c.key())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        return Err(anyhow!(
-            "模型 {name} 不具备 {} 能力（当前能力：{current}）",
-            expected.key()
-        ));
+pub(crate) fn test_config() -> Result<serde_json::Value> {
+    invoke("test", serde_json::json!({}))
+}
+
+fn invoke(operation: &str, payload: serde_json::Value) -> Result<serde_json::Value> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "memory",
+        operation,
+        payload,
+    )
+}
+
+fn validate_model_key(bootstrap: &MemoryBootstrap, key: &str, capability: &str) -> Result<()> {
+    let model = bootstrap
+        .models
+        .iter()
+        .find(|model| model.key == key)
+        .ok_or_else(|| anyhow!("模型 {key} 不存在于 models.json"))?;
+    if !model.capabilities.iter().any(|item| item == capability) {
+        bail!("模型 {key} 不具备 {capability} 能力");
     }
-    Ok((
-        provider_name.to_string(),
-        provider.clone(),
-        model_id.to_string(),
-    ))
+    Ok(())
 }
 
-/// 查找模型供 Memory LLM 使用（校验 chat 能力，最常见场景）。
-fn lookup_model_for_llm(
-    models: &ModelsConfig,
-    name: &str,
-) -> Result<(String, ProviderConfig, String)> {
-    let (provider_name, provider, model_id) = lookup_model_entry(models, name)?;
-    let entry = &models.models[name];
-    // Memory LLM 宽松校验：具备 chat 能力即可（embedding/rerank 模型不适合做 LLM 总结）
-    if !entry.capabilities.contains(&ModelCapability::Chat) {
-        let current = if entry.capabilities.is_empty() {
-            "无".to_string()
-        } else {
-            entry
-                .capabilities
-                .iter()
-                .map(|c| c.key())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        return Err(anyhow!(
-            "模型 {name} 不具备 chat 能力，不适合作为 Memory LLM（当前能力：{current}）"
-        ));
-    }
-    Ok((
-        provider_name.to_string(),
-        provider.clone(),
-        model_id.to_string(),
-    ))
-}
-
-fn print_config(config: &MemoryConfig) {
+fn print_selection(bootstrap: &MemoryBootstrap) {
     println!("== Memory 配置 ==");
     println!(
         "启用状态：{}",
-        if is_memory_disabled() {
-            "\x1b[31m禁用\x1b[0m"
+        if bootstrap.disabled {
+            "已禁用"
         } else {
-            "\x1b[32m启用\x1b[0m"
+            "已启用"
         }
     );
-    println!("vector_mode: {:?}", config.vector_mode);
-
-    println!("\n-- LLM 端点 --");
-    match &config.model {
-        Some(m) => {
-            println!("  base_url: {}", m.base_url);
-            println!("  model: {}", m.model);
-            println!("  protocol: {}", m.protocol.as_str());
-            println!("  timeout_ms: {}", m.timeout_ms);
-        }
-        None => println!("  （未配置）"),
-    }
-
-    println!("\n-- Embedding 端点 --");
-    match &config.embedding {
-        Some(e) => {
-            println!("  base_url: {}", e.base_url);
-            println!("  model: {}", e.model);
-            println!("  dimension: {}", e.dimension);
-        }
-        None => println!("  （未配置）"),
-    }
-
-    println!("\n-- Rerank 端点 --");
-    match &config.rerank {
-        Some(r) => {
-            println!("  base_url: {}", r.base_url);
-            println!("  model: {}", r.model);
-        }
-        None => println!("  （未配置）"),
-    }
+    println!("vector_mode: {}", bootstrap.config.vector_mode);
+    println!(
+        "LLM 模型：{}",
+        bootstrap.config.model_key.as_deref().unwrap_or("未配置")
+    );
+    println!(
+        "Embedding 模型：{}",
+        bootstrap
+            .config
+            .embedding_key
+            .as_deref()
+            .unwrap_or("未配置")
+    );
+    println!(
+        "Rerank 模型：{}",
+        bootstrap.config.rerank_key.as_deref().unwrap_or("未配置")
+    );
 }
 
-fn print_status() {
-    let config = MemoryConfig::load_or_default();
-    let disabled = is_memory_disabled();
-    let llm_valid = config
-        .model
-        .as_ref()
-        .map(|m| endpoint_valid(&m.base_url, &m.api_key, &m.model))
+fn print_status(status: &serde_json::Value) {
+    let disabled = status
+        .get("disabled")
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-
-    println!("禁用标记：{}", if disabled { "存在" } else { "无" });
+    println!("启用状态：{}", if disabled { "已禁用" } else { "已启用" });
     println!(
-        "启用状态：{}",
-        if disabled {
-            "\x1b[31m已禁用\x1b[0m"
-        } else if llm_valid {
-            "\x1b[32m已启用且配置有效\x1b[0m"
-        } else {
-            "\x1b[33m已启用（LLM 未配置，将降级为规则策略）\x1b[0m"
-        }
+        "vector_mode: {}",
+        status
+            .get("vector_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("未知")
     );
-    println!("vector_mode: {:?}", config.vector_mode);
-    println!(
-        "LLM 端点：{}",
-        config
-            .model
-            .as_ref()
-            .map(|m| format!("{} @ {}", m.model, m.base_url))
-            .unwrap_or_else(|| "（未配置）".to_string())
-    );
-    println!(
-        "Embedding 端点：{}",
-        config
-            .embedding
-            .as_ref()
-            .map(|e| format!("{} (dim={})", e.model, e.dimension))
-            .unwrap_or_else(|| "（未配置）".to_string())
-    );
-    println!(
-        "Rerank 端点：{}",
-        config
-            .rerank
-            .as_ref()
-            .map(|r| r.model.clone())
-            .unwrap_or_else(|| "（未配置）".to_string())
-    );
-}
-
-fn endpoint_valid(base_url: &str, api_key: &str, model: &str) -> bool {
-    !base_url.trim().is_empty() && !api_key.trim().is_empty() && !model.trim().is_empty()
-}
-
-/// 检查端点的 `${ENV}` 密钥是否可解析，不可解析返回错误描述。
-fn endpoint_secret_issue(label: &str, api_key: &str) -> Option<String> {
-    use crate::secrets::env_secret_resolvable;
-    let (ok, var) = env_secret_resolvable(api_key);
-    if ok {
-        None
-    } else {
-        Some(format!(
-            "{label} 密钥环境变量 {} 未设置",
-            var.unwrap_or_default()
-        ))
+    for (key, label) in [
+        ("llm", "LLM"),
+        ("embedding", "Embedding"),
+        ("rerank", "Rerank"),
+    ] {
+        let model = status
+            .get(key)
+            .and_then(|value| value.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("未配置");
+        println!("{label}：{model}");
     }
 }
 
-/// 测试 Memory 配置完整性。
-///
-/// 校验 Memory 端点配置是否完整（base_url/api_key/model 非空），
-/// 并验证 `${ENV}` 密钥可解析到真实值。真实连通性测试由
-/// `tiangong model test` 覆盖（端点最终来自 models.json）。
 fn test_memory() -> Result<()> {
-    let config = MemoryConfig::load_or_default();
-    if is_memory_disabled() {
-        println!("⚠️  Memory 当前已被禁用（`tiangong memory enable` 可重新启用）");
+    let result = test_config()?;
+    let ok = result
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if ok {
+        println!("Memory 配置测试通过");
+        return Ok(());
     }
-
-    println!("== Memory 配置测试 ==");
-
-    let mut issues = Vec::new();
-
-    // LLM 端点
-    match &config.model {
-        Some(m) if endpoint_valid(&m.base_url, &m.api_key, &m.model) => {
-            if let Some(issue) = endpoint_secret_issue("LLM 端点", &m.api_key) {
-                issues.push(issue);
-            } else {
-                println!("✅ LLM 端点有效：{} @ {}", m.model, m.base_url);
-            }
-        }
-        Some(_) => {
-            issues.push("LLM 端点配置不完整（base_url/api_key/model 不能为空）".to_string());
-        }
-        None => {
-            issues.push("未配置 LLM 端点".to_string());
-        }
+    let issues = result
+        .get("issues")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for issue in &issues {
+        eprintln!("- {}", issue.as_str().unwrap_or("未知问题"));
     }
+    Err(anyhow!("Memory 配置测试未通过（{} 个问题）", issues.len()))
+}
 
-    // Embedding 端点（可选）
-    match &config.embedding {
-        Some(e) if endpoint_valid(&e.base_url, &e.api_key, &e.model) => {
-            if let Some(issue) = endpoint_secret_issue("Embedding 端点", &e.api_key) {
-                issues.push(issue);
-            } else if e.dimension == 0 {
-                println!("⚠️  Embedding 端点有效但 dimension=0（向量维度未设置）");
-            } else {
-                println!("✅ Embedding 端点有效：{} (dim={})", e.model, e.dimension);
-            }
-        }
-        Some(_) => {
-            issues.push("Embedding 端点配置不完整".to_string());
-        }
-        None => {
-            println!("ℹ️  未配置 Embedding 端点（可选，缺失会降级）");
-        }
-    }
-
-    // Rerank 端点（可选）
-    match &config.rerank {
-        Some(r) if endpoint_valid(&r.base_url, &r.api_key, &r.model) => {
-            if let Some(issue) = endpoint_secret_issue("Rerank 端点", &r.api_key) {
-                issues.push(issue);
-            } else {
-                println!("✅ Rerank 端点有效：{}", r.model);
-            }
-        }
-        Some(_) => {
-            issues.push("Rerank 端点配置不完整".to_string());
-        }
-        None => {
-            println!("ℹ️  未配置 Rerank 端点（可选，缺失会降级）");
-        }
-    }
-
-    if issues.is_empty() {
-        println!("\n✅ Memory 配置测试通过");
-        println!("（如需验证真实连通性，可对引用的模型执行 `tiangong model test <模型名>`）");
-        Ok(())
-    } else {
-        println!("\n❌ Memory 配置测试未通过：");
-        for issue in &issues {
-            println!("  - {issue}");
-        }
-        Err(anyhow!("Memory 配置测试未通过（{} 个问题）", issues.len()))
-    }
+fn default_vector_mode() -> String {
+    "auto".to_string()
 }

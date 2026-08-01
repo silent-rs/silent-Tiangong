@@ -1383,3 +1383,32 @@ mod ready_content_tests {
         assert_eq!(legacy.context().len(), 1);
     }
 }
+
+/// Core Session → 插件只读快照转换。
+///
+/// 由 WASM Adapter 在生命周期钩子里调用，序列化为 JSON 传给 WASM。
+/// 不暴露 Core 内部状态（token 计数、任务记录、信任模式等）。
+impl From<&Session> for tiangong_types::PluginSession {
+    fn from(session: &Session) -> Self {
+        // 工作区标识：取 cwd 的末尾目录名（平台无关，由宿主生成）。
+        let workspace_id = session
+            .cwd
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&session.cwd)
+            .to_string();
+        Self {
+            id: session.id.clone(),
+            title: session.title.clone(),
+            cwd: session.cwd.clone(),
+            workspace_id,
+            parent_session_id: session.parent_session_id.clone(),
+            reasoning_effort: session.reasoning_effort.clone(),
+            messages: session.messages.clone(),
+            context_summary: session.context_summary.clone(),
+            created_at: session.created_at.clone(),
+            updated_at: session.updated_at.clone(),
+        }
+    }
+}

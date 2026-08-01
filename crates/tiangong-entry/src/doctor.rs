@@ -4,7 +4,6 @@ use tiangong_config::default_tiangong_dir;
 use tiangong_config::io::custom_prompt_path;
 use tiangong_config::{load_server_config, load_tiangong_config};
 use tiangong_llm::models_config::RoutingSlot;
-use tiangong_memory::{MemoryConfig, is_memory_disabled};
 
 use crate::args::DoctorArgs;
 use crate::secrets::env_secret_resolvable;
@@ -153,25 +152,6 @@ fn check_model_secrets(report: &mut DoctorReport) {
         }
     }
 
-    // Memory 端点的 api_key
-    let memory = MemoryConfig::load_or_default();
-    for (label, cfg) in [
-        ("Memory LLM", memory.model.as_ref().map(|m| &m.api_key)),
-        (
-            "Memory Embedding",
-            memory.embedding.as_ref().map(|e| &e.api_key),
-        ),
-        ("Memory Rerank", memory.rerank.as_ref().map(|r| &r.api_key)),
-    ] {
-        if let Some(key) = cfg {
-            checked += 1;
-            let (ok, var) = env_secret_resolvable(key);
-            if !ok {
-                missing.push(format!("{label}（{}）", var.unwrap_or_default()));
-            }
-        }
-    }
-
     if missing.is_empty() {
         if checked > 0 {
             report.ok("密钥环境变量", format!("{checked} 项密钥均可解析"));
@@ -201,30 +181,26 @@ fn check_server_token(report: &mut DoctorReport) {
 }
 
 fn check_memory(report: &mut DoctorReport) {
-    let memory = MemoryConfig::load_or_default();
-    let disabled = is_memory_disabled();
-    let has_model = memory
-        .model
-        .as_ref()
-        .map(|m| {
-            !m.base_url.trim().is_empty()
-                && !m.api_key.trim().is_empty()
-                && !m.model.trim().is_empty()
-        })
-        .unwrap_or(false);
-
-    if disabled {
-        report.warn("Memory 配置", "已禁用");
-    } else if has_model {
-        let model_name = memory
-            .model
-            .as_ref()
-            .map(|m| m.model.clone())
-            .unwrap_or_default();
-        report.ok("Memory 配置", format!("已启用，LLM={model_name}"));
-    } else {
-        report.warn("Memory 配置", "已启用但 LLM 端点未配置");
-        report.hint("可执行：tiangong memory config set --llm <模型名>");
+    match crate::memory::query_status() {
+        Ok(status) => {
+            let disabled = status
+                .get("disabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let model_name = status
+                .get("llm")
+                .and_then(|value| value.get("model"))
+                .and_then(serde_json::Value::as_str);
+            if disabled {
+                report.warn("Memory 配置", "已禁用");
+            } else if let Some(model_name) = model_name {
+                report.ok("Memory 配置", format!("已启用，LLM={model_name}"));
+            } else {
+                report.warn("Memory 配置", "已启用但 LLM 端点未配置");
+                report.hint("可执行：tiangong memory config set --llm <模型名>");
+            }
+        }
+        Err(error) => report.err("Memory sidecar", error.to_string()),
     }
 }
 

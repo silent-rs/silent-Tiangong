@@ -2,10 +2,8 @@
 //!
 //! 提供分层记忆管理、三级 Injection 注入、Episode 写入与渐进式召回。
 //!
-//! # 使用方式
-//!
-//! 各入口（GUI、CLI、Server）在启动时调用 [`start`] 获取 [`MemoryHandle`]，
-//! 然后将 Handle 显式传给上层运行时。
+//! 本 crate 只在 Memory sidecar 进程内启动 Actor、存储与 IPC 服务。
+//! App、CLI、Server 通过 WASM 插件运行时访问 sidecar，不直接依赖本 crate。
 //!
 //! ```no_run
 //! let handle = tiangong_memory::start().expect("Memory 系统启动失败");
@@ -15,10 +13,8 @@
 pub mod command;
 pub mod config;
 pub mod election;
-pub mod gui_api;
 pub mod handle;
 pub mod ipc;
-pub mod registry;
 pub mod types;
 
 mod actor;
@@ -26,6 +22,7 @@ mod db;
 mod injection;
 mod llm_metrics;
 mod options;
+mod paths;
 mod recall;
 mod recall_anchor;
 mod recall_context;
@@ -36,9 +33,9 @@ mod writer;
 
 pub use actor::{start_memory as start, start_memory_with_options as start_with_options};
 pub use config::{
-    MemoryConfig, MemoryEmbeddingConfig, MemoryLlmConfig, MemoryRerankConfig,
-    default_memory_config_path, disable_memory, disable_memory_at, enable_memory, enable_memory_at,
-    is_memory_disabled, memory_disabled_marker_path,
+    MemoryConfig, MemoryConfigSelection, MemoryEmbeddingConfig, MemoryLlmConfig,
+    MemoryRerankConfig, default_memory_config_path, disable_memory, disable_memory_at,
+    enable_memory, enable_memory_at, is_memory_disabled, memory_disabled_marker_path,
 };
 pub use election::{
     LeaderInfo, LeaderState, ManagedMemory, ProcessType, leader_info_path, leader_lock_path,

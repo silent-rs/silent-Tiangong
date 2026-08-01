@@ -1,0 +1,6 @@
+[test-groups]
+memory-integration = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(=tiangong-memory)'
+test-group = 'memory-integration'

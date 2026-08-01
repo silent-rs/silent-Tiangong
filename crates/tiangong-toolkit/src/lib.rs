@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 
-use tiangong_types::process::configure_no_window;
+pub mod process;
+
+pub use process::{configure_no_window, configure_tokio_no_window};
 
 /// 读取进程当前工作目录，供无显式 base 注入的回退路径使用。
 ///

@@ -12,6 +12,7 @@ tiangong-llm = { workspace = true }
 tiangong-app-state = { workspace = true }
 tiangong-media-archive = { workspace = true }
 tiangong-types = { workspace = true }
+tiangong-toolkit = { workspace = true }
 tiangong-bots = { workspace = true }
 tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
@@ -23,7 +24,7 @@ tiangong-plugin-generate-image = { workspace = true }
 tiangong-plugin-generate-video = { workspace = true }
 tiangong-plugin-text-to-speech = { workspace = true }
 tiangong-plugin-speech-to-text = { workspace = true }
-tiangong-plugin-memory = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-scheduler = { workspace = true }
 tiangong-plugin-task = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }
@@ -34,7 +35,6 @@ tiangong-plugin-agent-team = { workspace = true }
 tiangong-plugin-prompt = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
-tiangong-memory = { workspace = true }
 tiangong-scheduler = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }
 async-trait = { workspace = true }

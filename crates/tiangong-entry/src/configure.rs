@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow};
 use tiangong_config::{generate_token, load_server_config, save_server_config};
 use tiangong_core::model::ProviderProtocol;
 use tiangong_llm::models_config::{ModelCapability, ModelsConfig, RoutingSlot};
-use tiangong_memory::{MemoryConfig, enable_memory};
 
 use crate::interactive as ui;
 
@@ -263,11 +262,10 @@ pub fn run_memory_configure() -> Result<()> {
     ui::ensure_terminal()?;
     println!("=== Memory 配置向导 ===\n");
 
-    // 是否启用
-    let currently_disabled = tiangong_memory::is_memory_disabled();
-    if currently_disabled {
+    let mut bootstrap = crate::memory::load_bootstrap()?;
+    if bootstrap.disabled {
         if ui::confirm("Memory 当前已禁用，是否启用？", true)? {
-            enable_memory()?;
+            crate::memory::set_enabled(true)?;
             println!("Memory 已启用");
         } else {
             println!("已保持禁用状态，向导结束");
@@ -278,158 +276,82 @@ pub fn run_memory_configure() -> Result<()> {
         return Ok(());
     }
 
-    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
-    if models.models.is_empty() {
+    if bootstrap.models.is_empty() {
         println!("⚠️  models.json 中没有已注册模型，请先运行 `tiangong model configure`");
         println!("（Memory 端点引用 models.json 中的模型）");
         return Ok(());
     }
 
-    let mut config = MemoryConfig::load_or_default();
-
-    // LLM 模型（要求 chat 能力）
-    config.model = Some(pick_memory_llm(&models)?);
+    bootstrap.config.model_key = Some(pick_memory_model(&bootstrap.models, "chat", "Memory LLM")?);
     println!();
 
-    // Embedding 模型（可选）
-    if ui::confirm("是否配置 Embedding 端点？", false)?
-        && let Some(m) = pick_memory_endpoint(&models, ModelCapability::Embedding, "Embedding")?
-    {
-        config.embedding = Some(m);
+    if ui::confirm("是否配置 Embedding 端点？", false)? {
+        bootstrap.config.embedding_key =
+            pick_optional_memory_model(&bootstrap.models, "embedding", "Embedding")?;
     }
     println!();
 
-    // Rerank 模型（可选）
-    if ui::confirm("是否配置 Rerank 端点？", false)?
-        && let Some(m) = pick_memory_rerank(&models, "Rerank")?
-    {
-        config.rerank = Some(m);
+    if ui::confirm("是否配置 Rerank 端点？", false)? {
+        bootstrap.config.rerank_key =
+            pick_optional_memory_model(&bootstrap.models, "rerank", "Rerank")?;
     }
 
-    config.save()?;
+    crate::memory::save_selection(&bootstrap.config)?;
     println!();
     println!("✅ Memory 配置已保存");
     println!("提示：可用 `tiangong memory test` 检查端点有效性");
     Ok(())
 }
 
-/// 让用户从已注册模型中选择一个作为 Memory LLM（校验 chat 能力）。
-fn pick_memory_llm(models: &ModelsConfig) -> Result<tiangong_memory::MemoryLlmConfig> {
-    let mut chat_models: Vec<(&String, &str)> = models
-        .models
+fn pick_memory_model(
+    models: &[crate::memory::MemoryUiModel],
+    capability: &str,
+    label: &str,
+) -> Result<String> {
+    let mut candidates = models
         .iter()
-        .filter(|(_, m)| m.capabilities.contains(&ModelCapability::Chat))
-        .map(|(k, m)| (k, m.model.as_str()))
-        .collect();
-    chat_models.sort_by_key(|(k, _)| k.as_str());
-    if chat_models.is_empty() {
-        return Err(anyhow!(
-            "没有具备 chat 能力的已注册模型，请先 `tiangong model add-model ... --capability chat`"
-        ));
+        .filter(|model| {
+            model
+                .capabilities
+                .iter()
+                .any(|current| current == capability)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.key.cmp(&right.key));
+    if candidates.is_empty() {
+        return Err(anyhow!("没有具备 {capability} 能力的已注册模型"));
     }
-    let labels: Vec<String> = chat_models
+    let labels = candidates
         .iter()
-        .map(|(k, id)| format!("{k} ({id})"))
-        .collect();
+        .map(|model| {
+            let dimension = model
+                .dimension
+                .map(|value| format!(" / dim={value}"))
+                .unwrap_or_default();
+            format!(
+                "{} ({} / {}{})",
+                model.key, model.provider, model.model, dimension
+            )
+        })
+        .collect::<Vec<_>>();
     let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = ui::select("选择 Memory LLM 模型", &label_refs)?;
-    let (name, _) = chat_models[idx];
-    build_llm_config(models, name)
+    let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
+    Ok(candidates[idx].key.clone())
 }
 
-/// 让用户从已注册模型中选择一个 Embedding 模型（校验对应能力），可跳过。
-fn pick_memory_endpoint(
-    models: &ModelsConfig,
-    expected: ModelCapability,
+fn pick_optional_memory_model(
+    models: &[crate::memory::MemoryUiModel],
+    capability: &str,
     label: &str,
-) -> Result<Option<tiangong_memory::MemoryEmbeddingConfig>> {
-    let mut candidates: Vec<(&String, &str)> = models
-        .models
-        .iter()
-        .filter(|(_, m)| m.capabilities.contains(&expected))
-        .map(|(k, m)| (k, m.model.as_str()))
-        .collect();
-    candidates.sort_by_key(|(k, _)| k.as_str());
-    if candidates.is_empty() {
+) -> Result<Option<String>> {
+    if !models.iter().any(|model| {
+        model
+            .capabilities
+            .iter()
+            .any(|current| current == capability)
+    }) {
         println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
         return Ok(None);
     }
-    let labels: Vec<String> = candidates
-        .iter()
-        .map(|(k, id)| format!("{k} ({id})"))
-        .collect();
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
-    let (name, _) = candidates[idx];
-    let provider_name = &models.models[name].provider;
-    let provider = models
-        .providers
-        .get(provider_name)
-        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {provider_name}"))?;
-    use tiangong_memory::MemoryEmbeddingConfig;
-    Ok(Some(MemoryEmbeddingConfig {
-        provider_key: Some(provider_name.clone()),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: models.models[name].model.clone(),
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-        dimension: 0,
-    }))
-}
-
-/// 让用户从已注册模型中选择一个 Rerank 模型（校验 rerank 能力），可跳过。
-fn pick_memory_rerank(
-    models: &ModelsConfig,
-    label: &str,
-) -> Result<Option<tiangong_memory::MemoryRerankConfig>> {
-    let mut candidates: Vec<(&String, &str)> = models
-        .models
-        .iter()
-        .filter(|(_, m)| m.capabilities.contains(&ModelCapability::Rerank))
-        .map(|(k, m)| (k, m.model.as_str()))
-        .collect();
-    candidates.sort_by_key(|(k, _)| k.as_str());
-    if candidates.is_empty() {
-        println!("⚠️  没有具备 {label} 能力的已注册模型，已跳过");
-        return Ok(None);
-    }
-    let labels: Vec<String> = candidates
-        .iter()
-        .map(|(k, id)| format!("{k} ({id})"))
-        .collect();
-    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-    let idx = ui::select(&format!("选择 {label} 模型"), &label_refs)?;
-    let (name, _) = candidates[idx];
-    let provider_name = &models.models[name].provider;
-    let provider = models
-        .providers
-        .get(provider_name)
-        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {provider_name}"))?;
-    use tiangong_memory::MemoryRerankConfig;
-    Ok(Some(MemoryRerankConfig {
-        provider_key: Some(provider_name.clone()),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: models.models[name].model.clone(),
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-    }))
-}
-
-/// 构建 Memory LLM 配置（复用 provider 端点）。
-fn build_llm_config(models: &ModelsConfig, name: &str) -> Result<tiangong_memory::MemoryLlmConfig> {
-    let entry = &models.models[name];
-    let provider = models
-        .providers
-        .get(&entry.provider)
-        .ok_or_else(|| anyhow!("模型 {name} 引用了不存在的 provider {}", entry.provider))?;
-    Ok(tiangong_memory::MemoryLlmConfig {
-        provider_key: Some(entry.provider.clone()),
-        base_url: provider.base_url.clone(),
-        api_key: provider.api_key.clone(),
-        model: entry.model.clone(),
-        protocol: provider.protocol,
-        timeout_ms: provider.timeout_ms,
-    })
+    pick_memory_model(models, capability, label).map(Some)
 }

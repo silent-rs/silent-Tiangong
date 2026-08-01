@@ -54,6 +54,15 @@ pub fn models() -> tiangong_llm::models_config::ModelsConfig {
     config().models
 }
 
+/// 读取内存中的模型配置；入口尚未初始化配置时返回 None。
+pub fn try_models() -> Option<tiangong_llm::models_config::ModelsConfig> {
+    config_cell()
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|config| config.models)
+}
+
 /// 可靠更新模型配置：先写盘成功，再更新兼容副本并返回新的完整配置。
 ///
 /// 处理顺序：

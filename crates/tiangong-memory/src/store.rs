@@ -23,7 +23,7 @@ use crate::search::TantivyIndex;
 use crate::search::lancedb_search::LanceDbIndex;
 use crate::search::vector::VectorIndex;
 use crate::types::{
-    Decision, Entity, Episode, EpisodeOutcome, ExpandedMemory, ManualMemoryDraft,
+    Decision, Entity, Episode, EpisodeOutcome, Evidence, ExpandedMemory, ManualMemoryDraft,
     MemoryCognitiveType, MemoryKind, MemoryListQuery, MemoryNode, MemoryRelation,
     MemoryRelationDraft, MemoryRelationKind, MemoryScopeType, MemoryStatus, RecallAnchors,
     RecallHit,
@@ -600,6 +600,60 @@ impl MemoryStore {
         self.db.list_entities(workspace_id).unwrap_or_default()
     }
 
+    /// 写入 Evidence（补齐之前缺失的持久化）。
+    /// Evidence 存储为 memory_node + evidence 扩展表。
+    pub(crate) fn write_evidence(
+        &mut self,
+        evidence: Evidence,
+        workspace_id: Option<&str>,
+    ) -> Result<String> {
+        let id = scru128::new().to_string();
+        self.db.insert_evidence(&id, &evidence, workspace_id)?;
+
+        // 索引到 Tantivy。
+        let body_extra = evidence
+            .url
+            .as_ref()
+            .or(evidence.file_path.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let node = MemoryNode {
+            id: id.clone(),
+            kind: MemoryKind::Evidence,
+            memory_type: MemoryCognitiveType::Factual,
+            scope_type: MemoryScopeType::Workspace,
+            scope_id: workspace_id.map(|s| s.to_string()),
+            title: evidence.title.clone(),
+            summary: evidence.summary.clone(),
+            keywords: evidence
+                .file_path
+                .as_ref()
+                .or(evidence.url.as_ref())
+                .map(|p| vec![p.clone()])
+                .unwrap_or_default(),
+            importance: 0.5,
+            confidence: 0.0,
+            status: MemoryStatus::Active,
+            source: evidence.source_tool.clone(),
+            usage_count: 0,
+            last_used_at: None,
+            created_at: chrono::Local::now().naive_local().to_string(),
+            updated_at: chrono::Local::now().naive_local().to_string(),
+        };
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.index_node(&node, body_extra)
+        {
+            tracing::warn!("Tantivy Evidence 索引写入失败（非致命）: {}", e);
+        }
+        if let Some(ref mut tantivy) = self.tantivy
+            && let Err(e) = tantivy.commit()
+        {
+            tracing::warn!("Tantivy commit 失败（非致命）: {e}");
+        }
+
+        Ok(id)
+    }
+
     /// 列出 Decision，供 MesoRumination 幂等更新使用。
     pub(crate) fn list_decisions(&self, workspace_id: Option<&str>) -> Vec<Decision> {
         self.db.list_decisions(workspace_id).unwrap_or_default()
@@ -869,22 +923,9 @@ fn decision_to_node(decision: &Decision, workspace_id: Option<&str>) -> MemoryNo
 }
 
 fn memory_base_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
+    crate::paths::memory_data_dir()
 }
 
 fn default_vector_mode() -> MemoryVectorMode {
     MemoryVectorMode::EmbeddedLanceDb
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
 }

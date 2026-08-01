@@ -157,6 +157,7 @@ pub(crate) async fn process_enhanced_micro(
     workspace_id: Option<&str>,
     model: Option<&LlmEndpointConfig>,
 ) -> Result<()> {
+    // 恢复原有分流：候选为空时走普通 Micro（与原生版本一致）。
     let turn_result = TurnResult {
         session_id: enhanced.session_id.clone(),
         turn_id: enhanced.turn_id.clone(),
@@ -221,7 +222,16 @@ pub(crate) async fn process_enhanced_micro(
         }
     }
 
-    // 5. 跨类型关联
+    // 5. 写入 Evidence（补齐之前缺失的持久化）
+    let mut written_evidence_ids = Vec::new();
+    for evidence in &extraction.evidences {
+        match store.write_evidence(evidence.clone(), workspace_id) {
+            Ok(id) => written_evidence_ids.push(id),
+            Err(e) => tracing::warn!("Evidence 写入失败: {}", e),
+        }
+    }
+
+    // 6. 跨类型关联
     link_written_memories(
         store,
         &written_episode_ids,
@@ -229,7 +239,7 @@ pub(crate) async fn process_enhanced_micro(
         &written_decision_ids,
     );
 
-    // 6. 更新 Session Injection
+    // 7. 更新 Session Injection
     let recent = store.recent_episodes_for_session(workspace_id, &enhanced.session_id, 3);
     if !recent.is_empty() {
         let content = build_session_injection(&recent, &enhanced.session_id);

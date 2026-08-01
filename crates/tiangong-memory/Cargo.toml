@@ -8,6 +8,9 @@ license = "Apache-2.0"
 default = []
 
 [dependencies]
+tiangong-plugin-memory-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-config = { workspace = true }
 tokio = { workspace = true, features = [
     "sync",
     "time",
@@ -16,6 +19,7 @@ tokio = { workspace = true, features = [
     "net",
     "io-util",
     "macros",
+    "process",
 ] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -26,13 +30,13 @@ chrono = { workspace = true, default-features = false, features = [
 scru128 = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+libc = { workspace = true }
 rusqlite = { workspace = true, features = [
     "bundled-sqlcipher-vendored-openssl",
 ] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tantivy = { workspace = true }
-libc = { workspace = true }
 tiangong-llm = { workspace = true }
 tiangong-types = { workspace = true }
 lancedb = { workspace = true }
@@ -42,5 +46,3 @@ futures-util = { workspace = true }
 [dev-dependencies]
 serial_test = { workspace = true }
 tempfile = { workspace = true }
-tiangong-config = { workspace = true }
-tiangong-core = { workspace = true }

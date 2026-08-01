@@ -14,9 +14,21 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use plugin_ui::{CONFIG_GET_OPERATION, CONFIG_SET_OPERATION};
 use protocol::{
     IpcAuth, IpcEndpoint, IpcFrame, IpcRequest, IpcResponse, MemoryIpcRequestPayload,
     MemoryIpcResponsePayload,
+};
+use tiangong_plugin_memory_protocol::control::{
+    DISABLE_OPERATION, ENABLE_OPERATION, STATUS_OPERATION, TEST_OPERATION,
+};
+use tiangong_plugin_memory_protocol::{
+    injection as plugin_injection, recall as plugin_recall, rumination as plugin_rumination,
+    ui as plugin_ui,
+};
+use tiangong_plugin_runtime::protocol::{
+    ErrorCode as PluginErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION,
+    Request as PluginRequest, Response as PluginResponse, ServiceStatus,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -249,20 +261,526 @@ async fn run_memory_bridge(
 async fn serve_connection(mut connection: IpcConnection, handle: MemoryHandle) -> Result<()> {
     loop {
         let request = connection.read_request().await?;
-        let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
-            .with_context(|| "解析 Memory IPC 请求载荷失败")?;
-        let response_payload = handle_memory_request(handle.clone(), payload).await?;
+        let response_payload = if request.payload.get("protocol_version").is_some() {
+            let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload) {
+                Ok(plugin_request) => {
+                    handle_plugin_request_with_connection(
+                        handle.clone(),
+                        plugin_request,
+                        &mut connection,
+                    )
+                    .await
+                }
+                Err(error) => PluginResponse::error(
+                    "unknown",
+                    PluginErrorCode::BadRequest,
+                    format!("解析插件 sidecar 请求失败: {error}"),
+                    false,
+                ),
+            };
+            serde_json::to_value(plugin_response).with_context(|| "序列化插件 sidecar 响应失败")?
+        } else {
+            let payload: MemoryIpcRequestPayload = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory IPC 请求载荷失败")?;
+            serde_json::to_value(handle_memory_request(handle.clone(), payload).await?)
+                .with_context(|| "序列化 Memory IPC 响应载荷失败")?
+        };
         connection
             .write_response(IpcResponse {
                 request_id: request.request_id,
-                payload: serde_json::to_value(response_payload)
-                    .with_context(|| "序列化 Memory IPC 响应载荷失败")?,
+                payload: response_payload,
             })
             .await?;
     }
 }
 
-async fn handle_memory_request(
+async fn handle_plugin_request_with_connection(
+    handle: MemoryHandle,
+    request: PluginRequest,
+    connection: &mut IpcConnection,
+) -> PluginResponse {
+    let request_id = request.request_id.clone();
+    if request.protocol_version != PROTOCOL_VERSION {
+        return PluginResponse::error(
+            request_id,
+            PluginErrorCode::ProtocolMismatch,
+            format!(
+                "Memory 协议版本不匹配: expected={PROTOCOL_VERSION}, actual={}",
+                request.protocol_version
+            ),
+            false,
+        );
+    }
+    if crate::is_memory_disabled()
+        && !matches!(
+            request.operation.as_str(),
+            HANDSHAKE_OPERATION
+                | ENABLE_OPERATION
+                | DISABLE_OPERATION
+                | STATUS_OPERATION
+                | TEST_OPERATION
+                | CONFIG_GET_OPERATION
+                | CONFIG_SET_OPERATION
+                | tiangong_plugin_memory_protocol::control::RECONFIGURE_OPERATION
+        )
+    {
+        return PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceDisabled,
+            "Memory 已禁用",
+            false,
+        );
+    }
+    if request.operation != plugin_recall::RECALL_CONTEXT_OPERATION {
+        return dispatch_checked_plugin_request(handle, request).await;
+    }
+
+    let recall: plugin_recall::RecallContextRequest =
+        match decode(&request.payload, plugin_recall::RECALL_CONTEXT_OPERATION) {
+            Ok(request) => request,
+            Err(error) => {
+                return PluginResponse::error(
+                    request_id,
+                    PluginErrorCode::BadRequest,
+                    error.to_string(),
+                    false,
+                );
+            }
+        };
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut memory_request: crate::types::MemoryRecallRequest = match transcode(recall.request) {
+        Ok(request) => request,
+        Err(error) => {
+            return PluginResponse::error(
+                request_id,
+                PluginErrorCode::BadRequest,
+                error.to_string(),
+                false,
+            );
+        }
+    };
+    memory_request.progress = Some(Arc::new(move |phase| {
+        let event = tiangong_types::StreamEvent::MemoryRecallProgress {
+            phase: phase.to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            let _ = progress_tx.send(json);
+        }
+    }));
+
+    let recall_task = tokio::spawn(async move { handle.recall_context(memory_request).await });
+    tokio::pin!(recall_task);
+    let response = loop {
+        tokio::select! {
+            Some(message) = progress_rx.recv() => {
+                if let Err(error) = connection.write_progress(&request_id, message).await {
+                    return PluginResponse::error(
+                        request_id,
+                        PluginErrorCode::ServiceError,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            }
+            result = &mut recall_task => {
+                while let Ok(message) = progress_rx.try_recv() {
+                    if let Err(error) = connection.write_progress(&request_id, message).await {
+                        return PluginResponse::error(
+                            request_id,
+                            PluginErrorCode::ServiceError,
+                            error.to_string(),
+                            false,
+                        );
+                    }
+                }
+                break result;
+            },
+        }
+    };
+
+    match response {
+        Ok(response) => {
+            let response: plugin_recall::RecallContextResponse = match transcode(response) {
+                Ok(response) => response,
+                Err(error) => {
+                    return PluginResponse::error(
+                        request_id,
+                        PluginErrorCode::ServiceError,
+                        error.to_string(),
+                        false,
+                    );
+                }
+            };
+            match serde_json::to_value(plugin_recall::RecallContextResult { response }) {
+                Ok(payload) => PluginResponse::success(request_id, payload),
+                Err(error) => PluginResponse::error(
+                    request_id,
+                    PluginErrorCode::ServiceError,
+                    error.to_string(),
+                    false,
+                ),
+            }
+        }
+        Err(error) => PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceError,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+async fn dispatch_checked_plugin_request(
+    handle: MemoryHandle,
+    request: PluginRequest,
+) -> PluginResponse {
+    let request_id = request.request_id.clone();
+    match dispatch_plugin_request(handle, request).await {
+        Ok(payload) => PluginResponse::success(request_id, payload),
+        Err(error) => PluginResponse::error(
+            request_id,
+            PluginErrorCode::ServiceError,
+            error.to_string(),
+            false,
+        ),
+    }
+}
+
+async fn dispatch_plugin_request(
+    handle: MemoryHandle,
+    request: PluginRequest,
+) -> Result<serde_json::Value> {
+    match request.operation.as_str() {
+        HANDSHAKE_OPERATION => serde_json::to_value(HandshakeResponse {
+            plugin_id: tiangong_plugin_memory_protocol::PLUGIN_ID.to_string(),
+            plugin_version: tiangong_plugin_memory_protocol::PLUGIN_VERSION.to_string(),
+            sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            business_protocol: tiangong_plugin_memory_protocol::MEMORY_PROTOCOL_VERSION,
+            capabilities: vec!["memory".to_string()],
+            instance_id: format!("memory-sidecar-{}", std::process::id()),
+            status: ServiceStatus::Ready,
+        })
+        .with_context(|| "序列化 Memory 握手响应失败"),
+        CONFIG_GET_OPERATION => memory_ui_bootstrap(),
+        CONFIG_SET_OPERATION => {
+            let selection: plugin_ui::MemorySelection = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory 页面配置失败")?;
+            let selection: crate::MemoryConfigSelection = transcode(selection)?;
+            let models =
+                tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+            let config = selection.to_memory(&models)?;
+            config.save()?;
+            handle.reconfigure(config.to_options()).await?;
+            serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
+                .with_context(|| "序列化 Memory 配置保存响应失败")
+        }
+        tiangong_plugin_memory_protocol::control::RECONFIGURE_OPERATION => {
+            let _: tiangong_plugin_memory_protocol::Empty = serde_json::from_value(request.payload)
+                .with_context(|| "解析 Memory 重载配置请求失败")?;
+            let config = crate::MemoryConfig::load_or_default();
+            handle.reconfigure(config.to_options()).await?;
+            serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())
+                .with_context(|| "序列化 Memory 重载配置响应失败")
+        }
+        ENABLE_OPERATION => {
+            crate::enable_memory()?;
+            Ok(serde_json::json!({"ok": true, "disabled": false}))
+        }
+        DISABLE_OPERATION => {
+            crate::disable_memory()?;
+            Ok(serde_json::json!({"ok": true, "disabled": true}))
+        }
+        STATUS_OPERATION => memory_status(),
+        TEST_OPERATION => memory_config_test(),
+        operation => {
+            let memory_request = decode_plugin_memory_request(operation, &request.payload)?
+                .ok_or_else(|| anyhow!("不支持的 Memory 操作: {operation}"))?;
+            let response = handle_memory_request(handle, memory_request).await?;
+            encode_plugin_memory_response(operation, response)
+        }
+    }
+}
+
+fn memory_ui_bootstrap() -> Result<serde_json::Value> {
+    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+    let config = crate::MemoryConfig::load_or_default();
+    let selection = crate::MemoryConfigSelection::from_memory(&config, &models);
+    let mut model_entries = models
+        .models
+        .iter()
+        .map(|(key, entry)| plugin_ui::MemoryUiModel {
+            key: key.clone(),
+            provider: entry.provider.clone(),
+            model: entry.model.clone(),
+            capabilities: entry
+                .capabilities
+                .iter()
+                .map(|capability| capability.key().to_string())
+                .collect(),
+            dimension: entry
+                .options
+                .get("dimension")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok()),
+        })
+        .collect::<Vec<_>>();
+    model_entries.sort_by(|left, right| left.key.cmp(&right.key));
+    serde_json::to_value(plugin_ui::MemoryBootstrap {
+        config: transcode(selection)?,
+        models: model_entries,
+        disabled: crate::is_memory_disabled(),
+    })
+    .with_context(|| "序列化 Memory 页面配置失败")
+}
+
+fn decode_plugin_memory_request(
+    operation: &str,
+    payload: &serde_json::Value,
+) -> Result<Option<MemoryIpcRequestPayload>> {
+    let request = match operation {
+        plugin_injection::LOAD_OPERATION => {
+            let request: plugin_injection::LoadInjectionRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::LoadInjection {
+                session_id: request.session_id,
+                workspace_id: request.workspace_id,
+            }
+        }
+        plugin_recall::RECALL_OPERATION => {
+            let request: plugin_recall::RecallRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::Recall {
+                anchors: transcode(request.anchors)?,
+                limit: request.limit,
+            }
+        }
+        plugin_recall::RECALL_CONTEXT_OPERATION => {
+            let request: plugin_recall::RecallContextRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RecallContext {
+                request: transcode(request.request)?,
+            }
+        }
+        plugin_rumination::RUN_ENHANCED_MICRO_OPERATION => {
+            let request: plugin_rumination::RunEnhancedMicroRuminationRequest =
+                decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunEnhancedMicroRumination {
+                turn_result: transcode(request.turn_result)?,
+            }
+        }
+        plugin_rumination::RUN_MESO_OPERATION => {
+            let request: plugin_rumination::RunMesoRuminationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunMesoRumination {
+                session_id: request.session_id,
+                workspace_id: request.workspace_id,
+            }
+        }
+        plugin_rumination::RUN_META_OPERATION => {
+            let _: plugin_rumination::RunMetaRuminationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::RunMetaRumination
+        }
+        plugin_ui::LIST_NODES_OPERATION => {
+            let request: plugin_ui::ListNodesRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListNodes {
+                query: transcode(request.query)?,
+            }
+        }
+        plugin_ui::COUNT_NODES_OPERATION => {
+            let request: plugin_ui::CountNodesRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::CountNodes {
+                query: transcode(request.query)?,
+            }
+        }
+        plugin_ui::LIST_RELATIONS_OPERATION => {
+            let request: plugin_ui::ListRelationsRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListRelations {
+                node_id: request.node_id,
+            }
+        }
+        plugin_ui::LIST_RELATIONS_BATCH_OPERATION => {
+            let request: plugin_ui::ListRelationsBatchRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::ListRelationsBatch {
+                node_ids: request.node_ids,
+            }
+        }
+        plugin_ui::UPSERT_MANUAL_MEMORY_OPERATION => {
+            let request: plugin_ui::UpsertManualMemoryRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::UpsertManualMemory {
+                draft: transcode(request.draft)?,
+            }
+        }
+        plugin_ui::SET_NODE_STATUS_OPERATION => {
+            let request: plugin_ui::SetNodeStatusRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::SetNodeStatus {
+                node_id: request.node_id,
+                status: transcode(request.status)?,
+            }
+        }
+        plugin_ui::UPSERT_RELATION_OPERATION => {
+            let request: plugin_ui::UpsertRelationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::UpsertRelation {
+                draft: transcode(request.draft)?,
+            }
+        }
+        plugin_ui::DELETE_RELATION_OPERATION => {
+            let request: plugin_ui::DeleteRelationRequest = decode(payload, operation)?;
+            MemoryIpcRequestPayload::DeleteRelation {
+                relation_id: request.relation_id,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(request))
+}
+
+fn encode_plugin_memory_response(
+    operation: &str,
+    response: MemoryIpcResponsePayload,
+) -> Result<serde_json::Value> {
+    let value = match (operation, response) {
+        (plugin_injection::LOAD_OPERATION, MemoryIpcResponsePayload::Injection { items }) => {
+            serde_json::to_value(plugin_injection::LoadInjectionResponse { items })?
+        }
+        (plugin_recall::RECALL_OPERATION, MemoryIpcResponsePayload::Recall { hits }) => {
+            let hits: Vec<plugin_recall::RecallHit> = transcode(hits)?;
+            serde_json::to_value(plugin_recall::RecallResponse { hits })?
+        }
+        (
+            plugin_recall::RECALL_CONTEXT_OPERATION,
+            MemoryIpcResponsePayload::RecallContext { response },
+        ) => {
+            let response: plugin_recall::RecallContextResponse = transcode(response)?;
+            serde_json::to_value(plugin_recall::RecallContextResult { response })?
+        }
+        (
+            plugin_rumination::RUN_ENHANCED_MICRO_OPERATION
+            | plugin_rumination::RUN_MESO_OPERATION
+            | plugin_rumination::RUN_META_OPERATION,
+            MemoryIpcResponsePayload::Ack,
+        ) => serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())?,
+        (plugin_ui::LIST_NODES_OPERATION, MemoryIpcResponsePayload::Nodes { items }) => {
+            let items: Vec<plugin_ui::MemoryNode> = transcode(items)?;
+            serde_json::to_value(plugin_ui::NodesResponse { items })?
+        }
+        (plugin_ui::COUNT_NODES_OPERATION, MemoryIpcResponsePayload::NodeCount { count }) => {
+            serde_json::to_value(plugin_ui::NodeCountResponse { count })?
+        }
+        (
+            plugin_ui::LIST_RELATIONS_OPERATION | plugin_ui::LIST_RELATIONS_BATCH_OPERATION,
+            MemoryIpcResponsePayload::Relations { items },
+        ) => {
+            let items: Vec<plugin_ui::MemoryRelation> = transcode(items)?;
+            serde_json::to_value(plugin_ui::RelationsResponse { items })?
+        }
+        (plugin_ui::UPSERT_MANUAL_MEMORY_OPERATION, MemoryIpcResponsePayload::Node { item }) => {
+            let item: plugin_ui::MemoryNode = transcode(item)?;
+            serde_json::to_value(plugin_ui::NodeResponse { item })?
+        }
+        (
+            plugin_ui::SET_NODE_STATUS_OPERATION | plugin_ui::DELETE_RELATION_OPERATION,
+            MemoryIpcResponsePayload::Ack,
+        ) => serde_json::to_value(tiangong_plugin_memory_protocol::Ack::default())?,
+        (plugin_ui::UPSERT_RELATION_OPERATION, MemoryIpcResponsePayload::Relation { item }) => {
+            let item: plugin_ui::MemoryRelation = transcode(item)?;
+            serde_json::to_value(plugin_ui::RelationResponse { item })?
+        }
+        (_, response) => {
+            bail!("Memory {operation} 返回了不匹配的响应: {response:?}")
+        }
+    };
+    Ok(value)
+}
+
+fn decode<T>(payload: &serde_json::Value, operation: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(payload.clone())
+        .with_context(|| format!("解析 Memory {operation} 请求失败"))
+}
+
+fn transcode<T, U>(value: T) -> Result<U>
+where
+    T: serde::Serialize,
+    U: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(serde_json::to_value(value)?)
+        .with_context(|| "转换 Memory 插件协议类型失败")
+}
+
+fn memory_status() -> Result<serde_json::Value> {
+    let config = crate::MemoryConfig::load_or_default();
+    Ok(serde_json::json!({
+        "disabled": crate::is_memory_disabled(),
+        "vector_mode": format!("{:?}", config.vector_mode),
+        "llm": config.model.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+        "embedding": config.embedding.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "dimension": model.dimension,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+        "rerank": config.rerank.as_ref().map(|model| serde_json::json!({
+            "model": model.model,
+            "base_url": model.base_url,
+            "configured": endpoint_configured(&model.base_url, &model.api_key, &model.model),
+        })),
+    }))
+}
+
+fn memory_config_test() -> Result<serde_json::Value> {
+    let config = crate::MemoryConfig::load_or_default();
+    let mut issues = Vec::new();
+    match &config.model {
+        Some(model) if endpoint_configured(&model.base_url, &model.api_key, &model.model) => {
+            push_secret_issue(&mut issues, "LLM", &model.api_key);
+        }
+        Some(_) => issues.push("LLM 端点配置不完整".to_string()),
+        None => issues.push("未配置 LLM 端点".to_string()),
+    }
+    if let Some(model) = &config.embedding {
+        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
+            issues.push("Embedding 端点配置不完整".to_string());
+        } else {
+            push_secret_issue(&mut issues, "Embedding", &model.api_key);
+        }
+    }
+    if let Some(model) = &config.rerank {
+        if !endpoint_configured(&model.base_url, &model.api_key, &model.model) {
+            issues.push("Rerank 端点配置不完整".to_string());
+        } else {
+            push_secret_issue(&mut issues, "Rerank", &model.api_key);
+        }
+    }
+    Ok(serde_json::json!({
+        "ok": issues.is_empty(),
+        "issues": issues,
+    }))
+}
+
+fn push_secret_issue(issues: &mut Vec<String>, label: &str, value: &str) {
+    let trimmed = value.trim();
+    let Some(inner) = trimmed
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return;
+    };
+    let variable = inner.trim();
+    if variable.is_empty() {
+        issues.push(format!("{label} 端点密钥环境变量名称为空"));
+    } else if std::env::var(variable).is_err() {
+        issues.push(format!("{label} 端点密钥环境变量 {variable} 未设置"));
+    }
+}
+
+fn endpoint_configured(base_url: &str, api_key: &str, model: &str) -> bool {
+    !base_url.trim().is_empty() && !api_key.trim().is_empty() && !model.trim().is_empty()
+}
+
+pub async fn handle_memory_request(
     handle: MemoryHandle,
     payload: MemoryIpcRequestPayload,
 ) -> Result<MemoryIpcResponsePayload> {
@@ -340,6 +858,10 @@ async fn handle_memory_request(
             handle.delete_relation(relation_id).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
+        MemoryIpcRequestPayload::Reconfigure { config } => {
+            handle.reconfigure(config.to_options()).await?;
+            Ok(MemoryIpcResponsePayload::Ack)
+        }
         MemoryIpcRequestPayload::UpdateInjection {
             level,
             target_id,
@@ -403,6 +925,14 @@ impl IpcConnection {
         self.write_frame(&IpcFrame::Response(response)).await
     }
 
+    pub async fn write_progress(&mut self, request_id: &str, message: String) -> Result<()> {
+        self.write_frame(&IpcFrame::Progress {
+            request_id: request_id.to_string(),
+            message,
+        })
+        .await
+    }
+
     async fn write_frame(&mut self, frame: &IpcFrame) -> Result<()> {
         let line = serde_json::to_string(frame).with_context(|| "序列化 IPC 帧失败")?;
         self.writer
@@ -435,6 +965,11 @@ impl IpcConnection {
 }
 
 pub fn endpoint_path(service: &str) -> Result<PathBuf> {
+    if let Some(path) =
+        std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
     let base = runtime_dir()?;
     Ok(base.join(format!("{service}.json")))
 }

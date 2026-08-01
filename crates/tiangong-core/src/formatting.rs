@@ -199,7 +199,7 @@ fn single_line_ellipsis(text: &str, max_chars: usize) -> String {
 
 pub(super) fn workspace_change_overview() -> Option<String> {
     let mut status_command = Command::new("git");
-    tiangong_types::process::configure_no_window(status_command.arg("status").arg("--short"));
+    tiangong_toolkit::configure_no_window(status_command.arg("status").arg("--short"));
     let status_output = status_command.output().ok()?;
     if !status_output.status.success() {
         return None;
@@ -242,7 +242,7 @@ pub(super) fn workspace_change_overview() -> Option<String> {
     };
 
     let mut diff_command = Command::new("git");
-    tiangong_types::process::configure_no_window(diff_command.arg("diff").arg("--stat"));
+    tiangong_toolkit::configure_no_window(diff_command.arg("diff").arg("--stat"));
     let diff_output = diff_command.output().ok()?;
     if !diff_output.status.success() {
         return Some(file_part);

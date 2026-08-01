@@ -27,7 +27,9 @@ members = [
     "crates/plugins/tiangong-plugin-generate-video",
     "crates/plugins/tiangong-plugin-text-to-speech",
     "crates/plugins/tiangong-plugin-speech-to-text",
-    "crates/plugins/tiangong-plugin-memory",
+    "crates/plugins/tiangong-plugin-memory/protocol",
+    "crates/plugins/tiangong-plugin-memory/wasm",
+    "crates/plugins/tiangong-plugin-memory/sidecar",
     "crates/plugins/tiangong-plugin-scheduler",
     "crates/plugins/tiangong-plugin-task",
     "crates/plugins/tiangong-plugin-terminal",
@@ -36,7 +38,9 @@ members = [
     "crates/plugins/tiangong-plugin-mcp",
     "crates/plugins/tiangong-plugin-agent-team",
     "crates/plugins/tiangong-plugin-prompt",
+    "crates/tiangong-plugin-runtime",
     "src-tauri",
+    "xtask",
 ]
 
 [workspace.package]
@@ -55,6 +59,8 @@ tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-media-archive = { path = "crates/tiangong-media-archive" }
 tiangong-memory = { path = "crates/tiangong-memory" }
+tiangong-plugin-memory-sidecar = { path = "crates/plugins/tiangong-plugin-memory/sidecar" }
+tiangong-plugin-memory-protocol = { path = "crates/plugins/tiangong-plugin-memory/protocol" }
 tiangong-plugin-browser = { path = "crates/plugins/tiangong-plugin-browser" }
 tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch = { path = "crates/plugins/tiangong-plugin-fetch" }
@@ -64,7 +70,6 @@ tiangong-plugin-generate-image = { path = "crates/plugins/tiangong-plugin-genera
 tiangong-plugin-generate-video = { path = "crates/plugins/tiangong-plugin-generate-video" }
 tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-to-speech" }
 tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech-to-text" }
-tiangong-plugin-memory = { path = "crates/plugins/tiangong-plugin-memory" }
 tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
 tiangong-plugin-task = { path = "crates/plugins/tiangong-plugin-task" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
@@ -73,6 +78,8 @@ tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
 tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
 tiangong-plugin-prompt = { path = "crates/plugins/tiangong-plugin-prompt" }
+tiangong-plugin-memory-wasm = { path = "crates/plugins/tiangong-plugin-memory/wasm" }
+tiangong-plugin-runtime = { path = "crates/tiangong-plugin-runtime" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }
@@ -140,6 +147,16 @@ tracing-subscriber = "0.3"
 typed-builder = "0.23"
 wiremock = "0.6"
 wry = "=0.55.1"
+wasmtime = { version = "47", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "component-model",
+    "parallel-compilation",
+    "pooling-allocator",
+    "cache",
+] }
+wasmtime-wasi = { version = "47", default-features = false }
+wit-bindgen = "0.46"
 zip = { version = "8", default-features = false }
 
 [patch.crates-io]

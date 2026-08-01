@@ -766,7 +766,7 @@ fn parse_entity_type(raw: Option<&str>) -> crate::types::EntityType {
     }
 }
 
-/// 规则 fallback：未配置 Memory LLM 时只提取 Episode。
+/// 规则 fallback：未配置 Memory LLM 时只提取 Episode（恢复原生行为）。
 fn extract_multi_type_fallback(
     turn_result: &TurnResult,
     enhanced: &EnhancedTurnResult,

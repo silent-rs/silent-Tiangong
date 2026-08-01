@@ -18,16 +18,7 @@ use crate::workspace_tabs::{
 
 const MAX_ATTACHMENT_BASE64_BYTES: u64 = 50 * 1024 * 1024;
 
-#[allow(unused_mut)]
-fn configure_no_window(command: &mut tokio::process::Command) -> &mut tokio::process::Command {
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
+use tiangong_toolkit::configure_tokio_no_window;
 
 #[allow(dead_code)]
 fn done_event_keeps_turn_running(
@@ -1981,7 +1972,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
     {
         let mut command = tokio::process::Command::new("afplay");
         command.arg(&file_path);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await
@@ -1995,7 +1986,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
             "-c",
             &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", file_path),
         ]);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await
@@ -2006,7 +1997,7 @@ pub async fn play_audio_file(file_path: String) -> Result<(), String> {
     {
         let mut command = tokio::process::Command::new("aplay");
         command.arg(&file_path);
-        configure_no_window(&mut command);
+        configure_tokio_no_window(&mut command);
         command
             .output()
             .await
@@ -3808,150 +3799,6 @@ pub async fn set_models_config(
     Ok(())
 }
 
-/// 获取 Memory 独立模型配置
-#[tauri::command]
-pub async fn get_memory_config(state: State<'_, TiangongApp>) -> Result<MemoryConfigView, String> {
-    let config = tiangong_memory::registry::load_memory_config();
-    state
-        .with_state_read(|core_state| {
-            Ok(MemoryConfigView::from_memory(
-                &config,
-                &core_state.config.models,
-            ))
-        })
-        .await
-}
-
-/// 设置 Memory 独立模型配置
-#[tauri::command]
-pub async fn set_memory_config(
-    config: MemoryConfigView,
-    state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    let memory_config = state
-        .with_state_read(|core_state| {
-            config
-                .to_memory(&core_state.config.models)
-                .map_err(anyhow::Error::msg)
-        })
-        .await?;
-    tiangong_memory::registry::save_memory_config(memory_config).map_err(|err| err.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(())
-}
-
-/// 列出全部记忆节点。
-#[tauri::command]
-pub async fn list_memory_nodes(
-    query: Option<String>,
-    status: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-    _state: State<'_, TiangongApp>,
-) -> Result<Vec<tiangong_memory::MemoryNode>, String> {
-    tiangong_memory::gui_api::list_memory_nodes_for_gui(query, status, limit, offset)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 统计全部记忆节点真实总数。
-#[tauri::command]
-pub async fn count_memory_nodes(
-    query: Option<String>,
-    status: Option<String>,
-    created_after: Option<String>,
-    _state: State<'_, TiangongApp>,
-) -> Result<usize, String> {
-    tiangong_memory::gui_api::count_memory_nodes_for_gui(query, status, created_after)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 手动新增或调整一条记忆。
-#[tauri::command]
-pub async fn upsert_manual_memory(
-    draft: tiangong_memory::ManualMemoryDraft,
-    _state: State<'_, TiangongApp>,
-) -> Result<tiangong_memory::MemoryNode, String> {
-    if draft.title.trim().is_empty() {
-        return Err("记忆标题不能为空".to_string());
-    }
-    if draft.summary.trim().is_empty() {
-        return Err("记忆内容不能为空".to_string());
-    }
-    tiangong_memory::gui_api::upsert_manual_memory_for_gui(draft)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 归档或恢复记忆节点。
-#[tauri::command]
-pub async fn set_memory_node_status(
-    node_id: String,
-    status: String,
-    _state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    tiangong_memory::gui_api::set_memory_node_status_for_gui(node_id, status)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 列出指定记忆节点的图关系。
-#[tauri::command]
-pub async fn list_memory_relations(
-    node_id: String,
-    _state: State<'_, TiangongApp>,
-) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    tiangong_memory::gui_api::list_memory_relations_for_gui(node_id)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 批量列出多个记忆节点的关联关系（去重，修复 N+1 性能问题）。
-#[tauri::command]
-pub async fn list_memory_relations_batch(
-    node_ids: Vec<String>,
-    _state: State<'_, TiangongApp>,
-) -> Result<Vec<tiangong_memory::MemoryRelation>, String> {
-    tiangong_memory::gui_api::list_memory_relations_batch_for_gui(node_ids)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 新增或调整记忆图关系。
-#[tauri::command]
-pub async fn upsert_memory_relation(
-    draft: tiangong_memory::MemoryRelationDraft,
-    _state: State<'_, TiangongApp>,
-) -> Result<tiangong_memory::MemoryRelation, String> {
-    tiangong_memory::gui_api::upsert_memory_relation_for_gui(draft)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 删除记忆图关系。
-#[tauri::command]
-pub async fn delete_memory_relation(
-    relation_id: String,
-    _state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    tiangong_memory::gui_api::delete_memory_relation_for_gui(relation_id)
-        .await
-        .map_err(|err| err.to_string())
-}
-
-/// 手动测试记忆召回，不写入会话消息链。
-#[tauri::command]
-pub async fn test_memory_recall(
-    query: String,
-    limit: Option<usize>,
-    _state: State<'_, TiangongApp>,
-) -> Result<Vec<tiangong_memory::RecallHit>, String> {
-    tiangong_memory::gui_api::test_memory_recall_for_gui(query, limit)
-        .await
-        .map_err(|err| err.to_string())
-}
-
 // ── 索引管理 ──
 
 /// 列出所有 Workspace 索引
@@ -4692,4 +4539,235 @@ pub async fn resolve_model_context_window(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     Ok(tiangong_config::io::resolve_context_limit_at(&dir, &model))
+}
+
+// ── 插件 UI 桥接（WASM 插件动态 UI）──
+//
+// 天工只提供通用桥接，不处理具体插件业务：
+// - list_plugin_contributions：列出插件声明（含是否有页面）
+// - plugin_open_view：按需获取插件页面 HTML（天工只当容器，不处理内容）
+// - plugin_call：通用桥接，转发到 WASM 的 handle-view-message
+
+/// 列出所有已加载 WASM 插件的设置页贡献。
+#[tauri::command]
+pub async fn list_plugin_contributions() -> Result<Vec<PluginContributionEntry>, String> {
+    let entries = tiangong_plugin_runtime::registry::list_contributions();
+    Ok(entries
+        .into_iter()
+        .flat_map(|(plugin_id, generation, contributions)| {
+            contributions
+                .into_iter()
+                .map(move |c| PluginContributionEntry {
+                    plugin_id: plugin_id.clone(),
+                    generation,
+                    contribution_id: c.id,
+                    title: c.title,
+                    description: c.description,
+                    icon: c.icon,
+                    group: c.group,
+                    has_view: c.has_view,
+                })
+        })
+        .collect())
+}
+
+/// 列出已安装插件、当前加载版本和 sidecar 状态。
+#[tauri::command]
+pub async fn list_plugins(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_plugin_runtime::registry::PluginStatus>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::list_plugins(&storage_root)
+    })
+    .await
+    .map_err(|error| format!("读取插件状态失败: {error}"))
+}
+
+/// 从 OSS 静态目录读取当前平台可安装的插件。
+#[tauri::command]
+pub async fn list_available_plugins(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<tiangong_plugin_runtime::artifacts::AvailablePlugin>, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+        .map_err(|error| error.to_string())?;
+    repository
+        .list_available(&storage_root)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn download_and_install_plugin(
+    storage_root: std::path::PathBuf,
+    plugin_id: String,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+        .map_err(|error| error.to_string())?;
+    let staged = repository
+        .download(&storage_root, &plugin_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::install_staged_plugin(&storage_root, staged.path())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("安装插件任务失败: {error}"))?
+}
+
+/// 从用户选择的本地完整目录导入插件。
+#[tauri::command]
+pub async fn import_local_plugin(
+    path: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let staged = tiangong_plugin_runtime::artifacts::stage_local_plugin(
+            &storage_root,
+            std::path::Path::new(&path),
+        )
+        .map_err(|error| error.to_string())?;
+        tiangong_plugin_runtime::registry::import_staged_plugin(&storage_root, staged.path())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("导入本地插件任务失败: {error}"))?
+}
+
+/// 从 OSS 下载并安装插件。
+#[tauri::command]
+pub async fn install_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    download_and_install_plugin(storage_root, plugin_id).await
+}
+
+/// 从 OSS 下载并升级插件，运行时负责失败恢复和本地回滚版本保留。
+#[tauri::command]
+pub async fn upgrade_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    download_and_install_plugin(storage_root, plugin_id).await
+}
+
+/// 启用或停用已安装插件。
+#[tauri::command]
+pub async fn set_plugin_enabled(
+    plugin_id: String,
+    enabled: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::set_plugin_enabled(&storage_root, &plugin_id, enabled)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("切换插件状态任务失败: {error}"))?
+}
+
+/// 回滚到本地保留的上一个插件版本。
+#[tauri::command]
+pub async fn rollback_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::rollback_plugin(&storage_root, &plugin_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("回滚插件任务失败: {error}"))?
+}
+
+/// 卸载插件，可选择保留插件数据。
+#[tauri::command]
+pub async fn uninstall_plugin(
+    plugin_id: String,
+    keep_data: bool,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::uninstall_plugin(&storage_root, &plugin_id, keep_data)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("卸载插件任务失败: {error}"))?
+}
+
+/// 从已安装目录读取新制品并原子替换全部存活 WASM 实例。
+#[tauri::command]
+pub async fn reload_plugin(
+    plugin_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::registry::reload_plugin(&storage_root, &plugin_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("热加载插件失败: {error}"))?
+}
+
+/// 按需获取插件页面 HTML（用户点击进入时才调用）。
+#[tauri::command]
+pub async fn plugin_open_view(
+    plugin_id: String,
+    contribution_id: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::open_view(&plugin_id, &contribution_id)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或无页面"))
+}
+
+/// 通用桥接：转发到 WASM 的 handle-view-message。
+/// iframe 内的 JS 经 postMessage → 前端 → 本命令 → WASM。
+/// 天工不关心 method/payload 含义，只做透传。
+#[tauri::command]
+pub async fn plugin_call(
+    plugin_id: String,
+    method: String,
+    payload: String,
+) -> Result<String, String> {
+    tiangong_plugin_runtime::registry::handle_view_message(&plugin_id, &method, &payload)
+        .ok_or_else(|| format!("插件 {plugin_id} 未加载或处理消息失败"))
+}
+
+/// 插件设置页贡献项（传给前端）。
+#[derive(serde::Serialize)]
+pub struct PluginContributionEntry {
+    pub plugin_id: String,
+    pub generation: u64,
+    pub contribution_id: String,
+    pub title: String,
+    pub description: String,
+    pub icon: String,
+    pub group: String,
+    pub has_view: bool,
 }

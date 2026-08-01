@@ -27,13 +27,15 @@ const FOLLOWER_WATCH_INTERVAL: Duration = Duration::from_millis(250);
 const HEARTBEAT_TIMEOUT_SECS: i64 = 10;
 static LEADER_INFO_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server）
+/// 进程类型（用于 Leader 选举，区分 GUI/CLI/Server/Sidecar）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessType {
     Gui,
     Cli,
     Server,
+    /// 独立 memory sidecar 进程
+    Sidecar,
 }
 
 /// Leader 状态
@@ -186,7 +188,18 @@ pub fn is_leader_alive(info: &LeaderInfo) -> bool {
             Err(_) => return false,
         };
     let elapsed = chrono::Local::now().naive_local() - heartbeat;
-    elapsed.num_seconds() <= HEARTBEAT_TIMEOUT_SECS
+    elapsed.num_seconds() <= HEARTBEAT_TIMEOUT_SECS && process_is_alive(info.pid)
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // SAFETY: 信号 0 只检查进程是否存在，不会向目标进程发送信号。
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
 }
 
 /// 选举或连接到现有 leader。
@@ -520,20 +533,7 @@ fn ensure_memory_runtime_dir() -> Result<()> {
 }
 
 fn memory_base_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
+    crate::paths::memory_data_dir()
 }
 
 #[cfg(test)]

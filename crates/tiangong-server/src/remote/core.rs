@@ -335,13 +335,6 @@ impl ServerCoreManager {
 
         let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
 
-        // 初始化 Memory Handle（入口层负责，构造时注入 memory 插件）。
-        let memory_handle = tiangong_memory::registry::init_memory_handle_for_process(
-            self.core_manager.config().generation(),
-            tiangong_memory::ProcessType::Server,
-        )
-        .await;
-
         let _config_guard = self.config_update_lock.lock().await;
 
         // async 初始化期间仍做第二次检查。会话锁保证正常路径不会并发创建，
@@ -416,8 +409,8 @@ impl ServerCoreManager {
             if let Some(ep) = stt_endpoint.clone() {
                 plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
-            plugins.extend(tiangong_plugin_memory::default_plugins(
-                memory_handle.clone(),
+            plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
+                &storage_root,
             ));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
@@ -461,9 +454,9 @@ impl ServerCoreManager {
                     if let Some(ep) = stt_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                     }
-                    child_plugins.extend(tiangong_plugin_memory::default_plugins(
-                        memory_handle.clone(),
-                    ));
+                    child_plugins.extend(
+                        tiangong_plugin_runtime::registry::load_installed_plugins(&storage_root),
+                    );
                     child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());
                     // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。

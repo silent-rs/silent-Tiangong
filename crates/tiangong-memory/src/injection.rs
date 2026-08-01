@@ -12,20 +12,7 @@ use crate::command::InjectionLevel;
 
 /// 获取 memory 基础目录
 pub(crate) fn memory_base_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("memory")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(profile));
-    }
-    None
+    crate::paths::memory_data_dir()
 }
 
 /// 读取注入文件，返回文件内容（不存在则返回 None）
