@@ -10897,6 +10897,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-mcp-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-mcp-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "http",
+ "libc",
+ "rmcp",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiangong-plugin-mcp-protocol",
+ "tiangong-plugin-runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-mcp-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-mcp-protocol",
+ "wit-bindgen 0.46.0",
+]
+
+[[package]]
 name = "tiangong-plugin-memory-protocol"
 version = "0.13.4"
 dependencies = [

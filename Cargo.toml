@@ -36,6 +36,9 @@ members = [
     "crates/plugins/tiangong-plugin-analyze-attachment",
     "crates/plugins/tiangong-plugin-skill",
     "crates/plugins/tiangong-plugin-mcp",
+    "crates/plugins/tiangong-plugin-mcp/protocol",
+    "crates/plugins/tiangong-plugin-mcp/sidecar",
+    "crates/plugins/tiangong-plugin-mcp/wasm",
     "crates/plugins/tiangong-plugin-agent-team",
     "crates/plugins/tiangong-plugin-prompt",
     "crates/tiangong-plugin-runtime",
@@ -76,6 +79,7 @@ tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-analyze-attachment" }
 tiangong-plugin-skill = { path = "crates/plugins/tiangong-plugin-skill" }
 tiangong-plugin-mcp = { path = "crates/plugins/tiangong-plugin-mcp" }
+tiangong-plugin-mcp-protocol = { path = "crates/plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
 tiangong-plugin-prompt = { path = "crates/plugins/tiangong-plugin-prompt" }
 tiangong-plugin-memory-wasm = { path = "crates/plugins/tiangong-plugin-memory/wasm" }
