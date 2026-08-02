@@ -13,8 +13,10 @@ path = "src/main.rs"
 [dependencies]
 tiangong-plugin-index-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
 tiangong-toolkit = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "io-util", "net", "sync"] }

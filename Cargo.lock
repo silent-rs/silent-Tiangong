@@ -10796,6 +10796,7 @@ name = "tiangong-plugin-index-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "dashmap",
  "libc",
@@ -10806,6 +10807,7 @@ dependencies = [
  "tempfile",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
  "tiangong-toolkit",
  "tokio",
  "tracing",
@@ -10836,6 +10838,7 @@ name = "tiangong-plugin-mcp-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "http",
  "libc",
@@ -10846,6 +10849,7 @@ dependencies = [
  "tempfile",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -10937,6 +10941,23 @@ dependencies = [
  "tiangong-scheduler",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "tiangong-plugin-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "libc",
+ "scru128",
+ "serde",
+ "serde_json",
+ "tiangong-plugin-runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

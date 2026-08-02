@@ -486,3 +486,13 @@ fn handle_prewarm_blocking(manager: Arc<IndexManager>, root: &Path) -> Result<()
     });
     Ok(())
 }
+
+#[async_trait::async_trait]
+impl tiangong_plugin_sidecar::SidecarService for IndexService {
+    async fn dispatch(
+        &self,
+        request: tiangong_plugin_runtime::protocol::Request,
+    ) -> tiangong_plugin_runtime::protocol::Response {
+        IndexService::dispatch(self, request).await
+    }
+}

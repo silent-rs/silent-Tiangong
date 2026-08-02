@@ -619,3 +619,13 @@ struct NormalizedMcpFields {
     enabled: bool,
     tags: Vec<String>,
 }
+
+#[async_trait::async_trait]
+impl tiangong_plugin_sidecar::SidecarService for McpService {
+    async fn dispatch(
+        &self,
+        request: tiangong_plugin_runtime::protocol::Request,
+    ) -> tiangong_plugin_runtime::protocol::Response {
+        McpService::dispatch(self, request).await
+    }
+}

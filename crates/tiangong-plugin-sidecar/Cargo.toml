@@ -1,35 +1,20 @@
 [package]
-name = "tiangong-plugin-mcp-sidecar"
+name = "tiangong-plugin-sidecar"
 version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
-description = "MCP 独立 sidecar 进程（承载 rmcp 客户端、capability 探测原生运行）"
+description = "插件 sidecar 通用运行库（单例选举、IPC server、端点发布、退出信号）"
 publish = false
 
-[[bin]]
-name = "tiangong-mcp-sidecar"
-path = "src/main.rs"
-
 [dependencies]
-tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-sidecar = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "io-util", "net", "sync"] }
-http = { workspace = true }
 libc = { workspace = true }
-rmcp = { workspace = true, features = [
-    "client",
-    "transport-child-process",
-    "transport-streamable-http-client-reqwest",
-] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 scru128 = { workspace = true }
 chrono = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }

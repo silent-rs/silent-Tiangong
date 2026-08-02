@@ -1,11 +1,11 @@
-//! Leader 选举与进程注册。
+//! Leader 选举与进程单例。
 //!
-//! 对齐 Memory sidecar 的选举机制：
+//! 通用 sidecar 单例机制（对齐 Memory / MCP / Index sidecar 的选举）：
 //! - `leader.lock` 原子创建实现单 Leader 互斥
 //! - `leader.json` 记录 leader 服务信息与心跳
 //! - 已有健康 leader 时本 sidecar 优雅退出（不重复运行）
 //!
-//! MCP sidecar 由运行时按 `plugin.json` 启动，运行时通过 endpoint 文件连接 winner。
+//! sidecar 由运行时按 `plugin.json` 启动，运行时通过 endpoint 文件连接 winner。
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -17,12 +17,24 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tiangong_plugin_runtime::protocol::{Request, Response};
 
-use crate::service::McpService;
+use crate::endpoint;
+use crate::identity::SidecarConfig;
+use crate::server::{self, IpcBridge};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_TIMEOUT_SECS: i64 = 10;
 static LEADER_INFO_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 业务 sidecar 实现此 trait，提供请求分发。
+///
+/// `dispatch` 在 IPC server 的 tokio task 内 `await` 调用，慢操作应在内部用
+/// `spawn_blocking` 等让出调度（参见 index sidecar）。
+#[async_trait::async_trait]
+pub trait SidecarService: Send + Sync {
+    async fn dispatch(&self, request: Request) -> Response;
+}
 
 /// Leader 状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,17 +66,17 @@ impl LeaderInfo {
     }
 }
 
-/// 带运行时守卫的 MCP 服务。
-pub struct ManagedMcp {
-    inner: Arc<Mutex<ManagedMcpInner>>,
+/// 带运行时守卫的 sidecar（持有选举结果 + IPC bridge + 心跳线程）。
+pub struct ManagedSidecar {
+    inner: Arc<Mutex<ManagedSidecarInner>>,
 }
 
-struct ManagedMcpInner {
+struct ManagedSidecarInner {
     state: LeaderState,
     _lease: Option<LeaderLease>,
     heartbeat_tx: Option<std_mpsc::Sender<()>>,
     heartbeat_join: Option<thread::JoinHandle<()>>,
-    _bridge: Option<crate::ipc::IpcBridge>,
+    _bridge: Option<IpcBridge>,
 }
 
 struct LeaderLease {
@@ -73,11 +85,11 @@ struct LeaderLease {
     info: LeaderInfo,
 }
 
-impl ManagedMcp {
+impl ManagedSidecar {
     pub fn state(&self) -> LeaderState {
         self.inner
             .lock()
-            .expect("ManagedMcp inner lock poisoned")
+            .expect("ManagedSidecar inner lock poisoned")
             .state
             .clone()
     }
@@ -88,9 +100,12 @@ impl ManagedMcp {
     }
 }
 
-impl Drop for ManagedMcp {
+impl Drop for ManagedSidecar {
     fn drop(&mut self) {
-        let mut guard = self.inner.lock().expect("ManagedMcp inner lock poisoned");
+        let mut guard = self
+            .inner
+            .lock()
+            .expect("ManagedSidecar inner lock poisoned");
         if let Some(tx) = guard.heartbeat_tx.take() {
             let _ = tx.send(());
         }
@@ -110,17 +125,20 @@ impl Drop for LeaderLease {
     }
 }
 
-/// 选举：抢到 Leader 就起 IPC server + capability，没抢到就当 Follower 退出。
-pub async fn start_or_connect() -> Result<ManagedMcp> {
-    let service = mcp_service_name();
-    ensure_mcp_runtime_dir()?;
+/// 选举：抢到 Leader 就起 IPC server + service，没抢到就当 Follower 退出。
+pub fn start_or_connect(
+    config: &SidecarConfig,
+    service_obj: Arc<dyn SidecarService>,
+) -> Result<ManagedSidecar> {
+    let service = config.service.clone();
+    endpoint::ensure_runtime_dir(&service)?;
 
     for _ in 0..2 {
-        if let Some(leader) = read_leader_info()? {
+        if let Some(leader) = read_leader_info(&service)? {
             if is_leader_alive(&leader) {
                 // 已有健康 leader，本 sidecar 无需重复启动。
-                return Ok(ManagedMcp {
-                    inner: Arc::new(Mutex::new(ManagedMcpInner {
+                return Ok(ManagedSidecar {
+                    inner: Arc::new(Mutex::new(ManagedSidecarInner {
                         state: LeaderState::Follower { pid: leader.pid },
                         _lease: None,
                         heartbeat_tx: None,
@@ -129,17 +147,16 @@ pub async fn start_or_connect() -> Result<ManagedMcp> {
                     })),
                 });
             }
-            clear_stale_registration(&leader)?;
+            clear_stale_registration(&service, &leader)?;
         }
 
-        match try_acquire_leader_lease(service.clone())? {
+        match try_acquire_leader_lease(&service)? {
             Some(lease) => {
-                let service_obj = McpService::new()?;
-                let bridge = crate::ipc::spawn_mcp_bridge(service.clone(), service_obj)?;
-                let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(lease.info.clone());
+                let bridge = server::spawn_bridge(config, service_obj)?;
+                let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(config, lease.info.clone());
 
-                return Ok(ManagedMcp {
-                    inner: Arc::new(Mutex::new(ManagedMcpInner {
+                return Ok(ManagedSidecar {
+                    inner: Arc::new(Mutex::new(ManagedSidecarInner {
                         state: LeaderState::Leader,
                         _lease: Some(lease),
                         heartbeat_tx: Some(heartbeat_tx),
@@ -150,10 +167,10 @@ pub async fn start_or_connect() -> Result<ManagedMcp> {
             }
             None => {
                 // lock 被占用但 leader.json 还没出现，或 leader.json 出现了——重试。
-                if let Some(leader) = read_leader_info()? {
+                if let Some(leader) = read_leader_info(&service)? {
                     if is_leader_alive(&leader) {
-                        return Ok(ManagedMcp {
-                            inner: Arc::new(Mutex::new(ManagedMcpInner {
+                        return Ok(ManagedSidecar {
+                            inner: Arc::new(Mutex::new(ManagedSidecarInner {
                                 state: LeaderState::Follower { pid: leader.pid },
                                 _lease: None,
                                 heartbeat_tx: None,
@@ -162,9 +179,9 @@ pub async fn start_or_connect() -> Result<ManagedMcp> {
                             })),
                         });
                     }
-                    clear_stale_registration(&leader)?;
+                    clear_stale_registration(&service, &leader)?;
                 } else {
-                    let lock_path = leader_lock_path();
+                    let lock_path = endpoint::leader_lock_path(&service)?;
                     if lock_path.exists() {
                         let _ = std::fs::remove_file(lock_path);
                     }
@@ -173,23 +190,12 @@ pub async fn start_or_connect() -> Result<ManagedMcp> {
         }
     }
 
-    bail!("MCP leader 选举失败：未能建立 leader 或确认 follower")
+    bail!("{service} leader 选举失败：未能建立 leader 或确认 follower")
 }
 
-fn mcp_service_name() -> String {
-    "mcp".to_string()
-}
-
-fn leader_lock_path() -> PathBuf {
-    mcp_runtime_dir().join("leader.lock")
-}
-
-fn leader_info_path() -> PathBuf {
-    mcp_runtime_dir().join("leader.json")
-}
-
-fn read_leader_info() -> Result<Option<LeaderInfo>> {
-    read_leader_info_from_path(&leader_info_path())
+fn read_leader_info(service: &str) -> Result<Option<LeaderInfo>> {
+    let path = endpoint::leader_info_path(service)?;
+    read_leader_info_from_path(&path)
 }
 
 fn read_leader_info_from_path(path: &PathBuf) -> Result<Option<LeaderInfo>> {
@@ -221,6 +227,7 @@ fn is_leader_alive(info: &LeaderInfo) -> bool {
 
 #[cfg(unix)]
 fn process_is_alive(pid: u32) -> bool {
+    // SAFETY: 信号 0 只检查进程是否存在，不会向目标进程发送信号。
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
@@ -229,9 +236,9 @@ fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
-fn try_acquire_leader_lease(service: String) -> Result<Option<LeaderLease>> {
-    let lock_path = leader_lock_path();
-    let info_path = leader_info_path();
+fn try_acquire_leader_lease(service: &str) -> Result<Option<LeaderLease>> {
+    let lock_path = endpoint::leader_lock_path(service)?;
+    let info_path = endpoint::leader_info_path(service)?;
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建 leader 运行目录失败: {}", parent.display()))?;
@@ -249,7 +256,7 @@ fn try_acquire_leader_lease(service: String) -> Result<Option<LeaderLease>> {
         }
     };
 
-    let info = LeaderInfo::new(service);
+    let info = LeaderInfo::new(service.to_string());
     if let Err(err) = write_leader_info(&info, &info_path) {
         let _ = std::fs::remove_file(&lock_path);
         return Err(err);
@@ -287,8 +294,8 @@ fn leader_info_temp_path(path: &std::path::Path) -> PathBuf {
     path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), seq))
 }
 
-fn update_heartbeat(info: &LeaderInfo) -> Result<()> {
-    let path = leader_info_path();
+fn update_heartbeat(service: &str, info: &LeaderInfo) -> Result<()> {
+    let path = endpoint::leader_info_path(service)?;
     let mut current =
         read_leader_info_from_path(&path)?.ok_or_else(|| anyhow::anyhow!("leader 信息不存在"))?;
     if current.pid != info.pid || current.service != info.service {
@@ -298,17 +305,22 @@ fn update_heartbeat(info: &LeaderInfo) -> Result<()> {
     write_leader_info(&current, &path)
 }
 
-fn spawn_heartbeat(info: LeaderInfo) -> (std_mpsc::Sender<()>, thread::JoinHandle<()>) {
+fn spawn_heartbeat(
+    config: &SidecarConfig,
+    info: LeaderInfo,
+) -> (std_mpsc::Sender<()>, thread::JoinHandle<()>) {
     let (tx, rx) = std_mpsc::channel();
+    let service = config.service.clone();
+    let thread_prefix = config.heartbeat_prefix.clone();
     let join_handle = thread::Builder::new()
-        .name(format!("mcp-heartbeat-{}", info.service))
+        .name(format!("{thread_prefix}-{}", info.service))
         .spawn(move || {
             loop {
                 match rx.recv_timeout(HEARTBEAT_INTERVAL) {
                     Ok(()) => break,
                     Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                        if let Err(err) = update_heartbeat(&info) {
-                            tracing::debug!("MCP leader 心跳停止: {}", err);
+                        if let Err(err) = update_heartbeat(&service, &info) {
+                            tracing::debug!("{service} leader 心跳停止: {}", err);
                             break;
                         }
                     }
@@ -316,16 +328,18 @@ fn spawn_heartbeat(info: LeaderInfo) -> (std_mpsc::Sender<()>, thread::JoinHandl
                 }
             }
         })
-        .expect("创建 MCP leader 心跳线程失败");
+        .expect("创建 leader 心跳线程失败");
     (tx, join_handle)
 }
 
-fn clear_stale_registration(info: &LeaderInfo) -> Result<()> {
+fn clear_stale_registration(service: &str, info: &LeaderInfo) -> Result<()> {
     if is_leader_alive(info) {
         return Ok(());
     }
-    clear_leader_registration_if_matches(info, &leader_info_path())?;
-    let _ = std::fs::remove_file(leader_lock_path());
+    let info_path = endpoint::leader_info_path(service)?;
+    clear_leader_registration_if_matches(info, &info_path)?;
+    let lock_path = endpoint::leader_lock_path(service)?;
+    let _ = std::fs::remove_file(lock_path);
     Ok(())
 }
 
@@ -337,39 +351,4 @@ fn clear_leader_registration_if_matches(info: &LeaderInfo, path: &PathBuf) -> Re
         let _ = std::fs::remove_file(path);
     }
     Ok(())
-}
-
-fn ensure_mcp_runtime_dir() -> Result<()> {
-    let dir = mcp_runtime_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("创建 mcp 运行目录失败: {}", dir.display()))
-}
-
-/// MCP 运行时目录（endpoint.json / leader.json / leader.lock 所在）。
-///
-/// 优先使用运行时注入的 `TIANGONG_PLUGIN_DATA_DIR`（与 plugin-runtime 的 sidecar
-/// 配置对齐），否则回退 `~/.tiangong/mcp/runtime`。
-fn mcp_runtime_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir).join("runtime");
-    }
-    if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|v| !v.is_empty())
-        && let Some(parent) = PathBuf::from(dir).parent()
-    {
-        return parent.to_path_buf();
-    }
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tiangong")
-        .join("mcp")
-        .join("runtime")
-}
-
-pub(crate) fn home_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(home));
-    }
-    std::env::var_os("USERPROFILE")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
 }

@@ -43,6 +43,7 @@ members = [
     "crates/plugins/tiangong-plugin-agent-team",
     "crates/plugins/tiangong-plugin-prompt",
     "crates/tiangong-plugin-runtime",
+    "crates/tiangong-plugin-sidecar",
     "src-tauri",
     "xtask",
 ]
@@ -86,6 +87,7 @@ tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team
 tiangong-plugin-prompt = { path = "crates/plugins/tiangong-plugin-prompt" }
 tiangong-plugin-memory-wasm = { path = "crates/plugins/tiangong-plugin-memory/wasm" }
 tiangong-plugin-runtime = { path = "crates/tiangong-plugin-runtime" }
+tiangong-plugin-sidecar = { path = "crates/tiangong-plugin-sidecar" }
 tiangong-server = { path = "crates/tiangong-server" }
 tiangong-toolkit = { path = "crates/tiangong-toolkit" }
 tiangong-scheduler = { path = "crates/tiangong-scheduler" }

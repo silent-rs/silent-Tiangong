@@ -303,7 +303,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 ## 共同约定
 
 - 每个重型插件按 Memory 模板建立私有协议 crate（业务操作名 + 请求/响应），wasm 与 sidecar 共同依赖，App 不依赖。
-- sidecar 的单例选举（Leader 互斥 + 心跳 + IPC）由各 sidecar 自身实现，app 只按 `plugin.json` 启动 sidecar、不参与其内部选举。各 sidecar 可直接复用 memory 现有选举代码，但作为 sidecar 的自有职责，不在 app 层抽取共享 crate。
+- sidecar 的单例选举（Leader 互斥 + 心跳 + IPC）由通用运行库 `tiangong-plugin-sidecar` 提供，各 sidecar 引入该库并实现 `SidecarService` trait，自身仍负责业务服务。app 只按 `plugin.json` 启动 sidecar、不参与其内部选举。memory 因同时服务 in-process 场景保留自有复杂 election，待后续统一。
 
 ## 完成标准
 
