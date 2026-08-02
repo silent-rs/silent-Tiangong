@@ -102,8 +102,15 @@ interface plugin {
     /// 关闭插件，释放资源。
     shutdown: func() -> result<_, plugin-error>;
 
-    /// 注入当前会话工作目录。
-    set-workspace: func(workspace: option<string>) -> result<_, plugin-error>;
+    /// 注入当前会话工作目录与信任模式。
+    ///
+    /// `full-trust` 为 true 时允许插件放宽工作区外路径校验（如 search_code 越界读取）。
+    /// 信任模式可能在 set-workspace 之后变更，host 会在 set-trust-mode 时再次调用本接口
+    /// 推送最新值（workspace 保持不变）。
+    set-workspace: func(
+        workspace: option<string>,
+        full-trust: bool,
+    ) -> result<_, plugin-error>;
 
     /// CoreConfig 变更通知。
     on-config-updated: func(config-json: string) -> result<_, plugin-error>;

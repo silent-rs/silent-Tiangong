@@ -3892,6 +3892,30 @@ pub async fn set_models_config(
     Ok(())
 }
 
+// ── 索引预热 ──
+
+/// 预热指定路径的工作区索引。
+///
+/// 后台静默调用（创建新对话/切换工作目录时触发，无用户交互），经 sidecar 通道
+/// 转发：索引已存在则直接返回，否则后台扫描立即返回不阻塞。索引管理（列表/
+/// 删除/重建）由「设置 → 索引管理」页经插件 UI 通道处理，不在此处。
+#[tauri::command]
+pub async fn prewarm_workspace_index(root: String) -> Result<(), String> {
+    let storage_root = tiangong_config::io::storage_root();
+    let payload = serde_json::to_value(
+        tiangong_plugin_index_protocol::management::PrewarmWorkspaceIndexRequest { root },
+    )
+    .map_err(|e| e.to_string())?;
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &storage_root,
+        "index",
+        tiangong_plugin_index_protocol::management::PREWARM_WORKSPACE_INDEX_OPERATION,
+        payload,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 获取所有可用的模型能力列表
 #[tauri::command]
 pub async fn get_model_capabilities() -> Result<Vec<ModelCapabilityInfo>, String> {

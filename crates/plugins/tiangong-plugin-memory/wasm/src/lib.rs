@@ -346,7 +346,7 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn set_workspace(workspace: Option<String>) -> Result<(), PluginError> {
+    fn set_workspace(workspace: Option<String>, _full_trust: bool) -> Result<(), PluginError> {
         state::set_workspace(workspace);
         Ok(())
     }

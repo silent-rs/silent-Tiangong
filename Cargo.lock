@@ -10393,6 +10393,7 @@ dependencies = [
  "tiangong-plugin-fs",
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
+ "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",

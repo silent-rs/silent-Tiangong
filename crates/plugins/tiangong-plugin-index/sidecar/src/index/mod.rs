@@ -96,6 +96,7 @@ impl IndexManager {
         Self::with_base_dir(base_dir)
     }
 
+    #[allow(dead_code)]
     pub fn new_with_dir(base_dir: PathBuf) -> Result<Self> {
         Self::with_base_dir(base_dir)
     }
@@ -110,6 +111,7 @@ impl IndexManager {
         })
     }
 
+    #[allow(dead_code)]
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
@@ -358,6 +360,16 @@ impl IndexManager {
     }
 
     fn default_dir() -> PathBuf {
+        // 优先使用运行时注入的存储根（与 plugin-runtime sidecar 配置对齐）：
+        // 1. TIANGONG_PLUGIN_DATA_DIR（插件私有数据目录）→ join("index")
+        // 2. TIANGONG_STORAGE_ROOT（应用存储根）→ join("index")
+        // 3. 回退 ~/.tiangong/index（与 ipc.rs 的 index_runtime_dir 对齐）
+        if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
+            return PathBuf::from(dir).join("index");
+        }
+        if let Some(dir) = std::env::var_os("TIANGONG_STORAGE_ROOT").filter(|v| !v.is_empty()) {
+            return PathBuf::from(dir).join("index");
+        }
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));

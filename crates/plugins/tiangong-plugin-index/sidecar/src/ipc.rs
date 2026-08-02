@@ -204,7 +204,7 @@ async fn serve_connection(
         let request = connection.read_request().await?;
         let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone())
         {
-            Ok(plugin_request) => service_obj.dispatch(plugin_request),
+            Ok(plugin_request) => service_obj.dispatch(plugin_request).await,
             Err(error) => PluginResponse::error(
                 &request.request_id,
                 PluginErrorCode::BadRequest,

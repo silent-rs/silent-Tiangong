@@ -18,11 +18,15 @@ use tiangong_plugin_index_protocol::lifecycle::{
     FinalizeSession, FinalizeSessionRequest, IndexTurnBatch, IndexTurnBatchRequest, SetWorkspace,
     SetWorkspaceRequest,
 };
+use tiangong_plugin_index_protocol::management::{
+    DeleteWorkspaceIndex, DeleteWorkspaceIndexRequest, ListWorkspaceIndexes, RebuildWorkspaceIndex,
+    RebuildWorkspaceIndexRequest,
+};
 use tiangong_plugin_index_protocol::search::{
     IndexSearch, IndexSearchRequest, IndexSearchResponse, SearchCode, SearchCodeRequest,
     SearchCodeResponse,
 };
-use tiangong_plugin_index_protocol::{IndexScope, TurnData};
+use tiangong_plugin_index_protocol::{IndexOperation, IndexScope, TurnData};
 use tiangong_types::{MessageRole, PluginSession};
 
 mod descriptor {
@@ -38,17 +42,27 @@ mod state {
     struct PluginState {
         workspace: Option<String>,
         session_id: Option<String>,
+        full_trust: bool,
     }
 
     thread_local! {
         static STATE: RefCell<PluginState> = const { RefCell::new(PluginState {
             workspace: None,
             session_id: None,
+            full_trust: false,
         }) };
     }
 
     pub fn set_workspace(ws: Option<String>) {
         STATE.with(|s| s.borrow_mut().workspace = ws);
+    }
+
+    pub fn set_full_trust(full_trust: bool) {
+        STATE.with(|s| s.borrow_mut().full_trust = full_trust);
+    }
+
+    pub fn full_trust() -> bool {
+        STATE.with(|s| s.borrow().full_trust)
     }
 
     pub fn workspace() -> Option<String> {
@@ -149,8 +163,9 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn set_workspace(workspace: Option<String>) -> Result<(), PluginError> {
+    fn set_workspace(workspace: Option<String>, full_trust: bool) -> Result<(), PluginError> {
         state::set_workspace(workspace.clone());
+        state::set_full_trust(full_trust);
         // 通知 sidecar 工作区变更并触发后台扫描。
         let request = SetWorkspaceRequest { workspace };
         let _ = sidecar_client::invoke::<SetWorkspace>(&request);
@@ -287,9 +302,9 @@ fn handle_search_code(call: &ToolCall) -> Result<ToolResult, PluginError> {
             .and_then(serde_json::Value::as_str)
             .map(String::from),
         workspace: state::workspace(),
-        // trust_mode 由 host 侧保证（sidecar 直接用 workspace 作 current_dir，
-        // 路径校验在 sidecar 内按 full_trust=false 走，与原 fs 插件默认一致）。
-        full_trust: false,
+        // 信任模式由 host 在 set_workspace 时注入；sidecar 据此决定 search_code
+        // 的路径校验严格度（full_trust 时放宽工作区外路径）。
+        full_trust: state::full_trust(),
     };
     let response: SearchCodeResponse = sidecar_client::invoke::<SearchCode>(&request)
         .map_err(|e| plugin_err(format!("search_code 执行失败: {e}")))?;
@@ -364,25 +379,80 @@ fn tool_failure(ok: bool, summary: &str, stderr: &str) -> ToolResult {
     }
 }
 
-/// Index 插件不提供 UI 设置页，UiGuest 各方法返回空/错误以满足 WIT world 约束。
+/// 索引管理设置页模板（单文件内联，与 memory 设置页同构）。
+const INDEX_PAGE_TEMPLATE: &str = include_str!("index.html");
+const INDEX_PAGE_CSS: &str = include_str!("index.css");
+const INDEX_PAGE_JS: &str = include_str!("index.js");
+
+/// 把 CSS/JS 内联进 HTML 占位符，返回完整设置页 HTML。
+fn index_settings_html() -> String {
+    INDEX_PAGE_TEMPLATE
+        .replace("/*__INDEX_CSS__*/", INDEX_PAGE_CSS)
+        .replace("/*__INDEX_JS__*/", INDEX_PAGE_JS)
+}
+
+/// 索引管理设置页 UiGuest 实现：列出工作区索引 + 重建/删除。
+///
+/// 与 memory 设置页同构——contributions 声明设置页贡献，open_view 返回内联 HTML，
+/// handle_view_message 按 method 转发到 sidecar（list/delete/rebuild）。
 impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
-        Ok(Vec::new())
+        Ok(vec![Contribution {
+            id: "index-settings".to_string(),
+            title: "索引管理".to_string(),
+            description: "工作区索引列表与重建/删除".to_string(),
+            icon: "database".to_string(),
+            group: "plugins".to_string(),
+            has_view: true,
+        }])
     }
 
-    fn open_view(_contribution_id: String) -> Result<ViewResponse, PluginError> {
-        Err(plugin_err("Index 插件不提供 UI 视图"))
+    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
+        if contribution_id != "index-settings" {
+            return Err(plugin_err(format!(
+                "未知的 contribution: {contribution_id}"
+            )));
+        }
+        Ok(ViewResponse {
+            html: index_settings_html(),
+        })
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {
-        Err(plugin_err("Index 插件不提供 UI 资源"))
+        Err(plugin_err("Index 设置页无外部资源"))
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        Err(plugin_err("Index 插件不处理 UI 消息"))
+        let payload = match request.method.as_str() {
+            "list" => {
+                invoke_for_ui::<ListWorkspaceIndexes>(&tiangong_plugin_index_protocol::Empty {})?
+            }
+            "delete" => {
+                let req: DeleteWorkspaceIndexRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析删除请求失败: {e}")))?;
+                invoke_for_ui::<DeleteWorkspaceIndex>(&req)?
+            }
+            "rebuild" => {
+                let req: RebuildWorkspaceIndexRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析重建请求失败: {e}")))?;
+                invoke_for_ui::<RebuildWorkspaceIndex>(&req)?
+            }
+            other => return Err(plugin_err(format!("未知的索引管理消息: {other}"))),
+        };
+        Ok(ViewMessageResponse { payload })
     }
+}
+
+/// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。
+fn invoke_for_ui<O>(request: &O::Request) -> Result<String, PluginError>
+where
+    O: IndexOperation,
+    O::Response: serde::Serialize,
+{
+    let response = sidecar_client::invoke::<O>(request).map_err(|e| plugin_err(e.to_string()))?;
+    serde_json::to_string(&response).map_err(|e| plugin_err(e.to_string()))
 }
 
 bindings::export!(Component with_types_in bindings);
