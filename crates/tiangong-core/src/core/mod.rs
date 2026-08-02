@@ -269,14 +269,29 @@ impl TiangongCore {
     pub fn into_session(self) -> Result<Session, CoreError> {
         // 发 Cancel 终止活跃 turn(如有)
         let _ = self.send_cmd(Command::Cancel);
-        Session::load_from_storage(&self.storage_root, &self.session_id)
-            .map_err(|_| CoreError::WorkerPanicked)
+        let mut session = Session::load_from_storage(&self.storage_root, &self.session_id)
+            .map_err(|_| CoreError::WorkerPanicked)?;
+        // worker 即将退出前触发插件 finalize（index 落盘 / agent-team 清理 / memory meso 反刍）。
+        self.finalize_plugins(&mut session);
+        Ok(session)
     }
 
     /// 关闭 Core,不取回 session(session 已在磁盘上)。
     pub fn shutdown_join(self) -> Result<(), CoreError> {
         let _ = self.send_cmd(Command::Cancel);
+        // worker 即将退出前触发插件 finalize（与 into_session 对称）。
+        if let Ok(mut session) = Session::load_from_storage(&self.storage_root, &self.session_id) {
+            self.finalize_plugins(&mut session);
+            let _ = session.try_persist_to_disk();
+        }
         Ok(())
+    }
+
+    /// 遍历插件调用 on_session_ended（worker 退出前的 finalize 钩子）。
+    fn finalize_plugins(&self, session: &mut Session) {
+        for plugin in &self.plugins {
+            plugin.on_session_ended(session);
+        }
     }
 }
 

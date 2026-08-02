@@ -351,6 +351,15 @@ impl IndexManager {
         tantivy_dir.is_dir()
     }
 
+    /// 索引年龄（秒），None 表示索引不存在。用于判定是否过期需要重建。
+    pub fn workspace_index_age_secs(&self, root: &Path) -> Option<u64> {
+        let tantivy_dir = self.workspace_index_dir(root);
+        let meta = tantivy_dir.metadata().ok()?;
+        let modified = meta.modified().ok()?;
+        let elapsed = std::time::SystemTime::now().duration_since(modified).ok()?;
+        Some(elapsed.as_secs())
+    }
+
     fn workspace_index_dir(&self, root: &Path) -> PathBuf {
         let workspace_id = workspace_index::hash_path(root);
         self.base_dir

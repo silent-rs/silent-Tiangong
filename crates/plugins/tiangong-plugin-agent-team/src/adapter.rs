@@ -134,12 +134,23 @@ impl Plugin for AgentTeamPlugin {
         // Core 即将退出，销毁团队（关闭子 Core、清空 runtimes）。
         // coordinator.shutdown 是 async，但 on_session_ended 是同步钩子——
         // fire-and-forget spawn 后台执行，不阻塞 worker 退出。
+        // 无 tokio runtime 时（同步上下文调用）跳过，避免 panic。
         let coordinator = self.coordinator.clone();
         let session_id = session.id.clone();
-        tokio::spawn(async move {
-            tracing::info!(session_id, "后台销毁 Agent Team 团队");
-            coordinator.shutdown().await;
-        });
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    tracing::info!(session_id, "后台销毁 Agent Team 团队");
+                    coordinator.shutdown().await;
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id,
+                    "on_session_ended 无 tokio runtime，跳过 Agent Team 团队销毁"
+                );
+            }
+        }
     }
 }
 

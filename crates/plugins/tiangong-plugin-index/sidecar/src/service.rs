@@ -183,7 +183,7 @@ impl IndexService {
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     let root = Path::new(&req.root);
                     // 取得扫描 permit 与后台扫描/重建互斥，避免删除时后台线程继续写已移除目录。
-                    let _permit = wait_for_scan_permit(&manager, root);
+                    let _permit = wait_for_scan_permit(&manager, root)?;
                     manager.delete_workspace_index(root, &req.workspace_id)
                 })
                 .await
@@ -198,7 +198,7 @@ impl IndexService {
                 let count = tokio::task::spawn_blocking(move || -> Result<usize> {
                     let root = Path::new(&req.root);
                     // 取得扫描 permit 与后台扫描/删除互斥，避免并发写同一磁盘索引。
-                    let _permit = wait_for_scan_permit(&manager, root);
+                    let _permit = wait_for_scan_permit(&manager, root)?;
                     manager.full_scan(root)
                 })
                 .await
@@ -255,7 +255,10 @@ impl IndexService {
         Ok(())
     }
 
-    /// 对工作区做全量扫描（索引不存在则后台扫描，已存在则复用+置位 last_scanned）。
+    /// 对工作区做全量扫描：
+    /// - 索引不存在：后台全量扫描
+    /// - 索引过期（>1 小时）：后台重建（不阻塞搜索）
+    /// - 索引新鲜：复用，置位 last_scanned
     fn full_scan_workspace(&self, root: &Path) {
         if !root.is_dir() {
             return;
@@ -266,6 +269,14 @@ impl IndexService {
         }
         if let Ok(mut guard) = self.last_scanned.write() {
             guard.clone_from(&Some(root.to_path_buf()));
+        }
+        // 索引已存在——检查是否过期，过期则后台重建。
+        const STALE_THRESHOLD_SECS: u64 = 3600;
+        if let Some(age) = self.manager.workspace_index_age_secs(root)
+            && age > STALE_THRESHOLD_SECS
+        {
+            tracing::info!(age_secs = age, "Workspace 索引过期，后台重建");
+            self.spawn_background_scan(root);
         }
     }
 
@@ -475,24 +486,19 @@ fn handle_search_code_blocking(
 
 /// 等待取得工作区扫描 permit（与后台扫描/重建/删除互斥）。
 ///
-/// 用于 delete/rebuild 操作：在已有后台扫描进行时短暂轮询等待其结束（最多约 30s），
-/// 拿到 permit 后返回；持有期间调用方独占该 root 的写权限，drop 时自动复位。
-fn wait_for_scan_permit(manager: &IndexManager, root: &Path) -> crate::index::WorkspaceScanPermit {
+/// 用于 delete/rebuild 操作：在已有后台扫描进行时短暂轮询等待（最多约 30s），
+/// 拿到 permit 后返回；超时仍未取得则返回错误，避免无限阻塞累积后台任务。
+fn wait_for_scan_permit(
+    manager: &IndexManager,
+    root: &Path,
+) -> Result<crate::index::WorkspaceScanPermit> {
     for _ in 0..300 {
         if let Some(permit) = manager.try_begin_workspace_scan(root) {
-            return permit;
+            return Ok(permit);
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    // 兜底：强制取 permit（极端情况下后台扫描超时未结束，避免无限阻塞）。
-    // try_begin_workspace_scan 返回 None 时用死循环等；此处直接 panic 不合理，
-    // 改为无限等待（实际 30s 内后台扫描应已完成）。
-    loop {
-        if let Some(permit) = manager.try_begin_workspace_scan(root) {
-            return permit;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    Err(anyhow!("索引正在构建中，请稍后重试"))
 }
 
 /// prewarm 阻塞实现（在 spawn_blocking 线程内执行）。

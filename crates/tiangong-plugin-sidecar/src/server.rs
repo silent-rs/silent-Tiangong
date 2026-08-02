@@ -224,6 +224,13 @@ async fn serve_connection(
                 false,
             ),
         };
+        if let Some(err_msg) = &plugin_response.error_message {
+            tracing::warn!(
+                request_id = %request.request_id,
+                error = %err_msg,
+                "sidecar 操作失败"
+            );
+        }
         let payload =
             serde_json::to_value(plugin_response).with_context(|| "序列化 sidecar 响应失败")?;
         connection
