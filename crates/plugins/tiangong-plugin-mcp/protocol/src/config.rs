@@ -1,20 +1,23 @@
-//! MCP 配置类型。
+//! MCP 配置类型（协议层，纯数据结构）。
 //!
-//! 原属 `tiangong-core::agent_config`，MCP 管理插件化后迁入本 crate，
-//! 由 plugin 自托管读写 `~/.tiangong/mcp.json`，core 不再持有 MCP 概念。
+//! 这些类型同时被 sidecar 和 WASM 引用，必须可序列化、不依赖 rmcp/tokio/anyhow。
+//! 解析、校验、规范化等业务逻辑保留在 sidecar。
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 用户在配置里声明的传输模式（Auto 由 sidecar 根据字段推断）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransportMode {
+    #[default]
     Auto,
     Stdio,
     Http,
 }
 
+/// 解析后的实际传输模式（仅 sidecar 内部使用，不序列化进 mcp.json）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedMcpTransport {
     Stdio,
@@ -102,12 +105,6 @@ impl Default for McpConfig {
     }
 }
 
-impl Default for McpTransportMode {
-    fn default() -> Self {
-        default_mcp_transport_mode()
-    }
-}
-
 fn default_enabled() -> bool {
     true
 }
@@ -125,109 +122,43 @@ pub fn is_http_endpoint(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
-// ── 注册 / 编辑请求类型（原 app_state::RegisterMcpServerRequest / Options）──
+// ── 注册 / 编辑请求类型 ──
+//
+// `RegisterMcpServerOptions` 的 headers/env 用 Vec<(String,String)> 而非 BTreeMap，
+// 以保留前端表单的输入顺序；sidecar 规范化时再聚合去重。
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegisterMcpServerOptions {
+    #[serde(default)]
     pub transport: Option<McpTransportMode>,
+    #[serde(default)]
     pub endpoint: Option<String>,
+    #[serde(default)]
     pub auth_header: Option<String>,
+    #[serde(default)]
     pub headers: Vec<(String, String)>,
+    #[serde(default)]
     pub env: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegisterMcpServerRequest {
     pub name: String,
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub options: RegisterMcpServerOptions,
 }
 
-/// 规范化后的 MCP server 字段（不含 name，name 作为主键由调用方处理）。
-pub(crate) struct NormalizedMcpFields {
-    pub(crate) transport: McpTransportMode,
-    pub(crate) command: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) endpoint: String,
-    pub(crate) auth_header: String,
-    pub(crate) headers: BTreeMap<String, String>,
-    pub(crate) env: BTreeMap<String, String>,
-    pub(crate) enabled: bool,
-    pub(crate) tags: Vec<String>,
-}
-
-/// 把注册/编辑请求规范化为可直接写入 [`McpServerConfig`] 的字段。
-/// register_mcp_server 与 update_mcp_server 共用，避免 trim/filter 逻辑重复。
-pub(crate) fn normalize_request_fields(
-    request: RegisterMcpServerRequest,
-) -> anyhow::Result<NormalizedMcpFields> {
-    let tags = request
-        .tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .collect::<Vec<_>>();
-    let args = request
-        .args
-        .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-    let transport = request.options.transport.unwrap_or_default();
-    let endpoint = request
-        .options
-        .endpoint
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let auth_header = request
-        .options
-        .auth_header
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    let headers = request
-        .options
-        .headers
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-            if key.is_empty() || value.is_empty() {
-                None
-            } else {
-                Some((key, value))
-            }
-        })
-        .collect::<BTreeMap<_, _>>();
-    let env = request
-        .options
-        .env
-        .into_iter()
-        .filter_map(|(key, value)| {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-            if key.is_empty() || value.is_empty() {
-                None
-            } else {
-                Some((key, value))
-            }
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    Ok(NormalizedMcpFields {
-        transport,
-        command: request.command.trim().to_string(),
-        args,
-        endpoint,
-        auth_header,
-        headers,
-        env,
-        enabled: request.enabled,
-        tags,
-    })
+/// 更新顶层 MCP 配置项请求（enabled / timeout_ms）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateConfigEntryRequest {
+    pub key: String,
+    pub value: String,
 }

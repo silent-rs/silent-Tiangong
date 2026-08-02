@@ -467,8 +467,7 @@ async fn dispatch_plugin_request(
             let selection: plugin_ui::MemorySelection = serde_json::from_value(request.payload)
                 .with_context(|| "解析 Memory 页面配置失败")?;
             let selection: crate::MemoryConfigSelection = transcode(selection)?;
-            let models =
-                tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+            let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
             let config = selection.to_memory(&models)?;
             config.save()?;
             handle.reconfigure(config.to_options()).await?;
@@ -503,7 +502,7 @@ async fn dispatch_plugin_request(
 }
 
 fn memory_ui_bootstrap() -> Result<serde_json::Value> {
-    let models = tiangong_config::io::load_models_config_at(&tiangong_config::io::storage_root());
+    let models = tiangong_config::io::load_models_config_at(&crate::paths::storage_root());
     let config = crate::MemoryConfig::load_or_default();
     let selection = crate::MemoryConfigSelection::from_memory(&config, &models);
     let mut model_entries = models

@@ -5,27 +5,57 @@ use anyhow::{Context, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
 
-use tiangong_plugin_mcp::{
-    McpConfig, McpPlugin, McpServerConfig, McpTransportMode, RegisterMcpServerOptions,
-    RegisterMcpServerRequest, validate_mcp_config,
+use tiangong_plugin_mcp_protocol::config::{
+    McpServerConfig, McpTransportMode, RegisterMcpServerOptions, RegisterMcpServerRequest,
 };
+use tiangong_plugin_mcp_protocol::management::{
+    RemoveServerRequest, SERVER_REMOVE_OPERATION, SERVER_SET_ENABLED_OPERATION, ServersResponse,
+    SetEnabledRequest,
+};
+use tiangong_plugin_mcp_protocol::query::TextResponse;
+use tiangong_plugin_mcp_protocol::{MessageResponse, NameFilterRequest};
 
 use crate::args::{McpArgs, McpSubcommand};
 
+/// 经运行时 sidecar 通道调用 MCP 插件操作。
+fn invoke(operation: &str, payload: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "mcp",
+        operation,
+        payload,
+    )
+}
+
+/// 查询当前所有 MCP server 配置。
+fn list_servers() -> anyhow::Result<Vec<McpServerConfig>> {
+    let response: ServersResponse =
+        serde_json::from_value(invoke("mcp.server.list", serde_json::json!({}))?)
+            .context("解析 MCP server 列表失败")?;
+    Ok(response.servers)
+}
+
 pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
-    // MCP 配置由 mcp plugin 自管（~/.tiangong/mcp.json），CLI 子命令构造临时
-    // plugin 实例操作（文件共享，多进程一致）。
-    let mcp_plugin = McpPlugin::new();
     match args.command {
         McpSubcommand::List => {
-            println!("{}", mcp_plugin.mcp_server_summary(None));
+            let response: TextResponse = serde_json::from_value(invoke(
+                "mcp.server.summary",
+                serde_json::to_value(NameFilterRequest { filter: None })?,
+            )?)
+            .context("解析 MCP 摘要失败")?;
+            println!("{}", response.text);
         }
         McpSubcommand::Show { name } => {
-            if let Some(name) = name {
-                println!("{}", mcp_plugin.mcp_server_detail(Some(&name)));
+            let filter = NameFilterRequest { filter: name };
+            let operation = if filter.filter.is_some() {
+                "mcp.server.detail"
             } else {
-                println!("{}", mcp_plugin.mcp_server_summary(None));
-            }
+                "mcp.server.summary"
+            };
+            let response: TextResponse =
+                serde_json::from_value(invoke(operation, serde_json::to_value(filter)?)?)
+                    .context("解析 MCP 详情失败")?;
+            println!("{}", response.text);
         }
         McpSubcommand::Add {
             name,
@@ -58,22 +88,21 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                 )?;
                 let raw_json = load_add_json_payload(json, json_file)?;
                 let imported = parse_mcp_servers_from_json(&raw_json)?;
-                let msgs = import_mcp_servers(&mcp_plugin, imported, force)?;
+                let msgs = import_mcp_servers(imported, force)?;
                 for msg in msgs {
                     println!("{msg}");
                 }
             } else {
                 let name = name.ok_or_else(|| anyhow!("缺少 MCP server 名称"))?;
                 let (command, args) = resolve_mcp_add_command(command, args, cmdline)?;
-                if force
-                    && mcp_plugin
-                        .mcp_servers()
-                        .iter()
-                        .any(|item| item.name == name.trim())
-                {
-                    let _ = mcp_plugin.remove_mcp_server(&name)?;
+                if force && list_servers()?.iter().any(|item| item.name == name.trim()) {
+                    let _: MessageResponse = serde_json::from_value(invoke(
+                        SERVER_REMOVE_OPERATION,
+                        serde_json::to_value(RemoveServerRequest { name: name.clone() })?,
+                    )?)
+                    .context("解析删除响应失败")?;
                 }
-                let msg = mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
+                let request = RegisterMcpServerRequest {
                     name,
                     command,
                     args,
@@ -86,21 +115,44 @@ pub(crate) fn run_mcp_command(args: McpArgs) -> anyhow::Result<()> {
                         headers,
                         env,
                     },
-                })?;
-                println!("{msg}");
+                };
+                let response: MessageResponse = serde_json::from_value(invoke(
+                    "mcp.server.register",
+                    serde_json::to_value(&request)?,
+                )?)
+                .context("解析注册响应失败")?;
+                println!("{}", response.message);
             }
         }
         McpSubcommand::Remove { name } => {
-            let msg = mcp_plugin.remove_mcp_server(&name)?;
-            println!("{msg}");
+            let response: MessageResponse = serde_json::from_value(invoke(
+                SERVER_REMOVE_OPERATION,
+                serde_json::to_value(RemoveServerRequest { name })?,
+            )?)
+            .context("解析删除响应失败")?;
+            println!("{}", response.message);
         }
         McpSubcommand::Enable { name } => {
-            let msg = mcp_plugin.set_mcp_server_enabled(&name, true)?;
-            println!("{msg}");
+            let response: MessageResponse = serde_json::from_value(invoke(
+                SERVER_SET_ENABLED_OPERATION,
+                serde_json::to_value(SetEnabledRequest {
+                    name,
+                    enabled: true,
+                })?,
+            )?)
+            .context("解析启停响应失败")?;
+            println!("{}", response.message);
         }
         McpSubcommand::Disable { name } => {
-            let msg = mcp_plugin.set_mcp_server_enabled(&name, false)?;
-            println!("{msg}");
+            let response: MessageResponse = serde_json::from_value(invoke(
+                SERVER_SET_ENABLED_OPERATION,
+                serde_json::to_value(SetEnabledRequest {
+                    name,
+                    enabled: false,
+                })?,
+            )?)
+            .context("解析启停响应失败")?;
+            println!("{}", response.message);
         }
     }
     Ok(())
@@ -375,79 +427,54 @@ fn normalize_map_pairs(input: BTreeMap<String, String>) -> Vec<(String, String)>
         .collect()
 }
 
-fn import_mcp_servers(
-    mcp_plugin: &McpPlugin,
-    servers: Vec<ImportedMcpServer>,
-    force: bool,
-) -> anyhow::Result<Vec<String>> {
+fn import_mcp_servers(servers: Vec<ImportedMcpServer>, force: bool) -> anyhow::Result<Vec<String>> {
     if servers.is_empty() {
         return Err(anyhow!("没有可导入的 MCP server"));
     }
 
-    ensure_import_servers_valid(&servers)?;
-    ensure_import_conflicts(mcp_plugin, &servers, force)?;
+    ensure_import_conflicts(&servers, force)?;
 
     let mut msgs = Vec::new();
     for server in servers {
-        let exists = mcp_plugin
-            .mcp_servers()
-            .iter()
-            .any(|item| item.name == server.name);
+        let exists = list_servers()?.iter().any(|item| item.name == server.name);
         if force && exists {
-            let msg = mcp_plugin.remove_mcp_server(&server.name)?;
-            msgs.push(msg);
+            let response: MessageResponse = serde_json::from_value(invoke(
+                SERVER_REMOVE_OPERATION,
+                serde_json::to_value(RemoveServerRequest {
+                    name: server.name.clone(),
+                })?,
+            )?)
+            .context("解析删除响应失败")?;
+            msgs.push(response.message);
         }
 
-        let msg = mcp_plugin.register_mcp_server(RegisterMcpServerRequest {
+        let request = RegisterMcpServerRequest {
             name: server.name,
             command: server.command,
             args: server.args,
             tags: server.tags,
             enabled: server.enabled,
             options: server.options,
-        })?;
-        msgs.push(msg);
+        };
+        let response: MessageResponse = serde_json::from_value(invoke(
+            "mcp.server.register",
+            serde_json::to_value(&request)?,
+        )?)
+        .context("解析注册响应失败")?;
+        msgs.push(response.message);
     }
 
     Ok(msgs)
 }
 
-fn ensure_import_servers_valid(servers: &[ImportedMcpServer]) -> anyhow::Result<()> {
-    let mut seen = HashSet::new();
-    for server in servers {
-        if !seen.insert(server.name.clone()) {
-            return Err(anyhow!(
-                "导入 JSON 包含重复 MCP server 名称：{}",
-                server.name
-            ));
-        }
-    }
-
-    let config = McpConfig {
-        enabled: true,
-        timeout_ms: 15_000,
-        servers: servers
-            .iter()
-            .map(imported_server_to_config)
-            .collect::<Vec<McpServerConfig>>(),
-    };
-    validate_mcp_config(&config)?;
-    Ok(())
-}
-
-fn ensure_import_conflicts(
-    mcp_plugin: &McpPlugin,
-    servers: &[ImportedMcpServer],
-    force: bool,
-) -> anyhow::Result<()> {
+fn ensure_import_conflicts(servers: &[ImportedMcpServer], force: bool) -> anyhow::Result<()> {
     if force {
         return Ok(());
     }
 
-    let existing = mcp_plugin
-        .mcp_servers()
-        .iter()
-        .map(|item| item.name.clone())
+    let existing = list_servers()?
+        .into_iter()
+        .map(|item| item.name)
         .collect::<HashSet<String>>();
     let conflicts = servers
         .iter()
@@ -462,36 +489,6 @@ fn ensure_import_conflicts(
     }
 
     Ok(())
-}
-
-fn imported_server_to_config(server: &ImportedMcpServer) -> McpServerConfig {
-    let endpoint = server.options.endpoint.clone().unwrap_or_default();
-    let auth_header = server.options.auth_header.clone().unwrap_or_default();
-    let headers = server
-        .options
-        .headers
-        .iter()
-        .cloned()
-        .collect::<BTreeMap<_, _>>();
-    let env = server
-        .options
-        .env
-        .iter()
-        .cloned()
-        .collect::<BTreeMap<_, _>>();
-
-    McpServerConfig {
-        name: server.name.clone(),
-        transport: server.options.transport.clone().unwrap_or_default(),
-        command: server.command.clone(),
-        args: server.args.clone(),
-        endpoint,
-        auth_header,
-        headers,
-        env,
-        enabled: server.enabled,
-        tags: server.tags.clone(),
-    }
 }
 
 fn default_enabled() -> bool {

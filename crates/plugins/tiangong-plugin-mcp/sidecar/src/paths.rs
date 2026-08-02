@@ -1,6 +1,6 @@
 //! MCP 存储路径自管（对齐 skill plugin 的自治模式）。
 //!
-//! plugin 自行计算 `~/.tiangong/` 下的 MCP 相关路径，不依赖 core 的
+//! plugin 从 App 注入的存储根目录计算 MCP 相关路径，不依赖 core 的
 //! `app_state::default_mcp_*` 路径函数——MCP 概念已从 core 彻底迁出。
 
 use std::path::PathBuf;
@@ -25,8 +25,13 @@ fn user_home_dir() -> Option<PathBuf> {
     }
 }
 
-/// 天工存储根目录：`~/.tiangong/`（主目录不可用时回退到当前目录）。
+/// 天工存储根目录：优先使用 App 注入值，否则回退 `~/.tiangong/`。
 fn storage_root() -> PathBuf {
+    if let Some(root) = std::env::var_os(tiangong_plugin_runtime::sidecar::STORAGE_ROOT_ENV)
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(root);
+    }
     user_home_dir()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
         .join(".tiangong")
@@ -43,6 +48,7 @@ pub fn default_mcp_capability_cache_path() -> PathBuf {
 }
 
 /// MCP 依赖锁路径：`~/.tiangong/skills/mcp-lock.json`（与 skills 存储同目录）。
+#[allow(dead_code)]
 pub fn default_mcp_lock_path() -> PathBuf {
     storage_root().join("skills").join("mcp-lock.json")
 }

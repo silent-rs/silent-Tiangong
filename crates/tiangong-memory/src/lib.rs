@@ -26,6 +26,7 @@ mod paths;
 mod recall;
 mod recall_anchor;
 mod recall_context;
+mod recovery;
 mod rumination;
 mod search;
 mod store;
@@ -44,6 +45,7 @@ pub use election::{
 };
 pub use handle::MemoryHandle;
 pub use options::{MemoryOptions, MemoryVectorMode};
+pub use recovery::recover_plugin_data_dir;
 pub use types::*;
 
 /// 同步加载三级注入上下文（不经过 Actor，直接读文件）

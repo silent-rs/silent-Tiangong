@@ -23,9 +23,6 @@ pub struct ServerCoreManager {
     state: SharedState,
     core_manager: tiangong_app_state::app_state::CoreManager,
     event_bus: Arc<EventBus>,
-    /// MCP 管理插件共享句柄：core 注册与 API 管理使用同一实例（dual-ownership），
-    /// 避免 API 修改的配置与运行中 core 的 plugin 状态分叉。
-    mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     /// 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
     index_manager: Arc<tiangong_plugin_index::IndexManager>,
     /// 调度器执行上下文（构造后由入口层经 [`Self::set_scheduler_context`] 注入）。
@@ -52,14 +49,12 @@ impl ServerCoreManager {
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
-        mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
         index_manager: Arc<tiangong_plugin_index::IndexManager>,
     ) -> Self {
         Self {
             state,
             core_manager,
             event_bus,
-            mcp_plugin,
             index_manager,
             scheduler_context: Arc::new(std::sync::OnceLock::new()),
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -429,7 +424,6 @@ impl ServerCoreManager {
             // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
             // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
             //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
-            plugins.push(self.mcp_plugin.clone());
             // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
             // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
             let child_plugin_factory = Arc::new({
@@ -470,9 +464,6 @@ impl ServerCoreManager {
                             .push(tiangong_plugin_analyze_attachment::build_plugin(client));
                     }
                     child_plugins.extend(tiangong_plugin_skill::default_plugins());
-                    child_plugins.push(Arc::new(
-                        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-                    ));
                     child_plugins
                 }
             });
@@ -1311,9 +1302,6 @@ mod tests {
             state.clone(),
             core_manager,
             Arc::new(EventBus::default()),
-            Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-                root.join("mcp"),
-            )),
             std::sync::Arc::new(
                 tiangong_plugin_index::IndexManager::new_with_dir(root.join("index"))
                     .expect("IndexManager test init"),

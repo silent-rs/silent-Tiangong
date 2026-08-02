@@ -205,9 +205,19 @@ fn check_memory(report: &mut DoctorReport) {
 }
 
 fn check_mcp(report: &mut DoctorReport) {
-    // MCP 配置由 mcp plugin 自管，doctor 构造临时实例读取。
-    let mcp_plugin = tiangong_plugin_mcp::McpPlugin::new();
-    let count = mcp_plugin.mcp_servers().len();
+    // 经 sidecar 通道读取 MCP server 列表。
+    let count = tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "mcp",
+        "mcp.server.list",
+        serde_json::json!({}),
+    )
+    .and_then(|v| {
+        let resp: tiangong_plugin_mcp_protocol::management::ServersResponse =
+            serde_json::from_value(v)?;
+        Ok(resp.servers.len())
+    })
+    .unwrap_or(0);
     if count == 0 {
         report.warn("MCP 配置", "0 个服务");
     } else {

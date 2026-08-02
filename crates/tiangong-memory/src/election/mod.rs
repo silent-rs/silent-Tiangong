@@ -17,7 +17,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::actor::start_memory_with_options;
+use crate::actor::spawn_memory_actor;
 use crate::handle::MemoryHandle;
 use crate::ipc::{IpcBridge, spawn_memory_bridge};
 use crate::options::MemoryOptions;
@@ -78,12 +78,19 @@ pub struct ManagedMemory {
 }
 
 struct ManagedMemoryInner {
-    handle: MemoryHandle,
+    /// 本地 handle，仅用于在 Drop 时精确控制释放顺序。
+    ///
+    /// 运行期始终为 `Some`；leader 持有本地 actor 句柄，follower 持有远端
+    /// 句柄。Drop 时被 `take()` 以便在 join actor 线程前释放最后一个本地
+    /// 通道引用，确保 actor run loop 退出。
+    handle: Option<MemoryHandle>,
     state: LeaderState,
     _bridge: Option<IpcBridge>,
     _lease: Option<LeaderLease>,
     heartbeat_tx: Option<std_mpsc::Sender<()>>,
     heartbeat_join: Option<thread::JoinHandle<()>>,
+    /// leader 本地 actor 线程的 JoinHandle，follower 为 `None`。
+    actor_join: Option<thread::JoinHandle<()>>,
 }
 
 struct LeaderLease {
@@ -98,6 +105,8 @@ impl ManagedMemory {
             .lock()
             .expect("ManagedMemory inner lock poisoned")
             .handle
+            .as_ref()
+            .expect("ManagedMemory handle 已在 Drop 中被 take")
             .clone()
     }
 
@@ -127,12 +136,33 @@ impl Drop for ManagedMemory {
 
 impl Drop for ManagedMemoryInner {
     fn drop(&mut self) {
+        // 显式 take + drop，确保各后台线程在进程退出前完整结束，
+        // 避免与进程级全局静态析构竞态（Linux 偶发 SIGSEGV）。
+
+        // 1. 先停心跳线程
         if let Some(tx) = self.heartbeat_tx.take() {
             let _ = tx.send(());
         }
         if let Some(join_handle) = self.heartbeat_join.take() {
             let _ = join_handle.join();
         }
+
+        // 2. 停 IPC bridge 线程，并释放 bridge 持有的 handle clone
+        //    （IpcBridge::drop 会发 shutdown 并 join IPC 线程）
+        self._bridge.take();
+
+        // 3. 释放最后一个本地 handle 引用：leader 的本地 actor 通道
+        //    发送端全部 drop 后，actor 的 recv() 返回 None，run loop 退出，
+        //    actor 线程随即开始析构 MemoryStore（Tantivy mmap / SQLite）。
+        self.handle.take();
+
+        // 4. 等待 actor 线程完整退出，确保 native 资源在进程退出前析构完成。
+        if let Some(join_handle) = self.actor_join.take() {
+            let _ = join_handle.join();
+        }
+
+        // 5. 最后清理 leader 注册与锁文件
+        self._lease.take();
     }
 }
 
@@ -254,12 +284,13 @@ async fn start_or_connect_inner(
                 match MemoryHandle::connect_tcp(&leader.service).await {
                     Ok(handle) => {
                         return Ok(ManagedMemoryInner {
-                            handle,
+                            handle: Some(handle),
                             state: LeaderState::Follower { pid: leader.pid },
                             _bridge: None,
                             _lease: None,
                             heartbeat_tx: None,
                             heartbeat_join: None,
+                            actor_join: None,
                         });
                     }
                     Err(err) => {
@@ -273,17 +304,18 @@ async fn start_or_connect_inner(
 
         match try_acquire_leader_lease(process_type.clone(), service.clone())? {
             Some(lease) => {
-                let handle = start_memory_with_options(options.clone())?;
+                let (handle, actor_join) = spawn_memory_actor(options.clone())?;
                 let bridge = spawn_memory_bridge(service.clone(), handle.clone())?;
                 let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(lease.info.clone());
 
                 return Ok(ManagedMemoryInner {
-                    handle,
+                    handle: Some(handle),
                     state: LeaderState::Leader,
                     _bridge: Some(bridge),
                     _lease: Some(lease),
                     heartbeat_tx: Some(heartbeat_tx),
                     heartbeat_join: Some(heartbeat_join),
+                    actor_join: Some(actor_join),
                 });
             }
             None => {
@@ -293,12 +325,13 @@ async fn start_or_connect_inner(
                             .await
                             .with_context(|| "连接选举完成后的 Memory leader 失败")?;
                         return Ok(ManagedMemoryInner {
-                            handle,
+                            handle: Some(handle),
                             state: LeaderState::Follower { pid: leader.pid },
                             _bridge: None,
                             _lease: None,
                             heartbeat_tx: None,
                             heartbeat_join: None,
+                            actor_join: None,
                         });
                     }
                     clear_stale_registration(&leader)?;
@@ -738,8 +771,7 @@ mod tests {
     /// 以「向量层禁用」的 MemoryOptions 执行选举，与 registry 测试保持一致。
     ///
     /// 这些测试只验证 leader/follower 选举与 failover 逻辑，不涉及向量检索。
-    /// 用 `Disabled` 跳过 lancedb（C++ FFI）初始化，从根上消除测试进程 teardown
-    /// 时 Actor 线程析构 lancedb 与进程 C++ 静态析构的竞态（Linux 偶发 SIGSEGV）。
+    /// 用 `Disabled` 跳过 lancedb（C++ FFI）初始化，进一步降低析构竞态风险。
     async fn start_or_connect_test(process_type: ProcessType) -> Result<ManagedMemory> {
         let options = MemoryOptions::new().with_vector_mode(MemoryVectorMode::Disabled);
         start_or_connect_with_options(options, process_type).await

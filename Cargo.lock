@@ -10470,7 +10470,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
+ "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",
@@ -10532,6 +10532,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "scru128",
+ "serde_json",
  "termimad",
  "tiangong-app-state",
  "tiangong-config",
@@ -10545,7 +10546,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
+ "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
@@ -10656,7 +10657,7 @@ dependencies = [
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-plugin-mcp",
+ "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill",
  "tiangong-server",
@@ -10880,20 +10881,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-mcp"
+name = "tiangong-plugin-mcp-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-mcp-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "chrono",
  "http",
+ "libc",
  "rmcp",
+ "scru128",
  "serde",
  "serde_json",
  "tempfile",
- "tiangong-core",
- "tiangong-toolkit",
- "tiangong-types",
+ "tiangong-plugin-mcp-protocol",
+ "tiangong-plugin-runtime",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-mcp-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-mcp-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11106,7 +11128,7 @@ dependencies = [
  "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index",
- "tiangong-plugin-mcp",
+ "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-scheduler",

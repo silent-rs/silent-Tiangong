@@ -61,6 +61,16 @@ button {
   cursor: pointer;
 }
 
+button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
 button:disabled,
 input:disabled,
 select:disabled {

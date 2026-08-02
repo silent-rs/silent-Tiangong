@@ -356,6 +356,20 @@ pub fn start_memory() -> anyhow::Result<MemoryHandle> {
 /// 上层可通过 `tiangong-config` 读取配置文件，再将解析后的 embedding
 /// 端点传入这里。Memory 自身不负责重复解析全局配置文件。
 pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<MemoryHandle> {
+    let (handle, _join) = spawn_memory_actor(options)?;
+    Ok(handle)
+}
+
+/// 启动 Memory Actor 线程，返回 handle 与 actor 线程的 JoinHandle。
+///
+/// 调用方负责在合适的时机 join 返回的 JoinHandle，以保证 actor 线程内的
+/// native 资源（Tantivy mmap、SQLite 连接等）在进程退出前完成析构，避免
+/// 与进程级全局静态析构产生竞态（Linux 偶发 SIGSEGV）。不需要显式 join
+/// 的调用方（如生产路径）可直接丢弃返回的 JoinHandle，actor 线程会在
+/// handle 全部释放后随通道关闭自行退出。
+pub(crate) fn spawn_memory_actor(
+    options: MemoryOptions,
+) -> anyhow::Result<(MemoryHandle, std::thread::JoinHandle<()>)> {
     let (tx, rx) = mpsc::channel(256);
 
     let store = MemoryStore::open().map_err(|e| {
@@ -365,7 +379,7 @@ pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<Memor
 
     let actor = MemoryActor::new(rx, store, options);
 
-    std::thread::Builder::new()
+    let join_handle = std::thread::Builder::new()
         .name("tiangong-memory-actor".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -377,5 +391,5 @@ pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<Memor
         })
         .expect("Memory Actor 线程创建失败");
 
-    Ok(MemoryHandle::new(tx))
+    Ok((MemoryHandle::new(tx), join_handle))
 }

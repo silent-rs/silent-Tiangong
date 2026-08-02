@@ -22,12 +22,25 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-use crate::config::{McpServerConfig, ResolvedMcpTransport};
-use tiangong_toolkit::configure_tokio_no_window;
+use tiangong_plugin_mcp_protocol::config::{McpServerConfig, ResolvedMcpTransport};
 
 const MAX_LIST_PAGES: usize = 8;
 /// 最多保留的 stderr 末尾字节数，用于在握手失败时诊断子进程报错。
 const STDERR_CAPTURE_BYTES: usize = 8 * 1024;
+
+/// Windows 下隐藏子进程控制台窗口（对齐 tiangong_toolkit 的实现）。
+fn configure_no_window(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -35,74 +48,7 @@ pub struct McpResourceMeta {
     pub uri: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct McpToolMeta {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub input_schema: Value,
-    #[serde(default)]
-    pub argument_summaries: Vec<McpToolArgumentSummary>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct McpToolArgumentSummary {
-    pub name: String,
-    pub type_name: String,
-    pub required: bool,
-    pub description: String,
-    pub default_value: String,
-    pub enum_values: Vec<String>,
-}
-
-impl McpToolMeta {
-    pub fn compact_signature(&self) -> String {
-        if self.argument_summaries.is_empty() {
-            return format!("{}()", self.name);
-        }
-        let args = self
-            .argument_summaries
-            .iter()
-            .map(|arg| {
-                let required_flag = if arg.required { "*" } else { "" };
-                if arg.type_name.is_empty() {
-                    format!("{}{}", arg.name, required_flag)
-                } else {
-                    format!("{}{}:{}", arg.name, required_flag, arg.type_name)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{}({})", self.name, args)
-    }
-
-    pub fn argument_brief(&self, max_items: usize) -> String {
-        if self.argument_summaries.is_empty() || max_items == 0 {
-            return "none".to_string();
-        }
-        self.argument_summaries
-            .iter()
-            .take(max_items)
-            .map(|arg| {
-                let required_flag = if arg.required { "*" } else { "" };
-                let mut text = if arg.type_name.is_empty() {
-                    format!("{}{}", arg.name, required_flag)
-                } else {
-                    format!("{}{}:{}", arg.name, required_flag, arg.type_name)
-                };
-                if !arg.default_value.is_empty() {
-                    text.push_str(&format!("=default({})", arg.default_value));
-                }
-                if !arg.enum_values.is_empty() {
-                    text.push_str(&format!(" enum({})", arg.enum_values.join("|")));
-                }
-                text
-            })
-            .collect::<Vec<_>>()
-            .join(";")
-    }
-}
+pub use tiangong_plugin_mcp_protocol::tool::{McpToolArgumentSummary, McpToolMeta};
 
 #[allow(dead_code)]
 pub trait McpClient {
@@ -452,7 +398,7 @@ async fn run_stdio_mcp_request_async(
     };
     let (transport, stderr_handle) =
         TokioChildProcess::builder(Command::new(command).configure(|cmd| {
-            configure_tokio_no_window(cmd);
+            configure_no_window(cmd);
             cmd.args(&server.args);
             // stdio MCP 跟随当前会话工作目录（与 run_command 一致）。workspace 由
             // 工具执行入口从 McpPlugin 注入；capability 探测等无会话上下文的路径

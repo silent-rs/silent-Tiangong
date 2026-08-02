@@ -17,7 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::client::{LocalMcpClient, McpClient, McpToolMeta, get_cached_server_version};
-use crate::config::{McpConfig, McpServerConfig};
+use tiangong_plugin_mcp_protocol::config::{McpConfig, McpServerConfig};
 
 const MIN_REFRESH_INTERVAL_SECS: u64 = 60;
 
@@ -90,6 +90,7 @@ impl McpCapabilityIndex {
     }
 
     /// 把当前实例的 capability index 持久化到磁盘。
+    #[allow(dead_code)]
     pub fn persist_cache(&self, cache_path: &Path) -> Result<()> {
         if let Some(parent) = cache_path.parent() {
             fs::create_dir_all(parent)
@@ -160,6 +161,7 @@ impl McpCapabilityIndex {
     }
 
     /// 请求后台调度器线程停止（plugin drop 时调用，避免线程泄漏）。
+    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.shutdown
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -312,14 +314,7 @@ pub struct ProbeOutcome {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct McpServerHealthStatus {
-    pub name: String,
-    pub healthy: bool,
-    pub tool_count: usize,
-    pub last_error: Option<String>,
-    pub server_version: Option<String>,
-}
+pub use tiangong_plugin_mcp_protocol::query::McpServerHealthStatus;
 
 // ── 内部刷新逻辑（操作实例化的 index，不再用全局 static）──
 

@@ -22,7 +22,12 @@ pub(crate) struct MemoryDb {
 impl MemoryDb {
     /// 打开或创建加密数据库，并初始化 Schema
     pub(crate) fn open() -> Result<Self> {
-        let db_path = db_file_path();
+        Self::open_at_data_dir(&memory_base_path())
+    }
+
+    /// 在指定数据目录打开数据库，供数据恢复前核对节点数量。
+    pub(crate) fn open_at_data_dir(data_dir: &Path) -> Result<Self> {
+        let db_path = data_dir.join("metadata.db");
 
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
@@ -1240,11 +1245,6 @@ struct ExpandedRow {
     decision_content: Option<String>,
     evidence_path: Option<String>,
     evidence_byte_size: Option<i64>,
-}
-
-/// 获取数据库文件路径
-fn db_file_path() -> PathBuf {
-    memory_base_path().join("metadata.db")
 }
 
 fn memory_base_path() -> PathBuf {

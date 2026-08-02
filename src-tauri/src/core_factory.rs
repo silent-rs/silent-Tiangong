@@ -27,7 +27,6 @@ use tiangong_scheduler::executor::SchedulerContext;
 pub struct DesktopCoreFactory {
     pub app_handle: Arc<std::sync::OnceLock<AppHandle>>,
     pub skill_plugin: Arc<tiangong_plugin_skill::SkillPlugin>,
-    pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
     pub index_manager: Arc<tiangong_plugin_index::IndexManager>,
@@ -117,9 +116,8 @@ impl DesktopCoreFactory {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
         }
         // Skill / MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具，
-        // app 侧经 self.skill_plugin / self.mcp_plugin 做管理。
+        // app 侧经 self.skill_plugin 做管理。
         plugins.push(self.skill_plugin.clone());
-        plugins.push(self.mcp_plugin.clone());
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
@@ -171,9 +169,6 @@ impl DesktopCoreFactory {
                         storage_root.join("skills"),
                     ),
                 ));
-                child_plugins.push(Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-                    storage_root.clone(),
-                )));
                 child_plugins
             }
         });

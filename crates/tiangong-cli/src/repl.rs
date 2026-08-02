@@ -36,9 +36,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
     // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
     // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
-    let mcp_plugin: std::sync::Arc<tiangong_plugin_mcp::McpPlugin> = std::sync::Arc::new(
-        tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
-    );
     // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
     // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
     let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
@@ -72,7 +69,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let input = {
             reader.read_line(&prompt, |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, &skill_plugin, &mcp_plugin)
+                    completion::complete(trigger, &prefix, &skill_plugin)
                 } else {
                     Vec::new()
                 }
@@ -93,8 +90,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin, &mcp_plugin)
-            {
+            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin) {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {
@@ -127,7 +123,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 &storage_root,
                 &state.config.models,
                 &skill_plugin,
-                &mcp_plugin,
                 &index_manager,
             )
         };
@@ -175,7 +170,6 @@ fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
-    mcp_plugin: &std::sync::Arc<tiangong_plugin_mcp::McpPlugin>,
     index_manager: &std::sync::Arc<tiangong_plugin_index::IndexManager>,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
     use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
@@ -226,7 +220,6 @@ fn build_cli_plugins(
         plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
     }
     plugins.push(skill_plugin.clone());
-    plugins.push(mcp_plugin.clone());
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
@@ -261,9 +254,6 @@ fn build_cli_plugins(
             }
             child_plugins.push(std::sync::Arc::new(
                 tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
-            ));
-            child_plugins.push(std::sync::Arc::new(
-                tiangong_plugin_mcp::McpPlugin::with_storage_root(storage_root.clone()),
             ));
             child_plugins
         }

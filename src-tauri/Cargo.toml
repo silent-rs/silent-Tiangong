@@ -30,7 +30,7 @@ tiangong-plugin-task = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }
 tiangong-plugin-analyze-attachment = { workspace = true }
 tiangong-plugin-skill = { workspace = true }
-tiangong-plugin-mcp = { workspace = true }
+tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-plugin-agent-team = { workspace = true }
 tiangong-plugin-prompt = { workspace = true }
 tiangong-media = { workspace = true }

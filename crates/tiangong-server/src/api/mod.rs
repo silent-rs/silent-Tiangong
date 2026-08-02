@@ -35,9 +35,6 @@ pub struct ServerAppContext {
     pub core_backend: Arc<dyn ServerCoreBackend>,
     pub scheduler_context: Arc<dyn SchedulerContext>,
     pub router: Arc<MessageRouter>,
-    /// MCP 管理插件共享句柄：API 管理（register/remove/...）与 core 注册使用同一实例，
-    /// 避免管理实例与运行实例状态分叉（对齐 CLI/Tauri 的 dual-ownership）。
-    pub mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
 }
 
 impl ServerAppContext {
@@ -45,12 +42,9 @@ impl ServerAppContext {
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
-        storage_root: std::path::PathBuf,
+        _storage_root: std::path::PathBuf,
     ) -> Self {
         let config = core_manager.config().clone();
-        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-            storage_root,
-        ));
         // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
         // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
         let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
@@ -63,7 +57,6 @@ impl ServerAppContext {
             state.clone(),
             core_manager,
             event_bus.clone(),
-            mcp_plugin.clone(),
             index_manager,
         ));
         let core_backend: Arc<dyn ServerCoreBackend> = cores.clone();
@@ -75,14 +68,7 @@ impl ServerAppContext {
         // 存在循环依赖（ServerSchedulerContext 需 core_backend，而 core_backend 即 cores），
         // 故用回填而非构造参数。
         cores.set_scheduler_context(scheduler_context.clone());
-        Self::with_backend(
-            state,
-            config,
-            event_bus,
-            core_backend,
-            scheduler_context,
-            mcp_plugin,
-        )
+        Self::with_backend(state, config, event_bus, core_backend, scheduler_context)
     }
 
     /// 使用宿主提供的 Core 与调度上下文构建 Server。
@@ -94,7 +80,6 @@ impl ServerAppContext {
         event_bus: Arc<EventBus>,
         core_backend: Arc<dyn ServerCoreBackend>,
         scheduler_context: Arc<dyn SchedulerContext>,
-        mcp_plugin: Arc<tiangong_plugin_mcp::McpPlugin>,
     ) -> Self {
         let router = Arc::new(MessageRouter::new(
             state.clone(),
@@ -107,7 +92,6 @@ impl ServerAppContext {
             core_backend,
             scheduler_context,
             router,
-            mcp_plugin,
         }
     }
 
@@ -288,13 +272,8 @@ mod tests {
         let scheduler: Arc<dyn SchedulerContext> = Arc::new(EmbeddedScheduler {
             calls: scheduler_calls.clone(),
         });
-        let mcp_plugin = Arc::new(tiangong_plugin_mcp::McpPlugin::with_storage_root(
-            temp.path().to_path_buf(),
-        ));
 
-        let context = ServerAppContext::with_backend(
-            state, config, event_bus, backend, scheduler, mcp_plugin,
-        );
+        let context = ServerAppContext::with_backend(state, config, event_bus, backend, scheduler);
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);
         assert_eq!(backend_calls.load(Ordering::Relaxed), 0);

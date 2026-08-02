@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "mcp",
+  "version": "0.13.4",
+  "wasm": {
+    "binary": "tiangong_plugin_mcp_wasm.wasm"
+  },
+  "sidecar": {
+    "binary": "tiangong-mcp-sidecar",
+    "transport_protocol": "0.1.0",
+    "business_protocol": 1,
+    "startup_timeout_ms": 15000,
+    "request_timeout_ms": 60000
+  },
+  "permissions": ["sidecar.invoke"]
+}
