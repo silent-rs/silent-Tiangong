@@ -104,21 +104,24 @@ fn memory_wasm_path() -> PathBuf {
     path
 }
 
-/// 若 wasm 文件不存在则提示。
-fn ensure_wasm_or_skip() -> PathBuf {
+/// 若 wasm 文件不存在则提示并跳过当前测试。
+fn wasm_or_skip() -> Option<PathBuf> {
     let path = memory_wasm_path();
     if !path.exists() {
         eprintln!(
             "跳过测试：未找到 wasm 组件 {}，请先执行 `cargo run -p xtask -- build-wasm`",
             path.display()
         );
+        return None;
     }
-    path
+    Some(path)
 }
 
 #[test]
 fn load_and_describe() {
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -131,7 +134,9 @@ fn load_and_describe() {
 
 #[test]
 fn tool_specs_contains_recall_memory() {
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -149,7 +154,9 @@ fn tool_specs_contains_recall_memory() {
 
 #[test]
 fn handle_unknown_tool_returns_error() {
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -168,7 +175,9 @@ fn handle_unknown_tool_returns_error() {
 #[test]
 fn fuel_limit_traps_runaway_execution() {
     // 给极少 fuel，迫使一次正常调用因 fuel 不足被中断，证明 fuel 限制生效。
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let strict = PluginRuntimeConfig {
         fuel_limit: 1_000,
         epoch_deadline: Duration::from_secs(10),
@@ -193,7 +202,9 @@ fn fuel_limit_traps_runaway_execution() {
 #[test]
 fn handle_recall_memory_without_handle_returns_disabled() {
     // 无 handle 时，经 request 转发应返回 disabled 降级提示（而非错误）。
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let mut plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -222,7 +233,9 @@ fn handle_recall_memory_without_handle_returns_disabled() {
 #[test]
 fn handle_recall_memory_with_connection_uses_sidecar() {
     let sidecar = Arc::new(MockMemorySidecar::default());
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
@@ -255,7 +268,9 @@ fn handle_recall_memory_with_connection_uses_sidecar() {
 #[test]
 fn on_config_updated_forwards_to_wasm() {
     let sidecar = Arc::new(MockMemorySidecar::default());
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
@@ -269,7 +284,9 @@ fn on_config_updated_forwards_to_wasm() {
 
 #[test]
 fn adapter_integrates_with_core_plugin_trait() {
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -324,7 +341,9 @@ fn test_session_with_user_message() -> Session {
 fn lifecycle_hooks_forward_session_without_panic() {
     // 经 Plugin trait 调用全部生命周期钩子，验证 session 序列化传入不 panic。
     // 无 sidecar 时各钩子内部 best-effort 忽略 request 错误，仍正常返回。
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -341,7 +360,9 @@ fn lifecycle_hooks_forward_session_without_panic() {
 #[test]
 fn on_turn_finished_with_connection_forwards_rumination() {
     let sidecar = Arc::new(MockMemorySidecar::default());
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
@@ -364,7 +385,9 @@ fn on_turn_finished_with_connection_forwards_rumination() {
 #[test]
 fn every_tenth_turn_forwards_meta_rumination() {
     let sidecar = Arc::new(MockMemorySidecar::default());
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
@@ -385,7 +408,9 @@ fn every_tenth_turn_forwards_meta_rumination() {
 #[test]
 fn prompt_sections_without_handle_returns_empty() {
     // 无 handle 时，prompt_sections 应返回空（不注入），不报错。
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader = WasmPluginLoader::new(&config).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
@@ -399,7 +424,9 @@ fn prompt_sections_without_handle_returns_empty() {
 fn set_workspace_and_prompt_sections_flow() {
     // set_workspace → on_session_ready → prompt_sections 完整流程。
     let sidecar = Arc::new(MockMemorySidecar::default());
-    let wasm = ensure_wasm_or_skip();
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
     let config = PluginRuntimeConfig::default();
     let loader =
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
