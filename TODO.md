@@ -267,7 +267,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 |---|---|---|---|
 | 1 | ~~**mcp** #325~~ ✅ | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 已完成。三子 crate（protocol/sidecar/wasm）+ 四入口管理 API 经 invoke_sidecar + 原生 crate 已删除。 |
 | 2 | **fetch** #326 | 网络栈（reqwest 阻塞式）+ HTML 解析（scraper）+ DNS + 落盘 | reqwest 阻塞客户端独占线程与 runtime，是硬卡点；逻辑封闭、无 GUI 回路，改造相对干净。 |
-| 3 | **index** #327 | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 复用 Memory 单例模式：原「进程内 Arc 共享」改为「全机一个 sidecar 进程」，跨会话共享索引与扫描去重原样保留，且消除多入口磁盘锁冲突。sidecar 单例选举由自身实现（复用 memory 选举代码）。 |
+| 3 | ~~**index** #327~~ ✅ | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 已完成。三子 crate（protocol/sidecar/wasm），照 MCP 模板：核心实现 + Leader 选举内置 sidecar；wasm 桥接 index_search/search_code 工具与生命周期钩子；三入口改走 load_installed_plugins，原生 crate 与 5 个 GUI 索引管理命令已删除。 |
 | 4 | **scheduler** #328 | cron 调度 + JobStore + 任务去重 + 执行记录 | 与 Memory 契合度最高：wasm 给 Agent 提供任务 CRUD 工具，sidecar 长驻跑调度。**触发回路不经 WIT**——到点 sidecar 直接 HTTP 调本机 server 的 `POST /api/v1/messages` 投递消息（与 Bot/webhook 同链路），无需扩反向回调。鉴权用 host 启动时注入的短期凭证。 |
 | 5 | **task** #329 | 子进程 spawn + 任务注册表 | 任务列表当前被 GUI/Tauri 直接读取，sidecar 化后需解决注册表跨边界一致性。 |
 | 6 | **fs** #330 | `std::fs` 全套 + 进程级全局锁表 | 走 sidecar。文件读写虽可由 WASI 承接，但走 sidecar 的真正理由是**锁表需跨 wasm 实例全局共享**（主/子 Agent 写同一文件互斥）：wasm 实例间内存隔离，锁表只能落在所有实例共享的 sidecar 进程内；路径解析（动态工作区 + FullTrust 越界）随之一起下沉，避免为 fs 专用定制 WIT host import。 |
@@ -292,12 +292,13 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 |---|---|---|
 | 14 | **prompt** #338 | 纯字符串注入 + config 缓存，零副作用，现有 WIT 全覆盖。与 Memory 形成「轻/重」两端对照。 |
 
-## 已完成（2 个）
+## 已完成（3 个）
 
 | 插件 | 模式 |
 |---|---|
 | **memory** | wasm 桥接 + 原生 sidecar（重型样板） |
 | **mcp** | wasm 桥接 + 原生 sidecar（#325，四类耦合，工程量最大） |
+| **index** | wasm 桥接 + 原生 sidecar（#327，tantivy mmap + 后台扫描 + rg/grep） |
 
 ## 共同约定
 

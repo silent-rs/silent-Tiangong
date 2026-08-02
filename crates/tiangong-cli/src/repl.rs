@@ -36,14 +36,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
     // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
     // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
-    // 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
-    // 构造失败时降级为独立实例（plugin 内部仍会兜底自建），不阻断启动。
-    let index_manager = tiangong_plugin_index::shared_index_manager().unwrap_or_else(|e| {
-        tracing::warn!("共享 IndexManager 初始化失败，降级独立实例: {e}");
-        std::sync::Arc::new(
-            tiangong_plugin_index::IndexManager::new().expect("IndexManager 初始化兜底失败"),
-        )
-    });
     let (stream_tx, stream_rx) = mpsc::channel::<StreamEvent>();
     // 对齐 server 入口（tiangong-server/src/lib.rs）：多线程 runtime + enter()，
     // 让主线程在整个 REPL 生命周期内持有 reactor guard。这样主循环里同步执行的
@@ -119,12 +111,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let plugins = if state.core_manager.has_live_core(&session_id) {
             Vec::new()
         } else {
-            build_cli_plugins(
-                &storage_root,
-                &state.config.models,
-                &skill_plugin,
-                &index_manager,
-            )
+            build_cli_plugins(&storage_root, &state.config.models, &skill_plugin)
         };
         runtime
             .block_on(state.core_manager.ensure_core(
@@ -170,7 +157,6 @@ fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
     skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
-    index_manager: &std::sync::Arc<tiangong_plugin_index::IndexManager>,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
     use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
 
@@ -193,9 +179,6 @@ fn build_cli_plugins(
 
     let mut plugins = tiangong_plugin_prompt::default_plugins();
     plugins.extend(tiangong_plugin_fs::default_plugins());
-    plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
-        index_manager.clone(),
-    ));
     if let Some(ep) = image_endpoint.clone() {
         plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
     }
@@ -223,13 +206,9 @@ fn build_cli_plugins(
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
-        let index_manager = index_manager.clone();
         move || {
             let mut child_plugins = tiangong_plugin_prompt::default_plugins();
             child_plugins.extend(tiangong_plugin_fs::default_plugins());
-            child_plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
-                index_manager.clone(),
-            ));
             if let Some(ep) = image_endpoint.clone() {
                 child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }

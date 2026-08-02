@@ -1,0 +1,14 @@
+[package]
+name = "tiangong-plugin-index-protocol"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata.tiangong]
+business-protocol = 1
+description = "Index WASM 与 sidecar 共用的私有业务协议"
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

@@ -22,7 +22,9 @@ members = [
     "crates/plugins/tiangong-plugin-command",
     "crates/plugins/tiangong-plugin-fetch",
     "crates/plugins/tiangong-plugin-fs",
-    "crates/plugins/tiangong-plugin-index",
+    "crates/plugins/tiangong-plugin-index/protocol",
+    "crates/plugins/tiangong-plugin-index/sidecar",
+    "crates/plugins/tiangong-plugin-index/wasm",
     "crates/plugins/tiangong-plugin-generate-image",
     "crates/plugins/tiangong-plugin-generate-video",
     "crates/plugins/tiangong-plugin-text-to-speech",
@@ -67,7 +69,9 @@ tiangong-plugin-browser = { path = "crates/plugins/tiangong-plugin-browser" }
 tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch = { path = "crates/plugins/tiangong-plugin-fetch" }
 tiangong-plugin-fs = { path = "crates/plugins/tiangong-plugin-fs" }
-tiangong-plugin-index = { path = "crates/plugins/tiangong-plugin-index" }
+tiangong-plugin-index-protocol = { path = "crates/plugins/tiangong-plugin-index/protocol" }
+tiangong-plugin-index-wasm = { path = "crates/plugins/tiangong-plugin-index/wasm" }
+tiangong-plugin-index-sidecar = { path = "crates/plugins/tiangong-plugin-index/sidecar" }
 tiangong-plugin-generate-image = { path = "crates/plugins/tiangong-plugin-generate-image" }
 tiangong-plugin-generate-video = { path = "crates/plugins/tiangong-plugin-generate-video" }
 tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-to-speech" }

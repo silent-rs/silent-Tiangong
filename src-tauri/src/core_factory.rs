@@ -21,7 +21,6 @@ use tiangong_scheduler::executor::SchedulerContext;
 /// - `skill_plugin` / `mcp_plugin`：管理插件句柄（core 拿 clone 做 LLM 工具）
 /// - `config`：全局 CoreConfigProvider
 /// - `storage_root`：会话文件根
-/// - `index_manager`：工作区索引单例（issue #259，跨 Core 共享底层索引缓存与扫描状态）
 /// - `scheduler_context`：调度器执行上下文（让 Agent 手动触发定时任务能真正执行）
 #[derive(Clone)]
 pub struct DesktopCoreFactory {
@@ -29,7 +28,6 @@ pub struct DesktopCoreFactory {
     pub skill_plugin: Arc<tiangong_plugin_skill::SkillPlugin>,
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
-    pub index_manager: Arc<tiangong_plugin_index::IndexManager>,
     pub scheduler_context: Arc<dyn SchedulerContext>,
 }
 
@@ -70,9 +68,6 @@ impl DesktopCoreFactory {
                 false
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
-        plugins.push(tiangong_plugin_index::build_plugin_with_manager(
-            self.index_manager.clone(),
-        ));
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
         let resolve_ep = |cap: ModelCapability| {
@@ -122,7 +117,6 @@ impl DesktopCoreFactory {
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
             let storage_root = storage_root.clone();
-            let index_manager = self.index_manager.clone();
             let scheduler_context = self.scheduler_context.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
@@ -138,9 +132,6 @@ impl DesktopCoreFactory {
                     }
                 }
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
-                child_plugins.push(tiangong_plugin_index::build_plugin_with_manager(
-                    index_manager.clone(),
-                ));
                 if let Some(ep) = image_endpoint.clone() {
                     child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                 }

@@ -19,7 +19,6 @@ tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-browser = { workspace = true }
 tiangong-plugin-fs = { workspace = true }
-tiangong-plugin-index = { workspace = true }
 tiangong-plugin-generate-image = { workspace = true }
 tiangong-plugin-generate-video = { workspace = true }
 tiangong-plugin-text-to-speech = { workspace = true }

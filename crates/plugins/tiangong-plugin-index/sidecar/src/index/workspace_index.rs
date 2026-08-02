@@ -287,6 +287,7 @@ struct SymbolEntry {
     signature: String,
 }
 
+#[allow(dead_code)]
 pub struct WorkspaceIndex {
     index: Index,
     fields: WorkspaceFields,
@@ -416,6 +417,7 @@ impl WorkspaceIndex {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn index_file(&mut self, path: &Path) -> Result<()> {
         let mut writer = self.create_writer("index_file")?;
         self.index_file_with_writer(&mut writer, path, None)?;
@@ -486,6 +488,7 @@ impl WorkspaceIndex {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn remove_file(&mut self, rel_path: &str) -> Result<()> {
         let mut writer = self.create_writer("remove_file")?;
         let term = tantivy::Term::from_field_text(self.fields.path, rel_path);
@@ -545,10 +548,12 @@ impl WorkspaceIndex {
         Ok(hits)
     }
 
+    #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         self.entry_count
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }

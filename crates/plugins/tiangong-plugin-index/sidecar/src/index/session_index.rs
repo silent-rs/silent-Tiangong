@@ -9,12 +9,14 @@ use tantivy::{Index, IndexWriter, TantivyDocument};
 
 use super::tantivy_schema::{SessionFields, session_schema};
 
+#[allow(dead_code)]
 pub struct SessionIndex {
     index: Index,
     writer: IndexWriter,
     fields: SessionFields,
     session_id: String,
     turn_count: usize,
+    base_dir: PathBuf,
 }
 
 impl SessionIndex {
@@ -41,6 +43,7 @@ impl SessionIndex {
             fields,
             session_id: session_id.to_string(),
             turn_count: 0,
+            base_dir: base_dir.to_path_buf(),
         })
     }
 
@@ -125,10 +128,12 @@ impl SessionIndex {
         Ok(hits)
     }
 
+    #[allow(dead_code)]
     pub fn turn_count(&self) -> usize {
         self.turn_count
     }
 
+    #[allow(dead_code)]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -162,13 +167,7 @@ impl SessionIndex {
     }
 
     fn meta_dir(&self) -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".tiangong")
-            .join("index")
-            .join("sessions")
-            .join(&self.session_id)
+        self.base_dir.join("sessions").join(&self.session_id)
     }
 }
 
