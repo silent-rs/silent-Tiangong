@@ -274,12 +274,11 @@ impl McpService {
                     server_name: req.server_name,
                     tool_name: req.tool_name,
                 };
-                let workspace = self
+                let workspace = req
                     .workspace
-                    .read()
-                    .ok()
-                    .and_then(|guard| guard.clone())
-                    .or_else(|| req.workspace.map(PathBuf::from));
+                    .clone()
+                    .map(PathBuf::from)
+                    .or_else(|| self.workspace.read().ok().and_then(|guard| guard.clone()));
                 let result: ExecuteToolResponse =
                     execute_tool(&target, req.arguments, &config, workspace)
                         .await

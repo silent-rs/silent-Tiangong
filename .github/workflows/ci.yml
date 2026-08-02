@@ -117,6 +117,8 @@ jobs:
               "tiangong-cli":             "crates/tiangong-cli/",
               "tiangong-server":          "crates/tiangong-server/",
               "tiangong-entry":           "crates/tiangong-entry/",
+              "tiangong-plugin-runtime":        "crates/tiangong-plugin-runtime/",
+              "tiangong-plugin-sidecar":        "crates/tiangong-plugin-sidecar/",
               "tiangong-plugin-browser":         "crates/plugins/tiangong-plugin-browser/",
               "tiangong-plugin-command":         "crates/plugins/tiangong-plugin-command/",
               "tiangong-plugin-fetch":           "crates/plugins/tiangong-plugin-fetch/",

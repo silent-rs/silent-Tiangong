@@ -18,8 +18,6 @@ mod paths;
 mod service;
 mod validate;
 
-use std::sync::Arc;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -35,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let config = tiangong_plugin_sidecar::SidecarConfig::new("mcp");
-    let service = Arc::new(service::McpService::new()?);
-    tiangong_plugin_sidecar::run(config, service).await
+    tiangong_plugin_sidecar::run(config, || {
+        Ok(std::sync::Arc::new(service::McpService::new()?))
+    })
+    .await
 }

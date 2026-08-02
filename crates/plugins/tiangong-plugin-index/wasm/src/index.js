@@ -5,7 +5,9 @@
 // - callHost(method, payload) 经 postMessage 把请求发回宿主，宿主调 pluginCall 转发到 WASM
 //   的 handle_view_message，结果回传（天工不解析消息内容，只做透传）
 
-const HOST_TIMEOUT_MS = 30000;
+// 与 sidecar request_timeout_ms（60s）对齐，留出 IPC 通信余量。
+// 大工作区重建耗时较长，30s 会先于 sidecar 失败导致前端误报。
+const HOST_TIMEOUT_MS = 90000;
 let hostChannel = null;
 let hostReadyResolve = null;
 const hostReady = new Promise((resolve) => {

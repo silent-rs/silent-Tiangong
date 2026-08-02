@@ -17,16 +17,17 @@
 //! # 快速启动
 //! ```no_run
 //! # use std::sync::Arc;
+//! # use async_trait::async_trait;
 //! # use tiangong_plugin_sidecar::{SidecarConfig, SidecarService, run};
+//! # use tiangong_plugin_runtime::protocol::{Request, Response};
 //! # struct MyService;
+//! # #[async_trait]
 //! # impl SidecarService for MyService {
-//! #     async fn dispatch(&self, _: tiangong_plugin_runtime::protocol::Request)
-//! #         -> tiangong_plugin_runtime::protocol::Response { unimplemented!() }
+//! #     async fn dispatch(&self, _: Request) -> Response { unimplemented!() }
 //! # }
 //! # async fn demo() -> anyhow::Result<()> {
 //! let config = SidecarConfig::new("my-plugin");
-//! let service = Arc::new(MyService);
-//! run(config, service).await
+//! run(config, || Ok(Arc::new(MyService))).await
 //! # }
 //! ```
 
@@ -47,12 +48,16 @@ use anyhow::Result;
 /// 一键启动 sidecar。
 ///
 /// 完整流程：选举 → Leader 起 IPC server + 心跳，阻塞等终止信号；Follower 退出。
-/// `service` 在 Leader 期间经 IPC 暴露给运行时（host 侧 invoke_sidecar）。
+/// `service_factory` 仅在确认成为 Leader 后调用（被淘汰的 follower 候选不会构造
+/// service，避免白白打开数据、占用资源）。
 ///
-/// 各插件 main.rs 只需构造好 `SidecarConfig` + 业务 service，调本函数即可。
-/// 若需在启动前做业务前置（如加载配置、恢复数据目录），在调用前完成。
-pub async fn run(config: SidecarConfig, service: Arc<dyn SidecarService>) -> Result<()> {
-    let managed = start_or_connect(&config, service)?;
+/// 各插件 main.rs 只需构造好 `SidecarConfig` + 业务 service 工厂，调本函数即可。
+/// 若需在启动前做业务前置（如加载配置、恢复数据目录），在工厂闭包内完成。
+pub async fn run<F>(config: SidecarConfig, service_factory: F) -> Result<()>
+where
+    F: FnOnce() -> anyhow::Result<Arc<dyn SidecarService>>,
+{
+    let managed = start_or_connect(&config, service_factory)?;
     match managed.state() {
         LeaderState::Leader => {
             tracing::info!("{} sidecar 已成为 Leader，开始服务", config.service);

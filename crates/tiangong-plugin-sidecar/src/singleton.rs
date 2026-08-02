@@ -52,16 +52,20 @@ pub struct LeaderInfo {
     pub service: String,
     pub started_at: String,
     pub heartbeat_at: String,
+    /// 传输协议版本（版本不匹配的旧 leader 视为需替换）。
+    #[serde(default)]
+    pub protocol_version: String,
 }
 
 impl LeaderInfo {
-    fn new(service: String) -> Self {
+    fn new(service: String, protocol_version: String) -> Self {
         let now = chrono::Local::now().naive_local().to_string();
         Self {
             pid: std::process::id(),
             service,
             started_at: now.clone(),
             heartbeat_at: now,
+            protocol_version,
         }
     }
 }
@@ -80,9 +84,38 @@ struct ManagedSidecarInner {
 }
 
 struct LeaderLease {
+    #[allow(dead_code)]
     lock_path: PathBuf,
     leader_info_path: PathBuf,
     info: LeaderInfo,
+    /// 持有的文件锁句柄（unix flock / windows create_new 文件）。
+    /// drop 时自动释放锁（unix）或删除文件（windows）。
+    _lock_guard: LockGuard,
+}
+
+/// 跨平台文件锁守卫。
+#[cfg(unix)]
+struct LockGuard {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        // File drop 自动释放 flock（close 即解锁），无需显式 unlock。
+    }
+}
+
+#[cfg(not(unix))]
+struct LockGuard {
+    lock_path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
 }
 
 impl ManagedSidecar {
@@ -121,21 +154,25 @@ impl Drop for ManagedSidecar {
 impl Drop for LeaderLease {
     fn drop(&mut self) {
         let _ = clear_leader_registration_if_matches(&self.info, &self.leader_info_path);
-        let _ = std::fs::remove_file(&self.lock_path);
+        // lock 由 LockGuard::drop 释放（unix flock 自动 / windows 删文件），
+        // 不再手工 remove_file——避免误删其他进程刚创建的 lock。
     }
 }
 
 /// 选举：抢到 Leader 就起 IPC server + service，没抢到就当 Follower 退出。
-pub fn start_or_connect(
-    config: &SidecarConfig,
-    service_obj: Arc<dyn SidecarService>,
-) -> Result<ManagedSidecar> {
+///
+/// `service_factory` 仅在确认成为 Leader 后调用，被淘汰的候选不会构造 service
+/// （避免 follower 进程白白打开数据、占用资源）。
+pub fn start_or_connect<F>(config: &SidecarConfig, service_factory: F) -> Result<ManagedSidecar>
+where
+    F: FnOnce() -> Result<Arc<dyn SidecarService>>,
+{
     let service = config.service.clone();
     endpoint::ensure_runtime_dir(&service)?;
 
     for _ in 0..2 {
         if let Some(leader) = read_leader_info(&service)? {
-            if is_leader_alive(&leader) {
+            if is_leader_alive(&service, &config.protocol_version, &leader) {
                 // 已有健康 leader，本 sidecar 无需重复启动。
                 return Ok(ManagedSidecar {
                     inner: Arc::new(Mutex::new(ManagedSidecarInner {
@@ -147,11 +184,13 @@ pub fn start_or_connect(
                     })),
                 });
             }
-            clear_stale_registration(&service, &leader)?;
+            clear_stale_registration(&service, &config.protocol_version, &leader)?;
         }
 
-        match try_acquire_leader_lease(&service)? {
+        match try_acquire_leader_lease(&service, &config.protocol_version)? {
             Some(lease) => {
+                // 确认成为 Leader 后才构造 service（follower 候选不会走到这里）。
+                let service_obj = service_factory()?;
                 let bridge = server::spawn_bridge(config, service_obj)?;
                 let (heartbeat_tx, heartbeat_join) = spawn_heartbeat(config, lease.info.clone());
 
@@ -166,9 +205,11 @@ pub fn start_or_connect(
                 });
             }
             None => {
-                // lock 被占用但 leader.json 还没出现，或 leader.json 出现了——重试。
+                // flock 被占用（真有进程持有）但 leader.json 还没出现——
+                // flock 模式下不删 lock 文件（残留文件不阻塞新进程 open+flock），
+                // 短暂等待让持有者写出 leader.json，下一轮循环再判定。
                 if let Some(leader) = read_leader_info(&service)? {
-                    if is_leader_alive(&leader) {
+                    if is_leader_alive(&service, &config.protocol_version, &leader) {
                         return Ok(ManagedSidecar {
                             inner: Arc::new(Mutex::new(ManagedSidecarInner {
                                 state: LeaderState::Follower { pid: leader.pid },
@@ -179,12 +220,10 @@ pub fn start_or_connect(
                             })),
                         });
                     }
-                    clear_stale_registration(&service, &leader)?;
+                    clear_stale_registration(&service, &config.protocol_version, &leader)?;
                 } else {
-                    let lock_path = endpoint::leader_lock_path(&service)?;
-                    if lock_path.exists() {
-                        let _ = std::fs::remove_file(lock_path);
-                    }
+                    // leader.json 仍不存在，等待持有者写出（flock 仍被占用说明进程存活）。
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
@@ -215,14 +254,31 @@ fn read_leader_info_from_path(path: &PathBuf) -> Result<Option<LeaderInfo>> {
     }
 }
 
-fn is_leader_alive(info: &LeaderInfo) -> bool {
+/// 判定 leader 是否健康。
+///
+/// 三重校验：
+/// 1. 进程存活 + 心跳未超时
+/// 2. endpoint 文件存在（IPC server 崩溃则 IpcServer::drop 删除 endpoint）
+/// 3. 协议版本匹配（旧版 leader 视为需替换，让新候选接管）
+fn is_leader_alive(service: &str, expected_protocol_version: &str, info: &LeaderInfo) -> bool {
     let heartbeat =
         match chrono::NaiveDateTime::parse_from_str(&info.heartbeat_at, "%Y-%m-%d %H:%M:%S%.f") {
             Ok(value) => value,
             Err(_) => return false,
         };
     let elapsed = chrono::Local::now().naive_local() - heartbeat;
-    elapsed.num_seconds() <= HEARTBEAT_TIMEOUT_SECS && process_is_alive(info.pid)
+    if elapsed.num_seconds() > HEARTBEAT_TIMEOUT_SECS || !process_is_alive(info.pid) {
+        return false;
+    }
+    // endpoint 文件被 IpcServer::drop 删除说明 IPC server 已停（即使主进程存活）。
+    if let Ok(endpoint_path) = endpoint::endpoint_path(service)
+        && !endpoint_path.exists()
+    {
+        return false;
+    }
+    // 协议版本不匹配（升级场景）：旧 leader 视为不健康，让新候选接管。
+    // 空 protocol_version 兼容旧版 leader.json（视为匹配，不阻断）。
+    info.protocol_version.is_empty() || info.protocol_version == expected_protocol_version
 }
 
 #[cfg(unix)]
@@ -236,36 +292,65 @@ fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
-fn try_acquire_leader_lease(service: &str) -> Result<Option<LeaderLease>> {
+fn try_acquire_leader_lease(service: &str, protocol_version: &str) -> Result<Option<LeaderLease>> {
     let lock_path = endpoint::leader_lock_path(service)?;
     let info_path = endpoint::leader_info_path(service)?;
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("创建 leader 运行目录失败: {}", parent.display()))?;
     }
-    let _file = match OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&lock_path)
-    {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
-        Err(err) => {
+
+    // 跨平台文件锁：unix 用 flock 独占锁（崩溃自动释放，进程退出即解锁），
+    // windows 回退到 create_new 文件存在性互斥。
+    #[cfg(unix)]
+    let lock_guard = {
+        use std::os::unix::io::AsRawFd;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("打开 leader lock 失败: {}", lock_path.display()))?;
+        // SAFETY: flock 对有效 fd 调用，LOCK_EX|LOCK_NB 非阻塞，失败立即返回 EWOULDBLOCK。
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
             return Err(err)
-                .with_context(|| format!("创建 leader lock 失败: {}", lock_path.display()));
+                .with_context(|| format!("flock leader lock 失败: {}", lock_path.display()));
+        }
+        LockGuard { _file: file }
+    };
+    #[cfg(not(unix))]
+    let lock_guard = {
+        let _file = match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("创建 leader lock 失败: {}", lock_path.display()));
+            }
+        };
+        LockGuard {
+            lock_path: lock_path.clone(),
         }
     };
 
-    let info = LeaderInfo::new(service.to_string());
-    if let Err(err) = write_leader_info(&info, &info_path) {
-        let _ = std::fs::remove_file(&lock_path);
-        return Err(err);
-    }
+    let info = LeaderInfo::new(service.to_string(), protocol_version.to_string());
+    write_leader_info(&info, &info_path)?;
 
     Ok(Some(LeaderLease {
         lock_path,
         leader_info_path: info_path,
         info,
+        _lock_guard: lock_guard,
     }))
 }
 
@@ -332,12 +417,17 @@ fn spawn_heartbeat(
     (tx, join_handle)
 }
 
-fn clear_stale_registration(service: &str, info: &LeaderInfo) -> Result<()> {
-    if is_leader_alive(info) {
+fn clear_stale_registration(
+    service: &str,
+    expected_protocol_version: &str,
+    info: &LeaderInfo,
+) -> Result<()> {
+    if is_leader_alive(service, expected_protocol_version, info) {
         return Ok(());
     }
     let info_path = endpoint::leader_info_path(service)?;
     clear_leader_registration_if_matches(info, &info_path)?;
+    // flock 模式下删 lock 文件是 best-effort（残留文件不阻塞新候选 open+flock）。
     let lock_path = endpoint::leader_lock_path(service)?;
     let _ = std::fs::remove_file(lock_path);
     Ok(())

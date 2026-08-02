@@ -17,8 +17,6 @@ mod service;
 #[cfg(test)]
 mod integration_tests;
 
-use std::sync::Arc;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -34,6 +32,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let config = tiangong_plugin_sidecar::SidecarConfig::new("index");
-    let service = Arc::new(service::IndexService::new()?);
-    tiangong_plugin_sidecar::run(config, service).await
+    tiangong_plugin_sidecar::run(config, || {
+        Ok(std::sync::Arc::new(service::IndexService::new()?))
+    })
+    .await
 }

@@ -104,6 +104,15 @@ impl IpcServer {
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
+        // 删除前校验 endpoint 文件里的 pid 仍是本进程，避免旧实例晚退出时
+        // 误删新实例刚发布的 endpoint 文件。
+        if let Ok(content) = std::fs::read_to_string(&self.endpoint_path)
+            && let Ok(endpoint) = serde_json::from_str::<IpcEndpoint>(&content)
+            && endpoint.pid != std::process::id()
+        {
+            // 文件已被新实例覆盖，不删。
+            return;
+        }
         let _ = std::fs::remove_file(&self.endpoint_path);
     }
 }

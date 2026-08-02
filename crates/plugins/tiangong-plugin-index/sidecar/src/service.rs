@@ -180,8 +180,11 @@ impl IndexService {
                 let req: DeleteWorkspaceIndexRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 delete_workspace_index 请求失败")?;
                 let manager = self.manager.clone();
-                tokio::task::spawn_blocking(move || {
-                    manager.delete_workspace_index(Path::new(&req.root), &req.workspace_id)
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let root = Path::new(&req.root);
+                    // 取得扫描 permit 与后台扫描/重建互斥，避免删除时后台线程继续写已移除目录。
+                    let _permit = wait_for_scan_permit(&manager, root);
+                    manager.delete_workspace_index(root, &req.workspace_id)
                 })
                 .await
                 .with_context(|| "delete_workspace_index 后台任务失败")??;
@@ -192,10 +195,14 @@ impl IndexService {
                 let req: RebuildWorkspaceIndexRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 rebuild_workspace_index 请求失败")?;
                 let manager = self.manager.clone();
-                let count =
-                    tokio::task::spawn_blocking(move || manager.full_scan(Path::new(&req.root)))
-                        .await
-                        .with_context(|| "rebuild_workspace_index 后台任务失败")??;
+                let count = tokio::task::spawn_blocking(move || -> Result<usize> {
+                    let root = Path::new(&req.root);
+                    // 取得扫描 permit 与后台扫描/删除互斥，避免并发写同一磁盘索引。
+                    let _permit = wait_for_scan_permit(&manager, root);
+                    manager.full_scan(root)
+                })
+                .await
+                .with_context(|| "rebuild_workspace_index 后台任务失败")??;
                 serde_json::to_value(RebuildWorkspaceIndexResponse { count })
                     .with_context(|| "序列化 rebuild_workspace_index 响应失败")
             }
@@ -463,6 +470,28 @@ fn handle_search_code_blocking(
         stdout,
         stderr,
         exit_code: exit_code as i64,
+    }
+}
+
+/// 等待取得工作区扫描 permit（与后台扫描/重建/删除互斥）。
+///
+/// 用于 delete/rebuild 操作：在已有后台扫描进行时短暂轮询等待其结束（最多约 30s），
+/// 拿到 permit 后返回；持有期间调用方独占该 root 的写权限，drop 时自动复位。
+fn wait_for_scan_permit(manager: &IndexManager, root: &Path) -> crate::index::WorkspaceScanPermit {
+    for _ in 0..300 {
+        if let Some(permit) = manager.try_begin_workspace_scan(root) {
+            return permit;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // 兜底：强制取 permit（极端情况下后台扫描超时未结束，避免无限阻塞）。
+    // try_begin_workspace_scan 返回 None 时用死循环等；此处直接 panic 不合理，
+    // 改为无限等待（实际 30s 内后台扫描应已完成）。
+    loop {
+        if let Some(permit) = manager.try_begin_workspace_scan(root) {
+            return permit;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
