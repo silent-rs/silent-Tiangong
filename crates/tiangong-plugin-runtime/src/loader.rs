@@ -265,11 +265,11 @@ impl WasmPlugin {
 
     // ── 通用生命周期 ──
 
-    /// 注入工作目录（对应 `Plugin::set_workspace`）。
-    pub fn set_workspace(&mut self, workspace: Option<String>) -> Result<()> {
+    /// 注入工作目录与信任模式（对应 `Plugin::set_workspace`）。
+    pub fn set_workspace(&mut self, workspace: Option<String>, full_trust: bool) -> Result<()> {
         self.instance
             .tiangong_plugin_plugin()
-            .call_set_workspace(&mut self.store, workspace.as_deref())
+            .call_set_workspace(&mut self.store, workspace.as_deref(), full_trust)
             .map_err(|e| anyhow::anyhow!("set-workspace 调用失败: {e}"))?
             .map_err(plugin_err)
     }

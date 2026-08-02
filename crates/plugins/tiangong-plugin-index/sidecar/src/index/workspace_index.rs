@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use tantivy::collector::TopDocs;
@@ -10,12 +10,25 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Schema, Value};
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
+use super::WORKSPACE_SCHEMA_VERSION;
 use super::tantivy_schema::{WorkspaceFields, workspace_schema};
 
 const MAX_ENTRIES: usize = 5000;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
 const SNIPPET_LINES: usize = 50;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileState {
+    modified_at: u64,
+    size: u64,
+}
+
+#[derive(Default)]
+struct ScanSnapshot {
+    files: HashMap<String, FileState>,
+    complete: bool,
+}
 
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -287,6 +300,7 @@ struct SymbolEntry {
     signature: String,
 }
 
+#[allow(dead_code)]
 pub struct WorkspaceIndex {
     index: Index,
     fields: WorkspaceFields,
@@ -307,7 +321,38 @@ impl WorkspaceIndex {
             match Index::open_in_dir(&index_dir).with_context(|| {
                 workspace_index_context(root, base_dir, "open", "打开 Workspace Tantivy 索引失败")
             }) {
-                Ok(index) => index,
+                Ok(index) if index.schema() == schema => index,
+                Ok(_) => {
+                    tracing::info!(
+                        workspace = %root.display(),
+                        index_dir = %index_dir.display(),
+                        "Workspace 索引 schema 已更新，准备全量校准"
+                    );
+                    fs::remove_dir_all(&index_dir).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "migrate_schema",
+                            "删除旧 Workspace 索引目录失败",
+                        )
+                    })?;
+                    fs::create_dir_all(&index_dir).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "migrate_schema",
+                            "创建 Workspace 索引目录失败",
+                        )
+                    })?;
+                    Index::create_in_dir(&index_dir, schema.clone()).with_context(|| {
+                        workspace_index_context(
+                            root,
+                            base_dir,
+                            "migrate_schema",
+                            "创建新版 Workspace Tantivy 索引失败",
+                        )
+                    })?
+                }
                 Err(err) => {
                     tracing::warn!(
                         workspace = %root.display(),
@@ -350,13 +395,18 @@ impl WorkspaceIndex {
             })?
         };
 
+        let entry_count = index
+            .reader()
+            .with_context(|| workspace_index_context(root, base_dir, "open", "创建索引读取器失败"))?
+            .searcher()
+            .num_docs() as usize;
         Ok(Self {
             schema,
             index,
             fields,
             root: root.to_path_buf(),
             base_dir: base_dir.to_path_buf(),
-            entry_count: 0,
+            entry_count,
         })
     }
 
@@ -370,8 +420,157 @@ impl WorkspaceIndex {
         writer
             .commit()
             .with_context(|| self.context("full_scan", "提交 Workspace 索引失败"))?;
+        self.refresh_entry_count()?;
         self.write_meta()?;
         Ok(self.entry_count)
+    }
+
+    pub fn incremental_scan(&mut self) -> Result<usize> {
+        let existing = self.indexed_file_states()?;
+        let mut snapshot = ScanSnapshot {
+            files: HashMap::new(),
+            complete: true,
+        };
+        self.collect_file_states(&self.root.clone(), 0, &mut snapshot)?;
+
+        let mut writer = self.create_writer("incremental_scan")?;
+        for (rel_path, state) in &snapshot.files {
+            if existing.get(rel_path) == Some(state) {
+                continue;
+            }
+            writer.delete_term(tantivy::Term::from_field_text(
+                self.fields.path_exact,
+                rel_path,
+            ));
+            self.index_file_with_writer(&mut writer, &self.root.join(rel_path), None)?;
+        }
+        if snapshot.complete {
+            for rel_path in existing.keys() {
+                if !snapshot.files.contains_key(rel_path) {
+                    writer.delete_term(tantivy::Term::from_field_text(
+                        self.fields.path_exact,
+                        rel_path,
+                    ));
+                }
+            }
+        }
+        writer
+            .commit()
+            .with_context(|| self.context("incremental_scan", "提交 Workspace 增量索引失败"))?;
+        self.refresh_entry_count()?;
+        self.write_meta()?;
+        Ok(self.entry_count)
+    }
+
+    fn indexed_file_states(&self) -> Result<HashMap<String, FileState>> {
+        let reader = self
+            .index
+            .reader()
+            .with_context(|| self.context("incremental_scan", "创建 Workspace 索引读取器失败"))?;
+        let searcher = reader.searcher();
+        let mut states = HashMap::new();
+        for segment_reader in searcher.segment_readers() {
+            let store_reader = segment_reader
+                .get_store_reader(1)
+                .with_context(|| self.context("incremental_scan", "打开 Workspace 文档存储失败"))?;
+            for doc_id in segment_reader.doc_ids_alive() {
+                let doc: TantivyDocument = store_reader.get(doc_id)?;
+                let Some(path) = doc
+                    .get_first(self.fields.path_exact)
+                    .and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+                let size = doc
+                    .get_first(self.fields.size)
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default();
+                let modified_at = doc
+                    .get_first(self.fields.modified_at)
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or_default();
+                states.insert(path.to_string(), FileState { modified_at, size });
+            }
+        }
+        Ok(states)
+    }
+
+    fn collect_file_states(
+        &self,
+        dir: &Path,
+        depth: usize,
+        snapshot: &mut ScanSnapshot,
+    ) -> Result<()> {
+        if depth > MAX_DEPTH || snapshot.files.len() >= MAX_ENTRIES {
+            snapshot.complete = false;
+            return Ok(());
+        }
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                snapshot.complete = false;
+                tracing::warn!(path = %dir.display(), %error, "Workspace 目录读取失败，保留未扫描的旧索引");
+                return Ok(());
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    snapshot.complete = false;
+                    tracing::warn!(path = %dir.display(), %error, "Workspace 目录项读取失败");
+                    continue;
+                }
+            };
+            if snapshot.files.len() >= MAX_ENTRIES {
+                snapshot.complete = false;
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    snapshot.complete = false;
+                    tracing::warn!(path = %path.display(), %error, "Workspace 文件类型读取失败");
+                    continue;
+                }
+            };
+            if file_type.is_dir() {
+                if !should_skip_dir(&name_str) {
+                    self.collect_file_states(&path, depth + 1, snapshot)?;
+                }
+                continue;
+            }
+            if !file_type.is_file() || should_skip_file(&name_str) {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    snapshot.complete = false;
+                    tracing::warn!(path = %path.display(), %error, "Workspace 文件属性读取失败");
+                    continue;
+                }
+            };
+            if metadata.len() > MAX_FILE_SIZE {
+                continue;
+            }
+            let rel_path = path
+                .strip_prefix(&self.root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            snapshot.files.insert(
+                rel_path,
+                FileState {
+                    modified_at: modified_timestamp(&metadata),
+                    size: metadata.len(),
+                },
+            );
+        }
+        Ok(())
     }
 
     fn scan_dir(&mut self, writer: &mut IndexWriter, dir: &Path, depth: usize) -> Result<()> {
@@ -416,12 +615,23 @@ impl WorkspaceIndex {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn index_file(&mut self, path: &Path) -> Result<()> {
         let mut writer = self.create_writer("index_file")?;
+        let rel_path = path
+            .strip_prefix(&self.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        writer.delete_term(tantivy::Term::from_field_text(
+            self.fields.path_exact,
+            &rel_path,
+        ));
         self.index_file_with_writer(&mut writer, path, None)?;
         writer
             .commit()
             .with_context(|| self.context("index_file", "提交 Workspace 索引失败"))?;
+        self.refresh_entry_count()?;
         self.write_meta()?;
         Ok(())
     }
@@ -460,8 +670,10 @@ impl WorkspaceIndex {
 
         let mut doc = TantivyDocument::new();
         doc.add_text(self.fields.path, &rel_path);
+        doc.add_text(self.fields.path_exact, &rel_path);
         doc.add_text(self.fields.file_type, "file");
         doc.add_u64(self.fields.size, size);
+        doc.add_u64(self.fields.modified_at, modified_timestamp(metadata));
         doc.add_text(self.fields.language, &language);
         if !content.is_empty() {
             doc.add_text(self.fields.content, &content);
@@ -486,13 +698,15 @@ impl WorkspaceIndex {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn remove_file(&mut self, rel_path: &str) -> Result<()> {
         let mut writer = self.create_writer("remove_file")?;
-        let term = tantivy::Term::from_field_text(self.fields.path, rel_path);
+        let term = tantivy::Term::from_field_text(self.fields.path_exact, rel_path);
         writer.delete_term(term);
         writer
             .commit()
             .with_context(|| self.context("remove_file", "提交 Workspace 索引失败"))?;
+        self.refresh_entry_count()?;
         self.write_meta()?;
         Ok(())
     }
@@ -545,19 +759,34 @@ impl WorkspaceIndex {
         Ok(hits)
     }
 
+    #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
         self.entry_count
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    fn refresh_entry_count(&mut self) -> Result<()> {
+        self.entry_count = self
+            .index
+            .reader()
+            .with_context(|| self.context("count", "创建 Workspace 索引读取器失败"))?
+            .searcher()
+            .num_docs() as usize;
+        Ok(())
+    }
+
     fn write_meta(&self) -> Result<()> {
+        let now = chrono::Local::now();
         let meta = super::IndexMeta {
             root: self.root.to_string_lossy().to_string(),
             entry_count: self.entry_count,
-            updated_at: chrono::Local::now().naive_local().to_string(),
+            updated_at: now.naive_local().to_string(),
+            schema_version: WORKSPACE_SCHEMA_VERSION,
+            last_successful_scan_at: now.timestamp(),
         };
         let meta_dir = Self::index_dir(&self.root, &self.base_dir)
             .parent()
@@ -566,10 +795,13 @@ impl WorkspaceIndex {
         std::fs::create_dir_all(&meta_dir)
             .with_context(|| self.context("write_meta", "创建 Workspace meta 目录失败"))?;
         let meta_path = meta_dir.join("meta.json");
+        let temp_path = meta_dir.join(format!("meta.json.tmp-{}", std::process::id()));
         let json = serde_json::to_string_pretty(&meta)
             .with_context(|| self.context("write_meta", "序列化 Workspace meta 失败"))?;
-        std::fs::write(&meta_path, json)
-            .with_context(|| self.context("write_meta", "写入 Workspace meta 失败"))?;
+        std::fs::write(&temp_path, json)
+            .with_context(|| self.context("write_meta", "写入 Workspace 临时 meta 失败"))?;
+        std::fs::rename(&temp_path, &meta_path)
+            .with_context(|| self.context("write_meta", "替换 Workspace meta 失败"))?;
         Ok(())
     }
 
@@ -611,6 +843,15 @@ pub struct SearchHit {
 
 pub fn hash_path(root: &Path) -> String {
     md5_hex(root.to_string_lossy().as_bytes())
+}
+
+fn modified_timestamp(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
 }
 
 fn workspace_index_context(root: &Path, base_dir: &Path, stage: &str, message: &str) -> String {

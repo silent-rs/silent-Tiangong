@@ -9,7 +9,7 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, HardDrive, Clock, Bot as BotIcon, Package, Brain } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Clock, Bot as BotIcon, Package, Brain } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -17,7 +17,6 @@ import { api } from '@/api/tauri';
 import type { Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
-import { IndexManagementSettings } from './index/IndexManagementSettings';
 import { AutomationSettings } from './automation/AutomationSettings';
 import { WebhookPanel } from './automation/WebhookPanel';
 import { BotPanel } from './bots/BotPanel';
@@ -115,10 +114,6 @@ export function SettingsDialog() {
                   <Settings className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">模型配置</span>
                 </TabsTrigger>
-                <TabsTrigger value="index" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
-                  <HardDrive className="w-4 h-4 sm:mr-2" />
-                  <span className="sr-only sm:not-sr-only">索引管理</span>
-                </TabsTrigger>
                 <TabsTrigger value="skill" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                   <Puzzle className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">Skills</span>
@@ -168,9 +163,6 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="llm" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
-              </TabsContent>
-              <TabsContent value="index" className="m-0 flex-1 min-h-0 overflow-hidden">
-                <IndexManagementSettings />
               </TabsContent>
               <TabsContent value="skill" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <SkillSettings />

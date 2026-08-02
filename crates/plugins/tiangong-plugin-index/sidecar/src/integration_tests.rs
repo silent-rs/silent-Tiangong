@@ -1,7 +1,15 @@
+//! Index 集成测试（搬迁自原 tests/index_integration.rs）。
+//!
+//! 全部用 sidecar 内部 IndexManager 直接测试，不经 IPC。
+
+#![cfg(test)]
+
 use std::fs;
 use std::path::Path;
 
-use tiangong_plugin_index::{IndexManager, IndexQuery, IndexScope, TurnData};
+use tiangong_plugin_index_protocol::{IndexScope, TurnData};
+
+use crate::index::{IndexManager, IndexQuery};
 
 fn create_temp_workspace(dir: &Path) {
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -74,16 +82,13 @@ fn create_index_manager() -> (tempfile::TempDir, IndexManager) {
 
 #[test]
 fn test_workspace_full_scan_and_search() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
     create_temp_workspace(workspace);
 
     let count = manager.full_scan(workspace).unwrap();
-
     assert!(count >= 3, "至少索引 3 个源文件，实际: {}", count);
 
     let hits = manager
@@ -93,7 +98,7 @@ fn test_workspace_full_scan_and_search() {
         )
         .unwrap();
     assert!(!hits.is_empty(), "搜索 'greet' 应有结果");
-    assert_eq!(hits[0].source, IndexScope::Workspace);
+    assert_eq!(hits[0].scope, IndexScope::Workspace);
 
     let path_hit = manager
         .search(
@@ -109,9 +114,7 @@ fn test_workspace_full_scan_and_search() {
 
 #[test]
 fn test_workspace_skip_dirs_and_binary_files() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
@@ -138,9 +141,7 @@ fn test_workspace_skip_dirs_and_binary_files() {
 
 #[test]
 fn test_workspace_rust_symbol_search() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
@@ -148,7 +149,6 @@ fn test_workspace_rust_symbol_search() {
 
     let _ = manager.full_scan(workspace);
 
-    // 搜索函数名
     let fn_hits = manager
         .search(
             workspace,
@@ -157,7 +157,6 @@ fn test_workspace_rust_symbol_search() {
         .unwrap();
     assert!(!fn_hits.is_empty(), "搜索函数 'greet' 应有结果");
 
-    // 搜索结构体名
     let struct_hits = manager
         .search(
             workspace,
@@ -166,7 +165,6 @@ fn test_workspace_rust_symbol_search() {
         .unwrap();
     assert!(!struct_hits.is_empty(), "搜索结构体 'App' 应有结果");
 
-    // 搜索枚举名
     let enum_hits = manager
         .search(
             workspace,
@@ -175,7 +173,6 @@ fn test_workspace_rust_symbol_search() {
         .unwrap();
     assert!(!enum_hits.is_empty(), "搜索枚举 'Status' 应有结果");
 
-    // 搜索 trait 名
     let trait_hits = manager
         .search(
             workspace,
@@ -184,7 +181,6 @@ fn test_workspace_rust_symbol_search() {
         .unwrap();
     assert!(!trait_hits.is_empty(), "搜索 trait 'Service' 应有结果");
 
-    // 搜索常量名
     let const_hits = manager
         .search(
             workspace,
@@ -196,9 +192,7 @@ fn test_workspace_rust_symbol_search() {
 
 #[test]
 fn test_workspace_update_and_remove_file() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();
@@ -224,10 +218,48 @@ fn test_workspace_update_and_remove_file() {
 }
 
 #[test]
+fn test_workspace_incremental_scan_updates_and_removes_files() {
+    let (_index_temp, manager) = create_index_manager();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path();
+    let source = workspace.join("lib.rs");
+
+    fs::write(&source, "pub fn old_keyword() {}\n").unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    fs::write(&source, "pub fn new_keyword_with_longer_name() {}\n").unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+    assert!(
+        manager
+            .search(workspace, &IndexQuery::new("old_keyword"))
+            .unwrap()
+            .is_empty(),
+        "修改后旧内容不应继续命中"
+    );
+    assert!(
+        !manager
+            .search(workspace, &IndexQuery::new("new_keyword_with_longer_name"))
+            .unwrap()
+            .is_empty(),
+        "修改后新内容应可命中"
+    );
+
+    fs::remove_file(&source).unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 0);
+    assert!(
+        manager
+            .search(workspace, &IndexQuery::new("new_keyword_with_longer_name"))
+            .unwrap()
+            .is_empty(),
+        "删除文件后内容不应继续命中"
+    );
+}
+
+#[test]
 fn test_session_index_turn_and_search() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let session_id = scru128::new().to_string();
 
@@ -284,16 +316,13 @@ fn test_session_finalize() {
     manager.index_turn(&session_id, &turn).unwrap();
     manager.finalize_session_index(&session_id).unwrap();
 
-    // 验证索引目录已创建在临时目录中
     let session_dir = index_temp.path().join("sessions").join(&session_id);
     assert!(session_dir.exists(), "finalize 后应存在 session 索引目录");
 }
 
 #[test]
 fn test_workspace_entry_count() {
-    let _index_temp;
-    let manager;
-    (_index_temp, manager) = create_index_manager();
+    let (_index_temp, manager) = create_index_manager();
 
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path();

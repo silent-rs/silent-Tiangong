@@ -75,18 +75,28 @@ impl CoreManager {
     /// async 调用方。`cancel` 为 true 时先投递 `Command::Cancel` 再 take + join，
     /// 用于删除会话等需要主动终止在途 turn 的场景；失败回滚传 false（仅取走本次
     /// 绑定的 Core 并等其写盘结束）。Core 不存在时直接返回。
-    pub async fn retire_core(&self, session_id: &str, cancel: bool) {
+    pub async fn retire_core(&self, session_id: &str, cancel: bool) -> Result<(), String> {
+        let creation_lock = self.creation_lock(session_id);
+        let _creation_guard = creation_lock.lock_owned().await;
+        self.retire_core_locked(session_id, cancel).await
+    }
+
+    pub(crate) async fn retire_core_locked(
+        &self,
+        session_id: &str,
+        cancel: bool,
+    ) -> Result<(), String> {
         if cancel {
             let _ = self.cancel_core(session_id);
         }
         let Some(core) = self.take_core(session_id) else {
-            return;
+            return Ok(());
         };
         let sid = session_id.to_string();
         match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(session_id = %sid, %error, "关闭 Core 失败"),
-            Err(error) => tracing::warn!(session_id = %sid, %error, "等待 Core 关闭任务失败"),
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("关闭会话 {sid} 的 Core 失败：{error}")),
+            Err(error) => Err(format!("等待会话 {sid} 的 Core 关闭失败：{error}")),
         }
     }
 

@@ -1,7 +1,7 @@
-//! IPC 模块（TCP loopback + 动态端口）。
+//! 通用 IPC server（TCP loopback + 动态端口 + endpoint 文件 + 首帧 token 鉴权）。
 //!
-//! 对齐 Memory sidecar：`127.0.0.1:0` 动态端口监听、本地 endpoint 文件发现、
-//! 首帧 token 鉴权。帧层复用 `tiangong_plugin_runtime::protocol` 的通用类型。
+//! 帧层复用 `tiangong_plugin_runtime::protocol` 的通用类型，不重新定义。
+//! 各 sidecar 通过实现 [`SidecarService`] trait 提供请求分发。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,8 +19,9 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-use crate::election::home_dir;
-use crate::service::McpService;
+use crate::endpoint;
+use crate::identity::SidecarConfig;
+use crate::singleton::SidecarService;
 
 /// 监听中的 IPC 服务端。
 struct IpcServer {
@@ -69,8 +70,8 @@ impl IpcServer {
             token: scru128::new().to_string(),
             updated_at: chrono::Local::now().naive_local().to_string(),
         };
-        let endpoint_path = endpoint_path(service)?;
-        persist_endpoint(&endpoint_path, &endpoint)?;
+        let endpoint_path = endpoint::endpoint_path(service)?;
+        endpoint::persist_endpoint(&endpoint_path, &endpoint)?;
         Ok(Self {
             listener,
             endpoint,
@@ -103,45 +104,61 @@ impl IpcServer {
 
 impl Drop for IpcServer {
     fn drop(&mut self) {
+        // 删除前校验 endpoint 文件里的 pid 仍是本进程，避免旧实例晚退出时
+        // 误删新实例刚发布的 endpoint 文件。
+        if let Ok(content) = std::fs::read_to_string(&self.endpoint_path)
+            && let Ok(endpoint) = serde_json::from_str::<IpcEndpoint>(&content)
+            && endpoint.pid != std::process::id()
+        {
+            // 文件已被新实例覆盖，不删。
+            return;
+        }
         let _ = std::fs::remove_file(&self.endpoint_path);
     }
 }
 
-/// 启动 MCP IPC bridge，将本地 [`McpService`] 暴露为 TCP loopback 服务。
-pub fn spawn_mcp_bridge(service: impl Into<String>, service_obj: McpService) -> Result<IpcBridge> {
-    let service = service.into();
+/// 启动 IPC bridge，将 [`SidecarService`] 暴露为 TCP loopback 服务。
+pub fn spawn_bridge(
+    config: &SidecarConfig,
+    service_obj: Arc<dyn SidecarService>,
+) -> Result<IpcBridge> {
+    let service = config.service.clone();
+    let bridge_thread_name = format!("{}-ipc-bridge-{service}", config.service);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
 
     let join_handle = thread::Builder::new()
-        .name(format!("mcp-ipc-bridge-{service}"))
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("MCP IPC runtime 构建失败");
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let server = match IpcServer::bind(&service).await {
-                    Ok(server) => {
-                        let _ = ready_tx.send(Ok(()));
-                        Arc::new(server)
+        .name(bridge_thread_name)
+        .spawn({
+            let service = service.clone();
+            move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("sidecar IPC runtime 构建失败");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    let server = match IpcServer::bind(&service).await {
+                        Ok(server) => {
+                            let _ = ready_tx.send(Ok(()));
+                            Arc::new(server)
+                        }
+                        Err(err) => {
+                            let _ = ready_tx.send(Err(anyhow!(err.to_string())));
+                            return;
+                        }
+                    };
+                    if let Err(err) = run_bridge(service, server, service_obj, shutdown_rx).await {
+                        tracing::warn!("sidecar IPC bridge 退出异常: {}", err);
                     }
-                    Err(err) => {
-                        let _ = ready_tx.send(Err(anyhow!(err.to_string())));
-                        return;
-                    }
-                };
-                if let Err(err) = run_mcp_bridge(service, server, service_obj, shutdown_rx).await {
-                    tracing::warn!("MCP IPC bridge 退出异常: {}", err);
-                }
-            });
+                });
+            }
         })
-        .with_context(|| "创建 MCP IPC bridge 线程失败")?;
+        .with_context(|| format!("创建 {service} IPC bridge 线程失败"))?;
 
     ready_rx
         .recv()
-        .with_context(|| "等待 MCP IPC bridge 就绪失败")??;
+        .with_context(|| format!("等待 {service} IPC bridge 就绪失败"))??;
 
     Ok(IpcBridge {
         shutdown_tx: Some(shutdown_tx),
@@ -149,18 +166,17 @@ pub fn spawn_mcp_bridge(service: impl Into<String>, service_obj: McpService) -> 
     })
 }
 
-async fn run_mcp_bridge(
+async fn run_bridge(
     service: String,
     server: Arc<IpcServer>,
-    service_obj: McpService,
+    service_obj: Arc<dyn SidecarService>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     tracing::info!(
         service = %service,
         port = server.endpoint.port,
-        "MCP IPC bridge 已启动"
+        "{service} IPC bridge 已启动"
     );
-    let service_obj = Arc::new(service_obj);
 
     loop {
         tokio::select! {
@@ -175,12 +191,12 @@ async fn run_mcp_bridge(
                         let service_obj = service_obj.clone();
                         tokio::spawn(async move {
                             if let Err(err) = serve_connection(connection, service_obj).await {
-                                tracing::debug!("MCP IPC 连接结束: {}", err);
+                                tracing::debug!("IPC 连接结束: {}", err);
                             }
                         });
                     }
                     Err(err) => {
-                        tracing::warn!("接受 MCP IPC 客户端失败: {}", err);
+                        tracing::warn!("接受 {service} IPC 客户端失败: {}", err);
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                 }
@@ -188,16 +204,22 @@ async fn run_mcp_bridge(
         }
     }
 
-    tracing::info!(service = %service, "MCP IPC bridge 已关闭");
+    tracing::info!(service = %service, "{service} IPC bridge 已关闭");
     Ok(())
 }
 
 async fn serve_connection(
     mut connection: IpcConnection,
-    service_obj: Arc<McpService>,
+    service_obj: Arc<dyn SidecarService>,
 ) -> Result<()> {
     loop {
         let request = connection.read_request().await?;
+        let operation = request
+            .payload
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone())
         {
             Ok(plugin_request) => service_obj.dispatch(plugin_request).await,
@@ -208,8 +230,17 @@ async fn serve_connection(
                 false,
             ),
         };
+        if let Some(err_msg) = &plugin_response.error_message {
+            tracing::warn!(
+                request_id = %request.request_id,
+                operation,
+                error_code = ?plugin_response.error_code,
+                error = %err_msg,
+                "sidecar 操作失败"
+            );
+        }
         let payload =
-            serde_json::to_value(plugin_response).with_context(|| "序列化 MCP 响应失败")?;
+            serde_json::to_value(plugin_response).with_context(|| "序列化 sidecar 响应失败")?;
         connection
             .write_response(IpcResponse {
                 request_id: request.request_id,
@@ -269,35 +300,4 @@ impl IpcConnection {
         }
         serde_json::from_str(buf.trim_end()).with_context(|| "解析 IPC 帧失败")
     }
-}
-
-fn endpoint_path(service: &str) -> Result<PathBuf> {
-    if let Some(path) =
-        std::env::var_os("TIANGONG_PLUGIN_ENDPOINT").filter(|value| !value.is_empty())
-    {
-        return Ok(PathBuf::from(path));
-    }
-    Ok(mcp_runtime_dir()?.join(format!("{service}.json")))
-}
-
-fn mcp_runtime_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
-        return Ok(PathBuf::from(dir).join("runtime"));
-    }
-    Ok(home_dir()
-        .ok_or_else(|| anyhow!("无法确定 HOME/USERPROFILE"))?
-        .join(".tiangong")
-        .join("mcp")
-        .join("runtime"))
-}
-
-fn persist_endpoint(path: &PathBuf, endpoint: &IpcEndpoint) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("创建 IPC runtime 目录失败: {}", parent.display()))?;
-    }
-    let content =
-        serde_json::to_string_pretty(endpoint).with_context(|| "序列化 IPC endpoint 失败")?;
-    std::fs::write(path, content)
-        .with_context(|| format!("写入 IPC endpoint 文件失败: {}", path.display()))
 }

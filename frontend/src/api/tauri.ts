@@ -501,13 +501,6 @@ export interface CapabilityAvailabilityInfo {
   routed_model?: string;
 }
 
-export interface WorkspaceIndexInfo {
-  id: string;
-  root: string;
-  entry_count: number;
-  updated_at: string;
-}
-
 // ============================================================================
 // 定时任务 & Webhook
 // ============================================================================
@@ -863,17 +856,8 @@ export const api = {
   setModelsConfig: (config: ModelsConfigView): Promise<void> =>
     invoke('set_models_config', { config }),
 
-  // ── 索引管理 ──
-  listWorkspaceIndexes: (): Promise<WorkspaceIndexInfo[]> =>
-    invoke('list_workspace_indexes'),
-
-  deleteWorkspaceIndex: (workspaceId: string, root: string): Promise<void> =>
-    invoke('delete_workspace_index', { workspaceId, root }),
-
-  rebuildWorkspaceIndex: (root: string): Promise<number> =>
-    invoke('rebuild_workspace_index', { root }),
-
   // 预热工作区索引（索引已存在则直接返回，否则后台扫描，立即返回不阻塞）
+  // 索引管理（列表/删除/重建）由「设置 → 索引管理」页经插件 UI 通道处理。
   prewarmWorkspaceIndex: (root: string): Promise<void> =>
     invoke('prewarm_workspace_index', { root }),
 

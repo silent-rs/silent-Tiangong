@@ -148,17 +148,9 @@ impl CoreManager {
     /// 这是安全的操作——retire_core 保证 worker 停止并写盘结束后才返回，
     /// 随后删除文件不会影响在途 turn。Core 不存在时只删文件。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        // 先从 registry 取走 Core 并等待其停止（如果在途 turn 中）。
-        if let Some(core) = self.take_core(session_id) {
-            let sid = session_id.to_string();
-            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(session_id = %sid, %error, "删除会话时关闭 Core 失败")
-                }
-                Err(error) => tracing::warn!(session_id = %sid, %error, "等待 Core 关闭失败"),
-            }
-        }
+        let creation_lock = self.creation_lock(session_id);
+        let _creation_guard = creation_lock.lock_owned().await;
+        self.retire_core_locked(session_id, true).await?;
         self.delete_session_file(session_id)
     }
 

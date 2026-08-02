@@ -111,7 +111,7 @@ impl WasmPluginAdapter {
         if let Some(config_json) = context.config_json {
             plugin.on_config_updated(config_json)?;
         }
-        plugin.set_workspace(context.workspace)?;
+        plugin.set_workspace(context.workspace, self.is_full_trust())?;
         if let Some(session_json) = context.session_json {
             plugin.on_session_ready(session_json)?;
         }
@@ -177,29 +177,41 @@ impl Plugin for WasmPluginAdapter {
 
     /// 会话就绪：序列化 session 只读快照转发到 WASM。
     fn on_session_ready(&self, session: &mut Session) {
-        self.forward_session_hook(session, |plugin, json| plugin.on_session_ready(json));
+        self.forward_session_hook("on_session_ready", session, |plugin, json| {
+            plugin.on_session_ready(json)
+        });
     }
 
     /// 轮次开始：序列化 session 转发。
     fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
-            plugin.on_turn_started(json, idx)
-        });
+        self.forward_session_hook_with_idx(
+            "on_turn_started",
+            session,
+            turn_start_idx,
+            |plugin, json, idx| plugin.on_turn_started(json, idx),
+        );
     }
 
     /// 轮次结束：序列化 session 转发（WASM 内部触发 micro 反刍）。
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
-            plugin.on_turn_finished(json, idx)
-        });
+        self.forward_session_hook_with_idx(
+            "on_turn_finished",
+            session,
+            turn_start_idx,
+            |plugin, json, idx| plugin.on_turn_finished(json, idx),
+        );
     }
 
     /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
     fn on_session_ended(&self, session: &mut Session) {
-        self.forward_session_hook(session, |plugin, json| plugin.on_session_ended(json));
+        self.forward_session_hook("on_session_ended", session, |plugin, json| {
+            plugin.on_session_ended(json)
+        });
     }
 
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
+    ///
+    /// 同时携带当前信任模式（full_trust），供插件放宽/收紧工作区外路径校验。
     fn set_workspace(&self, workspace: Option<&std::path::Path>) {
         let ws = workspace.map(|p| p.to_string_lossy().to_string());
         if let Ok(mut context) = self.context.lock() {
@@ -208,7 +220,10 @@ impl Plugin for WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        if let Err(e) = self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws)) {
+        let full_trust = self.is_full_trust();
+        if let Err(e) =
+            self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws, full_trust))
+        {
             tracing::warn!("wasm set_workspace 失败: {e}");
         }
     }
@@ -216,6 +231,18 @@ impl Plugin for WasmPluginAdapter {
     fn set_trust_mode(&self, trust: TrustMode) {
         if let Ok(mut context) = self.context.lock() {
             context.trust_mode = Some(trust);
+        }
+        // 信任模式可能在 set_workspace 之后变更：重新调一次 set_workspace，
+        // 把最新 trust 推送给 WASM（workspace 保持 context 中缓存的值不变）。
+        if !self.is_enabled() {
+            return;
+        }
+        let ws = self.context.lock().ok().and_then(|c| c.workspace.clone());
+        let full_trust = matches!(trust, TrustMode::FullTrust);
+        if let Err(e) =
+            self.call_wasm_off_runtime(move |plugin| plugin.set_workspace(ws, full_trust))
+        {
+            tracing::warn!("wasm set_trust_mode 推送失败: {e}");
         }
     }
 
@@ -227,6 +254,11 @@ impl Plugin for WasmPluginAdapter {
 }
 
 impl WasmPluginAdapter {
+    /// 当前是否为完全信任模式（供 set_workspace 推送给 WASM）。
+    fn is_full_trust(&self) -> bool {
+        self.context.lock().ok().and_then(|c| c.trust_mode) == Some(TrustMode::FullTrust)
+    }
+
     /// 在 Tokio runtime 外执行 WASM 调用，避免 wasmtime-wasi 嵌套 block_on。
     fn call_wasm_off_runtime<R>(
         &self,
@@ -241,6 +273,7 @@ impl WasmPluginAdapter {
     /// 序列化 PluginSession 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
     fn forward_session_hook(
         &self,
+        hook: &'static str,
         session: &Session,
         call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
@@ -258,14 +291,15 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
-            tracing::warn!("wasm 生命周期钩子失败: {e}");
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
+            tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
     }
 
     /// 同上，但带 turn_start_idx 参数。
     fn forward_session_hook_with_idx(
         &self,
+        hook: &'static str,
         session: &Session,
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
@@ -285,8 +319,8 @@ impl WasmPluginAdapter {
             return;
         }
         let idx = turn_start_idx as u32;
-        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
-            tracing::warn!("wasm 生命周期钩子失败: {e}");
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
+            tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
     }
 }

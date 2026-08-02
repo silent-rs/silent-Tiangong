@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -23,18 +23,22 @@ use crate::turn_context::TurnContext;
 /// 共享 runtime 的 worker 线程数。
 const WORKER_THREADS: usize = 2;
 
-/// GC 扫描间隔(清理 panic 的 turn task)。
-const GC_INTERVAL: Duration = Duration::from_millis(500);
-
 static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// turn task 注册表:session_id → (cmd_tx, JoinHandle)
+/// turn task 注册表: session_id → 当前代任务。
 ///
 /// cmd_tx 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx,
 /// deliver(Cancel/Approval) 通过 send_command 投递到活跃 turn task。
-type TurnTaskMap = HashMap<String, (UnboundedSender<Command>, JoinHandle<()>)>;
+struct TurnTask {
+    generation: u64,
+    cmd_tx: UnboundedSender<Command>,
+    handle: JoinHandle<()>,
+}
+
+type TurnTaskMap = HashMap<String, TurnTask>;
 
 static TURN_TASKS: OnceLock<Mutex<TurnTaskMap>> = OnceLock::new();
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn turn_tasks() -> &'static Mutex<TurnTaskMap> {
     TURN_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -43,23 +47,11 @@ fn turn_tasks() -> &'static Mutex<TurnTaskMap> {
 /// 获取进程级共享 tokio runtime。
 pub fn shared_runtime() -> &'static Runtime {
     SHARED_RUNTIME.get_or_init(|| {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
+        tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKER_THREADS)
             .enable_all()
             .build()
-            .expect("创建共享 tokio runtime 失败");
-
-        // 启动 GC task:定期清理已结束(含 panic)的 turn task。
-        runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(GC_INTERVAL).await;
-                if let Ok(mut tasks) = turn_tasks().lock() {
-                    tasks.retain(|_id, (_, handle)| !handle.is_finished());
-                }
-            }
-        });
-
-        runtime
+            .expect("创建共享 tokio runtime 失败")
     })
 }
 
@@ -69,8 +61,8 @@ pub fn shared_runtime() -> &'static Runtime {
 /// 同步完成任务启动前的准备并生成 Future。只有上述步骤全部成功后才注册并启动任务，
 /// 避免留下半初始化运行态。
 ///
-/// turn task 正常结束或被 abort 后,wrapper 会立即调 `remove_turn` 清理。
-/// panic 的 task 由 GC task 定期清理。
+/// turn task 正常结束时，wrapper 会按任务代际立即清理。
+/// panic 的任务保留在表中，供关闭路径等待并上报。
 pub fn spawn_turn<F, Fut>(
     context: TurnContext,
     future_factory: F,
@@ -89,25 +81,34 @@ where
     }
     let future = future_factory(context, cmd_rx)?;
 
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     let (start_tx, start_rx) = oneshot::channel();
     let sid = session_id.clone();
     let handle = shared_runtime().spawn(async move {
         if start_rx.await.is_ok() {
             future.await;
         }
-        remove_turn(&sid);
+        remove_turn_if_current(&sid, generation);
     });
     let mut tasks = turn_tasks()
         .lock()
         .map_err(|_| crate::core::CoreError::WorkerStopped)?;
-    if tasks
-        .get(&session_id)
-        .is_some_and(|(_, handle)| !handle.is_finished())
-    {
+    if let Some(task) = tasks.get(&session_id) {
         handle.abort();
-        return Err(crate::core::CoreError::Busy);
+        return Err(if task.handle.is_finished() {
+            crate::core::CoreError::WorkerPanicked
+        } else {
+            crate::core::CoreError::Busy
+        });
     }
-    tasks.insert(session_id, (cmd_tx, handle));
+    tasks.insert(
+        session_id,
+        TurnTask {
+            generation,
+            cmd_tx,
+            handle,
+        },
+    );
     drop(tasks);
     start_tx
         .send(())
@@ -119,19 +120,44 @@ where
 /// 无活跃任务时返回 false(命令被忽略)。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
     if let Ok(tasks) = turn_tasks().lock()
-        && let Some((tx, handle)) = tasks.get(session_id)
-        && !handle.is_finished()
+        && let Some(task) = tasks.get(session_id)
+        && !task.handle.is_finished()
     {
-        return tx.send(cmd).is_ok();
+        return task.cmd_tx.send(cmd).is_ok();
     }
     false
 }
 
-/// 从 turn_tasks 移除指定 session。
-pub fn remove_turn(session_id: &str) {
-    if let Ok(mut tasks) = turn_tasks().lock() {
+fn remove_turn_if_current(session_id: &str, generation: u64) {
+    if let Ok(mut tasks) = turn_tasks().lock()
+        && tasks
+            .get(session_id)
+            .is_some_and(|task| task.generation == generation)
+    {
         tasks.remove(session_id);
     }
+}
+
+/// 取消并等待指定 session 的活跃 turn 完成。
+pub fn cancel_and_join(session_id: &str) -> Result<(), crate::core::CoreError> {
+    let handle = {
+        let mut tasks = turn_tasks()
+            .lock()
+            .map_err(|_| crate::core::CoreError::WorkerStopped)?;
+        let Some(task) = tasks.remove(session_id) else {
+            return Ok(());
+        };
+        let _ = task.cmd_tx.send(Command::Cancel);
+        task.handle
+    };
+
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || shared_runtime().block_on(handle))
+            .join()
+            .map_err(|_| crate::core::CoreError::WorkerPanicked)?
+            .map_err(|_| crate::core::CoreError::WorkerPanicked)
+    })
 }
 
 /// 查询指定 session 是否有活跃的 turn task。
@@ -139,7 +165,7 @@ pub fn is_running(session_id: &str) -> bool {
     if let Ok(tasks) = turn_tasks().lock() {
         tasks
             .get(session_id)
-            .is_some_and(|(_, handle)| !handle.is_finished())
+            .is_some_and(|task| !task.handle.is_finished())
     } else {
         false
     }

@@ -23,8 +23,6 @@ pub struct ServerCoreManager {
     state: SharedState,
     core_manager: tiangong_app_state::app_state::CoreManager,
     event_bus: Arc<EventBus>,
-    /// 工作区索引单例（issue #259）：跨 Core 共享底层索引缓存与扫描状态。
-    index_manager: Arc<tiangong_plugin_index::IndexManager>,
     /// 调度器执行上下文（构造后由入口层经 [`Self::set_scheduler_context`] 注入）。
     ///
     /// 持有它仅为了让 Agent 手动触发（`scheduler_trigger_job`）的 plugin 能拿到
@@ -49,13 +47,11 @@ impl ServerCoreManager {
         state: SharedState,
         core_manager: tiangong_app_state::app_state::CoreManager,
         event_bus: Arc<EventBus>,
-        index_manager: Arc<tiangong_plugin_index::IndexManager>,
     ) -> Self {
         Self {
             state,
             core_manager,
             event_bus,
-            index_manager,
             scheduler_context: Arc::new(std::sync::OnceLock::new()),
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -389,9 +385,6 @@ impl ServerCoreManager {
             // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
             let mut plugins = tiangong_plugin_prompt::default_plugins();
             plugins.extend(tiangong_plugin_fs::default_plugins());
-            plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
-                self.index_manager.clone(),
-            ));
             if let Some(ep) = image_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
             }
@@ -428,14 +421,10 @@ impl ServerCoreManager {
             // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
             let child_plugin_factory = Arc::new({
                 let storage_root = storage_root.clone();
-                let index_manager = self.index_manager.clone();
                 let scheduler_context = self.scheduler_context.clone();
                 move || {
                     let mut child_plugins = tiangong_plugin_prompt::default_plugins();
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                    child_plugins.extend(tiangong_plugin_index::default_plugins_with_manager(
-                        index_manager.clone(),
-                    ));
                     if let Some(ep) = image_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
                     }
@@ -1284,7 +1273,7 @@ mod tests {
     use super::test_support::{STORAGE_TEST_LOCK, TestHomeGuard};
 
     fn isolated_test_manager(
-        root: &Path,
+        _root: &Path,
     ) -> (Arc<ServerCoreManager>, Session, PathBuf, SharedState) {
         let mut state = tiangong_app_state::app_state::TiangongState::new();
         let storage_root = state.config.storage_root.clone();
@@ -1302,10 +1291,6 @@ mod tests {
             state.clone(),
             core_manager,
             Arc::new(EventBus::default()),
-            std::sync::Arc::new(
-                tiangong_plugin_index::IndexManager::new_with_dir(root.join("index"))
-                    .expect("IndexManager test init"),
-            ),
         ));
         (manager, session, session_path, state)
     }

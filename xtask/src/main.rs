@@ -55,10 +55,25 @@ const MCP: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-mcp/protocol/Cargo.toml",
 };
 
+const INDEX: PluginConfig = PluginConfig {
+    id: "index",
+    name: "Index",
+    description: "工作区文件索引、对话历史索引与代码检索",
+    protocol_crate: "tiangong-plugin-index-protocol",
+    wasm_crate: "tiangong-plugin-index-wasm",
+    wasm_artifact: "tiangong_plugin_index_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-index-sidecar",
+    sidecar_artifact: "tiangong-index-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-index",
+    plugin_manifest: "crates/plugins/tiangong-plugin-index/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-index/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
         "mcp" => Ok(&MCP),
+        "index" => Ok(&INDEX),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
