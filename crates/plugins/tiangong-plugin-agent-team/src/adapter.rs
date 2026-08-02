@@ -131,25 +131,26 @@ impl Plugin for AgentTeamPlugin {
     }
 
     fn on_session_ended(&self, session: &mut Session) {
-        // Core 即将退出，销毁团队（关闭子 Core、清空 runtimes）。
-        // coordinator.shutdown 是 async，但 on_session_ended 是同步钩子——
-        // fire-and-forget spawn 后台执行，不阻塞 worker 退出。
-        // 无 tokio runtime 时（同步上下文调用）跳过，避免 panic。
         let coordinator = self.coordinator.clone();
         let session_id = session.id.clone();
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn(async move {
-                    tracing::info!(session_id, "后台销毁 Agent Team 团队");
-                    coordinator.shutdown().await;
-                });
-            }
-            Err(_) => {
-                tracing::warn!(
-                    session_id,
-                    "on_session_ended 无 tokio runtime，跳过 Agent Team 团队销毁"
-                );
-            }
+        let result = std::thread::Builder::new()
+            .name(format!("agent-team-shutdown-{session_id}"))
+            .spawn(move || -> Result<(), String> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("创建 Agent Team 关闭运行时失败：{error}"))?;
+                runtime.block_on(coordinator.shutdown());
+                Ok(())
+            })
+            .and_then(|thread| {
+                thread
+                    .join()
+                    .map_err(|_| std::io::Error::other("Agent Team 关闭线程异常退出"))?
+                    .map_err(std::io::Error::other)
+            });
+        if let Err(error) = result {
+            tracing::warn!(%session_id, %error, "Agent Team 团队销毁失败");
         }
     }
 }

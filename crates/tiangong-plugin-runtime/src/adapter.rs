@@ -177,26 +177,36 @@ impl Plugin for WasmPluginAdapter {
 
     /// 会话就绪：序列化 session 只读快照转发到 WASM。
     fn on_session_ready(&self, session: &mut Session) {
-        self.forward_session_hook(session, |plugin, json| plugin.on_session_ready(json));
+        self.forward_session_hook("on_session_ready", session, |plugin, json| {
+            plugin.on_session_ready(json)
+        });
     }
 
     /// 轮次开始：序列化 session 转发。
     fn on_turn_started(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
-            plugin.on_turn_started(json, idx)
-        });
+        self.forward_session_hook_with_idx(
+            "on_turn_started",
+            session,
+            turn_start_idx,
+            |plugin, json, idx| plugin.on_turn_started(json, idx),
+        );
     }
 
     /// 轮次结束：序列化 session 转发（WASM 内部触发 micro 反刍）。
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(session, turn_start_idx, |plugin, json, idx| {
-            plugin.on_turn_finished(json, idx)
-        });
+        self.forward_session_hook_with_idx(
+            "on_turn_finished",
+            session,
+            turn_start_idx,
+            |plugin, json, idx| plugin.on_turn_finished(json, idx),
+        );
     }
 
     /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
     fn on_session_ended(&self, session: &mut Session) {
-        self.forward_session_hook(session, |plugin, json| plugin.on_session_ended(json));
+        self.forward_session_hook("on_session_ended", session, |plugin, json| {
+            plugin.on_session_ended(json)
+        });
     }
 
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
@@ -263,6 +273,7 @@ impl WasmPluginAdapter {
     /// 序列化 PluginSession 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
     fn forward_session_hook(
         &self,
+        hook: &'static str,
         session: &Session,
         call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
@@ -280,14 +291,15 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
-            tracing::warn!("wasm 生命周期钩子失败: {e}");
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
+            tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
     }
 
     /// 同上，但带 turn_start_idx 参数。
     fn forward_session_hook_with_idx(
         &self,
+        hook: &'static str,
         session: &Session,
         turn_start_idx: usize,
         call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync,
@@ -307,8 +319,8 @@ impl WasmPluginAdapter {
             return;
         }
         let idx = turn_start_idx as u32;
-        if let Err(e) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
-            tracing::warn!("wasm 生命周期钩子失败: {e}");
+        if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
+            tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
         }
     }
 }

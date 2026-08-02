@@ -267,24 +267,23 @@ impl TiangongCore {
     /// `Session::new("recovered")`——避免丢失原会话数据后调用方误判成功。
     /// 从磁盘加载最终 session。
     pub fn into_session(self) -> Result<Session, CoreError> {
-        // 发 Cancel 终止活跃 turn(如有)
-        let _ = self.send_cmd(Command::Cancel);
-        let mut session = Session::load_from_storage(&self.storage_root, &self.session_id)
-            .map_err(|_| CoreError::WorkerPanicked)?;
-        // worker 即将退出前触发插件 finalize（index 落盘 / agent-team 清理 / memory meso 反刍）。
-        self.finalize_plugins(&mut session);
-        Ok(session)
+        self.finalize_session()
     }
 
     /// 关闭 Core,不取回 session(session 已在磁盘上)。
     pub fn shutdown_join(self) -> Result<(), CoreError> {
-        let _ = self.send_cmd(Command::Cancel);
-        // worker 即将退出前触发插件 finalize（与 into_session 对称）。
-        if let Ok(mut session) = Session::load_from_storage(&self.storage_root, &self.session_id) {
-            self.finalize_plugins(&mut session);
-            let _ = session.try_persist_to_disk();
-        }
-        Ok(())
+        self.finalize_session().map(|_| ())
+    }
+
+    fn finalize_session(&self) -> Result<Session, CoreError> {
+        crate::shared_runtime::cancel_and_join(&self.session_id)?;
+        let mut session = self.load_session()?;
+        self.finalize_plugins(&mut session);
+        session.try_persist_to_disk().map_err(|error| {
+            tracing::warn!(%error, session_id = %self.session_id, "持久化会话结束钩子结果失败");
+            CoreError::WorkerStopped
+        })?;
+        Ok(session)
     }
 
     /// 遍历插件调用 on_session_ended（worker 退出前的 finalize 钩子）。

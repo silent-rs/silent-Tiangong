@@ -51,11 +51,17 @@ impl IndexQuery {
     }
 }
 
+const WORKSPACE_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexMeta {
     pub root: String,
     pub entry_count: usize,
     pub updated_at: String,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub last_successful_scan_at: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -93,6 +99,7 @@ impl Drop for WorkspaceScanPermit {
 impl IndexManager {
     pub fn new() -> Result<Self> {
         let base_dir = Self::default_dir();
+        recover_legacy_index_dir(&base_dir);
         Self::with_base_dir(base_dir)
     }
 
@@ -175,6 +182,14 @@ impl IndexManager {
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
         guard.full_scan()
+    }
+
+    pub fn incremental_scan(&self, root: &Path) -> Result<usize> {
+        let index = self.get_or_create_workspace_index(root)?;
+        let mut guard = index
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
+        guard.incremental_scan()
     }
 
     pub fn search(&self, root: &Path, query: &IndexQuery) -> Result<Vec<IndexHit>> {
@@ -306,6 +321,8 @@ impl IndexManager {
                     root: String::new(),
                     entry_count: 0,
                     updated_at: String::new(),
+                    schema_version: 0,
+                    last_successful_scan_at: 0,
                 });
                 (meta.root, meta.entry_count, meta.updated_at)
             } else {
@@ -351,13 +368,16 @@ impl IndexManager {
         tantivy_dir.is_dir()
     }
 
-    /// 索引年龄（秒），None 表示索引不存在。用于判定是否过期需要重建。
+    /// 距离最近一次成功扫描的秒数，None 表示索引不存在或没有成功扫描记录。
     pub fn workspace_index_age_secs(&self, root: &Path) -> Option<u64> {
-        let tantivy_dir = self.workspace_index_dir(root);
-        let meta = tantivy_dir.metadata().ok()?;
-        let modified = meta.modified().ok()?;
-        let elapsed = std::time::SystemTime::now().duration_since(modified).ok()?;
-        Some(elapsed.as_secs())
+        let meta_path = self.workspace_meta_path(root);
+        let content = fs::read_to_string(meta_path).ok()?;
+        let meta: IndexMeta = serde_json::from_str(&content).ok()?;
+        if meta.last_successful_scan_at <= 0 || meta.schema_version != WORKSPACE_SCHEMA_VERSION {
+            return None;
+        }
+        let now = chrono::Local::now().timestamp();
+        Some(now.saturating_sub(meta.last_successful_scan_at) as u64)
     }
 
     fn workspace_index_dir(&self, root: &Path) -> PathBuf {
@@ -368,14 +388,16 @@ impl IndexManager {
             .join("tantivy")
     }
 
+    fn workspace_meta_path(&self, root: &Path) -> PathBuf {
+        let workspace_id = workspace_index::hash_path(root);
+        self.base_dir
+            .join("workspaces")
+            .join(workspace_id)
+            .join("meta.json")
+    }
+
     fn default_dir() -> PathBuf {
-        // 优先使用运行时注入的存储根（与 plugin-runtime sidecar 配置对齐）：
-        // 1. TIANGONG_PLUGIN_DATA_DIR（插件私有数据目录）→ join("index")
-        // 2. TIANGONG_STORAGE_ROOT（应用存储根）→ join("index")
-        // 3. 回退 ~/.tiangong/index（与 ipc.rs 的 index_runtime_dir 对齐）
-        if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
-            return PathBuf::from(dir).join("index");
-        }
+        // 业务索引属于应用数据，插件私有目录只保存 endpoint 等生命周期文件。
         if let Some(dir) = std::env::var_os("TIANGONG_STORAGE_ROOT").filter(|v| !v.is_empty()) {
             return PathBuf::from(dir).join("index");
         }
@@ -384,6 +406,69 @@ impl IndexManager {
             .unwrap_or_else(|| PathBuf::from("."));
         home.join(".tiangong").join("index")
     }
+}
+
+fn recover_legacy_index_dir(target: &Path) {
+    if has_index_data(target) {
+        return;
+    }
+    let mut candidates = Vec::new();
+    if let Some(plugin_dir) =
+        std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|value| !value.is_empty())
+    {
+        candidates.push(PathBuf::from(plugin_dir).join("index"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".tiangong").join("index"));
+    }
+    candidates.retain(|source| source != target);
+
+    for source in candidates {
+        let Ok(metadata) = fs::symlink_metadata(&source) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            tracing::warn!(source = %source.display(), "拒绝恢复符号链接形式的旧 Index 目录");
+            continue;
+        }
+        if !metadata.is_dir() || !has_index_data(&source) {
+            continue;
+        }
+        if let Some(parent) = target.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            tracing::warn!(target = %target.display(), %error, "创建 Index 标准数据目录失败");
+            return;
+        }
+        if target.exists() {
+            let target_is_empty = fs::read_dir(target)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if target_is_empty {
+                if let Err(error) = fs::remove_dir(target) {
+                    tracing::warn!(target = %target.display(), %error, "清理空的 Index 标准数据目录失败");
+                    return;
+                }
+            } else {
+                tracing::warn!(source = %source.display(), target = %target.display(), "Index 标准目录已有其他数据，保留旧目录且不执行覆盖");
+                return;
+            }
+        }
+        match fs::rename(&source, target) {
+            Ok(()) => {
+                tracing::info!(source = %source.display(), target = %target.display(), "旧 Index 数据目录恢复完成");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(source = %source.display(), target = %target.display(), %error, "旧 Index 数据目录恢复失败，将使用标准目录重新建库");
+                return;
+            }
+        }
+    }
+}
+
+fn has_index_data(dir: &Path) -> bool {
+    dir.join("workspaces").is_dir() || dir.join("sessions").is_dir()
 }
 
 /// 工作区在内存映射（`workspaces` / `scanning_roots`）中的统一 key。

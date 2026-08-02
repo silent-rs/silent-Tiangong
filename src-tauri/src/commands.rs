@@ -554,7 +554,9 @@ pub async fn delete_sessions_by_cwd(
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
 pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
-    state.core_manager.retire_core(session_id, false).await;
+    if let Err(error) = state.core_manager.retire_core(session_id, false).await {
+        tracing::warn!(%session_id, %error, "失败回滚时关闭 Core 失败");
+    }
 }
 
 /// 更新会话标题
@@ -1218,7 +1220,7 @@ pub async fn edit_and_resend(
         .inner()
         .core_manager
         .retire_core(&session_id, true)
-        .await;
+        .await?;
     crate::session_ops::restore_session(session_snapshot.clone())
         .map_err(|error| error.to_string())?;
 

@@ -168,7 +168,8 @@ impl Guest for Component {
         state::set_full_trust(full_trust);
         // 通知 sidecar 工作区变更并触发后台扫描。
         let request = SetWorkspaceRequest { workspace };
-        let _ = sidecar_client::invoke::<SetWorkspace>(&request);
+        sidecar_client::invoke::<SetWorkspace>(&request)
+            .map_err(|error| plugin_err(format!("set_workspace 调用 sidecar 失败: {error}")))?;
         Ok(())
     }
 
@@ -192,13 +193,11 @@ impl Guest for Component {
     }
 
     fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
-        let _ = forward_turn_batch(&session_json, turn_start_idx);
-        Ok(())
+        forward_turn_batch(&session_json, turn_start_idx)
     }
 
     fn on_session_ended(session_json: String) -> Result<(), PluginError> {
-        let _ = forward_finalize(&session_json);
-        Ok(())
+        forward_finalize(&session_json)
     }
 }
 
@@ -352,7 +351,8 @@ fn forward_turn_batch(session_json: &str, turn_start_idx: u32) -> Result<(), Plu
         session_id: session.id,
         turns,
     };
-    let _ = sidecar_client::invoke::<IndexTurnBatch>(&request);
+    sidecar_client::invoke::<IndexTurnBatch>(&request)
+        .map_err(|error| plugin_err(format!("on_turn_finished 调用 sidecar 失败: {error}")))?;
     Ok(())
 }
 
@@ -363,7 +363,8 @@ fn forward_finalize(session_json: &str) -> Result<(), PluginError> {
     let request = FinalizeSessionRequest {
         session_id: session.id,
     };
-    let _ = sidecar_client::invoke::<FinalizeSession>(&request);
+    sidecar_client::invoke::<FinalizeSession>(&request)
+        .map_err(|error| plugin_err(format!("on_session_ended 调用 sidecar 失败: {error}")))?;
     Ok(())
 }
 

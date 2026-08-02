@@ -214,6 +214,12 @@ async fn serve_connection(
 ) -> Result<()> {
     loop {
         let request = connection.read_request().await?;
+        let operation = request
+            .payload
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let plugin_response = match serde_json::from_value::<PluginRequest>(request.payload.clone())
         {
             Ok(plugin_request) => service_obj.dispatch(plugin_request).await,
@@ -227,6 +233,8 @@ async fn serve_connection(
         if let Some(err_msg) = &plugin_response.error_message {
             tracing::warn!(
                 request_id = %request.request_id,
+                operation,
+                error_code = ?plugin_response.error_code,
                 error = %err_msg,
                 "sidecar 操作失败"
             );

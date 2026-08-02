@@ -267,7 +267,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 |---|---|---|---|
 | 1 | ~~**mcp** #325~~ ✅ | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 已完成。三子 crate（protocol/sidecar/wasm）+ 四入口管理 API 经 invoke_sidecar + 原生 crate 已删除。 |
 | 2 | **fetch** #326 | 网络栈（reqwest 阻塞式）+ HTML 解析（scraper）+ DNS + 落盘 | reqwest 阻塞客户端独占线程与 runtime，是硬卡点；逻辑封闭、无 GUI 回路，改造相对干净。 |
-| 3 | ~~**index** #327~~ ✅ | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 已完成。三子 crate（protocol/sidecar/wasm），照 MCP 模板：核心实现 + 单例淘汰（通用运行库）内置 sidecar；wasm 桥接 index_search/search_code 工具与生命周期钩子；三入口改走 load_installed_plugins，原生 crate 与 5 个 GUI 索引管理命令已删除。 |
+| 3 | ~~**index** #327~~ ✅ | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 已完成。三子 crate（protocol/sidecar/wasm），照 MCP 模板：核心实现 + 单例淘汰（通用运行库）内置 sidecar；wasm 桥接 index_search/search_code 工具与生命周期钩子；三入口改走 load_installed_plugins，原生 crate 与 5 个 GUI 索引管理命令已删除；工作区自动刷新按路径、修改时间和大小增量处理，用户主动重建仍执行全量重建。 |
 | 4 | **scheduler** #328 | cron 调度 + JobStore + 任务去重 + 执行记录 | 与 Memory 契合度最高：wasm 给 Agent 提供任务 CRUD 工具，sidecar 长驻跑调度。**触发回路不经 WIT**——到点 sidecar 直接 HTTP 调本机 server 的 `POST /api/v1/messages` 投递消息（与 Bot/webhook 同链路），无需扩反向回调。鉴权用 host 启动时注入的短期凭证。 |
 | 5 | **task** #329 | 子进程 spawn + 任务注册表 | 任务列表当前被 GUI/Tauri 直接读取，sidecar 化后需解决注册表跨边界一致性。 |
 | 6 | **fs** #330 | `std::fs` 全套 + 进程级全局锁表 | 走 sidecar。文件读写虽可由 WASI 承接，但走 sidecar 的真正理由是**锁表需跨 wasm 实例全局共享**（主/子 Agent 写同一文件互斥）：wasm 实例间内存隔离，锁表只能落在所有实例共享的 sidecar 进程内；路径解析（动态工作区 + FullTrust 越界）随之一起下沉，避免为 fs 专用定制 WIT host import。 |
@@ -309,6 +309,8 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 
 - 必须原生的 3 个插件长期保留，不纳入 WASM 化排期。
 - 每个 sidecar 插件迁移后，三入口均能加载该 WASM 制品，原有能力不回退，重能力下沉到独立进程。
+- Index 工作区索引自动刷新只处理新增、修改和删除文件；旧 schema 首次打开时自动全量校准，旧索引目录恢复时不覆盖现有有效数据。
+- Index 生命周期调用失败可在宿主日志中定位但不阻断对话；Core 结束会话前必须等待活跃 turn 完成，确保结束钩子只处理最终会话数据。
 - 轻量插件等 Host 模型代理落地后再迁，密钥由 host 解析，不进 wasm/sidecar。
 - 每完成一个插件，更新本节状态并补充对应模板说明。
 

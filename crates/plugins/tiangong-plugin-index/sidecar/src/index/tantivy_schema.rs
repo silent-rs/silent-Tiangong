@@ -2,9 +2,9 @@ use tantivy::schema::*;
 
 pub struct WorkspaceFields {
     pub path: Field,
+    pub path_exact: Field,
     pub file_type: Field,
     pub size: Field,
-    #[allow(dead_code)]
     pub modified_at: Field,
     pub content: Field,
     pub language: Field,
@@ -18,9 +18,10 @@ pub struct WorkspaceFields {
 pub fn workspace_schema() -> (Schema, WorkspaceFields) {
     let mut b = Schema::builder();
     let path = b.add_text_field("path", TEXT | STORED);
+    let path_exact = b.add_text_field("path_exact", STRING | STORED);
     let file_type = b.add_text_field("file_type", STRING | STORED);
     let size = b.add_u64_field("size", STORED);
-    let modified_at = b.add_text_field("modified_at", STRING | STORED);
+    let modified_at = b.add_u64_field("modified_at", STORED);
     let content = b.add_text_field("content", TEXT);
     let language = b.add_text_field("language", STRING | STORED);
     let symbol_name = b.add_text_field("symbol_name", TEXT);
@@ -32,6 +33,7 @@ pub fn workspace_schema() -> (Schema, WorkspaceFields) {
         b.build(),
         WorkspaceFields {
             path,
+            path_exact,
             file_type,
             size,
             modified_at,

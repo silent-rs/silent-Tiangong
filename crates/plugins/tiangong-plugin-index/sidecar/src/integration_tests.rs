@@ -218,6 +218,46 @@ fn test_workspace_update_and_remove_file() {
 }
 
 #[test]
+fn test_workspace_incremental_scan_updates_and_removes_files() {
+    let (_index_temp, manager) = create_index_manager();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path();
+    let source = workspace.join("lib.rs");
+
+    fs::write(&source, "pub fn old_keyword() {}\n").unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    fs::write(&source, "pub fn new_keyword_with_longer_name() {}\n").unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 1);
+    assert!(
+        manager
+            .search(workspace, &IndexQuery::new("old_keyword"))
+            .unwrap()
+            .is_empty(),
+        "修改后旧内容不应继续命中"
+    );
+    assert!(
+        !manager
+            .search(workspace, &IndexQuery::new("new_keyword_with_longer_name"))
+            .unwrap()
+            .is_empty(),
+        "修改后新内容应可命中"
+    );
+
+    fs::remove_file(&source).unwrap();
+    assert_eq!(manager.incremental_scan(workspace).unwrap(), 0);
+    assert!(
+        manager
+            .search(workspace, &IndexQuery::new("new_keyword_with_longer_name"))
+            .unwrap()
+            .is_empty(),
+        "删除文件后内容不应继续命中"
+    );
+}
+
+#[test]
 fn test_session_index_turn_and_search() {
     let (_index_temp, manager) = create_index_manager();
 

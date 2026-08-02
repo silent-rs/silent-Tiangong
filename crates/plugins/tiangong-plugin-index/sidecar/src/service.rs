@@ -40,8 +40,6 @@ pub struct IndexService {
     manager: Arc<IndexManager>,
     /// 当前会话工作目录（由 set_workspace 注入）。
     workspace: RwLock<Option<PathBuf>>,
-    /// 上次已扫描的工作目录（避免同一目录重复扫描）。
-    last_scanned: RwLock<Option<PathBuf>>,
 }
 
 impl IndexService {
@@ -51,7 +49,6 @@ impl IndexService {
         Ok(Self {
             manager,
             workspace: RwLock::new(None),
-            last_scanned: RwLock::new(None),
         })
     }
 
@@ -238,44 +235,24 @@ impl IndexService {
         if let Ok(mut guard) = self.workspace.write() {
             *guard = new_path.clone();
         }
-        // 工作区变更后触发后台扫描（与原 plugin.rs set_workspace 逻辑一致）。
         if let Some(ref root) = new_path
             && root.is_dir()
+            && !self.manager.is_workspace_scanning(root)
         {
-            let already_scanned = self
-                .last_scanned
-                .read()
-                .map(|g| g.as_ref() == Some(root))
-                .unwrap_or(false);
-            let scanning = self.manager.is_workspace_scanning(root);
-            if !already_scanned && !scanning {
-                self.full_scan_workspace(root);
-            }
+            self.refresh_workspace(root);
         }
         Ok(())
     }
 
-    /// 对工作区做全量扫描：
-    /// - 索引不存在：后台全量扫描
-    /// - 索引过期（>1 小时）：后台重建（不阻塞搜索）
-    /// - 索引新鲜：复用，置位 last_scanned
-    fn full_scan_workspace(&self, root: &Path) {
-        if !root.is_dir() {
-            return;
-        }
-        if !self.manager.workspace_index_exists(root) {
-            self.spawn_background_scan(root);
-            return;
-        }
-        if let Ok(mut guard) = self.last_scanned.write() {
-            guard.clone_from(&Some(root.to_path_buf()));
-        }
-        // 索引已存在——检查是否过期，过期则后台重建。
+    /// 首次打开或成功扫描超过一小时后触发增量刷新。
+    fn refresh_workspace(&self, root: &Path) {
         const STALE_THRESHOLD_SECS: u64 = 3600;
-        if let Some(age) = self.manager.workspace_index_age_secs(root)
-            && age > STALE_THRESHOLD_SECS
-        {
-            tracing::info!(age_secs = age, "Workspace 索引过期，后台重建");
+        let needs_refresh = !self.manager.workspace_index_exists(root)
+            || self
+                .manager
+                .workspace_index_age_secs(root)
+                .is_none_or(|age| age > STALE_THRESHOLD_SECS);
+        if needs_refresh {
             self.spawn_background_scan(root);
         }
     }
@@ -294,9 +271,9 @@ impl IndexService {
         std::thread::spawn(move || {
             // permit 持有期间状态保持占用；drop（含 panic 展开）时自动复位。
             let _permit = permit;
-            match manager.full_scan(&root) {
-                Ok(count) => tracing::info!(count, "Workspace 索引后台扫描完成"),
-                Err(e) => tracing::warn!("Workspace 索引后台扫描失败: {e}"),
+            match manager.incremental_scan(&root) {
+                Ok(count) => tracing::info!(count, "Workspace 索引后台增量刷新完成"),
+                Err(e) => tracing::warn!("Workspace 索引后台增量刷新失败: {e}"),
             }
         });
     }
@@ -492,13 +469,16 @@ fn wait_for_scan_permit(
     manager: &IndexManager,
     root: &Path,
 ) -> Result<crate::index::WorkspaceScanPermit> {
-    for _ in 0..300 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
         if let Some(permit) = manager.try_begin_workspace_scan(root) {
             return Ok(permit);
         }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!("等待索引扫描许可超时，请稍后重试"));
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(anyhow!("索引正在构建中，请稍后重试"))
 }
 
 /// prewarm 阻塞实现（在 spawn_blocking 线程内执行）。
@@ -514,7 +494,7 @@ fn handle_prewarm_blocking(manager: Arc<IndexManager>, root: &Path) -> Result<()
     tracing::info!(workspace = %root.display(), "Workspace 索引预热启动");
     std::thread::spawn(move || {
         let _permit = permit;
-        match manager.full_scan(&root) {
+        match manager.incremental_scan(&root) {
             Ok(count) => tracing::info!(count, "Workspace 索引预热完成"),
             Err(e) => tracing::warn!("Workspace 索引预热失败: {e}"),
         }
