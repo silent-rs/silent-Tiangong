@@ -1,18 +1,18 @@
 //! 端点发布、读取与运行时目录解析。
 //!
-//! 所有 sidecar 共用的 endpoint 文件（`<service>.json`）、leader 文件
-//! （`leader.lock` / `leader.json`）都落在运行时目录下。运行时目录解析遵循
-//! 统一的三级优先级，确保运行时注入的数据目录始终生效：
+//! 所有 sidecar 共用的 endpoint 文件（`<service>.json`）都落在运行时目录下。
+//! 运行时目录解析遵循统一的三级优先级，确保运行时注入的数据目录始终生效：
 //! 1. `TIANGONG_PLUGIN_DATA_DIR` → `join("runtime")`
 //! 2. `TIANGONG_PLUGIN_ENDPOINT` 的父目录（运行时直接指定 endpoint 文件时）
 //! 3. `~/.tiangong/<service>/runtime`（回退）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use tiangong_plugin_runtime::protocol::IpcEndpoint;
 
-/// 解析指定 service 的运行时目录（endpoint.json / leader.json / leader.lock 所在）。
+/// 解析指定 service 的运行时目录（endpoint.json 所在）。
 pub fn runtime_dir(service: &str) -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("TIANGONG_PLUGIN_DATA_DIR").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(dir).join("runtime"));
@@ -53,14 +53,12 @@ pub fn persist_endpoint(path: &PathBuf, endpoint: &IpcEndpoint) -> Result<()> {
         .with_context(|| format!("写入 IPC endpoint 文件失败: {}", path.display()))
 }
 
-/// leader.lock 文件路径。
-pub fn leader_lock_path(service: &str) -> Result<PathBuf> {
-    Ok(runtime_dir(service)?.join("leader.lock"))
-}
-
-/// leader.json 文件路径。
-pub fn leader_info_path(service: &str) -> Result<PathBuf> {
-    Ok(runtime_dir(service)?.join("leader.json"))
+/// 读取 endpoint 文件并解析。
+pub fn read_endpoint(path: &Path) -> Result<IpcEndpoint> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("读取 endpoint 文件失败: {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("解析 endpoint 文件失败: {}", path.display()))
 }
 
 /// 确保运行时目录存在。
@@ -68,6 +66,23 @@ pub fn ensure_runtime_dir(service: &str) -> Result<()> {
     let dir = runtime_dir(service)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("创建 {service} 运行目录失败: {}", dir.display()))
+}
+
+/// TCP 端口可达性探测（短超时），用于判定已有 sidecar 实例是否健康。
+///
+/// 成功（端口在监听）返回 true；失败（端口关闭/无监听/超时）返回 false。
+pub fn tcp_probe(host: &str, port: u16) -> bool {
+    let address = format!("{host}:{port}");
+    let Ok(socket) = std::net::TcpStream::connect_timeout(
+        &address
+            .parse()
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+        Duration::from_millis(500),
+    ) else {
+        return false;
+    };
+    drop(socket);
+    true
 }
 
 /// 用户主目录（HOME > USERPROFILE > HOMEDRIVE+HOMEPATH）。

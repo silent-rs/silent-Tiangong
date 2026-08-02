@@ -4,9 +4,9 @@
 //! （加载 WASM / 启动连接 sidecar / 转发请求）边界清晰。
 //!
 //! # 包含
-//! - [`singleton`]：跨进程单例选举（Leader 互斥 + 心跳 + follower 退出）
+//! - [`singleton`]：进程单例（淘汰制：已有健康实例则退出，不存在时才启动）
 //! - [`identity`]：sidecar 配置与实例身份
-//! - [`endpoint`]：运行时目录解析、endpoint 文件发布/读取/清理
+//! - [`endpoint`]：运行时目录解析、endpoint 文件发布/读取/清理、TCP 可达性探测
 //! - [`server`]：通用 IPC server（TCP loopback + 动态端口 + token 鉴权 + JSON Lines 帧）
 //! - [`shutdown`]：跨平台退出信号（Ctrl+C / SIGTERM）
 //!
@@ -39,38 +39,41 @@ pub mod singleton;
 
 pub use identity::{SidecarConfig, SidecarIdentity};
 pub use server::IpcBridge;
-pub use singleton::{LeaderInfo, LeaderState, ManagedSidecar, SidecarService, start_or_connect};
+pub use singleton::{SidecarService, SingletonError, SingletonGuard, start};
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
-/// 一键启动 sidecar。
+/// 一键启动 sidecar（淘汰制单例）。
 ///
-/// 完整流程：选举 → Leader 起 IPC server + 心跳，阻塞等终止信号；Follower 退出。
-/// `service_factory` 仅在确认成为 Leader 后调用（被淘汰的 follower 候选不会构造
-/// service，避免白白打开数据、占用资源）。
+/// 完整流程：单例判定 → 成为唯一实例则起 IPC server，阻塞等终止信号；
+/// 已有健康实例则返回 `Err(SingletonError::AlreadyRunning)`，调用方应优雅退出。
+///
+/// `service_factory` 仅在确认成为唯一实例后调用（被淘汰的候选不会构造 service，
+/// 避免白白打开数据、占用资源）。
 ///
 /// 各插件 main.rs 只需构造好 `SidecarConfig` + 业务 service 工厂，调本函数即可。
 /// 若需在启动前做业务前置（如加载配置、恢复数据目录），在工厂闭包内完成。
 pub async fn run<F>(config: SidecarConfig, service_factory: F) -> Result<()>
 where
-    F: FnOnce() -> anyhow::Result<Arc<dyn SidecarService>>,
+    F: FnOnce() -> Result<Arc<dyn SidecarService>>,
 {
-    let managed = start_or_connect(&config, service_factory)?;
-    match managed.state() {
-        LeaderState::Leader => {
-            tracing::info!("{} sidecar 已成为 Leader，开始服务", config.service);
-            shutdown::wait_for_shutdown_signal().await?;
-            tracing::info!("收到终止信号，{} sidecar 退出", config.service);
-        }
-        LeaderState::Follower { pid } => {
+    let guard = start(&config, service_factory).inspect_err(|err| {
+        if err
+            .downcast_ref::<SingletonError>()
+            .is_some_and(|e| matches!(e, SingletonError::AlreadyRunning))
+        {
             tracing::info!(
-                "已有 {} Leader 运行中（pid={pid}），本 sidecar 无需重复启动，退出",
+                "{} sidecar 已有实例运行中，本进程无需重复启动，退出",
                 config.service
             );
         }
-    }
-    drop(managed);
+    })?;
+
+    tracing::info!("{} sidecar 已成为唯一实例，开始服务", config.service);
+    shutdown::wait_for_shutdown_signal().await?;
+    tracing::info!("收到终止信号，{} sidecar 退出", config.service);
+    drop(guard);
     Ok(())
 }
