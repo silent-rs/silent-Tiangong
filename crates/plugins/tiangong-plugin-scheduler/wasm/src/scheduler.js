@@ -1,6 +1,7 @@
 // 定时任务设置页脚本。
 //
 // 与 index.js / memory.js 同构的 host context + callHost 桥接框架。
+// UI 对齐主程序原版 React 页面（JobPanel / JobFormDialog / RunHistoryDialog）。
 
 const HOST_TIMEOUT_MS = 60000;
 let hostChannel = null;
@@ -68,6 +69,25 @@ async function callHost(method, payload = "") {
   });
 }
 
+function setHostMask(visible) {
+  if (!hostChannel) return;
+  window.parent.postMessage(
+    {
+      type: "plugin_host_mask",
+      channel: hostChannel,
+      visible,
+      ...(visible ? { color: "rgba(0, 0, 0, 0.5)" } : {}),
+    },
+    "*",
+  );
+}
+
+function syncHostMask() {
+  const formOpen = !document.getElementById("form-modal").hidden;
+  const runsOpen = !document.getElementById("runs-modal").hidden;
+  setHostMask(formOpen || runsOpen);
+}
+
 // ── Cron 工具（简化版，不依赖外部库）──
 
 const WEEKDAY_OPTIONS = [
@@ -122,7 +142,6 @@ function validateCron(expr) {
   if (fields.length > 6) {
     return { ok: false, error: "应为 6 个字段（秒 分 时 日 月 周）；带年的 7 字段请直接保存由后端校验" };
   }
-  // 简单语法校验：每个字段只允许数字、*、-、,、/
   for (const f of fields) {
     if (!/^[0-9*/,-]+$/.test(f)) {
       return { ok: false, error: `字段「${f}」包含非法字符` };
@@ -142,10 +161,18 @@ function nextRuns(expr, count) {
   const [sec, min, hour, dom, mon, dow] = fields;
   const now = new Date();
   const results = [];
-  let cursor = new Date(now.getTime() + 1000);
+  const fixedSecond = /^\d+$/.test(sec) ? parseInt(sec, 10) : null;
+  const stepMs = fixedSecond !== null && fixedSecond >= 0 && fixedSecond <= 59 ? 60000 : 1000;
+  let cursor = new Date(now);
   cursor.setMilliseconds(0);
+  if (stepMs === 60000) {
+    cursor.setSeconds(fixedSecond);
+    if (cursor <= now) cursor = new Date(cursor.getTime() + stepMs);
+  } else {
+    cursor = new Date(cursor.getTime() + stepMs);
+  }
   let iterations = 0;
-  const maxIterations = 500000;
+  const maxIterations = stepMs === 60000 ? 600000 : 500000;
 
   while (results.length < count && iterations < maxIterations) {
     iterations++;
@@ -157,7 +184,7 @@ function nextRuns(expr, count) {
         matchDow(dow, cursor.getDay())) {
       results.push(new Date(cursor));
     }
-    cursor = new Date(cursor.getTime() + 1000);
+    cursor = new Date(cursor.getTime() + stepMs);
   }
   return results.length > 0 ? results : null;
 }
@@ -172,27 +199,23 @@ function matchField(field, value) {
 
 function matchPart(part, value) {
   if (part === "*") return true;
-  // */n 步进
   const stepMatch = part.match(/^\*\/(\d+)$/);
   if (stepMatch) {
     const step = parseInt(stepMatch[1], 10);
     return value % step === 0;
   }
-  // a-b 范围
   const rangeMatch = part.match(/^(\d+)-(\d+)$/);
   if (rangeMatch) {
     const lo = parseInt(rangeMatch[1], 10);
     const hi = parseInt(rangeMatch[2], 10);
     return value >= lo && value <= hi;
   }
-  // a/b 步进
   const slashMatch = part.match(/^(\d+)\/(\d+)$/);
   if (slashMatch) {
     const base = parseInt(slashMatch[1], 10);
     const step = parseInt(slashMatch[2], 10);
     return value >= base && (value - base) % step === 0;
   }
-  // 单个数字
   const num = parseInt(part, 10);
   return num === value;
 }
@@ -200,7 +223,6 @@ function matchPart(part, value) {
 /** 周字段匹配：cron 中 0/7=周日，JS getDay() 中 0=周日。 */
 function matchDow(dowField, jsDay) {
   if (dowField === "*") return true;
-  // 把 7 当作 0（周日）
   const normalize = (v) => (v === 7 ? 0 : v);
   for (const part of dowField.split(",")) {
     if (part.includes("-")) {
@@ -208,7 +230,6 @@ function matchDow(dowField, jsDay) {
       if (lo <= hi) {
         if (jsDay >= lo && jsDay <= hi) return true;
       } else {
-        // 跨周边界，如 5-0（周五到周日）
         if (jsDay >= lo || jsDay <= hi) return true;
       }
     } else {
@@ -234,54 +255,77 @@ function relativeFromNow(d, ref) {
   return `约 ${days} 天后`;
 }
 
+function humanizeCron(expr) {
+  const simple = tryParseToSimple(expr);
+  if (!simple) return null;
+  const weekday = WEEKDAY_OPTIONS.find((option) => option.value === simple.weekday)?.label;
+  const minute = String(simple.minute).padStart(2, "0");
+  const hour = String(simple.hour).padStart(2, "0");
+  return weekday ? `${weekday} ${hour}:${minute}` : null;
+}
+
 // ── DOM 引用 ──
 
 const listEl = document.getElementById("list");
 const statusEl = document.getElementById("status");
-const emptyTemplate = document.getElementById("empty-template");
+const loadingState = document.getElementById("loading-state");
+const jobContent = document.getElementById("job-content");
+const emptyState = document.getElementById("empty-state");
+const countEl = document.getElementById("job-count-num");
+const refreshBtn = document.getElementById("refresh-btn");
+const refreshIcon = document.getElementById("refresh-icon");
 const rowTemplate = document.getElementById("row-template");
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
+  statusEl.hidden = !text;
 }
 
 // ── 任务列表 ──
 
-async function loadJobs() {
-  setStatus("加载中…");
+async function loadJobs(manual = false) {
+  refreshBtn.disabled = true;
+  refreshIcon.classList.add("spinning");
+  if (manual) setStatus("正在刷新…");
   try {
     const raw = await callHost("list", "{}");
     const data = raw ? JSON.parse(raw) : { jobs: [] };
     renderList(data.jobs || []);
-    setStatus("");
+    if (manual) setStatus("已刷新");
   } catch (e) {
     renderList([]);
     setStatus(`加载任务列表失败：${e.message || e}`, true);
+  } finally {
+    loadingState.hidden = true;
+    jobContent.hidden = false;
+    refreshBtn.disabled = false;
+    refreshIcon.classList.remove("spinning");
   }
 }
 
 function renderList(jobs) {
   listEl.innerHTML = "";
-  if (jobs.length === 0) {
-    listEl.appendChild(emptyTemplate.content.cloneNode(true));
-    return;
-  }
+  emptyState.hidden = jobs.length !== 0;
+  listEl.hidden = jobs.length === 0;
+  countEl.textContent = String(jobs.length);
   for (const job of jobs) {
     const node = rowTemplate.content.firstElementChild.cloneNode(true);
     node.querySelector(".job-row-name").textContent = job.name || job.id;
+    node.querySelector(".job-row-name").title = job.name || job.id;
     node.querySelector(".job-row-schedule").textContent = job.schedule || "—";
     node.querySelector(".job-row-desc").textContent = job.description || "";
-    node.dataset.jobId = job.id;
 
     const checkbox = node.querySelector(".toggle-checkbox");
     checkbox.checked = job.enabled !== false;
-    checkbox.addEventListener("change", () => toggleJob(job, checkbox.checked));
+    checkbox.addEventListener("change", () => toggleJob(job, checkbox.checked, checkbox));
 
-    node.querySelector(".trigger-btn").addEventListener("click", () => triggerJob(job));
+    const triggerBtn = node.querySelector(".trigger-btn");
+    const deleteBtn = node.querySelector(".delete-btn");
+    triggerBtn.addEventListener("click", () => triggerJob(job, triggerBtn));
     node.querySelector(".runs-btn").addEventListener("click", () => showRuns(job.id));
     node.querySelector(".edit-btn").addEventListener("click", () => openEditForm(job));
-    node.querySelector(".delete-btn").addEventListener("click", () => deleteJob(job));
+    deleteBtn.addEventListener("click", () => deleteJob(job, deleteBtn));
 
     listEl.appendChild(node);
   }
@@ -298,6 +342,8 @@ const fieldDescription = document.getElementById("field-description");
 const fieldPayload = document.getElementById("field-payload");
 const fieldSession = document.getElementById("field-session");
 const formSubmit = document.getElementById("form-submit");
+const formError = document.getElementById("form-error");
+let formSaving = false;
 
 // 填充星期下拉
 const weekdaySelect = document.getElementById("simple-weekday");
@@ -338,6 +384,12 @@ const simplePreview = document.getElementById("simple-preview");
 });
 
 fieldCron.addEventListener("input", updateSchedulePreview);
+[fieldName, fieldDescription, fieldPayload].forEach((field) => {
+  field.addEventListener("input", () => {
+    setFormError("");
+    syncFormValidity();
+  });
+});
 
 function getCurrentSchedule() {
   if (currentMode === "simple") {
@@ -356,12 +408,14 @@ function updateSchedulePreview() {
   const valid = validateCron(schedule);
 
   if (!valid.ok) {
-    previewEl.innerHTML = `<div class="preview-box error"><span class="badge badge-failed">无效</span><span class="preview-label">${valid.error}</span></div>`;
+    previewEl.innerHTML = `<div class="preview-box error"><div class="preview-row"><span class="badge badge-failed">无效</span><span class="preview-label">${escapeHtml(valid.error)}</span></div></div>`;
+    syncFormValidity();
     return;
   }
 
   const runs = nextRuns(schedule, 3);
-  let html = `<div class="preview-box"><div class="preview-row"><span class="badge badge-success">有效</span></div>`;
+  const human = humanizeCron(schedule);
+  let html = `<div class="preview-box"><div class="preview-row"><span class="badge badge-running">有效</span>${human ? `<span class="preview-label">${escapeHtml(human)}</span>` : ""}</div>`;
   if (runs && runs.length > 0) {
     html += `<div class="preview-row"><span class="preview-label">下次触发：${formatLocal(runs[0])}</span></div>`;
     if (runs.length > 1) {
@@ -371,19 +425,48 @@ function updateSchedulePreview() {
   }
   html += `</div>`;
   previewEl.innerHTML = html;
+  syncFormValidity();
+}
+
+function setFormError(text) {
+  formError.textContent = text;
+  formError.hidden = !text;
+}
+
+function syncFormValidity() {
+  const valid = validateCron(getCurrentSchedule()).ok;
+  formSubmit.disabled = formSaving
+    || !fieldName.value.trim()
+    || !fieldDescription.value.trim()
+    || !fieldPayload.value.trim()
+    || !valid;
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 document.getElementById("create-btn").addEventListener("click", () => openCreateForm());
+refreshBtn.addEventListener("click", () => loadJobs(true));
 document.getElementById("form-close").addEventListener("click", closeForm);
 document.getElementById("form-cancel").addEventListener("click", closeForm);
 
-async function loadSessions(selectedId) {
-  // 清空除第一个以外的选项
-  while (fieldSession.children.length > 1) {
-    fieldSession.removeChild(fieldSession.lastChild);
+function loadSessions(selectedId) {
+  fieldSession.innerHTML = "";
+  const option = document.createElement("option");
+  if (selectedId) {
+    option.value = selectedId;
+    option.textContent = selectedId;
+  } else {
+    option.value = "";
+    option.textContent = "不关联，自动创建新会话";
   }
-  fieldSession.value = "";
-  // 不阻塞表单打开——会话列表加载失败时静默降级为手动输入
+  fieldSession.appendChild(option);
+  fieldSession.value = option.value;
 }
 
 function openCreateForm() {
@@ -393,6 +476,7 @@ function openCreateForm() {
   fieldName.value = "";
   fieldDescription.value = "";
   fieldPayload.value = "";
+  setFormError("");
   // 默认简单模式
   currentMode = "simple";
   document.querySelector(".tab-simple").click();
@@ -404,6 +488,8 @@ function openCreateForm() {
   loadSessions("");
   updateSchedulePreview();
   formModal.hidden = false;
+  syncHostMask();
+  fieldName.focus();
 }
 
 function openEditForm(job) {
@@ -413,6 +499,8 @@ function openEditForm(job) {
   fieldName.value = job.name || "";
   fieldDescription.value = job.description || "";
   fieldPayload.value = job.payload || "";
+  fieldCron.value = job.schedule || "0 0 9 * * *";
+  setFormError("");
 
   // 尝试回填到简单模式
   const simple = tryParseToSimple(job.schedule);
@@ -426,7 +514,6 @@ function openEditForm(job) {
   } else {
     currentMode = "cron";
     document.querySelector(".tab-cron").click();
-    fieldCron.value = job.schedule || "0 0 9 * * *";
   }
 
   // 会话
@@ -434,32 +521,38 @@ function openEditForm(job) {
 
   updateSchedulePreview();
   formModal.hidden = false;
+  syncHostMask();
+  fieldName.focus();
 }
 
 function closeForm() {
   formModal.hidden = true;
+  setFormError("");
+  syncHostMask();
 }
 
-jobForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
+async function submitJobForm() {
   const schedule = getCurrentSchedule();
   const valid = validateCron(schedule);
   if (!valid.ok) {
-    setStatus(valid.error || "Cron 表达式无效", true);
+    setFormError(valid.error || "Cron 表达式无效");
     return;
   }
   const name = fieldName.value.trim();
   const description = fieldDescription.value.trim();
   const payload = fieldPayload.value.trim();
   if (!name || !description || !payload) {
-    setStatus("请填写所有必填字段", true);
+    setFormError("请填写所有必填字段");
     return;
   }
   const sessionId = fieldSession.value || null;
-  formSubmit.disabled = true;
+  setFormError("");
+  formSaving = true;
+  syncFormValidity();
   formSubmit.textContent = "保存中…";
   try {
     const id = fieldId.value;
+    let successMessage = "已创建";
     if (id) {
       await callHost("update", JSON.stringify({
         id,
@@ -469,7 +562,7 @@ jobForm.addEventListener("submit", async (e) => {
         session_id: sessionId,
         payload,
       }));
-      setStatus("已更新");
+      successMessage = "已更新";
     } else {
       await callHost("create", JSON.stringify({
         name,
@@ -479,34 +572,46 @@ jobForm.addEventListener("submit", async (e) => {
         payload,
         enabled: true,
       }));
-      setStatus("已创建");
     }
     closeForm();
+    setStatus(successMessage);
     await loadJobs();
   } catch (err) {
-    setStatus(`保存失败：${err.message || err}`, true);
+    setFormError(`保存失败：${err.message || err}`);
   } finally {
-    formSubmit.disabled = false;
+    formSaving = false;
     formSubmit.textContent = fieldId.value ? "更新" : "创建";
+    syncFormValidity();
   }
+}
+
+formSubmit.addEventListener("click", submitJobForm);
+jobForm.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.target.tagName === "TEXTAREA" || formSubmit.disabled) return;
+  event.preventDefault();
+  submitJobForm();
 });
 
 // ── 启用/停用 ──
 
-async function toggleJob(job, enabled) {
+async function toggleJob(job, enabled, checkbox) {
+  checkbox.disabled = true;
   try {
     await callHost("update", JSON.stringify({ id: job.id, enabled }));
     setStatus(enabled ? "已启用" : "已停用");
+    await loadJobs();
   } catch (e) {
     setStatus(`操作失败：${e.message || e}`, true);
     await loadJobs();
+  } finally {
+    checkbox.disabled = false;
   }
 }
 
 // ── 删除 ──
 
-async function deleteJob(job) {
-  if (!confirm(`确认删除任务「${job.name || job.id}」？`)) return;
+async function deleteJob(job, button) {
+  button.disabled = true;
   setStatus("删除中…");
   try {
     await callHost("delete", JSON.stringify({ id: job.id }));
@@ -514,18 +619,24 @@ async function deleteJob(job) {
     await loadJobs();
   } catch (e) {
     setStatus(`删除失败：${e.message || e}`, true);
+  } finally {
+    button.disabled = false;
   }
 }
 
 // ── 触发 ──
 
-async function triggerJob(job) {
+async function triggerJob(job, button) {
+  button.disabled = true;
   setStatus(`正在触发「${job.name || job.id}」…`);
   try {
     await callHost("trigger", JSON.stringify({ id: job.id }));
     setStatus(`已触发「${job.name || job.id}」，执行中`);
+    setTimeout(loadJobs, 2000);
   } catch (e) {
     setStatus(`触发失败：${e.message || e}`, true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -539,20 +650,23 @@ const runsEmpty = document.getElementById("runs-empty");
 
 document.getElementById("runs-close").addEventListener("click", () => {
   runsModal.hidden = true;
+  syncHostMask();
 });
 
 const STATUS_LABELS = { succeeded: "成功", failed: "失败", running: "运行中" };
 
 function statusBadge(status) {
   const label = STATUS_LABELS[status] || status;
-  const cls = status === "succeeded" ? "badge-success" : status === "failed" ? "badge-failed" : status === "running" ? "badge-running" : "";
-  return `<span class="badge ${cls}">${label}</span>`;
+  const cls = status === "succeeded" ? "badge-success" : status === "failed" ? "badge-failed" : status === "running" ? "badge-running" : "badge-neutral";
+  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
 }
 
 async function showRuns(jobId) {
   runsModal.hidden = false;
+  syncHostMask();
   runsTable.hidden = true;
   runsEmpty.hidden = true;
+  runsEmpty.textContent = "暂无执行记录";
   runsLoading.hidden = false;
   try {
     const raw = await callHost("runs", JSON.stringify({ id: jobId, limit: 50 }));
@@ -566,7 +680,8 @@ async function showRuns(jobId) {
     runsTbody.innerHTML = "";
     for (const run of runs) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${statusBadge(run.status)}</td><td class="nowrap">${run.started_at || "-"}</td><td class="nowrap">${run.finished_at || "-"}</td><td class="truncate" title="${(run.result_summary || "").replace(/"/g, "&quot;")}">${run.result_summary || "-"}</td>`;
+      const summary = run.result_summary || "-";
+      tr.innerHTML = `<td>${statusBadge(run.status)}</td><td class="nowrap">${escapeHtml(run.started_at || "-")}</td><td class="nowrap">${escapeHtml(run.finished_at || "-")}</td><td title="${escapeHtml(summary)}">${escapeHtml(summary)}</td>`;
       runsTbody.appendChild(tr);
     }
     runsTable.hidden = false;
