@@ -23,22 +23,27 @@ impl CoreManager {
     /// （`creation_lock`），避免落选 Core 仍执行插件恢复钩子。
     ///
     /// - 命中既有 Core：`replace_config(session_config)` + `set_trust_mode`，返回 `is_new=false`
-    /// - 未命中：用 host 传入的 `plugins` 构造全新 TiangongCore 并插入 registry
+    /// - 未命中：调用 `build_plugins` 构造插件集合，构造全新 TiangongCore 并插入 registry
     ///
-    /// `plugins` 由 host 构造（桌面/服务端的插件集合差异大，不能在共享层硬编码）。
+    /// `build_plugins` 是**按需回调**：只有 Core 不存在（需要新建）时才会被调用。
+    /// 这样命中分支不会浪费一次完整的插件构造（含 WASM 实例化）。
     /// session 真相源是磁盘，Core 内部按需 `load_from_storage`。
-    pub async fn ensure_core(
+    pub async fn ensure_core<F>(
         &self,
         session_id: &str,
         session_config: CoreConfig,
         workspace_dir: String,
         stream_tx: Sender<StreamEvent>,
-        plugins: Vec<Arc<dyn Plugin>>,
-    ) -> Result<EnsuredCore, String> {
+        build_plugins: F,
+    ) -> Result<EnsuredCore, String>
+    where
+        F: FnOnce() -> Vec<Arc<dyn Plugin>>,
+    {
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
 
         // 命中既有 Core：只刷新配置与 trust_mode（cwd 由磁盘真相源维护，无需投递）。
+        // build_plugins 回调不会被调用，避免每次发送都重新构造插件集合。
         {
             let registry = self.registry();
             if let Some(core) = registry.get(session_id) {
@@ -51,7 +56,8 @@ impl CoreManager {
             }
         }
 
-        // 未命中：用 host 传入的 plugins 构造全新 Core。
+        // 未命中：按需构造插件集合，再构造全新 Core。
+        let plugins = build_plugins();
         let core = TiangongCore::builder()
             .session_id(session_id.to_string())
             .config(CoreConfigProvider::new(session_config.clone()))

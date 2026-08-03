@@ -34,7 +34,11 @@ impl DesktopCoreFactory {
     /// 调用方（`TiangongApp`）在 `ensure_core` 前调用本方法，把返回的 plugins
     /// 作为参数传给 `CoreManager::ensure_core`。Core 的实际 builder 构造由
     /// CoreManager 内部完成，host 不再直接 build TiangongCore。
-    pub async fn build_plugins(
+    /// 构造桌面端 Core 所需的完整插件集合（issue #245）。
+    ///
+    /// 同步函数：body 内无异步操作，但保留 `async` 签名仅为历史兼容。调用方经
+    /// `CoreManager::ensure_core` 的按需回调传入，只有 Core 不存在时才会执行。
+    pub fn build_plugins_sync(
         &self,
         models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {

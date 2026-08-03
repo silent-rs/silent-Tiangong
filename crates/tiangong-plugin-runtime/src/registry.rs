@@ -21,21 +21,90 @@ static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarCo
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
 
-/// 全局 server 连接信息（入口层启动时设置一次，供需要回调 host 的 sidecar 使用）。
-static SERVER_ENDPOINT: OnceLock<(String, Option<String>)> = OnceLock::new();
-
-/// 设置本机 server 的连接信息。入口层（Server/Desktop）启动时调用一次。
+/// 全局 server 连接信息（可覆盖更新），供需要回调 host 的 sidecar 使用。
 ///
-/// 之后启动的所有插件 sidecar 都会通过环境变量收到这两个值，scheduler 等
-/// 需要回调 host 的 sidecar 据此向本机 server 发 HTTP 请求。
+/// Server 启停、端口或令牌变化时，入口层会调 [`set_server_endpoint`] 更新此值，
+/// 并重启依赖 server 的 sidecar（如 scheduler）。
+static SERVER_ENDPOINT: Mutex<Option<(String, Option<String>)>> = Mutex::new(None);
+
+/// 设置或更新本机 server 的连接信息。
+///
+/// 与上一次值不同时，会重启所有依赖 server 回调的 sidecar（当前为 scheduler），
+/// 让它们用新的地址/令牌重新连接。
 pub fn set_server_endpoint(url: String, token: Option<String>) {
-    let _ = SERVER_ENDPOINT.set((url, token));
+    let restart_needed = {
+        let mut guard = SERVER_ENDPOINT.lock().expect("SERVER_ENDPOINT 锁损坏");
+        let changed = guard
+            .as_ref()
+            .map(|(prev_url, prev_token)| {
+                prev_url != &url || prev_token.as_deref() != token.as_deref()
+            })
+            .unwrap_or(true);
+        *guard = Some((url, token));
+        changed
+    };
+    if restart_needed {
+        restart_server_dependent_sidecars();
+    }
 }
 
 /// 取当前已设置的 server 连接信息（未设置返回 None）。
 fn current_server_endpoint() -> Option<(String, Option<String>)> {
-    SERVER_ENDPOINT.get().cloned()
+    SERVER_ENDPOINT.lock().ok().and_then(|guard| guard.clone())
 }
+
+/// 重启依赖 server 回调的 sidecar（当前为 scheduler）。
+///
+/// Server 地址/令牌变化后，旧 sidecar 进程持有的 env 已过期，必须重启才能拿到新值。
+/// 停止后，下次 invoke 时运行时会自动用新配置重新拉起 sidecar。
+fn restart_server_dependent_sidecars() {
+    let Some(home) = user_home_dir() else {
+        tracing::warn!("重启 server 依赖 sidecar 时无法确定 home 目录，跳过");
+        return;
+    };
+    let storage_root = home.join(".tiangong");
+    for plugin_id in SERVER_DEPENDENT_PLUGINS {
+        if let Err(error) = stop_installed_sidecar(&storage_root, plugin_id) {
+            tracing::warn!(plugin_id, %error, "重启 server 依赖 sidecar 时停止失败");
+        }
+    }
+}
+
+/// 跨平台获取用户 home 目录（与 sidecar 框架 `endpoint::home_dir` 同源）。
+fn user_home_dir() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(home));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(profile));
+    }
+    let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
+    let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
+    match (drive, path) {
+        (Some(drive), Some(path)) => {
+            let mut buf = std::path::PathBuf::from(drive);
+            buf.push(path);
+            Some(buf)
+        }
+        _ => None,
+    }
+}
+
+/// 停止指定插件的 sidecar 进程（停止连接 + 清除连接缓存）。
+///
+/// 停止后下次 invoke 会用最新配置（含新 env）重新拉起 sidecar。
+fn stop_installed_sidecar(storage_root: &Path, plugin_id: &str) -> Result<()> {
+    let installed = find_installed_plugin(storage_root, plugin_id)?;
+    stop_loaded_sidecar(plugin_id)?;
+    stop_connection_for_directory(&installed.directory)?;
+    tracing::info!(plugin_id, "已停止 sidecar，下次调用将以新配置重启");
+    Ok(())
+}
+
+/// 依赖 server 回调的插件 ID 列表。
+///
+/// 这些 sidecar 会在运行时经 HTTP 回调本机 server，server 连接信息变化时必须重启。
+const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler"];
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";
 const PRESERVED_ENTRIES: [&str; 3] = ["runtime", "logs", "data"];
