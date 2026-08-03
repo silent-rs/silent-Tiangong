@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>定时任务</title>
+    <style>
+      /*__SCHEDULER_CSS__*/
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="header">
+        <h2>定时任务</h2>
+        <button id="create-btn" class="btn btn-primary" type="button">创建任务</button>
+      </header>
+      <p id="status" class="status" role="status"></p>
+      <div id="list" class="list"></div>
+
+      <template id="empty-template">
+        <div class="empty">暂无定时任务，点击「创建任务」添加。</div>
+      </template>
+
+      <template id="row-template">
+        <div class="job-row">
+          <div class="job-row-main">
+            <div class="job-row-top">
+              <span class="job-row-name"></span>
+              <span class="job-row-schedule badge"></span>
+              <span class="job-row-status badge"></span>
+            </div>
+            <div class="job-row-desc"></div>
+          </div>
+          <div class="job-row-actions">
+            <button class="btn btn-secondary toggle-btn" type="button"></button>
+            <button class="btn btn-secondary trigger-btn" type="button">触发</button>
+            <button class="btn btn-secondary runs-btn" type="button">历史</button>
+            <button class="btn btn-secondary edit-btn" type="button">编辑</button>
+            <button class="btn btn-danger delete-btn" type="button">删除</button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- 创建/编辑模态框 -->
+    <div id="form-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <h3 id="form-title">创建任务</h3>
+          <button class="modal-close" type="button" id="form-close">&times;</button>
+        </div>
+        <form id="job-form" class="form">
+          <input type="hidden" id="field-id" />
+          <label class="field">
+            <span>任务名称</span>
+            <input type="text" id="field-name" required maxlength="100" placeholder="如：每日早报" />
+          </label>
+          <label class="field">
+            <span>任务描述</span>
+            <input type="text" id="field-description" required maxlength="200" placeholder="简述任务用途" />
+          </label>
+          <label class="field">
+            <span>Cron 表达式</span>
+            <input type="text" id="field-schedule" required placeholder="0 0 9 * * *（每天 9 点）" />
+            <small id="cron-hint" class="hint">6 字段：秒 分 时 日 月 周</small>
+          </label>
+          <label class="field">
+            <span>任务内容</span>
+            <textarea id="field-payload" required rows="3" placeholder="触发时发送给 AI 的任务描述"></textarea>
+          </label>
+          <label class="field">
+            <span>关联会话（可选）</span>
+            <input type="text" id="field-session-id" placeholder="留空则自动创建新会话" />
+          </label>
+          <label class="field-inline">
+            <input type="checkbox" id="field-enabled" checked />
+            <span>启用</span>
+          </label>
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" id="form-cancel">取消</button>
+            <button type="submit" class="btn btn-primary" id="form-submit">保存</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 执行历史模态框 -->
+    <div id="runs-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <h3>执行历史</h3>
+          <button class="modal-close" type="button" id="runs-close">&times;</button>
+        </div>
+        <div id="runs-list" class="runs-list"></div>
+        <template id="runs-empty-template">
+          <div class="empty">暂无执行记录</div>
+        </template>
+        <template id="run-row-template">
+          <div class="run-row">
+            <span class="run-status badge"></span>
+            <span class="run-started"></span>
+            <span class="run-summary"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <script>
+      /*__SCHEDULER_JS__*/
+    </script>
+  </body>
+</html>
