@@ -23,20 +23,22 @@
 
       <template id="row-template">
         <div class="job-row">
-          <div class="job-row-main">
+          <div class="job-row-info">
             <div class="job-row-top">
               <span class="job-row-name"></span>
               <span class="job-row-schedule badge"></span>
-              <span class="job-row-status badge"></span>
             </div>
-            <div class="job-row-desc"></div>
+            <p class="job-row-desc"></p>
           </div>
           <div class="job-row-actions">
-            <button class="btn btn-secondary toggle-btn" type="button"></button>
-            <button class="btn btn-secondary trigger-btn" type="button">触发</button>
-            <button class="btn btn-secondary runs-btn" type="button">历史</button>
-            <button class="btn btn-secondary edit-btn" type="button">编辑</button>
-            <button class="btn btn-danger delete-btn" type="button">删除</button>
+            <label class="switch">
+              <input type="checkbox" class="toggle-checkbox" />
+              <span class="switch-slider"></span>
+            </label>
+            <button class="btn btn-ghost trigger-btn" type="button">触发</button>
+            <button class="btn btn-ghost runs-btn" type="button">历史</button>
+            <button class="btn btn-ghost edit-btn" type="button">编辑</button>
+            <button class="btn btn-ghost danger delete-btn" type="button">删除</button>
           </div>
         </div>
       </template>
@@ -46,39 +48,69 @@
     <div id="form-modal" class="modal-overlay" hidden>
       <div class="modal">
         <div class="modal-header">
-          <h3 id="form-title">创建任务</h3>
+          <h3 id="form-title">创建定时任务</h3>
           <button class="modal-close" type="button" id="form-close">&times;</button>
         </div>
         <form id="job-form" class="form">
           <input type="hidden" id="field-id" />
           <label class="field">
-            <span>任务名称</span>
-            <input type="text" id="field-name" required maxlength="100" placeholder="如：每日早报" />
+            <span>名称</span>
+            <input type="text" id="field-name" required maxlength="100" placeholder="每日站会提醒" />
           </label>
           <label class="field">
-            <span>任务描述</span>
-            <input type="text" id="field-description" required maxlength="200" placeholder="简述任务用途" />
+            <span>描述</span>
+            <input type="text" id="field-description" required maxlength="200" placeholder="任务描述" />
           </label>
+
+          <!-- Cron Tab：简单 / 表达式 -->
+          <div class="schedule-section">
+            <div class="tabs">
+              <button type="button" class="tab tab-simple" data-mode="simple">简单</button>
+              <button type="button" class="tab tab-cron" data-mode="cron">Cron 表达式</button>
+            </div>
+
+            <!-- 简单模式 -->
+            <div class="tab-panel" id="panel-simple">
+              <div class="simple-grid">
+                <label class="field">
+                  <span class="text-xs">分钟</span>
+                  <input type="number" id="simple-minute" min="0" max="59" value="0" />
+                </label>
+                <label class="field">
+                  <span class="text-xs">小时</span>
+                  <input type="number" id="simple-hour" min="0" max="23" value="9" />
+                </label>
+                <label class="field">
+                  <span class="text-xs">星期</span>
+                  <select id="simple-weekday"></select>
+                </label>
+              </div>
+              <p class="synthesized">合成表达式：<code id="simple-preview"></code></p>
+            </div>
+
+            <!-- Cron 表达式模式 -->
+            <div class="tab-panel" id="panel-cron" hidden>
+              <input type="text" id="field-cron" class="mono" placeholder="0 0 9 * * *" />
+              <p class="hint">格式：秒 分 时 日 月 周（6 字段）。例如每天 9 点：<code>0 0 9 * * *</code></p>
+            </div>
+
+            <!-- 预览（两模式共用） -->
+            <div id="schedule-preview"></div>
+          </div>
+
           <label class="field">
-            <span>Cron 表达式</span>
-            <input type="text" id="field-schedule" required placeholder="0 0 9 * * *（每天 9 点）" />
-            <small id="cron-hint" class="hint">6 字段：秒 分 时 日 月 周</small>
+            <span>关联会话（可选）</span>
+            <select id="field-session">
+              <option value="">不关联，自动创建新会话</option>
+            </select>
           </label>
           <label class="field">
             <span>任务内容</span>
-            <textarea id="field-payload" required rows="3" placeholder="触发时发送给 AI 的任务描述"></textarea>
-          </label>
-          <label class="field">
-            <span>关联会话（可选）</span>
-            <input type="text" id="field-session-id" placeholder="留空则自动创建新会话" />
-          </label>
-          <label class="field-inline">
-            <input type="checkbox" id="field-enabled" checked />
-            <span>启用</span>
+            <textarea id="field-payload" required rows="4" placeholder="触发时发送给 AI 的任务描述"></textarea>
           </label>
           <div class="form-actions">
             <button type="button" class="btn btn-secondary" id="form-cancel">取消</button>
-            <button type="submit" class="btn btn-primary" id="form-submit">保存</button>
+            <button type="submit" class="btn btn-primary" id="form-submit">创建</button>
           </div>
         </form>
       </div>
@@ -86,22 +118,26 @@
 
     <!-- 执行历史模态框 -->
     <div id="runs-modal" class="modal-overlay" hidden>
-      <div class="modal">
+      <div class="modal modal-wide">
         <div class="modal-header">
-          <h3>执行历史</h3>
+          <h3>任务执行历史</h3>
           <button class="modal-close" type="button" id="runs-close">&times;</button>
         </div>
-        <div id="runs-list" class="runs-list"></div>
-        <template id="runs-empty-template">
-          <div class="empty">暂无执行记录</div>
-        </template>
-        <template id="run-row-template">
-          <div class="run-row">
-            <span class="run-status badge"></span>
-            <span class="run-started"></span>
-            <span class="run-summary"></span>
-          </div>
-        </template>
+        <div class="runs-body">
+          <p id="runs-loading" class="empty">加载中...</p>
+          <table class="runs-table" id="runs-table" hidden>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
+                <th>结果摘要</th>
+              </tr>
+            </thead>
+            <tbody id="runs-tbody"></tbody>
+          </table>
+          <div id="runs-empty" class="empty" hidden>暂无执行记录</div>
+        </div>
       </div>
     </div>
 
