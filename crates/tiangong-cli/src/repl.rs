@@ -119,7 +119,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
                 session_config,
                 workspace_dir,
                 stream_tx.clone(),
-                plugins,
+                || plugins,
             ))
             .map_err(anyhow::Error::msg)?;
 

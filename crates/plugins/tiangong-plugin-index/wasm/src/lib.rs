@@ -164,6 +164,12 @@ impl Guest for Component {
     }
 
     fn set_workspace(workspace: Option<String>, full_trust: bool) -> Result<(), PluginError> {
+        // 工作目录和信任模式都未变时，跳过 sidecar 调用，避免每轮消息都做一次同步 IPC。
+        // 这把 set_workspace 从发送热路径移除（Core 已存在时 prepare_plugins 仍会调本钩子）。
+        let unchanged = state::workspace() == workspace && state::full_trust() == full_trust;
+        if unchanged {
+            return Ok(());
+        }
         state::set_workspace(workspace.clone());
         state::set_full_trust(full_trust);
         // 通知 sidecar 工作区变更并触发后台扫描。

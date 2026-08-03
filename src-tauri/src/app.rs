@@ -744,16 +744,15 @@ impl TiangongApp {
             .filter(|effort| !effort.trim().is_empty())
             .unwrap_or(agent_config.reasoning_effort);
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
-        let plugins = self.desktop_factory.build_plugins(app_config.models).await;
+        // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
+        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        let factory = self.desktop_factory.clone();
+        let models = app_config.models.clone();
         let ensured = self
             .core_manager
-            .ensure_core(
-                session_id,
-                session_config,
-                workspace_dir,
-                stream_tx,
-                plugins,
-            )
+            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
+                factory.build_plugins_sync(models)
+            })
             .await
             .expect("ensure_core 不应失败");
         EnsuredCore {

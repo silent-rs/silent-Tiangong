@@ -435,7 +435,7 @@ impl ServerCoreManager {
                 session_config,
                 workspace_dir,
                 stream_tx,
-                plugins,
+                || plugins,
             )
             .await
             .map_err(anyhow::Error::msg)?;
@@ -1233,6 +1233,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
+    use tiangong_core::core::Plugin;
     use tiangong_core::core_config::CoreConfig;
     use tiangong_types::{ContentBlock, StoredAsset};
 
@@ -1344,7 +1345,7 @@ mod tests {
                         CoreConfig::default(),
                         String::new(),
                         stream_tx,
-                        Vec::new(),
+                        Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )
                     .await
                     .map(|ensured| ensured.is_new)
@@ -1366,7 +1367,7 @@ mod tests {
                         CoreConfig::default(),
                         String::new(),
                         stream_tx,
-                        Vec::new(),
+                        Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )
                     .await
                     .map(|ensured| ensured.is_new)

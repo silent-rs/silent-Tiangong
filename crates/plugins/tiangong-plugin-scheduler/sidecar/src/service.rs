@@ -49,8 +49,10 @@ impl MessageDeliver {
         let server_token = std::env::var("TIANGONG_SERVER_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
+        // server 收到 scheduler 消息后会立即返回 202（respond-async），不需要等整轮
+        // turn 完成，因此 30s 超时足够覆盖 server 启动/繁忙场景。
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -61,10 +63,14 @@ impl MessageDeliver {
         }
     }
 
-    /// 投递消息到本机 server。fire-and-forget：发完即返回，忽略响应体。
+    /// 投递消息到本机 server。
     ///
     /// 用 `connector="server-api"` + `channel_id=session_id`，让 server 把 channel_id
     /// 直接当 session_id 用（与 `/api/v1/chat` 同路径，零改动 server 路由）。
+    ///
+    /// 请求带 `Prefer: respond-async` 头，server 收到后立即返回 202，整轮 turn 在后台
+    /// 异步执行。因此本调用只需确认「消息已被 server 接收」，不等整轮完成。
+    /// 仍然检查响应状态码：401/403/500 等服务端错误会被识别为投递失败。
     async fn deliver(&self, session_id: &str, content: String) -> Result<()> {
         let url = self
             .server_url
@@ -76,15 +82,26 @@ impl MessageDeliver {
             "channel_id": session_id,
             "message": content,
         });
-        let mut request = self.client.post(&endpoint).json(&body);
+        let mut request = self
+            .client
+            .post(&endpoint)
+            .json(&body)
+            .header("Prefer", "respond-async");
         if let Some(token) = self.server_token.as_deref() {
             request = request.bearer_auth(token);
         }
-        let _ = request
+        let response = request
             .send()
             .await
             .with_context(|| format!("投递定时任务消息失败: {endpoint}"))?;
-        // 触发为 fire-and-forget：成功发送即可，不读响应体。
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "server 拒绝定时任务消息: HTTP {status}: {}",
+                body.chars().take(200).collect::<String>()
+            );
+        }
         Ok(())
     }
 }
