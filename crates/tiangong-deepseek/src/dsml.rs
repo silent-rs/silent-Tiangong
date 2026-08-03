@@ -29,8 +29,8 @@ pub struct DsmlToolCall {
 
 // ── 原生协议标记（全角竖线 U+FF5C + 下块 U+2581） ───────────────────────
 
-const NATIVE_CALLS_BEGIN: &str = "<｜tool▁calls▁begin｜>";
-const NATIVE_CALLS_END: &str = "<｜tool▁calls▁end｜>";
+pub const NATIVE_CALLS_BEGIN: &str = "<｜tool▁calls▁begin｜>";
+pub const NATIVE_CALLS_END: &str = "<｜tool▁calls▁end｜>";
 const NATIVE_CALL_BEGIN: &str = "<｜tool▁call▁begin｜>";
 const NATIVE_CALL_END: &str = "<｜tool▁call▁end｜>";
 const NATIVE_SEP: &str = "<｜tool▁sep｜>";
@@ -40,7 +40,9 @@ const NATIVE_SEP: &str = "<｜tool▁sep｜>";
 /// 全角竖线常量（U+FF5C）。
 const BAR: char = '｜';
 const DSML_TOOL_CALLS_OPEN: &str = "<｜｜DSML｜｜tool_calls>";
-const DSML_TOOL_CALLS_CLOSE: &str = "</｜｜DSML｜｜tool_calls>";
+pub const DSML_TOOL_CALLS_CLOSE: &str = "</｜｜DSML｜｜tool_calls>";
+/// DSML invoke 闭合标签。
+pub const DSML_INVOKE_CLOSE: &str = "</｜｜DSML｜｜invoke>";
 
 /// 尝试从 `content` 文本中解析工具调用。
 ///
