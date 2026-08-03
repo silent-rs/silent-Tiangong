@@ -330,6 +330,7 @@ fn extract_text(message: &ChatMessage) -> String {
 
 pub fn from_deepseek_response(
     response: tiangong_deepseek::types::ChatCompletionResponse,
+    tools_enabled: bool,
 ) -> Result<ProviderResponse> {
     let choice = response
         .choices
@@ -354,9 +355,9 @@ pub fn from_deepseek_response(
                 arguments,
             }));
         }
-    } else {
-        // 结构化字段为空时，尝试从 content 文本中兜底解析工具调用（原生协议或 DSML 协议）。
-        // 解析逻辑由 SDK（tiangong_deepseek::dsml）提供，本层只做结果映射。
+    } else if tools_enabled {
+        // 仅当请求携带 tools 时才做文本协议兜底——无 tools 时（如总结阶段
+        // ToolChoice::None）模型不可能走工具调用，兜底只会误伤讨论协议的正常文本。
         match tiangong_deepseek::dsml::parse_dsml_tool_calls(text.trim()) {
             Some(text_calls) if !text_calls.is_empty() => {
                 tracing::warn!(
@@ -384,6 +385,9 @@ pub fn from_deepseek_response(
                 }
             }
         }
+    } else if !text.trim().is_empty() {
+        // 无 tools 时文本原样保留，不做协议兜底。
+        content.push(MessageContent::Text(text.trim().to_string()));
     }
 
     let usage = parse_usage(&response.usage);
@@ -651,7 +655,7 @@ mod tests {
     #[test]
     fn invalid_tool_arguments_become_parse_error() {
         let response =
-            from_deepseek_response(response_with_arguments("{\"path\":")).expect("response");
+            from_deepseek_response(response_with_arguments("{\"path\":"), true).expect("response");
         let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -671,7 +675,7 @@ mod tests {
 
     #[test]
     fn empty_tool_arguments_become_parse_error() {
-        let response = from_deepseek_response(response_with_arguments("")).expect("response");
+        let response = from_deepseek_response(response_with_arguments(""), true).expect("response");
         let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -729,6 +733,48 @@ mod tests {
             Some("")
         );
         assert_eq!(assistant.reasoning_content.as_deref(), Some("纯思考"));
+    }
+
+    #[test]
+    fn non_stream_skips_text_protocol_fallback_without_tools() {
+        // 无 tools 时（总结阶段），即使 content 含 DSML 字面量也不应误判为工具调用。
+        let response = tiangong_deepseek::types::ChatCompletionResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "deepseek-v4-pro".to_string(),
+            choices: vec![tiangong_deepseek::types::Choice {
+                index: 0,
+                message: tiangong_deepseek::types::ChoiceMessage {
+                    role: tiangong_deepseek::types::MessageRole::Assistant,
+                    content: Some("讨论 DSML 协议：\n</｜｜DSML｜｜tool_calls>".to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: "stop".to_string(),
+                logprobs: None,
+            }],
+            usage: tiangong_deepseek::types::Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+                completion_tokens_details: None,
+            },
+            system_fingerprint: String::new(),
+        };
+        // tools_enabled=false → 文本原样保留，不解析为工具调用。
+        let result = from_deepseek_response(response, false).expect("response");
+        assert_eq!(result.assistant_message.content.len(), 1);
+        let MessageContent::Text(text) = &result.assistant_message.content[0] else {
+            panic!("应为纯文本");
+        };
+        assert!(text.contains("讨论 DSML 协议"), "文本应原样保留：{text}");
+        assert!(
+            text.contains("</｜｜DSML｜｜tool_calls>"),
+            "DSML 字面量不应被剥离：{text}"
+        );
     }
 
     #[test]

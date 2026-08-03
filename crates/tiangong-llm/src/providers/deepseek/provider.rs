@@ -47,7 +47,7 @@ where
         let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let response = self.client.create(request).await?;
-        from_deepseek_response(response).map_err(|err| LlmError::Provider {
+        from_deepseek_response(response, !req.tools.is_empty()).map_err(|err| LlmError::Provider {
             provider: "deepseek",
             message: err.to_string(),
         })
