@@ -272,6 +272,8 @@ const loadingState = document.getElementById("loading-state");
 const jobContent = document.getElementById("job-content");
 const emptyState = document.getElementById("empty-state");
 const countEl = document.getElementById("job-count-num");
+const refreshBtn = document.getElementById("refresh-btn");
+const refreshIcon = document.getElementById("refresh-icon");
 const rowTemplate = document.getElementById("row-template");
 
 function setStatus(text, isError = false) {
@@ -282,17 +284,23 @@ function setStatus(text, isError = false) {
 
 // ── 任务列表 ──
 
-async function loadJobs() {
+async function loadJobs(manual = false) {
+  refreshBtn.disabled = true;
+  refreshIcon.classList.add("spinning");
+  if (manual) setStatus("正在刷新…");
   try {
     const raw = await callHost("list", "{}");
     const data = raw ? JSON.parse(raw) : { jobs: [] };
     renderList(data.jobs || []);
+    if (manual) setStatus("已刷新");
   } catch (e) {
     renderList([]);
     setStatus(`加载任务列表失败：${e.message || e}`, true);
   } finally {
     loadingState.hidden = true;
     jobContent.hidden = false;
+    refreshBtn.disabled = false;
+    refreshIcon.classList.remove("spinning");
   }
 }
 
@@ -443,6 +451,7 @@ function escapeHtml(s) {
 }
 
 document.getElementById("create-btn").addEventListener("click", () => openCreateForm());
+refreshBtn.addEventListener("click", () => loadJobs(true));
 document.getElementById("form-close").addEventListener("click", closeForm);
 document.getElementById("form-cancel").addEventListener("click", closeForm);
 

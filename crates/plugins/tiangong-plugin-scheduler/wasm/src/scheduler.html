@@ -11,10 +11,21 @@
     <div id="loading-state" class="loading-state">加载中...</div>
 
     <section id="job-content" class="job-content" hidden>
-      <!-- 顶部：计数 + 创建按钮（对齐原版 JobPanel） -->
+      <!-- 顶部：计数 + 操作按钮（对齐原版 JobPanel） -->
       <div class="job-toolbar">
         <p class="job-count">共 <span id="job-count-num">0</span> 个定时任务</p>
-        <button id="create-btn" class="btn btn-primary btn-sm" type="button">创建任务</button>
+        <div class="job-toolbar-actions">
+          <button id="refresh-btn" class="btn btn-outline btn-sm" type="button">
+            <svg id="refresh-icon" class="btn-icon spinable" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+              <path d="M8 16H3v5" />
+            </svg>
+            刷新
+          </button>
+          <button id="create-btn" class="btn btn-primary btn-sm" type="button">创建任务</button>
+        </div>
       </div>
 
       <p id="status" class="page-status" role="status" hidden></p>

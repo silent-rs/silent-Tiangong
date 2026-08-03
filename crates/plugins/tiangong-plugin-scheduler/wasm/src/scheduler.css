@@ -111,6 +111,13 @@ select:disabled {
   font-size: 14px;
 }
 
+.job-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .page-status {
   margin: 0;
   color: var(--muted);
@@ -346,6 +353,20 @@ select:disabled {
 .btn-sm {
   height: 36px;
   padding: 0 12px;
+}
+
+.btn-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.spinable.spinning {
+  animation: spin 0.8s linear infinite;
 }
 
 .btn .danger,
@@ -659,6 +680,12 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 720px) {
   .job-row {
     align-items: flex-start;
@@ -675,6 +702,11 @@ button:focus-visible {
 @media (max-width: 520px) {
   .page {
     padding: 16px;
+  }
+
+  .job-toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .job-row-actions {
