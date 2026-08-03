@@ -27,14 +27,14 @@ impl<'c> Chat<'c> {
     /// 创建流式对话。
     ///
     /// SDK 内置文本工具调用协议兜底：当模型把工具调用写进 `content` 文本（原生协议
-    /// 或 DSML 协议）而非结构化 `tool_calls` 字段时，SDK 会自动缓冲文本并在流末
-    /// 解析为 `StreamEvent::TextProtocolToolCall`，避免上层重复实现兜底逻辑。
+    /// 或 DSML 协议）而非结构化 `tool_calls` 字段时，SDK 会在正常接收流式响应的同时
+    /// 收集协议文本，并在完整响应结束后统一解析为 `StreamEvent::TextProtocolToolCall`。
     pub async fn create_stream(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<EventStream, DeepSeekError> {
-        // 仅当请求携带 tools 时才启用文本协议兜底缓冲：无 tools 时模型不可能走
-        // 工具调用（总结阶段 ToolChoice::None 即如此），缓冲只会误判正常文本。
+        // 仅当请求携带 tools 时才启用文本协议兜底缓冲。即使 tool_choice=none，调用方
+        // 也可能保留 tools schema；若模型仍返回文本工具调用，流末会完整识别并交由上层续作。
         let enable_buffer = request.tools.is_some();
         let response = self
             .client
@@ -61,9 +61,8 @@ impl<'c> Chat<'c> {
         });
         let flat = chunk_stream.flat_map(stream::iter);
 
-        // 第二层：文本协议兜底缓冲。仅当请求携带 tools 时启用——无 tools 时
-        // 模型不可能走工具调用（如总结阶段 ToolChoice::None），缓冲只会误伤
-        // 讨论协议本身的正常文本。
+        // 第二层：文本协议兜底缓冲。普通文本正常透传；确认命中文本工具协议后，
+        // 等完整响应结束再统一解析，避免按单个 invoke 尾缀提前拆散一组工具调用。
         if !enable_buffer {
             return Ok(Box::pin(flat));
         }
@@ -84,12 +83,10 @@ impl<'c> Chat<'c> {
 /// 三态：
 /// - `Idle`：正常透传。遇到 `<` 切到 `Probing`，暂存从 `<` 起的文本。
 /// - `Probing`：窗口探测。累积 `<` 后的文本（窗口上限 `PROBE_WINDOW_CHARS` 字符），
-///   出现 `tool`/`dsml` 关键词 → `Confirmed`；窗口满仍未出现 → 整块吐出回 `Idle`。
-/// - `Confirmed`：确认走文本协议，持续缓冲。含尾缀标记时立即解析输出；
-///   缓冲超过 `CONFIRMED_MAX_CHARS` 仍未出现尾缀 → 误判，整块吐出回 `Idle`。
+///   出现已知协议前缀 → `Confirmed`；窗口满仍未出现 → 整块吐出回 `Idle`。
+/// - `Confirmed`：确认走文本协议，持续缓冲到完整响应结束后统一解析。
 ///
-/// 用语义关键词 + 尾缀双向约束，对未来格式微调更健壮。误判时延迟可控
-/// （窗口或缓冲上限耗尽即吐出），不影响体验。
+/// 探测只匹配两套协议的精确前缀，避免把 `<toolbar>` 等普通内容误判为工具调用。
 #[derive(Default)]
 struct BufferState {
     /// 是否已出现过结构化 ToolCallStart（出现则永不缓冲）。
@@ -114,21 +111,10 @@ enum BufferPhase {
 /// （原生 `<｜tool` 约 5 字符，DSML `<｜｜DSML` 约 6 字符），留足余量。
 const PROBE_WINDOW_CHARS: usize = 10;
 
-/// Confirmed 状态最多缓冲的字符数。超过则判定为误判，整块吐出回退。
-/// 真实工具调用的文本块通常不超过几百字符（函数名 + 参数 JSON）。
-const CONFIRMED_MAX_CHARS: usize = 4096;
-
-/// 判断窗口文本是否含协议关键词（不区分大小写）。
-fn contains_protocol_keyword(text: &str) -> bool {
+/// 判断累计文本是否含已知协议前缀（不区分大小写）。
+fn contains_protocol_prefix(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("tool") || lower.contains("dsml")
-}
-
-/// 判断 pending 是否含任一已知协议尾缀标记（工具调用块闭合）。
-fn contains_protocol_suffix(text: &str) -> bool {
-    text.contains(dsml::NATIVE_CALLS_END)
-        || text.contains(dsml::DSML_TOOL_CALLS_CLOSE)
-        || text.contains(dsml::DSML_INVOKE_CLOSE)
+    lower.contains("｜tool") || lower.contains("｜｜dsml")
 }
 
 /// 对单个事件施加缓冲逻辑，可能产出 0~N 个事件。
@@ -154,14 +140,8 @@ fn apply_buffer(
             events
         }
         Ok(StreamEvent::Usage(usage)) => {
-            let mut events = vec![Ok(StreamEvent::Usage(usage))];
-            if state.phase == BufferPhase::Confirmed {
-                events.extend(resolve_confirmed(state));
-            } else if state.phase == BufferPhase::Probing {
-                // Usage 提前到达，probing 未决 → 整块吐出。
-                events.extend(flush_pending(state));
-            }
-            events
+            // Usage 不是内容结束标记。继续等待 Done，确保根据完整 content 统一识别。
+            vec![Ok(StreamEvent::Usage(usage))]
         }
         Ok(StreamEvent::Done) => {
             let mut events = Vec::new();
@@ -196,31 +176,13 @@ fn handle_text_delta(state: &mut BufferState, delta: String) -> Vec<StreamEvent>
         }
         BufferPhase::Confirmed => {
             state.pending.push_str(&delta);
-            check_confirmed(state)
+            Vec::new()
         }
     }
 }
 
-/// Confirmed 状态下检查：含尾缀 → 立即解析输出；超限 → 误判整块吐出；否则继续缓冲。
-fn check_confirmed(state: &mut BufferState) -> Vec<StreamEvent> {
-    // 尾缀到达 → 立即解析，不用等流末。
-    if contains_protocol_suffix(&state.pending) {
-        tracing::info!("工具调用文本协议尾缀到达，立即解析");
-        return resolve_confirmed_events(state);
-    }
-    // 缓冲超限 → 误判，整块吐出回 Idle。
-    if state.pending.chars().count() >= CONFIRMED_MAX_CHARS {
-        tracing::warn!(
-            len = state.pending.len(),
-            "工具调用文本缓冲超限，判定为误判，整块吐出"
-        );
-        return flush_to_events(state);
-    }
-    Vec::new()
-}
-
-/// 流末对确认的协议文本做最终解析（返回 StreamEvent，不含 Err 包装）。
-fn resolve_confirmed_events(state: &mut BufferState) -> Vec<StreamEvent> {
+/// 完整响应结束后对确认的协议文本做最终解析。
+fn resolve_confirmed(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSeekError>> {
     state.phase = BufferPhase::Idle;
     if let Some(calls) = dsml::parse_dsml_tool_calls(state.pending.trim()) {
         tracing::info!(count = calls.len(), "工具调用文本协议兜底解析出工具调用");
@@ -228,14 +190,14 @@ fn resolve_confirmed_events(state: &mut BufferState) -> Vec<StreamEvent> {
         state.pending.clear();
         let mut events = Vec::new();
         if !leftover.is_empty() {
-            events.push(StreamEvent::TextDelta(leftover));
+            events.push(Ok(StreamEvent::TextDelta(leftover)));
         }
         for (idx, call) in calls.into_iter().enumerate() {
-            events.push(StreamEvent::TextProtocolToolCall {
+            events.push(Ok(StreamEvent::TextProtocolToolCall {
                 id: format!("textcall_{idx}"),
                 name: call.name,
                 arguments: call.arguments,
-            });
+            }));
         }
         events
     } else {
@@ -243,7 +205,7 @@ fn resolve_confirmed_events(state: &mut BufferState) -> Vec<StreamEvent> {
             len = state.pending.len(),
             "工具调用文本缓冲解析失败，整块补发缓冲文本"
         );
-        flush_to_events(state)
+        flush_pending(state)
     }
 }
 
@@ -257,9 +219,9 @@ fn check_probe_window(state: &mut BufferState) -> Vec<StreamEvent> {
     let after_lt = &state.pending[lt_pos + 1..];
     let window_chars = after_lt.chars().count();
 
-    if contains_protocol_keyword(after_lt) {
+    if contains_protocol_prefix(&state.pending) {
         state.phase = BufferPhase::Confirmed;
-        tracing::info!("DeepSeek 流式确认走工具调用文本协议，持续缓冲");
+        tracing::info!("DeepSeek 流式确认走工具调用文本协议，等待完整响应");
         Vec::new()
     } else if window_chars >= PROBE_WINDOW_CHARS {
         // 窗口耗尽仍无关键词 → 不是协议，整块吐出。
@@ -290,14 +252,6 @@ fn flush_pending(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSeekErr
     let text = std::mem::take(&mut state.pending);
     state.phase = BufferPhase::Idle;
     vec![Ok(StreamEvent::TextDelta(text))]
-}
-
-/// 流末对确认的协议文本做最终解析。
-fn resolve_confirmed(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSeekError>> {
-    resolve_confirmed_events(state)
-        .into_iter()
-        .map(Ok)
-        .collect()
 }
 
 /// 解析单个 SSE chunk，可能产出多个事件。
@@ -522,8 +476,8 @@ mod buffer_tests {
     }
 
     #[test]
-    fn usage_triggers_resolution() {
-        // Usage 事件也应触发缓冲解析。
+    fn usage_waits_for_done_before_resolution() {
+        // Usage 可能先于 Done 到达，不能用它提前解析尚未结束的 content。
         let dsml = "<｜｜DSML｜｜invoke name=\"fn\">\n<｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>";
         let usage = Usage {
             prompt_tokens: 10,
@@ -533,64 +487,99 @@ mod buffer_tests {
             prompt_cache_miss_tokens: None,
             completion_tokens_details: None,
         };
-        let out = collect(vec![text_delta(dsml), Ok(StreamEvent::Usage(usage))]);
-        assert!(out.iter().any(|e| e.contains("TextProtocolToolCall")));
-        assert!(out.iter().any(|e| e.contains("Usage")));
+        let mut state = BufferState::default();
+        assert!(apply_buffer(&mut state, text_delta(dsml)).is_empty());
+        let usage_events = apply_buffer(&mut state, Ok(StreamEvent::Usage(usage)));
+        assert!(
+            usage_events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::Usage(_))))
+        );
+        assert!(
+            usage_events
+                .iter()
+                .all(|event| !matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. })))
+        );
+
+        let done_events = apply_buffer(&mut state, Ok(StreamEvent::Done));
+        assert!(
+            done_events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::TextProtocolToolCall { .. })))
+        );
     }
 
     #[test]
-    fn suffix_arrives_during_confirmed_triggers_immediate_resolution() {
-        // Confirmed 后尾缀到达 → 立即解析输出，不等 Done。
-        // 用不含尾缀的分片进入 Confirmed，再单独发送尾缀。
-        let out = collect(vec![
-            text_delta("<｜｜DSML｜｜invoke name=\"read_file\">"),
-            text_delta(
-                "<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>",
+    fn complete_response_resolves_multiple_invokes_as_one_group() {
+        let dsml = "<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name=\"fn_a\">
+<｜｜DSML｜｜parameter name=\"x\" string=\"true\">1</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+<｜｜DSML｜｜invoke name=\"fn_b\">
+<｜｜DSML｜｜parameter name=\"y\" string=\"true\">2</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>";
+        let mut state = BufferState::default();
+        let first_invoke_end =
+            dsml.find("</｜｜DSML｜｜invoke>").unwrap() + "</｜｜DSML｜｜invoke>".len();
+        assert!(
+            apply_buffer(&mut state, text_delta(&dsml[..first_invoke_end])).is_empty(),
+            "第一个 invoke 结束时不能提前解析"
+        );
+        assert!(
+            apply_buffer(&mut state, text_delta(&dsml[first_invoke_end..])).is_empty(),
+            "完整 content 结束前不能提前解析"
+        );
+
+        let out = apply_buffer(&mut state, Ok(StreamEvent::Done));
+        let calls = out
+            .iter()
+            .filter_map(|event| match event {
+                Ok(StreamEvent::TextProtocolToolCall { id, name, .. }) => {
+                    Some((id.as_str(), name.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(calls, vec![("textcall_0", "fn_a"), ("textcall_1", "fn_b")]);
+        assert!(
+            out.iter().all(
+                |event| !matches!(event, Ok(StreamEvent::TextDelta(text)) if text.contains("DSML"))
             ),
-            text_delta("</｜｜DSML｜｜invoke>"), // 尾缀到达 → 立即解析
-            text_delta("后续正常文本"),          // 已回 Idle，正常透传
-            Ok(StreamEvent::Done),
-        ]);
-        // 尾缀到达即产出工具调用（Done 之前）。
+            "完整工具调用组不应泄漏协议标记：{out:?}"
+        );
+    }
+
+    #[test]
+    fn long_tool_arguments_are_not_downgraded_to_plain_text() {
+        let value = "a".repeat(5_000);
+        let dsml = format!(
+            "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"write_file\">\n<｜｜DSML｜｜parameter name=\"content\" string=\"true\">{value}</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+        );
+        let out = collect(vec![text_delta(&dsml), Ok(StreamEvent::Done)]);
         assert!(
             out.iter()
-                .any(|e| e.contains("TextProtocolToolCall") && e.contains("read_file")),
-            "尾缀到达应立即解析：{out:?}"
-        );
-        // 后续文本正常透传。
-        assert!(
-            out.iter().any(|e| e.contains("TextDelta(\"后续正常文本")),
-            "解析后应恢复正常透传：{out:?}"
+                .any(|event| event.contains("TextProtocolToolCall") && event.contains("write_file")),
+            "长参数仍应识别为工具调用"
         );
         assert!(
-            !out.iter().any(|e| e.contains("DSML") || e.contains("｜｜")),
-            "标记原文不应透传：{out:?}"
+            !out.iter()
+                .any(|event| event.contains("TextDelta") && event.contains("DSML")),
+            "长参数工具调用不应作为普通文本透传"
         );
     }
 
     #[test]
-    fn confirmed_buffer_overflow_flushes_as_plain_text() {
-        // Confirmed 后缓冲超限（CONFIRMED_MAX_CHARS）仍未出现尾缀 → 误判整块吐出。
-        // 构造一段含 tool 关键词但无尾缀的长文本。
-        let long_text = format!(
-            "<toolbar>{padding}",
-            padding = "a".repeat(CONFIRMED_MAX_CHARS)
+    fn toolbar_text_does_not_enter_protocol_buffering() {
+        let mut state = BufferState::default();
+        let out = apply_buffer(
+            &mut state,
+            text_delta("<toolbar>普通内容继续输出，不是工具协议"),
         );
-        let out = collect(vec![text_delta(&long_text), Ok(StreamEvent::Done)]);
-        // 应整块吐出，不解析为工具调用。
-        assert!(
-            !out.iter().any(|e| e.contains("TextProtocolToolCall")),
-            "超限误判不应产出工具调用：{out:?}"
-        );
-        // 文本不丢失。
-        let combined: String = out
-            .iter()
-            .filter(|e| e.contains("TextDelta"))
-            .cloned()
-            .collect();
-        assert!(
-            combined.contains("<toolbar>"),
-            "超限应整块吐出不丢内容：{out:?}"
-        );
+        assert!(out.iter().any(|event| matches!(
+            event,
+            Ok(StreamEvent::TextDelta(text)) if text.contains("<toolbar>")
+        )));
+        assert!(state.phase == BufferPhase::Idle);
     }
 }
