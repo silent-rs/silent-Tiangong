@@ -33,6 +33,9 @@ impl<'c> Chat<'c> {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<EventStream, DeepSeekError> {
+        // 仅当请求携带 tools 时才启用文本协议兜底缓冲：无 tools 时模型不可能走
+        // 工具调用（总结阶段 ToolChoice::None 即如此），缓冲只会误判正常文本。
+        let enable_buffer = request.tools.is_some();
         let response = self
             .client
             .post_stream_raw("/chat/completions", &request)
@@ -58,8 +61,13 @@ impl<'c> Chat<'c> {
         });
         let flat = chunk_stream.flat_map(stream::iter);
 
-        // 第二层：文本协议兜底缓冲。累积 TextDelta，检测到协议特征即缓冲；
-        // 流末（Usage/Done）统一解析，成功则产出 TextProtocolToolCall，误判则补发文本。
+        // 第二层：文本协议兜底缓冲。仅当请求携带 tools 时启用——无 tools 时
+        // 模型不可能走工具调用（如总结阶段 ToolChoice::None），缓冲只会误伤
+        // 讨论协议本身的正常文本。
+        if !enable_buffer {
+            return Ok(Box::pin(flat));
+        }
+
         let state = BufferState::default();
         let buffered = flat
             .scan(state, |state, result| {
