@@ -1,15 +1,16 @@
 //! WASM 组件加载器。
 //!
 //! 负责：
-//! - 创建开启 fuel + epoch 中断的 [`Engine`]；
-//! - 读取并编译单文件 `.wasm` Component；
-//! - 在资源受限的 [`Store`] 中实例化；
-//! - 返回可被宿主当作 `Plugin` 使用的 [`WasmPlugin`]。
+//! - 管理 App 级共享的 [`Engine`]（编译缓存复用）和 [`Linker`]（host import 注册）；
+//! - 编译单文件 `.wasm` Component（重型操作，每插件生命周期内只调一次）；
+//! - 从已编译 Component 创建独立 Store + 实例（轻量，每个 Core 调一次）。
 //!
-//! 阶段一 PoC 不实现热加载、版本快照与权限探测；每个 `.wasm` 文件实例化一次。
+//! Engine 和 Linker 是 App 级单例（`OnceLock`），所有插件共享同一份编译基础设施。
+//! 每个插件编译后的 [`Component`] 缓存在 registry 的 `LoadedPlugin` 中，
+//! 创建 Core 实例时直接复用，不再重复编译。
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use wasmtime::component::{Component, HasSelf, Linker};
@@ -21,68 +22,144 @@ use crate::config::PluginRuntimeConfig;
 use crate::host_state::HostState;
 use crate::sidecar::SidecarConnection;
 
-/// WASM 组件加载器。
-///
-/// 持有一个共享的 [`Engine`]（编译缓存复用）和一个用于实例化的 [`Linker`]。
-/// 可选注入 [`SidecarConnection`]，供 sidecar host import 转发请求。
-pub struct WasmPluginLoader {
-    engine: Engine,
-    linker: Arc<Linker<HostState>>,
-    sidecar: Option<Arc<dyn SidecarConnection>>,
-}
+/// App 级共享 Wasmtime Engine（编译缓存复用）。
+static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
+
+/// App 级共享 Linker（host import 注册）。
+static SHARED_LINKER: OnceLock<Arc<Linker<HostState>>> = OnceLock::new();
 
 /// host import 的 host_getter：返回 HostState 自身的可变借用。
 fn host_self_getter(state: &mut HostState) -> &mut HostState {
     state
 }
 
-impl WasmPluginLoader {
-    /// 以给定配置创建加载器，不注入 sidecar（invoke 返回 unavailable）。
-    pub fn new(config: &PluginRuntimeConfig) -> Result<Self> {
-        Self::with_sidecar(config, None)
-    }
-
-    /// 以给定配置创建加载器，并注入 sidecar 连接。
-    pub fn with_sidecar(
-        _config: &PluginRuntimeConfig,
-        sidecar: Option<Arc<dyn SidecarConnection>>,
-    ) -> Result<Self> {
+/// 获取共享 Engine（首次调用时初始化）。
+pub fn shared_engine() -> &'static Engine {
+    SHARED_ENGINE.get_or_init(|| {
         let mut cfg = Config::new();
         cfg.consume_fuel(true);
         cfg.epoch_interruption(true);
         cfg.strategy(wasmtime::Strategy::Cranelift);
-        let engine = Engine::new(&cfg).map_err(|e| anyhow::anyhow!("创建引擎失败: {e}"))?;
+        Engine::new(&cfg).expect("创建 Wasmtime Engine 失败")
+    })
+}
 
-        let mut linker = Linker::<HostState>::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| anyhow::anyhow!("接入 WASI 失败: {e}"))?;
+/// 获取共享 Linker（首次调用时初始化）。
+pub fn shared_linker() -> &'static Arc<Linker<HostState>> {
+    SHARED_LINKER.get_or_init(|| {
+        let engine = shared_engine();
+        let mut linker = Linker::<HostState>::new(engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker).expect("接入 WASI 失败");
         crate::bindings::tiangong::plugin::clock::add_to_linker::<HostState, HasSelf<HostState>>(
             &mut linker,
             host_self_getter,
         )
-        .map_err(|e| anyhow::anyhow!("接入 clock 失败: {e}"))?;
+        .expect("接入 clock 失败");
         crate::bindings::tiangong::plugin::sidecar::add_to_linker::<HostState, HasSelf<HostState>>(
             &mut linker,
             host_self_getter,
         )
-        .map_err(|e| anyhow::anyhow!("接入 sidecar 失败: {e}"))?;
+        .expect("接入 sidecar 失败");
         crate::bindings::tiangong::plugin::feedback::add_to_linker::<HostState, HasSelf<HostState>>(
             &mut linker,
             host_self_getter,
         )
-        .map_err(|e| anyhow::anyhow!("接入 feedback 失败: {e}"))?;
-        let linker = Arc::new(linker);
+        .expect("接入 feedback 失败");
+        Arc::new(linker)
+    })
+}
 
-        Ok(Self {
-            engine,
-            linker,
-            sidecar,
-        })
+/// 编译 WASM 字节为 Component（重型操作）。
+///
+/// 使用共享 Engine 编译。每个插件生命周期内只需编译一次，结果缓存在 registry
+/// 的 `LoadedPlugin.component` 中。后续创建 Core 实例时复用此 Component，不再重复编译。
+pub fn compile_component(bytes: &[u8]) -> Result<Component> {
+    let t = std::time::Instant::now();
+    let component = Component::new(shared_engine(), bytes)
+        .map_err(|e| anyhow::anyhow!("编译 wasm 组件失败: {e}"))?;
+    tracing::info!(
+        target: "perf_trace",
+        stage = "wasm.component.compile",
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
+    Ok(component)
+}
+
+/// 从已编译 Component 创建独立 Store + 实例（轻量操作）。
+///
+/// 每个 Core 调用一次，创建独立的 Store（含独立内存/fuel/epoch）和组件实例。
+/// 不涉及编译，预期耗时几毫秒。
+pub fn instantiate_component(
+    component: &Component,
+    config: &PluginRuntimeConfig,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
+    plugin_id: &str,
+) -> Result<WasmPlugin> {
+    let t = std::time::Instant::now();
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(config.memory_limit)
+        .build();
+
+    let mut store = Store::new(
+        shared_engine(),
+        HostState::new(limits, sidecar, plugin_id.to_string()),
+    );
+    store.limiter(|state: &mut HostState| state.limits_mut());
+    let _ = store.set_fuel(config.fuel_limit);
+    store.set_epoch_deadline(u64::MAX);
+    tracing::info!(
+        target: "perf_trace",
+        plugin_id,
+        stage = "wasm.store.create",
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
+
+    let t = std::time::Instant::now();
+    let instance = TiangongPlugin::instantiate(&mut store, component, shared_linker())
+        .map_err(|e| anyhow::anyhow!("实例化 wasm 组件失败: {e}"))?;
+    tracing::info!(
+        target: "perf_trace",
+        plugin_id,
+        stage = "wasm.component.instantiate",
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
+
+    Ok(WasmPlugin { instance, store })
+}
+
+/// WASM 组件加载器（向后兼容薄包装）。
+///
+/// Engine 和 Linker 已改为 App 级共享（[`shared_engine`] / [`shared_linker`]）。
+/// 本结构体仅保留 `sidecar` 字段，供 `load_wasm_plugin_at` 等测试入口使用。
+pub struct WasmPluginLoader {
+    sidecar: Option<Arc<dyn SidecarConnection>>,
+}
+
+impl WasmPluginLoader {
+    /// 以给定配置创建加载器，不注入 sidecar（invoke 返回 unavailable）。
+    pub fn new(_config: &PluginRuntimeConfig) -> Result<Self> {
+        Self::with_sidecar(_config, None)
     }
 
-    /// 引擎句柄，供外部（如 epoch 心跳线程）调用 `increment_epoch`。
-    pub fn engine(&self) -> &Engine {
-        &self.engine
+    /// 以给定配置创建加载器，并注入 sidecar 连接。
+    ///
+    /// Engine 和 Linker 已改为 App 级共享，这里只确保它们已初始化并注入 sidecar。
+    pub fn with_sidecar(
+        _config: &PluginRuntimeConfig,
+        sidecar: Option<Arc<dyn SidecarConnection>>,
+    ) -> Result<Self> {
+        // 确保 Engine 和 Linker 已初始化（首次调用时触发）。
+        let _ = shared_engine();
+        let _ = shared_linker();
+        Ok(Self { sidecar })
+    }
+
+    /// 引擎句柄（共享 Engine 的引用）。
+    pub fn engine(&self) -> &'static Engine {
+        shared_engine()
     }
 
     /// 加载并实例化一个 `.wasm` Component，返回宿主侧 [`WasmPlugin`]。
@@ -113,78 +190,27 @@ impl WasmPluginLoader {
             })
     }
 
-    /// 从同一份不可变字节快照创建实例，供动态热加载批量替换使用。
+    /// 从字节编译 + 实例化（向后兼容组合方法）。
+    ///
+    /// 内部调 [`compile_component`] + [`instantiate_component`]。
+    /// 仅供 `load_wasm_plugin_at` 等测试入口使用；生产路径应分别调 compile 和
+    /// instantiate 以复用编译缓存。
     pub fn load_bytes_for_plugin(
         &self,
         bytes: &[u8],
         config: &PluginRuntimeConfig,
         plugin_id: &str,
     ) -> Result<WasmPlugin> {
-        let t = std::time::Instant::now();
-        let component = Component::new(&self.engine, bytes)
-            .map_err(|e| anyhow::anyhow!("编译 wasm 组件失败: {e}"))?;
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.component.compile",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
-
-        let t = std::time::Instant::now();
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(config.memory_limit)
-            .build();
-
-        let mut store = Store::new(
-            &self.engine,
-            HostState::new(limits, self.sidecar.clone(), plugin_id.to_string()),
-        );
-        // 注册内存/表/实例上限：limiter 闭包返回 StoreLimits 的借用。
-        store.limiter(|state: &mut HostState| state.limits_mut());
-        // fuel 在每次工具调用前重置；实例化阶段也给足 fuel。
-        // set_fuel 仅在未开启 consume_fuel 时返回 Err，此处配置已开启，故安全忽略。
-        let _ = store.set_fuel(config.fuel_limit);
-        // epoch：实例化阶段给一个宽裕的 deadline，避免初始化被误中断。
-        // 工具调用时再按 config.epoch_deadline_ticks() 重置为实际限制。
-        store.set_epoch_deadline(u64::MAX);
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.store.create",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
-
-        let t = std::time::Instant::now();
-        let instance = TiangongPlugin::instantiate(&mut store, &component, &self.linker)
-            .map_err(|e| anyhow::anyhow!("实例化 wasm 组件失败: {e}"))?;
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.component.instantiate",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
-
-        Ok(WasmPlugin {
-            engine: self.engine.clone(),
-            #[allow(unused_variables)]
-            linker: self.linker.clone(),
-            instance,
-            store,
-        })
+        let component = compile_component(bytes)?;
+        instantiate_component(&component, config, self.sidecar.clone(), plugin_id)
     }
 }
 
 /// 宿主侧持有的已实例化 WASM 插件句柄。
 ///
-/// 内部包含独立的 [`Store`]，每次工具调用在调用前重置 fuel 与 epoch deadline，
-/// 保证单次调用可被独立限制与终止。
+/// 每个实例拥有独立的 [`Store`]（含独立线性内存、fuel、epoch），
+/// 但共享底层 Engine 和编译产物（Component 的 JIT 代码）。
 pub struct WasmPlugin {
-    engine: Engine,
-    #[allow(dead_code)]
-    linker: Arc<Linker<HostState>>,
     instance: TiangongPlugin,
     store: Store<HostState>,
 }
@@ -405,9 +431,9 @@ impl WasmPlugin {
             .payload)
     }
 
-    /// 引擎句柄（测试与 epoch 心跳用）。
-    pub fn engine(&self) -> &Engine {
-        &self.engine
+    /// 引擎句柄（共享 Engine 的引用，测试与 epoch 心跳用）。
+    pub fn engine(&self) -> &'static Engine {
+        shared_engine()
     }
 
     /// 暴露 store 的可变借用，用于测试断言（如剩余 fuel）。

@@ -12,7 +12,10 @@ use tiangong_core::core::Plugin;
 
 use crate::adapter::{WasmPluginAdapter, call_wasm_off_runtime};
 use crate::config::PluginRuntimeConfig;
-use crate::loader::{Contribution, Descriptor, WasmPlugin, WasmPluginLoader};
+use crate::loader::{
+    Contribution, Descriptor, WasmPlugin, WasmPluginLoader, compile_component,
+    instantiate_component,
+};
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
 
@@ -120,6 +123,8 @@ struct LoadedPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
     wasm_bytes: Option<Arc<Vec<u8>>>,
+    /// 编译缓存：预加载/热加载时编译一次，Core 实例创建时复用（零编译）。
+    component: Option<Arc<wasmtime::component::Component>>,
     ui_plugin: Option<Arc<Mutex<WasmPlugin>>>,
     descriptor: Option<Descriptor>,
     generation: u64,
@@ -316,20 +321,22 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     };
 
     let runtime_config = PluginRuntimeConfig::default();
-    let (ui_plugin, descriptor) = instantiate_snapshot(
+    // 编译新版本一次（含 UI 实例创建 + describe 校验）。
+    let (component, ui_plugin, descriptor) = compile_plugin(
         wasm_bytes.clone(),
         &installed.manifest,
         sidecar.clone(),
         runtime_config,
     )?;
 
+    // 从新 Component 为每个存活 Core 创建实例（零编译，只创建 Store + 实例化）。
     let mut replacements = Vec::with_capacity(instances.len());
     for adapter in &instances {
-        let (plugin, _) = instantiate_snapshot(
-            wasm_bytes.clone(),
-            &installed.manifest,
+        let plugin = instantiate_from_compiled(
+            component.clone(),
             sidecar.clone(),
             adapter.runtime_config(),
+            installed.manifest.id.clone(),
         )?;
         let adapter = adapter.clone();
         let activate = installed.enabled;
@@ -353,6 +360,7 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
     loaded.directory = installed.directory.clone();
     loaded.manifest = installed.manifest.clone();
     loaded.wasm_bytes = Some(wasm_bytes);
+    loaded.component = Some(component);
     loaded.ui_plugin = Some(Arc::new(Mutex::new(ui_plugin)));
     loaded.descriptor = Some(descriptor);
     loaded.generation = next_generation;
@@ -486,22 +494,23 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
 
     let load_result = read_wasm_bytes(&installed).and_then(|bytes| {
         let bytes = Arc::new(bytes);
-        instantiate_snapshot(
+        compile_plugin(
             bytes.clone(),
             &installed.manifest,
             sidecar.clone(),
             PluginRuntimeConfig::default(),
         )
-        .map(|(plugin, descriptor)| (bytes, plugin, descriptor))
+        .map(|(component, plugin, descriptor)| (bytes, component, plugin, descriptor))
     });
 
     match load_result {
-        Ok((bytes, plugin, descriptor)) => {
+        Ok((bytes, component, plugin, descriptor)) => {
             tracing::info!(plugin_id = %installed.manifest.id, "WASM 插件已预加载");
             LoadedPlugin {
                 directory: installed.directory,
                 manifest: installed.manifest,
                 wasm_bytes: Some(bytes),
+                component: Some(component),
                 ui_plugin: Some(Arc::new(Mutex::new(plugin))),
                 descriptor: Some(descriptor),
                 generation: 1,
@@ -517,6 +526,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
                 directory: installed.directory,
                 manifest: installed.manifest,
                 wasm_bytes: None,
+                component: None,
                 ui_plugin: None,
                 descriptor: None,
                 generation: 0,
@@ -531,29 +541,40 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
 
 fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
     let instantiate_start = std::time::Instant::now();
-    let (manifest, bytes, sidecar, enabled) = {
+    let (component, descriptor_id, sidecar, enabled) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
-            loaded.manifest.clone(),
-            loaded.wasm_bytes.clone()?,
+            loaded.component.clone()?,
+            loaded
+                .descriptor
+                .as_ref()
+                .map(|d| d.id.clone())
+                .unwrap_or_else(|| plugin_id.to_string()),
             loaded.sidecar.clone(),
             loaded.enabled,
         )
     };
-    let (plugin, _) =
-        match instantiate_snapshot(bytes, &manifest, sidecar, PluginRuntimeConfig::default()) {
-            Ok(value) => value,
-            Err(error) => {
-                set_last_error(plugin_id, error.to_string());
-                tracing::warn!(plugin_id, %error, "创建 Core WASM 插件实例失败");
-                return None;
-            }
-        };
-    let adapter = Arc::new(WasmPluginAdapter::new_with_enabled(
+    // 从缓存的 Component 创建独立实例（零编译、零 describe）。
+    let plugin = match instantiate_from_compiled(
+        component,
+        sidecar,
+        PluginRuntimeConfig::default(),
+        plugin_id.to_string(),
+    ) {
+        Ok(plugin) => plugin,
+        Err(error) => {
+            set_last_error(plugin_id, error.to_string());
+            tracing::warn!(plugin_id, %error, "创建 Core WASM 插件实例失败");
+            return None;
+        }
+    };
+    // 用缓存的 descriptor.id 构造 adapter，避免每个 Core 再调一次 describe。
+    let adapter = Arc::new(WasmPluginAdapter::new_with_id(
         plugin,
         PluginRuntimeConfig::default(),
         enabled,
+        descriptor_id,
     ));
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.get_mut(plugin_id)
@@ -584,47 +605,25 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
     Some(adapter)
 }
 
-fn instantiate_snapshot(
+/// 编译 WASM 字节 + 实例化 + describe（预加载/热加载时调一次）。
+///
+/// 返回编译后的 `Arc<Component>`（可缓存复用）、首个实例（供 UI 或校验用）和 Descriptor。
+/// 后续创建 Core 实例时调 [`instantiate_from_compiled`]，复用 Component，零编译、零 describe。
+fn compile_plugin(
     bytes: Arc<Vec<u8>>,
     manifest: &PluginManifest,
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     config: PluginRuntimeConfig,
-) -> Result<(WasmPlugin, Descriptor)> {
+) -> Result<(Arc<wasmtime::component::Component>, WasmPlugin, Descriptor)> {
     let plugin_id = manifest.id.clone();
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
         let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
 
-        let t = std::time::Instant::now();
-        let loader = WasmPluginLoader::with_sidecar(&config, sidecar)?;
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.loader.create",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
+        let component = Arc::new(compile_component(&bytes)?);
+        let mut plugin = instantiate_component(&component, &config, sidecar, &plugin_id)?;
 
-        let t = std::time::Instant::now();
-        let mut plugin = loader.load_bytes_for_plugin(&bytes, &config, &plugin_id)?;
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.component.load",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
-
-        let t = std::time::Instant::now();
         let descriptor = plugin.describe()?;
-        tracing::info!(
-            target: "perf_trace",
-            plugin_id,
-            stage = "wasm.describe",
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            "性能跟踪"
-        );
-
         if descriptor.id != plugin_id {
             bail!(
                 "插件清单 ID 与组件描述不一致: manifest={plugin_id}, component={}",
@@ -637,7 +636,20 @@ fn instantiate_snapshot(
                 descriptor.version
             );
         }
-        Ok((plugin, descriptor))
+        Ok((component, plugin, descriptor))
+    })
+}
+
+/// 从已编译 Component 创建独立实例（Core 创建时调，零编译、零 describe）。
+fn instantiate_from_compiled(
+    component: Arc<wasmtime::component::Component>,
+    sidecar: Option<Arc<ProcessSidecarConnection>>,
+    config: PluginRuntimeConfig,
+    plugin_id: String,
+) -> Result<WasmPlugin> {
+    crate::execution::run_outside_tokio(move || {
+        let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
+        instantiate_component(&component, &config, sidecar, &plugin_id)
     })
 }
 
@@ -923,7 +935,7 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
                 bail!("插件 sidecar 制品不存在: {}", binary.display());
             }
         }
-        instantiate_snapshot(
+        compile_plugin(
             wasm_bytes,
             &installed.manifest,
             sidecar,

@@ -73,6 +73,26 @@ impl WasmPluginAdapter {
         }
     }
 
+    /// 用外部传入的 plugin_id 构造 adapter，避免每个 Core 再调一次 describe。
+    ///
+    /// 用于 `load_core_plugin`：descriptor 已在预加载时缓存，无需重复调用 WASM。
+    pub(crate) fn new_with_id(
+        plugin: WasmPlugin,
+        config: PluginRuntimeConfig,
+        enabled: bool,
+        id: String,
+    ) -> Self {
+        let inner = Arc::new(Mutex::new(plugin));
+        Self {
+            inner: RwLock::new(inner),
+            id,
+            config,
+            feedback_tx: RwLock::new(None),
+            context: Mutex::new(ReloadContext::default()),
+            enabled: AtomicBool::new(enabled),
+        }
+    }
+
     pub(crate) fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
     }
