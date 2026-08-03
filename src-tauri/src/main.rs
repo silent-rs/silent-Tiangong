@@ -333,12 +333,8 @@ fn run_gui() {
                 });
             });
 
-            let scheduler_ctx = state.create_scheduler_context();
-            state.start_scheduled_message_consumer(app.handle().clone());
-            tauri::async_runtime::spawn(async move {
-                tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
-                silent::Scheduler::schedule(silent::SCHEDULER.clone()).await;
-            });
+            // 定时任务的 cron 调度已下沉到 scheduler sidecar 进程，本进程不再恢复
+            // cron job 或启动 silent scheduler 循环。
 
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_start_server_and_bots(app_handle));

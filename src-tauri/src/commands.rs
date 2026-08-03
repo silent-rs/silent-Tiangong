@@ -4072,6 +4072,9 @@ pub async fn probe_embedding_dimension(
 }
 
 // ── 定时任务管理 ──────────────────────────────────────────────
+//
+// 写操作（create/update/delete/trigger）经 scheduler sidecar，确保 cron 调度同步；
+// 读操作（list/list_runs）直调 JobStore（sidecar 与本进程共享同一存储目录）。
 
 #[tauri::command]
 pub async fn job_list() -> Result<Vec<serde_json::Value>, String> {
@@ -4092,25 +4095,20 @@ pub async fn job_create(
     payload: String,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    // 校验 cron 表达式：后端 cron 0.16 要求 6 字段（秒 分 时 日 月 周），在此兜底拦截，
-    // 即便前端校验被绕过（旧版前端、直接调 API）也不会落库无法解析的表达式。
-    validate_job_schedule(&schedule)?;
-    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
-    let now = chrono::Local::now().naive_local().to_string();
-    let job = tiangong_scheduler::model::Job {
-        id: scru128::new().to_string(),
-        name,
-        description,
-        trigger_type: tiangong_scheduler::model::TriggerType::Cron,
-        schedule: Some(schedule),
-        session_id,
-        payload,
-        enabled: enabled.unwrap_or(true),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    let job = store.insert_job(&job).map_err(|e| e.to_string())?;
-    Ok(serde_json::to_value(job).unwrap())
+    let payload = serde_json::json!({
+        "name": name,
+        "description": description,
+        "schedule": schedule,
+        "session_id": session_id,
+        "payload": payload,
+        "enabled": enabled.unwrap_or(true),
+    });
+    let response = invoke_scheduler_sidecar("create_job", payload)?;
+    let job = response
+        .get("job")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(job)
 }
 
 #[tauri::command]
@@ -4123,67 +4121,58 @@ pub async fn job_update(
     payload: Option<String>,
     enabled: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    // 更新 schedule 时同样校验（非空串才校验；None 表示不变，空串表示清空）。
-    if let Some(s) = schedule.as_ref().filter(|s| !s.is_empty()) {
-        validate_job_schedule(s)?;
-    }
-    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
-    let req = tiangong_scheduler::model::UpdateJobRequest {
-        name,
-        description,
-        schedule,
-        session_id,
-        payload,
-        enabled,
-    };
-    let updated = store.update_job(&id, &req).map_err(|e| e.to_string())?;
-    if !updated {
-        return Err(format!("定时任务 '{id}' 不存在"));
-    }
-    let job = store.get_job(&id).map_err(|e| e.to_string())?;
-    Ok(serde_json::to_value(job).unwrap())
-}
-
-/// 校验 cron 表达式是否合法（与 restore_cron_jobs 同一套解析）。
-///
-/// 失败返回带 6 字段示例提示的错误字符串（直接成为 Tauri command 的 Err，
-/// 前端 invoke 会 reject 并拿到此信息）。
-fn validate_job_schedule(expr: &str) -> Result<(), String> {
-    tiangong_scheduler::executor::validate_cron_schedule(expr).map_err(|e| {
-        format!("schedule 不是合法的 cron 表达式（需 6 字段，如 '0 0 9 * * *' 表示每天 9 点）：{e}")
-    })
+    let request = serde_json::json!({
+        "id": id,
+        "name": name,
+        "description": description,
+        "schedule": schedule,
+        "session_id": session_id,
+        "payload": payload,
+        "enabled": enabled,
+    });
+    let response = invoke_scheduler_sidecar("update_job", request).map_err(|e| {
+        if e.to_string().contains("不存在") {
+            format!("定时任务 '{id}' 不存在")
+        } else {
+            e.to_string()
+        }
+    })?;
+    let job = response
+        .get("job")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(job)
 }
 
 #[tauri::command]
 pub async fn job_delete(id: String) -> Result<(), String> {
-    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
-    let deleted = store.delete_job(&id).map_err(|e| e.to_string())?;
-    if !deleted {
-        return Err(format!("定时任务 '{id}' 不存在"));
-    }
+    invoke_scheduler_sidecar("delete_job", serde_json::json!({ "id": id })).map_err(|e| {
+        if e.to_string().contains("不存在") {
+            format!("定时任务 '{id}' 不存在")
+        } else {
+            e.to_string()
+        }
+    })?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn job_trigger(
-    id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<serde_json::Value, String> {
-    let store = tiangong_scheduler::store::JobStore::open().map_err(|e| e.to_string())?;
-    let job = store
-        .get_job(&id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("定时任务 '{id}' 不存在"))?;
-
-    let ctx = state.create_scheduler_context();
-    let job_clone = job.clone();
-    tokio::spawn(async move {
-        tiangong_scheduler::executor::execute_job(ctx, job_clone).await;
-    });
-
+pub async fn job_trigger(id: String) -> Result<serde_json::Value, String> {
+    let response = invoke_scheduler_sidecar("trigger_job", serde_json::json!({ "id": id }))
+        .map_err(|e| {
+            if e.to_string().contains("不存在") {
+                format!("定时任务 '{id}' 不存在")
+            } else {
+                e.to_string()
+            }
+        })?;
+    let job = response
+        .get("job")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     Ok(serde_json::json!({
-        "job_id": job.id,
-        "session_id": job.session_id,
+        "job_id": job.get("id").and_then(|v| v.as_str()).unwrap_or(&id),
+        "session_id": job.get("session_id").and_then(|v| v.as_str()),
         "status": "triggered",
     }))
 }
@@ -4201,6 +4190,20 @@ pub async fn job_list_runs(
         .into_iter()
         .map(|r| serde_json::to_value(r).unwrap())
         .collect())
+}
+
+/// 调用 scheduler sidecar 的指定操作（同步）。
+fn invoke_scheduler_sidecar(
+    operation: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        &tiangong_config::io::storage_root(),
+        "scheduler",
+        operation,
+        payload,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ── Webhook 管理 ─────────────────────────────────────────────

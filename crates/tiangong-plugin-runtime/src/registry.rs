@@ -20,6 +20,22 @@ static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
     OnceLock::new();
 static LOAD_OPERATION: Mutex<()> = Mutex::new(());
+
+/// 全局 server 连接信息（入口层启动时设置一次，供需要回调 host 的 sidecar 使用）。
+static SERVER_ENDPOINT: OnceLock<(String, Option<String>)> = OnceLock::new();
+
+/// 设置本机 server 的连接信息。入口层（Server/Desktop）启动时调用一次。
+///
+/// 之后启动的所有插件 sidecar 都会通过环境变量收到这两个值，scheduler 等
+/// 需要回调 host 的 sidecar 据此向本机 server 发 HTTP 请求。
+pub fn set_server_endpoint(url: String, token: Option<String>) {
+    let _ = SERVER_ENDPOINT.set((url, token));
+}
+
+/// 取当前已设置的 server 连接信息（未设置返回 None）。
+fn current_server_endpoint() -> Option<(String, Option<String>)> {
+    SERVER_ENDPOINT.get().cloned()
+}
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";
 const PRESERVED_ENTRIES: [&str; 3] = ["runtime", "logs", "data"];
@@ -1275,6 +1291,9 @@ fn sidecar_connection(
     let endpoint = installed.directory.join("runtime").join("endpoint.json");
     let log = installed.directory.join("logs").join("sidecar.log");
     let data_dir = installed.directory.join("data");
+    let (server_url, server_token) = current_server_endpoint()
+        .map(|(url, token)| (Some(url), token))
+        .unwrap_or((None, None));
     let config = SidecarConfig::new(
         &installed.manifest.id,
         &installed.manifest.version,
@@ -1288,7 +1307,8 @@ fn sidecar_connection(
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),
         Duration::from_millis(sidecar.request_timeout_ms),
-    );
+    )
+    .with_server_endpoint(server_url, server_token);
 
     let mut connections = sidecar_connections()
         .lock()

@@ -32,7 +32,9 @@ members = [
     "crates/plugins/tiangong-plugin-memory/protocol",
     "crates/plugins/tiangong-plugin-memory/wasm",
     "crates/plugins/tiangong-plugin-memory/sidecar",
-    "crates/plugins/tiangong-plugin-scheduler",
+    "crates/plugins/tiangong-plugin-scheduler/protocol",
+    "crates/plugins/tiangong-plugin-scheduler/wasm",
+    "crates/plugins/tiangong-plugin-scheduler/sidecar",
     "crates/plugins/tiangong-plugin-task",
     "crates/plugins/tiangong-plugin-terminal",
     "crates/plugins/tiangong-plugin-analyze-attachment",
@@ -77,7 +79,9 @@ tiangong-plugin-generate-image = { path = "crates/plugins/tiangong-plugin-genera
 tiangong-plugin-generate-video = { path = "crates/plugins/tiangong-plugin-generate-video" }
 tiangong-plugin-text-to-speech = { path = "crates/plugins/tiangong-plugin-text-to-speech" }
 tiangong-plugin-speech-to-text = { path = "crates/plugins/tiangong-plugin-speech-to-text" }
-tiangong-plugin-scheduler = { path = "crates/plugins/tiangong-plugin-scheduler" }
+tiangong-plugin-scheduler-protocol = { path = "crates/plugins/tiangong-plugin-scheduler/protocol" }
+tiangong-plugin-scheduler-wasm = { path = "crates/plugins/tiangong-plugin-scheduler/wasm" }
+tiangong-plugin-scheduler-sidecar = { path = "crates/plugins/tiangong-plugin-scheduler/sidecar" }
 tiangong-plugin-task = { path = "crates/plugins/tiangong-plugin-task" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-plugin-analyze-attachment = { path = "crates/plugins/tiangong-plugin-analyze-attachment" }

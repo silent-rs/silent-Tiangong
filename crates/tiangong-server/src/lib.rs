@@ -3,7 +3,6 @@ pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod remote;
-pub mod scheduler;
 pub mod webhook;
 
 use std::net::SocketAddr;
@@ -12,7 +11,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use silent::prelude::*;
 use tiangong_core::permission::TrustMode;
-use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
 
 use self::api::{ServerAppContext, SharedState, build_routes};
@@ -22,6 +20,12 @@ use self::remote::event::EventBus;
 /// 启动 Server 模式（前台运行，阻塞）
 pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    // 注入 server 连接信息给所有插件 sidecar（定时任务等需经 HTTP 回调本机 server）。
+    tiangong_plugin_runtime::registry::set_server_endpoint(
+        format!("http://{host}:{port}"),
+        token.clone(),
+    );
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -56,17 +60,9 @@ pub fn run_server(host: &str, port: u16, token: Option<String>) -> Result<()> {
 
     tracing::info!("Server 启动：http://{addr}");
 
-    // 自建 runtime 并真正用 block_on 驱动：恢复定时任务与 HTTP 服务跑在同一个
-    // runtime 上。若只用 runtime.enter() 而不 block_on，spawn 的 future 永远不会被
-    // poll（恢复 cron job 不执行，SCHEDULER 为空，定时任务永不触发）；而
-    // Server::run 会另行创建独立 runtime 驱动 HTTP，两者互不相干。
+    // 自建 runtime 并真正用 block_on 驱动：HTTP 服务跑在这个 runtime 上。
+    // 定时任务的 cron 调度已下沉到 scheduler sidecar，本进程不再恢复 cron job。
     runtime.block_on(async move {
-        // 先恢复已启用的 cron job 到全局 SCHEDULER，再启动 HTTP。silent 的
-        // Server::serve 内部会调用 ensure_scheduler_running() 拉起
-        // Scheduler::schedule 循环，从而真正按 cron 触发已注册的任务。
-        let scheduler_ctx = app.scheduler_context.clone();
-        tiangong_scheduler::executor::restore_cron_jobs(scheduler_ctx).await;
-
         Server::new().bind(addr).serve(route).await;
     });
 
@@ -106,13 +102,12 @@ impl EmbeddedServerHandle {
 
 /// 启动嵌入式 Server（非阻塞，在独立线程中运行）
 ///
-/// 创建独立的 tokio runtime 运行 HTTP，但 Core、调度上下文和 MCP 管理实例均由
-/// Desktop 注入。HTTP runtime 不拥有会话写入器，也不会恢复或启动全局调度器。
+/// 创建独立的 tokio runtime 运行 HTTP，但 Core 和 MCP 管理实例均由 Desktop 注入。
+/// HTTP runtime 不拥有会话写入器；定时任务的 cron 调度由 scheduler sidecar 负责。
 pub struct EmbeddedServerDependencies {
     pub state: SharedState,
     pub config: tiangong_core::core_config::CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
-    pub scheduler_context: Arc<dyn SchedulerContext>,
     pub event_bus: Arc<EventBus>,
 }
 
@@ -123,12 +118,16 @@ pub fn run_embedded(
     dependencies: EmbeddedServerDependencies,
 ) -> Result<EmbeddedServerHandle> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
+    // 注入 server 连接信息给所有插件 sidecar（定时任务等需经 HTTP 回调本机 server）。
+    tiangong_plugin_runtime::registry::set_server_endpoint(
+        format!("http://{host}:{port}"),
+        token.clone(),
+    );
 
     let EmbeddedServerDependencies {
         state,
         config,
         core_backend,
-        scheduler_context,
         event_bus,
     } = dependencies;
     let app = Arc::new(ServerAppContext::with_backend(
@@ -136,7 +135,6 @@ pub fn run_embedded(
         config,
         event_bus.clone(),
         core_backend,
-        scheduler_context,
     ));
 
     tracing::info!("构建嵌入式 Server 路由...");
@@ -156,7 +154,6 @@ pub fn run_embedded(
                 .build()
                 .expect("failed to build embedded server runtime");
             rt.block_on(async move {
-                // Desktop 已经恢复并启动全局调度器；内嵌 HTTP 只复用注入的执行上下文。
                 let server = Server::new()
                     .bind(addr)
                     .with_shutdown(std::time::Duration::from_secs(5));
