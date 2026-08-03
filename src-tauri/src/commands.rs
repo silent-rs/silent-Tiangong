@@ -2025,10 +2025,11 @@ pub async fn stop_audio() -> Result<(), String> {
 /// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）
 #[tauri::command]
 pub async fn get_mention_candidates(
-    state: State<'_, TiangongApp>,
+    _state: State<'_, TiangongApp>,
 ) -> Result<Vec<MentionCandidate>, String> {
     // Skill + MCP servers + active tools 均由各自 plugin 自管，先读取快照。
-    let skills = state.skill_plugin.installed_skills();
+    let storage_root = tiangong_config::io::storage_root();
+    let skills = list_enabled_skills_for_mention(&storage_root);
     let mcp_servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
         serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
             mcp_invoke("mcp.server.list", serde_json::json!({}))?,
@@ -3397,158 +3398,30 @@ pub async fn bot_upgrade(
 
 // ============================================================================
 // Skill 管理
+//
+// skill 列表/详情/启停/删除/env 编辑等管理操作全部经插件设置页（WASM UI）
+// 走 handle_view_message 通道，不再暴露 Tauri 命令。@提及补全仍需列出已启用
+// skill，经 sidecar 通道查询。
 // ============================================================================
 
-/// 获取已安装的 Skill 列表
-#[tauri::command]
-pub async fn get_skills(state: State<'_, TiangongApp>) -> Result<Vec<SkillView>, String> {
-    Ok(state
-        .skill_plugin
-        .installed_skills()
-        .iter()
-        .map(SkillView::from_core)
-        .collect())
-}
-
-/// 刷新 Skill 注册表（重扫 skills/<id>/）
-#[tauri::command]
-pub async fn refresh_skills(state: State<'_, TiangongApp>) -> Result<String, String> {
-    let message = state
-        .skill_plugin
-        .refresh_skills()
-        .map_err(|e| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(message)
-}
-
-/// 获取 Skill 完整详情（按需读取 SKILL.md）
-#[tauri::command]
-pub async fn get_skill_detail(
-    id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<SkillDetailView, String> {
-    let detail = state
-        .skill_plugin
-        .get_skill_detail(&id)
-        .map_err(|e| e.to_string())?;
-    Ok(SkillDetailView::from_core(&detail))
-}
-
-/// 移除 Skill
-#[tauri::command]
-pub async fn remove_skill(id: String, state: State<'_, TiangongApp>) -> Result<String, String> {
-    let outcome = state
-        .skill_plugin
-        .remove_skill(&id)
-        .map_err(|e| e.to_string())?;
-    // 清理 plugin 报告的孤儿托管 MCP server（经 sidecar 通道操作 MCP 插件）
-    if !outcome.orphan_mcp_servers.is_empty() {
-        use tiangong_plugin_mcp_protocol::management::RemoveServerRequest;
-        for orphan in &outcome.orphan_mcp_servers {
-            let _ = mcp_invoke(
-                "mcp.server.remove",
-                serde_json::to_value(RemoveServerRequest {
-                    name: orphan.clone(),
-                })
-                .unwrap_or_default(),
-            );
-        }
-    }
-    state.sync_core_config_from_state().await?;
-    Ok(outcome.message)
-}
-
-/// 获取 Skill 的环境变量（合并 skill.toml 声明的 requires.env + .env.local 已有值）
-#[tauri::command]
-pub async fn get_skill_env(
-    id: String,
-    state: State<'_, TiangongApp>,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let installed = state.skill_plugin.installed_skills();
-    let skill = installed
-        .iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| format!("未找到 skill：{id}"))?;
-    let skill_dir = std::path::Path::new(&skill.source.value);
-    let mut env = std::collections::HashMap::new();
-
-    // 1. 从 skill.toml 的 requires.env 读取声明的 key（值为空）
-    let toml_path = skill_dir.join("skill.toml");
-    if let Ok(raw) = std::fs::read_to_string(&toml_path) {
-        #[derive(serde::Deserialize, Default)]
-        struct T {
-            #[serde(default)]
-            requires: R,
-        }
-        #[derive(serde::Deserialize, Default)]
-        struct R {
-            #[serde(default)]
-            env: Vec<String>,
-        }
-        if let Ok(parsed) = toml::from_str::<T>(&raw) {
-            for key in parsed.requires.env {
-                env.insert(key, String::new());
-            }
-        }
-    }
-
-    // 2. 从 .env.local 读取已有值（覆盖空值）
-    let env_path = skill_dir.join(".env.local");
-    if let Ok(content) = std::fs::read_to_string(&env_path) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                env.insert(k.trim().to_string(), v.trim().to_string());
-            }
-        }
-    }
-
-    Ok(env)
-}
-
-/// 设置 Skill 的环境变量
-#[tauri::command]
-pub async fn set_skill_env(
-    id: String,
-    env: std::collections::HashMap<String, String>,
-    state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    let installed = state.skill_plugin.installed_skills();
-    let skill = installed
-        .iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| format!("未找到 skill：{id}"))?;
-    let env_path = std::path::Path::new(&skill.source.value).join(".env.local");
-    let lines: Vec<String> = env
-        .iter()
-        .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
-        .map(|(k, v)| format!("{}={}", k.trim(), v.trim()))
-        .collect();
-    if lines.is_empty() {
-        let _ = std::fs::remove_file(&env_path);
-    } else {
-        std::fs::write(&env_path, format!("{}\n", lines.join("\n")))
-            .map_err(|e| format!("写入 .env.local 失败：{e}"))?;
-    }
-    Ok(())
-}
-
-/// 设置 Skill 启用状态
-#[tauri::command]
-pub async fn set_skill_enabled(
-    id: String,
-    enabled: bool,
-    state: State<'_, TiangongApp>,
-) -> Result<String, String> {
-    let message = state
-        .skill_plugin
-        .set_skill_enabled(&id, enabled)
-        .map_err(|e| e.to_string())?;
-    state.sync_core_config_from_state().await?;
-    Ok(message)
+/// 列出已启用的 Skill（供 @提及补全用，经 sidecar 通道查询）。
+pub fn list_enabled_skills_for_mention(
+    storage_root: &std::path::Path,
+) -> Vec<tiangong_plugin_skill_protocol::InstalledSkillConfig> {
+    let payload =
+        serde_json::to_value(tiangong_plugin_skill_protocol::Empty {}).unwrap_or_default();
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        storage_root,
+        "skill",
+        tiangong_plugin_skill_protocol::LIST_SKILLS_OPERATION,
+        payload,
+    )
+    .ok()
+    .and_then(|v| {
+        serde_json::from_value::<tiangong_plugin_skill_protocol::ListSkillsResponse>(v).ok()
+    })
+    .map(|r| r.skills)
+    .unwrap_or_default()
 }
 
 // ============================================================================

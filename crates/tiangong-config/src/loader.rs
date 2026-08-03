@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use tiangong_llm::models_config::ModelsConfig;
-use tiangong_plugin_skill::SkillsConfig;
+use tiangong_plugin_skill_protocol::SkillsConfig;
 use tiangong_types::TrustMode;
 
 use crate::config::{ConnectorConfig, TiangongConfig};

@@ -326,25 +326,6 @@ export interface UpdateMcpServerInput {
   env?: Record<string, string>;
 }
 
-export interface Skill {
-  id: string;
-  name: string;
-  version: string;
-  description?: string;
-  enabled: boolean;
-  source_type: string;
-}
-
-export interface SkillDetail {
-  id: string;
-  name: string;
-  version: string;
-  description?: string;
-  enabled: boolean;
-  entry: string;
-  readme: string;
-}
-
 export interface McpHealthStatus {
   name: string;
   healthy: boolean;
@@ -807,30 +788,6 @@ export const api = {
 
   botUpgrade: (botId: string): Promise<string> =>
     invoke('bot_upgrade', { botId }),
-
-  // ----------------------------------------------------------------
-  // Skill 管理
-  // ----------------------------------------------------------------
-  getSkills: (): Promise<Skill[]> =>
-    invoke('get_skills'),
-
-  refreshSkills: (): Promise<string> =>
-    invoke('refresh_skills'),
-
-  getSkillDetail: (id: string): Promise<SkillDetail> =>
-    invoke('get_skill_detail', { id }),
-
-  removeSkill: (id: string): Promise<string> =>
-    invoke('remove_skill', { id }),
-
-  getSkillEnv: (id: string): Promise<Record<string, string>> =>
-    invoke('get_skill_env', { id }),
-
-  setSkillEnv: (id: string, env: Record<string, string>): Promise<void> =>
-    invoke('set_skill_env', { id, env }),
-
-  setSkillEnabled: (id: string, enabled: boolean): Promise<string> =>
-    invoke('set_skill_enabled', { id, enabled }),
 
   // ----------------------------------------------------------------
   // Server 管理

@@ -279,7 +279,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 
 | 顺序 | 插件 | 卡点 | 前置 |
 |---|---|---|---|
-| 8 | **skill** #332 | 文件读写 + 环境变量 + 管理 API 被直调 + exec_env 回传 | 配小 sidecar，管理接口重新经插件页面暴露（不依赖模型代理） |
+| 8 | **skill** #332 ✅ | 文件读写 + 环境变量 + 管理 API 被直调 + exec_env 回传 | 配小 sidecar，管理接口重新经插件页面暴露（不依赖模型代理）。已完成 WASM 化（wasm + sidecar + protocol 三子 crate），管理操作经插件设置页，exec_env 暂置空 |
 | 9 | **analyze-attachment** #333 | 多模态模型调用 | 等 Host 模型代理 |
 | 10 | **generate-image** #334 | 模型 + 图片归档落盘 | 等 Host 模型代理 + 媒体归档接口 |
 | 11 | **text-to-speech** #336 | 模型 + 音频写入 | 等 Host 模型代理 + 媒体写入接口 |

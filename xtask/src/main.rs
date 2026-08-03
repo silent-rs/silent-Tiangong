@@ -83,12 +83,27 @@ const SCHEDULER: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-scheduler/protocol/Cargo.toml",
 };
 
+const SKILL: PluginConfig = PluginConfig {
+    id: "skill",
+    name: "Skill",
+    description: "Skill 注册表管理、详情查询与 prompt 段落注入",
+    protocol_crate: "tiangong-plugin-skill-protocol",
+    wasm_crate: "tiangong-plugin-skill-wasm",
+    wasm_artifact: "tiangong_plugin_skill_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-skill-sidecar",
+    sidecar_artifact: "tiangong-skill-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-skill",
+    plugin_manifest: "crates/plugins/tiangong-plugin-skill/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-skill/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
         "mcp" => Ok(&MCP),
         "index" => Ok(&INDEX),
         "scheduler" => Ok(&SCHEDULER),
+        "skill" => Ok(&SKILL),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

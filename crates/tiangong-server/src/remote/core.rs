@@ -382,9 +382,7 @@ impl ServerCoreManager {
             if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                 plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
             }
-            // Skill 详情查询（get_skill_detail）：无条件注册，插件内部按是否存在
-            // 已启用 skill 决定是否暴露工具与注入 prompt 段落。
-            plugins.extend(tiangong_plugin_skill::default_plugins());
+            // skill 等 WASM 插件由 load_installed_plugins 自动加载。
             // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
             // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
             //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
@@ -418,7 +416,6 @@ impl ServerCoreManager {
                         child_plugins
                             .push(tiangong_plugin_analyze_attachment::build_plugin(client));
                     }
-                    child_plugins.extend(tiangong_plugin_skill::default_plugins());
                     child_plugins
                 }
             });

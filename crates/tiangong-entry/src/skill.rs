@@ -1,21 +1,49 @@
-use tiangong_plugin_skill::{InstalledSkillConfig, SkillPlugin, init_tiangong_skill_scaffold};
+use tiangong_plugin_skill_protocol::{
+    Empty, GET_SKILL_DETAIL_OPERATION, GetSkillDetailRequest, INIT_SKILL_OPERATION,
+    InitSkillRequest, InstalledSkillConfig, LIST_SKILLS_OPERATION, ListSkillsResponse,
+    MessageResponse, REFRESH_SKILLS_OPERATION, REMOVE_SKILL_OPERATION, RemoveSkillRequest,
+    RemoveSkillResponse, SET_SKILL_ENABLED_OPERATION, SetSkillEnabledRequest, SkillDetailResponse,
+};
 
 use crate::args::{SkillArgs, SkillSubcommand};
 
 pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
-    let skill_plugin = SkillPlugin::new();
+    let storage_root = tiangong_config::io::storage_root();
     match args.command {
         SkillSubcommand::List => {
-            println!("{}", summarize_skills(&skill_plugin.installed_skills()));
+            let skills = list_skills(&storage_root);
+            println!("{}", summarize_skills(&skills));
         }
         SkillSubcommand::Show { id } => {
             if let Some(id) = id {
-                println!(
-                    "{}",
-                    describe_skills(&skill_plugin.installed_skills(), Some(&id))
-                );
+                // 详情需读 SKILL.md，经 get_skill_detail 操作。
+                match invoke_skill(
+                    &storage_root,
+                    GET_SKILL_DETAIL_OPERATION,
+                    serde_json::to_value(GetSkillDetailRequest { id: id.clone() })
+                        .unwrap_or_default(),
+                ) {
+                    Ok(resp) => {
+                        let detail: SkillDetailResponse =
+                            serde_json::from_value(resp).unwrap_or_default();
+                        println!(
+                            "id: {}\nname: {}\nversion: {}\nenabled: {}\ndescription: {}\nentry: {}\n\n{}",
+                            detail.detail.id,
+                            detail.detail.name,
+                            detail.detail.version,
+                            detail.detail.enabled,
+                            detail.detail.description,
+                            detail.detail.entry,
+                            detail.detail.readme
+                        );
+                    }
+                    Err(err) => {
+                        println!("读取 skill 详情失败：{err}");
+                    }
+                }
             } else {
-                println!("{}", summarize_skills(&skill_plugin.installed_skills()));
+                let skills = list_skills(&storage_root);
+                println!("{}", summarize_skills(&skills));
             }
         }
         SkillSubcommand::Init {
@@ -24,21 +52,31 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
             id,
             force,
         } => {
-            let result = init_tiangong_skill_scaffold(
-                std::path::Path::new(&path),
-                name.as_deref(),
-                id.as_deref(),
-                force,
+            let resp = invoke_skill(
+                &storage_root,
+                INIT_SKILL_OPERATION,
+                serde_json::to_value(InitSkillRequest {
+                    path,
+                    name,
+                    id,
+                    force,
+                })
+                .unwrap_or_default(),
             )?;
+            let result: tiangong_plugin_skill_protocol::InitSkillResult =
+                serde_json::from_value(resp)?;
             println!(
                 "skill 初始化完成：id={} name={} path={}",
-                result.skill_id,
-                result.skill_name,
-                result.dir.display()
+                result.skill_id, result.skill_name, result.dir
             );
         }
         SkillSubcommand::Remove { id } => {
-            let outcome = skill_plugin.remove_skill(&id)?;
+            let resp = invoke_skill(
+                &storage_root,
+                REMOVE_SKILL_OPERATION,
+                serde_json::to_value(RemoveSkillRequest { id }).unwrap_or_default(),
+            )?;
+            let outcome: RemoveSkillResponse = serde_json::from_value(resp)?;
             // 清理孤儿托管 MCP server（经 sidecar 通道操作 MCP 插件）
             if !outcome.orphan_mcp_servers.is_empty() {
                 use tiangong_plugin_mcp_protocol::management::{
@@ -46,7 +84,7 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
                 };
                 for orphan in &outcome.orphan_mcp_servers {
                     let _ = tiangong_plugin_runtime::registry::invoke_sidecar(
-                        &tiangong_config::io::storage_root(),
+                        &storage_root,
                         "mcp",
                         SERVER_REMOVE_OPERATION,
                         serde_json::to_value(RemoveServerRequest {
@@ -59,23 +97,61 @@ pub(crate) fn run_skill_command(args: SkillArgs) -> anyhow::Result<()> {
             println!("{}", outcome.message);
         }
         SkillSubcommand::Enable { id } => {
-            let msg = skill_plugin.set_skill_enabled(&id, true)?;
-            println!("{msg}");
+            let resp = invoke_skill(
+                &storage_root,
+                SET_SKILL_ENABLED_OPERATION,
+                serde_json::to_value(SetSkillEnabledRequest { id, enabled: true })
+                    .unwrap_or_default(),
+            )?;
+            let msg: MessageResponse = serde_json::from_value(resp).unwrap_or_default();
+            println!("{}", msg.message);
         }
         SkillSubcommand::Disable { id } => {
-            let msg = skill_plugin.set_skill_enabled(&id, false)?;
-            println!("{msg}");
+            let resp = invoke_skill(
+                &storage_root,
+                SET_SKILL_ENABLED_OPERATION,
+                serde_json::to_value(SetSkillEnabledRequest { id, enabled: false })
+                    .unwrap_or_default(),
+            )?;
+            let msg: MessageResponse = serde_json::from_value(resp).unwrap_or_default();
+            println!("{}", msg.message);
         }
         SkillSubcommand::Refresh => {
-            let msg = skill_plugin.refresh_skills()?;
-            println!("{msg}");
+            let resp = invoke_skill(
+                &storage_root,
+                REFRESH_SKILLS_OPERATION,
+                serde_json::to_value(Empty {}).unwrap_or_default(),
+            )?;
+            let msg: MessageResponse = serde_json::from_value(resp).unwrap_or_default();
+            println!("{}", msg.message);
         }
         SkillSubcommand::Validate => {
-            // validate_agent_config 已删除：历史上始终返回 Ok，直接提示通过即可。
             println!("配置校验通过");
         }
     }
     Ok(())
+}
+
+/// 经 sidecar 列出全部已安装 skill。
+fn list_skills(storage_root: &std::path::Path) -> Vec<InstalledSkillConfig> {
+    invoke_skill(
+        storage_root,
+        LIST_SKILLS_OPERATION,
+        serde_json::to_value(Empty {}).unwrap_or_default(),
+    )
+    .ok()
+    .and_then(|v| serde_json::from_value::<ListSkillsResponse>(v).ok())
+    .map(|r| r.skills)
+    .unwrap_or_default()
+}
+
+/// 经 sidecar 调用 skill 操作。
+fn invoke_skill(
+    storage_root: &std::path::Path,
+    operation: &str,
+    payload: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(storage_root, "skill", operation, payload)
 }
 
 fn summarize_skills(skills: &[InstalledSkillConfig]) -> String {
@@ -91,30 +167,4 @@ fn summarize_skills(skills: &[InstalledSkillConfig]) -> String {
         ));
     }
     lines.join("\n")
-}
-
-fn describe_skills(skills: &[InstalledSkillConfig], id_filter: Option<&str>) -> String {
-    let filtered: Vec<&InstalledSkillConfig> = skills
-        .iter()
-        .filter(|s| id_filter.is_some_and(|id| s.id == id))
-        .collect();
-    if filtered.is_empty() {
-        return format!("未找到匹配的 skill：{}", id_filter.unwrap_or(""));
-    }
-    filtered
-        .iter()
-        .map(|skill| {
-            format!(
-                "id: {}\nname: {}\nversion: {}\nenabled: {}\ndescription: {}\nentry: {}\nsource: {}",
-                skill.id,
-                skill.name,
-                skill.version,
-                skill.enabled,
-                skill.description,
-                skill.entry,
-                skill.source.value
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n---\n")
 }
