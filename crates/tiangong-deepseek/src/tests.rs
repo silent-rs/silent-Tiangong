@@ -389,10 +389,13 @@ fn stream_chunk_emits_multiple_events() {
 }
 
 #[test]
-fn stream_empty_delta_is_error() {
-    let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{}}]}"#;
-    let events = parse_stream_chunk(data);
-    assert!(events.iter().all(Result::is_err));
+fn stream_empty_delta_is_skipped_not_error() {
+    // OpenAI 兼容协议：role 首片和 finish_reason 结束片 delta 全空，是正常 chunk。
+    let role_chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
+    assert!(parse_stream_chunk(role_chunk).is_empty());
+
+    let finish_chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
+    assert!(parse_stream_chunk(finish_chunk).is_empty());
 }
 
 #[test]

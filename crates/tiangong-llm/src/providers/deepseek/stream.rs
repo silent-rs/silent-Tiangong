@@ -112,25 +112,28 @@ fn resolve_buffered_tool_calls(
     if let Some(calls) = dsml::parse_dsml_tool_calls(state.text.trim()) {
         tracing::info!(count = calls.len(), "工具调用文本协议兜底解析出工具调用");
         state.buffering = false;
-        return calls
-            .into_iter()
-            .enumerate()
-            .flat_map(|(idx, call)| {
-                let call_id = format!("textcall_{idx}");
-                [
-                    Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
-                        id: call_id.clone(),
-                        name: call.name,
-                        arguments: serde_json::json!({}),
-                    })),
-                    Ok(ProviderStreamEvent::ToolCallDelta {
-                        call_id: call_id.clone(),
-                        partial_json: call.arguments,
-                    }),
-                    Ok(ProviderStreamEvent::ToolCallEnd { call_id }),
-                ]
-            })
-            .collect();
+        // 先补发标记外的说明文字（如"我来读取文件"），与非流式行为一致。
+        let leftover = dsml::strip_tool_call_block(state.text.trim());
+        let mut events = Vec::new();
+        if !leftover.is_empty() {
+            events.push(Ok(ProviderStreamEvent::TextDelta(leftover)));
+        }
+        events.extend(calls.into_iter().enumerate().flat_map(|(idx, call)| {
+            let call_id = format!("textcall_{idx}");
+            [
+                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: call_id.clone(),
+                    name: call.name,
+                    arguments: serde_json::json!({}),
+                })),
+                Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id: call_id.clone(),
+                    partial_json: call.arguments,
+                }),
+                Ok(ProviderStreamEvent::ToolCallEnd { call_id }),
+            ]
+        }));
+        return events;
     }
     // 误判：把缓冲文本原样补发，不吞内容。
     tracing::warn!(
@@ -198,6 +201,26 @@ mod tests {
         assert!(
             events.iter().any(|e| e.contains("ToolCallStart")),
             "应补发工具调用：{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dsml_preserves_explanatory_text() {
+        // 工具调用前的说明文字应在兜底解析后作为 TextDelta 补发，不丢失。
+        let text = format!(
+            "我来读取配置文件。\n{dsml}",
+            dsml = "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"read_file\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">/tmp/x</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+        );
+        let events = collect_events(vec![DsEvent::TextDelta(text), DsEvent::Done]).await;
+        assert!(
+            events.iter().any(|e| e.contains("我来读取配置文件")),
+            "说明文字应被补发：{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("ToolCallStart") && e.contains("read_file")),
+            "应解析出工具调用：{events:?}"
         );
     }
 

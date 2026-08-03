@@ -72,8 +72,9 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
     }
 
     for choice in chunk.choices {
+        // OpenAI 兼容协议会发送只含 role 的首片（{"role":"assistant"}）和只含
+        // finish_reason 的结束片（delta 全空）。这些是正常 chunk，不应报错。
         let delta = choice.delta;
-
         if let Some(reasoning) = delta.reasoning_content.filter(|s| !s.is_empty()) {
             events.push(Ok(StreamEvent::ReasoningDelta(reasoning)));
         }
@@ -103,12 +104,7 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
         }
     }
 
-    // 兜底：chunk 完全无法产出任何事件时返回错误，保持与旧行为一致以便上层感知异常。
-    if events.is_empty() {
-        vec![Err(DeepSeekError::Stream(format!(
-            "failed to parse stream chunk: {data}"
-        )))]
-    } else {
-        events
-    }
+    // 空事件是正常的（role 首片、finish_reason 结束片、空 delta），
+    // 返回空 Vec 静默跳过；只有 JSON 反序列化失败才是真正的错误。
+    events
 }
