@@ -36,9 +36,15 @@ pub struct RebuildWorkspaceIndexRequest {
     pub root: String,
 }
 
-/// 重建返回扫描条目数。
+/// 重建响应。
+///
+/// `queued=true` 表示重建已排队后台执行（异步模式），`count` 为 0；
+/// `queued=false` 表示重建已完成（同步模式），`count` 为扫描条目数。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RebuildWorkspaceIndexResponse {
+    #[serde(default)]
+    pub queued: bool,
+    #[serde(default)]
     pub count: usize,
 }
 

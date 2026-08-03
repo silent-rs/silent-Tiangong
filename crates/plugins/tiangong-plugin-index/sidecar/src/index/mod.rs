@@ -176,12 +176,30 @@ impl IndexManager {
         Ok(index)
     }
 
+    #[allow(dead_code)]
     pub fn full_scan(&self, root: &Path) -> Result<usize> {
         let index = self.get_or_create_workspace_index(root)?;
         let mut guard = index
             .lock()
             .map_err(|e| anyhow::anyhow!("Workspace 索引锁获取失败: {}", e))?;
         guard.full_scan()
+    }
+
+    /// 全量重建索引（双索引切换）。
+    ///
+    /// 与 [`full_scan`] 不同，本方法**不持有旧索引的锁**：构建在临时目录进行，
+    /// 期间搜索继续命中旧索引（零阻塞）；完成后用指向新目录的实例替换 DashMap 中的
+    /// 旧对象，旧实例在所有并发搜索结束后自动 drop。
+    pub fn rebuild(&self, root: &Path) -> Result<usize> {
+        let count = WorkspaceIndex::build_to_staging(root, &self.base_dir)?;
+        // 重新打开指向新目录的实例。
+        let fresh = Arc::new(std::sync::Mutex::new(WorkspaceIndex::open_or_create(
+            root,
+            &self.base_dir,
+        )?));
+        let key = workspace_key(root);
+        self.workspaces.insert(key, fresh);
+        Ok(count)
     }
 
     pub fn incremental_scan(&self, root: &Path) -> Result<usize> {

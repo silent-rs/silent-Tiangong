@@ -410,6 +410,7 @@ impl WorkspaceIndex {
         })
     }
 
+    #[allow(dead_code)]
     pub fn full_scan(&mut self) -> Result<usize> {
         let mut writer = self.create_writer("full_scan")?;
         writer
@@ -423,6 +424,63 @@ impl WorkspaceIndex {
         self.refresh_entry_count()?;
         self.write_meta()?;
         Ok(self.entry_count)
+    }
+
+    /// 构建全新索引到临时目录，完成后原子替换正式目录。
+    ///
+    /// 与 [`full_scan`] 的区别：构建期间不影响正在服务的旧索引（旧 `WorkspaceIndex`
+    /// 实例仍持有旧 `tantivy::Index`，并发搜索继续命中旧数据）。完成后删除旧目录、
+    /// rename 临时目录为正式目录，调用方再重新 `open_or_create` 拿到指向新目录的实例。
+    ///
+    /// 返回新建索引的文档数。
+    pub fn build_to_staging(root: &Path, base_dir: &Path) -> Result<usize> {
+        let index_dir = Self::index_dir(root, base_dir);
+        let build_dir = Self::build_dir(root, base_dir);
+        let (schema, fields) = workspace_schema();
+
+        // 清理可能残留的上次失败构建目录。
+        if build_dir.exists() {
+            let _ = fs::remove_dir_all(&build_dir);
+        }
+        fs::create_dir_all(&build_dir).with_context(|| {
+            workspace_index_context(root, base_dir, "build_to_staging", "创建构建目录失败")
+        })?;
+
+        // 在临时目录创建全新索引并全量扫描。
+        let index = Index::create_in_dir(&build_dir, schema.clone()).with_context(|| {
+            workspace_index_context(root, base_dir, "build_to_staging", "创建临时索引失败")
+        })?;
+        let mut staging = Self {
+            index,
+            fields,
+            schema,
+            root: root.to_path_buf(),
+            base_dir: base_dir.to_path_buf(),
+            entry_count: 0,
+        };
+        let mut writer = staging.create_writer("build_to_staging")?;
+        staging.scan_dir(&mut writer, &staging.root.clone(), 0)?;
+        writer.commit().with_context(|| {
+            workspace_index_context(root, base_dir, "build_to_staging", "提交临时索引失败")
+        })?;
+        staging.refresh_entry_count()?;
+        staging.write_meta()?;
+        let count = staging.entry_count;
+
+        // writer 已 drop（释放 tantivy 写锁），安全替换目录。
+        drop(staging);
+        // 删除旧正式目录，rename 临时目录为正式目录。
+        // 两次操作非原子，但旧索引数据已通过旧 WorkspaceIndex 实例的 mmap 持有，
+        // 删除目录不影响正在进行的搜索（Unix 下已打开的 fd 不会因目录删除失效）。
+        if index_dir.exists() {
+            fs::remove_dir_all(&index_dir).with_context(|| {
+                workspace_index_context(root, base_dir, "build_to_staging", "删除旧索引目录失败")
+            })?;
+        }
+        fs::rename(&build_dir, &index_dir).with_context(|| {
+            workspace_index_context(root, base_dir, "build_to_staging", "替换索引目录失败")
+        })?;
+        Ok(count)
     }
 
     pub fn incremental_scan(&mut self) -> Result<usize> {
@@ -811,6 +869,11 @@ impl WorkspaceIndex {
             .join("workspaces")
             .join(workspace_id)
             .join("tantivy")
+    }
+
+    /// 临时构建目录（rebuild 时构建新索引到此目录，完成后原子替换正式目录）。
+    pub(crate) fn build_dir(root: &Path, base_dir: &Path) -> PathBuf {
+        Self::index_dir(root, base_dir).with_file_name("tantivy.build")
     }
 
     fn create_writer(&self, stage: &str) -> Result<IndexWriter> {

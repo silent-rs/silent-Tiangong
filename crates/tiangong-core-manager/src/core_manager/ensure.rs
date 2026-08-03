@@ -57,7 +57,14 @@ impl CoreManager {
         }
 
         // 未命中：按需构造插件集合，再构造全新 Core。
+        let build_start = std::time::Instant::now();
         let plugins = build_plugins();
+        tracing::info!(
+            session_id,
+            plugin_count = plugins.len(),
+            elapsed_ms = build_start.elapsed().as_millis() as u64,
+            "build_plugins 完成（仅新建 Core 时触发）"
+        );
         let core = TiangongCore::builder()
             .session_id(session_id.to_string())
             .config(CoreConfigProvider::new(session_config.clone()))

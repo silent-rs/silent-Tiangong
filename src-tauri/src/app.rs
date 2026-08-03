@@ -720,6 +720,7 @@ impl TiangongApp {
         initial_reasoning_effort: Option<String>,
         stream_tx: std::sync::mpsc::Sender<tiangong_types::StreamEvent>,
     ) -> EnsuredCore {
+        let ensure_start = std::time::Instant::now();
         let (app_config, agent_config, default_workspace_dir) = self
             .with_state_read(|state| {
                 Ok((
@@ -755,6 +756,12 @@ impl TiangongApp {
             })
             .await
             .expect("ensure_core 不应失败");
+        tracing::info!(
+            session_id,
+            is_new = ensured.is_new,
+            elapsed_ms = ensure_start.elapsed().as_millis() as u64,
+            "ensure_core 完成"
+        );
         EnsuredCore {
             session_id: ensured.session_id,
             is_new: ensured.is_new,

@@ -192,16 +192,28 @@ impl IndexService {
                 let req: RebuildWorkspaceIndexRequest = serde_json::from_value(payload)
                     .with_context(|| "解析 rebuild_workspace_index 请求失败")?;
                 let manager = self.manager.clone();
-                let count = tokio::task::spawn_blocking(move || -> Result<usize> {
+                // 异步重建：立即返回「已排队」，后台用双索引切换（零阻塞搜索）执行。
+                // rebuild 构建到临时目录，完成后原子替换，搜索在重建期间继续命中旧索引。
+                tokio::task::spawn_blocking(move || -> Result<()> {
                     let root = Path::new(&req.root);
-                    // 取得扫描 permit 与后台扫描/删除互斥，避免并发写同一磁盘索引。
                     let _permit = wait_for_scan_permit(&manager, root)?;
-                    manager.full_scan(root)
+                    match manager.rebuild(root) {
+                        Ok(count) => {
+                            tracing::info!(count, "工作区索引重建完成（双索引切换）");
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "工作区索引重建失败");
+                        }
+                    }
+                    Ok(())
                 })
                 .await
-                .with_context(|| "rebuild_workspace_index 后台任务失败")??;
-                serde_json::to_value(RebuildWorkspaceIndexResponse { count })
-                    .with_context(|| "序列化 rebuild_workspace_index 响应失败")
+                .ok();
+                serde_json::to_value(RebuildWorkspaceIndexResponse {
+                    queued: true,
+                    count: 0,
+                })
+                .with_context(|| "序列化 rebuild_workspace_index 响应失败")
             }
             PREWARM_WORKSPACE_INDEX_OPERATION => {
                 let req: PrewarmWorkspaceIndexRequest = serde_json::from_value(payload)
@@ -308,24 +320,23 @@ fn handle_index_search_blocking(
     let scope = req.scope;
 
     let mut workspace_hits = Vec::new();
-    let mut scanning = false;
+    let scanning = false;
 
     // Workspace 索引查询
+    //
+    // 不再因后台扫描/rebuild 进行中而短路：后台 incremental 只在 commit 时短暂持锁，
+    // rebuild 用双索引切换（不持有旧索引锁），搜索总能命中当前可用索引。
     if matches!(scope, IndexScope::Workspace | IndexScope::All)
         && let Some(cwd) = cwd
         && cwd.is_dir()
     {
-        if manager.is_workspace_scanning(cwd) {
-            scanning = true;
-        } else {
-            let index_query = IndexQuery::new(&req.query)
-                .with_scope(IndexScope::Workspace)
-                .with_limit(limit);
-            match manager.search(cwd, &index_query) {
-                Ok(hits) => workspace_hits = hits,
-                Err(e) => {
-                    tracing::warn!("工作区搜索失败: {e}");
-                }
+        let index_query = IndexQuery::new(&req.query)
+            .with_scope(IndexScope::Workspace)
+            .with_limit(limit);
+        match manager.search(cwd, &index_query) {
+            Ok(hits) => workspace_hits = hits,
+            Err(e) => {
+                tracing::warn!(%e, "工作区搜索失败（索引可能正在初始化）");
             }
         }
     }

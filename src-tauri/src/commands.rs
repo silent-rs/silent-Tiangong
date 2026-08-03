@@ -778,6 +778,7 @@ async fn send_message_inner(
     let user_message_id = scru128::new().to_string();
     let message_id_for_prepare = user_message_id.clone();
     let content_for_prepare = content.clone();
+    let attach_start = std::time::Instant::now();
     let prepared_batch = tokio::task::spawn_blocking(move || {
         let store = tiangong_media_archive::AttachmentStore::default();
         let mut transaction = store.store_batch(attachments)?;
@@ -797,6 +798,11 @@ async fn send_message_inner(
             return Err(format!("附件准备失败：{error}"));
         }
     };
+    tracing::info!(
+        session_id,
+        elapsed_ms = attach_start.elapsed().as_millis() as u64,
+        "附件准备完成"
+    );
 
     // 附件所有权从临时事务转移给该消息。
     let created_paths = transaction
@@ -836,6 +842,7 @@ async fn send_message_inner(
         )
         .await;
     let sid = ensured.session_id.clone();
+    let deliver_start = std::time::Instant::now();
     if let Err(error) =
         state.deliver_prepared_if_live(&sid, user_message_id.clone(), prepared.clone())
     {
@@ -846,6 +853,11 @@ async fn send_message_inner(
         abort_session_send(state, &session_id, revision, true).await;
         return Err(format!("消息投递失败：{error}"));
     }
+    tracing::info!(
+        session_id,
+        elapsed_ms = deliver_start.elapsed().as_millis() as u64,
+        "消息投递完成"
+    );
 
     // 消息已投递给 Core（Core 内部会持久化），附件从此由消息引用持有，不能再自动回滚。
     state.mark_input_revision_delivered(&session_id, revision);

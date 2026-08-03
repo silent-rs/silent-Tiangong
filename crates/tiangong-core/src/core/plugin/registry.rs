@@ -20,6 +20,7 @@ pub(crate) fn prepare_plugins(
     trust_mode: TrustMode,
     session: &Session,
 ) -> PreparedPlugins {
+    let prepare_start = std::time::Instant::now();
     let workspace_path = std::path::Path::new(&session.cwd);
     let workspace = workspace_path.is_dir().then_some(workspace_path);
 
@@ -28,6 +29,11 @@ pub(crate) fn prepare_plugins(
         plugin.set_workspace(workspace);
         plugin.set_trust_mode(trust_mode);
     }
+    tracing::info!(
+        plugin_count = plugins.len(),
+        elapsed_ms = prepare_start.elapsed().as_millis() as u64,
+        "prepare_plugins 完成（每轮 turn 调用一次）"
+    );
 
     let mut exec_env = BTreeMap::new();
     for plugin in plugins {
