@@ -6,7 +6,8 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 - **Chat Completions** — synchronous and SSE streaming, with tool calling and reasoning support
 - **Thinking Mode** — `thinking`（enabled/disabled）+ `reasoning_effort`（low/high/max）分档控制，`reasoning_content` 思考内容解析
-- **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错，内置工具调用文本协议兜底（原生 + DSML）
+- **Text Protocol Fallback** — 内置工具调用文本协议兜底（原生 + DSML），SDK 自动从 `content` 文本中识别并解析
+- **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错
 - **Model Listing** — list available models
 - **Balance Queries** — check account balance (CNY / USD)
 - **Context Caching** — `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` exposed in usage
@@ -16,7 +17,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 ```toml
 [dependencies]
-tiangong-deepseek = "0.1"
+tiangong-deepseek = "0.1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -61,6 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match event? {
             StreamEvent::ReasoningDelta(text) => eprint!("\r[思考] {text}"),
             StreamEvent::TextDelta(text) => print!("{text}"),
+            StreamEvent::TextProtocolToolCall { name, arguments, .. } => {
+                println!("\n[文本协议工具调用] {name}: {arguments}");
+            }
             StreamEvent::Usage(usage) => {
                 let hit = usage.prompt_cache_hit_tokens.unwrap_or(0);
                 println!("\n[kv cache 命中 {hit} tokens]");
@@ -94,32 +98,57 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 
 ## 工具调用文本协议兜底
 
-正常情况下 DeepSeek 通过结构化 `tool_calls` 字段返回工具调用。但部分场景下模型会把工具调用写进 `content` 文本，使用特殊标记协议。**SDK 内置完整的兜底解析**，调用方无需自行处理：
+正常情况下 DeepSeek 通过结构化 `tool_calls` 字段返回工具调用。但部分场景下模型会把工具调用写进 `content` 文本，使用特殊标记协议。**SDK 内置完整兜底**，调用方无需自行处理。
 
-- **流式自动缓冲**：`create_stream` 内部累积 TextDelta，检测到协议特征即缓冲，流末统一解析为 `StreamEvent::TextProtocolToolCall`（含完整 name + arguments），标记外的说明文字作为 `TextDelta` 补发。
-- **非流式可直接调用**：`tiangong_deepseek::dsml::parse_dsml_tool_calls(content)` 从文本中提取工具调用，`strip_tool_call_block(content)` 剥离标记文本。
+### 触发条件
 
-底层支撑：
+仅当请求携带 `tools` 时启用。无 tools 时（如总结阶段 `ToolChoice::None`）模型不可能走工具调用，兜底关闭，避免误伤讨论协议的正常文本。
+
+### 工作方式
+
+**流式**（`create_stream`）：SDK 在接收流式响应的同时收集文本，使用三态状态机判定：
+- `Idle` → 遇到 `<` 进入探测
+- `Probing` → 窗口内（10 字符）匹配协议精确前缀（`｜tool` / `｜｜dsml`）→ `Confirmed`；窗口满未命中 → 整块吐出回 `Idle`
+- `Confirmed` → 持续缓冲，完整响应结束后统一解析为 `StreamEvent::TextProtocolToolCall`
+
+探测使用精确前缀而非宽泛关键词，避免把 `<toolbar>`、`<dsml>` 等普通内容误判为工具调用。
+
+**非流式**：`tiangong_deepseek::dsml::parse_dsml_tool_calls(content)` 从文本提取工具调用，`strip_tool_call_block(content)` 剥离标记文本。
+
+### 底层支撑
 
 - **流式 chunk 多事件输出**：单个 SSE chunk 可能同时携带 `reasoning_content`/`content`/`tool_calls`，收集全部而非只取首个非空字段。
 - **空 delta 容错**：只含 `role` 的首片和只含 `finish_reason` 的结束片（delta 全空）静默跳过，不报错。
 
-已知的两套文本协议：
+### 已知协议
 
-| 协议 | 标记特征 | 来源 |
+| 协议 | 前缀标记 | 来源 |
 |------|----------|------|
 | 原生协议 | `<｜tool▁calls▁begin｜>` 等（竖线 U+FF5C，分隔符 ▁ U+2581） | tokenizer 内置原子 token（id 128806~128814），完整出现 |
 | DSML 协议 | `<｜｜DSML｜｜invoke>` 等（双全角竖线） | V3.2 引入的 XML 风格，非原子 token，流式时分片到达 |
 
-原生协议的标记是原子 token，模型输出时完整出现，解析采用严格匹配。DSML 协议的标记是普通字符流，流式时按字符分片到达，外层包裹可能残缺或完全缺失——因此采用部分识别策略，只要出现内层 `<｜｜DSML｜｜invoke` 标记就尝试提取工具调用，不依赖外层 `<｜｜DSML｜｜tool_calls>` 完整。
+原生协议标记是原子 token，模型输出时完整出现，解析采用严格匹配。DSML 协议标记是普通字符流，流式时按字符分片到达，外层包裹可能残缺或完全缺失——采用部分识别策略，只要出现内层 `<｜｜DSML｜｜invoke` 标记就尝试提取工具调用，不依赖外层包裹完整。
 
 ## API Coverage
 
 | Endpoint | Method | Status |
 |----------|--------|--------|
-| `/chat/completions` | POST | Supported (sync + SSE stream, thinking mode, tool calling) |
+| `/chat/completions` | POST | Supported (sync + SSE stream, thinking mode, tool calling, text protocol fallback) |
 | `/models` | GET | Supported |
 | `/user/balance` | GET | Supported |
+
+## Changelog
+
+### 0.1.1
+
+- **V4 接口适配**：`reasoning_effort` 新增 `Low` 档；思考模式开启时省略 `temperature`/`top_p`；移除未文档化的 `budget_tokens`
+- **文本协议兜底**：内置工具调用文本协议解析（原生 `<｜tool▁calls` + DSML `<｜｜DSML`），三态状态机（Idle → Probing → Confirmed），仅 `tools` 请求启用
+- **流式健壮性**：单 chunk 多事件收集；空 delta（role 首片 / finish_reason 结束片）静默跳过；`stream_options.include_usage` 自动设置
+- **兼容性**：`reasoning_content` 添加 `thinking_content` 别名；`response_format` 经 metadata 透传
+
+### 0.1.0
+
+- 初始发布：Chat Completions（同步 + SSE 流式）、模型列表、余额查询、上下文缓存
 
 ## License
 
