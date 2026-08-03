@@ -39,8 +39,17 @@ impl CoreManager {
     where
         F: FnOnce() -> Vec<Arc<dyn Plugin>>,
     {
+        let ensure_start = std::time::Instant::now();
         let creation_lock = self.creation_lock(session_id);
+        let lock_start = std::time::Instant::now();
         let _creation_guard = creation_lock.lock_owned().await;
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            stage = "core.creation_lock",
+            elapsed_ms = lock_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
 
         // 命中既有 Core：只刷新配置与 trust_mode（cwd 由磁盘真相源维护，无需投递）。
         // build_plugins 回调不会被调用，避免每次发送都重新构造插件集合。
@@ -49,6 +58,14 @@ impl CoreManager {
             if let Some(core) = registry.get(session_id) {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
+                tracing::info!(
+                    target: "perf_trace",
+                    session_id,
+                    is_new = false,
+                    stage = "core.ensure.total",
+                    elapsed_ms = ensure_start.elapsed().as_millis() as u64,
+                    "性能跟踪"
+                );
                 return Ok(EnsuredCore {
                     session_id: session_id.to_string(),
                     is_new: false,
@@ -60,11 +77,14 @@ impl CoreManager {
         let build_start = std::time::Instant::now();
         let plugins = build_plugins();
         tracing::info!(
+            target: "perf_trace",
             session_id,
             plugin_count = plugins.len(),
+            stage = "plugins.build.total",
             elapsed_ms = build_start.elapsed().as_millis() as u64,
-            "build_plugins 完成（仅新建 Core 时触发）"
+            "性能跟踪"
         );
+        let builder_start = std::time::Instant::now();
         let core = TiangongCore::builder()
             .session_id(session_id.to_string())
             .config(CoreConfigProvider::new(session_config.clone()))
@@ -74,8 +94,23 @@ impl CoreManager {
             .stream_tx(stream_tx)
             .plugins(plugins)
             .build();
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            stage = "core.builder",
+            elapsed_ms = builder_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         let id = core.session_id().to_string();
         self.registry().insert(id.clone(), core);
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            is_new = true,
+            stage = "core.ensure.total",
+            elapsed_ms = ensure_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         Ok(EnsuredCore {
             session_id: id,
             is_new: true,
@@ -89,9 +124,26 @@ impl CoreManager {
     /// 用于删除会话等需要主动终止在途 turn 的场景；失败回滚传 false（仅取走本次
     /// 绑定的 Core 并等其写盘结束）。Core 不存在时直接返回。
     pub async fn retire_core(&self, session_id: &str, cancel: bool) -> Result<(), String> {
+        let retire_start = std::time::Instant::now();
         let creation_lock = self.creation_lock(session_id);
+        let lock_start = std::time::Instant::now();
         let _creation_guard = creation_lock.lock_owned().await;
-        self.retire_core_locked(session_id, cancel).await
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            stage = "core.retire.creation_lock",
+            elapsed_ms = lock_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        let result = self.retire_core_locked(session_id, cancel).await;
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            stage = "core.retire.total",
+            elapsed_ms = retire_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        result
     }
 
     pub(crate) async fn retire_core_locked(
@@ -106,8 +158,18 @@ impl CoreManager {
             return Ok(());
         };
         let sid = session_id.to_string();
+        let join_start = std::time::Instant::now();
         match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                tracing::info!(
+                    target: "perf_trace",
+                    session_id = sid,
+                    stage = "core.retire.shutdown_join",
+                    elapsed_ms = join_start.elapsed().as_millis() as u64,
+                    "性能跟踪"
+                );
+                Ok(())
+            }
             Ok(Err(error)) => Err(format!("关闭会话 {sid} 的 Core 失败：{error}")),
             Err(error) => Err(format!("等待会话 {sid} 的 Core 关闭失败：{error}")),
         }

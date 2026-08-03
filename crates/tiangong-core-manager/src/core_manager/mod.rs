@@ -148,10 +148,28 @@ impl CoreManager {
     /// 这是安全的操作——retire_core 保证 worker 停止并写盘结束后才返回，
     /// 随后删除文件不会影响在途 turn。Core 不存在时只删文件。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let end_start = std::time::Instant::now();
         let creation_lock = self.creation_lock(session_id);
+        let lock_start = std::time::Instant::now();
         let _creation_guard = creation_lock.lock_owned().await;
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            stage = "core.retire.creation_lock",
+            elapsed_ms = lock_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         self.retire_core_locked(session_id, true).await?;
-        self.delete_session_file(session_id)
+        self.delete_session_file(session_id)?;
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            reason = "delete",
+            stage = "session.end.total",
+            elapsed_ms = end_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        Ok(())
     }
 
     /// 同步配置快照到所有存活 Core。

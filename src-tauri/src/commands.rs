@@ -366,26 +366,53 @@ pub async fn switch_session(
     session_id: String,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
+    let switch_start = std::time::Instant::now();
     if !state.inner().core_manager.session_exists(&session_id) {
         return Err(format!("会话不存在：{session_id}"));
     }
 
-    if !state.core_manager.has_live_core(&session_id) {
+    let had_core = state.core_manager.has_live_core(&session_id);
+    if !had_core {
+        let ensure_start = std::time::Instant::now();
         let (stream_tx, stream_rx) = std::sync::mpsc::channel::<tiangong_types::StreamEvent>();
         let ensured = state
             .ensure_core(&session_id, None, None, None, stream_tx)
             .await;
+        tracing::info!(
+            target: "perf_trace",
+            session_id,
+            is_new = ensured.is_new,
+            stage = "session.switch.ensure_core",
+            elapsed_ms = ensure_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         if ensured.is_new {
             start_stream_consumer(app, ensured.session_id, stream_rx);
         }
     }
 
+    let activate_start = std::time::Instant::now();
     state
         .with_state(|core_state| {
-            core_state.active_session_id = session_id;
+            core_state.active_session_id = session_id.clone();
             Ok(())
         })
         .await?;
+    tracing::info!(
+        target: "perf_trace",
+        session_id = %session_id,
+        had_core,
+        stage = "session.switch.total",
+        elapsed_ms = switch_start.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
+    tracing::info!(
+        target: "perf_trace",
+        session_id = %session_id,
+        stage = "session.switch.activate",
+        elapsed_ms = activate_start.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
 
     Ok(())
 }
@@ -554,9 +581,18 @@ pub async fn delete_sessions_by_cwd(
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
 /// 才能恢复宿主快照，避免旧 Core 的迟到持久化覆盖回滚结果。
 pub(crate) async fn shutdown_join_core_if_current(state: &TiangongApp, session_id: &str) {
+    let end_start = std::time::Instant::now();
     if let Err(error) = state.core_manager.retire_core(session_id, false).await {
         tracing::warn!(%session_id, %error, "失败回滚时关闭 Core 失败");
     }
+    tracing::info!(
+        target: "perf_trace",
+        session_id,
+        reason = "rollback",
+        stage = "session.end.total",
+        elapsed_ms = end_start.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
 }
 
 /// 更新会话标题
@@ -1228,11 +1264,20 @@ pub async fn edit_and_resend(
     // 最终校验及稳定消息落盘均成功后，才终止旧 Core（cancel + take + join）。
     // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
     // 此后已无旧写入者可覆盖。
+    let retire_start = std::time::Instant::now();
     state
         .inner()
         .core_manager
         .retire_core(&session_id, true)
         .await?;
+    tracing::info!(
+        target: "perf_trace",
+        session_id = %session_id,
+        reason = "retire",
+        stage = "session.end.total",
+        elapsed_ms = retire_start.elapsed().as_millis() as u64,
+        "性能跟踪"
+    );
     crate::session_ops::restore_session(session_snapshot.clone())
         .map_err(|error| error.to_string())?;
 

@@ -44,9 +44,11 @@ impl DesktopCoreFactory {
     ) -> Vec<Arc<dyn Plugin>> {
         use tracing::{info, warn};
 
+        let build_start = std::time::Instant::now();
         let storage_root = self.storage_root.clone();
         let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
         // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
+        let native_start = std::time::Instant::now();
         plugins.extend(tiangong_plugin_prompt::default_plugins());
         let Some(app_handle) = self.app_handle.get().cloned() else {
             warn!("app_handle 尚未注入，浏览器/终端能力将缺失");
@@ -69,8 +71,15 @@ impl DesktopCoreFactory {
                 false
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
+        tracing::info!(
+            target: "perf_trace",
+            stage = "plugins.native",
+            elapsed_ms = native_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
         use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+        let cap_start = std::time::Instant::now();
         let resolve_ep = |cap: ModelCapability| {
             models
                 .resolve_for_capability(cap)
@@ -98,14 +107,30 @@ impl DesktopCoreFactory {
         if let Some(ep) = stt_endpoint.clone() {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
+        tracing::info!(
+            target: "perf_trace",
+            stage = "plugins.model_capabilities",
+            elapsed_ms = cap_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        let wasm_start = std::time::Instant::now();
         let wasm_plugins =
             tiangong_plugin_runtime::registry::load_installed_plugins(&self.storage_root);
-        info!(count = wasm_plugins.len(), "已加载 WASM 插件");
+        let wasm_count = wasm_plugins.len();
+        info!(count = wasm_count, "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
+        tracing::info!(
+            target: "perf_trace",
+            stage = "plugins.wasm",
+            count = wasm_count,
+            elapsed_ms = wasm_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         plugins.push(tiangong_plugin_task::build_plugin());
         if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
         }
+        let skill_start = std::time::Instant::now();
         // Skill / MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具，
         // app 侧经 self.skill_plugin 做管理。
         plugins.push(self.skill_plugin.clone());
@@ -158,6 +183,19 @@ impl DesktopCoreFactory {
             storage_root.clone(),
             child_plugin_factory,
         ));
+        tracing::info!(
+            target: "perf_trace",
+            stage = "plugins.skill_mcp",
+            elapsed_ms = skill_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        tracing::info!(
+            target: "perf_trace",
+            stage = "plugins.build.total",
+            plugin_count = plugins.len(),
+            elapsed_ms = build_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         plugins
     }
 }

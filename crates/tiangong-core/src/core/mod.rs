@@ -276,20 +276,79 @@ impl TiangongCore {
     }
 
     fn finalize_session(&self) -> Result<Session, CoreError> {
+        let total_start = std::time::Instant::now();
+        let t = std::time::Instant::now();
         crate::shared_runtime::cancel_and_join(&self.session_id)?;
+        tracing::info!(
+            target: "perf_trace",
+            session_id = %self.session_id,
+            stage = "session.finalize.cancel_and_join",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        let t = std::time::Instant::now();
         let mut session = self.load_session()?;
+        tracing::info!(
+            target: "perf_trace",
+            session_id = %self.session_id,
+            stage = "session.finalize.load_session",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        let t = std::time::Instant::now();
         self.finalize_plugins(&mut session);
+        tracing::info!(
+            target: "perf_trace",
+            session_id = %self.session_id,
+            stage = "session.finalize.plugins",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        let t = std::time::Instant::now();
         session.try_persist_to_disk().map_err(|error| {
             tracing::warn!(%error, session_id = %self.session_id, "持久化会话结束钩子结果失败");
             CoreError::WorkerStopped
         })?;
+        tracing::info!(
+            target: "perf_trace",
+            session_id = %self.session_id,
+            stage = "session.finalize.persist",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+        tracing::info!(
+            target: "perf_trace",
+            session_id = %self.session_id,
+            stage = "session.finalize.total",
+            elapsed_ms = total_start.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
         Ok(session)
     }
 
     /// 遍历插件调用 on_session_ended（worker 退出前的 finalize 钩子）。
     fn finalize_plugins(&self, session: &mut Session) {
         for plugin in &self.plugins {
+            let t = std::time::Instant::now();
             plugin.on_session_ended(session);
+            let elapsed_ms = t.elapsed().as_millis() as u64;
+            if elapsed_ms >= 20 {
+                tracing::info!(
+                    target: "perf_trace",
+                    session_id = %self.session_id,
+                    stage = "plugin.on_session_ended",
+                    elapsed_ms,
+                    "性能跟踪"
+                );
+            } else {
+                tracing::debug!(
+                    target: "perf_trace",
+                    session_id = %self.session_id,
+                    stage = "plugin.on_session_ended",
+                    elapsed_ms,
+                    "性能跟踪"
+                );
+            }
         }
     }
 }

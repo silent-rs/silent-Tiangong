@@ -530,6 +530,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
 }
 
 fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
+    let instantiate_start = std::time::Instant::now();
     let (manifest, bytes, sidecar, enabled) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
@@ -561,6 +562,24 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
             .instances
             .retain(|instance| instance.strong_count() > 0);
         loaded.instances.push(Arc::downgrade(&adapter));
+    }
+    let elapsed_ms = instantiate_start.elapsed().as_millis() as u64;
+    if elapsed_ms >= 20 {
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.instantiate.total",
+            elapsed_ms,
+            "性能跟踪"
+        );
+    } else {
+        tracing::debug!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.instantiate.total",
+            elapsed_ms,
+            "性能跟踪"
+        );
     }
     Some(adapter)
 }
