@@ -277,6 +277,7 @@ impl WasmPluginAdapter {
         session: &Session,
         call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync,
     ) {
+        let hook_start = std::time::Instant::now();
         let plugin_session = tiangong_types::PluginSession::from(session);
         let json = match serde_json::to_string(&plugin_session) {
             Ok(j) => j,
@@ -293,6 +294,26 @@ impl WasmPluginAdapter {
         }
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
+        }
+        let elapsed_ms = hook_start.elapsed().as_millis() as u64;
+        if elapsed_ms >= 20 {
+            tracing::info!(
+                target: "perf_trace",
+                plugin_id = %self.id,
+                hook,
+                stage = "wasm.hook.total",
+                elapsed_ms,
+                "性能跟踪"
+            );
+        } else {
+            tracing::debug!(
+                target: "perf_trace",
+                plugin_id = %self.id,
+                hook,
+                stage = "wasm.hook.total",
+                elapsed_ms,
+                "性能跟踪"
+            );
         }
     }
 

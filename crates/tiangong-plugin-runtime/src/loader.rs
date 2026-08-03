@@ -120,9 +120,18 @@ impl WasmPluginLoader {
         config: &PluginRuntimeConfig,
         plugin_id: &str,
     ) -> Result<WasmPlugin> {
+        let t = std::time::Instant::now();
         let component = Component::new(&self.engine, bytes)
             .map_err(|e| anyhow::anyhow!("编译 wasm 组件失败: {e}"))?;
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.component.compile",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
 
+        let t = std::time::Instant::now();
         let limits = StoreLimitsBuilder::new()
             .memory_size(config.memory_limit)
             .build();
@@ -139,9 +148,24 @@ impl WasmPluginLoader {
         // epoch：实例化阶段给一个宽裕的 deadline，避免初始化被误中断。
         // 工具调用时再按 config.epoch_deadline_ticks() 重置为实际限制。
         store.set_epoch_deadline(u64::MAX);
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.store.create",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
 
+        let t = std::time::Instant::now();
         let instance = TiangongPlugin::instantiate(&mut store, &component, &self.linker)
             .map_err(|e| anyhow::anyhow!("实例化 wasm 组件失败: {e}"))?;
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.component.instantiate",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
 
         Ok(WasmPlugin {
             engine: self.engine.clone(),

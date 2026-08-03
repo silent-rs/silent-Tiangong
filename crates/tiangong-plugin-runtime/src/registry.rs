@@ -594,9 +594,37 @@ fn instantiate_snapshot(
     let expected_version = manifest.version.clone();
     crate::execution::run_outside_tokio(move || {
         let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
+
+        let t = std::time::Instant::now();
         let loader = WasmPluginLoader::with_sidecar(&config, sidecar)?;
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.loader.create",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+
+        let t = std::time::Instant::now();
         let mut plugin = loader.load_bytes_for_plugin(&bytes, &config, &plugin_id)?;
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.component.load",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+
+        let t = std::time::Instant::now();
         let descriptor = plugin.describe()?;
+        tracing::info!(
+            target: "perf_trace",
+            plugin_id,
+            stage = "wasm.describe",
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "性能跟踪"
+        );
+
         if descriptor.id != plugin_id {
             bail!(
                 "插件清单 ID 与组件描述不一致: manifest={plugin_id}, component={}",
