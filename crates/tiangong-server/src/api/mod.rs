@@ -15,14 +15,12 @@ use std::sync::Arc;
 use silent::prelude::*;
 use tiangong_app_state::app_state::TiangongState;
 use tiangong_config::CoreConfigProvider;
-use tiangong_scheduler::executor::SchedulerContext;
 use tokio::sync::Mutex;
 
 use crate::remote::backend::ServerCoreBackend;
 use crate::remote::core::ServerCoreManager;
 use crate::remote::event::EventBus;
 use crate::remote::router::MessageRouter;
-use crate::scheduler::context::ServerSchedulerContext;
 
 /// 共享应用状态类型
 pub type SharedState = Arc<Mutex<TiangongState>>;
@@ -33,7 +31,6 @@ pub struct ServerAppContext {
     pub state: SharedState,
     pub config: CoreConfigProvider,
     pub core_backend: Arc<dyn ServerCoreBackend>,
-    pub scheduler_context: Arc<dyn SchedulerContext>,
     pub router: Arc<MessageRouter>,
 }
 
@@ -51,18 +48,10 @@ impl ServerAppContext {
             event_bus.clone(),
         ));
         let core_backend: Arc<dyn ServerCoreBackend> = cores.clone();
-        let scheduler_context: Arc<dyn SchedulerContext> = Arc::new(ServerSchedulerContext {
-            state: state.clone(),
-            core_backend: core_backend.clone(),
-        });
-        // 回填执行上下文，让 Agent 手动触发定时任务（scheduler_trigger_job）能真正执行。
-        // 存在循环依赖（ServerSchedulerContext 需 core_backend，而 core_backend 即 cores），
-        // 故用回填而非构造参数。
-        cores.set_scheduler_context(scheduler_context.clone());
-        Self::with_backend(state, config, event_bus, core_backend, scheduler_context)
+        Self::with_backend(state, config, event_bus, core_backend)
     }
 
-    /// 使用宿主提供的 Core 与调度上下文构建 Server。
+    /// 使用宿主提供的 Core 构建 Server。
     ///
     /// Desktop 内嵌模式必须走此入口，确保 HTTP 与桌面 UI 共用同一套 Core 生命周期。
     pub fn with_backend(
@@ -70,7 +59,6 @@ impl ServerAppContext {
         config: CoreConfigProvider,
         event_bus: Arc<EventBus>,
         core_backend: Arc<dyn ServerCoreBackend>,
-        scheduler_context: Arc<dyn SchedulerContext>,
     ) -> Self {
         let router = Arc::new(MessageRouter::new(
             state.clone(),
@@ -81,7 +69,6 @@ impl ServerAppContext {
             state,
             config,
             core_backend,
-            scheduler_context,
             router,
         }
     }
@@ -222,26 +209,6 @@ mod tests {
         }
     }
 
-    struct EmbeddedScheduler {
-        calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl SchedulerContext for EmbeddedScheduler {
-        async fn send_message(&self, _session_id: &str, _content: String) -> Result<()> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Err(anyhow!("not used"))
-        }
-
-        async fn resolve_session_id(
-            &self,
-            _requested_session_id: Option<&str>,
-        ) -> Result<(String, bool)> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Err(anyhow!("not used"))
-        }
-    }
-
     #[tokio::test]
     async fn embedded_messages_use_host_backend_without_starting_another_scheduler() {
         let _storage_guard = crate::remote::core::test_support::STORAGE_TEST_LOCK
@@ -256,19 +223,14 @@ mod tests {
         ));
         let event_bus = Arc::new(EventBus::default());
         let backend_calls = Arc::new(AtomicUsize::new(0));
-        let scheduler_calls = Arc::new(AtomicUsize::new(0));
         let backend: Arc<dyn ServerCoreBackend> = Arc::new(EmbeddedBackend {
             calls: backend_calls.clone(),
         });
-        let scheduler: Arc<dyn SchedulerContext> = Arc::new(EmbeddedScheduler {
-            calls: scheduler_calls.clone(),
-        });
 
-        let context = ServerAppContext::with_backend(state, config, event_bus, backend, scheduler);
+        let context = ServerAppContext::with_backend(state, config, event_bus, backend);
 
         assert_eq!(context.core_backend.kind(), CoreBackendKind::EmbeddedHost);
         assert_eq!(backend_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(scheduler_calls.load(Ordering::Relaxed), 0);
 
         let outgoing = context
             .router
@@ -290,6 +252,5 @@ mod tests {
             MessageContent::Text(ref text) if text == "embedded reply"
         ));
         assert_eq!(backend_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(scheduler_calls.load(Ordering::Relaxed), 0);
     }
 }

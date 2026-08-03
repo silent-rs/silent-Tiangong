@@ -1,0 +1,29 @@
+[package]
+name = "tiangong-plugin-scheduler-sidecar"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "Scheduler 独立 sidecar 进程（承载 cron 调度、JobStore 与到点 HTTP 投递）"
+publish = false
+
+[[bin]]
+name = "tiangong-scheduler-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-scheduler = { workspace = true }
+tiangong-plugin-scheduler-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+scru128 = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+silent = { workspace = true, features = ["scheduler"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
