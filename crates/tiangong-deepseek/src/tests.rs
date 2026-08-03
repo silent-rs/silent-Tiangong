@@ -5,8 +5,8 @@ use crate::config::DeepSeekConfig;
 use crate::error::DeepSeekError;
 use crate::types::{
     BalanceResponse, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, Currency,
-    ListModelsResponse, MessageRole, ReasoningEffort, StreamEvent, ThinkingConfig, ToolCall,
-    ToolSpec, Usage,
+    ListModelsResponse, MessageRole, ReasoningEffort, StreamEvent, StreamOptions, ThinkingConfig,
+    ToolCall, ToolSpec, Usage,
 };
 
 // ── 配置 ──────────────────────────────────────────────
@@ -137,26 +137,36 @@ fn chat_request_serialization() {
 }
 
 #[test]
+fn stream_options_serialization() {
+    let opts = StreamOptions {
+        include_usage: true,
+    };
+    let value = serde_json::to_value(&opts).unwrap();
+    assert_eq!(value["include_usage"], true);
+}
+
+#[test]
 fn thinking_config_serialization() {
     let enabled = ThinkingConfig {
         thinking_type: "enabled".into(),
-        budget_tokens: Some(8192),
     };
     let value = serde_json::to_value(&enabled).unwrap();
     assert_eq!(value["type"], "enabled");
-    assert_eq!(value["budget_tokens"], 8192);
+    assert!(!value.as_object().unwrap().contains_key("budget_tokens"));
 
     let disabled = ThinkingConfig {
         thinking_type: "disabled".into(),
-        budget_tokens: None,
     };
     let value = serde_json::to_value(&disabled).unwrap();
     assert_eq!(value["type"], "disabled");
-    assert!(!value.as_object().unwrap().contains_key("budget_tokens"));
 }
 
 #[test]
 fn reasoning_effort_serde() {
+    assert_eq!(
+        serde_json::to_string(&ReasoningEffort::Low).unwrap(),
+        "\"low\""
+    );
     assert_eq!(
         serde_json::to_string(&ReasoningEffort::High).unwrap(),
         "\"high\""
@@ -165,6 +175,15 @@ fn reasoning_effort_serde() {
         serde_json::to_string(&ReasoningEffort::Max).unwrap(),
         "\"max\""
     );
+}
+
+#[test]
+fn choice_message_accepts_thinking_content_alias() {
+    // 官方部分版本可能用 thinking_content 命名，应能反序列化为 reasoning_content。
+    use crate::types::ChoiceMessage;
+    let json = r#"{"role":"assistant","content":"hi","thinking_content":"思绪"}"#;
+    let msg: ChoiceMessage = serde_json::from_str(json).unwrap();
+    assert_eq!(msg.reasoning_content.as_deref(), Some("思绪"));
 }
 
 // ── Chat 响应反序列化 ──────────────────────────────────
@@ -273,17 +292,29 @@ fn chat_response_with_tool_calls() {
 
 // ── 流式 chunk 解析 ──────────────────────────────────
 
+/// 取 parse_stream_chunk 产出的首个事件，断言有且仅有一个。
+fn single_event(data: &str) -> StreamEvent {
+    let events = parse_stream_chunk(data);
+    assert_eq!(
+        events.len(),
+        1,
+        "预期单个事件，实际得到 {} 个：{events:?}",
+        events.len()
+    );
+    events.into_iter().next().unwrap().expect("事件应为 Ok")
+}
+
 #[test]
 fn stream_text_delta() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
-    let event = parse_stream_chunk(data).unwrap();
+    let event = single_event(data);
     assert!(matches!(event, StreamEvent::TextDelta(ref s) if s == "Hello"));
 }
 
 #[test]
 fn stream_reasoning_delta() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"thinking..."},"finish_reason":null}]}"#;
-    let event = parse_stream_chunk(data).unwrap();
+    let event = single_event(data);
     assert!(matches!(
         event,
         StreamEvent::ReasoningDelta(ref s) if s == "thinking..."
@@ -293,7 +324,7 @@ fn stream_reasoning_delta() {
 #[test]
 fn stream_tool_call_start() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}"#;
-    let event = parse_stream_chunk(data).unwrap();
+    let event = single_event(data);
     match event {
         StreamEvent::ToolCallStart { id, name } => {
             assert_eq!(id, "call_001");
@@ -306,7 +337,7 @@ fn stream_tool_call_start() {
 #[test]
 fn stream_tool_call_delta() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]},"finish_reason":null}]}"#;
-    let event = parse_stream_chunk(data).unwrap();
+    let event = single_event(data);
     match event {
         StreamEvent::ToolCallDelta { index, arguments } => {
             assert_eq!(index, 0);
@@ -319,7 +350,7 @@ fn stream_tool_call_delta() {
 #[test]
 fn stream_usage_event() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_cache_hit_tokens":80}}"#;
-    let event = parse_stream_chunk(data).unwrap();
+    let event = single_event(data);
     match event {
         StreamEvent::Usage(usage) => {
             assert_eq!(usage.prompt_tokens, 100);
@@ -330,15 +361,44 @@ fn stream_usage_event() {
 }
 
 #[test]
+fn stream_chunk_emits_multiple_events() {
+    // 同一 delta 同时含 reasoning_content + content + tool_calls，应全部产出。
+    let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"想一下","content":"回复","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"fn","arguments":"{}"}}]},"finish_reason":null}]}"#;
+    let events = parse_stream_chunk(data);
+    // reasoning + text + ToolCallStart + ToolCallDelta = 4
+    assert!(
+        events.len() >= 3,
+        "应产出 reasoning + text + toolcall 多个事件，实际 {} 个",
+        events.len()
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Ok(StreamEvent::ReasoningDelta(_))))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Ok(StreamEvent::TextDelta(_))))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Ok(StreamEvent::ToolCallStart { .. })))
+    );
+}
+
+#[test]
 fn stream_empty_delta_is_error() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{}}]}"#;
-    assert!(parse_stream_chunk(data).is_err());
+    let events = parse_stream_chunk(data);
+    assert!(events.iter().all(Result::is_err));
 }
 
 #[test]
 fn stream_invalid_json_is_error() {
     let result = parse_stream_chunk("not json");
-    assert!(result.is_err());
+    assert!(result.iter().all(Result::is_err));
 }
 
 // ── 模型列表反序列化 ──────────────────────────────────

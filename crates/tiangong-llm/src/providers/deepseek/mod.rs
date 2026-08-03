@@ -1,5 +1,6 @@
 mod client;
 mod config;
+mod dsml;
 mod error;
 mod mapping;
 mod provider;

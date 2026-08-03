@@ -72,6 +72,7 @@ pub struct FunctionSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    Low,
     High,
     Max,
 }
@@ -80,8 +81,6 @@ pub enum ReasoningEffort {
 pub struct ThinkingConfig {
     #[serde(rename = "type")]
     pub thinking_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -147,7 +146,8 @@ pub struct ChoiceMessage {
     pub role: MessageRole,
     #[serde(default)]
     pub content: Option<String>,
-    #[serde(default)]
+    // 兼容官方不同版本字段命名（reasoning_content 为主，thinking_content 为历史别名）。
+    #[serde(default, alias = "thinking_content")]
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -200,7 +200,8 @@ pub struct StreamDelta {
     pub role: Option<MessageRole>,
     #[serde(default)]
     pub content: Option<String>,
-    #[serde(default)]
+    // 兼容官方不同版本字段命名。
+    #[serde(default, alias = "thinking_content")]
     pub reasoning_content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<StreamToolCall>>,
