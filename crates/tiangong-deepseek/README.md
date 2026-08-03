@@ -6,6 +6,7 @@ An asynchronous Rust client for the [DeepSeek API](https://api-docs.deepseek.com
 
 - **Chat Completions** — synchronous and SSE streaming, with tool calling and reasoning support
 - **Thinking Mode** — `thinking`（enabled/disabled）+ `reasoning_effort`（low/high/max）分档控制，`reasoning_content` 思考内容解析
+- **Streaming Robustness** — 单 chunk 多事件收集、空 delta 容错，内置工具调用文本协议兜底（原生 + DSML）
 - **Model Listing** — list available models
 - **Balance Queries** — check account balance (CNY / USD)
 - **Context Caching** — `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` exposed in usage
@@ -90,6 +91,27 @@ DeepSeek V4 默认开启思考模式，通过 `reasoning_content` 字段返回�
 - 思考模式下 `temperature`/`top_p` 不生效，可不传。
 - **多轮工具调用**时，assistant 消息中的 `reasoning_content` 必须随后续请求完整回传，否则 API 返回 400。
 - 普通多轮对话（无工具调用）的 `reasoning_content` 无需回传。
+
+## 工具调用文本协议兜底
+
+正常情况下 DeepSeek 通过结构化 `tool_calls` 字段返回工具调用。但部分场景下模型会把工具调用写进 `content` 文本，使用特殊标记协议。**SDK 内置完整的兜底解析**，调用方无需自行处理：
+
+- **流式自动缓冲**：`create_stream` 内部累积 TextDelta，检测到协议特征即缓冲，流末统一解析为 `StreamEvent::TextProtocolToolCall`（含完整 name + arguments），标记外的说明文字作为 `TextDelta` 补发。
+- **非流式可直接调用**：`tiangong_deepseek::dsml::parse_dsml_tool_calls(content)` 从文本中提取工具调用，`strip_tool_call_block(content)` 剥离标记文本。
+
+底层支撑：
+
+- **流式 chunk 多事件输出**：单个 SSE chunk 可能同时携带 `reasoning_content`/`content`/`tool_calls`，收集全部而非只取首个非空字段。
+- **空 delta 容错**：只含 `role` 的首片和只含 `finish_reason` 的结束片（delta 全空）静默跳过，不报错。
+
+已知的两套文本协议：
+
+| 协议 | 标记特征 | 来源 |
+|------|----------|------|
+| 原生协议 | `<｜tool▁calls▁begin｜>` 等（竖线 U+FF5C，分隔符 ▁ U+2581） | tokenizer 内置原子 token（id 128806~128814），完整出现 |
+| DSML 协议 | `<｜｜DSML｜｜invoke>` 等（双全角竖线） | V3.2 引入的 XML 风格，非原子 token，流式时分片到达 |
+
+原生协议的标记是原子 token，模型输出时完整出现，解析采用严格匹配。DSML 协议的标记是普通字符流，流式时按字符分片到达，外层包裹可能残缺或完全缺失——因此采用部分识别策略，只要出现内层 `<｜｜DSML｜｜invoke` 标记就尝试提取工具调用，不依赖外层 `<｜｜DSML｜｜tool_calls>` 完整。
 
 ## API Coverage
 

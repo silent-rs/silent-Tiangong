@@ -232,8 +232,21 @@ pub struct StreamFunctionCall {
 pub enum StreamEvent {
     ReasoningDelta(String),
     TextDelta(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallDelta { index: u32, arguments: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        index: u32,
+        arguments: String,
+    },
+    /// 文本协议兜底解析出的工具调用（整块，含完整参数）。
+    /// 由 `create_stream` 在流末统一产出，区别于流式增量到达的结构化 tool_calls。
+    TextProtocolToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
     Usage(Usage),
     Done,
     Error(String),

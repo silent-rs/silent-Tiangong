@@ -22,7 +22,7 @@ use serde_json::Value;
 
 /// 解析出的工具调用（名称 + 参数 JSON 文本，由上层转成 `Value`）。
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct DsmlToolCall {
+pub struct DsmlToolCall {
     pub name: String,
     pub arguments: String,
 }
@@ -46,7 +46,7 @@ const DSML_TOOL_CALLS_CLOSE: &str = "</｜｜DSML｜｜tool_calls>";
 ///
 /// 依次尝试原生协议与 DSML 协议；命中任一即返回。两者都不命中时返回 `None`，
 /// 表示该 content 是普通文本。
-pub(crate) fn parse_dsml_tool_calls(content: &str) -> Option<Vec<DsmlToolCall>> {
+pub fn parse_dsml_tool_calls(content: &str) -> Option<Vec<DsmlToolCall>> {
     // 原生协议：标记是原子 token，严格匹配。
     if content.contains(NATIVE_CALLS_BEGIN)
         && let Some(calls) = parse_native(content)
@@ -60,20 +60,10 @@ pub(crate) fn parse_dsml_tool_calls(content: &str) -> Option<Vec<DsmlToolCall>> 
     None
 }
 
-/// 判断 `content` 是否含任一已知工具调用文本协议的起始标记。
-///
-/// 用于流式缓冲的提前判定（标记分片到达时也能尽早识别）。
-pub(crate) fn looks_like_tool_call_text(content: &str) -> bool {
-    content.contains(NATIVE_CALLS_BEGIN)
-        || content.contains(NATIVE_CALL_BEGIN)
-        || content.contains(DSML_INVOKE_PREFIX)
-        || content.contains("<｜｜DSML")
-}
-
 /// 从 `content` 中移除工具调用文本块，返回剩余的可见文本。
 ///
 /// 工具调用兜底解析成功后用于剥离标记原文，避免把标记当作回复展示给用户。
-pub(crate) fn strip_tool_call_block(content: &str) -> String {
+pub fn strip_tool_call_block(content: &str) -> String {
     // 原生协议：标记是原子 token，剥离 calls_begin 到 calls_end 之间（含）全部内容。
     if let Some(begin) = content.find(NATIVE_CALLS_BEGIN) {
         let prefix = &content[..begin];
@@ -482,13 +472,7 @@ mod tests {
         assert!(parse_dsml_tool_calls("").is_none());
     }
 
-    #[test]
-    fn looks_like_detection() {
-        assert!(looks_like_tool_call_text(&native_sample_two_calls()));
-        assert!(looks_like_tool_call_text(DSML_SAMPLE_73));
-        assert!(looks_like_tool_call_text("<｜tool▁call▁begin｜>"));
-        assert!(!looks_like_tool_call_text("普通文本"));
-    }
+    // 缓冲状态机的判定逻辑（Idle→Probing→Confirmed）在 chat.rs 的 buffer_tests 中覆盖。
 
     #[test]
     fn strip_removes_native_block() {
@@ -565,12 +549,5 @@ mod tests {
         assert!(leftover.contains("后文"));
         assert!(!leftover.contains("DSML"));
         assert!(!leftover.contains("fn_a"));
-    }
-
-    #[test]
-    fn looks_like_detects_bare_invoke() {
-        assert!(looks_like_tool_call_text(
-            "<｜｜DSML｜｜invoke name=\"fn\">"
-        ));
     }
 }

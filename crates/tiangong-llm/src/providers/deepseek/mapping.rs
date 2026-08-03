@@ -103,13 +103,18 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
                     )
                 });
                 if !text.is_empty() || reasoning_content.is_some() || !tool_calls.is_empty() {
+                    // 新版 API 要求 assistant 消息的 content 或 tool_calls 至少有一个非空。
+                    // 当仅有 reasoning_content（纯思考轮次）时，content 填空字符串占位。
+                    let content_value = if text.is_empty() && tool_calls.is_empty() {
+                        Some(Value::String(String::new()))
+                    } else if text.is_empty() {
+                        None
+                    } else {
+                        Some(Value::String(text))
+                    };
                     messages.push(tiangong_deepseek::types::ChatMessage {
                         role: tiangong_deepseek::types::MessageRole::Assistant,
-                        content: if text.is_empty() {
-                            None
-                        } else {
-                            Some(Value::String(text))
-                        },
+                        content: content_value,
                         reasoning_content,
                         name: None,
                         tool_calls: if tool_calls.is_empty() {
@@ -351,14 +356,14 @@ pub fn from_deepseek_response(
         }
     } else {
         // 结构化字段为空时，尝试从 content 文本中兜底解析工具调用（原生协议或 DSML 协议）。
-        // 解析成功则剥离标记文本（它不是给用户看的回复），仅保留工具调用与可能的前后说明。
-        match super::dsml::parse_dsml_tool_calls(text.trim()) {
+        // 解析逻辑由 SDK（tiangong_deepseek::dsml）提供，本层只做结果映射。
+        match tiangong_deepseek::dsml::parse_dsml_tool_calls(text.trim()) {
             Some(text_calls) if !text_calls.is_empty() => {
                 tracing::warn!(
                     count = text_calls.len(),
                     "DeepSeek 返回了文本形式的工具调用，已兜底解析"
                 );
-                let leftover = super::dsml::strip_tool_call_block(text.trim());
+                let leftover = tiangong_deepseek::dsml::strip_tool_call_block(text.trim());
                 if !leftover.trim().is_empty() {
                     content.push(MessageContent::Text(leftover.trim().to_string()));
                 }
@@ -685,6 +690,45 @@ mod tests {
             build_tool_choice(Some(&ToolChoice::None)),
             Some(json!("none"))
         );
+    }
+
+    #[test]
+    fn reasoning_only_assistant_gets_empty_content_placeholder() {
+        // 仅含思考内容（纯思考轮次）、无 text 无 tool_calls 时，
+        // content 必须填空字符串占位，否则新版 API 报 "content or tool_calls must be set"。
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![ChatMessage::new(
+                MessageRole::Assistant,
+                vec![MessageContent::Thinking(ThinkingContent {
+                    thinking: "纯思考".to_string(),
+                    signature: None,
+                })],
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|m| m.role == tiangong_deepseek::types::MessageRole::Assistant)
+            .expect("assistant message");
+        // content 不应为 None（否则 API 报错），应为空字符串占位。
+        assert_eq!(
+            assistant.content.as_ref().and_then(|v| v.as_str()),
+            Some("")
+        );
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("纯思考"));
     }
 
     #[test]
