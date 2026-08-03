@@ -986,6 +986,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 
 - [x] Index WASM 设置页恢复原版索引管理的信息层级、状态、刷新、重建和删除交互。
 - [x] Scheduler WASM 提供新版动态设置页，恢复原版任务列表、新建编辑、启停、触发、删除、执行历史和双模式 Cron 编辑；宿主固定定时任务入口继续保留。
+- [x] Scheduler sidecar 优先读取宿主 `storage_root` 下既有的 `scheduler` 数据目录，确保固定入口与插件入口共用原任务和执行记录。
 - [x] 所有业务请求仅通过插件 `view-message` 与各自 sidecar 通信，不修改宿主前端、Tauri 或 Server。
 - [x] 页面适配宿主明暗主题、完整高度和 iframe 内滚动，错误与操作结果在插件页内可见。
 - [x] 重新构建 Index、Scheduler WASM 与完整插件制品并通过相关代码检查。

@@ -586,19 +586,19 @@ fn build_cron_task(
 
 // ── 辅助函数 ─────────────────────────────────────────────────────
 
-/// 打开 JobStore：优先用 env 注入的存储根，回退到默认 `~/.tiangong/scheduler`。
+/// 打开 JobStore：优先使用宿主共享存储根，确保两个设置入口共用原有任务数据。
 fn open_store() -> Result<JobStore> {
-    // 优先用插件数据目录下的 scheduler 子目录（与 storage_root 一致语义）。
-    if let Ok(data_dir) = std::env::var(PLUGIN_DATA_DIR_ENV)
-        && !data_dir.is_empty()
-    {
-        let base = std::path::PathBuf::from(data_dir).join("scheduler");
-        return JobStore::open_at(base);
-    }
     if let Ok(storage_root) = std::env::var(STORAGE_ROOT_ENV)
         && !storage_root.is_empty()
     {
         let base = std::path::PathBuf::from(storage_root).join("scheduler");
+        return JobStore::open_at(base);
+    }
+    // 独立运行且宿主未注入共享根目录时，才回退到插件私有数据目录。
+    if let Ok(data_dir) = std::env::var(PLUGIN_DATA_DIR_ENV)
+        && !data_dir.is_empty()
+    {
+        let base = std::path::PathBuf::from(data_dir).join("scheduler");
         return JobStore::open_at(base);
     }
     JobStore::open()
