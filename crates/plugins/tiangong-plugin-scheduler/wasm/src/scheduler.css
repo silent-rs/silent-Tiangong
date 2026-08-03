@@ -1,0 +1,351 @@
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--host-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  background: var(--host-background, #ffffff);
+  color: var(--host-foreground, #1f2933);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+[data-theme="dark"] body {
+  background: var(--host-background, #0f172a);
+  color: var(--host-foreground, #e2e8f0);
+}
+
+.page {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.status {
+  min-height: 20px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--host-muted-foreground, #64748b);
+}
+
+.status.error {
+  color: var(--host-destructive, #dc2626);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--host-muted-foreground, #64748b);
+  border: 1px dashed var(--host-border, #cbd5e1);
+  border-radius: 8px;
+}
+
+/* ── 任务行 ── */
+
+.job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--host-border, #e2e8f0);
+  border-radius: 8px;
+  gap: 12px;
+}
+
+[data-theme="dark"] .job-row {
+  border-color: var(--host-border, #1e293b);
+}
+
+.job-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.job-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.job-row-name {
+  font-weight: 500;
+}
+
+.job-row-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--host-muted-foreground, #64748b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ── 徽章 ── */
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--host-font-mono, monospace);
+  background: var(--host-secondary, #f1f5f9);
+  color: var(--host-secondary-foreground, #475569);
+  border: 1px solid var(--host-border, #e2e8f0);
+}
+
+[data-theme="dark"] .badge {
+  background: var(--host-secondary, #1e293b);
+  color: var(--host-secondary-foreground, #cbd5e1);
+  border-color: var(--host-border, #334155);
+}
+
+.badge-success {
+  background: #16a34a;
+  color: #fff;
+  border-color: #16a34a;
+}
+
+.badge-failed {
+  background: var(--host-destructive, #dc2626);
+  color: #fff;
+  border-color: var(--host-destructive, #dc2626);
+}
+
+.badge-running {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+
+.badge-disabled {
+  opacity: 0.5;
+}
+
+/* ── 按钮 ── */
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--host-border, #cbd5e1);
+  background: var(--host-secondary, #f1f5f9);
+  color: var(--host-secondary-foreground, #1f2933);
+  font-size: 13px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.btn:hover {
+  opacity: 0.85;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--host-primary, #2563eb);
+  color: var(--host-primary-foreground, #fff);
+  border-color: var(--host-primary, #2563eb);
+}
+
+.btn-danger {
+  background: var(--host-destructive, #dc2626);
+  color: #fff;
+  border-color: var(--host-destructive, #dc2626);
+}
+
+/* ── 模态框 ── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 60px;
+  z-index: 100;
+}
+
+.modal {
+  background: var(--host-card, #fff);
+  color: var(--host-foreground, #1f2933);
+  border-radius: 12px;
+  border: 1px solid var(--host-border, #e2e8f0);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  width: 90%;
+  max-width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+[data-theme="dark"] .modal {
+  background: var(--host-card, #1e293b);
+  border-color: var(--host-border, #334155);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--host-border, #e2e8f0);
+}
+
+[data-theme="dark"] .modal-header {
+  border-color: var(--host-border, #334155);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--host-muted-foreground, #64748b);
+  padding: 0 4px;
+}
+
+/* ── 表单 ── */
+
+.form {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field > span {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.field input,
+.field textarea {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--host-border, #cbd5e1);
+  background: var(--host-background, #fff);
+  color: var(--host-foreground, #1f2933);
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+}
+
+[data-theme="dark"] .field input,
+[data-theme="dark"] .field textarea {
+  background: var(--host-background, #0f172a);
+  border-color: var(--host-border, #334155);
+}
+
+.field input:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--host-primary, #2563eb);
+}
+
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--host-muted-foreground, #64748b);
+}
+
+.hint.error {
+  color: var(--host-destructive, #dc2626);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ── 执行历史 ── */
+
+.runs-list {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--host-border, #e2e8f0);
+  font-size: 12px;
+}
+
+[data-theme="dark"] .run-row {
+  border-color: var(--host-border, #334155);
+}
+
+.run-started {
+  color: var(--host-muted-foreground, #64748b);
+  white-space: nowrap;
+}
+
+.run-summary {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

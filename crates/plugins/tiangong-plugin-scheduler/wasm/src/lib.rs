@@ -16,9 +16,10 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 };
 use serde_json::Value;
 use tiangong_plugin_scheduler_protocol::{
-    CreateJob, CreateJobRequest, DeleteJob, DeleteJobRequest, GetJobRuns, GetJobRunsRequest, Job,
-    JobRun, ListJobs, TOOL_CREATE_JOB, TOOL_DELETE_JOB, TOOL_GET_JOB_RUNS, TOOL_LIST_JOBS,
-    TOOL_TRIGGER_JOB, TOOL_UPDATE_JOB, TriggerJob, TriggerJobRequest, UpdateJob, UpdateJobRequest,
+    CreateJob, CreateJobRequest, DeleteJob, DeleteJobRequest, Empty, GetJobRuns, GetJobRunsRequest,
+    Job, JobRun, ListJobs, SchedulerOperation, TOOL_CREATE_JOB, TOOL_DELETE_JOB, TOOL_GET_JOB_RUNS,
+    TOOL_LIST_JOBS, TOOL_TRIGGER_JOB, TOOL_UPDATE_JOB, TriggerJob, TriggerJobRequest, UpdateJob,
+    UpdateJobRequest,
 };
 
 mod descriptor {
@@ -379,26 +380,90 @@ fn job_summary(job: &Job) -> Value {
     })
 }
 
-// ── UI 能力（plugin-ui 接口）：scheduler 无设置页，返回空贡献 ──
+// ── UI 能力（plugin-ui 接口）──
+
+/// 设置页模板（单文件内联，与 memory/index 设置页同构）。
+const SCHEDULER_PAGE_TEMPLATE: &str = include_str!("scheduler.html");
+const SCHEDULER_PAGE_CSS: &str = include_str!("scheduler.css");
+const SCHEDULER_PAGE_JS: &str = include_str!("scheduler.js");
+
+fn scheduler_settings_html() -> String {
+    SCHEDULER_PAGE_TEMPLATE
+        .replace("/*__SCHEDULER_CSS__*/", SCHEDULER_PAGE_CSS)
+        .replace("/*__SCHEDULER_JS__*/", SCHEDULER_PAGE_JS)
+}
 
 impl UiGuest for Component {
     fn contributions() -> Result<Vec<Contribution>, PluginError> {
-        Ok(Vec::new())
+        Ok(vec![Contribution {
+            id: "scheduler-settings".to_string(),
+            title: "定时任务".to_string(),
+            description: "创建和管理定时任务".to_string(),
+            icon: "clock".to_string(),
+            group: "plugins".to_string(),
+            has_view: true,
+        }])
     }
 
-    fn open_view(_contribution_id: String) -> Result<ViewResponse, PluginError> {
-        Err(plugin_err("Scheduler 无设置页"))
+    fn open_view(contribution_id: String) -> Result<ViewResponse, PluginError> {
+        if contribution_id != "scheduler-settings" {
+            return Err(plugin_err(format!(
+                "未知的 contribution: {contribution_id}"
+            )));
+        }
+        Ok(ViewResponse {
+            html: scheduler_settings_html(),
+        })
     }
 
     fn get_view_resource(_path: String) -> Result<ResourceResponse, PluginError> {
-        Err(plugin_err("Scheduler 无外部资源"))
+        Err(plugin_err("Scheduler 设置页无外部资源"))
     }
 
     fn handle_view_message(
-        _request: ViewMessageRequest,
+        request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
-        Err(plugin_err("Scheduler 无设置页"))
+        let payload = match request.method.as_str() {
+            "list" => invoke_for_ui::<ListJobs>(&Empty {})?,
+            "create" => {
+                let req: CreateJobRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析创建任务请求失败: {e}")))?;
+                invoke_for_ui::<CreateJob>(&req)?
+            }
+            "update" => {
+                let req: UpdateJobRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析更新任务请求失败: {e}")))?;
+                invoke_for_ui::<UpdateJob>(&req)?
+            }
+            "delete" => {
+                let req: DeleteJobRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析删除任务请求失败: {e}")))?;
+                invoke_for_ui::<DeleteJob>(&req)?
+            }
+            "trigger" => {
+                let req: TriggerJobRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析触发任务请求失败: {e}")))?;
+                invoke_for_ui::<TriggerJob>(&req)?
+            }
+            "runs" => {
+                let req: GetJobRunsRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析执行历史请求失败: {e}")))?;
+                invoke_for_ui::<GetJobRuns>(&req)?
+            }
+            other => return Err(plugin_err(format!("未知的定时任务管理消息: {other}"))),
+        };
+        Ok(ViewMessageResponse { payload })
     }
+}
+
+/// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。
+fn invoke_for_ui<O>(request: &O::Request) -> Result<String, PluginError>
+where
+    O: SchedulerOperation,
+    O::Response: serde::Serialize,
+{
+    let response = sidecar_client::invoke::<O>(request).map_err(|e| plugin_err(e.to_string()))?;
+    serde_json::to_string(&response).map_err(|e| plugin_err(e.to_string()))
 }
 
 bindings::export!(Component with_types_in bindings);
