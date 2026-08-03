@@ -73,20 +73,69 @@ async function callHost(method, payload = "") {
   });
 }
 
-// ── 索引管理业务 ──
+// ── 索引管理业务（对齐原版 IndexManagementSettings）──
 
 const listEl = document.getElementById("list");
 const statusEl = document.getElementById("status");
-const emptyTemplate = document.getElementById("empty-template");
+const loadingState = document.getElementById("loading-state");
+const emptyState = document.getElementById("empty-state");
+const refreshBtn = document.getElementById("refresh-btn");
+const refreshIcon = document.getElementById("refresh-icon");
 const rowTemplate = document.getElementById("row-template");
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
+  statusEl.hidden = !text;
+}
+
+function showLoading() {
+  loadingState.hidden = false;
+  emptyState.hidden = true;
+  listEl.innerHTML = "";
+}
+
+function renderList(items) {
+  loadingState.hidden = true;
+  emptyState.hidden = items.length !== 0;
+  listEl.innerHTML = "";
+  if (items.length === 0) return;
+
+  for (const item of items) {
+    const node = rowTemplate.content.firstElementChild.cloneNode(true);
+    const root = item.root || `未知来源 (${String(item.id).slice(0, 12)}…)`;
+    node.querySelector(".row-title").textContent = root;
+    node.querySelector(".row-title").title = root;
+
+    const countEl = node.querySelector(".row-count");
+    countEl.textContent = `${item.entry_count ?? 0} 个文件`;
+
+    const updatedEl = node.querySelector(".row-updated");
+    if (item.updated_at) {
+      updatedEl.textContent = `更新于 ${String(item.updated_at).replace("T", " ").slice(0, 19)}`;
+    } else {
+      updatedEl.textContent = "未记录时间";
+      updatedEl.classList.add("warning");
+    }
+
+    const rebuildBtn = node.querySelector(".rebuild-btn");
+    const deleteBtn = node.querySelector(".delete-btn");
+    if (item.root) {
+      rebuildBtn.addEventListener("click", () => rebuild(item, rebuildBtn));
+    } else {
+      rebuildBtn.hidden = true;
+    }
+    deleteBtn.addEventListener("click", () => remove(item, deleteBtn));
+
+    listEl.appendChild(node);
+  }
 }
 
 async function loadIndexes() {
-  setStatus("加载中…");
+  showLoading();
+  refreshBtn.disabled = true;
+  refreshIcon.classList.add("spinning");
+  setStatus("");
   try {
     const raw = await callHost("list", "{}");
     const items = raw ? JSON.parse(raw) : [];
@@ -95,60 +144,49 @@ async function loadIndexes() {
   } catch (e) {
     renderList([]);
     setStatus(`加载索引列表失败：${e.message || e}`, true);
-  }
-}
-
-function renderList(items) {
-  listEl.innerHTML = "";
-  if (items.length === 0) {
-    listEl.appendChild(emptyTemplate.content.cloneNode(true));
-    return;
-  }
-  for (const item of items) {
-    const node = rowTemplate.content.firstElementChild.cloneNode(true);
-    node.querySelector(".index-row-root").textContent = item.root || item.id;
-    node.querySelector(".index-row-count").textContent = `${item.entry_count ?? 0} 个文件`;
-    node.querySelector(".index-row-updated").textContent = item.updated_at || "";
-    const rebuildBtn = node.querySelector(".rebuild-btn");
-    const deleteBtn = node.querySelector(".delete-btn");
-    rebuildBtn.addEventListener("click", () => rebuild(item, rebuildBtn));
-    deleteBtn.addEventListener("click", () => remove(item, deleteBtn));
-    listEl.appendChild(node);
+  } finally {
+    refreshBtn.disabled = false;
+    refreshIcon.classList.remove("spinning");
   }
 }
 
 async function rebuild(item, btn) {
   btn.disabled = true;
+  btn.querySelector("svg").classList.add("spinning");
   setStatus(`重建中：${item.root || item.id} …`);
   try {
-    await callHost("rebuild", JSON.stringify({ root: item.root }));
-    setStatus("重建完成");
+    const raw = await callHost("rebuild", JSON.stringify({ root: item.root }));
     await loadIndexes();
+    const count = Number(raw ? JSON.parse(raw) : NaN);
+    setStatus(Number.isFinite(count) ? `索引重建完成，共 ${count} 个文件` : "索引重建完成");
   } catch (e) {
-    setStatus(`重建失败：${e.message || e}`, true);
+    setStatus(`重建索引失败：${e.message || e}`, true);
   } finally {
     btn.disabled = false;
+    btn.querySelector("svg").classList.remove("spinning");
   }
 }
 
 async function remove(item, btn) {
   btn.disabled = true;
+  btn.querySelector("svg").classList.add("spinning");
   setStatus(`删除中：${item.root || item.id} …`);
   try {
     await callHost(
       "delete",
       JSON.stringify({ root: item.root, workspace_id: item.id }),
     );
-    setStatus("已删除");
     await loadIndexes();
+    setStatus("索引已删除");
   } catch (e) {
-    setStatus(`删除失败：${e.message || e}`, true);
+    setStatus(`删除索引失败：${e.message || e}`, true);
   } finally {
     btn.disabled = false;
+    btn.querySelector("svg").classList.remove("spinning");
   }
 }
 
-document.getElementById("refresh-btn").addEventListener("click", loadIndexes);
+refreshBtn.addEventListener("click", loadIndexes);
 
 // 挂载即加载列表。
 loadIndexes();

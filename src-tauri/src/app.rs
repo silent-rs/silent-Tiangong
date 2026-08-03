@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 use tiangong_core::agent_input::AgentInputKind;
 use tiangong_core::core_config::CoreConfigProvider;
@@ -38,12 +38,6 @@ pub struct TiangongApp {
     /// 当前进程已明确丢弃/删除的输入缓存键，阻止迟到写入复活。
     discarded_input_caches: Mutex<HashSet<String>>,
     pub config: CoreConfigProvider,
-    scheduler_context: std::sync::Arc<crate::scheduler::DesktopSchedulerContext>,
-    /// Desktop 定时消息消费者。调度上下文只持 sender；receiver 由 setup 取出后，
-    /// 把所有定时投递收敛到本应用的统一 Core 映射。
-    scheduled_message_rx: Mutex<
-        Option<tokio::sync::mpsc::UnboundedReceiver<crate::scheduler::ScheduledMessageRequest>>,
-    >,
     /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
     /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
     pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
@@ -162,18 +156,12 @@ impl TiangongApp {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let (tool_injection_tx, tool_injection_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (scheduled_message_tx, scheduled_message_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let core_state = tiangong_app_state::app_state::TiangongState::new();
         let config = core_state.core_manager.config().clone();
         let storage_root = core_state.config.storage_root.clone();
         let core_manager = core_state.core_manager.clone();
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
-        let scheduler_context =
-            std::sync::Arc::new(crate::scheduler::DesktopSchedulerContext::new(
-                core_manager.clone(),
-                scheduled_message_tx,
-            ));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
         let skill_plugin = std::sync::Arc::new(
@@ -194,8 +182,6 @@ impl TiangongApp {
             skill_plugin: skill_plugin.clone(),
             config: config.clone(),
             storage_root: storage_root.clone(),
-            scheduler_context: scheduler_context.clone()
-                as std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext>,
         });
         Self {
             state,
@@ -206,8 +192,6 @@ impl TiangongApp {
             input_send_claims: Mutex::new(HashMap::new()),
             discarded_input_caches: Mutex::new(HashSet::new()),
             config,
-            scheduler_context,
-            scheduled_message_rx: Mutex::new(Some(scheduled_message_rx)),
             skill_plugin,
             bot_store,
             bot_runtime,
@@ -456,127 +440,6 @@ impl TiangongApp {
             }
             tracing::info!("工具消息注入消费者任务结束");
         });
-    }
-
-    /// 启动 Desktop 定时消息消费者（main.rs setup 阶段调用一次）。
-    ///
-    /// 定时消息与前端消息共用 `session_send_lock`、`cores` 和流消费者；这里只等
-    /// Core 确认消息稳定持久化，模型轮次继续在既有 Core 中异步执行。
-    pub fn start_scheduled_message_consumer(&self, app_handle: tauri::AppHandle) {
-        let rx = {
-            let mut guard = self
-                .scheduled_message_rx
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            guard.take()
-        };
-        let Some(mut rx) = rx else {
-            tracing::warn!("Desktop 定时消息消费者已启动，跳过重复启动");
-            return;
-        };
-
-        tauri::async_runtime::spawn(async move {
-            while let Some(request) = rx.recv().await {
-                let request_app = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    let crate::scheduler::ScheduledMessageRequest {
-                        session_id,
-                        content,
-                        stable_enqueue_ack,
-                    } = request;
-                    let app_state = request_app.state::<TiangongApp>();
-                    let result = app_state
-                        .enqueue_scheduled_message(request_app.clone(), session_id, content)
-                        .await;
-                    let _ = stable_enqueue_ack.send(result);
-                });
-            }
-            tracing::info!("Desktop 定时消息消费者任务结束");
-        });
-    }
-
-    async fn enqueue_scheduled_message(
-        &self,
-        app_handle: tauri::AppHandle,
-        session_id: String,
-        content: String,
-    ) -> Result<(), String> {
-        use std::sync::mpsc;
-        use tiangong_types::ContentBlock;
-
-        if session_id.trim().is_empty() {
-            return Err("定时消息目标会话 ID 不能为空".to_string());
-        }
-
-        let _send_guard = loop {
-            self.wait_for_remote_turn_release(&session_id).await;
-            let session_lock = self.session_send_lock(&session_id);
-            let guard = session_lock.lock_owned().await;
-            if self.remote_turn_owner(&session_id).is_none() {
-                break guard;
-            }
-            drop(guard);
-        };
-        self.sync_core_config_from_state().await?;
-        let message_id = scru128::new().to_string();
-        let prepared = vec![ContentBlock::text(content)];
-
-        let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
-        let ensured = self
-            .ensure_core(&session_id, None, None, None, stream_tx)
-            .await;
-        let sid = ensured.session_id.clone();
-        if let Err(error) = self.deliver_prepared_if_live(&sid, message_id.clone(), prepared) {
-            let rollback = self
-                .rollback_failed_scheduled_message(&session_id, &message_id)
-                .await;
-            return Err(match rollback {
-                Ok(()) => format!("定时消息投递失败：{error}"),
-                Err(rollback_error) => {
-                    format!("定时消息投递失败：{error}；回滚也失败：{rollback_error}")
-                }
-            });
-        }
-
-        if ensured.is_new {
-            crate::commands::start_stream_consumer(app_handle.clone(), sid, stream_rx);
-            // 与 send_message_inner / 嵌入式 Server / Server 端入口一致：新建会话后
-            // 通知前端刷新会话列表。否则定时消息虽已入队、Core 已建，但用户在 UI
-            // 上看不到新对话，表现为「定时任务未设置对话时触发后没有创建新对话」。
-            let _ = app_handle.emit("sessions_updated", &());
-        }
-        Ok(())
-    }
-
-    /// 关闭本次投递绑定的 Core，等待其停止后再回滚宿主消息，防止旧 worker
-    /// 的迟到持久化重新写回失败消息。
-    async fn rollback_failed_scheduled_message(
-        &self,
-        session_id: &str,
-        message_id: &str,
-    ) -> Result<(), String> {
-        if let Some(core) = self.core_manager.take_core(session_id) {
-            let sid = session_id.to_string();
-            match tokio::task::spawn_blocking(move || core.shutdown_join()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(session_id = %sid, %error, "定时消息回滚前关闭 Core 失败");
-                }
-                Err(error) => {
-                    tracing::warn!(session_id = %sid, %error, "定时消息回滚前等待 Core 失败");
-                }
-            }
-        }
-
-        self.with_state(|core_state| {
-            if !self.core_manager.session_exists(session_id) {
-                return Err(anyhow::anyhow!("定时消息目标会话已不存在：{session_id}"));
-            }
-            crate::session_ops::remove_failed_message(&self.core_manager, session_id, message_id)?;
-            crate::state_ops::remove_pending_message(core_state, session_id, message_id);
-            Ok(())
-        })
-        .await
     }
 
     /// 同步工具消息注入（供需要同步返回值的场景，如 browser:events 的 ack 判断）。
@@ -881,16 +744,15 @@ impl TiangongApp {
             .filter(|effort| !effort.trim().is_empty())
             .unwrap_or(agent_config.reasoning_effort);
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
-        let plugins = self.desktop_factory.build_plugins(app_config.models).await;
+        // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
+        // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。
+        let factory = self.desktop_factory.clone();
+        let models = app_config.models.clone();
         let ensured = self
             .core_manager
-            .ensure_core(
-                session_id,
-                session_config,
-                workspace_dir,
-                stream_tx,
-                plugins,
-            )
+            .ensure_core(session_id, session_config, workspace_dir, stream_tx, || {
+                factory.build_plugins_sync(models)
+            })
             .await
             .expect("ensure_core 不应失败");
         EnsuredCore {
@@ -956,7 +818,6 @@ impl TiangongApp {
                 state: self.state.clone(),
                 config: self.config.clone(),
                 core_backend,
-                scheduler_context: self.create_scheduler_context(),
                 event_bus,
             },
         )
@@ -980,13 +841,6 @@ impl TiangongApp {
     pub fn is_embedded_server_running(&self) -> bool {
         let guard = self.lock_embedded_server();
         guard.is_some()
-    }
-
-    /// 创建调度器执行上下文（定时消息通过本应用的统一 Core 路由执行）
-    pub fn create_scheduler_context(
-        &self,
-    ) -> std::sync::Arc<dyn tiangong_scheduler::executor::SchedulerContext> {
-        self.scheduler_context.clone()
     }
 }
 

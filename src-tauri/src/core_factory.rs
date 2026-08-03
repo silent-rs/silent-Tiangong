@@ -12,7 +12,6 @@ use std::sync::Arc;
 use tauri::AppHandle;
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfigProvider;
-use tiangong_scheduler::executor::SchedulerContext;
 
 /// 桌面端 Core 构造依赖。
 ///
@@ -21,14 +20,12 @@ use tiangong_scheduler::executor::SchedulerContext;
 /// - `skill_plugin` / `mcp_plugin`：管理插件句柄（core 拿 clone 做 LLM 工具）
 /// - `config`：全局 CoreConfigProvider
 /// - `storage_root`：会话文件根
-/// - `scheduler_context`：调度器执行上下文（让 Agent 手动触发定时任务能真正执行）
 #[derive(Clone)]
 pub struct DesktopCoreFactory {
     pub app_handle: Arc<std::sync::OnceLock<AppHandle>>,
     pub skill_plugin: Arc<tiangong_plugin_skill::SkillPlugin>,
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
-    pub scheduler_context: Arc<dyn SchedulerContext>,
 }
 
 impl DesktopCoreFactory {
@@ -37,7 +34,11 @@ impl DesktopCoreFactory {
     /// 调用方（`TiangongApp`）在 `ensure_core` 前调用本方法，把返回的 plugins
     /// 作为参数传给 `CoreManager::ensure_core`。Core 的实际 builder 构造由
     /// CoreManager 内部完成，host 不再直接 build TiangongCore。
-    pub async fn build_plugins(
+    /// 构造桌面端 Core 所需的完整插件集合（issue #245）。
+    ///
+    /// 同步函数：body 内无异步操作，但保留 `async` 签名仅为历史兼容。调用方经
+    /// `CoreManager::ensure_core` 的按需回调传入，只有 Core 不存在时才会执行。
+    pub fn build_plugins_sync(
         &self,
         models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
@@ -101,11 +102,6 @@ impl DesktopCoreFactory {
             tiangong_plugin_runtime::registry::load_installed_plugins(&self.storage_root);
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
-        // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
-        // 能真正执行任务（execute_job）。
-        plugins.push(tiangong_plugin_scheduler::build_plugin(
-            self.scheduler_context.clone(),
-        ));
         plugins.push(tiangong_plugin_task::build_plugin());
         if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
@@ -117,7 +113,6 @@ impl DesktopCoreFactory {
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
             let storage_root = storage_root.clone();
-            let scheduler_context = self.scheduler_context.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
                 child_plugins.extend(tiangong_plugin_prompt::default_plugins());
@@ -146,10 +141,6 @@ impl DesktopCoreFactory {
                 }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
-                ));
-                // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。
-                child_plugins.push(tiangong_plugin_scheduler::build_plugin(
-                    scheduler_context.clone(),
                 ));
                 child_plugins.push(tiangong_plugin_task::build_plugin());
                 if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {

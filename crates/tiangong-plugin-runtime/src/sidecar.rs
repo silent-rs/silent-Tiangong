@@ -25,6 +25,11 @@ pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
 pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
 pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
+/// 本机 server 的 HTTP 地址（如 `http://127.0.0.1:8080`），供需要回调 host 的
+/// sidecar（如 scheduler 到点投递消息）使用。
+pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
+/// 本机 server 的鉴权 token（可选，未配置鉴权时为空）。
+pub const SERVER_TOKEN_ENV: &str = "TIANGONG_SERVER_TOKEN";
 
 #[derive(Debug)]
 pub enum SidecarInvokeError {
@@ -78,6 +83,10 @@ pub struct SidecarConfig {
     pub business_protocol: u32,
     pub start_timeout: Duration,
     pub request_timeout: Duration,
+    /// 本机 server 的 HTTP 地址（供需要回调 host 的 sidecar 使用，如 scheduler）。
+    pub server_url: Option<String>,
+    /// 本机 server 的鉴权 token。
+    pub server_token: Option<String>,
 }
 
 impl SidecarConfig {
@@ -102,6 +111,8 @@ impl SidecarConfig {
             business_protocol: 0,
             start_timeout: DEFAULT_START_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            server_url: None,
+            server_token: None,
         }
     }
 
@@ -118,6 +129,13 @@ impl SidecarConfig {
     pub fn with_timeouts(mut self, start_timeout: Duration, request_timeout: Duration) -> Self {
         self.start_timeout = start_timeout;
         self.request_timeout = request_timeout;
+        self
+    }
+
+    /// 注入本机 server 的连接信息（供 scheduler 等需要回调 host 的 sidecar 使用）。
+    pub fn with_server_endpoint(mut self, url: Option<String>, token: Option<String>) -> Self {
+        self.server_url = url;
+        self.server_token = token;
         self
     }
 }
@@ -353,6 +371,13 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
             .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
             .env(STORAGE_ROOT_ENV, &self.config.storage_root);
+        // 注入本机 server 连接信息（scheduler 等需回调 host 的 sidecar 使用）。
+        if let Some(url) = self.config.server_url.as_deref() {
+            command.env(SERVER_URL_ENV, url);
+        }
+        if let Some(token) = self.config.server_token.as_deref() {
+            command.env(SERVER_TOKEN_ENV, token);
+        }
         configure_detached(&mut command);
 
         let mut child = command

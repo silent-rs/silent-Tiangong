@@ -23,13 +23,6 @@ pub struct ServerCoreManager {
     state: SharedState,
     core_manager: tiangong_app_state::app_state::CoreManager,
     event_bus: Arc<EventBus>,
-    /// 调度器执行上下文（构造后由入口层经 [`Self::set_scheduler_context`] 注入）。
-    ///
-    /// 持有它仅为了让 Agent 手动触发（`scheduler_trigger_job`）的 plugin 能拿到
-    /// 真正的执行能力。用 `OnceLock` 而非构造参数：`ServerSchedulerContext` 自身
-    /// 需要本结构作为 `core_backend`，存在循环依赖，只能在结构体创建后回填。
-    scheduler_context:
-        Arc<std::sync::OnceLock<Arc<dyn tiangong_scheduler::executor::SchedulerContext>>>,
     /// 同一会话的 Core 创建、消息投递和删除共用这一把锁。
     ///
     /// 锁对象不主动删除，避免旧等待者尚未退出时为同一 session 创建第二把锁。
@@ -52,7 +45,6 @@ impl ServerCoreManager {
             state,
             core_manager,
             event_bus,
-            scheduler_context: Arc::new(std::sync::OnceLock::new()),
             session_operation_locks: Arc::new(Mutex::new(HashMap::new())),
             session_wait_locks: Arc::new(Mutex::new(HashMap::new())),
             config_update_lock: Arc::new(AsyncMutex::new(())),
@@ -60,22 +52,6 @@ impl ServerCoreManager {
             trackers: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    /// 回填调度器执行上下文（入口层在构造本结构后立即调用一次）。
-    ///
-    /// 用于让 Agent 手动触发定时任务（`scheduler_trigger_job`）时能拿到真正的
-    /// 执行能力。存在循环依赖（context 需要本结构作 backend），故用回填而非构造参数。
-    pub fn set_scheduler_context(
-        &self,
-        ctx: Arc<dyn tiangong_scheduler::executor::SchedulerContext>,
-    ) {
-        let _ = self.scheduler_context.set(ctx);
-    }
-
-    /// 取调度器执行上下文（未注入时返回 None，仅降级触发用得到）。
-    fn scheduler_context(&self) -> Option<Arc<dyn tiangong_scheduler::executor::SchedulerContext>> {
-        self.scheduler_context.get().cloned()
     }
 
     /// 从 App State 刷新全局模板，并按 session 为每个 Core 替换独立配置快照。
@@ -402,11 +378,6 @@ impl ServerCoreManager {
             ));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
-            // 调度器插件注入执行上下文：让 Agent 手动触发 scheduler_trigger_job 时
-            // 能真正执行任务（execute_job）。context 由 ServerAppContext 启动时回填。
-            if let Some(ctx) = self.scheduler_context() {
-                plugins.extend(tiangong_plugin_scheduler::default_plugins(ctx));
-            }
             plugins.extend(tiangong_plugin_task::default_plugins());
             if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                 plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
@@ -421,7 +392,6 @@ impl ServerCoreManager {
             // 子 Core 每次获得与该 Server Core 相同能力集合的全新插件外壳。
             let child_plugin_factory = Arc::new({
                 let storage_root = storage_root.clone();
-                let scheduler_context = self.scheduler_context.clone();
                 move || {
                     let mut child_plugins = tiangong_plugin_prompt::default_plugins();
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
@@ -442,10 +412,6 @@ impl ServerCoreManager {
                     );
                     child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());
-                    // 子 Core（Agent Team）同样注入调度执行上下文，保持与主 Core 一致。
-                    if let Some(ctx) = scheduler_context.get().cloned() {
-                        child_plugins.extend(tiangong_plugin_scheduler::default_plugins(ctx));
-                    }
                     child_plugins.extend(tiangong_plugin_task::default_plugins());
                     if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new)
                     {
@@ -469,7 +435,7 @@ impl ServerCoreManager {
                 session_config,
                 workspace_dir,
                 stream_tx,
-                plugins,
+                || plugins,
             )
             .await
             .map_err(anyhow::Error::msg)?;
@@ -1267,6 +1233,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
+    use tiangong_core::core::Plugin;
     use tiangong_core::core_config::CoreConfig;
     use tiangong_types::{ContentBlock, StoredAsset};
 
@@ -1378,7 +1345,7 @@ mod tests {
                         CoreConfig::default(),
                         String::new(),
                         stream_tx,
-                        Vec::new(),
+                        Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )
                     .await
                     .map(|ensured| ensured.is_new)
@@ -1400,7 +1367,7 @@ mod tests {
                         CoreConfig::default(),
                         String::new(),
                         stream_tx,
-                        Vec::new(),
+                        Vec::new as fn() -> Vec<Arc<dyn Plugin>>,
                     )
                     .await
                     .map(|ensured| ensured.is_new)

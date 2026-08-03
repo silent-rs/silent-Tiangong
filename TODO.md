@@ -268,7 +268,7 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 | 1 | ~~**mcp** #325~~ ✅ | rmcp 子进程 transport + HTTP + 后台探测线程 + capability cache | 已完成。三子 crate（protocol/sidecar/wasm）+ 四入口管理 API 经 invoke_sidecar + 原生 crate 已删除。 |
 | 2 | **fetch** #326 | 网络栈（reqwest 阻塞式）+ HTML 解析（scraper）+ DNS + 落盘 | reqwest 阻塞客户端独占线程与 runtime，是硬卡点；逻辑封闭、无 GUI 回路，改造相对干净。 |
 | 3 | ~~**index** #327~~ ✅ | tantivy（mmap）+ notify 文件监听 + 后台扫描 | 已完成。三子 crate（protocol/sidecar/wasm），照 MCP 模板：核心实现 + 单例淘汰（通用运行库）内置 sidecar；wasm 桥接 index_search/search_code 工具与生命周期钩子；三入口改走 load_installed_plugins，原生 crate 与 5 个 GUI 索引管理命令已删除；工作区自动刷新按路径、修改时间和大小增量处理，用户主动重建仍执行全量重建。 |
-| 4 | **scheduler** #328 | cron 调度 + JobStore + 任务去重 + 执行记录 | 与 Memory 契合度最高：wasm 给 Agent 提供任务 CRUD 工具，sidecar 长驻跑调度。**触发回路不经 WIT**——到点 sidecar 直接 HTTP 调本机 server 的 `POST /api/v1/messages` 投递消息（与 Bot/webhook 同链路），无需扩反向回调。鉴权用 host 启动时注入的短期凭证。 |
+| 4 | ~~**scheduler** #328~~ ✅ | cron 调度 + JobStore + 任务去重 + 执行记录 | 已完成。三子 crate（protocol/sidecar/wasm），照 Index 模板：sidecar 长驻跑 silent cron 调度 + JobStore + 任务去重，到点经 HTTP 调本机 server `POST /api/v1/messages`（`connector=server-api` + `channel_id=session_id` 直投）投递消息；host 启动 sidecar 时注入 `TIANGONG_SERVER_URL`/`TIANGONG_SERVER_TOKEN` 两个新标准 env（扩展通用 `SidecarConfig`）；三入口与 Tauri/REST 写操作改走 `invoke_sidecar`，进程内 `SchedulerContext`/`restore_cron_jobs`/`DesktopSchedulerContext`/`ServerSchedulerContext` 全部移除，`tiangong-scheduler` 核心库瘦身为只保留 model/store/validate_cron_schedule。 |
 | 5 | **task** #329 | 子进程 spawn + 任务注册表 | 任务列表当前被 GUI/Tauri 直接读取，sidecar 化后需解决注册表跨边界一致性。 |
 | 6 | **fs** #330 | `std::fs` 全套 + 进程级全局锁表 | 走 sidecar。文件读写虽可由 WASI 承接，但走 sidecar 的真正理由是**锁表需跨 wasm 实例全局共享**（主/子 Agent 写同一文件互斥）：wasm 实例间内存隔离，锁表只能落在所有实例共享的 sidecar 进程内；路径解析（动态工作区 + FullTrust 越界）随之一起下沉，避免为 fs 专用定制 WIT host import。 |
 | 7 | **command** #331 | 子进程 spawn（tokio process） | 最简单的 sidecar：校验与拆分进 wasm，仅 spawn 下沉，无 GUI 纠葛。 |
@@ -980,3 +980,19 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 - 地址栏、标签历史、全局历史和 Agent 结果保持一致。
 - 错误页可以重试并恢复到正常页面。
 - 进程不退出，Windows、Linux 和移动端现有行为不回退。
+
+
+## 当前任务：Index 与 Scheduler 插件设置 UI 对齐
+
+- [x] Index WASM 设置页恢复原版索引管理的信息层级、状态、刷新、重建和删除交互。
+- [x] Scheduler WASM 提供新版动态设置页，恢复原版任务列表、刷新、新建编辑、启停、触发、删除、执行历史和双模式 Cron 编辑；宿主固定定时任务入口继续保留。
+- [x] Scheduler sidecar 优先读取宿主 `storage_root` 下既有的 `scheduler` 数据目录，确保固定入口与插件入口共用原任务和执行记录。
+- [x] 所有业务请求仅通过插件 `view-message` 与各自 sidecar 通信，不修改宿主前端、Tauri 或 Server。
+- [x] 页面适配宿主明暗主题、完整高度和 iframe 内滚动，错误与操作结果在插件页内可见。
+- [x] 重新构建 Index、Scheduler WASM 与完整插件制品并通过相关代码检查。
+
+### 完成标准
+
+- Index 与 Scheduler 动态插件页的功能、信息和主要交互与迁移前页面一致。
+- 改动范围仅包含 `PLAN.md`、`TODO.md` 及两个插件目录。
+- 两个 WASM 组件和插件制品可正常构建。

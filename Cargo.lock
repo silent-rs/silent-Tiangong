@@ -10397,7 +10397,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
- "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
@@ -10928,20 +10927,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-scheduler"
+name = "tiangong-plugin-scheduler-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-scheduler-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "cron",
+ "reqwest 0.13.4",
  "scru128",
  "serde",
  "serde_json",
- "tempfile",
- "tiangong-core",
+ "silent",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-scheduler-protocol",
+ "tiangong-plugin-sidecar",
  "tiangong-scheduler",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-scheduler-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-scheduler-protocol",
+ "tiangong-types",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11044,16 +11067,13 @@ name = "tiangong-scheduler"
 version = "0.13.4"
 dependencies = [
  "anyhow",
- "async-trait",
  "chrono",
  "cron",
  "dirs",
  "scru128",
  "serde",
  "serde_json",
- "silent",
  "tempfile",
- "tokio",
  "tracing",
 ]
 
@@ -11095,7 +11115,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
- "tiangong-plugin-scheduler",
  "tiangong-plugin-skill",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",

@@ -6,15 +6,12 @@ license = "Apache-2.0"
 
 [dependencies]
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 chrono = { workspace = true }
 cron = { workspace = true }
 scru128 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-silent = { workspace = true, features = ["scheduler"] }
-tokio = { workspace = true, features = ["sync", "time"] }
 dirs = { workspace = true }
 
 [dev-dependencies]
