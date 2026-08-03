@@ -139,7 +139,7 @@ fn record_tool_calls(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
-    round: usize,
+    stage: String,
 ) -> Vec<ToolCall> {
     let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
@@ -149,7 +149,7 @@ fn record_tool_calls(
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
     let output = LlmOutputRecord {
-        stage: format!("react-round-{round}"),
+        stage,
         content: response.text.clone(),
         reasoning_content: response.reasoning_content.clone(),
         tool_calls: tool_names.clone(),
@@ -1175,7 +1175,12 @@ pub(super) async fn execute_turn(
                             }
                         } else {
                             state.executed_tool_in_phase = true;
-                            let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
+                            let calls = record_tool_calls(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                format!("react-round-{}", state.round),
+                            );
                             state.tool_batch = Some(ToolBatchState {
                                 calls: calls.into_iter().enumerate().collect(),
                                 ready_tools: Vec::new(),
@@ -1230,20 +1235,28 @@ pub(super) async fn execute_turn(
                             tracing::warn!(
                                 count = response.tool_calls.len(),
                                 protocol = ?ctx.client().protocol(),
-                                "summary phase returned tool calls despite ToolChoice::None"
+                                "summary phase returned tool calls; continuing tool execution"
                             );
-                            if response.text.trim().is_empty() {
-                                let message =
-                                    "总结阶段无视 ToolChoice::None 返回了工具调用且无文本回复"
-                                        .to_string();
-                                persist_error(ctx, format!("总结阶段失败：{message}"));
-                                state.next_step = NextStep::StartForceFinal {
-                                    reason: ForceFinalReason::SummaryError,
-                                    request_injection_generation,
-                                    summary_error: Some(message),
-                                };
-                                continue 'agent_loop;
-                            }
+                            // 工具调用说明任务仍可继续。把总结响应转回 ReAct 工具批次，
+                            // 不经过 finish_summary，因此不增加 outer_iteration。
+                            state.reset_react_phase();
+                            state.executed_tool_in_phase = true;
+                            let calls = record_tool_calls(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                format!("summary-iteration-{iteration}-continuation"),
+                            );
+                            state.tool_batch = Some(ToolBatchState {
+                                calls: calls.into_iter().enumerate().collect(),
+                                ready_tools: Vec::new(),
+                                prepared_keys: HashSet::new(),
+                                response_usage: response.usage,
+                                request_injection_generation,
+                                needs_failure_recovery: false,
+                            });
+                            state.next_step = NextStep::DriveTools;
+                            continue 'agent_loop;
                         }
 
                         let decision = parse_summary_phase_output(&response.text);
@@ -1693,6 +1706,7 @@ mod tests {
         serde_json::json!({
             "id": "chatcmpl-1",
             "object": "chat.completion.chunk",
+            "created": 0,
             "model": "test-model",
             "choices": [{
                 "index": 0,
@@ -1707,6 +1721,7 @@ mod tests {
         serde_json::json!({
             "id": "chatcmpl-1",
             "object": "chat.completion.chunk",
+            "created": 0,
             "model": "test-model",
             "choices": [],
             "usage": {
@@ -1722,6 +1737,7 @@ mod tests {
         serde_json::json!({
             "id": "chatcmpl-1",
             "object": "chat.completion.chunk",
+            "created": 0,
             "model": "test-model",
             "choices": [{
                 "index": 0,
@@ -1940,12 +1956,12 @@ mod tests {
     }
 
     /// 构造一个指向 mock 服务器的 ModelEndpoint。
-    fn endpoint(server: &MockServer) -> ModelEndpoint {
+    fn endpoint_with_protocol(server: &MockServer, protocol: ProviderProtocol) -> ModelEndpoint {
         ModelEndpoint {
             base_url: server.uri(),
             api_key: "test-key".to_string(),
             model: "test-model".to_string(),
-            protocol: ProviderProtocol::OpenAiChatCompletions,
+            protocol,
             timeout_ms: 5_000,
             options: serde_json::Value::Object(serde_json::Map::new()),
         }
@@ -1966,6 +1982,20 @@ mod tests {
             tools: Vec<ToolSpec>,
             tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
         ) -> Self {
+            Self::new_with_protocol(
+                server,
+                ProviderProtocol::OpenAiChatCompletions,
+                tools,
+                tool_overrides,
+            )
+        }
+
+        fn new_with_protocol(
+            server: &MockServer,
+            protocol: ProviderProtocol,
+            tools: Vec<ToolSpec>,
+            tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+        ) -> Self {
             let root = tempfile::tempdir().expect("创建临时目录失败");
             let mut session = Session::new("test-session".to_string());
             session.bind_storage_root(root.path());
@@ -1979,7 +2009,7 @@ mod tests {
                 reasoning_effort: "none".to_string(),
                 ..Default::default()
             };
-            let client = SingleProviderClient::new(endpoint(server));
+            let client = SingleProviderClient::new(endpoint_with_protocol(server, protocol));
             let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
             let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -3050,6 +3080,79 @@ mod tests {
         assert!(harness.ctx.session.messages.iter().any(|message| {
             message.text_content().contains("summary_need_more_work")
                 || message.text_content().contains("继续处理剩余步骤")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summary_tool_calls_continue_without_consuming_summary_iteration() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk(
+                    "先跑验证：\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"verify\">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>",
+                ),
+                usage_chunk(12, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:仍需总结]"), usage_chunk(20, 3)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[DONE]\n任务完成"), usage_chunk(24, 4)],
+        )
+        .await;
+
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "verify".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        let mut harness = TestHarness::new_with_protocol(
+            &server,
+            ProviderProtocol::DeepSeek,
+            vec![tool_spec("verify")],
+            overrides,
+        );
+        // 第一轮 ReAct 已到上限；总结工具调用必须重置阶段，才能继续处理工具结果。
+        harness.ctx.max_tool_rounds = 1;
+        harness.ctx.max_outer_iterations = 1;
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "DeepSeek 总结工具续作结果: {:?}",
+            result.outcome
+        );
+        assert_eq!(invocations.lock().unwrap().len(), 1);
+        let summary_iterations = harness
+            .stream_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                StreamEvent::PhaseChanged { phase, iteration } if phase == "summary" => {
+                    Some(iteration)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(summary_iterations, vec![1, 1]);
+        assert!(harness.ctx.session.messages.iter().any(|message| {
+            message.role == MessageRole::Tool
+                && message.tool_name.as_deref() == Some("verify")
+                && message.text_content().contains("done")
         }));
     }
 

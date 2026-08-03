@@ -7,6 +7,10 @@ use crate::tool::ToolCall;
 use super::error::map_deepseek_error;
 use super::mapping::parse_stream_usage;
 
+/// 把 SDK 的 EventStream 机械映射为统一的 ProviderStreamEvent 流。
+///
+/// 文本工具调用协议的兜底解析已下沉到 SDK（`tiangong_deepseek::chat` 内置缓冲），
+/// 本函数只做事件类型转换，不含 DeepSeek 特有逻辑。
 pub fn map_deepseek_stream(
     event_stream: tiangong_deepseek::types::EventStream,
 ) -> super::client::DeepSeekStream {
@@ -20,37 +24,48 @@ pub fn map_deepseek_stream(
 fn map_event(
     event: tiangong_deepseek::types::StreamEvent,
 ) -> Vec<Result<ProviderStreamEvent, LlmError>> {
+    use tiangong_deepseek::types::StreamEvent as E;
     match event {
-        tiangong_deepseek::types::StreamEvent::ReasoningDelta(delta) => {
-            vec![Ok(ProviderStreamEvent::ReasoningDelta(delta))]
-        }
-        tiangong_deepseek::types::StreamEvent::TextDelta(delta) => {
-            vec![Ok(ProviderStreamEvent::TextDelta(delta))]
-        }
-        tiangong_deepseek::types::StreamEvent::ToolCallStart { id, name } => {
+        E::ReasoningDelta(delta) => vec![Ok(ProviderStreamEvent::ReasoningDelta(delta))],
+        E::TextDelta(delta) => vec![Ok(ProviderStreamEvent::TextDelta(delta))],
+        E::ToolCallStart { id, name } => {
             vec![Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
                 id,
                 name,
                 arguments: serde_json::json!({}),
             }))]
         }
-        tiangong_deepseek::types::StreamEvent::ToolCallDelta { index, arguments } => {
+        E::ToolCallDelta { index, arguments } => {
             vec![Ok(ProviderStreamEvent::ToolCallDelta {
                 call_id: index.to_string(),
                 partial_json: arguments,
             })]
         }
-        tiangong_deepseek::types::StreamEvent::Usage(usage) => {
-            vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))]
+        E::TextProtocolToolCall {
+            id,
+            name,
+            arguments,
+        } => {
+            // SDK 文本协议兜底解析出的完整工具调用，映射为 Start→Delta→End 三件套，
+            // 与结构化流式 tool_calls 的消费路径保持一致。
+            vec![
+                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: id.clone(),
+                    name,
+                    arguments: serde_json::json!({}),
+                })),
+                Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id: id.clone(),
+                    partial_json: arguments,
+                }),
+                Ok(ProviderStreamEvent::ToolCallEnd { call_id: id }),
+            ]
         }
-        tiangong_deepseek::types::StreamEvent::Done => {
-            vec![Ok(ProviderStreamEvent::MessageEnd)]
-        }
-        tiangong_deepseek::types::StreamEvent::Error(message) => {
-            vec![Err(LlmError::Provider {
-                provider: "deepseek",
-                message,
-            })]
-        }
+        E::Usage(usage) => vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))],
+        E::Done => vec![Ok(ProviderStreamEvent::MessageEnd)],
+        E::Error(message) => vec![Err(LlmError::Provider {
+            provider: "deepseek",
+            message,
+        })],
     }
 }

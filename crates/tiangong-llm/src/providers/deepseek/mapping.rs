@@ -18,6 +18,12 @@ pub fn to_deepseek_request(
     let thinking = build_thinking(req);
     let reasoning_effort = build_reasoning_effort(req);
 
+    // 官方文档：思考模式不支持 temperature/top_p（设了也不生效）。
+    // 思考模式开启（thinking 配置存在且未禁用）时省略这两个参数，保持请求干净。
+    let thinking_enabled = thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "enabled");
+
     let mut tool_choice_value = None;
     let mut tools_value = None;
     if !req.tools.is_empty() {
@@ -29,8 +35,12 @@ pub fn to_deepseek_request(
         model: req.model.clone(),
         messages,
         max_tokens: Some(req.max_tokens),
-        temperature: req.temperature,
-        top_p: req.top_p,
+        temperature: if thinking_enabled {
+            None
+        } else {
+            req.temperature
+        },
+        top_p: if thinking_enabled { None } else { req.top_p },
         stream: None,
         stream_options: None,
         stop: if req.stop_sequences.is_empty() {
@@ -42,9 +52,22 @@ pub fn to_deepseek_request(
         tool_choice: tool_choice_value,
         thinking,
         reasoning_effort,
-        response_format: None,
+        response_format: build_response_format(req),
         user_id: None,
     })
+}
+
+/// 从 metadata 中提取 response_format（支持 text / json_object）。
+///
+/// 上层暂无专用字段，DeepSeek 需要强制 JSON 输出时由调用方在 metadata 写入：
+/// `{"response_format": "json_object"}` 或 `{"response_format": {"type": "json_object"}}`。
+fn build_response_format(req: &ProviderRequest) -> Option<Value> {
+    let fmt = req.metadata.as_ref()?.get("response_format")?;
+    match fmt {
+        Value::String(s) => Some(json!({ "type": s })),
+        Value::Object(_) => Some(fmt.clone()),
+        _ => None,
+    }
 }
 
 fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types::ChatMessage>> {
@@ -80,13 +103,18 @@ fn build_messages(req: &ProviderRequest) -> Result<Vec<tiangong_deepseek::types:
                     )
                 });
                 if !text.is_empty() || reasoning_content.is_some() || !tool_calls.is_empty() {
+                    // 新版 API 要求 assistant 消息的 content 或 tool_calls 至少有一个非空。
+                    // 当仅有 reasoning_content（纯思考轮次）时，content 填空字符串占位。
+                    let content_value = if text.is_empty() && tool_calls.is_empty() {
+                        Some(Value::String(String::new()))
+                    } else if text.is_empty() {
+                        None
+                    } else {
+                        Some(Value::String(text))
+                    };
                     messages.push(tiangong_deepseek::types::ChatMessage {
                         role: tiangong_deepseek::types::MessageRole::Assistant,
-                        content: if text.is_empty() {
-                            None
-                        } else {
-                            Some(Value::String(text))
-                        },
+                        content: content_value,
                         reasoning_content,
                         name: None,
                         tool_calls: if tool_calls.is_empty() {
@@ -249,17 +277,17 @@ fn build_tool_choice(choice: Option<&ToolChoice>) -> Option<Value> {
 }
 
 fn build_thinking(req: &ProviderRequest) -> Option<tiangong_deepseek::types::ThinkingConfig> {
+    // 官方文档：思考模式由 thinking.type（enabled/disabled）+ reasoning_effort 控制，
+    // 不再使用 budget_tokens 字段。
     if req.thinking_disabled {
         Some(tiangong_deepseek::types::ThinkingConfig {
             thinking_type: "disabled".to_string(),
-            budget_tokens: None,
         })
     } else {
         req.thinking
             .as_ref()
-            .map(|thinking| tiangong_deepseek::types::ThinkingConfig {
+            .map(|_| tiangong_deepseek::types::ThinkingConfig {
                 thinking_type: "enabled".to_string(),
-                budget_tokens: Some(thinking.budget_tokens),
             })
     }
 }
@@ -267,8 +295,11 @@ fn build_thinking(req: &ProviderRequest) -> Option<tiangong_deepseek::types::Thi
 fn build_reasoning_effort(
     req: &ProviderRequest,
 ) -> Option<tiangong_deepseek::types::ReasoningEffort> {
+    // 官方 reasoning_effort 取值：low / high / max。
+    // 内部 Medium 无对应档位，统一映射到 high（官方默认档）。
     req.reasoning_effort.map(|effort| match effort {
-        ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High => {
+        ReasoningEffort::Low => tiangong_deepseek::types::ReasoningEffort::Low,
+        ReasoningEffort::Medium | ReasoningEffort::High => {
             tiangong_deepseek::types::ReasoningEffort::High
         }
         ReasoningEffort::Max => tiangong_deepseek::types::ReasoningEffort::Max,
@@ -299,6 +330,7 @@ fn extract_text(message: &ChatMessage) -> String {
 
 pub fn from_deepseek_response(
     response: tiangong_deepseek::types::ChatCompletionResponse,
+    tools_enabled: bool,
 ) -> Result<ProviderResponse> {
     let choice = response
         .choices
@@ -309,10 +341,11 @@ pub fn from_deepseek_response(
     let reasoning_content = choice.message.reasoning_content.clone();
 
     let mut content = Vec::new();
-    if !text.trim().is_empty() {
-        content.push(MessageContent::Text(text.trim().to_string()));
-    }
     if let Some(tool_calls) = &choice.message.tool_calls {
+        // 优先使用结构化 tool_calls 字段。
+        if !text.trim().is_empty() {
+            content.push(MessageContent::Text(text.trim().to_string()));
+        }
         for tc in tool_calls {
             let arguments =
                 parse_tool_arguments_or_error(&tc.function.name, &tc.id, &tc.function.arguments);
@@ -322,6 +355,39 @@ pub fn from_deepseek_response(
                 arguments,
             }));
         }
+    } else if tools_enabled {
+        // 仅当请求携带 tools 时才做文本协议兜底——无 tools 时（如总结阶段
+        // ToolChoice::None）模型不可能走工具调用，兜底只会误伤讨论协议的正常文本。
+        match tiangong_deepseek::dsml::parse_dsml_tool_calls(text.trim()) {
+            Some(text_calls) if !text_calls.is_empty() => {
+                tracing::warn!(
+                    count = text_calls.len(),
+                    "DeepSeek 返回了文本形式的工具调用，已兜底解析"
+                );
+                let leftover = tiangong_deepseek::dsml::strip_tool_call_block(text.trim());
+                if !leftover.trim().is_empty() {
+                    content.push(MessageContent::Text(leftover.trim().to_string()));
+                }
+                for (idx, call) in text_calls.into_iter().enumerate() {
+                    let call_id = format!("textcall_{idx}");
+                    let arguments =
+                        parse_tool_arguments_or_error(&call.name, &call_id, &call.arguments);
+                    content.push(MessageContent::ToolCall(crate::tool::ToolCall {
+                        id: call_id,
+                        name: call.name,
+                        arguments,
+                    }));
+                }
+            }
+            _ => {
+                if !text.trim().is_empty() {
+                    content.push(MessageContent::Text(text.trim().to_string()));
+                }
+            }
+        }
+    } else if !text.trim().is_empty() {
+        // 无 tools 时文本原样保留，不做协议兜底。
+        content.push(MessageContent::Text(text.trim().to_string()));
     }
 
     let usage = parse_usage(&response.usage);
@@ -372,6 +438,7 @@ mod tests {
     use super::*;
     use crate::message::ThinkingContent;
     use crate::message::{ImageContent, MessageContent};
+    use crate::request::ThinkingConfig;
     use crate::tool::ToolCall;
 
     #[test]
@@ -552,7 +619,7 @@ mod tests {
     #[test]
     fn internal_plugin_injection_skips_reasoning_fallback_when_thinking_disabled() {
         let req = ProviderRequest {
-            model: "deepseek-chat".to_string(),
+            model: "deepseek-v4-pro".to_string(),
             system: None,
             messages: vec![ChatMessage::new(
                 MessageRole::Assistant,
@@ -588,7 +655,7 @@ mod tests {
     #[test]
     fn invalid_tool_arguments_become_parse_error() {
         let response =
-            from_deepseek_response(response_with_arguments("{\"path\":")).expect("response");
+            from_deepseek_response(response_with_arguments("{\"path\":"), true).expect("response");
         let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -608,7 +675,7 @@ mod tests {
 
     #[test]
     fn empty_tool_arguments_become_parse_error() {
-        let response = from_deepseek_response(response_with_arguments("")).expect("response");
+        let response = from_deepseek_response(response_with_arguments(""), true).expect("response");
         let MessageContent::ToolCall(call) = &response.assistant_message.content[0] else {
             panic!("expected tool call");
         };
@@ -627,5 +694,233 @@ mod tests {
             build_tool_choice(Some(&ToolChoice::None)),
             Some(json!("none"))
         );
+    }
+
+    #[test]
+    fn reasoning_only_assistant_gets_empty_content_placeholder() {
+        // 仅含思考内容（纯思考轮次）、无 text 无 tool_calls 时，
+        // content 必须填空字符串占位，否则新版 API 报 "content or tool_calls must be set"。
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: vec![ChatMessage::new(
+                MessageRole::Assistant,
+                vec![MessageContent::Thinking(ThinkingContent {
+                    thinking: "纯思考".to_string(),
+                    signature: None,
+                })],
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|m| m.role == tiangong_deepseek::types::MessageRole::Assistant)
+            .expect("assistant message");
+        // content 不应为 None（否则 API 报错），应为空字符串占位。
+        assert_eq!(
+            assistant.content.as_ref().and_then(|v| v.as_str()),
+            Some("")
+        );
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("纯思考"));
+    }
+
+    #[test]
+    fn non_stream_skips_text_protocol_fallback_without_tools() {
+        // 无 tools 时（总结阶段），即使 content 含 DSML 字面量也不应误判为工具调用。
+        let response = tiangong_deepseek::types::ChatCompletionResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "deepseek-v4-pro".to_string(),
+            choices: vec![tiangong_deepseek::types::Choice {
+                index: 0,
+                message: tiangong_deepseek::types::ChoiceMessage {
+                    role: tiangong_deepseek::types::MessageRole::Assistant,
+                    content: Some("讨论 DSML 协议：\n</｜｜DSML｜｜tool_calls>".to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: "stop".to_string(),
+                logprobs: None,
+            }],
+            usage: tiangong_deepseek::types::Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+                completion_tokens_details: None,
+            },
+            system_fingerprint: String::new(),
+        };
+        // tools_enabled=false → 文本原样保留，不解析为工具调用。
+        let result = from_deepseek_response(response, false).expect("response");
+        assert_eq!(result.assistant_message.content.len(), 1);
+        let MessageContent::Text(text) = &result.assistant_message.content[0] else {
+            panic!("应为纯文本");
+        };
+        assert!(text.contains("讨论 DSML 协议"), "文本应原样保留：{text}");
+        assert!(
+            text.contains("</｜｜DSML｜｜tool_calls>"),
+            "DSML 字面量不应被剥离：{text}"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_low_maps_to_low() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-flash".to_string(),
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(tiangong_deepseek::types::ReasoningEffort::Low)
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_medium_high_max_mapping() {
+        fn map(effort: ReasoningEffort) -> tiangong_deepseek::types::ReasoningEffort {
+            let req = ProviderRequest {
+                model: "deepseek-v4-pro".to_string(),
+                system: None,
+                messages: Vec::new(),
+                tools: Vec::new(),
+                tool_choice: None,
+                max_tokens: 1024,
+                temperature: None,
+                top_p: None,
+                stop_sequences: Vec::new(),
+                metadata: None,
+                thinking: None,
+                reasoning_effort: Some(effort),
+                thinking_disabled: false,
+            };
+            let request = to_deepseek_request(&req).expect("request");
+            request.reasoning_effort.expect("应产出 effort")
+        }
+        use tiangong_deepseek::types::ReasoningEffort as Ds;
+        assert_eq!(map(ReasoningEffort::Medium), Ds::High);
+        assert_eq!(map(ReasoningEffort::High), Ds::High);
+        assert_eq!(map(ReasoningEffort::Max), Ds::Max);
+    }
+
+    #[test]
+    fn temperature_top_p_omitted_when_thinking_enabled() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: Some(ThinkingConfig {
+                budget_tokens: 4096,
+            }),
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(request.temperature, None, "思考模式不应发送 temperature");
+        assert_eq!(request.top_p, None, "思考模式不应发送 top_p");
+    }
+
+    #[test]
+    fn temperature_top_p_sent_when_thinking_disabled() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: Some(0.7),
+            top_p: Some(0.9),
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: true,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(request.temperature, Some(0.7));
+        assert_eq!(request.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn response_format_from_metadata_string() {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "response_format".to_string(),
+            Value::String("json_object".to_string()),
+        );
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: Some(metadata),
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(
+            request.response_format,
+            Some(json!({ "type": "json_object" }))
+        );
+    }
+
+    #[test]
+    fn response_format_absent_without_metadata() {
+        let req = ProviderRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let request = to_deepseek_request(&req).expect("request");
+        assert_eq!(request.response_format, None);
     }
 }

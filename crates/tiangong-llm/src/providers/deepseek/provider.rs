@@ -47,15 +47,20 @@ where
         let request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let response = self.client.create(request).await?;
-        from_deepseek_response(response).map_err(|err| LlmError::Provider {
+        from_deepseek_response(response, !req.tools.is_empty()).map_err(|err| LlmError::Provider {
             provider: "deepseek",
             message: err.to_string(),
         })
     }
 
     async fn stream(&self, req: ProviderRequest) -> Result<ProviderStream, LlmError> {
-        let request =
+        let mut request =
             to_deepseek_request(&req).map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
+        // 流式请求必须显式开启 stream，并要求在流末返回 usage 统计。
+        request.stream = Some(true);
+        request.stream_options = Some(tiangong_deepseek::types::StreamOptions {
+            include_usage: true,
+        });
         let event_stream = self.client.create_stream(request).await?;
         Ok(map_deepseek_stream(event_stream))
     }

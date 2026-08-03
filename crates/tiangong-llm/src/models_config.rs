@@ -924,7 +924,7 @@ mod tests {
         config.upsert_model(
             "ds-chat",
             "deepseek",
-            "deepseek-chat",
+            "deepseek-v4-pro",
             vec![ModelCapability::Chat],
         );
         let refs = config.provider_referenced_by("deepseek");
@@ -956,11 +956,11 @@ mod tests {
         let result = config.set_route_by_name(RoutingSlot::Chat, "nonexistent");
         assert!(result.is_err());
 
-        config.upsert_model("ds", "p", "deepseek-chat", vec![ModelCapability::Chat]);
+        config.upsert_model("ds", "p", "deepseek-v4-pro", vec![ModelCapability::Chat]);
         config.set_route_by_name(RoutingSlot::Chat, "ds").unwrap();
         assert_eq!(
             config.routing.get(&RoutingSlot::Chat).unwrap().model,
-            "deepseek-chat"
+            "deepseek-v4-pro"
         );
     }
 
@@ -991,11 +991,16 @@ mod tests {
     fn set_route_lite_accepts_chat_capability() {
         // Lite 槽位无对应能力枚举，接受 chat 能力（轻量文本降级）
         let mut config = ModelsConfig::default();
-        config.upsert_model("lite", "p", "deepseek-lite", vec![ModelCapability::Chat]);
+        config.upsert_model(
+            "lite",
+            "p",
+            "deepseek-v4-flash",
+            vec![ModelCapability::Chat],
+        );
         config.set_route_by_name(RoutingSlot::Lite, "lite").unwrap();
         assert_eq!(
             config.routing.get(&RoutingSlot::Lite).unwrap().model,
-            "deepseek-lite"
+            "deepseek-v4-flash"
         );
     }
 
@@ -1015,10 +1020,10 @@ mod tests {
         config.upsert_model(
             "ds",
             "p",
-            "deepseek-chat",
+            "deepseek-v4-pro",
             vec![ModelCapability::Chat, ModelCapability::Multimodal],
         );
-        config.set_route_inline(RoutingSlot::Chat, "p", "deepseek-chat");
+        config.set_route_inline(RoutingSlot::Chat, "p", "deepseek-v4-pro");
         // 复用注册项时应携带 capabilities
         assert_eq!(
             config
@@ -1035,9 +1040,9 @@ mod tests {
     fn set_route_inline_creates_bare_entry_when_no_match() {
         let mut config = ModelsConfig::default();
         config.providers.insert("p".to_string(), sample_provider());
-        config.set_route_inline(RoutingSlot::Lite, "p", "deepseek-lite");
+        config.set_route_inline(RoutingSlot::Lite, "p", "deepseek-v4-flash");
         let entry = config.routing.get(&RoutingSlot::Lite).unwrap();
-        assert_eq!(entry.model, "deepseek-lite");
+        assert_eq!(entry.model, "deepseek-v4-flash");
         assert!(entry.capabilities.is_empty());
     }
 
@@ -1045,7 +1050,7 @@ mod tests {
     fn remove_model_reports_dangling_routes() {
         let mut config = ModelsConfig::default();
         config.providers.insert("p".to_string(), sample_provider());
-        config.upsert_model("ds", "p", "deepseek-chat", vec![ModelCapability::Chat]);
+        config.upsert_model("ds", "p", "deepseek-v4-pro", vec![ModelCapability::Chat]);
         config.set_route_by_name(RoutingSlot::Chat, "ds").unwrap();
 
         let (removed, dangling) = config.remove_model("ds");

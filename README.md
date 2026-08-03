@@ -2,7 +2,7 @@
 
 > 面向个人工作流的桌面级 AI 自动化中枢：对话、规划、执行、记忆、工具调用、嵌入式浏览器、多智能体协作、移动端控制和定时任务。
 
-天工是一个基于 Rust、Tauri 和 silent 构建的个人智能终端。它既可以作为桌面 AI 助手使用，也可以通过 CLI 和 Server API 接入脚本、服务或外部消息通道。核心目标不是只回答问题，而是让 Agent 能围绕真实工作区读取资料、拆解任务、调用工具、执行命令、保存长期记忆，并在你主动要求分工时招募 Sub Agent 协作。天工内置嵌入式浏览器，Agent 可自主打开网页、读取页面内容、点击元素和填写表单，同时感知用户在浏览器中的操作行为，实现人机协同浏览；通过飞书、微信、QQ 等 IM 平台接入移动端控制，可随时随地远程驱动 Agent，配合定时任务和 Webhook 实现按计划或按事件自动执行。项目完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 的 kimi-k3 和 [智谱](https://www.bigmodel.cn/) 的 GLM5.2，其他模型可以通过自定义供应商接入。
+天工是一个基于 Rust、Tauri 和 silent 构建的个人智能终端。它既可以作为桌面 AI 助手使用，也可以通过 CLI 和 Server API 接入脚本、服务或外部消息通道。核心目标不是只回答问题，而是让 Agent 能围绕真实工作区读取资料、拆解任务、调用工具、执行命令、保存长期记忆，并在你主动要求分工时招募 Sub Agent 协作。天工内置嵌入式浏览器，Agent 可自主打开网页、读取页面内容、点击元素和填写表单，同时感知用户在浏览器中的操作行为，实现人机协同浏览；通过飞书、微信、QQ 等 IM 平台接入移动端控制，可随时随地远程驱动 Agent，配合定时任务和 Webhook 实现按计划或按事件自动执行。项目完全适配 DeepSeek 的上下文缓存机制，多轮对话中历史消息可被高效命中缓存，显著降低重复传输成本并提升响应速度。DeepSeek 适配已跟进 V4 新版接口（`deepseek-v4-pro` / `deepseek-v4-flash`），支持思考模式（`reasoning_effort` 分档控制）、结构化与文本协议双通道工具调用解析，以及流式 KV cache 命中率统计。模型推荐使用 [DeepSeek](https://www.deepseek.com/)、[Kimi](https://kimi.com/) 的 kimi-k3 和 [智谱](https://www.bigmodel.cn/) 的 GLM5.2，其他模型可以通过自定义供应商接入。
 
 > 安全提示：天工当前未使用沙箱技术隔离工具执行环境。如果你对本地文件访问、命令执行或自动化操作的隔离要求较高，建议暂时考虑其他软件。
 
@@ -26,6 +26,7 @@
 | 定时与触发   | 内置 Cron 定时任务（简单/Cron 双模式）与 Webhook 触发，定时结果可推送到指定 Bot 通道         |
 | 长期记忆     | 基于 SQLite、Tantivy 和向量索引保存项目事实、偏好、决策、产物和历史问题                      |
 | 多媒体能力   | 支持图片、视频、语音识别、语音合成等能力路由，结果以结构化媒体资源进入会话                   |
+| DeepSeek V4  | 适配 V4 新版接口，支持思考模式分档、结构化与文本协议双通道工具调用解析、流式 KV cache 统计   |
 | 权限治理     | 桌面会话可在监督模式和信任模式之间切换，Server 模式使用受控的远程角色边界                    |
 | 发布更新     | GitHub Release 分发安装包，桌面设置页和 `tiangong update` 共用在线更新链路                   |
 
@@ -156,8 +157,8 @@ sudo install -m 0755 target/release/tiangong /usr/local/bin/tiangong
 
 ```bash
 tiangong model add-provider deepseek --protocol deepseek --base-url https://api.deepseek.com --api-key-env DEEPSEEK_API_KEY
-tiangong model add-model deepseek-chat --provider deepseek --model-id deepseek-chat --capability chat
-tiangong model route set chat deepseek-chat
+tiangong model add-model deepseek-v4-pro --provider deepseek --model-id deepseek-v4-pro --capability chat
+tiangong model route set chat deepseek-v4-pro
 tiangong server config set --host 127.0.0.1 --port 8080
 tiangong server token generate
 tiangong doctor
@@ -211,7 +212,7 @@ tiangong update
 
 ```bash
 tiangong model list                      # 查看模型配置
-tiangong model route set chat deepseek-chat  # 切换 chat 模型
+tiangong model route set chat deepseek-v4-pro  # 切换 chat 模型
 tiangong server token show               # 查看 Server Token
 tiangong memory enable                   # 启用 Memory
 tiangong prompt edit                     # 编辑自定义 Prompt
