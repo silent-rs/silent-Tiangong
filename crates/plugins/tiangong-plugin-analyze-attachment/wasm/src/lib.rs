@@ -28,9 +28,9 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
     PluginError::Message(message.into())
 }
 
-// 缓存的会话消息（thread-local，生命周期钩子注入）。
+/// 缓存的会话消息（thread-local，生命周期钩子注入）。
 thread_local! {
-    static SESSION_MESSAGES: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SESSION_MESSAGES: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(Vec::new());
 }
 
 struct Component;
@@ -205,10 +205,12 @@ fn find_attachment_source(
             if let Some(asset) = block
                 .get("asset")
                 .or_else(|| block.get("AssetReference").and_then(|a| a.get("asset")))
-                && let Some(path) = asset.get("local_path").and_then(Value::as_str)
-                && !path.is_empty()
             {
-                all_images.push(path.to_string());
+                if let Some(path) = asset.get("local_path").and_then(Value::as_str) {
+                    if !path.is_empty() {
+                        all_images.push(path.to_string());
+                    }
+                }
             }
         }
     }

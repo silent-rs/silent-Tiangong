@@ -68,7 +68,7 @@ impl DesktopCoreFactory {
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
         // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-        use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+        use tiangong_llm::{ModelCapability, ModelEndpoint};
         let resolve_ep = |cap: ModelCapability| {
             models
                 .resolve_for_capability(cap)
@@ -76,12 +76,6 @@ impl DesktopCoreFactory {
         };
         let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
         let stt_endpoint = resolve_ep(ModelCapability::Stt);
-        let multimodal_endpoint =
-            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-                resolve_ep(ModelCapability::Multimodal)
-            } else {
-                None
-            };
         if let Some(ep) = video_endpoint.clone() {
             plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
         }
@@ -95,10 +89,7 @@ impl DesktopCoreFactory {
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
         plugins.push(tiangong_plugin_task::build_plugin());
-        if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-            plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-        }
-        // skill 等 WASM 插件由上面的 load_installed_plugins 自动加载。
+        // skill/analyze-attachment 等 WASM 插件由上面的 load_installed_plugins 自动加载。
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
@@ -128,9 +119,6 @@ impl DesktopCoreFactory {
                     tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
                 ));
                 child_plugins.push(tiangong_plugin_task::build_plugin());
-                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
                 child_plugins
             }
         });

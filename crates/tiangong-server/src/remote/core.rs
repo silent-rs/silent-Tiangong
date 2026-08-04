@@ -341,7 +341,7 @@ impl ServerCoreManager {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
             // 看到的能力与该 Core 实际注册插件一致。
-            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+            use tiangong_llm::{ModelCapability, ModelEndpoint};
             let resolve_ep = |cap: ModelCapability| {
                 models
                     .resolve_for_capability(cap)
@@ -349,13 +349,6 @@ impl ServerCoreManager {
             };
             let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
             let stt_endpoint = resolve_ep(ModelCapability::Stt);
-            let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
-                && !models.chat_is_multimodal()
-            {
-                resolve_ep(ModelCapability::Multimodal)
-            } else {
-                None
-            };
             // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
             let mut plugins = tiangong_plugin_prompt::default_plugins();
             plugins.extend(tiangong_plugin_fs::default_plugins());
@@ -372,10 +365,7 @@ impl ServerCoreManager {
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
-            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-            }
-            // skill 等 WASM 插件由 load_installed_plugins 自动加载。
+            // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
             // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
             // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
             //（register/remove/set_enabled）与运行中 core 的 plugin 状态一致。
@@ -401,11 +391,6 @@ impl ServerCoreManager {
                     child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());
                     child_plugins.extend(tiangong_plugin_task::default_plugins());
-                    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new)
-                    {
-                        child_plugins
-                            .push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                    }
                     child_plugins
                 }
             });
