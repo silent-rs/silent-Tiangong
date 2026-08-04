@@ -61,7 +61,7 @@ pub struct GenerateResponse {
 }
 
 /// serde 友好的 VideoStatus 包装（Default）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoStatusWrapper {
     pub completed: bool,
     pub pending: bool,
@@ -72,20 +72,4 @@ pub struct VideoStatusWrapper {
     pub progress: Option<f64>,
     pub duration: Option<f64>,
     pub error: Option<String>,
-}
-
-impl Default for VideoStatusWrapper {
-    fn default() -> Self {
-        Self {
-            completed: false,
-            pending: false,
-            processing: false,
-            failed: false,
-            video_url: None,
-            task_id: None,
-            progress: None,
-            duration: None,
-            error: None,
-        }
-    }
 }
