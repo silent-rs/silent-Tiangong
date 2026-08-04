@@ -40,13 +40,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.13.4"
+version = "0.13.5"
 
 [workspace.dependencies]
 tiangong-anthropic = { path = "crates/tiangong-anthropic" }
 tiangong-app-state = { path = "crates/tiangong-app-state" }
 tiangong-cli = { path = "crates/tiangong-cli" }
-tiangong-deepseek = { path = "crates/tiangong-deepseek" }
+tiangong-deepseek = "0.1.1"
 tiangong-config = { path = "crates/tiangong-config" }
 tiangong-core = { path = "crates/tiangong-core" }
 tiangong-core-manager = { path = "crates/tiangong-core-manager" }

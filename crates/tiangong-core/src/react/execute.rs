@@ -139,7 +139,7 @@ fn record_tool_calls(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
-    round: usize,
+    stage: String,
 ) -> Vec<ToolCall> {
     let calls = response.tool_calls.clone();
     debug_assert!(!calls.is_empty(), "工具批次不能为空");
@@ -149,7 +149,7 @@ fn record_tool_calls(
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
     let output = LlmOutputRecord {
-        stage: format!("react-round-{round}"),
+        stage,
         content: response.text.clone(),
         reasoning_content: response.reasoning_content.clone(),
         tool_calls: tool_names.clone(),
@@ -1175,7 +1175,12 @@ pub(super) async fn execute_turn(
                             }
                         } else {
                             state.executed_tool_in_phase = true;
-                            let calls = record_tool_calls(ctx, &pending_msg_id, &response, state.round);
+                            let calls = record_tool_calls(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                format!("react-round-{}", state.round),
+                            );
                             state.tool_batch = Some(ToolBatchState {
                                 calls: calls.into_iter().enumerate().collect(),
                                 ready_tools: Vec::new(),
@@ -1230,20 +1235,26 @@ pub(super) async fn execute_turn(
                             tracing::warn!(
                                 count = response.tool_calls.len(),
                                 protocol = ?ctx.client().protocol(),
-                                "summary phase returned tool calls despite ToolChoice::None"
+                                "summary phase returned tool calls; continuing tool execution"
                             );
-                            if response.text.trim().is_empty() {
-                                let message =
-                                    "总结阶段无视 ToolChoice::None 返回了工具调用且无文本回复"
-                                        .to_string();
-                                persist_error(ctx, format!("总结阶段失败：{message}"));
-                                state.next_step = NextStep::StartForceFinal {
-                                    reason: ForceFinalReason::SummaryError,
-                                    request_injection_generation,
-                                    summary_error: Some(message),
-                                };
-                                continue 'agent_loop;
-                            }
+                            state.reset_react_phase();
+                            state.executed_tool_in_phase = true;
+                            let calls = record_tool_calls(
+                                ctx,
+                                &pending_msg_id,
+                                &response,
+                                format!("summary-iteration-{iteration}-continuation"),
+                            );
+                            state.tool_batch = Some(ToolBatchState {
+                                calls: calls.into_iter().enumerate().collect(),
+                                ready_tools: Vec::new(),
+                                prepared_keys: HashSet::new(),
+                                response_usage: response.usage,
+                                request_injection_generation,
+                                needs_failure_recovery: false,
+                            });
+                            state.next_step = NextStep::DriveTools;
+                            continue 'agent_loop;
                         }
 
                         let decision = parse_summary_phase_output(&response.text);

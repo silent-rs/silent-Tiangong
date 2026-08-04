@@ -40,6 +40,22 @@ fn map_event(
                 partial_json: arguments,
             })]
         }
+        tiangong_deepseek::types::StreamEvent::TextProtocolToolCall {
+            id,
+            name,
+            arguments,
+        } => vec![
+            Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id: id.clone(),
+                name,
+                arguments: serde_json::json!({}),
+            })),
+            Ok(ProviderStreamEvent::ToolCallDelta {
+                call_id: id.clone(),
+                partial_json: arguments,
+            }),
+            Ok(ProviderStreamEvent::ToolCallEnd { call_id: id }),
+        ],
         tiangong_deepseek::types::StreamEvent::Usage(usage) => {
             vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))]
         }

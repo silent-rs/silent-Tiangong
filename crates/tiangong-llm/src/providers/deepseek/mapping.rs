@@ -252,14 +252,12 @@ fn build_thinking(req: &ProviderRequest) -> Option<tiangong_deepseek::types::Thi
     if req.thinking_disabled {
         Some(tiangong_deepseek::types::ThinkingConfig {
             thinking_type: "disabled".to_string(),
-            budget_tokens: None,
         })
     } else {
         req.thinking
             .as_ref()
-            .map(|thinking| tiangong_deepseek::types::ThinkingConfig {
+            .map(|_| tiangong_deepseek::types::ThinkingConfig {
                 thinking_type: "enabled".to_string(),
-                budget_tokens: Some(thinking.budget_tokens),
             })
     }
 }
