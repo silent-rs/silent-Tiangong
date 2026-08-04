@@ -155,21 +155,10 @@ fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
-    use tiangong_llm::{ModelCapability, ModelEndpoint};
-
     let storage_root = storage_root.to_path_buf();
-    let resolve_ep = |cap: ModelCapability| {
-        models
-            .resolve_for_capability(cap)
-            .map(ModelEndpoint::from_resolved)
-    };
-    let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
 
     let mut plugins = tiangong_plugin_prompt::default_plugins();
     plugins.extend(tiangong_plugin_fs::default_plugins());
-    if let Some(ep) = video_endpoint.clone() {
-        plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-    }
     plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
         &storage_root,
         tiangong_plugin_runtime::registry::RuntimeKind::Cli,
@@ -185,9 +174,6 @@ fn build_cli_plugins(
         move || {
             let mut child_plugins = tiangong_plugin_prompt::default_plugins();
             child_plugins.extend(tiangong_plugin_fs::default_plugins());
-            if let Some(ep) = video_endpoint.clone() {
-                child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-            }
             child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Cli,

@@ -67,17 +67,7 @@ impl DesktopCoreFactory {
                 false
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
-        // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-        use tiangong_llm::{ModelCapability, ModelEndpoint};
-        let resolve_ep = |cap: ModelCapability| {
-            models
-                .resolve_for_capability(cap)
-                .map(ModelEndpoint::from_resolved)
-        };
-        let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-        if let Some(ep) = video_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-        }
+        // 所有媒体插件（image/video/tts/stt/attachment）由 load_installed_plugins 自动加载。
         let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
             &self.storage_root,
             tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
@@ -104,9 +94,6 @@ impl DesktopCoreFactory {
                     }
                 }
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
-                if let Some(ep) = video_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
                     tiangong_plugin_runtime::registry::RuntimeKind::Desktop,

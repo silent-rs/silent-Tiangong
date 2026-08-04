@@ -31,7 +31,9 @@ members = [
     "crates/plugins/tiangong-plugin-generate-image/protocol",
     "crates/plugins/tiangong-plugin-generate-image/sidecar",
     "crates/plugins/tiangong-plugin-generate-image/wasm",
-    "crates/plugins/tiangong-plugin-generate-video",
+    "crates/plugins/tiangong-plugin-generate-video/protocol",
+    "crates/plugins/tiangong-plugin-generate-video/sidecar",
+    "crates/plugins/tiangong-plugin-generate-video/wasm",
     "crates/plugins/tiangong-plugin-text-to-speech/protocol",
     "crates/plugins/tiangong-plugin-text-to-speech/sidecar",
     "crates/plugins/tiangong-plugin-text-to-speech/wasm",
@@ -94,7 +96,9 @@ tiangong-plugin-index-sidecar = { path = "crates/plugins/tiangong-plugin-index/s
 tiangong-plugin-generate-image-protocol = { path = "crates/plugins/tiangong-plugin-generate-image/protocol" }
 tiangong-plugin-generate-image-sidecar = { path = "crates/plugins/tiangong-plugin-generate-image/sidecar" }
 tiangong-plugin-generate-image-wasm = { path = "crates/plugins/tiangong-plugin-generate-image/wasm" }
-tiangong-plugin-generate-video = { path = "crates/plugins/tiangong-plugin-generate-video" }
+tiangong-plugin-generate-video-protocol = { path = "crates/plugins/tiangong-plugin-generate-video/protocol" }
+tiangong-plugin-generate-video-sidecar = { path = "crates/plugins/tiangong-plugin-generate-video/sidecar" }
+tiangong-plugin-generate-video-wasm = { path = "crates/plugins/tiangong-plugin-generate-video/wasm" }
 tiangong-plugin-text-to-speech-protocol = { path = "crates/plugins/tiangong-plugin-text-to-speech/protocol" }
 tiangong-plugin-text-to-speech-sidecar = { path = "crates/plugins/tiangong-plugin-text-to-speech/sidecar" }
 tiangong-plugin-text-to-speech-wasm = { path = "crates/plugins/tiangong-plugin-text-to-speech/wasm" }

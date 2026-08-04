@@ -341,19 +341,9 @@ impl ServerCoreManager {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
             // 看到的能力与该 Core 实际注册插件一致。
-            use tiangong_llm::{ModelCapability, ModelEndpoint};
-            let resolve_ep = |cap: ModelCapability| {
-                models
-                    .resolve_for_capability(cap)
-                    .map(ModelEndpoint::from_resolved)
-            };
-            let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
             // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
             let mut plugins = tiangong_plugin_prompt::default_plugins();
             plugins.extend(tiangong_plugin_fs::default_plugins());
-            if let Some(ep) = video_endpoint.clone() {
-                plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-            }
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Server,
@@ -372,9 +362,6 @@ impl ServerCoreManager {
                 move || {
                     let mut child_plugins = tiangong_plugin_prompt::default_plugins();
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
-                    if let Some(ep) = video_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                    }
                     child_plugins.extend(
                         tiangong_plugin_runtime::registry::load_installed_plugins(
                             &storage_root,
