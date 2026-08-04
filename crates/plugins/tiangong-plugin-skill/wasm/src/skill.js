@@ -187,6 +187,14 @@ function renderRow(skill) {
   envBtn.addEventListener("click", () => showEnvEditor(skill.id));
   actions.appendChild(envBtn);
 
+  // 打开目录按钮
+  const revealBtn = document.createElement("button");
+  revealBtn.className = "icon-btn";
+  revealBtn.title = "在文件管理器中打开";
+  revealBtn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+  revealBtn.addEventListener("click", () => revealDir(skill.id));
+  actions.appendChild(revealBtn);
+
   // 开关
   const switchBtn = document.createElement("button");
   switchBtn.className = "switch";
@@ -251,11 +259,18 @@ async function refreshSkills() {
 
 // ── 详情模态框 ──
 
+// 详情/编辑模态框状态
+let detailSkillId = null;
+let detailEditing = false;
+
 async function showDetail(id) {
   try {
     const raw = await callHost("detail", JSON.stringify({ id }));
     const data = raw ? JSON.parse(raw) : {};
     const detail = data.detail || {};
+
+    detailSkillId = id;
+    detailEditing = false;
 
     document.getElementById("detail-title").textContent = detail.name || id;
 
@@ -274,10 +289,63 @@ async function showDetail(id) {
 
     document.getElementById("detail-desc").textContent = detail.description || "";
     document.getElementById("detail-readme").textContent = detail.readme || "（无说明）";
+    document.getElementById("detail-textarea").value = detail.readme || "";
+
+    // 重置为查看模式
+    setDetailEditMode(false);
+    // 显示编辑说明 + 打开目录按钮
+    document.getElementById("detail-edit-btn").hidden = false;
+    document.getElementById("detail-reveal-btn").hidden = false;
+    hideDetailEditStatus();
 
     openModal("detail-modal");
   } catch (error) {
     showStatus(`读取详情失败：${error.message || error}`, true);
+  }
+}
+
+/// 切换详情模态框的查看/编辑模式。
+function setDetailEditMode(editing) {
+  detailEditing = editing;
+  document.getElementById("detail-readme").hidden = editing;
+  document.getElementById("detail-editor").hidden = !editing;
+  document.getElementById("detail-footer").hidden = !editing;
+  document.getElementById("detail-edit-btn").hidden = editing;
+  document.getElementById("detail-reveal-btn").hidden = editing;
+  syncHostMask();
+}
+
+async function saveSkillMd() {
+  if (!detailSkillId) return;
+  const content = document.getElementById("detail-textarea").value;
+  const saveBtn = document.getElementById("detail-save-btn");
+  saveBtn.disabled = true;
+  try {
+    await callHost("update_md", JSON.stringify({ id: detailSkillId, content }));
+    // 保存成功后回到查看模式并刷新 readme 展示
+    document.getElementById("detail-readme").textContent = content || "（无说明）";
+    setDetailEditMode(false);
+    await loadSkills();
+  } catch (error) {
+    const status = document.getElementById("detail-edit-status");
+    status.textContent = `保存失败：${error.message || error}`;
+    status.className = "page-status error";
+    status.hidden = false;
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function hideDetailEditStatus() {
+  document.getElementById("detail-edit-status").hidden = true;
+}
+
+/// 在系统文件管理器中打开 skill 目录。
+async function revealDir(id) {
+  try {
+    await callHost("reveal", JSON.stringify({ id }));
+  } catch (error) {
+    showStatus(`打开目录失败：${error.message || error}`, true);
   }
 }
 
@@ -399,6 +467,12 @@ function hideStatus() {
 refreshBtn.addEventListener("click", refreshSkills);
 document.getElementById("env-add-btn").addEventListener("click", () => addEnvRow());
 document.getElementById("env-save-btn").addEventListener("click", saveEnv);
+document.getElementById("detail-edit-btn").addEventListener("click", () => setDetailEditMode(true));
+document.getElementById("detail-reveal-btn").addEventListener("click", () => {
+  if (detailSkillId) revealDir(detailSkillId);
+});
+document.getElementById("detail-save-btn").addEventListener("click", saveSkillMd);
+document.getElementById("detail-cancel-btn").addEventListener("click", () => setDetailEditMode(false));
 
 // 所有 data-close 元素关闭对应模态框。
 document.querySelectorAll("[data-close]").forEach((el) => {

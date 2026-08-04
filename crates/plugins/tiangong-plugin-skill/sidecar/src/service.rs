@@ -153,6 +153,22 @@ impl SkillService {
                 serde_json::to_value(result).with_context(|| "序列化 init_skill 响应失败")
             }
 
+            "update_skill_md" => {
+                let req: tiangong_plugin_skill_protocol::UpdateSkillMdRequest =
+                    serde_json::from_value(payload)
+                        .with_context(|| "解析 update_skill_md 请求失败")?;
+                self.update_skill_md(&req.id, &req.content)?;
+                serde_json::to_value(Empty {}).with_context(|| "序列化 update_skill_md 响应失败")
+            }
+
+            "reveal_skill_dir" => {
+                let req: tiangong_plugin_skill_protocol::RevealSkillDirRequest =
+                    serde_json::from_value(payload)
+                        .with_context(|| "解析 reveal_skill_dir 请求失败")?;
+                self.reveal_skill_dir(&req.id)?;
+                serde_json::to_value(Empty {}).with_context(|| "序列化 reveal_skill_dir 响应失败")
+            }
+
             other => Err(anyhow!("未知的 Skill 操作: {other}")),
         }
     }
@@ -342,6 +358,52 @@ impl SkillService {
             storage_root: self.registry.root().display().to_string(),
         }
     }
+
+    /// 更新 skill 的 SKILL.md 内容。
+    fn update_skill_md(&self, id: &str, content: &str) -> Result<()> {
+        let id = id.trim();
+        if id.is_empty() {
+            anyhow::bail!("skill id 不能为空");
+        }
+        let view = self.registry.view();
+        let entry = view
+            .entries
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未找到 skill：{id}"))?;
+        // 先读 manifest 拿到 entry 文件名（默认 SKILL.md）。
+        let manifest = crate::registry::read_skill_manifest(&entry.dir.join("skill.toml"))?;
+        let md_path = entry.dir.join(&manifest.entry);
+        fs::write(&md_path, content)
+            .with_context(|| format!("写入 {} 失败：{}", manifest.entry, md_path.display()))?;
+        // 失效缓存，下次读取拿到新内容。
+        self.registry.invalidate(id);
+        self.registry.refresh();
+        crate::audit::append_audit_log(&crate::audit::AuditEntry::new(
+            "skill.update_md",
+            id,
+            &format!("更新 {}", manifest.entry),
+            true,
+        ));
+        Ok(())
+    }
+
+    /// 在系统文件管理器中打开 skill 目录。
+    fn reveal_skill_dir(&self, id: &str) -> Result<()> {
+        let id = id.trim();
+        if id.is_empty() {
+            anyhow::bail!("skill id 不能为空");
+        }
+        let view = self.registry.view();
+        let entry = view
+            .entries
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未找到 skill：{id}"))?;
+        let dir = entry.dir.clone();
+        reveal_path_in_file_manager(&dir);
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -401,4 +463,27 @@ fn build_installed_skill_config(
         requires_mcp: manifest.requires.mcp,
         permissions: manifest.permissions,
     })
+}
+
+/// 跨平台在系统文件管理器中打开/定位目录。
+///
+/// - macOS：`open <dir>`
+/// - Windows：`explorer <dir>`
+/// - Linux：`xdg-open <dir>`
+///
+/// 失败仅记录日志，不阻塞调用方。
+fn reveal_path_in_file_manager(dir: &std::path::Path) {
+    let (program, arg) = if cfg!(target_os = "macos") {
+        ("open", dir.as_os_str())
+    } else if cfg!(target_os = "windows") {
+        ("explorer", dir.as_os_str())
+    } else {
+        ("xdg-open", dir.as_os_str())
+    };
+    match std::process::Command::new(program).arg(arg).spawn() {
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, dir = %dir.display(), program, "打开文件管理器失败");
+        }
+    }
 }

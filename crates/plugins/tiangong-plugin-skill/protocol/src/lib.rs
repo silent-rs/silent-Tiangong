@@ -38,6 +38,8 @@ pub const GET_SKILL_ENV_OPERATION: &str = "get_skill_env";
 pub const SET_SKILL_ENV_OPERATION: &str = "set_skill_env";
 pub const GET_SKILL_SUMMARY_OPERATION: &str = "get_skill_summary";
 pub const INIT_SKILL_OPERATION: &str = "init_skill";
+pub const UPDATE_SKILL_MD_OPERATION: &str = "update_skill_md";
+pub const REVEAL_SKILL_DIR_OPERATION: &str = "reveal_skill_dir";
 
 // ── marker 类型 ───────────────────────────────────────────────
 
@@ -50,6 +52,8 @@ pub struct GetSkillEnv;
 pub struct SetSkillEnv;
 pub struct GetSkillSummary;
 pub struct InitSkill;
+pub struct UpdateSkillMd;
+pub struct RevealSkillDir;
 
 impl SkillOperation for ListSkills {
     const NAME: &'static str = LIST_SKILLS_OPERATION;
@@ -103,6 +107,18 @@ impl SkillOperation for InitSkill {
     const NAME: &'static str = INIT_SKILL_OPERATION;
     type Request = InitSkillRequest;
     type Response = InitSkillResult;
+}
+
+impl SkillOperation for UpdateSkillMd {
+    const NAME: &'static str = UPDATE_SKILL_MD_OPERATION;
+    type Request = UpdateSkillMdRequest;
+    type Response = Empty;
+}
+
+impl SkillOperation for RevealSkillDir {
+    const NAME: &'static str = REVEAL_SKILL_DIR_OPERATION;
+    type Request = RevealSkillDirRequest;
+    type Response = Empty;
 }
 
 // ── 通用结构 ──────────────────────────────────────────────────
@@ -381,4 +397,18 @@ pub struct InitSkillResult {
     pub dir: String,
     pub skill_id: String,
     pub skill_name: String,
+}
+
+// ── 编辑 SKILL.md / 打开目录 ──
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateSkillMdRequest {
+    pub id: String,
+    /// 新的 SKILL.md 全文。
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RevealSkillDirRequest {
+    pub id: String,
 }

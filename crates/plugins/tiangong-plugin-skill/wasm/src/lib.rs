@@ -17,9 +17,10 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 use serde_json::Value;
 use tiangong_plugin_skill_protocol::{
     Empty, GetSkillDetail, GetSkillDetailRequest, GetSkillEnv, GetSkillEnvRequest, GetSkillSummary,
-    ListSkills, RefreshSkills, RemoveSkill, RemoveSkillRequest, SetSkillEnabled,
-    SetSkillEnabledRequest, SetSkillEnv, SetSkillEnvRequest, SkillOperation, SkillSummaryResponse,
-    TOOL_GET_SKILL_DETAIL,
+    ListSkills, RefreshSkills, RemoveSkill, RemoveSkillRequest, RevealSkillDir,
+    RevealSkillDirRequest, SetSkillEnabled, SetSkillEnabledRequest, SetSkillEnv,
+    SetSkillEnvRequest, SkillOperation, SkillSummaryResponse, TOOL_GET_SKILL_DETAIL, UpdateSkillMd,
+    UpdateSkillMdRequest,
 };
 
 mod descriptor {
@@ -311,6 +312,20 @@ impl UiGuest for Component {
                 let req: SetSkillEnvRequest = serde_json::from_str(&request.payload)
                     .map_err(|e| plugin_err(format!("解析保存 env 请求失败: {e}")))?;
                 let _ = sidecar_client::invoke::<SetSkillEnv>(&req)
+                    .map_err(|e| plugin_err(e.to_string()))?;
+                "true".to_string()
+            }
+            "update_md" => {
+                let req: UpdateSkillMdRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析更新说明请求失败: {e}")))?;
+                let _ = sidecar_client::invoke::<UpdateSkillMd>(&req)
+                    .map_err(|e| plugin_err(e.to_string()))?;
+                "true".to_string()
+            }
+            "reveal" => {
+                let req: RevealSkillDirRequest = serde_json::from_str(&request.payload)
+                    .map_err(|e| plugin_err(format!("解析打开目录请求失败: {e}")))?;
+                let _ = sidecar_client::invoke::<RevealSkillDir>(&req)
                     .map_err(|e| plugin_err(e.to_string()))?;
                 "true".to_string()
             }

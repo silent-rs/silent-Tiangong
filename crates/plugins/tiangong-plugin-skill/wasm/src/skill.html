@@ -36,19 +36,33 @@
     </section>
   </main>
 
-  <!-- 详情模态框 -->
+  <!-- 详情/编辑模态框 -->
   <div id="detail-modal" class="modal-overlay" hidden>
     <div class="modal modal-large">
       <div class="modal-header">
         <h2 id="detail-title">Skill 详情</h2>
-        <button class="icon-btn" type="button" data-close="detail-modal" aria-label="关闭">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
-        </button>
+        <div class="modal-header-actions">
+          <button id="detail-edit-btn" class="btn btn-outline btn-sm" type="button" hidden>编辑说明</button>
+          <button id="detail-reveal-btn" class="btn btn-outline btn-sm" type="button" hidden>打开目录</button>
+          <button class="icon-btn" type="button" data-close="detail-modal" aria-label="关闭">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
       </div>
       <div class="modal-body">
         <div id="detail-badges" class="badge-row"></div>
         <p id="detail-desc" class="detail-desc"></p>
+        <!-- 查看模式 -->
         <pre id="detail-readme" class="detail-readme"></pre>
+        <!-- 编辑模式 -->
+        <div id="detail-editor" class="detail-editor" hidden>
+          <textarea id="detail-textarea" class="detail-textarea"></textarea>
+          <p id="detail-edit-status" class="page-status" role="status" hidden></p>
+        </div>
+      </div>
+      <div id="detail-footer" class="modal-footer" hidden>
+        <button id="detail-cancel-btn" class="btn btn-outline" type="button">取消</button>
+        <button id="detail-save-btn" class="btn btn-primary" type="button">保存</button>
       </div>
     </div>
   </div>

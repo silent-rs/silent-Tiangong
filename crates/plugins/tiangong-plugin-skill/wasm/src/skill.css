@@ -414,6 +414,38 @@ input:disabled {
   overflow-x: auto;
 }
 
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── SKILL.md 编辑 ── */
+
+.detail-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-textarea {
+  width: 100%;
+  min-height: 320px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--host-font-family, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.detail-textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
 /* ── env 编辑 ── */
 
 .env-rows {
