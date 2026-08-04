@@ -503,6 +503,8 @@ fn run_gui() {
                         runtime.stop_all().await;
                     });
                 }
+                // 逐个停止所有 sidecar（它们经 setsid 独立运行，不会随宿主自动退出）。
+                tiangong_plugin_runtime::registry::shutdown_all_sidecars();
             }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {

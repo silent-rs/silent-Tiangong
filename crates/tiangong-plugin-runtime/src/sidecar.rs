@@ -154,6 +154,11 @@ impl ProcessSidecarConnection {
         }
     }
 
+    /// 当前 sidecar 的插件 ID。
+    pub fn plugin_id(&self) -> &str {
+        &self.config.plugin_id
+    }
+
     pub fn ensure_running(&self) -> Result<()> {
         match self.health_check() {
             Ok(()) => return Ok(()),
