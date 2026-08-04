@@ -15,15 +15,8 @@ use std::path::{Path, PathBuf};
 use tiangong_llm::models_config::ModelsConfig;
 use tiangong_types::TrustMode;
 
-use crate::config::{ConnectorConfig, TiangongConfig};
+use crate::config::TiangongConfig;
 use crate::io;
-
-/// Connector 配置文件结构
-#[derive(serde::Deserialize)]
-struct ConnectorsFile {
-    #[serde(default)]
-    connectors: Vec<ConnectorConfig>,
-}
 
 /// `app.json` 只提取长期配置；旧的运行状态字段由 serde 自动忽略。
 #[derive(Default, serde::Deserialize)]
@@ -102,9 +95,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let app = load_json_config::<AppConfigFile>(dir, "app.json").unwrap_or_default();
     let models = load_models_config(dir);
     let server = crate::config::load_server_config_from_dir(dir);
-    let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
-        .map(|f| f.connectors)
-        .unwrap_or_default();
 
     let custom_system_prompt = io::load_custom_prompt_at(
         &dir.join("custom-prompt.md"),
@@ -134,7 +124,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
         custom_system_prompt,
         workspace_dir,
         server,
-        connectors,
     }
 }
 
