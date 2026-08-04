@@ -38,7 +38,7 @@ impl DesktopCoreFactory {
     /// `CoreManager::ensure_core` 的按需回调传入，只有 Core 不存在时才会执行。
     pub fn build_plugins_sync(
         &self,
-        models: tiangong_llm::models_config::ModelsConfig,
+        _models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
         use tracing::{info, warn};
 
