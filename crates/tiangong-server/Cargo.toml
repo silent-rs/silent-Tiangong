@@ -12,7 +12,6 @@ tiangong-plugin-command = { workspace = true }
 tiangong-plugin-fetch = { workspace = true }
 tiangong-plugin-fs = { workspace = true }
 tiangong-plugin-generate-video = { workspace = true }
-tiangong-plugin-speech-to-text = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-task = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }

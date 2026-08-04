@@ -75,12 +75,8 @@ impl DesktopCoreFactory {
                 .map(ModelEndpoint::from_resolved)
         };
         let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-        let stt_endpoint = resolve_ep(ModelCapability::Stt);
         if let Some(ep) = video_endpoint.clone() {
             plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-        }
-        if let Some(ep) = stt_endpoint.clone() {
-            plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
         let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
             &self.storage_root,
@@ -110,9 +106,6 @@ impl DesktopCoreFactory {
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
                 if let Some(ep) = video_endpoint.clone() {
                     child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
-                if let Some(ep) = stt_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                 }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
