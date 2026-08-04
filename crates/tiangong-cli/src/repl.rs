@@ -153,12 +153,37 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
 fn build_cli_plugins(
     storage_root: &std::path::Path,
-    _models: &tiangong_llm::models_config::ModelsConfig,
+    models: &tiangong_llm::models_config::ModelsConfig,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
+    use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+
     let storage_root = storage_root.to_path_buf();
+    let resolve_ep = |cap: ModelCapability| {
+        models
+            .resolve_for_capability(cap)
+            .map(ModelEndpoint::from_resolved)
+    };
+    let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+    let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+    let stt_endpoint = resolve_ep(ModelCapability::Stt);
+    let multimodal_endpoint =
+        if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
+            resolve_ep(ModelCapability::Multimodal)
+        } else {
+            None
+        };
 
     let mut plugins = tiangong_plugin_prompt::default_plugins();
     plugins.extend(tiangong_plugin_fs::default_plugins());
+    if let Some(ep) = image_endpoint.clone() {
+        plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+    }
+    if let Some(ep) = video_endpoint.clone() {
+        plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+    }
+    if let Some(ep) = stt_endpoint.clone() {
+        plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+    }
     plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
         &storage_root,
         tiangong_plugin_runtime::registry::RuntimeKind::Cli,
@@ -168,12 +193,24 @@ fn build_cli_plugins(
     // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。
     // CLI 作为前台交互工具，生命周期不稳定，不承载调度执行（见 issue 说明）。
     plugins.extend(tiangong_plugin_task::default_plugins());
+    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+        plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+    }
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
         move || {
             let mut child_plugins = tiangong_plugin_prompt::default_plugins();
             child_plugins.extend(tiangong_plugin_fs::default_plugins());
+            if let Some(ep) = image_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
+            }
+            if let Some(ep) = video_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
+            }
+            if let Some(ep) = stt_endpoint.clone() {
+                child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
+            }
             child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Cli,
@@ -182,6 +219,9 @@ fn build_cli_plugins(
             child_plugins.extend(tiangong_plugin_command::default_plugins());
             // 子 Core 同样不注册 scheduler 插件，与主 Core 一致。
             child_plugins.extend(tiangong_plugin_task::default_plugins());
+            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
+                child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
+            }
             child_plugins
         }
     });

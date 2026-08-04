@@ -97,20 +97,6 @@ const SKILL: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-skill/protocol/Cargo.toml",
 };
 
-const CODING: PluginConfig = PluginConfig {
-    id: "coding",
-    name: "Coding",
-    description: "通用开发工作流、项目上下文与交付审查",
-    protocol_crate: "tiangong-plugin-coding-protocol",
-    wasm_crate: "tiangong-plugin-coding-wasm",
-    wasm_artifact: "tiangong_plugin_coding_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-coding-sidecar",
-    sidecar_artifact: "tiangong-coding-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-coding",
-    plugin_manifest: "crates/plugins/tiangong-plugin-coding/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-coding/protocol/Cargo.toml",
-};
-
 const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
     id: "text-to-speech",
     name: "Text-To-Speech",
@@ -125,62 +111,6 @@ const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
 };
 
-const GENERATE_IMAGE: PluginConfig = PluginConfig {
-    id: "generate-image",
-    name: "Generate-Image",
-    description: "图片生成",
-    protocol_crate: "tiangong-plugin-generate-image-protocol",
-    wasm_crate: "tiangong-plugin-generate-image-wasm",
-    wasm_artifact: "tiangong_plugin_generate_image_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-generate-image-sidecar",
-    sidecar_artifact: "tiangong-generate-image-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-generate-image",
-    plugin_manifest: "crates/plugins/tiangong-plugin-generate-image/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
-};
-
-const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
-    id: "analyze-attachment",
-    name: "Analyze-Attachment",
-    description: "多模态附件分析",
-    protocol_crate: "tiangong-plugin-analyze-attachment-protocol",
-    wasm_crate: "tiangong-plugin-analyze-attachment-wasm",
-    wasm_artifact: "tiangong_plugin_analyze_attachment_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-analyze-attachment-sidecar",
-    sidecar_artifact: "tiangong-analyze-attachment-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-analyze-attachment",
-    plugin_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
-};
-
-const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
-    id: "speech-to-text",
-    name: "Speech-To-Text",
-    description: "语音转文本",
-    protocol_crate: "tiangong-plugin-speech-to-text-protocol",
-    wasm_crate: "tiangong-plugin-speech-to-text-wasm",
-    wasm_artifact: "tiangong_plugin_speech_to_text_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-speech-to-text-sidecar",
-    sidecar_artifact: "tiangong-speech-to-text-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-speech-to-text",
-    plugin_manifest: "crates/plugins/tiangong-plugin-speech-to-text/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml",
-};
-
-const GENERATE_VIDEO: PluginConfig = PluginConfig {
-    id: "generate-video",
-    name: "Generate-Video",
-    description: "视频生成",
-    protocol_crate: "tiangong-plugin-generate-video-protocol",
-    wasm_crate: "tiangong-plugin-generate-video-wasm",
-    wasm_artifact: "tiangong_plugin_generate_video_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-generate-video-sidecar",
-    sidecar_artifact: "tiangong-generate-video-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-generate-video",
-    plugin_manifest: "crates/plugins/tiangong-plugin-generate-video/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-generate-video/protocol/Cargo.toml",
-};
-
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -188,12 +118,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "index" => Ok(&INDEX),
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
-        "coding" => Ok(&CODING),
         "text-to-speech" => Ok(&TEXT_TO_SPEECH),
-        "generate-image" => Ok(&GENERATE_IMAGE),
-        "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
-        "speech-to-text" => Ok(&SPEECH_TO_TEXT),
-        "generate-video" => Ok(&GENERATE_VIDEO),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
@@ -232,7 +157,7 @@ fn main() {
 fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
     eprintln!("用法: cargo run -p xtask -- build-plugin <id>");
-    eprintln!("支持的插件: memory, mcp, index, scheduler, skill, coding");
+    eprintln!("支持的插件: memory, mcp, index, scheduler");
 }
 
 fn build_plugin(config: &PluginConfig) -> io::Result<()> {
