@@ -277,38 +277,6 @@ pub struct SkillSummaryItem {
     pub description: String,
 }
 
-/// skills.json 配置（历史 AgentConfig.skills 字段，config 加载用）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillsConfig {
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub dirs: Vec<String>,
-    #[serde(default = "default_max_matches")]
-    pub max_matches: usize,
-    #[serde(default)]
-    pub installed: Vec<InstalledSkillConfig>,
-}
-
-impl Default for SkillsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            dirs: Vec::new(),
-            max_matches: default_max_matches(),
-            installed: Vec::new(),
-        }
-    }
-}
-
-fn default_enabled() -> bool {
-    true
-}
-
-fn default_max_matches() -> usize {
-    3
-}
-
 // ── 请求/响应类型 ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

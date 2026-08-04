@@ -10493,7 +10493,6 @@ dependencies = [
  "tempfile",
  "tiangong-core",
  "tiangong-llm",
- "tiangong-plugin-skill-protocol",
  "tiangong-types",
  "tracing",
  "tracing-appender",

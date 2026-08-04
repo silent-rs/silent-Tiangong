@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tiangong_core::core_config::CoreConfig;
 use tiangong_llm::models_config::ModelsConfig;
-use tiangong_plugin_skill_protocol::SkillsConfig;
 use tiangong_types::TrustMode;
 
 /// Server 配置
@@ -169,8 +168,6 @@ pub struct TiangongConfig {
     // ===== Core 所需配置 =====
     /// LLM 模型配置
     pub models: ModelsConfig,
-    /// Skill 配置
-    pub skills: SkillsConfig,
     /// 新对话默认权限信任模式
     pub default_trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
@@ -190,7 +187,6 @@ impl Default for TiangongConfig {
         Self {
             storage_root: crate::loader::default_tiangong_dir(),
             models: ModelsConfig::default(),
-            skills: SkillsConfig::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             workspace_dir: crate::loader::default_workspace_dir(),

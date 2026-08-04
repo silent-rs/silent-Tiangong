@@ -13,7 +13,6 @@
 use std::path::{Path, PathBuf};
 
 use tiangong_llm::models_config::ModelsConfig;
-use tiangong_plugin_skill_protocol::SkillsConfig;
 use tiangong_types::TrustMode;
 
 use crate::config::{ConnectorConfig, TiangongConfig};
@@ -102,7 +101,6 @@ pub fn load_tiangong_config() -> TiangongConfig {
 pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     let app = load_json_config::<AppConfigFile>(dir, "app.json").unwrap_or_default();
     let models = load_models_config(dir);
-    let skills = load_json_config::<SkillsConfig>(dir, "skills.json").unwrap_or_default();
     let server = crate::config::load_server_config_from_dir(dir);
     let connectors = load_json_config::<ConnectorsFile>(dir, "connectors.json")
         .map(|f| f.connectors)
@@ -132,7 +130,6 @@ pub fn load_tiangong_config_from_dir(dir: &Path) -> TiangongConfig {
     TiangongConfig {
         storage_root: dir.to_path_buf(),
         models,
-        skills,
         default_trust_mode: app.resolved_default_trust_mode(),
         custom_system_prompt,
         workspace_dir,
