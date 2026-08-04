@@ -74,7 +74,6 @@ impl DesktopCoreFactory {
                 .resolve_for_capability(cap)
                 .map(ModelEndpoint::from_resolved)
         };
-        let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
         let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
         let stt_endpoint = resolve_ep(ModelCapability::Stt);
         let multimodal_endpoint =
@@ -83,9 +82,6 @@ impl DesktopCoreFactory {
             } else {
                 None
             };
-        if let Some(ep) = image_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-        }
         if let Some(ep) = video_endpoint.clone() {
             plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
         }
@@ -121,9 +117,6 @@ impl DesktopCoreFactory {
                     }
                 }
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
-                if let Some(ep) = image_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                }
                 if let Some(ep) = video_endpoint.clone() {
                     child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
                 }

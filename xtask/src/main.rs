@@ -111,6 +111,20 @@ const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
 };
 
+const GENERATE_IMAGE: PluginConfig = PluginConfig {
+    id: "generate-image",
+    name: "Generate-Image",
+    description: "图片生成",
+    protocol_crate: "tiangong-plugin-generate-image-protocol",
+    wasm_crate: "tiangong-plugin-generate-image-wasm",
+    wasm_artifact: "tiangong_plugin_generate_image_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-generate-image-sidecar",
+    sidecar_artifact: "tiangong-generate-image-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-generate-image",
+    plugin_manifest: "crates/plugins/tiangong-plugin-generate-image/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -119,6 +133,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
         "text-to-speech" => Ok(&TEXT_TO_SPEECH),
+        "generate-image" => Ok(&GENERATE_IMAGE),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
