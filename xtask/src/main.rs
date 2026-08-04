@@ -111,6 +111,20 @@ const CODING: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-coding/protocol/Cargo.toml",
 };
 
+const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
+    id: "text-to-speech",
+    name: "Text-To-Speech",
+    description: "文本转语音",
+    protocol_crate: "tiangong-plugin-text-to-speech-protocol",
+    wasm_crate: "tiangong-plugin-text-to-speech-wasm",
+    wasm_artifact: "tiangong_plugin_text_to_speech_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-text-to-speech-sidecar",
+    sidecar_artifact: "tiangong-text-to-speech-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-text-to-speech",
+    plugin_manifest: "crates/plugins/tiangong-plugin-text-to-speech/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -119,6 +133,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
         "coding" => Ok(&CODING),
+        "text-to-speech" => Ok(&TEXT_TO_SPEECH),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

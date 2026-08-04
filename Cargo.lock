@@ -10536,7 +10536,6 @@ dependencies = [
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
  "tiangong-plugin-terminal",
- "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-server",
  "tiangong-toolkit",
@@ -10609,7 +10608,6 @@ dependencies = [
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
- "tiangong-plugin-text-to-speech",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11247,16 +11245,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-text-to-speech"
+name = "tiangong-plugin-text-to-speech-protocol"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-text-to-speech-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "scru128",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tiangong-plugin-text-to-speech-protocol",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-text-to-speech-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-text-to-speech-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11315,7 +11338,6 @@ dependencies = [
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
- "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-types",
  "tokio",

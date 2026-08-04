@@ -13,7 +13,6 @@ tiangong-plugin-fetch = { workspace = true }
 tiangong-plugin-fs = { workspace = true }
 tiangong-plugin-generate-image = { workspace = true }
 tiangong-plugin-generate-video = { workspace = true }
-tiangong-plugin-text-to-speech = { workspace = true }
 tiangong-plugin-speech-to-text = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-task = { workspace = true }

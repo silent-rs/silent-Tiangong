@@ -349,7 +349,6 @@ impl ServerCoreManager {
             };
             let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
             let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-            let tts_endpoint = resolve_ep(ModelCapability::Tts);
             let stt_endpoint = resolve_ep(ModelCapability::Stt);
             let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
                 && !models.chat_is_multimodal()
@@ -366,9 +365,6 @@ impl ServerCoreManager {
             }
             if let Some(ep) = video_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-            }
-            if let Some(ep) = tts_endpoint.clone() {
-                plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
             }
             if let Some(ep) = stt_endpoint.clone() {
                 plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
@@ -399,9 +395,6 @@ impl ServerCoreManager {
                     }
                     if let Some(ep) = video_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                    }
-                    if let Some(ep) = tts_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
                     }
                     if let Some(ep) = stt_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
