@@ -10710,6 +10710,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiangong-plugin-coding-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-coding-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "serde_json",
+ "sha2",
+ "tiangong-plugin-coding-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-coding-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-coding-protocol",
+ "wit-bindgen 0.46.0",
+]
+
+[[package]]
 name = "tiangong-plugin-command"
 version = "0.13.4"
 dependencies = [

@@ -97,6 +97,20 @@ const SKILL: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-skill/protocol/Cargo.toml",
 };
 
+const CODING: PluginConfig = PluginConfig {
+    id: "coding",
+    name: "Coding",
+    description: "通用开发工作流、项目上下文与交付审查",
+    protocol_crate: "tiangong-plugin-coding-protocol",
+    wasm_crate: "tiangong-plugin-coding-wasm",
+    wasm_artifact: "tiangong_plugin_coding_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-coding-sidecar",
+    sidecar_artifact: "tiangong-coding-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-coding",
+    plugin_manifest: "crates/plugins/tiangong-plugin-coding/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-coding/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -104,6 +118,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "index" => Ok(&INDEX),
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
+        "coding" => Ok(&CODING),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
@@ -142,7 +157,7 @@ fn main() {
 fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
     eprintln!("用法: cargo run -p xtask -- build-plugin <id>");
-    eprintln!("支持的插件: memory, mcp, index, scheduler");
+    eprintln!("支持的插件: memory, mcp, index, scheduler, skill, coding");
 }
 
 fn build_plugin(config: &PluginConfig) -> io::Result<()> {

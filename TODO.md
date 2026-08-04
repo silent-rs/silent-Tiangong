@@ -243,6 +243,31 @@
 - 动态插件页占满设置内容区，App 侧不出现滚动条，插件长内容仍可在 iframe 内滚动。
 - Memory 页面所有图标按钮显示清晰，且不影响图谱中的 SVG 节点和连线。
 
+# Coding 专用 WASM 插件 PoC
+
+## 目标与边界
+
+- [x] 新增 Coding WASM + sidecar 插件，通过提示词编排现有 fs、index、command、terminal 等能力，并补充项目上下文、开发前检查、进度记录和交付审查能力。
+- [x] 不重复实现通用文件、检索、命令和终端工具，也不在插件内建立第二套 Agent Loop。
+- [x] 接收当前工作区和完全信任状态；sidecar 只提供 Coding 专用的结构化聚合能力。
+- [x] 接入统一插件构建、部署和 OSS 制品生成流程。
+
+## 当前任务：插件骨架、提示词与 sidecar 增强
+
+- [x] 创建 Coding 私有协议、WASM Component、sidecar 与 `plugin.json`。
+- [x] 注入项目约定发现、代码探索、最小改动、真实验证、失败修复和简明汇报规则，不预设固定规则文件名、技术栈或包管理方式。
+- [x] 明确现有检索、文件、命令和终端能力的调用顺序及安全边界。
+- [x] 提供项目上下文、开发前检查、进度记录和交付审查工具，不重复暴露已有原子能力。
+- [x] 在 xtask 注册 `build-plugin coding`。
+- [x] 构建 Coding 完整插件，校验清单、WASM、sidecar 和提示词内容。
+
+## 完成标准
+
+- `cargo run -p xtask -- build-plugin coding` 能完成协议检查、WASM 与 sidecar 构建、部署和 OSS 制品生成。
+- 插件可被现有运行时加载，描述符、sidecar 握手与清单 ID、版本一致。
+- 启用插件后能注入 Coding 工作流并提供 Coding 专用聚合工具，停用后不再注入或暴露工具。
+- 不改变宿主 Agent Loop，不重复暴露已有原子工具。
+
 # 后续插件 WASM 化排期
 
 Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难到易」推进，并明确区分哪些插件可改造、哪些必须保留原生。
