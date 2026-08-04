@@ -141,7 +141,9 @@ jobs:
               "tiangong-plugin-scheduler-wasm":     "crates/plugins/tiangong-plugin-scheduler/wasm/",
               "tiangong-plugin-terminal":       "crates/plugins/tiangong-plugin-terminal/",
               "tiangong-plugin-analyze-attachment": "crates/plugins/tiangong-plugin-analyze-attachment/",
-              "tiangong-plugin-skill":     "crates/plugins/tiangong-plugin-skill/",
+              "tiangong-plugin-skill-protocol": "crates/plugins/tiangong-plugin-skill/protocol/",
+              "tiangong-plugin-skill-sidecar":  "crates/plugins/tiangong-plugin-skill/sidecar/",
+              "tiangong-plugin-skill-wasm":     "crates/plugins/tiangong-plugin-skill/wasm/",
               "tiangong-app":             "src-tauri/",
               "tiangong":                 "src/",
           }
