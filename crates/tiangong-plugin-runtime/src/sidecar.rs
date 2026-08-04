@@ -25,6 +25,30 @@ pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
 pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
 pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
+
+/// 随天工构建和发布的内置可信插件 ID。
+///
+/// 只有这些插件的 sidecar 才能获得 `TIANGONG_STORAGE_ROOT`（从而能读取
+/// `~/.tiangong/models.json` 等敏感配置）。第三方插件不注入存储根目录。
+/// 后续签名体系完成后可替换为签名校验。
+const TRUSTED_BUILTIN_PLUGINS: &[&str] = &[
+    "memory",
+    "mcp",
+    "index",
+    "scheduler",
+    "skill",
+    "analyze-attachment",
+    "generate-image",
+    "generate-video",
+    "text-to-speech",
+    "speech-to-text",
+];
+
+/// 判断插件是否属于可信内置插件（可获得存储根目录）。
+pub fn is_trusted_plugin(plugin_id: &str) -> bool {
+    TRUSTED_BUILTIN_PLUGINS.contains(&plugin_id)
+}
+
 /// 本机 server 的 HTTP 地址（如 `http://127.0.0.1:8080`），供需要回调 host 的
 /// sidecar（如 scheduler 到点投递消息）使用。
 pub const SERVER_URL_ENV: &str = "TIANGONG_SERVER_URL";
@@ -374,8 +398,16 @@ impl ProcessSidecarConnection {
             .env(PLUGIN_ID_ENV, &self.config.plugin_id)
             .env(PLUGIN_VERSION_ENV, &self.config.plugin_version)
             .env(PLUGIN_ENDPOINT_ENV, &self.config.endpoint)
-            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir)
-            .env(STORAGE_ROOT_ENV, &self.config.storage_root);
+            .env(PLUGIN_DATA_DIR_ENV, &self.config.data_dir);
+        // 只向可信内置插件注入存储根目录（含 models.json 等敏感配置）。
+        if is_trusted_plugin(&self.config.plugin_id) {
+            command.env(STORAGE_ROOT_ENV, &self.config.storage_root);
+        } else {
+            tracing::warn!(
+                plugin_id = %self.config.plugin_id,
+                "非可信内置插件，不注入 TIANGONG_STORAGE_ROOT"
+            );
+        }
         // 注入本机 server 连接信息（scheduler 等需回调 host 的 sidecar 使用）。
         if let Some(url) = self.config.server_url.as_deref() {
             command.env(SERVER_URL_ENV, url);

@@ -375,6 +375,7 @@ impl ServerCoreManager {
             }
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
+                tiangong_plugin_runtime::registry::RuntimeKind::Server,
             ));
             plugins.extend(tiangong_plugin_fetch::default_plugins());
             plugins.extend(tiangong_plugin_command::default_plugins());
@@ -406,7 +407,10 @@ impl ServerCoreManager {
                         child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                     }
                     child_plugins.extend(
-                        tiangong_plugin_runtime::registry::load_installed_plugins(&storage_root),
+                        tiangong_plugin_runtime::registry::load_installed_plugins(
+                            &storage_root,
+                            tiangong_plugin_runtime::registry::RuntimeKind::Server,
+                        ),
                     );
                     child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());

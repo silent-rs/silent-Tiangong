@@ -110,6 +110,57 @@ fn stop_installed_sidecar(storage_root: &Path, plugin_id: &str) -> Result<()> {
 const SERVER_DEPENDENT_PLUGINS: &[&str] = &["scheduler"];
 const DISABLED_MARKER: &str = ".disabled";
 const ROLLBACK_DIR: &str = ".rollback";
+
+/// 天工运行入口类型。
+///
+/// 插件清单可声明 `entrypoints` 限定适用入口；runtime 据此过滤。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Desktop,
+    Cli,
+    Server,
+}
+
+impl RuntimeKind {
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Cli => "cli",
+            Self::Server => "server",
+        }
+    }
+}
+
+/// 获取当前已配置的模型能力列表（snake_case），供过滤判断。
+fn configured_model_capabilities() -> Vec<String> {
+    let models = tiangong_config::registry::models();
+    tiangong_llm::ModelCapability::all()
+        .iter()
+        .filter(|cap| models.resolve_for_capability(**cap).is_some())
+        .map(|cap| cap.key().to_string())
+        .collect()
+}
+
+/// 判断插件是否可在当前入口注册为 Core 工具。
+///
+/// 返回 `Some(reason)` 表示不可注册（reason 为跳过原因，供日志/管理页展示）。
+fn check_plugin_availability(
+    manifest: &PluginManifest,
+    runtime: RuntimeKind,
+    configured: &[String],
+) -> Option<String> {
+    // 入口过滤
+    if !manifest.available_at(runtime.key()) {
+        return Some(format!("当前入口 {} 不在插件声明的入口列表", runtime.key()));
+    }
+    // 必需模型能力过滤
+    let configured_strs: Vec<&str> = configured.iter().map(String::as_str).collect();
+    let missing = manifest.missing_capabilities(&configured_strs);
+    if !missing.is_empty() {
+        return Some(format!("缺少必需模型能力：{}", missing.join(", ")));
+    }
+    None
+}
 const PRESERVED_ENTRIES: [&str; 3] = ["runtime", "logs", "data"];
 
 #[derive(Clone)]
@@ -146,6 +197,10 @@ pub struct PluginStatus {
     pub has_sidecar: bool,
     pub sidecar_running: bool,
     pub last_error: Option<String>,
+    /// 插件未注册为可调用工具的原因（如缺少模型能力、入口不匹配）。
+    /// None 表示插件当前可调用；Some 表示不可调用及原因。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 fn loaded_plugins() -> &'static Mutex<HashMap<String, LoadedPlugin>> {
@@ -210,16 +265,33 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
 }
 
 /// 为一个 Core 创建独立实例。实例使用注册表已接受的同一份 WASM 字节快照。
-pub fn load_installed_plugins(storage_root: &Path) -> Vec<Arc<dyn Plugin>> {
+///
+/// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
+/// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
+pub fn load_installed_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
     preload_installed_plugins(storage_root);
     let Ok(_operation) = LOAD_OPERATION.lock() else {
         tracing::warn!("插件加载操作锁已损坏");
         return Vec::new();
     };
 
+    let configured = configured_model_capabilities();
     let plugin_ids = discover_installed_plugins(storage_root)
         .into_iter()
-        .map(|installed| installed.manifest.id)
+        .filter_map(|installed| {
+            if let Some(reason) =
+                check_plugin_availability(&installed.manifest, runtime, &configured)
+            {
+                tracing::info!(
+                    plugin_id = %installed.manifest.id,
+                    reason,
+                    "插件未注册工具（仍保持已安装）"
+                );
+                None
+            } else {
+                Some(installed.manifest.id)
+            }
+        })
         .collect::<Vec<_>>();
 
     plugin_ids
@@ -229,9 +301,12 @@ pub fn load_installed_plugins(storage_root: &Path) -> Vec<Arc<dyn Plugin>> {
 }
 
 /// 返回已安装插件状态，并探测 sidecar 当前是否可用。
-pub fn list_plugins(storage_root: &Path) -> Vec<PluginStatus> {
+///
+/// `runtime` 用于判断插件是否可在当前入口注册工具，填充 `unavailable_reason`。
+pub fn list_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
     preload_installed_plugins(storage_root);
     let installed = discover_installed_plugins(storage_root);
+    let configured = configured_model_capabilities();
     let snapshots = {
         let Ok(plugins) = loaded_plugins().lock() else {
             return Vec::new();
@@ -282,6 +357,11 @@ pub fn list_plugins(storage_root: &Path) -> Vec<PluginStatus> {
                 "loaded"
             };
             PluginStatus {
+                unavailable_reason: if enabled {
+                    check_plugin_availability(&manifest, runtime, &configured)
+                } else {
+                    None
+                },
                 id: manifest.id.clone(),
                 name: descriptor
                     .as_ref()
@@ -688,7 +768,13 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     } else {
         "loaded"
     };
+    let configured = configured_model_capabilities();
     Some(PluginStatus {
+        unavailable_reason: if enabled {
+            check_plugin_availability(manifest, RuntimeKind::Desktop, &configured)
+        } else {
+            None
+        },
         id: manifest.id.clone(),
         name: descriptor
             .as_ref()

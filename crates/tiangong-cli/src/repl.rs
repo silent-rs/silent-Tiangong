@@ -190,6 +190,7 @@ fn build_cli_plugins(
     }
     plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
         &storage_root,
+        tiangong_plugin_runtime::registry::RuntimeKind::Cli,
     ));
     plugins.extend(tiangong_plugin_fetch::default_plugins());
     plugins.extend(tiangong_plugin_command::default_plugins());
@@ -219,6 +220,7 @@ fn build_cli_plugins(
             }
             child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
+                tiangong_plugin_runtime::registry::RuntimeKind::Cli,
             ));
             child_plugins.extend(tiangong_plugin_fetch::default_plugins());
             child_plugins.extend(tiangong_plugin_command::default_plugins());

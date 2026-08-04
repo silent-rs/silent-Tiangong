@@ -96,8 +96,10 @@ impl DesktopCoreFactory {
         if let Some(ep) = stt_endpoint.clone() {
             plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
         }
-        let wasm_plugins =
-            tiangong_plugin_runtime::registry::load_installed_plugins(&self.storage_root);
+        let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
+            &self.storage_root,
+            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+        );
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
         plugins.push(tiangong_plugin_task::build_plugin());
@@ -137,6 +139,7 @@ impl DesktopCoreFactory {
                 }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
+                    tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
                 ));
                 child_plugins.push(tiangong_plugin_task::build_plugin());
                 if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
