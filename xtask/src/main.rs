@@ -139,6 +139,20 @@ const GENERATE_IMAGE: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
 };
 
+const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
+    id: "analyze-attachment",
+    name: "Analyze-Attachment",
+    description: "多模态附件分析",
+    protocol_crate: "tiangong-plugin-analyze-attachment-protocol",
+    wasm_crate: "tiangong-plugin-analyze-attachment-wasm",
+    wasm_artifact: "tiangong_plugin_analyze_attachment_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-analyze-attachment-sidecar",
+    sidecar_artifact: "tiangong-analyze-attachment-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-analyze-attachment",
+    plugin_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -149,6 +163,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "coding" => Ok(&CODING),
         "text-to-speech" => Ok(&TEXT_TO_SPEECH),
         "generate-image" => Ok(&GENERATE_IMAGE),
+        "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

@@ -10523,7 +10523,6 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
  "tiangong-plugin-generate-video",
@@ -10595,7 +10594,6 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
@@ -10810,16 +10808,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-analyze-attachment"
+name = "tiangong-plugin-analyze-attachment-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-analyze-attachment-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "scru128",
+ "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-analyze-attachment-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
  "tiangong-types",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-analyze-attachment-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-analyze-attachment-protocol",
+ "tiangong-types",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11349,7 +11375,6 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
