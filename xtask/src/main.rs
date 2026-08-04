@@ -153,6 +153,20 @@ const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
 };
 
+const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
+    id: "speech-to-text",
+    name: "Speech-To-Text",
+    description: "语音转文本",
+    protocol_crate: "tiangong-plugin-speech-to-text-protocol",
+    wasm_crate: "tiangong-plugin-speech-to-text-wasm",
+    wasm_artifact: "tiangong_plugin_speech_to_text_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-speech-to-text-sidecar",
+    sidecar_artifact: "tiangong-speech-to-text-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-speech-to-text",
+    plugin_manifest: "crates/plugins/tiangong-plugin-speech-to-text/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -164,6 +178,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "text-to-speech" => Ok(&TEXT_TO_SPEECH),
         "generate-image" => Ok(&GENERATE_IMAGE),
         "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
+        "speech-to-text" => Ok(&SPEECH_TO_TEXT),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
