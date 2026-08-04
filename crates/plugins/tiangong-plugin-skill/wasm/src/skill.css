@@ -336,12 +336,12 @@ input:disabled {
 .modal-overlay {
   position: fixed;
   inset: 0;
+  z-index: 70;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: color-mix(in srgb, var(--text) 40%, transparent);
-  z-index: 50;
+  background: rgba(0, 0, 0, 0.5);
 }
 
 .modal {
