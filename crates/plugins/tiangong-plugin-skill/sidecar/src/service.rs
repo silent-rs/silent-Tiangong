@@ -401,8 +401,7 @@ impl SkillService {
             .cloned()
             .ok_or_else(|| anyhow!("未找到 skill：{id}"))?;
         let dir = entry.dir.clone();
-        reveal_path_in_file_manager(&dir);
-        Ok(())
+        reveal_path_in_file_manager(&dir)
     }
 }
 
@@ -471,8 +470,12 @@ fn build_installed_skill_config(
 /// - Windows：`explorer <dir>`
 /// - Linux：`xdg-open <dir>`
 ///
-/// 失败仅记录日志，不阻塞调用方。
-fn reveal_path_in_file_manager(dir: &std::path::Path) {
+/// 跨平台在系统文件管理器中打开/定位目录。
+///
+/// sidecar 继承了宿主 GUI 应用的桌面会话，可正常唤起文件管理器。
+/// 显式重定向标准流并等待命令退出，避免子进程因管道问题立即结束。
+fn reveal_path_in_file_manager(dir: &std::path::Path) -> Result<()> {
+    use std::process::Stdio;
     let (program, arg) = if cfg!(target_os = "macos") {
         ("open", dir.as_os_str())
     } else if cfg!(target_os = "windows") {
@@ -480,10 +483,15 @@ fn reveal_path_in_file_manager(dir: &std::path::Path) {
     } else {
         ("xdg-open", dir.as_os_str())
     };
-    match std::process::Command::new(program).arg(arg).spawn() {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::warn!(%error, dir = %dir.display(), program, "打开文件管理器失败");
-        }
+    let status = std::process::Command::new(program)
+        .arg(arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("启动 {program} 失败"))?;
+    if !status.success() {
+        anyhow::bail!("{program} 退出码非 0：{status}");
     }
+    Ok(())
 }

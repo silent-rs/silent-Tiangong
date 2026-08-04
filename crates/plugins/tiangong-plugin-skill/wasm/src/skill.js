@@ -340,8 +340,12 @@ function hideDetailEditStatus() {
   document.getElementById("detail-edit-status").hidden = true;
 }
 
-/// 在系统文件管理器中打开 skill 目录。
+/// 在系统文件管理器中打开 skill 目录（经 sidecar reveal 操作）。
 async function revealDir(id) {
+  if (!id) {
+    showStatus("打开目录失败：skill id 为空", true);
+    return;
+  }
   try {
     await callHost("reveal", JSON.stringify({ id }));
   } catch (error) {
