@@ -153,7 +153,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
 fn build_cli_plugins(
     storage_root: &std::path::Path,
-    models: &tiangong_llm::models_config::ModelsConfig,
+    _models: &tiangong_llm::models_config::ModelsConfig,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
     let storage_root = storage_root.to_path_buf();
 
