@@ -397,13 +397,6 @@ fn run_gui() {
             tiangong_app::commands::update_mcp_server,
             tiangong_app::commands::remove_mcp_server,
             tiangong_app::commands::set_mcp_server_enabled,
-            tiangong_app::commands::get_skills,
-            tiangong_app::commands::refresh_skills,
-            tiangong_app::commands::get_skill_detail,
-            tiangong_app::commands::get_skill_env,
-            tiangong_app::commands::set_skill_env,
-            tiangong_app::commands::remove_skill,
-            tiangong_app::commands::set_skill_enabled,
             tiangong_app::commands::get_server_config,
             tiangong_app::commands::set_server_config,
             tiangong_app::commands::start_server,
@@ -510,6 +503,8 @@ fn run_gui() {
                         runtime.stop_all().await;
                     });
                 }
+                // 逐个停止所有 sidecar（它们经 setsid 独立运行，不会随宿主自动退出）。
+                tiangong_plugin_runtime::registry::shutdown_all_sidecars();
             }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {

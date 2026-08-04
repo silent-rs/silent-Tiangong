@@ -38,9 +38,6 @@ pub struct TiangongApp {
     /// 当前进程已明确丢弃/删除的输入缓存键，阻止迟到写入复活。
     discarded_input_caches: Mutex<HashSet<String>>,
     pub config: CoreConfigProvider,
-    /// Skill 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具，
-    /// app 持有此句柄做 skill 管理：remove/set_enabled/refresh/gc/doctor）。
-    pub skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
     /// MCP 管理插件句柄（dual-ownership：core 拿 clone 做 LLM 工具（动态 MCP 工具
     /// spec + 执行分发），app 持有此句柄做 MCP 管理：register/update/remove/
     /// set_enabled/probe/health）。
@@ -164,9 +161,6 @@ impl TiangongApp {
         let state = std::sync::Arc::new(AsyncMutex::new(core_state));
 
         let app_handle = std::sync::Arc::new(std::sync::OnceLock::new());
-        let skill_plugin = std::sync::Arc::new(
-            tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
-        );
         let bot_store = std::sync::Arc::new(
             tiangong_bots::BotStore::with_storage_root(storage_root.clone()).unwrap_or_else(
                 |error| panic!("加载 Bot 配置失败，请修正 bots.json 后重试：{error:#}"),
@@ -179,7 +173,6 @@ impl TiangongApp {
         let desktop_lock = tiangong_config::desktop_lock::acquire();
         let desktop_factory = std::sync::Arc::new(crate::core_factory::DesktopCoreFactory {
             app_handle: app_handle.clone(),
-            skill_plugin: skill_plugin.clone(),
             config: config.clone(),
             storage_root: storage_root.clone(),
         });
@@ -192,7 +185,6 @@ impl TiangongApp {
             input_send_claims: Mutex::new(HashMap::new()),
             discarded_input_caches: Mutex::new(HashSet::new()),
             config,
-            skill_plugin,
             bot_store,
             bot_runtime,
             desktop_lock,

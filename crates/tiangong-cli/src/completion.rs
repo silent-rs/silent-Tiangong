@@ -123,11 +123,11 @@ pub fn detect_trigger(input: &str, cursor: usize) -> Option<(CompletionTrigger, 
 pub fn complete(
     trigger: CompletionTrigger,
     prefix: &str,
-    skill_plugin: &tiangong_plugin_skill::SkillPlugin,
+    storage_root: &std::path::Path,
 ) -> Vec<CompletionCandidate> {
     match trigger {
         CompletionTrigger::SlashCommand => complete_slash_commands(prefix),
-        CompletionTrigger::AtMention => complete_at_mentions(prefix, skill_plugin),
+        CompletionTrigger::AtMention => complete_at_mentions(prefix, storage_root),
     }
 }
 
@@ -143,20 +143,15 @@ fn complete_slash_commands(prefix: &str) -> Vec<CompletionCandidate> {
         .collect()
 }
 
-fn complete_at_mentions(
-    prefix: &str,
-    skill_plugin: &tiangong_plugin_skill::SkillPlugin,
-) -> Vec<CompletionCandidate> {
+fn complete_at_mentions(prefix: &str, storage_root: &std::path::Path) -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
 
     // @file: 提及补全 - 列出当前目录文件
     candidates.extend(complete_files(prefix));
 
-    // @skill: 提及补全（skill 数据由 skill plugin 自管）
-    for skill in skill_plugin.installed_skills() {
-        if !skill.enabled {
-            continue;
-        }
+    // @skill: 提及补全（skill 数据经 sidecar 通道查询）
+    let skills = list_enabled_skills(storage_root);
+    for skill in &skills {
         let label = format!("skill:{}", skill.id);
         if label.starts_with(prefix) || skill.id.starts_with(prefix) || prefix.is_empty() {
             candidates.push(CompletionCandidate {
@@ -169,7 +164,7 @@ fn complete_at_mentions(
 
     // @mcp: 提及补全（MCP servers 经 sidecar 通道拉取）
     if let Ok(servers) = tiangong_plugin_runtime::registry::invoke_sidecar(
-        &tiangong_config::io::storage_root(),
+        storage_root,
         "mcp",
         "mcp.server.list",
         serde_json::json!({}),
@@ -195,6 +190,24 @@ fn complete_at_mentions(
     }
 
     candidates
+}
+
+/// 经 sidecar 通道列出已启用的 skill（供 @提及补全）。
+fn list_enabled_skills(
+    storage_root: &std::path::Path,
+) -> Vec<tiangong_plugin_skill_protocol::InstalledSkillConfig> {
+    tiangong_plugin_runtime::registry::invoke_sidecar(
+        storage_root,
+        "skill",
+        tiangong_plugin_skill_protocol::LIST_SKILLS_OPERATION,
+        serde_json::to_value(tiangong_plugin_skill_protocol::Empty {}).unwrap_or_default(),
+    )
+    .ok()
+    .and_then(|v| {
+        serde_json::from_value::<tiangong_plugin_skill_protocol::ListSkillsResponse>(v).ok()
+    })
+    .map(|r| r.skills)
+    .unwrap_or_default()
 }
 
 fn complete_files(prefix: &str) -> Vec<CompletionCandidate> {

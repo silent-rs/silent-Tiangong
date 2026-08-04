@@ -30,11 +30,11 @@ export function usePluginMask(
   const [mask, setMask] = useState<PluginMaskState | null>(null);
 
   useEffect(() => {
-    const source = iframeRef.current?.contentWindow;
-    if (!source) return;
-
     const handler = (event: MessageEvent) => {
-      if (event.source !== source) return;
+      // 动态取 contentWindow，避免 srcDoc iframe 首次加载时 contentWindow 尚未就绪
+      // 导致监听器漏注册。
+      const source = iframeRef.current?.contentWindow;
+      if (!source || event.source !== source) return;
       const data = event.data;
       if (
         !data

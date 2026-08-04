@@ -226,13 +226,24 @@ fn check_mcp(report: &mut DoctorReport) {
 }
 
 fn check_skills(report: &mut DoctorReport) {
-    // Skill 数据由 skill plugin 自管，doctor 构造临时实例读取。
-    let skill_plugin = tiangong_plugin_skill::SkillPlugin::new();
-    let skills = skill_plugin.installed_skills();
-    if skills.is_empty() {
+    // Skill 数据经 skill sidecar 查询。
+    let storage_root = tiangong_config::io::storage_root();
+    let count = tiangong_plugin_runtime::registry::invoke_sidecar(
+        &storage_root,
+        "skill",
+        tiangong_plugin_skill_protocol::LIST_SKILLS_OPERATION,
+        serde_json::to_value(tiangong_plugin_skill_protocol::Empty {}).unwrap_or_default(),
+    )
+    .ok()
+    .and_then(|v| {
+        serde_json::from_value::<tiangong_plugin_skill_protocol::ListSkillsResponse>(v).ok()
+    })
+    .map(|r| r.skills.len())
+    .unwrap_or(0);
+    if count == 0 {
         report.warn("Skill 目录", "0 个 Skill");
     } else {
-        report.ok("Skill 目录", format!("{} 个 Skill 可用", skills.len()));
+        report.ok("Skill 目录", format!("{count} 个 Skill 可用"));
     }
 }
 

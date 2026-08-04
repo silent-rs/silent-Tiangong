@@ -9,7 +9,6 @@ import type {
   SessionStreamEvent,
   Session,
   InputCache,
-  Skill,
   StreamEvent,
   TaskPlan,
   TokenStats,
@@ -794,7 +793,6 @@ export interface AppState {
   approvalRequestId: string | null;
   currentPlan: TaskPlan | undefined;
   mcpServers: McpServer[] | null;
-  skills: Skill[] | null;
 
   // 尚未首次发送的新对话
   isNewConversation: boolean;
@@ -885,7 +883,6 @@ export interface AppState {
   setWorkspaceDir: (workspaceDir: string) => Promise<void>;
 
   loadMcpServers: () => Promise<void>;
-  loadSkills: () => Promise<void>;
 
   setSelectedAgentTab: (tab: string | null) => void;
   beginContextManagement: (summary: string) => void;
@@ -922,7 +919,6 @@ export const useStore = create<AppState>((set, get) => ({
   approvalRequestId: null,
   currentPlan: undefined,
   mcpServers: null,
-  skills: null,
   isNewConversation: true,
   updateAvailable: null,
   setUpdateAvailable: (info) => set({ updateAvailable: info }),
@@ -1715,16 +1711,6 @@ export const useStore = create<AppState>((set, get) => ({
       set({ mcpServers: servers });
     } catch (error) {
       console.error('加载 MCP 服务器失败:', error);
-    }
-  },
-
-  // 加载 Skills
-  loadSkills: async () => {
-    try {
-      const skills = await api.getSkills();
-      set({ skills });
-    } catch (error) {
-      console.error('加载 Skills 失败:', error);
     }
   },
 

@@ -30,9 +30,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
     state.workspace_dir = std::env::current_dir()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
-    let skill_plugin: std::sync::Arc<tiangong_plugin_skill::SkillPlugin> = std::sync::Arc::new(
-        tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
-    );
     // MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具（动态 MCP 工具 spec +
     // 执行分发），CLI 侧经 mcp_plugin 做管理（modal 里的 add/remove/toggle、
     // /config set mcp.*、@mcp 补全、skill 删除后的孤儿 MCP 清理）。
@@ -59,9 +56,10 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let prompt = format!("\x1b[2m{short_id}\x1b[0m \x1b[1;36m❯\x1b[0m ");
 
         let input = {
-            reader.read_line(&prompt, |buf, cursor| {
+            let storage_root = storage_root.clone();
+            reader.read_line(&prompt, move |buf, cursor| {
                 if let Some((trigger, _start, prefix)) = completion::detect_trigger(buf, cursor) {
-                    completion::complete(trigger, &prefix, &skill_plugin)
+                    completion::complete(trigger, &prefix, &storage_root)
                 } else {
                     Vec::new()
                 }
@@ -82,7 +80,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 
         // / 命令（通过 TiangongState 处理）
         if trimmed.starts_with('/') {
-            match commands::handle_command(&mut state, &config, trimmed, &skill_plugin) {
+            match commands::handle_command(&mut state, &config, trimmed, &storage_root) {
                 Ok(true) => break,
                 Ok(false) => continue,
                 Err(err) => {
@@ -111,7 +109,7 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
         let plugins = if state.core_manager.has_live_core(&session_id) {
             Vec::new()
         } else {
-            build_cli_plugins(&storage_root, &state.config.models, &skill_plugin)
+            build_cli_plugins(&storage_root, &state.config.models)
         };
         runtime
             .block_on(state.core_manager.ensure_core(
@@ -156,7 +154,6 @@ pub fn run(trust_mode: Option<tiangong_core::permission::TrustMode>) -> Result<(
 fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
-    skill_plugin: &std::sync::Arc<tiangong_plugin_skill::SkillPlugin>,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
     use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
 
@@ -202,7 +199,6 @@ fn build_cli_plugins(
     if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
         plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
     }
-    plugins.push(skill_plugin.clone());
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
@@ -231,9 +227,6 @@ fn build_cli_plugins(
             if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                 child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
             }
-            child_plugins.push(std::sync::Arc::new(
-                tiangong_plugin_skill::SkillPlugin::with_storage_root(storage_root.join("skills")),
-            ));
             child_plugins
         }
     });

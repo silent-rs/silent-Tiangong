@@ -9,12 +9,12 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, KeyRound, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Clock, Bot as BotIcon, Package, Brain } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Clock, Bot as BotIcon, Package, Brain } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
-import type { Skill, SkillDetail, ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { AutomationSettings } from './automation/AutomationSettings';
@@ -114,10 +114,6 @@ export function SettingsDialog() {
                   <Settings className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">模型配置</span>
                 </TabsTrigger>
-                <TabsTrigger value="skill" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
-                  <Puzzle className="w-4 h-4 sm:mr-2" />
-                  <span className="sr-only sm:not-sr-only">Skills</span>
-                </TabsTrigger>
                 <TabsTrigger value="server" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                   <Globe className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">Server</span>
@@ -163,9 +159,6 @@ export function SettingsDialog() {
               </TabsContent>
               <TabsContent value="llm" className="m-0 flex-1 min-h-0 overflow-hidden">
                 <LLMSettings onSaveStatusChange={setSaveStatus} />
-              </TabsContent>
-              <TabsContent value="skill" className="m-0 flex-1 min-h-0 overflow-y-auto">
-                <SkillSettings />
               </TabsContent>
               <TabsContent value="server" className="m-0 flex-1 min-h-0 overflow-y-auto">
                 <ServerSettings />
@@ -1363,208 +1356,8 @@ function RoutingSection({
 }
 
 // ============================================================================
-// Skill 设置组件
+// Server 设置组件
 // ============================================================================
-
-function SkillSettings() {
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  // skill env 编辑
-  const [editSkillEnvId, setEditSkillEnvId] = useState<string | null>(null);
-  const [editSkillEnvValues, setEditSkillEnvValues] = useState<Record<string, string>>({});
-  const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
-  const { showSuccess, showError } = useToast();
-
-  const loadSkills = async () => {
-    setIsLoading(true);
-    try {
-      const data = await api.getSkills();
-      setSkills(data);
-    } catch (error) {
-      console.error('加载 Skills 失败:', error);
-      showError('加载失败', '无法加载 Skills 列表');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadSkills();
-  }, []);
-
-
-  const handleRemoveSkill = async (id: string) => {
-    try {
-      await api.removeSkill(id);
-      showSuccess('删除成功', 'Skill 已删除');
-      loadSkills();
-    } catch (error) {
-      console.error('删除 Skill 失败:', error);
-      showError('删除失败', '无法删除 Skill');
-    }
-  };
-
-  const handleToggleEnabled = async (id: string, enabled: boolean) => {
-    try {
-      await api.setSkillEnabled(id, enabled);
-      showSuccess('状态更新', `Skill 已${enabled ? '启用' : '禁用'}`);
-      loadSkills();
-    } catch (error) {
-      console.error('切换 Skill 状态失败:', error);
-      showError('操作失败', '无法更新 Skill 状态');
-    }
-  };
-
-  const handleRefreshSkills = async () => {
-    try {
-      const msg = await api.refreshSkills();
-      showSuccess('已刷新', msg);
-      loadSkills();
-    } catch (error) {
-      console.error('刷新 Skill 失败:', error);
-      showError('刷新失败', `${error}`);
-    }
-  };
-
-  const handleShowSkillDetail = async (id: string) => {
-    try {
-      const detail = await api.getSkillDetail(id);
-      setSkillDetail(detail);
-    } catch (error) {
-      console.error('读取 Skill 详情失败:', error);
-      showError('读取失败', `${error}`);
-    }
-  };
-
-  return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-medium">Skills</h3>
-        <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={handleRefreshSkills}>
-            <RefreshCw className="w-4 h-4 mr-2" />
-            刷新
-          </Button>
-        </div>
-      </div>
-
-      {isLoading ? (
-        <div className="text-center text-muted-foreground py-8">加载中...</div>
-      ) : skills.length === 0 ? (
-        <div className="text-center text-muted-foreground py-8">暂无已安装的 Skills</div>
-      ) : (
-        <div className="space-y-2">
-          {skills.map((skill) => (
-            <Card key={skill.id}>
-              <CardContent className="p-4 flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{skill.name}</span>
-                    <Badge variant={skill.enabled ? 'default' : 'secondary'}>
-                      {skill.enabled ? '已启用' : '已禁用'}
-                    </Badge>
-                    <Badge variant="outline">v{skill.version}</Badge>
-                  </div>
-                  {skill.description && (
-                    <div className="text-sm text-muted-foreground mt-1">{skill.description}</div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => handleShowSkillDetail(skill.id)}
-                    title="查看详情"
-                  >
-                    <Info className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={async () => {
-                      try {
-                        const env = await api.getSkillEnv(skill.id);
-                        setEditSkillEnvId(skill.id);
-                        setEditSkillEnvValues(env);
-                      } catch (e) {
-                        setEditSkillEnvId(skill.id);
-                        setEditSkillEnvValues({});
-                      }
-                    }}
-                    title="编辑环境变量"
-                  >
-                    <KeyRound className="w-4 h-4" />
-                  </Button>
-                  <Switch
-                    checked={skill.enabled}
-                    onCheckedChange={(checked) => handleToggleEnabled(skill.id, checked)}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="hover:bg-destructive/20 hover:text-destructive"
-                    onClick={() => handleRemoveSkill(skill.id)}
-                    title="删除"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Skill 环境变量编辑 */}
-      <EnvEditDialog
-        open={editSkillEnvId !== null}
-        title={`编辑环境变量: ${editSkillEnvId}`}
-        values={editSkillEnvValues}
-        onChange={setEditSkillEnvValues}
-        onSave={async () => {
-          if (!editSkillEnvId) return;
-          try {
-            await api.setSkillEnv(editSkillEnvId, editSkillEnvValues);
-            showSuccess('已保存', '环境变量已更新');
-            setEditSkillEnvId(null);
-          } catch (error) {
-            showError('保存失败', `${error}`);
-          }
-        }}
-        onCancel={() => setEditSkillEnvId(null)}
-      />
-
-      <Dialog open={skillDetail !== null} onOpenChange={(open) => !open && setSkillDetail(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle>{skillDetail?.name || 'Skill 详情'}</DialogTitle>
-          </DialogHeader>
-          {skillDetail && (
-            <div className="space-y-3 overflow-auto pr-1">
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <Badge variant="outline">{skillDetail.id}</Badge>
-                <Badge variant={skillDetail.enabled ? 'default' : 'secondary'}>
-                  {skillDetail.enabled ? '已启用' : '已禁用'}
-                </Badge>
-                <Badge variant="outline">v{skillDetail.version}</Badge>
-                <Badge variant="outline">{skillDetail.entry}</Badge>
-              </div>
-              {skillDetail.description && (
-                <p className="text-sm text-muted-foreground">{skillDetail.description}</p>
-              )}
-              <pre className="whitespace-pre-wrap rounded-md bg-muted/50 p-3 text-xs leading-relaxed">
-                {skillDetail.readme}
-              </pre>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
-    </div>
-  );
-}
 
 // ============================================================================
 // Server 设置组件
@@ -2052,106 +1845,6 @@ function AppUpdateSettings() {
               ) : (
                 '下载并安装'
               )}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-// ============================================================================
-// 通用环境变量编辑对话框
-// ============================================================================
-
-function EnvEditDialog({
-  open,
-  title,
-  values,
-  onChange,
-  onSave,
-  onCancel,
-}: {
-  open: boolean;
-  title: string;
-  values: Record<string, string>;
-  onChange: (v: Record<string, string>) => void;
-  onSave: () => Promise<void>;
-  onCancel: () => void;
-}) {
-  const [newKey, setNewKey] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
-
-  const addKey = () => {
-    const key = newKey.trim();
-    if (key && !(key in values)) {
-      onChange({ ...values, [key]: '' });
-      setNewKey('');
-    }
-  };
-
-  const removeKey = (key: string) => {
-    const next = { ...values };
-    delete next[key];
-    onChange(next);
-  };
-
-  const handleSave = async () => {
-    setIsSaving(true);
-    try { await onSave(); } finally { setIsSaving(false); }
-  };
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <Card className="max-w-md w-full mx-4 max-h-[70vh] flex flex-col">
-        <CardContent className="p-6 flex flex-col overflow-hidden">
-          <h3 className="text-lg font-medium mb-4 shrink-0">{title}</h3>
-          <div className="flex-1 overflow-y-auto space-y-3">
-            {Object.entries(values).map(([key, value]) => (
-              <div key={key} className="flex items-center gap-2">
-                <div className="flex-1 min-w-0">
-                  <Label className="text-xs font-mono">{key}</Label>
-                  <Input
-                    type="password"
-                    value={value}
-                    onChange={(e) => onChange({ ...values, [key]: e.target.value })}
-                    placeholder="输入值"
-                    className="text-sm h-8 mt-1"
-                  />
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0 mt-5 hover:bg-destructive/20 hover:text-destructive"
-                  onClick={() => removeKey(key)}
-                  title="移除"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </Button>
-              </div>
-            ))}
-            {Object.keys(values).length === 0 && (
-              <div className="text-xs text-muted-foreground text-center py-2">暂无环境变量</div>
-            )}
-          </div>
-          <div className="flex items-center gap-2 mt-4 shrink-0">
-            <Input
-              value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addKey()}
-              placeholder="添加新变量名"
-              className="text-sm h-8 flex-1"
-            />
-            <Button size="sm" variant="outline" onClick={addKey} disabled={!newKey.trim()}>
-              <Plus className="w-3 h-3 mr-1" />添加
-            </Button>
-          </div>
-          <div className="flex justify-end gap-2 mt-4 shrink-0">
-            <Button variant="ghost" onClick={onCancel}>取消</Button>
-            <Button onClick={handleSave} disabled={isSaving}>
-              {isSaving ? '保存中...' : '保存'}
             </Button>
           </div>
         </CardContent>

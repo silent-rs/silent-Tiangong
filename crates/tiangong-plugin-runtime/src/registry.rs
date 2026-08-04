@@ -152,6 +152,33 @@ fn sidecar_connections() -> &'static Mutex<HashMap<PathBuf, Arc<ProcessSidecarCo
     SIDECAR_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// 宿主退出时逐个停止所有已启动的 sidecar。
+///
+/// sidecar 经 `setsid()` 脱离进程组独立运行，不会随宿主自动退出。
+/// 宿主必须在退出前调用本函数主动终止它们，否则会残留孤儿进程占用端口与资源。
+pub fn shutdown_all_sidecars() {
+    let connections = sidecar_connections()
+        .lock()
+        .map(|connections| connections.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let total = connections.len();
+    let mut stopped = 0;
+    for connection in connections {
+        let plugin_id = connection.plugin_id().to_string();
+        match connection.stop() {
+            Ok(()) => {
+                stopped += 1;
+                tracing::info!(plugin_id = %plugin_id, "sidecar 已停止");
+            }
+            Err(error) => {
+                // endpoint 文件不存在说明 sidecar 未启动或已退出，属正常情况。
+                tracing::debug!(plugin_id = %plugin_id, %error, "停止 sidecar 时无需操作（可能未运行）");
+            }
+        }
+    }
+    tracing::info!(total, stopped, "sidecar 关闭完成");
+}
+
 /// 预加载设置页实例，供尚未创建 Core 时查询插件贡献。
 pub fn preload_installed_plugins(storage_root: &Path) -> usize {
     let Ok(_operation) = LOAD_OPERATION.lock() else {

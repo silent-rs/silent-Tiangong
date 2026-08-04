@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tiangong_core::core_config::CoreConfig;
 use tiangong_llm::models_config::ModelsConfig;
-use tiangong_plugin_skill::SkillsConfig;
 use tiangong_types::TrustMode;
 
 /// Server 配置
@@ -137,29 +136,9 @@ pub fn generate_token(length: usize) -> String {
     out
 }
 
-/// Connector 类型
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub enum ConnectorType {
-    #[default]
-    Webhook,
-    Telegram,
-    Discord,
-    Lark,
-}
-
-/// Connector 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorConfig {
-    pub name: String,
-    pub connector_type: ConnectorType,
-    pub enabled: bool,
-    pub settings: serde_json::Value,
-}
-
 /// 天工完整应用配置
 ///
-/// 包含 Core 所需的配置（models/skills/trust_mode）
-/// 以及应用层配置（server/connectors）。
+/// 包含 Core 所需的配置（models/trust_mode）以及应用层配置（server）。
 ///
 /// MCP 配置已脱离（由 tiangong-plugin-mcp 自管 ~/.tiangong/mcp.json）。
 #[derive(Debug, Clone)]
@@ -169,8 +148,6 @@ pub struct TiangongConfig {
     // ===== Core 所需配置 =====
     /// LLM 模型配置
     pub models: ModelsConfig,
-    /// Skill 配置
-    pub skills: SkillsConfig,
     /// 新对话默认权限信任模式
     pub default_trust_mode: TrustMode,
     /// 自定义系统 Prompt（从 custom-prompt.md 加载，注入 system prompt）
@@ -181,8 +158,6 @@ pub struct TiangongConfig {
     pub workspace_dir: String,
     /// Server 配置
     pub server: ServerConfig,
-    /// Connector 配置列表
-    pub connectors: Vec<ConnectorConfig>,
 }
 
 impl Default for TiangongConfig {
@@ -190,12 +165,10 @@ impl Default for TiangongConfig {
         Self {
             storage_root: crate::loader::default_tiangong_dir(),
             models: ModelsConfig::default(),
-            skills: SkillsConfig::default(),
             default_trust_mode: TrustMode::default(),
             custom_system_prompt: String::new(),
             workspace_dir: crate::loader::default_workspace_dir(),
             server: ServerConfig::default(),
-            connectors: Vec::new(),
         }
     }
 }

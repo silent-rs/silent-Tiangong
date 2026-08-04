@@ -4,8 +4,8 @@
 //! TiangongCore 构造（针对该类型，不抽象），host 在调用 `ensure_core` 前先经
 //! [`DesktopCoreFactory::build_plugins`] 构造好插件集合并作为参数传入。
 //!
-//! host 专属状态（Tauri app_handle、skill/mcp 管理插件、CoreConfigProvider 的
-//! generation）全部留在本结构。
+//! host 专属状态（Tauri app_handle、CoreConfigProvider 的 generation）留在本结构。
+//! skill/mcp 等 WASM 插件由 `load_installed_plugins` 自动加载，不再手动注入。
 
 use std::sync::Arc;
 
@@ -17,13 +17,11 @@ use tiangong_core::core_config::CoreConfigProvider;
 ///
 /// 与 `TiangongApp` 共享以下句柄（同一实例，dual-ownership 语义不变）：
 /// - `app_handle`：Tauri 句柄（setup 阶段注入；构造时尚未就绪）
-/// - `skill_plugin` / `mcp_plugin`：管理插件句柄（core 拿 clone 做 LLM 工具）
 /// - `config`：全局 CoreConfigProvider
 /// - `storage_root`：会话文件根
 #[derive(Clone)]
 pub struct DesktopCoreFactory {
     pub app_handle: Arc<std::sync::OnceLock<AppHandle>>,
-    pub skill_plugin: Arc<tiangong_plugin_skill::SkillPlugin>,
     pub config: CoreConfigProvider,
     pub storage_root: std::path::PathBuf,
 }
@@ -106,9 +104,7 @@ impl DesktopCoreFactory {
         if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
             plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
         }
-        // Skill / MCP 插件：dual-ownership——core 拿 clone 做 LLM 工具，
-        // app 侧经 self.skill_plugin 做管理。
-        plugins.push(self.skill_plugin.clone());
+        // skill 等 WASM 插件由上面的 load_installed_plugins 自动加载。
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
@@ -146,11 +142,6 @@ impl DesktopCoreFactory {
                 if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
                     child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
                 }
-                child_plugins.push(Arc::new(
-                    tiangong_plugin_skill::SkillPlugin::with_storage_root(
-                        storage_root.join("skills"),
-                    ),
-                ));
                 child_plugins
             }
         });

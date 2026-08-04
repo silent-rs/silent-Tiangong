@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use tiangong_plugin_mcp_protocol::config::ResolvedMcpTransport;
-use tiangong_plugin_skill::{InstalledSkillConfig, LoadedSkill};
 
 /// 语音合成结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,63 +241,6 @@ impl McpServerView {
                 Some(core_server.env.clone().into_iter().collect())
             },
             enabled: core_server.enabled,
-        }
-    }
-}
-
-/// Skill 配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillView {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: Option<String>,
-    pub enabled: bool,
-    pub source_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillDetailView {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: Option<String>,
-    pub enabled: bool,
-    pub entry: String,
-    pub readme: String,
-}
-
-impl SkillDetailView {
-    pub fn from_core(core_skill: &LoadedSkill) -> Self {
-        Self {
-            id: core_skill.manifest.id.clone(),
-            name: core_skill.manifest.name.clone(),
-            version: core_skill.manifest.version.clone(),
-            description: if core_skill.manifest.description.is_empty() {
-                None
-            } else {
-                Some(core_skill.manifest.description.clone())
-            },
-            enabled: core_skill.manifest.available,
-            entry: core_skill.manifest.entry.clone(),
-            readme: core_skill.readme.clone(),
-        }
-    }
-}
-
-impl SkillView {
-    pub fn from_core(core_skill: &InstalledSkillConfig) -> Self {
-        Self {
-            id: core_skill.id.clone(),
-            name: core_skill.name.clone(),
-            version: core_skill.version.clone(),
-            description: if core_skill.description.is_empty() {
-                None
-            } else {
-                Some(core_skill.description.clone())
-            },
-            enabled: core_skill.enabled,
-            source_type: core_skill.source.kind.clone(),
         }
     }
 }
