@@ -190,7 +190,14 @@ impl CodingService {
 
     fn project_context(&self, request: &WorkspaceRequest) -> Result<ProjectContextResponse> {
         let mut context = discover_project_context(request)?;
-        context.latest_checkpoint = self.load_checkpoint(Path::new(&context.workspace));
+        context.latest_checkpoint = request
+            .task
+            .as_deref()
+            .filter(|task| !task.trim().is_empty())
+            .and_then(|task| {
+                self.load_checkpoint(Path::new(&context.workspace))
+                    .filter(|checkpoint| checkpoint.state.task.trim() == task.trim())
+            });
         Ok(context)
     }
 
@@ -198,6 +205,7 @@ impl CodingService {
         let context = self.project_context(&WorkspaceRequest {
             workspace: request.workspace.clone(),
             full_trust: request.full_trust,
+            task: Some(request.task.clone()),
         })?;
         let mut blockers = Vec::new();
         let mut warnings = Vec::new();
@@ -217,7 +225,12 @@ impl CodingService {
         }
 
         Ok(PreflightResponse {
-            context,
+            workspace: context.workspace,
+            task: request.task.trim().to_string(),
+            version_controlled: context.version_controlled,
+            version_control_inspected: context.version_control_inspected,
+            git_branch: context.git_branch,
+            has_uncommitted_changes: context.has_uncommitted_changes,
             blockers,
             warnings,
             completion_criteria: vec![
@@ -283,16 +296,22 @@ fn discover_project_context(request: &WorkspaceRequest) -> Result<ProjectContext
 
 fn review(request: &ReviewRequest) -> Result<ReviewResponse> {
     let workspace = workspace_path(&request.workspace)?;
-    let git = git_context(&workspace);
-    let expected = request
-        .expected_files
+    let git = git_review_context(&workspace, request.base_ref.as_deref())?;
+    let allowed_paths = request
+        .allowed_paths
         .iter()
         .map(|file| normalize_relative_path(file))
+        .filter(|path| !path.is_empty())
         .collect::<BTreeSet<_>>();
     let unexpected_files = git
         .changed_files
         .iter()
-        .filter(|file| !expected.is_empty() && !expected.contains(*file))
+        .filter(|file| {
+            !allowed_paths.is_empty()
+                && !allowed_paths
+                    .iter()
+                    .any(|allowed| path_is_within_scope(file, allowed))
+        })
         .cloned()
         .collect::<Vec<_>>();
     let failed_verifications = request
@@ -308,18 +327,7 @@ fn review(request: &ReviewRequest) -> Result<ReviewResponse> {
         })
         .collect::<Vec<_>>();
     let verification_complete = !request.verification.is_empty() && failed_verifications.is_empty();
-    let missing_expected_scope = git.inspection_complete
-        && git.version_controlled
-        && !git.changed_files.is_empty()
-        && expected.is_empty();
-    let scope_reviewable = if !git.inspection_complete {
-        false
-    } else if git.version_controlled {
-        !missing_expected_scope
-    } else {
-        expected.is_empty()
-    };
-    let ready = verification_complete && unexpected_files.is_empty() && scope_reviewable;
+    let ready = verification_complete && unexpected_files.is_empty() && git.inspection_complete;
     let mut notes = Vec::new();
     if request.verification.is_empty() {
         notes.push("尚未记录验证结果".to_string());
@@ -329,11 +337,8 @@ fn review(request: &ReviewRequest) -> Result<ReviewResponse> {
     if !unexpected_files.is_empty() {
         notes.push("存在预期范围外的改动".to_string());
     }
-    if missing_expected_scope {
-        notes.push("存在改动但未提供预期文件范围，无法判断是否混入无关修改".to_string());
-    }
     if !git.inspection_complete {
-        notes.push("版本控制状态检查未完成，无法判断实际改动范围".to_string());
+        notes.push("未能确定 Git 基线或读取完整改动范围".to_string());
     } else if !git.version_controlled {
         notes.push("未检测到版本控制，无法自动核对改动文件范围".to_string());
     }
@@ -341,7 +346,10 @@ fn review(request: &ReviewRequest) -> Result<ReviewResponse> {
     Ok(ReviewResponse {
         version_controlled: git.version_controlled,
         version_control_inspected: git.inspection_complete,
-        has_uncommitted_changes: !git.changed_files.is_empty(),
+        base_ref: git.base_ref,
+        merge_base: git.merge_base,
+        has_committed_changes: !git.committed_files.is_empty(),
+        has_uncommitted_changes: !git.worktree_files.is_empty(),
         changed_files: git.changed_files,
         unexpected_files,
         verification_complete,
@@ -588,6 +596,141 @@ struct GitContext {
     changed_files: Vec<String>,
 }
 
+#[derive(Default)]
+struct GitReviewContext {
+    version_controlled: bool,
+    inspection_complete: bool,
+    base_ref: Option<String>,
+    merge_base: Option<String>,
+    committed_files: Vec<String>,
+    worktree_files: Vec<String>,
+    changed_files: Vec<String>,
+}
+
+fn git_review_context(workspace: &Path, requested_base: Option<&str>) -> Result<GitReviewContext> {
+    let worktree = git_context(workspace);
+    if !worktree.version_controlled {
+        return Ok(GitReviewContext {
+            version_controlled: false,
+            inspection_complete: worktree.inspection_complete,
+            worktree_files: worktree.changed_files.clone(),
+            changed_files: worktree.changed_files,
+            ..GitReviewContext::default()
+        });
+    }
+
+    let base_ref = resolve_review_base(workspace, requested_base)?;
+    let merge_base = base_ref
+        .as_deref()
+        .and_then(|base| command_text(workspace, &["git", "merge-base", "HEAD", base]))
+        .filter(|value| !value.is_empty());
+    let committed_files = merge_base
+        .as_deref()
+        .and_then(|base| git_diff_files(workspace, base));
+    let inspection_complete = worktree.inspection_complete
+        && base_ref.is_some()
+        && merge_base.is_some()
+        && committed_files.is_some();
+    let committed_files = committed_files.unwrap_or_default();
+    let worktree_files = worktree.changed_files;
+    let mut changed_files = committed_files.iter().cloned().collect::<BTreeSet<_>>();
+    changed_files.extend(worktree_files.iter().cloned());
+
+    Ok(GitReviewContext {
+        version_controlled: true,
+        inspection_complete,
+        base_ref,
+        merge_base,
+        committed_files,
+        worktree_files,
+        changed_files: changed_files.into_iter().collect(),
+    })
+}
+
+fn resolve_review_base(workspace: &Path, requested_base: Option<&str>) -> Result<Option<String>> {
+    if let Some(base) = requested_base
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+    {
+        if git_ref_exists(workspace, base) {
+            return Ok(Some(base.to_string()));
+        }
+        return Err(anyhow!("Git 基线引用不存在: {base}"));
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(remote_head) = command_text(
+        workspace,
+        &["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        candidates.push(remote_head);
+    }
+    candidates.extend(
+        ["main", "develop", "master"]
+            .into_iter()
+            .map(str::to_string),
+    );
+    if let Some(upstream) = command_text(
+        workspace,
+        &[
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) {
+        candidates.push(upstream);
+    }
+
+    Ok(candidates
+        .into_iter()
+        .find(|candidate| git_ref_exists(workspace, candidate)))
+}
+
+fn git_ref_exists(workspace: &Path, reference: &str) -> bool {
+    let commit_ref = format!("{reference}^{{commit}}");
+    matches!(
+        command_output(
+            workspace,
+            &["git", "rev-parse", "--verify", "--quiet", &commit_ref],
+        ),
+        CommandOutput::Success(_)
+    )
+}
+
+fn git_diff_files(workspace: &Path, base: &str) -> Option<Vec<String>> {
+    let CommandOutput::Success(output) = command_output(
+        workspace,
+        &[
+            "git",
+            "diff",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACDMRTUXB",
+            base,
+            "HEAD",
+        ],
+    ) else {
+        return None;
+    };
+    Some(
+        output
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| normalize_relative_path(&String::from_utf8_lossy(path)))
+            .collect(),
+    )
+}
+
+fn path_is_within_scope(path: &str, allowed: &str) -> bool {
+    allowed == "."
+        || path == allowed
+        || path
+            .strip_prefix(allowed)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn git_context(workspace: &Path) -> GitContext {
     let version_controlled =
         match command_output(workspace, &["git", "rev-parse", "--is-inside-work-tree"]) {
@@ -732,4 +875,120 @@ fn relative_path(workspace: &Path, path: &Path) -> String {
 
 fn normalize_relative_path(path: &str) -> String {
     path.trim().trim_start_matches("./").replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_git(workspace: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("git 应可执行");
+        assert!(status.success(), "git {args:?} 执行失败");
+    }
+
+    fn passing_verification() -> Vec<VerificationResult> {
+        vec![VerificationResult {
+            name: "cargo check".to_string(),
+            passed: true,
+            details: String::new(),
+        }]
+    }
+
+    #[test]
+    fn review_combines_committed_and_worktree_changes() {
+        let workspace = tempfile::tempdir().expect("创建临时仓库");
+        run_git(workspace.path(), &["init", "-b", "main"]);
+        run_git(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        run_git(workspace.path(), &["config", "user.name", "Test"]);
+        std::fs::write(workspace.path().join("base.txt"), "base").expect("写入基线文件");
+        run_git(workspace.path(), &["add", "base.txt"]);
+        run_git(workspace.path(), &["commit", "-m", "base"]);
+        run_git(workspace.path(), &["switch", "-c", "feature/review"]);
+        std::fs::write(workspace.path().join("committed.rs"), "fn committed() {}")
+            .expect("写入已提交文件");
+        run_git(workspace.path(), &["add", "committed.rs"]);
+        run_git(workspace.path(), &["commit", "-m", "feature"]);
+
+        let clean_review = review(&ReviewRequest {
+            workspace: workspace.path().display().to_string(),
+            base_ref: Some("main".to_string()),
+            allowed_paths: Vec::new(),
+            verification: passing_verification(),
+        })
+        .expect("检查干净功能分支");
+        assert_eq!(clean_review.changed_files, vec!["committed.rs"]);
+        assert!(clean_review.has_committed_changes);
+        assert!(!clean_review.has_uncommitted_changes);
+        assert!(clean_review.ready);
+
+        std::fs::write(workspace.path().join("worktree.rs"), "fn worktree() {}")
+            .expect("写入工作区文件");
+        let combined_review = review(&ReviewRequest {
+            workspace: workspace.path().display().to_string(),
+            base_ref: Some("main".to_string()),
+            allowed_paths: vec!["committed.rs".to_string()],
+            verification: passing_verification(),
+        })
+        .expect("检查组合改动");
+        assert_eq!(
+            combined_review.changed_files,
+            vec!["committed.rs", "worktree.rs"]
+        );
+        assert_eq!(combined_review.unexpected_files, vec!["worktree.rs"]);
+        assert!(!combined_review.ready);
+    }
+
+    #[test]
+    fn project_context_only_restores_matching_task_checkpoint() {
+        let workspace = tempfile::tempdir().expect("创建临时工作区");
+        let data_dir = tempfile::tempdir().expect("创建临时数据目录");
+        let service = CodingService {
+            data_dir: data_dir.path().to_path_buf(),
+        };
+        service
+            .save_checkpoint(&CheckpointRequest {
+                workspace: workspace.path().display().to_string(),
+                task: "修复流式工具参数".to_string(),
+                completion_criteria: Vec::new(),
+                completed: Vec::new(),
+                changed_files: Vec::new(),
+                verification: Vec::new(),
+                blockers: Vec::new(),
+            })
+            .expect("保存进度");
+
+        let unrelated = service
+            .project_context(&WorkspaceRequest {
+                workspace: workspace.path().display().to_string(),
+                full_trust: true,
+                task: Some("开发其他功能".to_string()),
+            })
+            .expect("读取其他任务上下文");
+        assert!(unrelated.latest_checkpoint.is_none());
+
+        let matching = service
+            .project_context(&WorkspaceRequest {
+                workspace: workspace.path().display().to_string(),
+                full_trust: true,
+                task: Some("修复流式工具参数".to_string()),
+            })
+            .expect("读取当前任务上下文");
+        assert_eq!(
+            matching
+                .latest_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.state.task.as_str()),
+            Some("修复流式工具参数")
+        );
+    }
 }

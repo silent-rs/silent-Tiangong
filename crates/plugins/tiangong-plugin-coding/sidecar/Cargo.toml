@@ -22,3 +22,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 chrono = { workspace = true, default-features = false, features = ["std", "clock"] }
 hex = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

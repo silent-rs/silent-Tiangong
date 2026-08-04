@@ -10727,6 +10727,7 @@ dependencies = [
  "hex",
  "serde_json",
  "sha2",
+ "tempfile",
  "tiangong-plugin-coding-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-sidecar",

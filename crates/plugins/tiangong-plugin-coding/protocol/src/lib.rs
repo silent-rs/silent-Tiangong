@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PLUGIN_ID: &str = "coding";
 pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const CODING_PROTOCOL_VERSION: u32 = 1;
+pub const CODING_PROTOCOL_VERSION: u32 = 2;
 
 pub const TOOL_PROJECT_CONTEXT: &str = "coding_project_context";
 pub const TOOL_PREFLIGHT: &str = "coding_preflight";
@@ -53,6 +53,8 @@ impl CodingOperation for Review {
 pub struct WorkspaceRequest {
     pub workspace: String,
     pub full_trust: bool,
+    #[serde(default)]
+    pub task: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -86,7 +88,12 @@ pub struct PreflightRequest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PreflightResponse {
-    pub context: ProjectContextResponse,
+    pub workspace: String,
+    pub task: String,
+    pub version_controlled: bool,
+    pub version_control_inspected: bool,
+    pub git_branch: Option<String>,
+    pub has_uncommitted_changes: bool,
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
     pub completion_criteria: Vec<String>,
@@ -126,7 +133,8 @@ pub struct CheckpointResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRequest {
     pub workspace: String,
-    pub expected_files: Vec<String>,
+    pub base_ref: Option<String>,
+    pub allowed_paths: Vec<String>,
     pub verification: Vec<VerificationResult>,
 }
 
@@ -134,9 +142,12 @@ pub struct ReviewRequest {
 pub struct ReviewResponse {
     pub version_controlled: bool,
     pub version_control_inspected: bool,
+    pub base_ref: Option<String>,
+    pub merge_base: Option<String>,
     pub changed_files: Vec<String>,
     pub unexpected_files: Vec<String>,
     pub has_uncommitted_changes: bool,
+    pub has_committed_changes: bool,
     pub verification_complete: bool,
     pub failed_verifications: Vec<String>,
     pub ready: bool,

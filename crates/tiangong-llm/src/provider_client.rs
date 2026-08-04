@@ -34,6 +34,7 @@ use crate::stream::{ProviderStream, ProviderStreamEvent};
 use crate::tool::{
     ToolCall, ToolCall as LlmToolCall, ToolChoice, ToolChoice as LlmToolChoice,
     ToolResult as LlmToolResult, ToolResultContent as LlmToolResultContent, ToolSpec,
+    parse_tool_arguments_or_error,
 };
 use crate::usage::TokenUsageData;
 use tiangong_types::TokenUsage;
@@ -49,6 +50,190 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
         .total_tokens
         .max(next.total_tokens)
         .max(computed_total);
+}
+
+#[derive(Default)]
+struct StreamingToolCalls {
+    calls: std::collections::BTreeMap<usize, StreamingToolCall>,
+    id_indexes: std::collections::HashMap<String, usize>,
+}
+
+#[derive(Default)]
+struct StreamingToolCall {
+    id: String,
+    name: String,
+    initial_arguments: String,
+    argument_deltas: String,
+}
+
+impl StreamingToolCalls {
+    fn start(&mut self, index: usize, call: ToolCall) {
+        let index = self.resolve_index(index, &call.id);
+        let entry = self.calls.entry(index).or_default();
+        merge_stream_field(index, "id", &mut entry.id, call.id);
+        merge_stream_field(index, "name", &mut entry.name, call.name);
+
+        let initial_arguments = if call.arguments.is_null() || call.arguments == json!({}) {
+            String::new()
+        } else if let Some(raw) = call.arguments.as_str() {
+            raw.to_string()
+        } else {
+            call.arguments.to_string()
+        };
+        if entry.initial_arguments.is_empty() && !initial_arguments.is_empty() {
+            entry.initial_arguments = initial_arguments;
+        }
+    }
+
+    fn push_delta(&mut self, index: usize, call_id: String, partial_json: String) {
+        let index = self.resolve_index(index, &call_id);
+        let entry = self.calls.entry(index).or_default();
+        merge_stream_field(index, "id", &mut entry.id, call_id);
+        entry.argument_deltas.push_str(&partial_json);
+    }
+
+    fn into_tool_calls(self, stop_reason: Option<&StopReason>) -> Vec<ToolCall> {
+        self.calls
+            .into_iter()
+            .filter_map(|(index, call)| {
+                if call.name.trim().is_empty() {
+                    tracing::warn!(index, tool_call_id = %call.id, "忽略缺少名称的流式工具调用");
+                    return None;
+                }
+                let raw_arguments = call.raw_arguments();
+                let id = if call.id.trim().is_empty() {
+                    format!("tool_call_{index}")
+                } else {
+                    call.id
+                };
+                let raw_args_preview: String = raw_arguments.chars().take(256).collect();
+                tracing::info!(
+                    index,
+                    tool_call_id = %id,
+                    tool_name = %call.name,
+                    raw_args_len = raw_arguments.len(),
+                    %raw_args_preview,
+                    "解析 tool call arguments"
+                );
+                Some(ToolCall {
+                    arguments: parse_stream_tool_arguments_or_error(
+                        &call.name,
+                        &id,
+                        &raw_arguments,
+                        stop_reason,
+                    ),
+                    id,
+                    name: call.name,
+                })
+            })
+            .collect()
+    }
+
+    fn resolve_index(&mut self, provider_index: usize, call_id: &str) -> usize {
+        if let Some(index) = self.id_indexes.get(call_id).copied() {
+            return index;
+        }
+
+        let index_conflicts = !call_id.is_empty()
+            && self
+                .calls
+                .get(&provider_index)
+                .is_some_and(|call| !call.id.is_empty() && call.id != call_id);
+        let resolved = if index_conflicts {
+            let fallback = self
+                .calls
+                .last_key_value()
+                .and_then(|(index, _)| index.checked_add(1))
+                .unwrap_or_else(|| {
+                    (0..)
+                        .find(|index| !self.calls.contains_key(index))
+                        .expect("工具调用序号必须存在可用值")
+                });
+            tracing::warn!(
+                provider_index,
+                fallback_index = fallback,
+                %call_id,
+                "provider 对不同工具调用重复使用同一序号，按调用 ID 分配回退序号"
+            );
+            fallback
+        } else {
+            provider_index
+        };
+        if !call_id.is_empty() {
+            self.id_indexes.insert(call_id.to_string(), resolved);
+        }
+        resolved
+    }
+}
+
+impl StreamingToolCall {
+    fn raw_arguments(&self) -> String {
+        if self.argument_deltas.is_empty() {
+            return self.initial_arguments.clone();
+        }
+        if self.initial_arguments.is_empty() || self.initial_arguments == self.argument_deltas {
+            return self.argument_deltas.clone();
+        }
+        if serde_json::from_str::<Value>(&self.argument_deltas).is_ok() {
+            return self.argument_deltas.clone();
+        }
+
+        let combined = format!("{}{}", self.initial_arguments, self.argument_deltas);
+        if serde_json::from_str::<Value>(&combined).is_ok()
+            || serde_json::from_str::<Value>(&self.initial_arguments).is_err()
+        {
+            combined
+        } else {
+            self.initial_arguments.clone()
+        }
+    }
+}
+
+fn merge_stream_field(index: usize, field: &str, current: &mut String, next: String) {
+    if next.trim().is_empty() {
+        return;
+    }
+    if current.is_empty() {
+        *current = next;
+    } else if *current != next {
+        tracing::warn!(index, field, existing = %current, incoming = %next, "流式工具调用字段发生冲突，保留首次值");
+    }
+}
+
+fn incomplete_tool_stop_reason(reason: Option<&StopReason>) -> Option<String> {
+    match reason {
+        Some(StopReason::MaxTokens) => Some("模型输出达到长度上限".to_string()),
+        Some(StopReason::Other(value)) if value.to_ascii_lowercase().contains("content_filter") => {
+            Some(format!("模型输出被内容过滤器终止（{value}）"))
+        }
+        _ => None,
+    }
+}
+
+fn incomplete_tool_arguments_error(
+    tool_name: &str,
+    call_id: &str,
+    raw_args: &str,
+    stop_reason: Option<&StopReason>,
+) -> Option<Value> {
+    let reason = incomplete_tool_stop_reason(stop_reason)?;
+    let raw_preview: String = raw_args.chars().take(512).collect();
+    Some(json!({
+        "__parse_error": format!(
+            "工具参数不完整：tool={tool_name} id={call_id}，{reason}。本次调用不会执行；请缩短参数并重新生成一次完整 JSON。"
+        ),
+        "__raw_args_preview": raw_preview,
+    }))
+}
+
+fn parse_stream_tool_arguments_or_error(
+    tool_name: &str,
+    call_id: &str,
+    raw_args: &str,
+    stop_reason: Option<&StopReason>,
+) -> Value {
+    incomplete_tool_arguments_error(tool_name, call_id, raw_args, stop_reason)
+        .unwrap_or_else(|| parse_tool_arguments_or_error(tool_name, call_id, raw_args))
 }
 
 #[derive(Debug, Clone)]
@@ -586,12 +771,6 @@ impl SingleProviderClient {
         tool_choice: Option<ToolChoice>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
-        fn looks_like_complete_json(raw: &str) -> bool {
-            let trimmed = raw.trim();
-            (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        }
-
         let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
         let model = self.cfg.model.trim().to_string();
         if model.is_empty() {
@@ -607,9 +786,8 @@ impl SingleProviderClient {
         let mut reasoning_content = String::new();
         let mut reasoning_signature: Option<String> = None;
         let mut usage = TokenUsageData::default();
-        let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
-            std::collections::BTreeMap::new();
-        let mut tool_call_order: Vec<String> = Vec::new();
+        let mut tool_calls = StreamingToolCalls::default();
+        let mut stop_reason = None;
 
         let mut stream = provider.stream(request).await.map_err(map_llm_error)?;
         while let Some(event) = stream.next().await {
@@ -639,35 +817,17 @@ impl SingleProviderClient {
                         });
                     }
                 }
-                ProviderStreamEvent::ToolCallStart(call) => {
-                    let args = if call.arguments.is_null() || call.arguments == json!({}) {
-                        String::new()
-                    } else {
-                        call.arguments.to_string()
-                    };
-                    tool_call_order.push(call.id.clone());
-                    tool_calls.insert(call.id.clone(), (call.name, args));
+                ProviderStreamEvent::ToolCallStart { index, call } => {
+                    tool_calls.start(index, call);
                 }
                 ProviderStreamEvent::ToolCallDelta {
+                    index,
                     call_id,
                     partial_json,
                 } => {
-                    let actual_id = if tool_calls.contains_key(&call_id) {
-                        call_id
-                    } else if let Ok(idx) = call_id.parse::<usize>() {
-                        tool_call_order.get(idx).cloned().unwrap_or_default()
-                    } else {
-                        call_id
-                    };
-                    let entry = tool_calls
-                        .entry(actual_id)
-                        .or_insert_with(|| (String::new(), String::new()));
-                    // 某些 provider 会在 ToolCallStart 里直接给出完整 arguments，
-                    // 也可能在 delta 中再发送一遍；这里尽量避免重复拼接导致 JSON 无法解析。
-                    if entry.1.trim().is_empty() || !looks_like_complete_json(&entry.1) {
-                        entry.1.push_str(&partial_json);
-                    }
+                    tool_calls.push_delta(index, call_id, partial_json);
                 }
+                ProviderStreamEvent::FinishReason(reason) => stop_reason = Some(reason),
                 ProviderStreamEvent::Usage(stream_usage) => {
                     merge_stream_usage(&mut usage, stream_usage);
                     let _ = chunk_tx.send(ModelStreamChunk {
@@ -683,32 +843,7 @@ impl SingleProviderClient {
             }
         }
 
-        let mut tool_calls_vec = Vec::new();
-        for (id, (name, raw_args)) in tool_calls.into_iter() {
-            if name.trim().is_empty() {
-                continue;
-            }
-            let raw_args_preview = raw_args
-                .char_indices()
-                .take_while(|(i, _)| *i < 256)
-                .last()
-                .map(|(i, c)| i + c.len_utf8())
-                .map(|end| &raw_args[..end])
-                .unwrap_or("");
-            tracing::info!(
-                tool_call_id = %id,
-                tool_name = %name,
-                raw_args_len = raw_args.len(),
-                %raw_args_preview,
-                "解析 tool call arguments"
-            );
-            let arguments = parse_tool_arguments_or_error(&name, &id, &raw_args);
-            tool_calls_vec.push(ToolCall {
-                id,
-                name,
-                arguments,
-            });
-        }
+        let tool_calls_vec = tool_calls.into_tool_calls(stop_reason.as_ref());
 
         if text.trim().is_empty()
             && reasoning_content.trim().is_empty()
@@ -721,7 +856,7 @@ impl SingleProviderClient {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-            stop_reason: None,
+            stop_reason,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
         })
@@ -1323,6 +1458,7 @@ fn convert_provider_response_to_function_response(
 ) -> Result<ModelFunctionResponse> {
     let text = collect_provider_text(&response);
     let reasoning_content = response.reasoning_content.clone().unwrap_or_default();
+    let stop_reason = response.stop_reason.clone();
     let tool_calls = response
         .assistant_message
         .content
@@ -1332,11 +1468,20 @@ fn convert_provider_response_to_function_response(
                 id,
                 name,
                 arguments,
-            }) if !name.is_empty() => Some(ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            }),
+            }) if !name.is_empty() => {
+                let arguments = incomplete_tool_arguments_error(
+                    name,
+                    id,
+                    &arguments.to_string(),
+                    stop_reason.as_ref(),
+                )
+                .unwrap_or_else(|| arguments.clone());
+                Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments,
+                })
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1352,7 +1497,7 @@ fn convert_provider_response_to_function_response(
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: collect_provider_reasoning_signature(&response),
-        stop_reason: response.stop_reason,
+        stop_reason,
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
     })
@@ -1426,28 +1571,6 @@ fn summarize_provider_raw_response(raw: &Value) -> Option<String> {
     Some(format!("raw_content={blocks}"))
 }
 
-fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
-    if raw_args.trim().is_empty() {
-        return json!({
-            "__parse_error": format!(
-                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
-            )
-        });
-    }
-
-    serde_json::from_str(raw_args).unwrap_or_else(|err| {
-        let raw_preview: String = raw_args.chars().take(512).collect();
-        json!({
-            "__parse_error": format!(
-                "工具参数 JSON 无效：tool={tool_name} id={call_id} error={err}。\
-        请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。\
-        长内容写入请分段调用 write_file，第一次 append=false，后续 append=true。"
-            ),
-            "__raw_args_preview": raw_preview,
-        })
-    })
-}
-
 fn collect_provider_text(response: &ProviderResponse) -> String {
     response
         .assistant_message
@@ -1487,9 +1610,8 @@ async fn consume_provider_stream_events_async(
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
-    let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
-        std::collections::BTreeMap::new();
-    let mut tool_call_order: Vec<String> = Vec::new();
+    let mut tool_calls = StreamingToolCalls::default();
+    let mut stop_reason = None;
 
     while let Some(event) = stream.next().await {
         match event.map_err(map_llm_error)? {
@@ -1518,31 +1640,17 @@ async fn consume_provider_stream_events_async(
                     });
                 }
             }
-            ProviderStreamEvent::ToolCallStart(call) => {
-                let args = if call.arguments.is_null() || call.arguments == json!({}) {
-                    String::new()
-                } else {
-                    call.arguments.to_string()
-                };
-                tool_call_order.push(call.id.clone());
-                tool_calls.insert(call.id.clone(), (call.name, args));
+            ProviderStreamEvent::ToolCallStart { index, call } => {
+                tool_calls.start(index, call);
             }
             ProviderStreamEvent::ToolCallDelta {
+                index,
                 call_id,
                 partial_json,
             } => {
-                let actual_id = if tool_calls.contains_key(&call_id) {
-                    call_id
-                } else if let Ok(idx) = call_id.parse::<usize>() {
-                    tool_call_order.get(idx).cloned().unwrap_or_default()
-                } else {
-                    call_id
-                };
-                let entry = tool_calls
-                    .entry(actual_id)
-                    .or_insert_with(|| (String::new(), String::new()));
-                entry.1.push_str(&partial_json);
+                tool_calls.push_delta(index, call_id, partial_json);
             }
+            ProviderStreamEvent::FinishReason(reason) => stop_reason = Some(reason),
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage)
             }
@@ -1553,15 +1661,7 @@ async fn consume_provider_stream_events_async(
         }
     }
 
-    let tool_calls = tool_calls
-        .into_iter()
-        .filter(|(_, (name, _))| !name.is_empty())
-        .map(|(id, (name, raw_args))| ToolCall {
-            arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
-            id,
-            name,
-        })
-        .collect::<Vec<_>>();
+    let tool_calls = tool_calls.into_tool_calls(stop_reason.as_ref());
 
     if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
         return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
@@ -1571,7 +1671,7 @@ async fn consume_provider_stream_events_async(
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-        stop_reason: None,
+        stop_reason,
         usage: usage.into(),
         tool_calls,
     })
@@ -1824,6 +1924,90 @@ mod tests {
         assert!(error.contains("工具参数为空"));
         assert!(error.contains("run_shell"));
         assert!(error.contains("call_empty"));
+    }
+
+    #[test]
+    fn streaming_tool_calls_accumulate_by_index_without_overwrite() {
+        let mut calls = StreamingToolCalls::default();
+        calls.push_delta(1, "call_b".to_string(), r#"{"path":"b"}"#.to_string());
+        calls.start(
+            1,
+            ToolCall {
+                id: "call_b".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "b"}),
+            },
+        );
+        calls.push_delta(0, String::new(), r#"{"payload":{"value":1}"#.to_string());
+        let first = ToolCall {
+            id: "call_a".to_string(),
+            name: "run_command".to_string(),
+            arguments: json!({}),
+        };
+        calls.start(0, first.clone());
+        calls.start(0, first);
+        calls.push_delta(0, "call_a".to_string(), "}".to_string());
+
+        let calls = calls.into_tool_calls(Some(&StopReason::ToolUse));
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[0].arguments["payload"]["value"], 1);
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[1].arguments["path"], "b");
+    }
+
+    #[test]
+    fn reused_provider_index_keeps_fallback_call_after_existing_call() {
+        let mut calls = StreamingToolCalls::default();
+        calls.start(
+            5,
+            ToolCall {
+                id: "call_a".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "a"}),
+            },
+        );
+        calls.start(
+            5,
+            ToolCall {
+                id: "call_b".to_string(),
+                name: "read_file".to_string(),
+                arguments: json!({"path": "b"}),
+            },
+        );
+
+        let calls = calls.into_tool_calls(Some(&StopReason::ToolUse));
+
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["call_a", "call_b"]
+        );
+    }
+
+    #[test]
+    fn max_tokens_marks_even_valid_tool_arguments_as_incomplete() {
+        let mut calls = StreamingToolCalls::default();
+        calls.start(
+            0,
+            ToolCall {
+                id: "call_truncated".to_string(),
+                name: "coding_review".to_string(),
+                arguments: json!({}),
+            },
+        );
+        calls.push_delta(0, String::new(), "{}".to_string());
+
+        let calls = calls.into_tool_calls(Some(&StopReason::MaxTokens));
+        let error = calls[0].arguments["__parse_error"]
+            .as_str()
+            .unwrap_or_default();
+
+        assert!(error.contains("长度上限"));
+        assert!(error.contains("不会执行"));
     }
 
     #[test]

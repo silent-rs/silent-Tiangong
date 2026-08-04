@@ -321,7 +321,10 @@ fn classify_failure_message(message: &str) -> ToolFailureKind {
 fn default_retryable(kind: ToolFailureKind) -> bool {
     matches!(
         kind,
-        ToolFailureKind::Timeout | ToolFailureKind::Network | ToolFailureKind::ToolInternal
+        ToolFailureKind::Argument
+            | ToolFailureKind::Timeout
+            | ToolFailureKind::Network
+            | ToolFailureKind::ToolInternal
     )
 }
 
@@ -813,7 +816,7 @@ mod tests {
         assert!(text.contains("[tool_failure]"));
         assert!(text.contains("tool_name: read_file"));
         assert!(text.contains("error_kind: argument_error"));
-        assert!(text.contains("retryable: false"));
+        assert!(text.contains("retryable: true"));
         assert!(text.contains("不要把 __parse_error 当作真实参数"));
     }
 

@@ -326,7 +326,8 @@ fn stream_tool_call_start() {
     let data = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_001","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}"#;
     let event = single_event(data);
     match event {
-        StreamEvent::ToolCallStart { id, name } => {
+        StreamEvent::ToolCallStart { index, id, name } => {
+            assert_eq!(index, 0);
             assert_eq!(id, "call_001");
             assert_eq!(name, "get_weather");
         }
@@ -395,7 +396,10 @@ fn stream_empty_delta_is_skipped_not_error() {
     assert!(parse_stream_chunk(role_chunk).is_empty());
 
     let finish_chunk = r#"{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#;
-    assert!(parse_stream_chunk(finish_chunk).is_empty());
+    assert!(matches!(
+        parse_stream_chunk(finish_chunk).as_slice(),
+        [Ok(StreamEvent::FinishReason(reason))] if reason == "stop"
+    ));
 }
 
 #[test]

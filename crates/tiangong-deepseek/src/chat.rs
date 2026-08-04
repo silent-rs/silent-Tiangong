@@ -194,6 +194,7 @@ fn resolve_confirmed(state: &mut BufferState) -> Vec<Result<StreamEvent, DeepSee
         }
         for (idx, call) in calls.into_iter().enumerate() {
             events.push(Ok(StreamEvent::TextProtocolToolCall {
+                index: idx as u32,
                 id: format!("textcall_{idx}"),
                 name: call.name,
                 arguments: call.arguments,
@@ -287,6 +288,7 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
                 {
                     let id = tc.id.clone().unwrap_or_default();
                     events.push(Ok(StreamEvent::ToolCallStart {
+                        index: tc.index,
                         id,
                         name: name.clone(),
                     }));
@@ -300,6 +302,9 @@ pub(crate) fn parse_stream_chunk(data: &str) -> Vec<Result<StreamEvent, DeepSeek
                     }));
                 }
             }
+        }
+        if let Some(reason) = choice.finish_reason {
+            events.push(Ok(StreamEvent::FinishReason(reason)));
         }
     }
 
@@ -410,6 +415,7 @@ mod buffer_tests {
             text_delta("读取"),  // 无 <，正常透传
             text_delta("<未完"), // < 触发 Probing
             Ok(StreamEvent::ToolCallStart {
+                index: 0,
                 id: "call_0".into(),
                 name: "read_file".into(),
             }),

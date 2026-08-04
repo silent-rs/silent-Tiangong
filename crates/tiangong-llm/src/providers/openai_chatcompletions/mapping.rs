@@ -286,7 +286,7 @@ pub fn parse_complete_response(payload: &Value) -> Result<ProviderResponse> {
     })
 }
 
-fn map_stop_reason(reason: &str) -> StopReason {
+pub(super) fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "stop" => StopReason::EndTurn,
         "tool_calls" => StopReason::ToolUse,

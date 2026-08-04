@@ -276,11 +276,14 @@ pub(super) fn map_stream_event(
                     state
                         .tool_calls
                         .insert(index, ToolCallAccumulator { id: id.clone() });
-                    Ok(vec![ProviderStreamEvent::ToolCallStart(ToolCall {
-                        id,
-                        name,
-                        arguments: input,
-                    })])
+                    Ok(vec![ProviderStreamEvent::ToolCallStart {
+                        index,
+                        call: ToolCall {
+                            id,
+                            name,
+                            arguments: input,
+                        },
+                    }])
                 }
                 ContentBlockStartData::Thinking {
                     thinking,
@@ -313,6 +316,7 @@ pub(super) fn map_stream_event(
                     .map(|call| call.id.clone())
                     .unwrap_or_else(|| format!("tool_call_{index}"));
                 Ok(vec![ProviderStreamEvent::ToolCallDelta {
+                    index,
                     call_id,
                     partial_json,
                 }])
@@ -329,17 +333,23 @@ pub(super) fn map_stream_event(
         },
         StreamEvent::ContentBlockStop { index } => {
             if let Some(call) = state.tool_calls.remove(&index) {
-                Ok(vec![ProviderStreamEvent::ToolCallEnd { call_id: call.id }])
+                Ok(vec![ProviderStreamEvent::ToolCallEnd {
+                    index,
+                    call_id: call.id,
+                }])
             } else {
                 Ok(Vec::new())
             }
         }
-        StreamEvent::MessageDelta { usage, .. } => {
+        StreamEvent::MessageDelta { delta, usage } => {
+            let mut events = Vec::new();
             if let Some(usage) = usage {
-                Ok(vec![ProviderStreamEvent::Usage(map_usage(usage))])
-            } else {
-                Ok(Vec::new())
+                events.push(ProviderStreamEvent::Usage(map_usage(usage)));
             }
+            if let Some(reason) = delta.stop_reason {
+                events.push(ProviderStreamEvent::FinishReason(map_stop_reason(&reason)));
+            }
+            Ok(events)
         }
         StreamEvent::MessageStop => Ok(vec![ProviderStreamEvent::MessageEnd]),
         StreamEvent::Error { message } => Ok(vec![ProviderStreamEvent::Error(message)]),

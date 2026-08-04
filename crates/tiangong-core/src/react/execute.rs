@@ -3,7 +3,7 @@
 //! 本模块只负责从已构建的 TurnContext 执行模型请求、工具调用与总结阶段；
 //! turn 的插件生命周期、状态提交和最终持久化由 react/turn.rs 负责。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
@@ -192,8 +192,15 @@ enum ToolPreflightOutcome {
         dedupe_key: String,
     },
     Skip {
-        needs_recovery: bool,
+        recovery: ToolRecovery,
     },
+}
+
+#[derive(Clone, Copy)]
+enum ToolRecovery {
+    None,
+    General,
+    Argument,
 }
 
 fn prepare_tool_call(
@@ -207,14 +214,22 @@ fn prepare_tool_call(
         .and_then(serde_json::Value::as_str)
     {
         let message = parse_error.to_string();
+        let args_summary = format_tool_args_summary(call);
         let failure = ToolFailureRecord::new(
             &call.name,
             &call.id,
-            format_tool_args_summary(call),
+            args_summary.clone(),
             ToolFailureKind::Argument,
             message.clone(),
         );
         let provider_text = failure.render_for_model();
+        ctx.observer.audit_tool_execution(
+            &ctx.session.id,
+            &call.name,
+            false,
+            (!args_summary.is_empty()).then_some(args_summary.as_str()),
+            &message,
+        );
         let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
             name: call.name.clone(),
             tool_call_id: Some(call.id.clone()),
@@ -237,9 +252,8 @@ fn prepare_tool_call(
         );
         let dedupe_key = tool_call_dedupe_key(&call.name, &call.arguments);
         history.failed_calls.insert(dedupe_key, provider_text);
-        history.failed_names.insert(call.name.clone());
         return ToolPreflightOutcome::Skip {
-            needs_recovery: true,
+            recovery: ToolRecovery::Argument,
         };
     }
 
@@ -248,7 +262,7 @@ fn prepare_tool_call(
     if history.successful_keys.contains(&dedupe_key) {
         append_duplicate_tool_result(ctx, &call.id, &call.name);
         return ToolPreflightOutcome::Skip {
-            needs_recovery: false,
+            recovery: ToolRecovery::None,
         };
     }
     if let Some(original_error) = history.failed_calls.get(&dedupe_key).cloned() {
@@ -262,7 +276,7 @@ fn prepare_tool_call(
         );
         history.failed_names.insert(call.name.clone());
         return ToolPreflightOutcome::Skip {
-            needs_recovery: true,
+            recovery: ToolRecovery::General,
         };
     }
 
@@ -449,6 +463,32 @@ fn append_failure_recovery_prompt(
     ctx.session.persist_to_disk();
 }
 
+fn append_argument_repair_prompt(ctx: &mut TurnContext, failed_tools: &BTreeSet<String>) {
+    let mut reminder = Message::new(
+        MessageRole::Tool,
+        format!(
+            "<system-reminder>\n以下工具调用的参数没有形成完整 JSON，因此均未执行：\n{}\n请直接根据工具 schema 缩短或拆分参数，只重新生成一次完整调用。不要为这个格式错误查询记忆或重复原始残缺参数。\n</system-reminder>",
+            failed_tools.iter().cloned().collect::<Vec<_>>().join("\n")
+        ),
+    );
+    reminder.tool_name = Some("react_argument_repair".to_string());
+    ctx.session.messages.push(reminder);
+    ctx.session.persist_to_disk();
+}
+
+fn append_argument_repair_exhausted(ctx: &mut TurnContext, failed_tools: &BTreeSet<String>) {
+    let mut reminder = Message::new(
+        MessageRole::Tool,
+        format!(
+            "<system-reminder>\n工具参数自动修正仍然失败，已停止继续重试：\n{}\n请在最终回复中说明未完成项和具体阻碍，不要再次调用这些残缺参数。\n</system-reminder>",
+            failed_tools.iter().cloned().collect::<Vec<_>>().join("\n")
+        ),
+    );
+    reminder.tool_name = Some("react_argument_repair_exhausted".to_string());
+    ctx.session.messages.push(reminder);
+    ctx.session.persist_to_disk();
+}
+
 /// 压缩完成后待执行的后续动作。
 enum CompressionContinuation {
     ReactText {
@@ -488,6 +528,7 @@ struct AgentLoopState {
     accumulated_usage: TokenUsage,
     tool_history: ToolCallHistory,
     tool_batch: Option<ToolBatchState>,
+    argument_repair_attempted: bool,
     next_step: NextStep,
 }
 
@@ -501,6 +542,7 @@ impl AgentLoopState {
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
             tool_batch: None,
+            argument_repair_attempted: false,
             next_step: NextStep::StartReact,
         }
     }
@@ -520,6 +562,7 @@ struct ToolBatchState {
     response_usage: TokenUsage,
     request_injection_generation: u64,
     needs_failure_recovery: bool,
+    argument_failures: BTreeSet<String>,
 }
 
 struct PreparedToolCall {
@@ -1188,6 +1231,7 @@ pub(super) async fn execute_turn(
                                 response_usage: response.usage,
                                 request_injection_generation,
                                 needs_failure_recovery: false,
+                                argument_failures: BTreeSet::new(),
                             });
                             state.next_step = NextStep::DriveTools;
                         }
@@ -1254,6 +1298,7 @@ pub(super) async fn execute_turn(
                                 response_usage: response.usage,
                                 request_injection_generation,
                                 needs_failure_recovery: false,
+                                argument_failures: BTreeSet::new(),
                             });
                             state.next_step = NextStep::DriveTools;
                             continue 'agent_loop;
@@ -1498,6 +1543,27 @@ pub(super) async fn execute_turn(
                             }
 
                             let batch = state.tool_batch.take().expect("工具批次必须存在");
+                            if !batch.argument_failures.is_empty() {
+                                if state.argument_repair_attempted {
+                                    append_argument_repair_exhausted(
+                                        ctx,
+                                        &batch.argument_failures,
+                                    );
+                                    injections.commit(ctx);
+                                    state.next_step = NextStep::StartForceFinal {
+                                        reason: ForceFinalReason::ArgumentRepairExhausted,
+                                        request_injection_generation: batch
+                                            .request_injection_generation,
+                                        summary_error: None,
+                                    };
+                                } else {
+                                    state.argument_repair_attempted = true;
+                                    append_argument_repair_prompt(ctx, &batch.argument_failures);
+                                    injections.commit(ctx);
+                                    state.next_step = NextStep::StartReact;
+                                }
+                                continue 'agent_loop;
+                            }
                             if batch.needs_failure_recovery {
                                 append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
                             } else {
@@ -1509,12 +1575,20 @@ pub(super) async fn execute_turn(
                         };
 
                         match prepare_tool_call(ctx, &call, &mut state.tool_history) {
-                            ToolPreflightOutcome::Skip { needs_recovery } => {
-                                state
+                            ToolPreflightOutcome::Skip { recovery } => {
+                                let batch = state
                                     .tool_batch
                                     .as_mut()
-                                    .expect("工具批次必须存在")
-                                    .needs_failure_recovery |= needs_recovery;
+                                    .expect("工具批次必须存在");
+                                match recovery {
+                                    ToolRecovery::None => {}
+                                    ToolRecovery::General => {
+                                        batch.needs_failure_recovery = true;
+                                    }
+                                    ToolRecovery::Argument => {
+                                        batch.argument_failures.insert(call.name.clone());
+                                    }
+                                }
                                 ctx.session.persist_to_disk();
                                 state.next_step = NextStep::DriveTools;
                             }
@@ -1997,6 +2071,7 @@ mod tests {
             tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
         ) -> Self {
             let root = tempfile::tempdir().expect("创建临时目录失败");
+            let observer_root = root.path().to_path_buf();
             let mut session = Session::new("test-session".to_string());
             session.bind_storage_root(root.path());
             session.append_message(MessageRole::User, "你好");
@@ -2021,7 +2096,7 @@ mod tests {
                 .context_limit(200_000)
                 .agent_config(agent_config)
                 .trust_mode(TrustMode::FullTrust)
-                .observer(Observer::new(std::env::temp_dir()))
+                .observer(Observer::new(observer_root))
                 .tool_overrides(tool_overrides)
                 .tools(tools)
                 .build();
@@ -2529,6 +2604,75 @@ mod tests {
             "echo 工具应被调用一次"
         );
         harness.drain_stream();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retries_invalid_tool_arguments_once_and_audits_each_failure() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_bad_1", "echo", r#"{"value":"#),
+                usage_chunk(10, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_bad_2", "echo", r#"{"value":"#),
+                usage_chunk(12, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("[[DONE]]\n工具参数未能修正，已停止执行。"),
+                usage_chunk(14, 3),
+            ],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, vec![tool_spec("echo")], HashMap::new());
+        let audit_path = harness.ctx.observer.storage_root.join("audit.jsonl");
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        let repair_messages = harness
+            .ctx
+            .session
+            .messages
+            .iter()
+            .filter_map(|message| message.tool_name.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            repair_messages
+                .iter()
+                .filter(|name| **name == "react_argument_repair")
+                .count(),
+            1
+        );
+        assert_eq!(
+            repair_messages
+                .iter()
+                .filter(|name| **name == "react_argument_repair_exhausted")
+                .count(),
+            1
+        );
+        assert!(!repair_messages.contains(&"react_failed_tool_recovery"));
+
+        let audit = std::fs::read_to_string(audit_path).expect("参数失败应写入审计");
+        let failed_tool_audits = audit
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| {
+                entry["action"] == "ToolExecution"
+                    && entry["target"] == "echo"
+                    && entry["success"] == false
+            })
+            .count();
+        assert_eq!(failed_tool_audits, 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

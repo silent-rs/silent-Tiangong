@@ -325,6 +325,8 @@ pub(super) enum ForceFinalReason {
     OuterLimit,
     /// 总结阶段 LLM 请求失败。
     SummaryError,
+    /// 工具参数的一次自动修正仍失败。
+    ArgumentRepairExhausted,
 }
 
 impl ForceFinalReason {
@@ -345,6 +347,14 @@ impl ForceFinalReason {
 2. 如果有未完成的任务，说明原因和后续建议。\n\
 3. 不要重复执行工具调用。\n\
 4. 如果需要用户提供信息才能继续，请明确列出需要什么。"
+            }
+            Self::ArgumentRepairExhausted => {
+                "工具参数在一次自动修正后仍不完整，相关工具没有执行。请直接给出最终回复。\n\
+要求：\n\
+1. 说明已完成的操作和结果。\n\
+2. 明确指出哪些操作因参数不完整而未完成。\n\
+3. 不要再次执行工具调用。\n\
+4. 仅在确实需要外部信息时说明用户需要提供什么。"
             }
         }
     }

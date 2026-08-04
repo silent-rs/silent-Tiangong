@@ -56,7 +56,16 @@ impl Guest for Component {
             ToolSpec {
                 name: TOOL_PROJECT_CONTEXT.to_string(),
                 description: "发现当前工作区的项目类型、规则与工作流文件、版本控制状态及可用检查命令。进入不熟悉的项目或需要确定验证方式时使用；此工具只读取和分析，不修改项目。".to_string(),
-                input_schema: empty_schema(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "当前任务；提供后只恢复与该任务匹配的进度"
+                        }
+                    }
+                })
+                .to_string(),
             },
             ToolSpec {
                 name: TOOL_PREFLIGHT.to_string(),
@@ -108,14 +117,18 @@ impl Guest for Component {
             },
             ToolSpec {
                 name: TOOL_REVIEW.to_string(),
-                description: "交付前核对实际改动范围和验证结果，识别预期外文件及失败检查。此工具不修改、提交或清理任何改动。".to_string(),
+                description: "交付前核对分支与工作区的实际改动范围和验证结果。自动选择上游基线；这只是交付范围检查，不替代代码质量审查，也不修改、提交或清理改动。".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "expected_files": {
+                        "base_ref": {
+                            "type": "string",
+                            "description": "可选 Git 基线引用；默认自动选择上游、远端默认分支或本地主分支"
+                        },
+                        "allowed_paths": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "本任务预期涉及的项目相对路径；存在改动时必须提供"
+                            "description": "可选的少量允许文件或目录前缀；为空时只报告实际范围，不判断越界"
                         },
                         "verification": verification_schema()
                     }
@@ -131,7 +144,7 @@ impl Guest for Component {
 
     fn handle_tool(call: ToolCall) -> Result<ToolResult, PluginError> {
         match call.name.as_str() {
-            TOOL_PROJECT_CONTEXT => handle_project_context(),
+            TOOL_PROJECT_CONTEXT => handle_project_context(&call),
             TOOL_PREFLIGHT => handle_preflight(&call),
             TOOL_CHECKPOINT => handle_checkpoint(&call),
             TOOL_REVIEW => handle_review(&call),
@@ -198,6 +211,12 @@ struct PreflightArgs {
     task: String,
 }
 
+#[derive(Default, Deserialize)]
+struct ProjectContextArgs {
+    #[serde(default)]
+    task: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct CheckpointArgs {
     task: String,
@@ -216,17 +235,21 @@ struct CheckpointArgs {
 #[derive(Default, Deserialize)]
 struct ReviewArgs {
     #[serde(default)]
-    expected_files: Vec<String>,
+    base_ref: Option<String>,
+    #[serde(default)]
+    allowed_paths: Vec<String>,
     #[serde(default)]
     verification: Vec<VerificationResult>,
 }
 
-fn handle_project_context() -> Result<ToolResult, PluginError> {
+fn handle_project_context(call: &ToolCall) -> Result<ToolResult, PluginError> {
+    let args: ProjectContextArgs = parse_arguments(call)?;
     let (workspace, full_trust) = current_context()?;
     let response: ProjectContextResponse =
         sidecar_client::invoke::<ProjectContext>(&WorkspaceRequest {
             workspace,
             full_trust,
+            task: args.task,
         })
         .map_err(|error| plugin_err(format!("获取项目上下文失败: {error}")))?;
     json_result(true, "已发现当前项目开发上下文", &response, Vec::new())
@@ -271,7 +294,8 @@ fn handle_review(call: &ToolCall) -> Result<ToolResult, PluginError> {
     let (workspace, _) = current_context()?;
     let response = sidecar_client::invoke::<Review>(&ReviewRequest {
         workspace,
-        expected_files: args.expected_files,
+        base_ref: args.base_ref,
+        allowed_paths: args.allowed_paths,
         verification: args.verification,
     })
     .map_err(|error| plugin_err(format!("交付审查失败: {error}")))?;
@@ -284,8 +308,11 @@ fn handle_review(call: &ToolCall) -> Result<ToolResult, PluginError> {
 }
 
 fn parse_arguments<T: DeserializeOwned>(call: &ToolCall) -> Result<T, PluginError> {
-    serde_json::from_str(&call.arguments)
-        .map_err(|error| plugin_err(format!("{} 参数无效: {error}", call.name)))
+    parse_arguments_raw(&call.name, &call.arguments)
+}
+
+fn parse_arguments_raw<T: DeserializeOwned>(name: &str, arguments: &str) -> Result<T, PluginError> {
+    serde_json::from_str(arguments).map_err(|error| plugin_err(format!("{name} 参数无效: {error}")))
 }
 
 fn current_context() -> Result<(String, bool), PluginError> {
@@ -316,10 +343,6 @@ fn json_result<T: serde::Serialize>(
         exit_code: if ok { 0 } else { 1 },
         execution: None,
     })
-}
-
-fn empty_schema() -> String {
-    r#"{"type":"object","properties":{}}"#.to_string()
 }
 
 fn verification_schema() -> serde_json::Value {
@@ -354,11 +377,11 @@ const CODING_WORKFLOW: &str = r#"## Coding 工作模式
 处理需要修改代码、配置或工程文件的任务时，遵循以下通用流程：
 
 1. 开始前明确可验证的完成标准。先发现并遵循当前项目已有的规则、需求、规划、任务管理和贡献约定，不假设它们使用固定文件名或固定流程；只有项目确实采用相关记录时才核对和维护。
-2. 面对不熟悉的项目，先调用 `coding_project_context` 获取结构化上下文，再读取其中与当前任务有关的规则和项目文件。实际修改前调用 `coding_preflight` 核对任务边界与工作区风险。
+2. 面对不熟悉的项目，先携带当前任务调用 `coding_project_context` 获取结构化上下文，再读取其中与当前任务有关的规则和项目文件。实际修改前调用 `coding_preflight` 核对任务边界与工作区风险。
 3. 先使用可用的检索能力缩小范围，再精确搜索并按需读取文件；根据真实代码和配置作出判断，不猜测项目结构、依赖或行为。
 4. 只做满足需求所需的最小改动，复用项目已有模式。不要覆盖、清理或混入用户原有工作，也不要未经授权执行提交、推送、合并或破坏性操作。
 5. 根据项目自己的清单、脚本、持续集成配置和规则选择最小充分验证，不预设语言、框架、包管理器或命令。所有命令使用合理时限；需要持续交互时才使用终端能力。
-6. 验证失败时读取真实输出，修复后重新运行。长任务可用 `coding_checkpoint` 记录进度；交付前用 `coding_review` 核对改动范围和实际验证结果。
+6. 验证失败时读取真实输出，修复后重新运行。长任务可用 `coding_checkpoint` 记录进度；交付前用 `coding_review` 自动核对分支与工作区改动范围和实际验证结果。该检查不能替代代码质量审查。
 7. 只有需求已经完成且验证通过，或确实存在需要外部介入的阻碍时才结束。最终用简单直白的语言说明完成内容、结果和仍存在的阻碍。
 
 通用文件、检索、命令和终端能力继续由现有工具提供；Coding 插件只补充开发工作流、项目上下文、进度记录和交付审查，不重复实现这些原子能力。"#;

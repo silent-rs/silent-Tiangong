@@ -6,7 +6,7 @@ license = "Apache-2.0"
 publish = false
 
 [package.metadata.tiangong]
-business-protocol = 1
+business-protocol = 2
 description = "Coding WASM 与 sidecar 共用的私有业务协议"
 
 [dependencies]
