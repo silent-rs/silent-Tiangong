@@ -155,7 +155,7 @@ fn build_cli_plugins(
     storage_root: &std::path::Path,
     models: &tiangong_llm::models_config::ModelsConfig,
 ) -> Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> {
-    use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+    use tiangong_llm::{ModelCapability, ModelEndpoint};
 
     let storage_root = storage_root.to_path_buf();
     let resolve_ep = |cap: ModelCapability| {
@@ -165,12 +165,6 @@ fn build_cli_plugins(
     };
     let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
     let stt_endpoint = resolve_ep(ModelCapability::Stt);
-    let multimodal_endpoint =
-        if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-            resolve_ep(ModelCapability::Multimodal)
-        } else {
-            None
-        };
 
     let mut plugins = tiangong_plugin_prompt::default_plugins();
     plugins.extend(tiangong_plugin_fs::default_plugins());
@@ -189,9 +183,6 @@ fn build_cli_plugins(
     // 不注册 scheduler 插件：定时任务属于 Desktop / Server 这类长期运行宿主的能力。
     // CLI 作为前台交互工具，生命周期不稳定，不承载调度执行（见 issue 说明）。
     plugins.extend(tiangong_plugin_task::default_plugins());
-    if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-        plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-    }
 
     let child_plugin_factory = std::sync::Arc::new({
         let storage_root = storage_root.clone();
@@ -212,9 +203,6 @@ fn build_cli_plugins(
             child_plugins.extend(tiangong_plugin_command::default_plugins());
             // 子 Core 同样不注册 scheduler 插件，与主 Core 一致。
             child_plugins.extend(tiangong_plugin_task::default_plugins());
-            if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-            }
             child_plugins
         }
     });
