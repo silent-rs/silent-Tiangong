@@ -348,15 +348,11 @@ impl ServerCoreManager {
                     .map(ModelEndpoint::from_resolved)
             };
             let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-            let stt_endpoint = resolve_ep(ModelCapability::Stt);
             // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
             let mut plugins = tiangong_plugin_prompt::default_plugins();
             plugins.extend(tiangong_plugin_fs::default_plugins());
             if let Some(ep) = video_endpoint.clone() {
                 plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-            }
-            if let Some(ep) = stt_endpoint.clone() {
-                plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
             }
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
@@ -378,9 +374,6 @@ impl ServerCoreManager {
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
                     if let Some(ep) = video_endpoint.clone() {
                         child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                    }
-                    if let Some(ep) = stt_endpoint.clone() {
-                        child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
                     }
                     child_plugins.extend(
                         tiangong_plugin_runtime::registry::load_installed_plugins(
