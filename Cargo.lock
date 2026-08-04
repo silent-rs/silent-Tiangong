@@ -10526,7 +10526,6 @@ dependencies = [
  "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
@@ -10600,7 +10599,6 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
@@ -10929,16 +10927,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-generate-image"
+name = "tiangong-plugin-generate-image-protocol"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-image-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media-archive",
+ "tiangong-plugin-generate-image-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-image-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-generate-image-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11330,7 +11353,6 @@ dependencies = [
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
  "tiangong-plugin-generate-video",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
