@@ -220,7 +220,7 @@ fn incomplete_tool_arguments_error(
     let raw_preview: String = raw_args.chars().take(512).collect();
     Some(json!({
         "__parse_error": format!(
-            "工具参数不完整：tool={tool_name} id={call_id}，{reason}。本次调用不会执行；请缩短参数并重新生成一次完整 JSON。"
+            "工具参数不完整：tool={tool_name} id={call_id}，{reason}。本次调用不会执行，请缩短参数并重新生成完整 JSON。"
         ),
         "__raw_args_preview": raw_preview,
     }))
@@ -271,10 +271,132 @@ pub struct ModelResponse {
     pub stop_reason: Option<StopReason>,
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
+    pub tool_argument_failures: Vec<ToolCallArgumentFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallArgumentFailure {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub message: String,
+    pub raw_arguments_preview: Option<String>,
+    pub attempt: u8,
+    pub retryable: bool,
 }
 
 /// 向后兼容别名
 pub type ModelFunctionResponse = ModelResponse;
+
+fn split_tool_argument_failures(
+    tool_calls: Vec<ToolCall>,
+) -> (Vec<ToolCall>, Vec<ToolCallArgumentFailure>) {
+    let mut valid_calls = Vec::new();
+    let mut failures = Vec::new();
+    for call in tool_calls {
+        let Some(message) = call.arguments.get("__parse_error").and_then(Value::as_str) else {
+            valid_calls.push(call);
+            continue;
+        };
+        failures.push(ToolCallArgumentFailure {
+            tool_call_id: call.id,
+            tool_name: call.name,
+            message: message.to_string(),
+            raw_arguments_preview: call
+                .arguments
+                .get("__raw_args_preview")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            attempt: 1,
+            retryable: true,
+        });
+    }
+    (valid_calls, failures)
+}
+
+fn tool_argument_repair_request(
+    request: &ModelRequest,
+    failures: &[ToolCallArgumentFailure],
+) -> ModelRequest {
+    let mut request = request.clone();
+    let failed_calls = failures
+        .iter()
+        .map(|failure| {
+            format!(
+                "- tool={} id={}：{}",
+                failure.tool_name, failure.tool_call_id, failure.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    tracing::warn!(
+        failure_count = failures.len(),
+        failed_calls = %failed_calls,
+        "LLM 层检测到工具参数不完整，发起唯一一次自动修正"
+    );
+    request.context.push(Message::new(
+        MessageRole::System,
+        format!(
+            "<system-reminder>\n上一次模型输出的以下工具调用参数未形成完整 JSON，因此没有交给 Agent，也没有执行：\n{failed_calls}\n这是唯一一次自动修正机会。请依据工具 schema 重新生成完整且更短的调用；长内容应拆成可独立执行的多个调用。不要查询记忆，也不要复述残缺参数。\n</system-reminder>"
+        ),
+    ));
+    request
+}
+
+fn merge_tool_argument_repair(
+    mut first: ModelFunctionResponse,
+    mut repaired: ModelFunctionResponse,
+) -> ModelFunctionResponse {
+    repaired.usage.accumulate(&first.usage);
+    for failure in &mut repaired.tool_argument_failures {
+        failure.attempt = 2;
+        failure.retryable = false;
+    }
+
+    let mut failures = std::mem::take(&mut first.tool_argument_failures);
+    let repair_exhausted = !repaired.tool_argument_failures.is_empty();
+    failures.append(&mut repaired.tool_argument_failures);
+    repaired.tool_argument_failures = failures;
+
+    if repair_exhausted {
+        let mut failed_tools = repaired
+            .tool_argument_failures
+            .iter()
+            .map(|failure| failure.tool_name.as_str())
+            .filter(|name| !name.trim().is_empty())
+            .collect::<Vec<_>>();
+        failed_tools.sort_unstable();
+        failed_tools.dedup();
+        let suffix = if failed_tools.is_empty() {
+            String::new()
+        } else {
+            format!("：{}", failed_tools.join("、"))
+        };
+        repaired.text = format!("工具调用参数在一次自动修正后仍不完整，相关操作未执行{suffix}。");
+        repaired.stop_reason = Some(StopReason::EndTurn);
+        repaired.tool_calls.clear();
+    }
+    repaired
+}
+
+fn emit_model_response_chunks(
+    response: &ModelResponse,
+    chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+) {
+    if !response.reasoning_content.is_empty() {
+        let _ = chunk_tx.send(ModelStreamChunk {
+            content: String::new(),
+            reasoning_content: response.reasoning_content.clone(),
+            usage: None,
+        });
+    }
+    if !response.text.is_empty() {
+        let _ = chunk_tx.send(ModelStreamChunk {
+            content: response.text.clone(),
+            reasoning_content: String::new(),
+            usage: None,
+        });
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelStreamChunk {
@@ -382,6 +504,7 @@ impl SingleProviderClient {
             stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
+            tool_argument_failures: Vec::new(),
         })
     }
 
@@ -612,6 +735,32 @@ impl SingleProviderClient {
         tool_choice: Option<ToolChoice>,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
+        let first = self.complete_with_functions_stream_once(
+            req,
+            functions,
+            tool_choice.clone(),
+            on_delta,
+        )?;
+        if first.tool_argument_failures.is_empty() {
+            return Ok(first);
+        }
+        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
+        let repaired = self.complete_with_functions_stream_once(
+            &repair_request,
+            functions,
+            tool_choice,
+            on_delta,
+        )?;
+        Ok(merge_tool_argument_repair(first, repaired))
+    }
+
+    fn complete_with_functions_stream_once(
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+        on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    ) -> Result<ModelFunctionResponse> {
         let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
         let model = self.cfg.model.trim();
         if model.is_empty() {
@@ -720,56 +869,58 @@ impl SingleProviderClient {
         tool_choice: Option<ToolChoice>,
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
-        let fallback_client = self.clone();
-        let fallback_req = req.clone();
-        let fallback_functions = functions.clone();
-        let fallback_tool_choice = tool_choice.clone();
-        let fallback_tx = chunk_tx.clone();
+        let first = self
+            .stream_function_calls_attempt(&req, &functions, tool_choice.clone(), &chunk_tx)
+            .await?;
+        if first.tool_argument_failures.is_empty() {
+            return Ok(first);
+        }
 
+        let repair_request = tool_argument_repair_request(&req, &first.tool_argument_failures);
+        let repaired = self
+            .stream_function_calls_attempt(&repair_request, &functions, tool_choice, &chunk_tx)
+            .await?;
+        Ok(merge_tool_argument_repair(first, repaired))
+    }
+
+    async fn stream_function_calls_attempt(
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+    ) -> Result<ModelFunctionResponse> {
         match self
-            .stream_function_calls_streaming(req, functions, tool_choice, chunk_tx)
+            .stream_function_calls_streaming(req, functions, tool_choice.clone(), chunk_tx)
             .await
         {
             Ok(response) => Ok(response),
             Err(err) => {
-                if let Some(on_retry) = &fallback_client.on_retry {
+                if let Some(on_retry) = &self.on_retry {
                     on_retry(1, MAX_RETRIES, 0, &err.to_string());
                 }
                 // 直接 await provider future；上层 abort 流任务时 HTTP future 会随之
                 // drop，不能使用不可取消的 spawn_blocking，否则旧请求会越过轮次屏障。
-                let response = fallback_client
-                    .complete_with_functions_with_tool_choice_async(
-                        &fallback_req,
-                        &fallback_functions,
-                        fallback_tool_choice,
+                let response = self
+                    .complete_with_functions_with_tool_choice_async_once(
+                        req,
+                        functions,
+                        tool_choice,
                     )
                     .await
                     .context("流式失败后回退非流式调用失败")?;
-                if !response.reasoning_content.is_empty() {
-                    let _ = fallback_tx.send(ModelStreamChunk {
-                        content: String::new(),
-                        reasoning_content: response.reasoning_content.clone(),
-                        usage: None,
-                    });
-                }
-                if !response.text.is_empty() {
-                    let _ = fallback_tx.send(ModelStreamChunk {
-                        content: response.text.clone(),
-                        reasoning_content: String::new(),
-                        usage: None,
-                    });
-                }
+                emit_model_response_chunks(&response, chunk_tx);
                 Ok(response)
             }
         }
     }
 
     async fn stream_function_calls_streaming(
-        self,
-        req: ModelRequest,
-        functions: Vec<ToolSpec>,
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
         tool_choice: Option<ToolChoice>,
-        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
         let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
         let model = self.cfg.model.trim().to_string();
@@ -778,8 +929,7 @@ impl SingleProviderClient {
                 "API_MODEL 不能为空，无法发起 async 流式工具模型请求"
             ));
         }
-        let request =
-            build_provider_request(&req, &model, MAX_TOKENS_MAIN, &functions, tool_choice)?;
+        let request = build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
         let provider = self.build_provider_dispatch(timeout_ms)?;
 
         let mut text = String::new();
@@ -843,11 +993,13 @@ impl SingleProviderClient {
             }
         }
 
-        let tool_calls_vec = tool_calls.into_tool_calls(stop_reason.as_ref());
+        let (tool_calls_vec, tool_argument_failures) =
+            split_tool_argument_failures(tool_calls.into_tool_calls(stop_reason.as_ref()));
 
         if text.trim().is_empty()
             && reasoning_content.trim().is_empty()
             && tool_calls_vec.is_empty()
+            && tool_argument_failures.is_empty()
         {
             return Err(anyhow!("async 流式响应缺少文本、思考内容和工具调用"));
         }
@@ -859,10 +1011,34 @@ impl SingleProviderClient {
             stop_reason,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
+            tool_argument_failures,
         })
     }
 
     pub fn complete_with_functions_with_tool_choice(
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ModelFunctionResponse> {
+        let first = self.complete_with_functions_with_tool_choice_once(
+            req,
+            functions,
+            tool_choice.clone(),
+        )?;
+        if first.tool_argument_failures.is_empty() {
+            return Ok(first);
+        }
+        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
+        let repaired = self.complete_with_functions_with_tool_choice_once(
+            &repair_request,
+            functions,
+            tool_choice,
+        )?;
+        Ok(merge_tool_argument_repair(first, repaired))
+    }
+
+    fn complete_with_functions_with_tool_choice_once(
         &self,
         req: &ModelRequest,
         functions: &[ToolSpec],
@@ -880,6 +1056,33 @@ impl SingleProviderClient {
     }
 
     pub async fn complete_with_functions_with_tool_choice_async(
+        &self,
+        req: &ModelRequest,
+        functions: &[ToolSpec],
+        tool_choice: Option<ToolChoice>,
+    ) -> Result<ModelFunctionResponse> {
+        let first = self
+            .complete_with_functions_with_tool_choice_async_once(
+                req,
+                functions,
+                tool_choice.clone(),
+            )
+            .await?;
+        if first.tool_argument_failures.is_empty() {
+            return Ok(first);
+        }
+        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
+        let repaired = self
+            .complete_with_functions_with_tool_choice_async_once(
+                &repair_request,
+                functions,
+                tool_choice,
+            )
+            .await?;
+        Ok(merge_tool_argument_repair(first, repaired))
+    }
+
+    async fn complete_with_functions_with_tool_choice_async_once(
         &self,
         req: &ModelRequest,
         functions: &[ToolSpec],
@@ -992,6 +1195,7 @@ impl ModelClient for SingleProviderClient {
             stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
+            tool_argument_failures: Vec::new(),
         })
     }
 
@@ -1485,8 +1689,13 @@ fn convert_provider_response_to_function_response(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let (tool_calls, tool_argument_failures) = split_tool_argument_failures(tool_calls);
 
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+    if text.trim().is_empty()
+        && reasoning_content.trim().is_empty()
+        && tool_calls.is_empty()
+        && tool_argument_failures.is_empty()
+    {
         return Err(anyhow!(
             "Anthropic 响应缺少文本和工具调用（{}）",
             empty_provider_response_diagnostic(&response)
@@ -1500,6 +1709,7 @@ fn convert_provider_response_to_function_response(
         stop_reason,
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
+        tool_argument_failures,
     })
 }
 
@@ -1661,9 +1871,14 @@ async fn consume_provider_stream_events_async(
         }
     }
 
-    let tool_calls = tool_calls.into_tool_calls(stop_reason.as_ref());
+    let (tool_calls, tool_argument_failures) =
+        split_tool_argument_failures(tool_calls.into_tool_calls(stop_reason.as_ref()));
 
-    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
+    if text.trim().is_empty()
+        && reasoning_content.trim().is_empty()
+        && tool_calls.is_empty()
+        && tool_argument_failures.is_empty()
+    {
         return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
     }
 
@@ -1674,6 +1889,7 @@ async fn consume_provider_stream_events_async(
         stop_reason,
         usage: usage.into(),
         tool_calls,
+        tool_argument_failures,
     })
 }
 
@@ -1720,6 +1936,7 @@ fn consume_provider_stream(
         stop_reason: response.stop_reason,
         usage: response.usage,
         tool_calls: response.tool_calls,
+        tool_argument_failures: response.tool_argument_failures,
     })
 }
 
@@ -1989,7 +2206,7 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_marks_even_valid_tool_arguments_as_incomplete() {
+    fn max_tokens_isolated_as_failure_before_returning_to_agent() {
         let mut calls = StreamingToolCalls::default();
         calls.start(
             0,
@@ -2002,12 +2219,12 @@ mod tests {
         calls.push_delta(0, String::new(), "{}".to_string());
 
         let calls = calls.into_tool_calls(Some(&StopReason::MaxTokens));
-        let error = calls[0].arguments["__parse_error"]
-            .as_str()
-            .unwrap_or_default();
+        let (valid_calls, failures) = split_tool_argument_failures(calls);
 
-        assert!(error.contains("长度上限"));
-        assert!(error.contains("不会执行"));
+        assert!(valid_calls.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].message.contains("长度上限"));
+        assert!(failures[0].message.contains("不会执行"));
     }
 
     #[test]

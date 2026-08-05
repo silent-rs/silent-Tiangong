@@ -23,7 +23,7 @@ pub use models_config::{
 };
 pub use provider_client::{
     ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
-    OnRetryCallback, SingleProviderClient,
+    OnRetryCallback, SingleProviderClient, ToolCallArgumentFailure,
 };
 
 pub use client::rerank_provider_from_config;

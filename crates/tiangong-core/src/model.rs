@@ -8,7 +8,7 @@ pub use tiangong_llm::ProviderProtocol;
 pub use tiangong_llm::StopReason;
 pub use tiangong_llm::provider_client::{
     ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
-    OnRetryCallback, SingleProviderClient,
+    OnRetryCallback, SingleProviderClient, ToolCallArgumentFailure,
 };
 pub use tiangong_llm::request::{ReasoningEffort, ThinkingConfig};
 pub use tiangong_llm::tool::{ToolCall, ToolChoice, ToolSpec};

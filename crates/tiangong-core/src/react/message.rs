@@ -303,7 +303,7 @@ pub(crate) fn classify_tool_result_failure(result: &crate::tool::ToolResult) -> 
 
 fn classify_failure_message(message: &str) -> ToolFailureKind {
     let lowered = message.to_lowercase();
-    if lowered.contains("__parse_error") || lowered.contains("参数") || lowered.contains("json") {
+    if lowered.contains("参数") || lowered.contains("json") {
         ToolFailureKind::Argument
     } else if lowered.contains("权限") || lowered.contains("permission") {
         ToolFailureKind::PermissionDenied
@@ -335,15 +335,9 @@ fn default_requires_user_input(kind: ToolFailureKind) -> bool {
     )
 }
 
-fn default_recommended_next_action(kind: ToolFailureKind, message: &str) -> &'static str {
+fn default_recommended_next_action(kind: ToolFailureKind, _message: &str) -> &'static str {
     match kind {
-        ToolFailureKind::Argument => {
-            if message.contains("__parse_error") {
-                "重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数。"
-            } else {
-                "检查工具 schema 和参数类型，修正参数后再调用。"
-            }
-        }
+        ToolFailureKind::Argument => "检查工具 schema 和参数类型，修正参数后再调用。",
         ToolFailureKind::PermissionDenied => {
             "不要重复执行被拒绝的操作；改用安全方案或请求用户授权。"
         }
@@ -456,7 +450,7 @@ pub(crate) fn append_repeated_failed_tool_result(
         format!("失败原因：{original_error}\n")
     };
     let message = format!(
-        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；如果失败原因包含 __parse_error，请重新生成完整 JSON 参数，不要把 __parse_error 当作真实参数；也可以切换到其他可行方式。"
+        "{error_hint}本轮已经执行过完全相同的 {tool_name} 工具调用且执行失败，系统已跳过重复执行。请不要继续重复相同工具和参数；请修正参数或切换到其他可行方式。"
     );
     let _ = ctx.stream_tx.send(StreamEvent::ToolResult {
         name: tool_name.to_string(),
@@ -808,7 +802,7 @@ mod tests {
             "call_bad",
             "path=(empty)",
             ToolFailureKind::Argument,
-            "工具参数 JSON 无效：__parse_error",
+            "工具参数 JSON 无效",
         );
 
         let text = record.render_for_model();
@@ -817,7 +811,7 @@ mod tests {
         assert!(text.contains("tool_name: read_file"));
         assert!(text.contains("error_kind: argument_error"));
         assert!(text.contains("retryable: true"));
-        assert!(text.contains("不要把 __parse_error 当作真实参数"));
+        assert!(text.contains("检查工具 schema 和参数类型"));
     }
 
     #[test]
