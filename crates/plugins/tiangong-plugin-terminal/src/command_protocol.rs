@@ -7,8 +7,6 @@ use tokio::sync::oneshot;
 use crate::manager::TerminalManager;
 use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
-const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
-
 /// 发送命令到 PTY
 fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyhow::Result<()> {
     writer.write_all(input.as_bytes())?;
@@ -356,7 +354,7 @@ pub(crate) async fn handle_exec(
     pty_state: &mut Option<PtyState>,
     app: &tauri::AppHandle,
     command: &str,
-    timeout_secs: Option<u64>,
+    timeout_secs: u64,
     response_tx: oneshot::Sender<TerminalExecResponse>,
     cancellation: Arc<crate::types::TerminalExecCancellation>,
     _completion: crate::types::TerminalExecCompletion,
@@ -463,9 +461,8 @@ pub(crate) async fn handle_exec(
     }
 
     // 等待 end marker 出现在输出中
-    let timeout = timeout_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
     let start_time = std::time::Instant::now();
-    let timeout_dur = std::time::Duration::from_secs(timeout);
+    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
     // 跨轮询持久状态：start marker 已出现
     let mut start_seen = false;
     let mut cwd_value = String::new();

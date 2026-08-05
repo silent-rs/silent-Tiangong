@@ -18,13 +18,10 @@ use crate::session_store::{TerminalSessionPersisted, TerminalSessionStore, Termi
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
-const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 120;
 const EXEC_RESPONSE_GRACE_SECS: u64 = 5;
 
-fn exec_response_wait_secs(timeout_secs: Option<u64>) -> u64 {
-    timeout_secs
-        .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
-        .saturating_add(EXEC_RESPONSE_GRACE_SECS)
+fn exec_response_wait_secs(timeout_secs: u64) -> u64 {
+    timeout_secs.saturating_add(EXEC_RESPONSE_GRACE_SECS)
 }
 
 /// 单个对话的 PTY 槽位
@@ -966,7 +963,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         &self,
         session_id: &str,
         command: &str,
-        timeout_secs: Option<u64>,
+        timeout_secs: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
@@ -1013,7 +1010,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         session_id: &str,
         cmd: &str,
         args: &[String],
-        timeout_secs: Option<u64>,
+        timeout_secs: u64,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
@@ -1206,10 +1203,9 @@ mod cancellation_tests {
 
     #[test]
     fn exec_response_wait_follows_requested_timeout() {
-        assert_eq!(exec_response_wait_secs(None), 125);
-        assert_eq!(exec_response_wait_secs(Some(30)), 35);
-        assert_eq!(exec_response_wait_secs(Some(3600)), 3605);
-        assert_eq!(exec_response_wait_secs(Some(u64::MAX)), u64::MAX);
+        assert_eq!(exec_response_wait_secs(30), 35);
+        assert_eq!(exec_response_wait_secs(3600), 3605);
+        assert_eq!(exec_response_wait_secs(u64::MAX), u64::MAX);
     }
 
     #[test]
@@ -1250,7 +1246,7 @@ mod cancellation_tests {
         assert!(command_tx
             .send(TerminalCommand::Exec {
                 command: "sleep 60".to_string(),
-                timeout_secs: None,
+                timeout_secs: 30,
                 response_tx,
                 cancellation: Arc::clone(&cancellation),
                 completion,

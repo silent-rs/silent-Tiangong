@@ -223,9 +223,9 @@ impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
                             "description": "命令参数列表"
                         },
                         "cwd": { "type": "string", "description": "工作目录（可选）" },
-                        "timeout": { "type": "integer", "description": "超时时间（秒），0 或不填表示不限时", "minimum": 0 }
+                        "timeout": { "type": "integer", "description": "允许命令运行的最长秒数；必须根据本次任务预计耗时设置", "minimum": 1 }
                     },
-                    "required": ["cmd"]
+                    "required": ["cmd", "timeout"]
                 }),
             },
             ToolSpec {
@@ -236,7 +236,7 @@ impl tiangong_core::tool_override::ToolSpecProvider for TerminalPlugin {
                     "properties": {
                         "script": { "type": "string", "description": "要执行的 shell 脚本" },
                         "cwd": { "type": "string", "description": "工作目录（可选）" },
-                        "timeout": { "type": "integer", "description": "超时秒数（可选）" },
+                        "timeout": { "type": "integer", "description": "非交互执行时必填；根据本次脚本预计耗时设置，最小 1 秒", "minimum": 1 },
                         "interactive": { "type": "boolean", "description": "是否启动交互程序，默认 false" }
                     },
                     "required": ["script"]
