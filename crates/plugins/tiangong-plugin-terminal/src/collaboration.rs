@@ -179,6 +179,18 @@ mod tests {
         ));
         tracker.release_agent_reservation(&winners[0]);
         assert_eq!(tracker.busy_state(), TerminalBusyState::Idle);
+
+        let next_command = "next-command".to_string();
+        assert!(tracker.try_reserve_agent_command(next_command.clone()));
+        tracker.release_agent_reservation(&winners[0]);
+        assert_eq!(
+            tracker.busy_state(),
+            TerminalBusyState::AgentRunning {
+                command_id: next_command.clone()
+            }
+        );
+        tracker.release_agent_reservation(&next_command);
+        assert_eq!(tracker.busy_state(), TerminalBusyState::Idle);
     }
 }
 
