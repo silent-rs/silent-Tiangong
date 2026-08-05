@@ -334,13 +334,13 @@ fn notify_auto_failure(ctx: &TurnContext, usage: &TokenUsage, error: &dyn std::f
 }
 
 fn notify_manual_success(ctx: &TurnContext, update: &CompressionUpdate, current_tokens: usize) {
-    notify_result(ctx, ContextCompressAction::Compress);
     notify_usage(
         ctx,
         &update.usage,
         Some(current_tokens),
         "manual_context_compress",
     );
+    notify_result(ctx, ContextCompressAction::Compress);
     tracing::info!(
         session_id = %ctx.session.id,
         summary_up_to = ctx.session.summary_up_to,
