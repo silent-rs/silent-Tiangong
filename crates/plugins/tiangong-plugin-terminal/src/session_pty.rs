@@ -18,6 +18,15 @@ use crate::session_store::{TerminalSessionPersisted, TerminalSessionStore, Termi
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
+const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 120;
+const EXEC_RESPONSE_GRACE_SECS: u64 = 5;
+
+fn exec_response_wait_secs(timeout_secs: Option<u64>) -> u64 {
+    timeout_secs
+        .unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)
+        .saturating_add(EXEC_RESPONSE_GRACE_SECS)
+}
+
 /// 单个对话的 PTY 槽位
 #[derive(Clone)]
 pub struct SessionPty {
@@ -857,39 +866,43 @@ impl SessionAwareTerminalProvider {
         Self { registry }
     }
 
-    /// 获取指定 session 的 cmd_tx（懒创建）
-    fn tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
+    /// 获取指定 session 的存活终端槽位；缺失或失效时沿用原 cwd 重建。
+    fn slot(&self, session_id: &str) -> Option<SessionPty> {
         if session_id.trim().is_empty() {
             return None;
         }
-        // 懒创建：若不存在则用 default cwd 创建
-        if self.registry.get(session_id).is_none() {
-            let default_cwd = self
-                .registry
-                .default_cwd
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            self.registry.ensure(session_id, &default_cwd);
+
+        let existing = self.registry.get(session_id);
+        if let Some(ref slot) = existing {
+            if slot.manager.is_alive() {
+                return Some(slot.clone());
+            }
         }
-        self.registry.get(session_id).map(|s| s.cmd_tx)
+
+        let cwd = existing
+            .as_ref()
+            .map(|slot| slot.manager.cwd())
+            .unwrap_or_else(|| {
+                self.registry
+                    .default_cwd
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_default()
+            });
+        if !self.registry.ensure(session_id, &cwd) {
+            return None;
+        }
+        self.registry.get(session_id)
+    }
+
+    /// 获取指定 session 的 cmd_tx（懒创建）
+    fn tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
+        self.slot(session_id).map(|slot| slot.cmd_tx)
     }
 
     /// 获取指定 session 的 manager（懒创建）
     fn manager(&self, session_id: &str) -> Option<Arc<TerminalManager>> {
-        if session_id.trim().is_empty() {
-            return None;
-        }
-        if self.registry.get(session_id).is_none() {
-            let default_cwd = self
-                .registry
-                .default_cwd
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            self.registry.ensure(session_id, &default_cwd);
-        }
-        self.registry.get(session_id).map(|s| s.manager)
+        self.slot(session_id).map(|slot| slot.manager)
     }
 
     fn interactive_tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
@@ -908,7 +921,7 @@ impl SessionAwareTerminalProvider {
         // 2. 回退到 active tab（任意存活状态）：与用户输入路由（registry.get →
         //    active_or_first_tab_id）一致，使 agent 能接手用户已手动启动的交互程序
         //    （ssh/vim/REPL 等）。此前这里返回 None → terminal pty unavailable。
-        self.registry.get(session_id).map(|s| s.cmd_tx)
+        self.tx(session_id)
     }
 }
 
@@ -962,6 +975,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
             None => return Box::pin(async { None }),
         };
         let command = command.to_string();
+        let response_wait_secs = exec_response_wait_secs(timeout_secs);
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
@@ -982,10 +996,13 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
                 return None;
             }
             cancel_on_drop.arm();
-            let resp = tokio::time::timeout(std::time::Duration::from_secs(180), response_rx)
-                .await
-                .ok()?
-                .ok()?;
+            let resp = tokio::time::timeout(
+                std::time::Duration::from_secs(response_wait_secs),
+                response_rx,
+            )
+            .await
+            .ok()?
+            .ok()?;
             cancel_on_drop.disarm();
             Some(resp.into())
         })
@@ -1091,7 +1108,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         let input = input.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            send_and_wait!(
+            let result: Result<(), String> = send_and_wait!(
                 tx,
                 TerminalCommand::SendInput {
                     input,
@@ -1101,6 +1118,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
                 response_rx,
                 5
             );
+            result.ok()?;
             Some(())
         })
     }
@@ -1185,6 +1203,14 @@ impl Drop for CancelTerminalExecOnDrop {
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+
+    #[test]
+    fn exec_response_wait_follows_requested_timeout() {
+        assert_eq!(exec_response_wait_secs(None), 125);
+        assert_eq!(exec_response_wait_secs(Some(30)), 35);
+        assert_eq!(exec_response_wait_secs(Some(3600)), 3605);
+        assert_eq!(exec_response_wait_secs(Some(u64::MAX)), u64::MAX);
+    }
 
     #[test]
     fn dropping_accepted_exec_waits_for_command_loop_cleanup() {

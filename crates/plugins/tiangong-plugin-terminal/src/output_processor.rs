@@ -377,6 +377,7 @@ pub(crate) fn spawn_output_reader(
     app: tauri::AppHandle,
     session_id: String,
     logger: Option<Arc<OutputLogger>>,
+    pty_generation: u64,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; READ_BUF_SIZE];
@@ -393,13 +394,27 @@ pub(crate) fn spawn_output_reader(
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) => {
-                        if e.kind() != std::io::ErrorKind::TimedOut {
-                            warn!(error = %e, "PTY 读取错误");
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::WouldBlock
+                                | std::io::ErrorKind::Interrupted
+                        ) {
+                            continue;
                         }
-                        continue;
+                        warn!(error = %e, "PTY 读取错误，终端已失效");
+                        break;
                     }
                 }
             };
+
+            let is_current_generation = state
+                .lock()
+                .map(|state| state.pty_generation == pty_generation)
+                .unwrap_or(false);
+            if !is_current_generation {
+                break;
+            }
 
             let raw_text = String::from_utf8_lossy(&buf[..n]).to_string();
 
@@ -441,7 +456,18 @@ pub(crate) fn spawn_output_reader(
             }
         }
 
-        info!(session_id = %session_id, "PTY 输出读取线程退出");
+        let marked_dead = state
+            .lock()
+            .map(|mut state| {
+                if state.pty_generation != pty_generation {
+                    return false;
+                }
+                state.alive = false;
+                state.writer = None;
+                true
+            })
+            .unwrap_or(false);
+        info!(session_id = %session_id, pty_generation, marked_dead, "PTY 输出读取线程退出");
     });
 }
 

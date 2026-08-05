@@ -161,7 +161,20 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
           const fitAddon = new FitAddon();
           term.loadAddon(fitAddon);
           term.onData((data) => {
-            api.terminalSessionSendInput(terminalId, data).catch(() => {});
+            api
+              .terminalSessionSendInput(terminalId, data)
+              .then(() => {
+                setDisplayInfo((current) =>
+                  current.alive ? current : { ...current, alive: true, error: undefined },
+                );
+              })
+              .catch((error) => {
+                setDisplayInfo((current) => ({
+                  ...current,
+                  alive: false,
+                  error: `终端输入失败：${String(error)}`,
+                }));
+              });
 
             if (data === '\r') {
               const command = inputBufferRef.current.trim();
@@ -263,9 +276,13 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
     try {
       await api.terminalSessionReset(terminalId);
       terminalRef.current?.clear();
-      setDisplayInfo((current) => ({ ...current, alive: true }));
-    } catch {
-      // ignore
+      setDisplayInfo((current) => ({ ...current, alive: true, error: undefined }));
+    } catch (error) {
+      setDisplayInfo((current) => ({
+        ...current,
+        alive: false,
+        error: `终端重置失败：${String(error)}`,
+      }));
     }
   }, [terminalId]);
 

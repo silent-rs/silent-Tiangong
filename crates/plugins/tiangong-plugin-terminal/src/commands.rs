@@ -22,8 +22,19 @@ fn ensure_pty(
     state: &State<'_, TerminalPluginState>,
     session_id: &str,
 ) -> Result<SessionPty, String> {
-    if state.registry.get(session_id).is_none() {
-        state.registry.ensure(session_id, "");
+    let existing = state.registry.get(session_id);
+    if let Some(ref pty) = existing {
+        if pty.manager.is_alive() {
+            return Ok(pty.clone());
+        }
+    }
+
+    let cwd = existing
+        .as_ref()
+        .map(|pty| pty.manager.cwd())
+        .unwrap_or_default();
+    if !state.registry.ensure(session_id, &cwd) {
+        return Err(format!("终端会话 {session_id} 创建失败"));
     }
     state
         .registry
@@ -60,16 +71,25 @@ pub async fn terminal_session_send_input(
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
     let pty = ensure_pty(&state, &session_id)?;
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    pty.cmd_tx
-        .send(crate::types::TerminalCommand::SendInput {
-            input,
-            source: crate::collaboration::InputSource::User,
-            response_tx,
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    await_response(response_rx).await
+    match pty.manager.write_input(input.as_bytes()) {
+        Ok(()) => {
+            pty.activity.record_user_input();
+            Ok(())
+        }
+        Err(first_error) => {
+            // reader 尚未来得及报告 EOF 时，写失败会把当前代次标记为死亡；
+            // 重新走 ensure 一次，让用户的首个按键也能落入新 shell。
+            let replacement = ensure_pty(&state, &session_id)?;
+            replacement
+                .manager
+                .write_input(input.as_bytes())
+                .map_err(|retry_error| {
+                    format!("终端输入失败: {first_error}; 自动恢复后重试失败: {retry_error}")
+                })?;
+            replacement.activity.record_user_input();
+            Ok(())
+        }
+    }
 }
 
 /// 上报用户在终端提交的完整命令行（回车截断后由前端累积上报）。

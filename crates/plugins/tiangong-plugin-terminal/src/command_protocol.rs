@@ -70,19 +70,20 @@ fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> 
     tracing::info!(session_id = %session_id, "系统 PTY 不可用，尝试重新启动");
     match crate::manager::start_pty(&session_id, &cwd, &shell, &pty_env) {
         Ok(new_ps) => {
-            manager.set_alive(true);
             {
                 let mut state = manager.state.lock().unwrap();
                 state.output_buffer.clear();
                 state.last_read_line = 0;
                 state.current_line.clear();
             }
+            let generation = manager.activate_pty(new_ps.writer.clone());
             crate::output_processor::spawn_output_reader(
                 new_ps.reader.clone(),
                 manager.clone_state(),
                 app.clone(),
                 session_id.clone(),
                 manager.logger.clone(),
+                generation,
             );
             tracing::info!(session_id = %session_id, "系统 PTY 已重新启动");
             Some(new_ps)
@@ -203,10 +204,48 @@ fn wrap_non_interactive_command(
     rc_marker: &str,
     end_marker: &str,
 ) -> String {
+    let command = if command_requires_isolation(command) {
+        format!("(\n{command}\n)")
+    } else {
+        command.to_string()
+    };
     format!(
         "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
         start_marker, command, cwd_marker, rc_marker, end_marker
     )
+}
+
+/// 会退出或改变长期 shell 错误处理行为的控制语句放入子 shell 执行。
+/// 普通命令仍在当前 shell 执行，以保留 cwd、环境变量和函数等会话状态。
+fn command_requires_isolation(command: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        return false;
+    }
+
+    command
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty() && !statement.starts_with('#'))
+        .any(|statement| {
+            let mut words = statement.split_whitespace();
+            let Some(first) = words.next() else {
+                return false;
+            };
+            match first {
+                "exit" | "logout" | "exec" | "trap" => true,
+                "set" => match words.next() {
+                    Some(option) if option.starts_with('-') && option[1..].contains('e') => true,
+                    Some("-o") => words.next().is_some_and(|name| name == "errexit"),
+                    _ => false,
+                },
+                "setopt" => words.any(|option| {
+                    option.eq_ignore_ascii_case("errexit")
+                        || option.eq_ignore_ascii_case("err_exit")
+                }),
+                _ => false,
+            }
+        })
 }
 
 /// 取得 PTY 当前前台进程组。交互 shell 开启 job control 后，运行中的用户命令
@@ -326,31 +365,28 @@ pub(crate) async fn handle_exec(
     if cancellation.is_requested() || response_tx.is_closed() {
         return;
     }
-    let ps = match pty_state {
-        Some(ps) => ps,
-        None => {
-            // 系统 PTY 启动失败或已退出的恢复路径：尝试重新拉起一次再执行，
-            // 避免用户全程只能得到"终端会话不可用"。重试仍失败才返回错误。
-            match ensure_system_pty(manager, app) {
-                Some(new_ps) => {
-                    *pty_state = Some(new_ps);
-                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
-                }
-                None => {
-                    let _ = response_tx.send(TerminalExecResponse {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "终端会话不可用".to_string(),
-                        timed_out: false,
-                        cwd_after: manager.cwd(),
-                        interrupted_by_user: false,
-                        interactive_mode: false,
-                    });
-                    return;
-                }
-            }
+    if !manager.is_alive() {
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
         }
-    };
+    }
+    if pty_state.is_none() {
+        // 系统 PTY 启动失败或已退出的恢复路径：尝试重新拉起一次再执行，
+        // 避免用户全程只能得到"终端会话不可用"。重试仍失败才返回错误。
+        *pty_state = ensure_system_pty(manager, app);
+    }
+    if pty_state.is_none() {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端会话不可用".to_string(),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
 
     // 生成 start marker 和 end marker
     let marker_id = scru128::new();
@@ -404,12 +440,9 @@ pub(crate) async fn handle_exec(
     // 这样多行命令（heredoc）的最后一行不会和 marker 命令混在一起泄漏
     let combined =
         wrap_non_interactive_command(&start_marker, command, &cwd_marker, &rc_marker, &end_marker);
-    let send_result = {
-        match ps.writer.lock() {
-            Ok(mut writer) => send_to_pty(&mut writer, &combined),
-            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
-        }
-    };
+    let send_result = manager
+        .write_input(combined.as_bytes())
+        .map_err(anyhow::Error::msg);
     if let Err(e) = send_result {
         if let Some(tracker) = activity {
             tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
@@ -423,6 +456,9 @@ pub(crate) async fn handle_exec(
             interrupted_by_user: false,
             interactive_mode: false,
         });
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
+        }
         return;
     }
 
@@ -528,12 +564,47 @@ pub(crate) async fn handle_exec(
             return;
         }
 
+        if !manager.is_alive() {
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
+            let (stdout_text, interrupted) = collect_command_output(
+                manager,
+                &start_marker,
+                &end_marker,
+                &cwd_marker,
+                &rc_marker,
+                true,
+                Some(fallback_idx),
+            );
+            let tracker_interrupted = activity.map(|t| t.take_user_intervened()).unwrap_or(false);
+            if let Some(tracker) = activity {
+                tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+            }
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: stdout_text,
+                stderr: "终端进程已退出，下一次执行将自动重建".to_string(),
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: interrupted || tracker_interrupted,
+                interactive_mode: false,
+            });
+            if let Some(ps) = pty_state.take() {
+                crate::manager::shutdown_pty(ps);
+            }
+            return;
+        }
+
         let cancelled = cancellation.is_requested() || response_tx.is_closed();
         if cancelled || start_time.elapsed() >= timeout_dur {
             // 完成栅栏只会在命令边界闭合，或前台进程组收到不可忽略终止后释放。
             // 因此即使用户命令捕获/忽略 SIGINT，也不能越过 Agent Team 文件锁。
-            let shell_stopped =
-                stop_cancelled_command(manager, ps, &start_marker, &end_marker).await;
+            let shell_stopped = match pty_state.as_mut() {
+                Some(ps) => stop_cancelled_command(manager, ps, &start_marker, &end_marker).await,
+                None => true,
+            };
 
             // 收集已捕获的输出
             let fallback_idx = {
@@ -569,7 +640,10 @@ pub(crate) async fn handle_exec(
             });
             if shell_stopped {
                 // 强制终止 shell 后丢弃失效 PTY；下一条命令会走统一恢复入口重建。
-                *pty_state = None;
+                manager.deactivate_pty();
+                if let Some(ps) = pty_state.take() {
+                    crate::manager::shutdown_pty(ps);
+                }
             }
             return;
         }
@@ -1104,6 +1178,44 @@ mod tests {
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_interactive_wrapper_isolates_errexit_from_long_lived_shell() {
+        let combined = wrap_non_interactive_command(
+            "__TIANGONG_START_x__",
+            "set -e\nfalse\necho should-not-run",
+            "__TIANGONG_CWD_x__",
+            "__TIANGONG_RC_x__",
+            "__TIANGONG_END_x__",
+        );
+        assert!(combined.contains("(\nset -e\nfalse\necho should-not-run\n)"));
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&combined)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "父 shell 被 errexit 带走: {stdout}"
+        );
+        assert!(stdout.contains("__TIANGONG_RC_x__1"));
+        assert!(stdout.contains("__TIANGONG_END_x__"));
+        assert!(!stdout.contains("should-not-run\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_commands_keep_current_shell_semantics() {
+        assert!(!command_requires_isolation("cd /tmp\nexport MODE=test"));
+        assert!(command_requires_isolation("set -euo pipefail\nfalse"));
+        assert!(command_requires_isolation("set -o errexit; false"));
+        assert!(command_requires_isolation("setopt ERR_EXIT\nfalse"));
+        assert!(command_requires_isolation("trap 'echo done' EXIT"));
+        assert!(command_requires_isolation("exec cargo check"));
     }
 
     #[cfg(unix)]
