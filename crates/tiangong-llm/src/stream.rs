@@ -4,7 +4,6 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
-use crate::response::StopReason;
 use crate::tool::ToolCall;
 use crate::usage::TokenUsageData;
 
@@ -15,20 +14,14 @@ pub enum ProviderStreamEvent {
     ReasoningDelta(String),
     ReasoningSignatureDelta(String),
     TextDelta(String),
-    ToolCallStart {
-        index: usize,
-        call: ToolCall,
-    },
+    ToolCallStart(ToolCall),
     ToolCallDelta {
-        index: usize,
         call_id: String,
         partial_json: String,
     },
     ToolCallEnd {
-        index: usize,
         call_id: String,
     },
-    FinishReason(StopReason),
     MessageEnd,
     Usage(TokenUsageData),
     Error(String),

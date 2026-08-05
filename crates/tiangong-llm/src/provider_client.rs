@@ -34,7 +34,6 @@ use crate::stream::{ProviderStream, ProviderStreamEvent};
 use crate::tool::{
     ToolCall, ToolCall as LlmToolCall, ToolChoice, ToolChoice as LlmToolChoice,
     ToolResult as LlmToolResult, ToolResultContent as LlmToolResultContent, ToolSpec,
-    parse_tool_arguments_or_error,
 };
 use crate::usage::TokenUsageData;
 use tiangong_types::TokenUsage;
@@ -52,188 +51,45 @@ fn merge_stream_usage(current: &mut TokenUsageData, next: TokenUsageData) {
         .max(computed_total);
 }
 
-#[derive(Default)]
-struct StreamingToolCalls {
-    calls: std::collections::BTreeMap<usize, StreamingToolCall>,
-    id_indexes: std::collections::HashMap<String, usize>,
-}
-
-#[derive(Default)]
-struct StreamingToolCall {
-    id: String,
-    name: String,
-    initial_arguments: String,
-    argument_deltas: String,
-}
-
-impl StreamingToolCalls {
-    fn start(&mut self, index: usize, call: ToolCall) {
-        let index = self.resolve_index(index, &call.id);
-        let entry = self.calls.entry(index).or_default();
-        merge_stream_field(index, "id", &mut entry.id, call.id);
-        merge_stream_field(index, "name", &mut entry.name, call.name);
-
-        let initial_arguments = if call.arguments.is_null() || call.arguments == json!({}) {
-            String::new()
-        } else if let Some(raw) = call.arguments.as_str() {
-            raw.to_string()
-        } else {
-            call.arguments.to_string()
-        };
-        if entry.initial_arguments.is_empty() && !initial_arguments.is_empty() {
-            entry.initial_arguments = initial_arguments;
+fn collect_openai_stream_tool_calls(
+    mut calls: std::collections::BTreeMap<String, (String, String)>,
+    order: Vec<String>,
+) -> Vec<ToolCall> {
+    let mut ordered_ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in order {
+        if !id.is_empty() && seen.insert(id.clone()) {
+            ordered_ids.push(id);
+        }
+    }
+    for id in calls.keys() {
+        if !id.is_empty() && seen.insert(id.clone()) {
+            ordered_ids.push(id.clone());
         }
     }
 
-    fn push_delta(&mut self, index: usize, call_id: String, partial_json: String) {
-        let index = self.resolve_index(index, &call_id);
-        let entry = self.calls.entry(index).or_default();
-        merge_stream_field(index, "id", &mut entry.id, call_id);
-        entry.argument_deltas.push_str(&partial_json);
-    }
-
-    fn into_tool_calls(self, stop_reason: Option<&StopReason>) -> Vec<ToolCall> {
-        self.calls
-            .into_iter()
-            .filter_map(|(index, call)| {
-                if call.name.trim().is_empty() {
-                    tracing::warn!(index, tool_call_id = %call.id, "忽略缺少名称的流式工具调用");
-                    return None;
-                }
-                let raw_arguments = call.raw_arguments();
-                let id = if call.id.trim().is_empty() {
-                    format!("tool_call_{index}")
-                } else {
-                    call.id
-                };
-                let raw_args_preview: String = raw_arguments.chars().take(256).collect();
-                tracing::info!(
-                    index,
-                    tool_call_id = %id,
-                    tool_name = %call.name,
-                    raw_args_len = raw_arguments.len(),
-                    %raw_args_preview,
-                    "解析 tool call arguments"
-                );
-                Some(ToolCall {
-                    arguments: parse_stream_tool_arguments_or_error(
-                        &call.name,
-                        &id,
-                        &raw_arguments,
-                        stop_reason,
-                    ),
-                    id,
-                    name: call.name,
-                })
-            })
-            .collect()
-    }
-
-    fn resolve_index(&mut self, provider_index: usize, call_id: &str) -> usize {
-        if let Some(index) = self.id_indexes.get(call_id).copied() {
-            return index;
-        }
-
-        let index_conflicts = !call_id.is_empty()
-            && self
-                .calls
-                .get(&provider_index)
-                .is_some_and(|call| !call.id.is_empty() && call.id != call_id);
-        let resolved = if index_conflicts {
-            let fallback = self
-                .calls
-                .last_key_value()
-                .and_then(|(index, _)| index.checked_add(1))
-                .unwrap_or_else(|| {
-                    (0..)
-                        .find(|index| !self.calls.contains_key(index))
-                        .expect("工具调用序号必须存在可用值")
-                });
-            tracing::warn!(
-                provider_index,
-                fallback_index = fallback,
-                %call_id,
-                "provider 对不同工具调用重复使用同一序号，按调用 ID 分配回退序号"
+    ordered_ids
+        .into_iter()
+        .filter_map(|id| {
+            let (name, raw_args) = calls.remove(&id)?;
+            if name.trim().is_empty() {
+                return None;
+            }
+            let raw_args_preview: String = raw_args.chars().take(256).collect();
+            tracing::info!(
+                tool_call_id = %id,
+                tool_name = %name,
+                raw_args_len = raw_args.len(),
+                %raw_args_preview,
+                "解析 tool call arguments"
             );
-            fallback
-        } else {
-            provider_index
-        };
-        if !call_id.is_empty() {
-            self.id_indexes.insert(call_id.to_string(), resolved);
-        }
-        resolved
-    }
-}
-
-impl StreamingToolCall {
-    fn raw_arguments(&self) -> String {
-        if self.argument_deltas.is_empty() {
-            return self.initial_arguments.clone();
-        }
-        if self.initial_arguments.is_empty() || self.initial_arguments == self.argument_deltas {
-            return self.argument_deltas.clone();
-        }
-        if serde_json::from_str::<Value>(&self.argument_deltas).is_ok() {
-            return self.argument_deltas.clone();
-        }
-
-        let combined = format!("{}{}", self.initial_arguments, self.argument_deltas);
-        if serde_json::from_str::<Value>(&combined).is_ok()
-            || serde_json::from_str::<Value>(&self.initial_arguments).is_err()
-        {
-            combined
-        } else {
-            self.initial_arguments.clone()
-        }
-    }
-}
-
-fn merge_stream_field(index: usize, field: &str, current: &mut String, next: String) {
-    if next.trim().is_empty() {
-        return;
-    }
-    if current.is_empty() {
-        *current = next;
-    } else if *current != next {
-        tracing::warn!(index, field, existing = %current, incoming = %next, "流式工具调用字段发生冲突，保留首次值");
-    }
-}
-
-fn incomplete_tool_stop_reason(reason: Option<&StopReason>) -> Option<String> {
-    match reason {
-        Some(StopReason::MaxTokens) => Some("模型输出达到长度上限".to_string()),
-        Some(StopReason::Other(value)) if value.to_ascii_lowercase().contains("content_filter") => {
-            Some(format!("模型输出被内容过滤器终止（{value}）"))
-        }
-        _ => None,
-    }
-}
-
-fn incomplete_tool_arguments_error(
-    tool_name: &str,
-    call_id: &str,
-    raw_args: &str,
-    stop_reason: Option<&StopReason>,
-) -> Option<Value> {
-    let reason = incomplete_tool_stop_reason(stop_reason)?;
-    let raw_preview: String = raw_args.chars().take(512).collect();
-    Some(json!({
-        "__parse_error": format!(
-            "工具参数不完整：tool={tool_name} id={call_id}，{reason}。本次调用不会执行，请缩短参数并重新生成完整 JSON。"
-        ),
-        "__raw_args_preview": raw_preview,
-    }))
-}
-
-fn parse_stream_tool_arguments_or_error(
-    tool_name: &str,
-    call_id: &str,
-    raw_args: &str,
-    stop_reason: Option<&StopReason>,
-) -> Value {
-    incomplete_tool_arguments_error(tool_name, call_id, raw_args, stop_reason)
-        .unwrap_or_else(|| parse_tool_arguments_or_error(tool_name, call_id, raw_args))
+            Some(ToolCall {
+                arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
+                id,
+                name,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -271,131 +127,226 @@ pub struct ModelResponse {
     pub stop_reason: Option<StopReason>,
     pub usage: TokenUsage,
     pub tool_calls: Vec<ToolCall>,
-    pub tool_argument_failures: Vec<ToolCallArgumentFailure>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCallArgumentFailure {
-    pub tool_call_id: String,
-    pub tool_name: String,
-    pub message: String,
-    pub raw_arguments_preview: Option<String>,
-    pub attempt: u8,
-    pub retryable: bool,
 }
 
 /// 向后兼容别名
 pub type ModelFunctionResponse = ModelResponse;
 
-fn split_tool_argument_failures(
-    tool_calls: Vec<ToolCall>,
-) -> (Vec<ToolCall>, Vec<ToolCallArgumentFailure>) {
-    let mut valid_calls = Vec::new();
-    let mut failures = Vec::new();
-    for call in tool_calls {
-        let Some(message) = call.arguments.get("__parse_error").and_then(Value::as_str) else {
-            valid_calls.push(call);
-            continue;
-        };
-        failures.push(ToolCallArgumentFailure {
-            tool_call_id: call.id,
-            tool_name: call.name,
-            message: message.to_string(),
-            raw_arguments_preview: call
-                .arguments
-                .get("__raw_args_preview")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            attempt: 1,
-            retryable: true,
-        });
-    }
-    (valid_calls, failures)
+#[derive(Debug, Clone)]
+struct OpenAiToolCallFailure {
+    call: ToolCall,
+    reason: String,
 }
 
-fn tool_argument_repair_request(
-    request: &ModelRequest,
-    failures: &[ToolCallArgumentFailure],
+enum OpenAiToolRepairPlan {
+    Return(ModelFunctionResponse),
+    Retry {
+        first: ModelFunctionResponse,
+        request: ModelRequest,
+        functions: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice>,
+    },
+}
+
+fn prepare_openai_tool_repair(
+    protocol: ProviderProtocol,
+    req: &ModelRequest,
+    functions: &[ToolSpec],
+    tool_choice: Option<ToolChoice>,
+    mut response: ModelFunctionResponse,
+) -> Result<OpenAiToolRepairPlan> {
+    if protocol != ProviderProtocol::OpenAiChatCompletions || response.tool_calls.is_empty() {
+        return Ok(OpenAiToolRepairPlan::Return(response));
+    }
+
+    let (valid_calls, failures) = validate_openai_tool_calls(response.tool_calls, functions)?;
+    response.tool_calls = valid_calls;
+    if failures.is_empty() {
+        return Ok(OpenAiToolRepairPlan::Return(response));
+    }
+
+    let repair_functions = select_openai_repair_functions(functions, &failures);
+    if repair_functions.is_empty() || matches!(tool_choice, Some(ToolChoice::None)) {
+        if response.tool_calls.is_empty() && response.text.trim().is_empty() {
+            response.text =
+                "OpenAI 返回的工具调用与本次 tools 定义不匹配，相关调用已剔除。".to_string();
+            response.stop_reason = Some(StopReason::EndTurn);
+        }
+        return Ok(OpenAiToolRepairPlan::Return(response));
+    }
+
+    tracing::warn!(
+        failure_count = failures.len(),
+        retained_count = response.tool_calls.len(),
+        repair_tool_count = repair_functions.len(),
+        "OpenAI 工具调用未通过本次 tools 定义校验，定向重发一次"
+    );
+    let request = openai_tool_repair_request(req, &failures, &response.tool_calls);
+    let tool_choice = match tool_choice {
+        Some(ToolChoice::Tool(name))
+            if repair_functions
+                .iter()
+                .any(|function| function.name == name) =>
+        {
+            Some(ToolChoice::Tool(name))
+        }
+        Some(ToolChoice::Any) => Some(ToolChoice::Any),
+        _ => Some(ToolChoice::Auto),
+    };
+    Ok(OpenAiToolRepairPlan::Retry {
+        first: response,
+        request,
+        functions: repair_functions,
+        tool_choice,
+    })
+}
+
+fn finish_openai_tool_repair(
+    mut first: ModelFunctionResponse,
+    mut repaired: ModelFunctionResponse,
+    repair_functions: &[ToolSpec],
+) -> Result<ModelFunctionResponse> {
+    let (repaired_calls, failures) =
+        validate_openai_tool_calls(repaired.tool_calls, repair_functions)?;
+    repaired.usage.accumulate(&first.usage);
+    repaired.tool_calls = merge_distinct_tool_calls(first.tool_calls, repaired_calls);
+
+    if repaired.text.trim().is_empty() {
+        repaired.text = std::mem::take(&mut first.text);
+    }
+    if repaired.reasoning_content.trim().is_empty() {
+        repaired.reasoning_content = std::mem::take(&mut first.reasoning_content);
+        repaired.reasoning_signature = first.reasoning_signature;
+    }
+
+    if !failures.is_empty() {
+        tracing::warn!(
+            failure_count = failures.len(),
+            retained_count = repaired.tool_calls.len(),
+            "OpenAI 工具参数定向修正仍未通过校验，剔除无效调用"
+        );
+        if repaired.tool_calls.is_empty() {
+            repaired.text =
+                "OpenAI 工具调用参数在一次自动修正后仍不符合本次 tools 定义，相关调用未执行。"
+                    .to_string();
+            repaired.stop_reason = Some(StopReason::EndTurn);
+        }
+    }
+    Ok(repaired)
+}
+
+fn validate_openai_tool_calls(
+    calls: Vec<ToolCall>,
+    functions: &[ToolSpec],
+) -> Result<(Vec<ToolCall>, Vec<OpenAiToolCallFailure>)> {
+    let mut valid_calls = Vec::new();
+    let mut failures = Vec::new();
+    for call in calls {
+        let Some(spec) = functions.iter().find(|function| function.name == call.name) else {
+            failures.push(OpenAiToolCallFailure {
+                reason: format!("工具 {} 不在本次 tools 定义中", call.name),
+                call,
+            });
+            continue;
+        };
+        if let Some(message) = call.arguments.get("__parse_error").and_then(Value::as_str) {
+            failures.push(OpenAiToolCallFailure {
+                reason: message.to_string(),
+                call,
+            });
+            continue;
+        }
+        if spec.input_schema.is_null() {
+            valid_calls.push(call);
+            continue;
+        }
+
+        let validator = jsonschema::validator_for(&spec.input_schema)
+            .with_context(|| format!("工具 {} 的 input_schema 无效", spec.name))?;
+        let errors = validator
+            .iter_errors(&call.arguments)
+            .take(3)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            valid_calls.push(call);
+        } else {
+            failures.push(OpenAiToolCallFailure {
+                reason: format!("参数不符合 schema：{}", errors.join("；")),
+                call,
+            });
+        }
+    }
+    Ok((valid_calls, failures))
+}
+
+fn select_openai_repair_functions(
+    functions: &[ToolSpec],
+    failures: &[OpenAiToolCallFailure],
+) -> Vec<ToolSpec> {
+    let contains_unknown_tool = failures.iter().any(|failure| {
+        !functions
+            .iter()
+            .any(|function| function.name == failure.call.name)
+    });
+    if contains_unknown_tool {
+        return functions.to_vec();
+    }
+    let failed_names = failures
+        .iter()
+        .map(|failure| failure.call.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    functions
+        .iter()
+        .filter(|function| failed_names.contains(function.name.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn openai_tool_repair_request(
+    req: &ModelRequest,
+    failures: &[OpenAiToolCallFailure],
+    retained_calls: &[ToolCall],
 ) -> ModelRequest {
-    let mut request = request.clone();
-    let failed_calls = failures
+    let mut request = req.clone();
+    let failures = failures
         .iter()
         .map(|failure| {
             format!(
                 "- tool={} id={}：{}",
-                failure.tool_name, failure.tool_call_id, failure.message
+                failure.call.name, failure.call.id, failure.reason
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
-    tracing::warn!(
-        failure_count = failures.len(),
-        failed_calls = %failed_calls,
-        "LLM 层检测到工具参数不完整，发起唯一一次自动修正"
-    );
+    let retained = if retained_calls.is_empty() {
+        "无".to_string()
+    } else {
+        retained_calls
+            .iter()
+            .map(|call| format!("- tool={} id={}", call.name, call.id))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     request.context.push(Message::new(
         MessageRole::System,
         format!(
-            "<system-reminder>\n上一次模型输出的以下工具调用参数未形成完整 JSON，因此没有交给 Agent，也没有执行：\n{failed_calls}\n这是唯一一次自动修正机会。请依据工具 schema 重新生成完整且更短的调用；长内容应拆成可独立执行的多个调用。不要查询记忆，也不要复述残缺参数。\n</system-reminder>"
+            "<system-reminder>\nOpenAI 上一次返回的部分工具调用未通过本次 tools 定义校验，未通过项如下：\n{failures}\n已保留的有效调用如下：\n{retained}\n这是唯一一次自动修正机会。只重新生成未通过项，严格遵守当前提供的工具名称与参数 schema；不要重复已保留调用，也不要输出解释文字。\n</system-reminder>"
         ),
     ));
     request
 }
 
-fn merge_tool_argument_repair(
-    mut first: ModelFunctionResponse,
-    mut repaired: ModelFunctionResponse,
-) -> ModelFunctionResponse {
-    repaired.usage.accumulate(&first.usage);
-    for failure in &mut repaired.tool_argument_failures {
-        failure.attempt = 2;
-        failure.retryable = false;
+fn merge_distinct_tool_calls(first: Vec<ToolCall>, repaired: Vec<ToolCall>) -> Vec<ToolCall> {
+    let mut merged = Vec::new();
+    for call in first.into_iter().chain(repaired) {
+        if !merged.iter().any(|existing: &ToolCall| {
+            existing.name == call.name && existing.arguments == call.arguments
+        }) {
+            merged.push(call);
+        }
     }
-
-    let mut failures = std::mem::take(&mut first.tool_argument_failures);
-    let repair_exhausted = !repaired.tool_argument_failures.is_empty();
-    failures.append(&mut repaired.tool_argument_failures);
-    repaired.tool_argument_failures = failures;
-
-    if repair_exhausted {
-        let mut failed_tools = repaired
-            .tool_argument_failures
-            .iter()
-            .map(|failure| failure.tool_name.as_str())
-            .filter(|name| !name.trim().is_empty())
-            .collect::<Vec<_>>();
-        failed_tools.sort_unstable();
-        failed_tools.dedup();
-        let suffix = if failed_tools.is_empty() {
-            String::new()
-        } else {
-            format!("：{}", failed_tools.join("、"))
-        };
-        repaired.text = format!("工具调用参数在一次自动修正后仍不完整，相关操作未执行{suffix}。");
-        repaired.stop_reason = Some(StopReason::EndTurn);
-        repaired.tool_calls.clear();
-    }
-    repaired
-}
-
-fn emit_model_response_chunks(
-    response: &ModelResponse,
-    chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
-) {
-    if !response.reasoning_content.is_empty() {
-        let _ = chunk_tx.send(ModelStreamChunk {
-            content: String::new(),
-            reasoning_content: response.reasoning_content.clone(),
-            usage: None,
-        });
-    }
-    if !response.text.is_empty() {
-        let _ = chunk_tx.send(ModelStreamChunk {
-            content: response.text.clone(),
-            reasoning_content: String::new(),
-            usage: None,
-        });
-    }
+    merged
 }
 
 #[derive(Debug, Clone, Default)]
@@ -504,7 +455,6 @@ impl SingleProviderClient {
             stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
-            tool_argument_failures: Vec::new(),
         })
     }
 
@@ -741,17 +691,23 @@ impl SingleProviderClient {
             tool_choice.clone(),
             on_delta,
         )?;
-        if first.tool_argument_failures.is_empty() {
-            return Ok(first);
+        match prepare_openai_tool_repair(self.protocol(), req, functions, tool_choice, first)? {
+            OpenAiToolRepairPlan::Return(response) => Ok(response),
+            OpenAiToolRepairPlan::Retry {
+                first,
+                request,
+                functions,
+                tool_choice,
+            } => {
+                let repaired = self.complete_with_functions_stream_once(
+                    &request,
+                    &functions,
+                    tool_choice,
+                    on_delta,
+                )?;
+                finish_openai_tool_repair(first, repaired, &functions)
+            }
         }
-        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
-        let repaired = self.complete_with_functions_stream_once(
-            &repair_request,
-            functions,
-            tool_choice,
-            on_delta,
-        )?;
-        Ok(merge_tool_argument_repair(first, repaired))
     }
 
     fn complete_with_functions_stream_once(
@@ -872,15 +828,20 @@ impl SingleProviderClient {
         let first = self
             .stream_function_calls_attempt(&req, &functions, tool_choice.clone(), &chunk_tx)
             .await?;
-        if first.tool_argument_failures.is_empty() {
-            return Ok(first);
+        match prepare_openai_tool_repair(self.protocol(), &req, &functions, tool_choice, first)? {
+            OpenAiToolRepairPlan::Return(response) => Ok(response),
+            OpenAiToolRepairPlan::Retry {
+                first,
+                request,
+                functions,
+                tool_choice,
+            } => {
+                let repaired = self
+                    .stream_function_calls_attempt(&request, &functions, tool_choice, &chunk_tx)
+                    .await?;
+                finish_openai_tool_repair(first, repaired, &functions)
+            }
         }
-
-        let repair_request = tool_argument_repair_request(&req, &first.tool_argument_failures);
-        let repaired = self
-            .stream_function_calls_attempt(&repair_request, &functions, tool_choice, &chunk_tx)
-            .await?;
-        Ok(merge_tool_argument_repair(first, repaired))
     }
 
     async fn stream_function_calls_attempt(
@@ -909,7 +870,20 @@ impl SingleProviderClient {
                     )
                     .await
                     .context("流式失败后回退非流式调用失败")?;
-                emit_model_response_chunks(&response, chunk_tx);
+                if !response.reasoning_content.is_empty() {
+                    let _ = chunk_tx.send(ModelStreamChunk {
+                        content: String::new(),
+                        reasoning_content: response.reasoning_content.clone(),
+                        usage: None,
+                    });
+                }
+                if !response.text.is_empty() {
+                    let _ = chunk_tx.send(ModelStreamChunk {
+                        content: response.text.clone(),
+                        reasoning_content: String::new(),
+                        usage: None,
+                    });
+                }
                 Ok(response)
             }
         }
@@ -922,6 +896,12 @@ impl SingleProviderClient {
         tool_choice: Option<ToolChoice>,
         chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
+        fn looks_like_complete_json(raw: &str) -> bool {
+            let trimmed = raw.trim();
+            (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        }
+
         let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
         let model = self.cfg.model.trim().to_string();
         if model.is_empty() {
@@ -930,14 +910,16 @@ impl SingleProviderClient {
             ));
         }
         let request = build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
+        let preserve_tool_call_order = self.protocol() == ProviderProtocol::OpenAiChatCompletions;
         let provider = self.build_provider_dispatch(timeout_ms)?;
 
         let mut text = String::new();
         let mut reasoning_content = String::new();
         let mut reasoning_signature: Option<String> = None;
         let mut usage = TokenUsageData::default();
-        let mut tool_calls = StreamingToolCalls::default();
-        let mut stop_reason = None;
+        let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
+            std::collections::BTreeMap::new();
+        let mut tool_call_order: Vec<String> = Vec::new();
 
         let mut stream = provider.stream(request).await.map_err(map_llm_error)?;
         while let Some(event) = stream.next().await {
@@ -967,17 +949,35 @@ impl SingleProviderClient {
                         });
                     }
                 }
-                ProviderStreamEvent::ToolCallStart { index, call } => {
-                    tool_calls.start(index, call);
+                ProviderStreamEvent::ToolCallStart(call) => {
+                    let args = if call.arguments.is_null() || call.arguments == json!({}) {
+                        String::new()
+                    } else {
+                        call.arguments.to_string()
+                    };
+                    tool_call_order.push(call.id.clone());
+                    tool_calls.insert(call.id.clone(), (call.name, args));
                 }
                 ProviderStreamEvent::ToolCallDelta {
-                    index,
                     call_id,
                     partial_json,
                 } => {
-                    tool_calls.push_delta(index, call_id, partial_json);
+                    let actual_id = if tool_calls.contains_key(&call_id) {
+                        call_id
+                    } else if let Ok(idx) = call_id.parse::<usize>() {
+                        tool_call_order.get(idx).cloned().unwrap_or_default()
+                    } else {
+                        call_id
+                    };
+                    let entry = tool_calls
+                        .entry(actual_id)
+                        .or_insert_with(|| (String::new(), String::new()));
+                    // 某些 provider 会在 ToolCallStart 里直接给出完整 arguments，
+                    // 也可能在 delta 中再发送一遍；这里尽量避免重复拼接导致 JSON 无法解析。
+                    if entry.1.trim().is_empty() || !looks_like_complete_json(&entry.1) {
+                        entry.1.push_str(&partial_json);
+                    }
                 }
-                ProviderStreamEvent::FinishReason(reason) => stop_reason = Some(reason),
                 ProviderStreamEvent::Usage(stream_usage) => {
                     merge_stream_usage(&mut usage, stream_usage);
                     let _ = chunk_tx.send(ModelStreamChunk {
@@ -993,13 +993,23 @@ impl SingleProviderClient {
             }
         }
 
-        let (tool_calls_vec, tool_argument_failures) =
-            split_tool_argument_failures(tool_calls.into_tool_calls(stop_reason.as_ref()));
+        let tool_calls_vec = if preserve_tool_call_order {
+            collect_openai_stream_tool_calls(tool_calls, tool_call_order)
+        } else {
+            tool_calls
+                .into_iter()
+                .filter(|(_, (name, _))| !name.is_empty())
+                .map(|(id, (name, raw_args))| ToolCall {
+                    arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
+                    id,
+                    name,
+                })
+                .collect()
+        };
 
         if text.trim().is_empty()
             && reasoning_content.trim().is_empty()
             && tool_calls_vec.is_empty()
-            && tool_argument_failures.is_empty()
         {
             return Err(anyhow!("async 流式响应缺少文本、思考内容和工具调用"));
         }
@@ -1008,10 +1018,9 @@ impl SingleProviderClient {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-            stop_reason,
+            stop_reason: None,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
-            tool_argument_failures,
         })
     }
 
@@ -1026,16 +1035,22 @@ impl SingleProviderClient {
             functions,
             tool_choice.clone(),
         )?;
-        if first.tool_argument_failures.is_empty() {
-            return Ok(first);
+        match prepare_openai_tool_repair(self.protocol(), req, functions, tool_choice, first)? {
+            OpenAiToolRepairPlan::Return(response) => Ok(response),
+            OpenAiToolRepairPlan::Retry {
+                first,
+                request,
+                functions,
+                tool_choice,
+            } => {
+                let repaired = self.complete_with_functions_with_tool_choice_once(
+                    &request,
+                    &functions,
+                    tool_choice,
+                )?;
+                finish_openai_tool_repair(first, repaired, &functions)
+            }
         }
-        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
-        let repaired = self.complete_with_functions_with_tool_choice_once(
-            &repair_request,
-            functions,
-            tool_choice,
-        )?;
-        Ok(merge_tool_argument_repair(first, repaired))
     }
 
     fn complete_with_functions_with_tool_choice_once(
@@ -1068,18 +1083,24 @@ impl SingleProviderClient {
                 tool_choice.clone(),
             )
             .await?;
-        if first.tool_argument_failures.is_empty() {
-            return Ok(first);
-        }
-        let repair_request = tool_argument_repair_request(req, &first.tool_argument_failures);
-        let repaired = self
-            .complete_with_functions_with_tool_choice_async_once(
-                &repair_request,
+        match prepare_openai_tool_repair(self.protocol(), req, functions, tool_choice, first)? {
+            OpenAiToolRepairPlan::Return(response) => Ok(response),
+            OpenAiToolRepairPlan::Retry {
+                first,
+                request,
                 functions,
                 tool_choice,
-            )
-            .await?;
-        Ok(merge_tool_argument_repair(first, repaired))
+            } => {
+                let repaired = self
+                    .complete_with_functions_with_tool_choice_async_once(
+                        &request,
+                        &functions,
+                        tool_choice,
+                    )
+                    .await?;
+                finish_openai_tool_repair(first, repaired, &functions)
+            }
+        }
     }
 
     async fn complete_with_functions_with_tool_choice_async_once(
@@ -1195,7 +1216,6 @@ impl ModelClient for SingleProviderClient {
             stop_reason: response.stop_reason,
             usage: response.usage.unwrap_or_default().into(),
             tool_calls: Vec::new(),
-            tool_argument_failures: Vec::new(),
         })
     }
 
@@ -1662,7 +1682,6 @@ fn convert_provider_response_to_function_response(
 ) -> Result<ModelFunctionResponse> {
     let text = collect_provider_text(&response);
     let reasoning_content = response.reasoning_content.clone().unwrap_or_default();
-    let stop_reason = response.stop_reason.clone();
     let tool_calls = response
         .assistant_message
         .content
@@ -1672,30 +1691,16 @@ fn convert_provider_response_to_function_response(
                 id,
                 name,
                 arguments,
-            }) if !name.is_empty() => {
-                let arguments = incomplete_tool_arguments_error(
-                    name,
-                    id,
-                    &arguments.to_string(),
-                    stop_reason.as_ref(),
-                )
-                .unwrap_or_else(|| arguments.clone());
-                Some(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    arguments,
-                })
-            }
+            }) if !name.is_empty() => Some(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            }),
             _ => None,
         })
         .collect::<Vec<_>>();
-    let (tool_calls, tool_argument_failures) = split_tool_argument_failures(tool_calls);
 
-    if text.trim().is_empty()
-        && reasoning_content.trim().is_empty()
-        && tool_calls.is_empty()
-        && tool_argument_failures.is_empty()
-    {
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
         return Err(anyhow!(
             "Anthropic 响应缺少文本和工具调用（{}）",
             empty_provider_response_diagnostic(&response)
@@ -1706,10 +1711,9 @@ fn convert_provider_response_to_function_response(
         text: text.trim().to_string(),
         reasoning_content,
         reasoning_signature: collect_provider_reasoning_signature(&response),
-        stop_reason,
+        stop_reason: response.stop_reason,
         usage: response.usage.unwrap_or_default().into(),
         tool_calls,
-        tool_argument_failures,
     })
 }
 
@@ -1781,6 +1785,28 @@ fn summarize_provider_raw_response(raw: &Value) -> Option<String> {
     Some(format!("raw_content={blocks}"))
 }
 
+fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
+    if raw_args.trim().is_empty() {
+        return json!({
+            "__parse_error": format!(
+                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
+            )
+        });
+    }
+
+    serde_json::from_str(raw_args).unwrap_or_else(|err| {
+        let raw_preview: String = raw_args.chars().take(512).collect();
+        json!({
+            "__parse_error": format!(
+                "工具参数 JSON 无效：tool={tool_name} id={call_id} error={err}。\
+        请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。\
+        长内容写入请分段调用 write_file，第一次 append=false，后续 append=true。"
+            ),
+            "__raw_args_preview": raw_preview,
+        })
+    })
+}
+
 fn collect_provider_text(response: &ProviderResponse) -> String {
     response
         .assistant_message
@@ -1815,13 +1841,15 @@ fn collect_provider_reasoning_signature(response: &ProviderResponse) -> Option<S
 async fn consume_provider_stream_events_async(
     mut stream: ProviderStream,
     on_delta: &mut dyn FnMut(&ModelStreamChunk),
+    preserve_tool_call_order: bool,
 ) -> Result<ModelFunctionResponse> {
     let mut text = String::new();
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
-    let mut tool_calls = StreamingToolCalls::default();
-    let mut stop_reason = None;
+    let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    let mut tool_call_order: Vec<String> = Vec::new();
 
     while let Some(event) = stream.next().await {
         match event.map_err(map_llm_error)? {
@@ -1850,17 +1878,31 @@ async fn consume_provider_stream_events_async(
                     });
                 }
             }
-            ProviderStreamEvent::ToolCallStart { index, call } => {
-                tool_calls.start(index, call);
+            ProviderStreamEvent::ToolCallStart(call) => {
+                let args = if call.arguments.is_null() || call.arguments == json!({}) {
+                    String::new()
+                } else {
+                    call.arguments.to_string()
+                };
+                tool_call_order.push(call.id.clone());
+                tool_calls.insert(call.id.clone(), (call.name, args));
             }
             ProviderStreamEvent::ToolCallDelta {
-                index,
                 call_id,
                 partial_json,
             } => {
-                tool_calls.push_delta(index, call_id, partial_json);
+                let actual_id = if tool_calls.contains_key(&call_id) {
+                    call_id
+                } else if let Ok(idx) = call_id.parse::<usize>() {
+                    tool_call_order.get(idx).cloned().unwrap_or_default()
+                } else {
+                    call_id
+                };
+                let entry = tool_calls
+                    .entry(actual_id)
+                    .or_insert_with(|| (String::new(), String::new()));
+                entry.1.push_str(&partial_json);
             }
-            ProviderStreamEvent::FinishReason(reason) => stop_reason = Some(reason),
             ProviderStreamEvent::Usage(stream_usage) => {
                 merge_stream_usage(&mut usage, stream_usage)
             }
@@ -1871,14 +1913,21 @@ async fn consume_provider_stream_events_async(
         }
     }
 
-    let (tool_calls, tool_argument_failures) =
-        split_tool_argument_failures(tool_calls.into_tool_calls(stop_reason.as_ref()));
+    let tool_calls = if preserve_tool_call_order {
+        collect_openai_stream_tool_calls(tool_calls, tool_call_order)
+    } else {
+        tool_calls
+            .into_iter()
+            .filter(|(_, (name, _))| !name.is_empty())
+            .map(|(id, (name, raw_args))| ToolCall {
+                arguments: parse_tool_arguments_or_error(&name, &id, &raw_args),
+                id,
+                name,
+            })
+            .collect()
+    };
 
-    if text.trim().is_empty()
-        && reasoning_content.trim().is_empty()
-        && tool_calls.is_empty()
-        && tool_argument_failures.is_empty()
-    {
+    if text.trim().is_empty() && reasoning_content.trim().is_empty() && tool_calls.is_empty() {
         return Err(anyhow!("Anthropic 流式响应缺少文本、思考内容和工具调用"));
     }
 
@@ -1886,10 +1935,9 @@ async fn consume_provider_stream_events_async(
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-        stop_reason,
+        stop_reason: None,
         usage: usage.into(),
         tool_calls,
-        tool_argument_failures,
     })
 }
 
@@ -1936,7 +1984,6 @@ fn consume_provider_stream(
         stop_reason: response.stop_reason,
         usage: response.usage,
         tool_calls: response.tool_calls,
-        tool_argument_failures: response.tool_argument_failures,
     })
 }
 
@@ -1958,8 +2005,9 @@ fn block_on_provider_stream(
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
+        let preserve_tool_call_order = matches!(&provider, ProviderDispatch::OpenAi(_));
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
-        consume_provider_stream_events_async(stream, on_delta).await
+        consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await
     }
 
     match tokio::runtime::Handle::try_current() {
@@ -2075,6 +2123,8 @@ mod tests {
     use tiangong_types::{
         ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
     };
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn provider_tool_call(id: &str) -> LlmMessageContent {
         LlmMessageContent::ToolCall(LlmToolCall {
@@ -2143,88 +2193,302 @@ mod tests {
         assert!(error.contains("call_empty"));
     }
 
-    #[test]
-    fn streaming_tool_calls_accumulate_by_index_without_overwrite() {
-        let mut calls = StreamingToolCalls::default();
-        calls.push_delta(1, "call_b".to_string(), r#"{"path":"b"}"#.to_string());
-        calls.start(
-            1,
-            ToolCall {
-                id: "call_b".to_string(),
-                name: "read_file".to_string(),
-                arguments: json!({"path": "b"}),
+    fn schema_tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_string(),
+            description: format!("测试工具 {name}"),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn model_response(tool_calls: Vec<ToolCall>, total_tokens: usize) -> ModelFunctionResponse {
+        ModelFunctionResponse {
+            text: String::new(),
+            reasoning_content: String::new(),
+            reasoning_signature: None,
+            stop_reason: Some(StopReason::ToolUse),
+            usage: TokenUsage {
+                total_tokens,
+                ..Default::default()
             },
-        );
-        calls.push_delta(0, String::new(), r#"{"payload":{"value":1}"#.to_string());
-        let first = ToolCall {
-            id: "call_a".to_string(),
-            name: "run_command".to_string(),
-            arguments: json!({}),
+            tool_calls,
+        }
+    }
+
+    #[test]
+    fn openai_repair_plan_keeps_valid_parallel_calls_and_limits_tools() {
+        let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
+        let valid = ToolCall {
+            id: "call_valid".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "TODO.md"}),
         };
-        calls.start(0, first.clone());
-        calls.start(0, first);
-        calls.push_delta(0, "call_a".to_string(), "}".to_string());
+        let invalid = ToolCall {
+            id: "call_invalid".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let request = ModelRequest {
+            user_input: String::new(),
+            context: Vec::new(),
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        };
 
-        let calls = calls.into_tool_calls(Some(&StopReason::ToolUse));
+        let plan = prepare_openai_tool_repair(
+            ProviderProtocol::OpenAiChatCompletions,
+            &request,
+            &functions,
+            None,
+            model_response(vec![valid, invalid], 10),
+        )
+        .unwrap();
 
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].id, "call_a");
-        assert_eq!(calls[0].arguments["payload"]["value"], 1);
-        assert_eq!(calls[1].id, "call_b");
-        assert_eq!(calls[1].arguments["path"], "b");
+        let OpenAiToolRepairPlan::Retry {
+            first,
+            request,
+            functions,
+            ..
+        } = plan
+        else {
+            panic!("OpenAI 无效参数应触发一次定向修正");
+        };
+        assert_eq!(first.tool_calls.len(), 1);
+        assert_eq!(first.tool_calls[0].id, "call_valid");
+        assert_eq!(functions.len(), 1);
+        assert_eq!(functions[0].name, "read_file");
+        assert!(
+            request
+                .context
+                .last()
+                .is_some_and(|message| message.text_content().contains("不要重复已保留调用"))
+        );
     }
 
     #[test]
-    fn reused_provider_index_keeps_fallback_call_after_existing_call() {
-        let mut calls = StreamingToolCalls::default();
-        calls.start(
-            5,
-            ToolCall {
-                id: "call_a".to_string(),
-                name: "read_file".to_string(),
-                arguments: json!({"path": "a"}),
-            },
-        );
-        calls.start(
-            5,
-            ToolCall {
-                id: "call_b".to_string(),
-                name: "read_file".to_string(),
-                arguments: json!({"path": "b"}),
-            },
-        );
+    fn non_openai_protocol_does_not_enter_tool_repair() {
+        let invalid = ToolCall {
+            id: "call_invalid".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let request = ModelRequest {
+            user_input: String::new(),
+            context: Vec::new(),
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        };
 
-        let calls = calls.into_tool_calls(Some(&StopReason::ToolUse));
+        let plan = prepare_openai_tool_repair(
+            ProviderProtocol::DeepSeek,
+            &request,
+            &[schema_tool("read_file")],
+            None,
+            model_response(vec![invalid], 10),
+        )
+        .unwrap();
 
-        assert_eq!(
-            calls
-                .iter()
-                .map(|call| call.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["call_a", "call_b"]
-        );
+        let OpenAiToolRepairPlan::Return(response) = plan else {
+            panic!("DeepSeek 不应进入 OpenAI 工具参数修正");
+        };
+        assert_eq!(response.tool_calls.len(), 1);
     }
 
     #[test]
-    fn max_tokens_isolated_as_failure_before_returning_to_agent() {
-        let mut calls = StreamingToolCalls::default();
-        calls.start(
-            0,
-            ToolCall {
-                id: "call_truncated".to_string(),
-                name: "coding_review".to_string(),
-                arguments: json!({}),
-            },
-        );
-        calls.push_delta(0, String::new(), "{}".to_string());
+    fn openai_tool_without_schema_still_validates_name_and_json() {
+        let functions = vec![ToolSpec {
+            name: "mcp_tool".to_string(),
+            description: String::new(),
+            input_schema: Value::Null,
+        }];
+        let call = ToolCall {
+            id: "call_mcp".to_string(),
+            name: "mcp_tool".to_string(),
+            arguments: serde_json::json!({"value": 1}),
+        };
 
-        let calls = calls.into_tool_calls(Some(&StopReason::MaxTokens));
-        let (valid_calls, failures) = split_tool_argument_failures(calls);
+        let (valid, failures) = validate_openai_tool_calls(vec![call], &functions).unwrap();
 
-        assert!(valid_calls.is_empty());
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].message.contains("长度上限"));
-        assert!(failures[0].message.contains("不会执行"));
+        assert_eq!(valid.len(), 1);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn repaired_calls_are_revalidated_merged_and_deduplicated() {
+        let functions = vec![schema_tool("read_file")];
+        let original = ToolCall {
+            id: "call_original".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "TODO.md"}),
+        };
+        let duplicate = ToolCall {
+            id: "call_duplicate".to_string(),
+            ..original.clone()
+        };
+        let repaired = ToolCall {
+            id: "call_repaired".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "PLAN.md"}),
+        };
+
+        let response = finish_openai_tool_repair(
+            model_response(vec![original], 10),
+            model_response(vec![duplicate, repaired], 20),
+            &functions,
+        )
+        .unwrap();
+
+        assert_eq!(response.usage.total_tokens, 30);
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "call_original");
+        assert_eq!(response.tool_calls[1].id, "call_repaired");
+    }
+
+    fn sse_body(chunks: &[Value]) -> Vec<u8> {
+        let mut body = String::new();
+        for chunk in chunks {
+            body.push_str(&format!("data: {chunk}\n\n"));
+        }
+        body.push_str("data: [DONE]\n\n");
+        body.into_bytes()
+    }
+
+    async fn mount_openai_stream(server: &MockServer, chunks: Vec<Value>) {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(sse_body(&chunks), "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+    }
+
+    fn usage_chunk(prompt_tokens: usize, completion_tokens: usize) -> Value {
+        serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "test-model",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn openai_stream_retries_only_invalid_parallel_calls_once() {
+        let server = MockServer::start().await;
+        mount_openai_stream(
+            &server,
+            vec![
+                serde_json::json!({
+                    "id": "chatcmpl-first",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_valid",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": "{\"path\":\"TODO.md\"}"
+                                    }
+                                },
+                                {
+                                    "index": 1,
+                                    "id": "call_invalid",
+                                    "function": { "name": "read_file", "arguments": "{}" }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                usage_chunk(10, 2),
+            ],
+        )
+        .await;
+        mount_openai_stream(
+            &server,
+            vec![
+                serde_json::json!({
+                    "id": "chatcmpl-repaired",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call_repaired",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"PLAN.md\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                usage_chunk(12, 3),
+            ],
+        )
+        .await;
+
+        let client = SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: Value::Object(serde_json::Map::new()),
+        });
+        let request = ModelRequest {
+            user_input: "检查项目".to_string(),
+            context: vec![Message::new(MessageRole::System, "system")],
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        };
+        let functions = vec![schema_tool("read_file"), schema_tool("other_tool")];
+        let (chunk_tx, _chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls(request, functions, chunk_tx)
+            .await
+            .unwrap();
+
+        assert_eq!(response.usage.total_tokens, 27);
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "call_valid");
+        assert_eq!(response.tool_calls[1].id, "call_repaired");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let repair_body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let repair_tools = repair_body["tools"].as_array().unwrap();
+        assert_eq!(repair_tools.len(), 1);
+        assert_eq!(repair_tools[0]["function"]["name"], "read_file");
+        assert!(repair_body.to_string().contains("唯一一次自动修正机会"));
     }
 
     #[test]

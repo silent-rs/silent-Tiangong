@@ -28,25 +28,20 @@ fn map_event(
     match event {
         E::ReasoningDelta(delta) => vec![Ok(ProviderStreamEvent::ReasoningDelta(delta))],
         E::TextDelta(delta) => vec![Ok(ProviderStreamEvent::TextDelta(delta))],
-        E::ToolCallStart { index, id, name } => {
-            vec![Ok(ProviderStreamEvent::ToolCallStart {
-                index: index as usize,
-                call: ToolCall {
-                    id,
-                    name,
-                    arguments: serde_json::json!({}),
-                },
-            })]
+        E::ToolCallStart { id, name } => {
+            vec![Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id,
+                name,
+                arguments: serde_json::json!({}),
+            }))]
         }
         E::ToolCallDelta { index, arguments } => {
             vec![Ok(ProviderStreamEvent::ToolCallDelta {
-                index: index as usize,
-                call_id: String::new(),
+                call_id: index.to_string(),
                 partial_json: arguments,
             })]
         }
         E::TextProtocolToolCall {
-            index,
             id,
             name,
             arguments,
@@ -54,42 +49,23 @@ fn map_event(
             // SDK 文本协议兜底解析出的完整工具调用，映射为 Start→Delta→End 三件套，
             // 与结构化流式 tool_calls 的消费路径保持一致。
             vec![
-                Ok(ProviderStreamEvent::ToolCallStart {
-                    index: index as usize,
-                    call: ToolCall {
-                        id: id.clone(),
-                        name,
-                        arguments: serde_json::json!({}),
-                    },
-                }),
+                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: id.clone(),
+                    name,
+                    arguments: serde_json::json!({}),
+                })),
                 Ok(ProviderStreamEvent::ToolCallDelta {
-                    index: index as usize,
                     call_id: id.clone(),
                     partial_json: arguments,
                 }),
-                Ok(ProviderStreamEvent::ToolCallEnd {
-                    index: index as usize,
-                    call_id: id,
-                }),
+                Ok(ProviderStreamEvent::ToolCallEnd { call_id: id }),
             ]
         }
         E::Usage(usage) => vec![Ok(ProviderStreamEvent::Usage(parse_stream_usage(&usage)))],
-        E::FinishReason(reason) => vec![Ok(ProviderStreamEvent::FinishReason(map_finish_reason(
-            &reason,
-        )))],
         E::Done => vec![Ok(ProviderStreamEvent::MessageEnd)],
         E::Error(message) => vec![Err(LlmError::Provider {
             provider: "deepseek",
             message,
         })],
-    }
-}
-
-fn map_finish_reason(reason: &str) -> crate::response::StopReason {
-    match reason {
-        "stop" => crate::response::StopReason::EndTurn,
-        "tool_calls" => crate::response::StopReason::ToolUse,
-        "length" => crate::response::StopReason::MaxTokens,
-        other => crate::response::StopReason::Other(other.to_string()),
     }
 }

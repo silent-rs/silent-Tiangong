@@ -129,6 +129,7 @@ hex = "0.4"
 hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
+jsonschema = { version = "0.33", default-features = false }
 libc = "0.2"
 sysinfo = "0.39"
 lancedb = "0.31"

@@ -233,7 +233,6 @@ pub enum StreamEvent {
     ReasoningDelta(String),
     TextDelta(String),
     ToolCallStart {
-        index: u32,
         id: String,
         name: String,
     },
@@ -244,13 +243,11 @@ pub enum StreamEvent {
     /// 文本协议兜底解析出的工具调用（整块，含完整参数）。
     /// 由 `create_stream` 在流末统一产出，区别于流式增量到达的结构化 tool_calls。
     TextProtocolToolCall {
-        index: u32,
         id: String,
         name: String,
         arguments: String,
     },
     Usage(Usage),
-    FinishReason(String),
     Done,
     Error(String),
 }

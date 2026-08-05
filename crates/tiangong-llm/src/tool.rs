@@ -35,12 +35,12 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-/// 解析 Provider 返回的工具参数。内部错误标记只供 LLM 层隔离和修正，不能返回 Agent。
+/// 解析 Provider 返回的工具参数。解析失败时保留为结构化错误，交给上层 ReAct 恢复链路处理。
 pub fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &str) -> Value {
     if raw_args.trim().is_empty() {
         return json!({
             "__parse_error": format!(
-                "工具参数为空：tool={tool_name} id={call_id}。本次调用不会执行，请重新生成完整 JSON 参数。"
+                "工具参数为空：tool={tool_name} id={call_id}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
             ),
         });
     }
@@ -49,7 +49,7 @@ pub fn parse_tool_arguments_or_error(tool_name: &str, call_id: &str, raw_args: &
         let raw_preview: String = raw_args.chars().take(512).collect();
         json!({
             "__parse_error": format!(
-                "工具参数 JSON 无效：tool={tool_name} id={call_id} error={err}。本次调用不会执行，请重新生成完整 JSON 参数。"
+                "工具参数 JSON 无效：tool={tool_name} id={call_id} error={err}。请重新生成完整 JSON 参数后再调用工具，不要把 __parse_error 当作真实参数。"
             ),
             "__raw_args_preview": raw_preview,
         })

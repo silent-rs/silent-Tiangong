@@ -1,162 +1,215 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::stream::ProviderStreamEvent;
+use crate::tool::ToolCall;
 
-pub fn parse_stream_payload(
-    payload: &Value,
-) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
-    let mut events = Vec::new();
-    if let Some(usage) = payload.get("usage") {
-        events.push(Ok(ProviderStreamEvent::Usage(super::mapping::parse_usage(
-            usage,
-        ))));
-    }
-    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
-        for choice in choices {
-            let delta = choice.get("delta").unwrap_or(&Value::Null);
-            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str)
-                && !reasoning.is_empty()
-            {
-                events.push(Ok(ProviderStreamEvent::ReasoningDelta(
-                    reasoning.to_string(),
-                )));
-            }
-            if let Some(content) = delta.get("content").and_then(Value::as_str)
-                && !content.is_empty()
-            {
-                events.push(Ok(ProviderStreamEvent::TextDelta(content.to_string())));
-            }
-            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
-                for (position, tool_call) in tool_calls.iter().enumerate() {
-                    let id = tool_call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_default()
-                        .to_string();
-                    let index = tool_call
-                        .get("index")
-                        .and_then(Value::as_u64)
-                        .and_then(|value| usize::try_from(value).ok())
-                        .unwrap_or(position);
-                    if let Some(function) = tool_call.get("function") {
-                        if let Some(name) = function.get("name").and_then(Value::as_str) {
-                            events.push(Ok(ProviderStreamEvent::ToolCallStart {
-                                index,
-                                call: crate::tool::ToolCall {
-                                    id: id.clone(),
-                                    name: name.to_string(),
-                                    arguments: serde_json::json!({}),
-                                },
-                            }));
-                        }
-                        if let Some(arguments) = function.get("arguments").and_then(Value::as_str)
-                            && !arguments.is_empty()
+#[derive(Default)]
+pub(super) struct OpenAiStreamDecoder {
+    tool_calls: BTreeMap<usize, PendingToolCall>,
+}
+
+#[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl OpenAiStreamDecoder {
+    pub(super) fn parse_payload(
+        &mut self,
+        payload: &Value,
+    ) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
+        let mut events = Vec::new();
+        if let Some(usage) = payload.get("usage") {
+            events.push(Ok(ProviderStreamEvent::Usage(super::mapping::parse_usage(
+                usage,
+            ))));
+        }
+        if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+            for choice in choices {
+                let delta = choice.get("delta").unwrap_or(&Value::Null);
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str)
+                    && !reasoning.is_empty()
+                {
+                    events.push(Ok(ProviderStreamEvent::ReasoningDelta(
+                        reasoning.to_string(),
+                    )));
+                }
+                if let Some(content) = delta.get("content").and_then(Value::as_str)
+                    && !content.is_empty()
+                {
+                    events.push(Ok(ProviderStreamEvent::TextDelta(content.to_string())));
+                }
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                    for (position, tool_call) in tool_calls.iter().enumerate() {
+                        let index = tool_call
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| usize::try_from(value).ok())
+                            .unwrap_or(position);
+                        let pending = self.tool_calls.entry(index).or_default();
+                        if let Some(id) = tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            && pending.id.is_empty()
                         {
-                            events.push(Ok(ProviderStreamEvent::ToolCallDelta {
-                                index,
-                                call_id: id,
-                                partial_json: arguments.to_string(),
-                            }));
+                            pending.id = id.to_string();
+                        }
+                        if let Some(function) = tool_call.get("function") {
+                            if let Some(name) = function
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.is_empty())
+                                && pending.name.is_empty()
+                            {
+                                pending.name = name.to_string();
+                            }
+                            if let Some(arguments) =
+                                function.get("arguments").and_then(Value::as_str)
+                            {
+                                pending.push_arguments(arguments);
+                            }
                         }
                     }
                 }
-            }
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
-                events.push(Ok(ProviderStreamEvent::FinishReason(
-                    super::mapping::map_stop_reason(reason),
-                )));
+                if choice
+                    .get("finish_reason")
+                    .is_some_and(|reason| !reason.is_null())
+                {
+                    events.extend(self.flush_tool_calls());
+                }
             }
         }
+        events
     }
-    events
+
+    fn flush_tool_calls(&mut self) -> Vec<Result<ProviderStreamEvent, crate::error::LlmError>> {
+        let mut events = Vec::new();
+        for (index, pending) in std::mem::take(&mut self.tool_calls) {
+            if pending.name.trim().is_empty() {
+                tracing::warn!(index, tool_call_id = %pending.id, "忽略缺少名称的 OpenAI 流式工具调用");
+                continue;
+            }
+            let id = if pending.id.trim().is_empty() {
+                format!("tool_call_{index}")
+            } else {
+                pending.id
+            };
+            events.push(Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                id: id.clone(),
+                name: pending.name,
+                arguments: serde_json::json!({}),
+            })));
+            if !pending.arguments.is_empty() {
+                events.push(Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id: id,
+                    partial_json: pending.arguments,
+                }));
+            }
+        }
+        events
+    }
+}
+
+impl PendingToolCall {
+    fn push_arguments(&mut self, partial: &str) {
+        if partial.is_empty() || self.arguments == partial {
+            return;
+        }
+        if self.arguments.is_empty() {
+            self.arguments.push_str(partial);
+            return;
+        }
+
+        let combined = format!("{}{}", self.arguments, partial);
+        if serde_json::from_str::<Value>(&combined).is_ok()
+            || serde_json::from_str::<Value>(&self.arguments).is_err()
+        {
+            self.arguments = combined;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn unwrap_events(payload: Value) -> Vec<ProviderStreamEvent> {
-        parse_stream_payload(&payload)
+    fn unwrap_events(
+        decoder: &mut OpenAiStreamDecoder,
+        payload: Value,
+    ) -> Vec<ProviderStreamEvent> {
+        decoder
+            .parse_payload(&payload)
             .into_iter()
             .map(Result::unwrap)
             .collect()
     }
 
     #[test]
-    fn parses_chat_completions_tool_call_start_and_delta_by_id() {
-        let start_events = unwrap_events(serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_a",
-                        "type": "function",
-                        "function": { "name": "run_shell" }
-                    }]
-                }
-            }]
-        }));
-        assert_eq!(start_events.len(), 1);
-        assert!(matches!(
-            &start_events[0],
-            ProviderStreamEvent::ToolCallStart { index, call }
-                if *index == 0 && call.id == "call_a" && call.name == "run_shell"
-        ));
+    fn accumulates_parallel_calls_and_flushes_in_provider_order() {
+        let mut decoder = OpenAiStreamDecoder::default();
+        let first = unwrap_events(
+            &mut decoder,
+            serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 1,
+                                "id": "call_b",
+                                "function": { "name": "read_file", "arguments": "{\"path\":\"b" }
+                            },
+                            {
+                                "index": 0,
+                                "id": "call_a",
+                                "function": { "name": "read_file", "arguments": "{\"path\":\"a" }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }]
+            }),
+        );
+        assert!(first.is_empty());
 
-        let delta_events = unwrap_events(serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "function": { "arguments": "{\"script\":\"pwd\"}" }
-                    }]
-                }
-            }]
-        }));
-        assert_eq!(delta_events.len(), 1);
-        assert!(matches!(
-            &delta_events[0],
-            ProviderStreamEvent::ToolCallDelta { index, call_id, partial_json }
-                if *index == 0 && call_id.is_empty()
-                    && partial_json == "{\"script\":\"pwd\"}"
-        ));
-    }
+        let finished = unwrap_events(
+            &mut decoder,
+            serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [
+                            { "index": 1, "function": { "arguments": "\"}" } },
+                            { "index": 0, "function": { "arguments": "\"}" } }
+                        ]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        );
 
-    #[test]
-    fn preserves_parallel_indexes_and_finish_reason() {
-        let events = unwrap_events(serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [
-                        {
-                            "index": 1,
-                            "id": "call_b",
-                            "function": { "name": "read_file", "arguments": "{\"path\":\"b\"}" }
-                        },
-                        {
-                            "index": 0,
-                            "id": "call_a",
-                            "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" }
-                        }
-                    ]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        }));
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ProviderStreamEvent::ToolCallStart { index: 1, call }
-                if call.id == "call_b"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            ProviderStreamEvent::ToolCallDelta { index: 0, call_id, .. }
-                if call_id == "call_a"
-        )));
-        assert!(events.contains(&ProviderStreamEvent::FinishReason(
-            crate::response::StopReason::ToolUse
-        )));
+        let calls = finished
+            .chunks_exact(2)
+            .map(|events| match (&events[0], &events[1]) {
+                (
+                    ProviderStreamEvent::ToolCallStart(call),
+                    ProviderStreamEvent::ToolCallDelta {
+                        call_id,
+                        partial_json,
+                    },
+                ) => (call.id.as_str(), call_id.as_str(), partial_json.as_str()),
+                _ => panic!("应按 Start + Delta 输出完整工具调用"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            vec![
+                ("call_a", "call_a", r#"{"path":"a"}"#),
+                ("call_b", "call_b", r#"{"path":"b"}"#),
+            ]
+        );
     }
 }
