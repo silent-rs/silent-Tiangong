@@ -1539,7 +1539,10 @@ fn sidecar_connection(
         data_dir,
         storage_root,
     )
-    .with_sensitive_storage(signed_release.has_permission("model-config.read"))
+    .with_sensitive_storage(
+        signed_release.has_permission("model-config.read")
+            || signed_release.has_permission("app-storage.read"),
+    )
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),

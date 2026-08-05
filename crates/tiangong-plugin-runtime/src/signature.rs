@@ -1,5 +1,6 @@
 //! 插件发布清单数字签名与制品完整性验证。
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -81,14 +82,31 @@ impl SignedPluginRelease {
         if self.id != plugin_manifest.id || self.version != plugin_manifest.version {
             bail!("插件签名清单与 plugin.json 的 ID 或版本不一致");
         }
-        if self.permissions != plugin_manifest.permissions {
+        if self.permissions.iter().any(|item| item.trim().is_empty())
+            || permission_set(&self.permissions)?.len() != self.permissions.len()
+        {
+            bail!("插件签名清单包含空权限或重复权限");
+        }
+        if plugin_manifest
+            .permissions
+            .iter()
+            .any(|item| item.trim().is_empty())
+            || permission_set(&plugin_manifest.permissions)?.len()
+                != plugin_manifest.permissions.len()
+        {
+            bail!("plugin.json 包含空权限或重复权限");
+        }
+        if permission_set(&self.permissions)? != permission_set(&plugin_manifest.permissions)? {
             bail!("插件签名清单与 plugin.json 的权限声明不一致");
         }
         self.manifest.verify(directory, Path::new(MANIFEST_FILE))?;
         self.wasm.verify(directory, plugin_manifest.wasm_binary())?;
         match (&self.sidecar, &plugin_manifest.sidecar) {
             (Some(signed), Some(sidecar)) => {
-                signed.verify(directory, &sidecar_binary_path(&sidecar.binary)?)?
+                if !self.has_permission("sidecar.invoke") {
+                    bail!("插件签名清单未授权 sidecar.invoke");
+                }
+                signed.verify(directory, &sidecar_binary_path(&sidecar.binary)?)?;
             }
             (None, None) => {}
             _ => bail!("插件签名清单与 plugin.json 的 sidecar 声明不一致"),
@@ -113,6 +131,10 @@ impl SignedArtifact {
         }
         Ok(())
     }
+}
+
+fn permission_set(permissions: &[String]) -> Result<BTreeSet<&str>> {
+    Ok(permissions.iter().map(String::as_str).collect())
 }
 
 fn verify_minisign(content: &[u8], signature_b64: &str) -> Result<()> {

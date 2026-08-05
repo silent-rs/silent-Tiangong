@@ -107,6 +107,22 @@ impl PluginManifest {
                 bail!("插件 {} sidecar 超时时间必须大于 0", self.id);
             }
         }
+        if self.permissions.iter().any(|item| item.trim().is_empty()) {
+            bail!("插件 {} permissions 不能包含空值", self.id);
+        }
+        let unique_permissions = self
+            .permissions
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if unique_permissions.len() != self.permissions.len() {
+            bail!("插件 {} permissions 不能包含重复值", self.id);
+        }
+        if self.sidecar.is_some() && !self.has_permission("sidecar.invoke") {
+            bail!(
+                "插件 {} 声明 sidecar 时必须声明 sidecar.invoke 权限",
+                self.id
+            );
+        }
         // 校验入口声明
         if let Some(entrypoints) = &self.entrypoints {
             for ep in entrypoints {

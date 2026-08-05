@@ -1,0 +1,1 @@
+{"schema_version":1,"id":"signed-fixture","version":"1.0.0","wasm":{"binary":"fixture.wasm"},"sidecar":{"binary":"fixture-sidecar","transport_protocol":"0.1.0","business_protocol":1,"startup_timeout_ms":1000,"request_timeout_ms":1000},"permissions":["sidecar.invoke","model-config.read"]}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "signed-fixture",
+  "version": "1.0.0",
+  "publisher": "tiangong-official",
+  "permissions": [
+    "sidecar.invoke",
+    "model-config.read"
+  ],
+  "manifest": {
+    "path": "plugin.json",
+    "sha256": "3b041bee7ed74ee6043547bf0860b3a5da1fff305f216174ec0a93fe7178fd35"
+  },
+  "wasm": {
+    "path": "fixture.wasm",
+    "sha256": "e5e166b499e548420dc2d5f4953867acaee605738aed8c28b0650d7828c887a0"
+  },
+  "sidecar": {
+    "path": "fixture-sidecar",
+    "sha256": "4d345a472d2325cafe853cf4ae376eb31c8c412a709f78441078892f2addc23d"
+  }
+}
