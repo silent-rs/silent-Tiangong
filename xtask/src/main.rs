@@ -111,6 +111,76 @@ const CODING: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-coding/protocol/Cargo.toml",
 };
 
+const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
+    id: "text-to-speech",
+    name: "Text-To-Speech",
+    description: "文本转语音",
+    protocol_crate: "tiangong-plugin-text-to-speech-protocol",
+    wasm_crate: "tiangong-plugin-text-to-speech-wasm",
+    wasm_artifact: "tiangong_plugin_text_to_speech_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-text-to-speech-sidecar",
+    sidecar_artifact: "tiangong-text-to-speech-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-text-to-speech",
+    plugin_manifest: "crates/plugins/tiangong-plugin-text-to-speech/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
+};
+
+const GENERATE_IMAGE: PluginConfig = PluginConfig {
+    id: "generate-image",
+    name: "Generate-Image",
+    description: "图片生成",
+    protocol_crate: "tiangong-plugin-generate-image-protocol",
+    wasm_crate: "tiangong-plugin-generate-image-wasm",
+    wasm_artifact: "tiangong_plugin_generate_image_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-generate-image-sidecar",
+    sidecar_artifact: "tiangong-generate-image-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-generate-image",
+    plugin_manifest: "crates/plugins/tiangong-plugin-generate-image/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
+};
+
+const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
+    id: "analyze-attachment",
+    name: "Analyze-Attachment",
+    description: "多模态附件分析",
+    protocol_crate: "tiangong-plugin-analyze-attachment-protocol",
+    wasm_crate: "tiangong-plugin-analyze-attachment-wasm",
+    wasm_artifact: "tiangong_plugin_analyze_attachment_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-analyze-attachment-sidecar",
+    sidecar_artifact: "tiangong-analyze-attachment-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-analyze-attachment",
+    plugin_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
+};
+
+const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
+    id: "speech-to-text",
+    name: "Speech-To-Text",
+    description: "语音转文本",
+    protocol_crate: "tiangong-plugin-speech-to-text-protocol",
+    wasm_crate: "tiangong-plugin-speech-to-text-wasm",
+    wasm_artifact: "tiangong_plugin_speech_to_text_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-speech-to-text-sidecar",
+    sidecar_artifact: "tiangong-speech-to-text-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-speech-to-text",
+    plugin_manifest: "crates/plugins/tiangong-plugin-speech-to-text/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml",
+};
+
+const GENERATE_VIDEO: PluginConfig = PluginConfig {
+    id: "generate-video",
+    name: "Generate-Video",
+    description: "视频生成",
+    protocol_crate: "tiangong-plugin-generate-video-protocol",
+    wasm_crate: "tiangong-plugin-generate-video-wasm",
+    wasm_artifact: "tiangong_plugin_generate_video_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-generate-video-sidecar",
+    sidecar_artifact: "tiangong-generate-video-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-generate-video",
+    plugin_manifest: "crates/plugins/tiangong-plugin-generate-video/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-generate-video/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -119,6 +189,11 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
         "coding" => Ok(&CODING),
+        "text-to-speech" => Ok(&TEXT_TO_SPEECH),
+        "generate-image" => Ok(&GENERATE_IMAGE),
+        "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
+        "speech-to-text" => Ok(&SPEECH_TO_TEXT),
+        "generate-video" => Ok(&GENERATE_VIDEO),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }

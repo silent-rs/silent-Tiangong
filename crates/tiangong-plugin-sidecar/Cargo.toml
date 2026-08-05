@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 tiangong-plugin-runtime = { workspace = true }
+tiangong-llm = { workspace = true }
+tiangong-config = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

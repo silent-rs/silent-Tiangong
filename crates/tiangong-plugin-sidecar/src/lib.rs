@@ -33,11 +33,13 @@
 
 pub mod endpoint;
 pub mod identity;
+pub mod model;
 pub mod server;
 pub mod shutdown;
 pub mod singleton;
 
 pub use identity::{SidecarConfig, SidecarIdentity};
+pub use model::{ModelInfo, mask_sensitive};
 pub use server::IpcBridge;
 pub use singleton::{SidecarService, SingletonError, SingletonGuard, start};
 

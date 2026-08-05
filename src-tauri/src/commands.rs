@@ -4461,7 +4461,10 @@ pub async fn list_plugins(
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
     tauri::async_runtime::spawn_blocking(move || {
-        tiangong_plugin_runtime::registry::list_plugins(&storage_root)
+        tiangong_plugin_runtime::registry::list_plugins(
+            &storage_root,
+            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+        )
     })
     .await
     .map_err(|error| format!("读取插件状态失败: {error}"))

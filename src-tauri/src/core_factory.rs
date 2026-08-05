@@ -38,7 +38,7 @@ impl DesktopCoreFactory {
     /// `CoreManager::ensure_core` 的按需回调传入，只有 Core 不存在时才会执行。
     pub fn build_plugins_sync(
         &self,
-        models: tiangong_llm::models_config::ModelsConfig,
+        _models: tiangong_llm::models_config::ModelsConfig,
     ) -> Vec<Arc<dyn Plugin>> {
         use tracing::{info, warn};
 
@@ -67,44 +67,15 @@ impl DesktopCoreFactory {
                 false
             };
         plugins.push(tiangong_plugin_fs::build_plugin());
-        // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
-        use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
-        let resolve_ep = |cap: ModelCapability| {
-            models
-                .resolve_for_capability(cap)
-                .map(ModelEndpoint::from_resolved)
-        };
-        let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
-        let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
-        let tts_endpoint = resolve_ep(ModelCapability::Tts);
-        let stt_endpoint = resolve_ep(ModelCapability::Stt);
-        let multimodal_endpoint =
-            if models.has_capability(ModelCapability::Multimodal) && !models.chat_is_multimodal() {
-                resolve_ep(ModelCapability::Multimodal)
-            } else {
-                None
-            };
-        if let Some(ep) = image_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-        }
-        if let Some(ep) = video_endpoint.clone() {
-            plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-        }
-        if let Some(ep) = tts_endpoint.clone() {
-            plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-        }
-        if let Some(ep) = stt_endpoint.clone() {
-            plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-        }
-        let wasm_plugins =
-            tiangong_plugin_runtime::registry::load_installed_plugins(&self.storage_root);
+        // 所有媒体插件（image/video/tts/stt/attachment）由 load_installed_plugins 自动加载。
+        let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
+            &self.storage_root,
+            tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
+        );
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
         plugins.push(tiangong_plugin_task::build_plugin());
-        if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-            plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-        }
-        // skill 等 WASM 插件由上面的 load_installed_plugins 自动加载。
+        // skill/analyze-attachment 等 WASM 插件由上面的 load_installed_plugins 自动加载。
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
             let app_handle = app_handle.clone();
@@ -123,25 +94,11 @@ impl DesktopCoreFactory {
                     }
                 }
                 child_plugins.push(tiangong_plugin_fs::build_plugin());
-                if let Some(ep) = image_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_image::build_plugin(ep));
-                }
-                if let Some(ep) = video_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_generate_video::build_plugin(ep));
-                }
-                if let Some(ep) = tts_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_text_to_speech::build_plugin(ep));
-                }
-                if let Some(ep) = stt_endpoint.clone() {
-                    child_plugins.push(tiangong_plugin_speech_to_text::build_plugin(ep));
-                }
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
+                    tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
                 ));
                 child_plugins.push(tiangong_plugin_task::build_plugin());
-                if let Some(client) = multimodal_endpoint.clone().map(SingleProviderClient::new) {
-                    child_plugins.push(tiangong_plugin_analyze_attachment::build_plugin(client));
-                }
                 child_plugins
             }
         });

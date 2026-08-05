@@ -10523,20 +10523,15 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-browser",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
- "tiangong-plugin-generate-video",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
  "tiangong-plugin-terminal",
- "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-server",
  "tiangong-toolkit",
@@ -10597,19 +10592,14 @@ dependencies = [
  "tiangong-core",
  "tiangong-llm",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
- "tiangong-plugin-generate-video",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
- "tiangong-plugin-text-to-speech",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -10814,16 +10804,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-analyze-attachment"
+name = "tiangong-plugin-analyze-attachment-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-analyze-attachment-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "scru128",
+ "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-analyze-attachment-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
  "tiangong-types",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-analyze-attachment-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-analyze-attachment-protocol",
+ "tiangong-types",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -10931,29 +10949,79 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-generate-image"
+name = "tiangong-plugin-generate-image-protocol"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-image-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media-archive",
+ "tiangong-plugin-generate-image-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
-name = "tiangong-plugin-generate-video"
+name = "tiangong-plugin-generate-image-wasm"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-generate-image-protocol",
+ "wit-bindgen 0.46.0",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-video-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-video-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
  "tiangong-media",
+ "tiangong-plugin-generate-video-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-generate-video-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-generate-video-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11091,7 +11159,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tiangong-config",
  "tiangong-core",
+ "tiangong-llm",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11151,6 +11221,8 @@ dependencies = [
  "scru128",
  "serde",
  "serde_json",
+ "tiangong-config",
+ "tiangong-llm",
  "tiangong-plugin-runtime",
  "tokio",
  "tracing",
@@ -11194,15 +11266,40 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-speech-to-text"
+name = "tiangong-plugin-speech-to-text-protocol"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-speech-to-text-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tiangong-plugin-speech-to-text-protocol",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-speech-to-text-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-speech-to-text-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11243,16 +11340,41 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-text-to-speech"
+name = "tiangong-plugin-text-to-speech-protocol"
 version = "0.13.4"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-text-to-speech-sidecar"
+version = "0.13.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
  "scru128",
  "serde",
  "serde_json",
  "tiangong-config",
  "tiangong-core",
  "tiangong-llm",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
+ "tiangong-plugin-text-to-speech-protocol",
+ "tokio",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-text-to-speech-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-text-to-speech-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11299,19 +11421,14 @@ dependencies = [
  "tiangong-media",
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
- "tiangong-plugin-analyze-attachment",
  "tiangong-plugin-command",
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
- "tiangong-plugin-generate-image",
- "tiangong-plugin-generate-video",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-speech-to-text",
  "tiangong-plugin-task",
- "tiangong-plugin-text-to-speech",
  "tiangong-scheduler",
  "tiangong-types",
  "tokio",
