@@ -1211,6 +1211,7 @@ mod tests {
         shell.args(["--noprofile", "--norc", "-i"]);
         shell.env("PS1", "__TIANGONG_TEST_READY__ ");
         let mut child = pair.slave.spawn_command(shell).unwrap();
+        drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
         let mut writer = pair.master.take_writer().unwrap();
         let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
