@@ -18,6 +18,7 @@ use crate::loader::{
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+use crate::signature::{SignedPluginRelease, verify_signed_release};
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
@@ -168,6 +169,7 @@ struct InstalledPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
     enabled: bool,
+    signed_release: Option<SignedPluginRelease>,
 }
 
 struct LoadedPlugin {
@@ -1003,10 +1005,12 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
     }
     ensure_directory(staged_path)?;
     let manifest = PluginManifest::load(&staged_path.join(MANIFEST_FILE))?;
+    let signed_release = verify_signed_release(staged_path, &manifest)?;
     let installed = InstalledPlugin {
         directory: staged_path.to_path_buf(),
         manifest,
         enabled: true,
+        signed_release,
     };
     let result = (|| {
         let wasm_bytes = Arc::new(read_wasm_bytes(&installed)?);
@@ -1061,6 +1065,7 @@ fn install_new_plugin(
         directory: destination.clone(),
         manifest: manifest.clone(),
         enabled: true,
+        signed_release: verify_signed_release(&destination, &manifest)?,
     };
     let loaded = load_plugin_record(storage_root, installed);
     if loaded.ui_plugin.is_none() || loaded.last_error.is_some() {
@@ -1125,6 +1130,7 @@ fn replace_installed_plugin(
         directory: current.directory.clone(),
         manifest: manifest.clone(),
         enabled: current.enabled,
+        signed_release: verify_signed_release(&current.directory, &manifest)?,
     };
     if let Err(error) = reload_plugin_inner(storage_root, &upgraded) {
         let _ = stop_connection_for_directory(&current.directory);
@@ -1440,10 +1446,18 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
         .filter_map(|path| match PluginManifest::load(&path) {
             Ok(manifest) => {
                 let directory = path.parent()?.to_path_buf();
+                let signed_release = match verify_signed_release(&directory, &manifest) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "忽略签名无效的插件");
+                        return None;
+                    }
+                };
                 Some(InstalledPlugin {
                     enabled: !directory.join(DISABLED_MARKER).is_file(),
                     directory,
                     manifest,
+                    signed_release,
                 })
             }
             Err(error) => {
@@ -1482,6 +1496,18 @@ fn sidecar_connection(
         .sidecar
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
+    let signed_release = installed.signed_release.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "未签名插件 {} 不允许启动原生 sidecar",
+            installed.manifest.id
+        )
+    })?;
+    if !signed_release.has_permission("sidecar.invoke") {
+        bail!(
+            "插件 {} 的官方签名未授权 sidecar.invoke",
+            installed.manifest.id
+        );
+    }
     if !installed.manifest.permissions.is_empty()
         && !installed.manifest.has_permission("sidecar.invoke")
     {
@@ -1513,6 +1539,7 @@ fn sidecar_connection(
         data_dir,
         storage_root,
     )
+    .with_sensitive_storage(signed_release.has_permission("model-config.read"))
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),

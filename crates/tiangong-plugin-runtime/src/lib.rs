@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod protocol;
 pub mod registry;
 pub mod sidecar;
+pub mod signature;
 
 pub use adapter::WasmPluginAdapter;
 pub use config::PluginRuntimeConfig;
