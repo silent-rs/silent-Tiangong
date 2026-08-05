@@ -360,12 +360,6 @@ fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> 
     Ok(())
 }
 
-fn user_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
 fn generate_oss_distribution(
     workspace_root: &Path,
     plugin: &Path,
@@ -433,6 +427,10 @@ fn generate_oss_distribution(
         "manifest": {
             "url": format!("{release_url}/plugin.json"),
             "checksum": manifest_checksum,
+        },
+        "signed_release": {
+            "url": format!("{release_url}/release.json"),
+            "signature_url": format!("{release_url}/release.json.sig"),
         },
         "wasm": {
             "url": format!("{release_url}/{}", config.wasm_artifact),
