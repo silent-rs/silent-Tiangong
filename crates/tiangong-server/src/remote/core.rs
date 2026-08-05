@@ -341,8 +341,25 @@ impl ServerCoreManager {
             // app 层判断是否注册各能力插件，经 llm 路由解析端点后构造注入。
             // 与 attachment_capabilities 使用同一份 models 快照，保证 Planner
             // 看到的能力与该 Core 实际注册插件一致。
-            // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-            let mut plugins = tiangong_plugin_prompt::default_plugins();
+            use tiangong_llm::{ModelCapability, ModelEndpoint, SingleProviderClient};
+            let resolve_ep = |cap: ModelCapability| {
+                models
+                    .resolve_for_capability(cap)
+                    .map(ModelEndpoint::from_resolved)
+            };
+            let image_endpoint = resolve_ep(ModelCapability::ImageGeneration);
+            let video_endpoint = resolve_ep(ModelCapability::VideoGeneration);
+            let tts_endpoint = resolve_ep(ModelCapability::Tts);
+            let stt_endpoint = resolve_ep(ModelCapability::Stt);
+            let multimodal_endpoint = if models.has_capability(ModelCapability::Multimodal)
+                && !models.chat_is_multimodal()
+            {
+                resolve_ep(ModelCapability::Multimodal)
+            } else {
+                None
+            };
+            // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
+            let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
             plugins.extend(tiangong_plugin_fs::default_plugins());
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
@@ -360,7 +377,8 @@ impl ServerCoreManager {
             let child_plugin_factory = Arc::new({
                 let storage_root = storage_root.clone();
                 move || {
-                    let mut child_plugins = tiangong_plugin_prompt::default_plugins();
+                    let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
+                        Vec::new();
                     child_plugins.extend(tiangong_plugin_fs::default_plugins());
                     child_plugins.extend(
                         tiangong_plugin_runtime::registry::load_installed_plugins(

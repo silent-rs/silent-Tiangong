@@ -1,8 +1,0 @@
-[package]
-name = "tiangong-plugin-prompt"
-version.workspace = true
-edition = "2024"
-license = "Apache-2.0"
-
-[dependencies]
-tiangong-core = { workspace = true }

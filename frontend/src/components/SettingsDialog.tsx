@@ -237,8 +237,6 @@ export function SettingsDialog() {
 
 function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: SaveStatus) => void }) {
   const [defaultTrustMode, setDefaultTrustMode] = useState('full_trust');
-  const [customPrompt, setCustomPrompt] = useState('');
-  const [lastSavedPrompt, setLastSavedPrompt] = useState('');
   const { showError } = useToast();
   const { workspaceDir, setWorkspaceDir } = useStore();
   const [editWorkspaceDir, setEditWorkspaceDir] = useState(workspaceDir);
@@ -250,40 +248,15 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
   }, [workspaceDir]);
 
   useEffect(() => {
-    Promise.all([
-      api.getDefaultTrustMode(),
-      api.getCustomSystemPrompt(),
-    ])
-      .then(([mode, prompt]) => {
+    api.getDefaultTrustMode()
+      .then((mode) => {
         setDefaultTrustMode(mode);
-        setCustomPrompt(prompt);
-        setLastSavedPrompt(prompt);
       })
       .catch((error) => {
         console.error('加载 Agent 配置失败:', error);
         showError('加载失败', '无法加载 Agent 配置');
       });
   }, [showError]);
-
-  const saveCustomPrompt = useCallback(async (prompt: string) => {
-    onSaveStatusChange('saving');
-    try {
-      await api.setCustomSystemPrompt(prompt);
-      setLastSavedPrompt(prompt);
-      onSaveStatusChange('saved');
-      setTimeout(() => onSaveStatusChange('idle'), 2000);
-    } catch (error) {
-      console.error('保存自定义 Prompt 失败:', error);
-      onSaveStatusChange('error');
-      showError('保存失败', '无法保存自定义 Prompt');
-    }
-  }, [onSaveStatusChange, showError]);
-
-  const handlePromptBlur = () => {
-    if (customPrompt !== lastSavedPrompt) {
-      saveCustomPrompt(customPrompt);
-    }
-  };
 
   const handleTrustModeChange = async (mode: string) => {
     setDefaultTrustMode(mode);
@@ -385,18 +358,6 @@ function AgentSettings({ onSaveStatusChange }: { onSaveStatusChange: (status: Sa
         </div>
       </div>
 
-      {/* 弹性区域：自定义 Prompt */}
-      <div className="flex flex-col flex-1 min-h-0">
-        <Label htmlFor="customSystemPrompt" className="shrink-0 mb-2">自定义 Prompt</Label>
-        <Textarea
-          id="customSystemPrompt"
-          value={customPrompt}
-          onChange={(event) => setCustomPrompt(event.target.value)}
-          onBlur={handlePromptBlur}
-          className="flex-1 min-h-0 resize-none"
-          placeholder="例如：回复时保持简洁，优先给出可执行步骤。"
-        />
-      </div>
     </div>
   );
 }

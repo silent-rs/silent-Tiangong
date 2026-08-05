@@ -30,6 +30,13 @@ pub struct PluginManifest {
     /// runtime 据此判断对应能力是否已配置端点；未配置时插件保持已安装但不注册工具。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_requirements: Option<Vec<ModelRequirement>>,
+    /// 插件是否需要访问天工存储根目录（~/.tiangong）。
+    ///
+    /// 为 true 时，runtime 在 WASI 上下文中额外 preopen storage_root 目录，
+    /// WASM 组件可直接读写其中的文件（如 custom-prompt.md）。
+    /// 默认 false，向后兼容。
+    #[serde(default)]
+    pub storage_access: bool,
 }
 
 /// 单项模型能力需求。
