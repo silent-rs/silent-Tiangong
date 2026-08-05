@@ -12,5 +12,8 @@
     "startup_timeout_ms": 15000,
     "request_timeout_ms": 60000
   },
-  "permissions": ["sidecar.invoke"]
+  "permissions": [
+    "model-config.read",
+    "sidecar.invoke"
+  ]
 }

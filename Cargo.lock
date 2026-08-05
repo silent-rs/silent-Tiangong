@@ -11151,9 +11151,11 @@ name = "tiangong-plugin-runtime"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "futures-util",
  "hex",
  "libc",
+ "minisign-verify",
  "reqwest 0.13.4",
  "scru128",
  "semver",
@@ -13644,6 +13646,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "hex",
  "serde_json",
  "sha2",

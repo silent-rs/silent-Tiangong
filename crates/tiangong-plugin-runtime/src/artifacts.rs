@@ -34,9 +34,16 @@ pub struct PluginRelease {
     pub manifest: RemoteArtifact,
     pub wasm: RemoteArtifact,
     #[serde(default)]
+    pub signed_release: Option<RemoteSignedRelease>,
+    #[serde(default)]
     pub sidecars: BTreeMap<String, RemoteArtifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSignedRelease {
+    pub url: String,
+    pub signature_url: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteArtifact {
     pub url: String,
@@ -237,12 +244,32 @@ impl PluginRepository {
             None => {}
         }
 
+        if let Some(signed) = &release.signed_release {
+            self.download_unchecked(&signed.url, &staged.path.join("release.json"))
+                .await?;
+            self.download_unchecked(&signed.signature_url, &staged.path.join("release.json.sig"))
+                .await?;
+        }
         for directory in ["runtime", "logs", "data"] {
             std::fs::create_dir_all(staged.path.join(directory))?;
         }
         Ok(staged)
     }
 
+    async fn download_unchecked(&self, url: &str, destination: &Path) -> Result<()> {
+        validate_download_url(url, "插件签名制品")?;
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("下载插件签名制品失败: {url}"))?;
+        if !response.status().is_success() {
+            bail!("插件签名制品下载响应异常: {}", response.status());
+        }
+        std::fs::write(destination, response.bytes().await?)
+            .with_context(|| format!("写入插件签名制品失败: {}", destination.display()))
+    }
     async fn download_file(&self, artifact: &RemoteArtifact, destination: &Path) -> Result<()> {
         let expected = parse_checksum(&artifact.checksum)?;
         validate_download_url(&artifact.url, "插件制品")?;
