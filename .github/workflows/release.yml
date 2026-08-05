@@ -210,6 +210,36 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare plugin signing key
+        id: plugin_signing
+        env:
+          PLUGIN_SIGNING_PRIVATE_KEY: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$PLUGIN_SIGNING_PRIVATE_KEY" ]]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY secret is required to sign official sidecar plugins."
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/tiangong-plugin-signing.key"
+          printf '%s' "$PLUGIN_SIGNING_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed official plugins
+        env:
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          plugins=(memory mcp index scheduler skill text-to-speech generate-image analyze-attachment speech-to-text generate-video)
+          for plugin in "${plugins[@]}"; do
+            cargo run -p xtask -- build-plugin "$plugin"
+          done
+
+      - name: Remove plugin signing key
+        if: always() && steps.plugin_signing.outputs.key_path != ''
+        env:
+          PLUGIN_SIGNING_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+        run: rm -f "$PLUGIN_SIGNING_KEY_PATH"
+
       - name: Build and upload installers
         uses: tauri-apps/tauri-action@v0.6.2
         env:

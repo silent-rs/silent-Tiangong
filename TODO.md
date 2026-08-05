@@ -1188,3 +1188,21 @@ cargo test -p tiangong-plugin-runtime --test load_and_call detached_turn_finish_
 cargo test -p tiangong-plugin-agent-team --lib adapter::tests::parent_shutdown_waits_for_child_session_ended_hook -- --ignored --exact --nocapture
 cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_append_cleanup_and_same_session_stall -- --ignored --exact --nocapture
 ```
+
+## 当前任务：官方插件数字签名安全边界
+
+- [x] 使用官方插件专用公钥验证 `release.json` 与 `release.json.sig`，不再以插件 ID 判断可信身份。
+- [x] 签名清单覆盖 `plugin.json`、WASM、当前平台 sidecar、版本、发布者和权限声明。
+- [x] 未签名插件仅允许纯 WASM；声明原生 sidecar 时必须具备有效官方签名和 `sidecar.invoke` 授权。
+- [x] 使用 `model-config.read` 授权模型配置访问，使用 `app-storage.read` 授权既有应用共享数据访问。
+- [x] 本地导入复制签名文件，OSS 目录按平台发布和下载签名清单；残缺或无效签名在安装切换前拒绝。
+- [x] 插件构建生成签名发布清单、平台制品和 OSS 目录片段，发布工作流通过独立机密写入临时签名私钥并在构建后删除。
+- [x] 增加有效签名、未签名识别、签名文件残缺、清单/WASM/sidecar/签名篡改和本地暂存验证。
+- [x] 完成所有官方 sidecar 插件签名构建、三入口检查与前端正式构建。
+
+### 当前任务完成标准
+
+- 第三方不能通过冒用官方插件 ID 启动原生程序或取得模型配置。
+- 任一被签名制品、权限或签名文件变化都会被拒绝，安装和升级失败不破坏当前版本。
+- 纯 WASM 插件保持可安装，官方 sidecar 插件在签名权限范围内保持既有功能。
+- 插件构建、运行时测试、主程序检查和前端正式构建全部通过。

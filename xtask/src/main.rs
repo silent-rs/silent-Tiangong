@@ -390,11 +390,11 @@ fn generate_oss_distribution(
     std::fs::copy(&manifest_path, &dist_manifest)?;
     std::fs::copy(
         plugin.join("release.json"),
-        release_root.join("release.json"),
+        platform_root.join("release.json"),
     )?;
     std::fs::copy(
         plugin.join("release.json.sig"),
-        release_root.join("release.json.sig"),
+        platform_root.join("release.json.sig"),
     )?;
     std::fs::copy(plugin.join(config.wasm_artifact), &dist_wasm)?;
     std::fs::copy(
@@ -428,9 +428,11 @@ fn generate_oss_distribution(
             "url": format!("{release_url}/plugin.json"),
             "checksum": manifest_checksum,
         },
-        "signed_release": {
-            "url": format!("{release_url}/release.json"),
-            "signature_url": format!("{release_url}/release.json.sig"),
+        "signed_releases": {
+            platform.clone(): {
+                "url": format!("{release_url}/{platform}/release.json"),
+                "signature_url": format!("{release_url}/{platform}/release.json.sig"),
+            }
         },
         "wasm": {
             "url": format!("{release_url}/{}", config.wasm_artifact),

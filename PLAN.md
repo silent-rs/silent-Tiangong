@@ -20,7 +20,9 @@
 
 - **WASM、sidecar 与私有协议共同组成完整插件**，三者统一组织、构建和发布，插件包支持携带多平台 sidecar 二进制。
 - **插件运行时统一负责 sidecar 发现、启动、健康检查和路由**，App 入口只加载已安装插件；崩溃退避与统一关闭按后续任务补齐。
-- **App 将实际 `storage_root` 通用注入 sidecar**，各插件自行决定业务数据与配置的相对路径；运行时不理解具体插件目录语义，插件安装目录下的私有数据目录只用于生命周期文件。
+- **原生 sidecar 以官方数字签名建立信任边界**：未签名插件只允许运行纯 WASM；只有官方签名清单明确授权 `sidecar.invoke` 才能启动 sidecar，`model-config.read` 与 `app-storage.read` 分别授权模型配置和应用共享存储访问。
+- **签名覆盖 `plugin.json`、WASM、当前平台 sidecar 与权限声明**，本地导入和 OSS 安装在切换版本前统一验签并核对制品哈希，失败时保留原可用版本。
+- **App 只对签名权限允许的 sidecar 注入实际 `storage_root`**，各插件自行决定业务数据与配置的相对路径；`model-config.read` 用于需要读取模型配置的官方插件，`app-storage.read` 用于需要兼容既有共享业务数据的官方插件。
 - **通用 sidecar 协议、制品清单和路由均定义在 `tiangong-plugin-runtime`**，不得在 App 入口增加具体插件分支。
 - **WASM 通过通用 Host 接口调用自己的 sidecar**，运行时根据当前 WASM 实例自动路由，WASM 不传插件 ID 或地址。
 - **Sidecar 后续通过 Host 模型代理调用外部模型**，不直接持有模型密钥或 URL。
