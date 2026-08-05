@@ -73,13 +73,14 @@ pub fn instantiate_component(
     config: &PluginRuntimeConfig,
     sidecar: Option<Arc<dyn SidecarConnection>>,
     plugin_id: &str,
+    storage_access: bool,
 ) -> Result<WasmPlugin> {
     let limits = StoreLimitsBuilder::new()
         .memory_size(config.memory_limit)
         .build();
     let mut store = Store::new(
         shared_engine(),
-        HostState::new(limits, sidecar, plugin_id.to_string()),
+        HostState::new(limits, sidecar, plugin_id.to_string(), storage_access),
     );
     store.limiter(|state: &mut HostState| state.limits_mut());
     let _ = store.set_fuel(config.fuel_limit);
@@ -135,7 +136,7 @@ impl WasmPluginLoader {
         let bytes = std::fs::read(wasm_path).map_err(|e| {
             anyhow::anyhow!("读取 wasm 组件失败 {path}: {e}", path = wasm_path.display())
         })?;
-        self.load_bytes_for_plugin(&bytes, config, plugin_id)
+        self.load_bytes_for_plugin(&bytes, config, plugin_id, false)
             .map_err(|error| {
                 anyhow::anyhow!(
                     "加载 wasm 组件失败 {path}: {error}",
@@ -150,9 +151,16 @@ impl WasmPluginLoader {
         bytes: &[u8],
         config: &PluginRuntimeConfig,
         plugin_id: &str,
+        storage_access: bool,
     ) -> Result<WasmPlugin> {
         let component = compile_component(bytes)?;
-        instantiate_component(&component, config, self.sidecar.clone(), plugin_id)
+        instantiate_component(
+            &component,
+            config,
+            self.sidecar.clone(),
+            plugin_id,
+            storage_access,
+        )
     }
 }
 

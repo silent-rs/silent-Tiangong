@@ -41,8 +41,9 @@ impl HostState {
         limits: StoreLimits,
         sidecar: Option<Arc<dyn SidecarConnection>>,
         plugin_id: String,
+        storage_access: bool,
     ) -> Self {
-        let wasi = build_wasi_ctx(&plugin_id);
+        let wasi = build_wasi_ctx(&plugin_id, storage_access);
         Self {
             limits,
             wasi,
@@ -142,7 +143,10 @@ fn map_sidecar_error(error: anyhow::Error) -> SidecarError {
 }
 
 /// 构建 WASI 上下文，preopen 插件配置目录供 WASM 组件读写自己的配置。
-fn build_wasi_ctx(plugin_id: &str) -> WasiCtx {
+///
+/// `storage_access` 为 true 时额外 preopen 天工存储根目录（~/.tiangong），
+/// 映射为 WASM 内的 `/storage`，供需要访问全局配置文件（如 custom-prompt.md）的插件使用。
+fn build_wasi_ctx(plugin_id: &str, storage_access: bool) -> WasiCtx {
     let mut builder = WasiCtxBuilder::new();
     let dir = plugin_config_dir(plugin_id);
     let _ = std::fs::create_dir_all(&dir);
@@ -153,6 +157,20 @@ fn build_wasi_ctx(plugin_id: &str) -> WasiCtx {
         wasmtime_wasi::FilePerms::all(),
     ) {
         tracing::debug!("preopen 插件配置目录失败（{e}），配置读写将不可用");
+    }
+    if storage_access {
+        let storage_root = plugin_storage_root();
+        if let Some(root) = &storage_root {
+            let _ = std::fs::create_dir_all(root);
+            if let Err(e) = builder.preopened_dir(
+                root,
+                "/storage",
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            ) {
+                tracing::debug!("preopen 存储根目录失败（{e}），存储根访问将不可用");
+            }
+        }
     }
     builder.build()
 }
@@ -172,4 +190,17 @@ fn plugin_config_dir(plugin_id: &str) -> std::path::PathBuf {
         .join(".tiangong")
         .join("plugins")
         .join(plugin_id)
+}
+
+/// 天工存储根目录：~/.tiangong/
+fn plugin_storage_root() -> Option<std::path::PathBuf> {
+    fn user_home() -> Option<std::path::PathBuf> {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return Some(std::path::PathBuf::from(home));
+        }
+        std::env::var_os("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+    user_home().map(|h| h.join(".tiangong"))
 }

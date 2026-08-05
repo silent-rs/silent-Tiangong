@@ -45,7 +45,6 @@ impl DesktopCoreFactory {
         let storage_root = self.storage_root.clone();
         let mut plugins: Vec<Arc<dyn Plugin>> = Vec::new();
         // 产品文案插件注册在最前，保证身份/规则段排在 system prompt 开头。
-        plugins.extend(tiangong_plugin_prompt::default_plugins());
         let Some(app_handle) = self.app_handle.get().cloned() else {
             warn!("app_handle 尚未注入，浏览器/终端能力将缺失");
             return plugins;
@@ -82,7 +81,6 @@ impl DesktopCoreFactory {
             let storage_root = storage_root.clone();
             move || {
                 let mut child_plugins: Vec<Arc<dyn Plugin>> = Vec::new();
-                child_plugins.extend(tiangong_plugin_prompt::default_plugins());
                 if browser_available {
                     if let Some(browser) = tiangong_plugin_browser::build_plugin(&app_handle) {
                         child_plugins.push(browser);

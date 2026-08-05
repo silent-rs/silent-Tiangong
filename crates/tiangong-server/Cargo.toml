@@ -16,7 +16,6 @@ tiangong-plugin-task = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }
 tiangong-plugin-agent-team = { workspace = true }
-tiangong-plugin-prompt = { workspace = true }
 tiangong-config = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-media-archive = { workspace = true }

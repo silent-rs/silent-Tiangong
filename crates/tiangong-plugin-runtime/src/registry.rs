@@ -424,6 +424,7 @@ fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Resu
             sidecar.clone(),
             adapter.runtime_config(),
             installed.manifest.id.clone(),
+            installed.manifest.storage_access,
         )?;
         let adapter = adapter.clone();
         let activate = installed.enabled;
@@ -556,7 +557,7 @@ pub fn load_wasm_plugin_at(
     let plugin_id_for_load = plugin_id.clone();
     let plugin = crate::execution::run_outside_tokio(move || {
         let loader = WasmPluginLoader::with_sidecar(&config, sidecar)?;
-        loader.load_bytes_for_plugin(&bytes, &config, &plugin_id_for_load)
+        loader.load_bytes_for_plugin(&bytes, &config, &plugin_id_for_load, false)
     })
     .ok()?;
     Some(Arc::new(WasmPluginAdapter::new(
@@ -627,7 +628,7 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
 }
 
 fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
-    let (component, descriptor_id, sidecar, enabled) = {
+    let (component, descriptor_id, sidecar, enabled, storage_access) = {
         let plugins = loaded_plugins().lock().ok()?;
         let loaded = plugins.get(plugin_id)?;
         (
@@ -639,6 +640,7 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
                 .unwrap_or_else(|| plugin_id.to_string()),
             loaded.sidecar.clone(),
             loaded.enabled,
+            loaded.manifest.storage_access,
         )
     };
     let plugin = match instantiate_from_compiled(
@@ -646,6 +648,7 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
         sidecar,
         PluginRuntimeConfig::default(),
         plugin_id.to_string(),
+        storage_access,
     ) {
         Ok(plugin) => plugin,
         Err(error) => {
@@ -682,7 +685,13 @@ fn compile_plugin(
     crate::execution::run_outside_tokio(move || {
         let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
         let component = Arc::new(compile_component(&bytes)?);
-        let mut plugin = instantiate_component(&component, &config, sidecar, &plugin_id)?;
+        let mut plugin = instantiate_component(
+            &component,
+            &config,
+            sidecar,
+            &plugin_id,
+            manifest.storage_access,
+        )?;
         let descriptor = plugin.describe()?;
         if descriptor.id != plugin_id {
             bail!(
@@ -705,10 +714,11 @@ fn instantiate_from_compiled(
     sidecar: Option<Arc<ProcessSidecarConnection>>,
     config: PluginRuntimeConfig,
     plugin_id: String,
+    storage_access: bool,
 ) -> Result<WasmPlugin> {
     crate::execution::run_outside_tokio(move || {
         let sidecar = sidecar.map(|value| value as Arc<dyn SidecarConnection>);
-        instantiate_component(&component, &config, sidecar, &plugin_id)
+        instantiate_component(&component, &config, sidecar, &plugin_id, storage_access)
     })
 }
 

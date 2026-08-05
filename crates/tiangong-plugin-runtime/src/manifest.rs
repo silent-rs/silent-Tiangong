@@ -30,6 +30,9 @@ pub struct PluginManifest {
     /// runtime 据此判断对应能力是否已配置端点；未配置时插件保持已安装但不注册工具。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_requirements: Option<Vec<ModelRequirement>>,
+    /// 插件是否需要访问天工存储根目录（~/.tiangong）。
+    #[serde(default)]
+    pub storage_access: bool,
 }
 
 /// 单项模型能力需求。
