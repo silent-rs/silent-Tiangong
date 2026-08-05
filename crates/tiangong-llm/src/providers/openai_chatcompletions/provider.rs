@@ -83,9 +83,10 @@ impl LlmProvider for OpenAiChatCompletionsProvider {
         let payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let stream = self.client.stream(&model, payload).await?;
+        let mut decoder = super::stream::OpenAiStreamDecoder::default();
         let mapped = stream
-            .map(|item| match item {
-                Ok(payload) => super::stream::parse_stream_payload(&payload),
+            .map(move |item| match item {
+                Ok(payload) => decoder.parse_payload(&payload),
                 Err(err) => vec![Err(map_openai_error(&err))],
             })
             .flat_map(stream::iter);

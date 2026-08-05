@@ -73,6 +73,23 @@ impl WasmPluginAdapter {
         }
     }
 
+    /// 使用预加载阶段已校验的插件 ID 构造实例，避免每个 Core 重复调用 describe。
+    pub(crate) fn new_with_id(
+        plugin: WasmPlugin,
+        config: PluginRuntimeConfig,
+        enabled: bool,
+        id: String,
+    ) -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(Mutex::new(plugin))),
+            id,
+            config,
+            feedback_tx: RwLock::new(None),
+            context: Mutex::new(ReloadContext::default()),
+            enabled: AtomicBool::new(enabled),
+        }
+    }
+
     pub(crate) fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
     }
