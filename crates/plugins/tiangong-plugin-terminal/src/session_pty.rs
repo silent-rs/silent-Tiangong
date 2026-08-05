@@ -963,7 +963,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         &self,
         session_id: &str,
         command: &str,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
@@ -972,7 +972,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
             None => return Box::pin(async { None }),
         };
         let command = command.to_string();
-        let response_wait_secs = exec_response_wait_secs(timeout_secs);
+        let response_wait_secs = timeout_secs.map(exec_response_wait_secs);
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
@@ -993,13 +993,15 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
                 return None;
             }
             cancel_on_drop.arm();
-            let resp = tokio::time::timeout(
-                std::time::Duration::from_secs(response_wait_secs),
-                response_rx,
-            )
-            .await
-            .ok()?
-            .ok()?;
+            let resp = match response_wait_secs {
+                Some(wait_secs) => {
+                    tokio::time::timeout(std::time::Duration::from_secs(wait_secs), response_rx)
+                        .await
+                        .ok()?
+                        .ok()?
+                }
+                None => response_rx.await.ok()?,
+            };
             cancel_on_drop.disarm();
             Some(resp.into())
         })
@@ -1010,7 +1012,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         session_id: &str,
         cmd: &str,
         args: &[String],
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Option<crate::capability::TerminalExecResult>> + Send>,
     > {
@@ -1246,7 +1248,7 @@ mod cancellation_tests {
         assert!(command_tx
             .send(TerminalCommand::Exec {
                 command: "sleep 60".to_string(),
-                timeout_secs: 30,
+                timeout_secs: None,
                 response_tx,
                 cancellation: Arc::clone(&cancellation),
                 completion,

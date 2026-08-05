@@ -128,18 +128,6 @@ impl TerminalToolOverride {
                     .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
             })
             .filter(|v| *v > 0);
-        let Some(timeout_secs) = timeout_secs else {
-            return Box::pin(async {
-                Some(ToolResult {
-                    ok: false,
-                    summary: "run_command 缺少有效 timeout 参数".to_string(),
-                    stdout: String::new(),
-                    stderr: "timeout 必须是根据本次命令预计耗时设置的大于 0 的秒数".to_string(),
-                    exit_code: 2,
-                    execution: None,
-                })
-            });
-        };
 
         // 命令白名单 / 路径校验：FullTrust 时跳过（信任用户已授权全部命令），
         // 否则按白名单 + 路径越界保守校验。
@@ -270,20 +258,6 @@ impl TerminalToolOverride {
             .get("timeout")
             .and_then(|v| v.as_u64())
             .filter(|v| *v > 0);
-        if !interactive && timeout_secs.is_none() {
-            return Box::pin(async {
-                Some(ToolResult {
-                    ok: false,
-                    summary: "run_shell 缺少有效 timeout 参数".to_string(),
-                    stdout: String::new(),
-                    stderr:
-                        "非交互 run_shell 的 timeout 必须是根据本次脚本预计耗时设置的大于 0 的秒数"
-                            .to_string(),
-                    exit_code: 2,
-                    execution: None,
-                })
-            });
-        }
         // 读取 agent 指定的工作目录（run_shell schema 含 cwd 字段）。
         // 与 run_command_via_pty 一致：cwd 与终端当前目录不同时，把 script
         // 包装成 `cd <cwd> && <script>`，避免命令在错误的目录执行。
@@ -329,14 +303,7 @@ impl TerminalToolOverride {
                     None => return Some(Self::terminal_unavailable()),
                 }
             } else {
-                match provider
-                    .exec(
-                        &terminal_id,
-                        &command,
-                        timeout_secs.expect("非交互执行已校验 timeout"),
-                    )
-                    .await
-                {
+                match provider.exec(&terminal_id, &command, timeout_secs).await {
                     Some(r) => r,
                     None => return Some(Self::terminal_unavailable()),
                 }
@@ -565,7 +532,7 @@ impl tiangong_core::tool_override::PromptSectionProvider for TerminalPromptSecti
     fn prompt_sections(&self) -> Vec<String> {
         vec![
             "当用户请求涉及命令行操作（安装依赖、创建项目、编译构建、文件操作等），必须逐步使用 `run_shell` 实际执行命令，不要仅以文本或代码块形式展示命令给用户。每步执行一条命令，根据执行结果决定下一步操作。回复中可以用代码块展示已执行的命令，但必须先通过 `run_shell` 实际执行。".to_string(),
-            "调用 `run_command` 或非交互 `run_shell` 时必须显式设置 `timeout`，并根据本次命令在当前环境中的预计耗时留出合理余量；不要省略、填写 0 或依赖固定默认值。若实际超时，先阅读已有输出，再根据剩余工作重新估算后续调用。".to_string(),
+            "`run_command` 和非交互 `run_shell` 的 `timeout` 是可选的：只有任务存在明确时间边界时才根据实际需要设置；耗时难以预估、需要长期运行或没有自然结束时间时省略该参数，命令会持续到完成、用户中断或任务取消。不要为避免等待而随意填写偏短时间；长时间任务占用当前终端时，其他调用会使用空闲终端，全部繁忙时会新建终端。".to_string(),
             "如果命令会启动需要持续输入的交互程序（例如编辑器、REPL、TUI、远程会话、确认流程等），使用 `run_shell{interactive:true, script:\"<command>\"}` 显式声明交互意图。返回的 stdout 是终端当前显示内容，请阅读后用 `terminal_send{input:\"<按键>\"}` 持续操作；每次发送后都会返回新快照。".to_string(),
             "文件编辑优先使用 write_file / replace_in_file；只有用户明确要求在终端程序里操作，或确实需要交互式程序时才用 `run_shell{interactive:true}`。".to_string(),
             "每轮对话开始时会收到 `terminal_data` 工具结果，包含当前各终端 Tab 的工作目录、shell 类型、运行阶段和最近输出。据此判断用户已在终端做了什么、当前处于什么环境，避免重复执行已知命令。".to_string(),

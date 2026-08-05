@@ -80,7 +80,7 @@ pub trait TerminalProvider: Send + Sync + 'static {
         &self,
         session_id: &str,
         command: &str,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
 
     /// 在指定对话的终端会话中执行原始命令（run_command 用）。
@@ -89,7 +89,7 @@ pub trait TerminalProvider: Send + Sync + 'static {
         session_id: &str,
         cmd: &str,
         args: &[String],
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = Option<TerminalExecResult>> + Send>>;
 
     /// 在指定对话的终端会话中以交互模式启动命令。

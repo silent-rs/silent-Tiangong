@@ -354,7 +354,7 @@ pub(crate) async fn handle_exec(
     pty_state: &mut Option<PtyState>,
     app: &tauri::AppHandle,
     command: &str,
-    timeout_secs: u64,
+    timeout_secs: Option<u64>,
     response_tx: oneshot::Sender<TerminalExecResponse>,
     cancellation: Arc<crate::types::TerminalExecCancellation>,
     _completion: crate::types::TerminalExecCompletion,
@@ -462,7 +462,7 @@ pub(crate) async fn handle_exec(
 
     // 等待 end marker 出现在输出中
     let start_time = std::time::Instant::now();
-    let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+    let timeout_dur = timeout_secs.map(std::time::Duration::from_secs);
     // 跨轮询持久状态：start marker 已出现
     let mut start_seen = false;
     let mut cwd_value = String::new();
@@ -595,7 +595,8 @@ pub(crate) async fn handle_exec(
         }
 
         let cancelled = cancellation.is_requested() || response_tx.is_closed();
-        if cancelled || start_time.elapsed() >= timeout_dur {
+        let timed_out = timeout_dur.is_some_and(|timeout| start_time.elapsed() >= timeout);
+        if cancelled || timed_out {
             // 完成栅栏只会在命令边界闭合，或前台进程组收到不可忽略终止后释放。
             // 因此即使用户命令捕获/忽略 SIGINT，也不能越过 Agent Team 文件锁。
             let shell_stopped = match pty_state.as_mut() {

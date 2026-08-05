@@ -40,7 +40,7 @@ pub(crate) struct CollectResult {
 pub enum TerminalCommand {
     Exec {
         command: String,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
         response_tx: oneshot::Sender<TerminalExecResponse>,
         cancellation: Arc<TerminalExecCancellation>,
         completion: TerminalExecCompletion,
