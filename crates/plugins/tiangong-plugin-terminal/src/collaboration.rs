@@ -79,6 +79,38 @@ impl TerminalActivityTracker {
         }
     }
 
+    /// 仅在终端空闲时为即将提交的 Agent 命令占用终端。
+    pub(crate) fn try_reserve_agent_command(&self, command_id: String) -> bool {
+        let Ok(mut state) = self.busy_state.lock() else {
+            return false;
+        };
+        if !matches!(*state, TerminalBusyState::Idle) {
+            return false;
+        }
+        *state = TerminalBusyState::AgentRunning { command_id };
+        drop(state);
+        if let Ok(mut flag) = self.user_intervened.lock() {
+            *flag = false;
+        }
+        true
+    }
+
+    /// 选择结果未进入实际执行时，只释放仍属于该选择结果的占用。
+    pub(crate) fn release_agent_reservation(&self, command_id: &str) {
+        let Ok(mut state) = self.busy_state.lock() else {
+            return;
+        };
+        let owned = matches!(
+            &*state,
+            TerminalBusyState::AgentRunning {
+                command_id: current
+            } if current == command_id
+        );
+        if owned {
+            *state = TerminalBusyState::Idle;
+        }
+    }
+
     /// 获取当前协作状态
     pub(crate) fn busy_state(&self) -> TerminalBusyState {
         self.busy_state
@@ -109,6 +141,44 @@ impl TerminalBusyState {
             TerminalBusyState::AgentRunning { .. } => "Running",
             TerminalBusyState::AgentInteractive { .. } => "Interactive",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn concurrent_agent_reservations_only_claim_idle_terminal_once() {
+        let tracker = Arc::new(TerminalActivityTracker::new());
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|index| {
+                let tracker = Arc::clone(&tracker);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let command_id = format!("reservation-{index}");
+                    barrier.wait();
+                    tracker
+                        .try_reserve_agent_command(command_id.clone())
+                        .then_some(command_id)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let winners = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(winners.len(), 1);
+        tracker.release_agent_reservation("not-the-owner");
+        assert!(matches!(
+            tracker.busy_state(),
+            TerminalBusyState::AgentRunning { .. }
+        ));
+        tracker.release_agent_reservation(&winners[0]);
+        assert_eq!(tracker.busy_state(), TerminalBusyState::Idle);
     }
 }
 

@@ -41,6 +41,8 @@ pub struct SessionTabs {
     pub tabs: Mutex<HashMap<String, SessionPty>>,
     pub active_tab_id: Mutex<Option<String>>,
     pub activity: Arc<TerminalActivityTracker>,
+    /// 同一会话内，终端的空闲检查和命令占用必须是一个原子步骤。
+    command_selection: Mutex<()>,
 }
 
 impl SessionTabs {
@@ -49,6 +51,7 @@ impl SessionTabs {
             tabs: Mutex::new(HashMap::new()),
             active_tab_id: Mutex::new(None),
             activity: Arc::new(TerminalActivityTracker::new()),
+            command_selection: Mutex::new(()),
         }
     }
 
@@ -646,62 +649,60 @@ impl SessionPtyRegistry {
     ) -> Option<crate::capability::TerminalSelection> {
         let route = parse_terminal_id(session_id)?;
         let session_tabs = self.session_tabs(&route.session_id);
-
-        if let Some(tab_id) = route.tab_id {
+        let _selection_guard = session_tabs.command_selection.lock().ok()?;
+        let reserve = |tab_id: String,
+                       slot: &SessionPty,
+                       created_new: bool,
+                       reason: crate::capability::TerminalSelectionReason| {
             let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
-            let slot = self.get(&terminal_id);
-            if let Some(slot) = slot {
-                if slot.manager.is_alive() {
-                    if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
+            crate::capability::TerminalSelection::reserve(
+                route.session_id.clone(),
+                tab_id,
+                terminal_id,
+                created_new,
+                reason,
+                Arc::clone(&slot.activity),
+            )
+        };
+
+        if let Some(tab_id) = route.tab_id.clone() {
+            let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
+            match self.get(&terminal_id) {
+                Some(slot) if slot.manager.is_alive() => {
+                    if let Some(selection) = reserve(
+                        tab_id.clone(),
+                        &slot,
+                        false,
+                        crate::capability::TerminalSelectionReason::ReusedIdle,
+                    ) {
                         session_tabs.set_active_tab(tab_id.clone());
                         self.persist_session_metadata(&route.session_id);
-                        self.emit_tab_updated(
-                            &route.session_id,
-                            Some(tab_id.clone()),
-                            "agent_command",
-                        );
-                        return Some(crate::capability::TerminalSelection {
-                            session_id: route.session_id,
-                            tab_id,
-                            terminal_id,
-                            created_new: false,
-                            reason: crate::capability::TerminalSelectionReason::ReusedIdle,
-                        });
+                        self.emit_tab_updated(&route.session_id, Some(tab_id), "agent_command");
+                        return Some(selection);
                     }
                     // 指定 Tab 存活但正在忙，避开它，后续走空闲 Tab / 新建 Tab。
-                } else {
+                }
+                _ => {
                     if !self.ensure(&terminal_id, "") {
                         return None;
                     }
+                    let slot = self.get(&terminal_id)?;
+                    let selection = reserve(
+                        tab_id.clone(),
+                        &slot,
+                        true,
+                        crate::capability::TerminalSelectionReason::NoAvailableTerminal,
+                    )?;
                     session_tabs.set_active_tab(tab_id.clone());
-                    self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                    return Some(crate::capability::TerminalSelection {
-                        session_id: route.session_id,
-                        tab_id,
-                        terminal_id,
-                        created_new: true,
-                        reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
-                    });
+                    self.emit_tab_updated(&route.session_id, Some(tab_id), "agent_command");
+                    return Some(selection);
                 }
-            } else {
-                if !self.ensure(&terminal_id, "") {
-                    return None;
-                }
-                session_tabs.set_active_tab(tab_id.clone());
-                self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                return Some(crate::capability::TerminalSelection {
-                    session_id: route.session_id,
-                    tab_id,
-                    terminal_id,
-                    created_new: true,
-                    reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
-                });
             }
         }
 
         let mut had_live_terminal = false;
         let mut dead_tabs = Vec::new();
-        let mut idle_tab_id = None;
+        let mut idle_selection = None;
         {
             let tabs = session_tabs.tabs.lock().unwrap();
             for (tab_id, slot) in tabs.iter() {
@@ -710,8 +711,13 @@ impl SessionPtyRegistry {
                     continue;
                 }
                 had_live_terminal = true;
-                if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
-                    idle_tab_id = Some(tab_id.clone());
+                if let Some(selection) = reserve(
+                    tab_id.clone(),
+                    slot,
+                    false,
+                    crate::capability::TerminalSelectionReason::ReusedIdle,
+                ) {
+                    idle_selection = Some(selection);
                     break;
                 }
             }
@@ -724,17 +730,15 @@ impl SessionPtyRegistry {
             }
         }
 
-        if let Some(tab_id) = idle_tab_id {
-            session_tabs.set_active_tab(tab_id.clone());
+        if let Some(selection) = idle_selection {
+            session_tabs.set_active_tab(selection.tab_id.clone());
             self.persist_session_metadata(&route.session_id);
-            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-            return Some(crate::capability::TerminalSelection {
-                session_id: route.session_id.clone(),
-                tab_id: tab_id.clone(),
-                terminal_id: terminal_instance_id(&route.session_id, &tab_id),
-                created_new: false,
-                reason: crate::capability::TerminalSelectionReason::ReusedIdle,
-            });
+            self.emit_tab_updated(
+                &route.session_id,
+                Some(selection.tab_id.clone()),
+                "agent_command",
+            );
+            return Some(selection);
         }
 
         let reason = if had_live_terminal {
@@ -747,15 +751,11 @@ impl SessionPtyRegistry {
         if !self.ensure(&terminal_id, "") {
             return None;
         }
+        let slot = self.get(&terminal_id)?;
+        let selection = reserve(tab_id.clone(), &slot, true, reason)?;
         session_tabs.set_active_tab(tab_id.clone());
         self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-        Some(crate::capability::TerminalSelection {
-            session_id: route.session_id,
-            tab_id,
-            terminal_id,
-            created_new: true,
-            reason,
-        })
+        Some(selection)
     }
 
     /// 销毁指定 session 或终端 Tab 的 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）。

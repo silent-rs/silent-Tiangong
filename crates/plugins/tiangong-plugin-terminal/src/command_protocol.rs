@@ -207,8 +207,10 @@ fn wrap_non_interactive_command(
     } else {
         command.to_string()
     };
+    // 外层命令块迫使交互 shell 在执行用户命令前先读完整个包装命令。
+    // 否则收尾行仍留在 PTY 输入队列时，Node/Vite 等读取 stdin 的前台程序会把它吞掉。
     format!(
-        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {{\n{}\n}}; __TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\r",
         start_marker, command, cwd_marker, rc_marker, end_marker
     )
 }
@@ -1176,6 +1178,93 @@ mod tests {
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
+        assert!(combined.contains("; {\ngit diff HEAD\n}; __TIANGONG_="));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_stdin_reader_cannot_consume_completion_markers() {
+        use std::io::Read as _;
+        use std::sync::mpsc;
+
+        use portable_pty::{CommandBuilder, PtySize};
+
+        let start_marker = "__TIANGONG_START_stdin__";
+        let end_marker = "__TIANGONG_END_stdin__";
+        let combined = wrap_non_interactive_command(
+            start_marker,
+            "if IFS= read -r -t 1 stolen; then printf 'stdin-consumed:%s\\n' \"$stolen\"; else echo stdin-empty; fi",
+            "__TIANGONG_CWD_stdin__",
+            "__TIANGONG_RC_stdin__",
+            end_marker,
+        );
+        let pty_system = portable_pty::native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut shell = CommandBuilder::new("/bin/bash");
+        shell.args(["--noprofile", "--norc", "-i"]);
+        shell.env("PS1", "__TIANGONG_TEST_READY__ ");
+        let mut child = pair.slave.spawn_command(shell).unwrap();
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                if output_tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut output = String::new();
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output.contains("__TIANGONG_TEST_READY__") {
+            let remaining = ready_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("测试 shell 未就绪");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
+        writer.write_all(combined.as_bytes()).unwrap();
+        writer.flush().unwrap();
+        let completed_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let completed = loop {
+            if output
+                .lines()
+                .any(|line| line_matches_marker(line, end_marker))
+            {
+                break true;
+            }
+            let remaining = completed_deadline.saturating_duration_since(std::time::Instant::now());
+            match output_rx.recv_timeout(remaining) {
+                Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(_) => break false,
+            }
+        };
+
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(writer);
+        drop(pair.master);
+        reader_thread.join().unwrap();
+        assert!(
+            completed,
+            "前台程序结束后应立即收到完成标记，PTY 输出: {output}"
+        );
+        assert!(output.contains("stdin-empty"), "PTY 输出异常: {output}");
+        assert!(!output.contains("stdin-consumed:__TIANGONG_"));
     }
 
     #[cfg(unix)]
