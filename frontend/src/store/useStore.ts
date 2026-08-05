@@ -41,6 +41,7 @@ interface SessionViewCache {
   messages: Message[];
   runStatus: string;
   runSummary: string;
+  contextManagementPending: boolean;
   approvalRequestId: string | null;
   tokenStats: TokenStats | null;
   lastUsage: AppState['lastUsage'];
@@ -485,6 +486,7 @@ function emptySessionViewCache(runStatus = 'idle'): SessionViewCache {
     messages: [],
     runStatus,
     runSummary: runStatus === 'idle' ? '' : '正在处理',
+    contextManagementPending: false,
     approvalRequestId: null,
     tokenStats: null,
     lastUsage: null,
@@ -504,6 +506,7 @@ function sessionViewCacheFromState(state: AppState): SessionViewCache {
     messages: state.messages,
     runStatus: state.runStatus,
     runSummary: state.runSummary,
+    contextManagementPending: false,
     approvalRequestId: state.approvalRequestId,
     tokenStats: state.tokenStats,
     lastUsage: state.lastUsage,
@@ -548,6 +551,7 @@ function applyEventToSessionView(
   let messages = current.messages;
   let runStatus = current.runStatus;
   let runSummary = current.runSummary;
+  let contextManagementPending = current.contextManagementPending;
   let approvalRequestId = current.approvalRequestId;
   let tokenStats = current.tokenStats;
   let lastUsage = current.lastUsage;
@@ -680,12 +684,16 @@ function applyEventToSessionView(
       runSummary = '正在压缩早期上下文...';
       break;
     case 'context_compressed':
-      runSummary = `上下文${event.action === 'clear'
-        ? '清理'
-        : event.action === 'failed'
-          ? '失败'
-          : '压缩'}`;
-      if (tokenStats && (event.action === 'clear' || event.action === 'compress')) {
+      if (event.action !== 'cancelled') {
+        runSummary = event.action === 'clear'
+          ? '上下文清理'
+          : event.action === 'failed'
+            ? '上下文压缩失败'
+            : event.action === 'noop'
+              ? '上下文无需压缩'
+              : '上下文压缩';
+      }
+      if (tokenStats && event.action === 'clear') {
         tokenStats = {
           ...tokenStats,
           current_tokens: 0,
@@ -699,6 +707,15 @@ function applyEventToSessionView(
           ...message,
           compact: index < event.summary_up_to!,
         }));
+      }
+      if (contextManagementPending) {
+        runStatus = 'idle';
+        if (event.action === 'cancelled') runSummary = '';
+        contextManagementPending = false;
+        approvalRequestId = null;
+        streamingMessageId = null;
+        streamingContent = '';
+        streamingReasoningContent = '';
       }
       break;
     case 'turn_elapsed':
@@ -718,6 +735,7 @@ function applyEventToSessionView(
       if (!lastUsage && event.usage) lastUsage = event.usage;
       runStatus = 'idle';
       runSummary = '';
+      contextManagementPending = false;
       approvalRequestId = null;
       currentPlan = undefined;
       streamingMessageId = null;
@@ -733,6 +751,7 @@ function applyEventToSessionView(
       );
       runStatus = 'idle';
       runSummary = errorMessage ? `执行失败：${errorMessage}` : '执行失败';
+      contextManagementPending = false;
       approvalRequestId = null;
       currentPlan = undefined;
       streamingMessageId = null;
@@ -748,6 +767,7 @@ function applyEventToSessionView(
     messages,
     runStatus,
     runSummary,
+    contextManagementPending,
     approvalRequestId,
     tokenStats,
     lastUsage,
@@ -1732,6 +1752,8 @@ export const useStore = create<AppState>((set, get) => ({
         ...cache,
         runStatus: 'executing',
         runSummary: summary,
+        contextManagementPending: true,
+        lastDurationMs: null,
         streamingMessageId: null,
         streamingContent: '',
         streamingReasoningContent: '',
@@ -1740,6 +1762,7 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       runStatus: 'executing',
       runSummary: summary,
+      lastDurationMs: null,
       streamingMessageId: null,
       streamingContent: '',
       streamingReasoningContent: '',
@@ -1750,14 +1773,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   endContextManagement: () => {
-    const { activeSessionId, runSummary } = get();
+    const { activeSessionId } = get();
     if (activeSessionId) {
       const cache = sessionViewCaches.get(activeSessionId);
       if (cache) {
         sessionViewCaches.set(activeSessionId, {
           ...cache,
           runStatus: 'idle',
-          runSummary: runSummary.includes('上下文') ? runSummary : '',
+          runSummary: '',
+          contextManagementPending: false,
         });
       }
     }
@@ -1768,7 +1792,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
       return {
         runStatus: 'idle',
-        runSummary: runSummary.includes('上下文') ? runSummary : '',
+        runSummary: '',
         sessionRunStatuses: nextStatuses,
       };
     });
