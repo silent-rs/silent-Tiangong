@@ -8,8 +8,8 @@
 //! 本测试默认指向 workspace target 目录下的 debug 产物。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use tiangong_core::core::Plugin;
 use tiangong_core::core_config::CoreConfig;
@@ -22,6 +22,7 @@ use tiangong_plugin_runtime::{
 #[derive(Default)]
 struct MockMemorySidecar {
     calls: Mutex<Vec<(String, serde_json::Value)>>,
+    call_recorded: Condvar,
 }
 
 impl MockMemorySidecar {
@@ -45,6 +46,28 @@ impl MockMemorySidecar {
             })
             .unwrap_or(serde_json::Value::Null)
     }
+
+    fn wait_for_call_count(&self, operation: &str, expected: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let Ok(mut calls) = self.calls.lock() else {
+            return false;
+        };
+        loop {
+            if calls.iter().filter(|(item, _)| item == operation).count() >= expected {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let Ok((next, result)) = self.call_recorded.wait_timeout(calls, remaining) else {
+                return false;
+            };
+            calls = next;
+            if result.timed_out() {
+                return calls.iter().filter(|(item, _)| item == operation).count() >= expected;
+            }
+        }
+    }
 }
 
 impl SidecarConnection for MockMemorySidecar {
@@ -63,6 +86,7 @@ impl SidecarConnection for MockMemorySidecar {
             .lock()
             .map_err(|_| anyhow::anyhow!("模拟 sidecar 调用记录已损坏"))?
             .push((operation.to_string(), payload));
+        self.call_recorded.notify_all();
         let response = match operation {
             "recall_context" => {
                 on_progress(serde_json::to_string(
@@ -371,7 +395,9 @@ fn on_turn_finished_with_connection_forwards_rumination() {
 
     let mut session = test_session_with_user_message();
     // 有用户消息时，on_turn_finished 应触发反刍（best-effort）。
+    // 反刍通知以 fire-and-forget 投递，等待模拟 sidecar 实际收到请求后再断言。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
     assert!(sidecar.called("run_enhanced_micro_rumination"));
     let payload = sidecar.payload("run_enhanced_micro_rumination");
     let turn = &payload["turn_result"];
@@ -398,8 +424,10 @@ fn every_tenth_turn_forwards_meta_rumination() {
     for _ in 0..9 {
         <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
     }
+    assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 9));
     assert!(!sidecar.called("run_meta_rumination"));
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    assert!(sidecar.wait_for_call_count("run_meta_rumination", 1));
     assert!(sidecar.called("run_meta_rumination"));
 }
 

@@ -210,8 +210,12 @@ impl Plugin for WasmPluginAdapter {
     }
 
     /// 轮次结束：序列化 session 转发（WASM 内部触发 micro 反刍）。
+    ///
+    /// 采用 fire-and-forget：WASM 调用（含 sidecar 往返）投递到独立 OS 线程，
+    /// 调用方立即返回，避免把 sidecar 建连与往返开销堆在发布终态前的关键路径上。
+    /// 反刍在 sidecar 端本就是后台异步执行，这里只需保证"通知发出"，不阻塞即可。
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(
+        self.forward_session_hook_with_idx_detached(
             "on_turn_finished",
             session,
             turn_start_idx,
@@ -220,8 +224,10 @@ impl Plugin for WasmPluginAdapter {
     }
 
     /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
+    ///
+    /// 同样采用 fire-and-forget：投递到独立线程立即返回，不阻塞 finalize 关键路径。
     fn on_session_ended(&self, session: &mut Session) {
-        self.forward_session_hook("on_session_ended", session, |plugin, json| {
+        self.forward_session_hook_detached("on_session_ended", session, |plugin, json| {
             plugin.on_session_ended(json)
         });
     }
@@ -338,6 +344,92 @@ impl WasmPluginAdapter {
         let idx = turn_start_idx as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
+        }
+    }
+
+    /// 与 [`forward_session_hook`](Self::forward_session_hook) 相同的序列化逻辑，
+    /// 但把 WASM 调用投递到独立 OS 线程后立即返回，不阻塞调用方。
+    ///
+    /// 用于收尾类钩子（`on_turn_finished` / `on_session_ended`）：这类钩子只需保证
+    /// 通知最终送达 sidecar，结果对当前路径无影响（失败本就只 warn），因此可以
+    /// 完全脱离关键路径，避免 sidecar 建连与往返开销拖慢回复收尾。
+    ///
+    /// 使用 `std::thread::spawn` 而非 `tokio::spawn_blocking`，是为了在 session
+    /// end 等 `spawn_blocking` 上下文中同样安全（那里没有 tokio runtime）。
+    fn forward_session_hook_detached(
+        &self,
+        hook: &'static str,
+        session: &Session,
+        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
+        if !self.is_enabled() {
+            return;
+        }
+        let inner = self.current_inner();
+        let plugin_id = self.id.clone();
+        let hook_thread_id = plugin_id.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("wasm-hook-{plugin_id}-{hook}"))
+            .spawn(move || {
+                if let Err(error) =
+                    call_wasm_off_runtime(inner, move |plugin| call(plugin, json))
+                {
+                    tracing::warn!(plugin_id = %hook_thread_id, hook, %error, "wasm 生命周期钩子失败");
+                }
+            })
+        {
+            tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
+        }
+    }
+
+    /// 同上，但带 turn_start_idx 参数。
+    fn forward_session_hook_with_idx_detached(
+        &self,
+        hook: &'static str,
+        session: &Session,
+        turn_start_idx: usize,
+        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
+        if !self.is_enabled() {
+            return;
+        }
+        let inner = self.current_inner();
+        let plugin_id = self.id.clone();
+        let hook_thread_id = plugin_id.clone();
+        let idx = turn_start_idx as u32;
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("wasm-hook-{plugin_id}-{hook}"))
+            .spawn(move || {
+                if let Err(error) =
+                    call_wasm_off_runtime(inner, move |plugin| call(plugin, json, idx))
+                {
+                    tracing::warn!(plugin_id = %hook_thread_id, hook, %error, "wasm 生命周期钩子失败");
+                }
+            })
+        {
+            tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
         }
     }
 }
