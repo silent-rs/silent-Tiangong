@@ -4,6 +4,7 @@ import {
   ArrowUpCircle,
   BookOpen,
   CheckCircle2,
+  Circle,
   Download,
   FolderInput,
   Loader2,
@@ -235,7 +236,7 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
 
   return (
     <TooltipProvider>
-      <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      <div className="relative flex h-full min-w-0 flex-col overflow-hidden">
         <div className="flex min-h-16 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
           <div className="min-w-0">
             <h2 className="text-base font-semibold">插件管理</h2>
@@ -295,12 +296,11 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
             ) : plugins.length === 0 ? (
               <EmptyState label="暂无已安装插件" />
             ) : (
-              plugins.map((plugin, index) => (
+              plugins.map((plugin) => (
                 <InstalledPluginRow
                   key={plugin.id}
                   plugin={plugin}
                   release={availableById.get(plugin.id)}
-                  index={index}
                   activeOperation={activeOperation}
                   disabled={isBusy}
                   onToggle={toggleEnabled}
@@ -340,6 +340,19 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
             )}
           </TabsContent>
         </Tabs>
+        {loading && (
+          <div
+            className="absolute inset-0 z-50 flex items-center justify-center bg-background/75 backdrop-blur-[1px]"
+            role="status"
+            aria-live="polite"
+            aria-label="正在刷新插件状态"
+          >
+            <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm shadow-lg">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+              正在刷新插件目录和运行状态…
+            </div>
+          </div>
+        )}
       </div>
 
       <Dialog open={uninstallTarget !== null} onOpenChange={(open) => !open && setUninstallTarget(null)}>
@@ -378,7 +391,6 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
 function InstalledPluginRow({
   plugin,
   release,
-  index,
   activeOperation,
   disabled,
   onToggle,
@@ -389,7 +401,6 @@ function InstalledPluginRow({
 }: {
   plugin: PluginStatus;
   release?: AvailablePlugin;
-  index: number;
   activeOperation: ActiveOperation | null;
   disabled: boolean;
   onToggle: (plugin: PluginStatus, enabled: boolean) => Promise<void>;
@@ -400,39 +411,63 @@ function InstalledPluginRow({
 }) {
   const working = activeOperation?.pluginId === plugin.id;
   const healthy = plugin.state === 'loaded';
+  const canUpgrade = Boolean(release?.update_available && release.supported);
+  const currentVersion = plugin.loaded_version ?? plugin.manifest_version;
+  const sidecar = getSidecarPresentation(plugin);
+  const StatusIcon = healthy ? CheckCircle2 : plugin.state === 'disabled' ? Circle : AlertCircle;
+
   return (
-    <div>
-      {index > 0 && <Separator />}
-      <div className="flex min-h-32 items-start gap-3 py-5">
-        <div className="mt-0.5 shrink-0">
-          {healthy ? (
-            <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-          ) : (
-            <AlertCircle
-              className={`h-5 w-5 ${plugin.state === 'disabled' ? 'text-muted-foreground' : 'text-amber-500'}`}
-            />
-          )}
-        </div>
+    <div className="border-b py-4 last:border-b-0">
+      <div className="flex items-start gap-3 rounded-lg border border-transparent px-3 py-3 transition-colors hover:border-border/70 hover:bg-muted/20">
+        <StatusIcon
+          className={`mt-0.5 h-5 w-5 shrink-0 ${
+            healthy
+              ? 'text-emerald-500'
+              : plugin.state === 'disabled'
+                ? 'text-muted-foreground'
+                : 'text-amber-500'
+          }`}
+        />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-words text-sm font-medium">{plugin.name}</span>
             <Badge variant={healthy ? 'secondary' : 'outline'}>{stateLabel[plugin.state]}</Badge>
-            {release?.update_available && <Badge variant="outline">可升级 {release.version}</Badge>}
+            {canUpgrade && <Badge className="border-primary/30 bg-primary/10 text-primary">发现新版本</Badge>}
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            <span>清单 {plugin.manifest_version}</span>
-            <span>运行 {plugin.loaded_version ?? '未加载'}</span>
-            <span>第 {plugin.generation} 代</span>
-            {plugin.has_sidecar && (
-              <span>Sidecar {plugin.sidecar_running ? '运行中' : '未运行'}</span>
+
+          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
+            <VersionInfo label="当前版本" value={currentVersion} />
+            {canUpgrade && release && (
+              <VersionInfo label="可升级至" value={release.version} emphasized />
             )}
+            <span className={`inline-flex items-center gap-1.5 ${sidecar.className}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${sidecar.dotClassName}`} />
+              {sidecar.label}
+            </span>
           </div>
+
           {plugin.last_error && (
-            <p className="mt-2 break-words text-xs text-destructive">{plugin.last_error}</p>
+            <p className="mt-2 break-words text-xs leading-5 text-destructive">{plugin.last_error}</p>
           )}
-          <div className="mt-3 flex flex-wrap items-center gap-1">
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {canUpgrade && (
+              <Button
+                size="sm"
+                className="h-8"
+                onClick={() => void onUpgrade(plugin)}
+                disabled={disabled}
+              >
+                {working && activeOperation?.operation === 'upgrade' ? (
+                  <Loader2 className="animate-spin" />
+                ) : (
+                  <ArrowUpCircle />
+                )}
+                升级到 {release?.version}
+              </Button>
+            )}
             <IconAction
-              label="热加载插件"
+              label="重新加载插件"
               onClick={() => void onReload(plugin)}
               disabled={disabled || !plugin.enabled}
               working={working && activeOperation?.operation === 'reload'}
@@ -440,15 +475,7 @@ function InstalledPluginRow({
               <RotateCw />
             </IconAction>
             <IconAction
-              label="升级插件"
-              onClick={() => void onUpgrade(plugin)}
-              disabled={disabled || !release?.update_available || !release.supported}
-              working={working && activeOperation?.operation === 'upgrade'}
-            >
-              <ArrowUpCircle />
-            </IconAction>
-            <IconAction
-              label="回滚插件"
+              label="回滚到上一版本"
               onClick={() => void onRollback(plugin)}
               disabled={disabled || !plugin.can_rollback}
               working={working && activeOperation?.operation === 'rollback'}
@@ -465,7 +492,11 @@ function InstalledPluginRow({
             </IconAction>
           </div>
         </div>
-        <div className="flex h-8 shrink-0 items-center">
+
+        <div className="flex shrink-0 items-center gap-2 pl-2">
+          <span className="hidden text-xs text-muted-foreground sm:inline">
+            {plugin.enabled ? '已启用' : '已停用'}
+          </span>
           {working && ['enable', 'disable'].includes(activeOperation?.operation ?? '') ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : (
@@ -480,6 +511,61 @@ function InstalledPluginRow({
       </div>
     </div>
   );
+}
+
+function VersionInfo({
+  label,
+  value,
+  emphasized = false,
+}: {
+  label: string;
+  value: string;
+  emphasized?: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+      <span>{label}</span>
+      <span className={emphasized ? 'font-medium text-primary' : 'font-medium text-foreground'}>
+        {value}
+      </span>
+    </span>
+  );
+}
+
+function getSidecarPresentation(plugin: PluginStatus) {
+  if (!plugin.has_sidecar) {
+    return {
+      label: '无需后台服务',
+      className: 'text-muted-foreground',
+      dotClassName: 'bg-muted-foreground/60',
+    };
+  }
+  if (plugin.sidecar_running) {
+    return {
+      label: '后台服务运行中',
+      className: 'text-emerald-500',
+      dotClassName: 'bg-emerald-500',
+    };
+  }
+  if (!plugin.enabled || plugin.state === 'disabled') {
+    return {
+      label: '后台服务已停用',
+      className: 'text-muted-foreground',
+      dotClassName: 'bg-muted-foreground/60',
+    };
+  }
+  if (plugin.last_error || plugin.state === 'error' || plugin.state === 'degraded') {
+    return {
+      label: '后台服务异常',
+      className: 'text-destructive',
+      dotClassName: 'bg-destructive',
+    };
+  }
+  return {
+    label: '后台服务按需启动',
+    className: 'text-muted-foreground',
+    dotClassName: 'bg-amber-500',
+  };
 }
 
 function AvailablePluginRow({

@@ -270,31 +270,35 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
 ///
 /// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
 /// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
-pub fn load_installed_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
-    preload_installed_plugins(storage_root);
+pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
     let Ok(_operation) = LOAD_OPERATION.lock() else {
         tracing::warn!("插件加载操作锁已损坏");
         return Vec::new();
     };
 
     let configured = configured_model_capabilities();
-    let plugin_ids = discover_installed_plugins(storage_root)
-        .into_iter()
-        .filter_map(|installed| {
-            if let Some(reason) =
-                check_plugin_availability(&installed.manifest, runtime, &configured)
-            {
-                tracing::info!(
-                    plugin_id = %installed.manifest.id,
-                    reason,
-                    "插件未注册工具（仍保持已安装）"
-                );
-                None
-            } else {
-                Some(installed.manifest.id)
-            }
-        })
-        .collect::<Vec<_>>();
+    let plugin_ids = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return Vec::new();
+        };
+        plugins
+            .values()
+            .filter_map(|loaded| {
+                if let Some(reason) =
+                    check_plugin_availability(&loaded.manifest, runtime, &configured)
+                {
+                    tracing::info!(
+                        plugin_id = %loaded.manifest.id,
+                        reason,
+                        "插件未注册工具（仍保持已安装）"
+                    );
+                    None
+                } else {
+                    Some(loaded.manifest.id.clone())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
 
     plugin_ids
         .into_iter()
@@ -306,7 +310,6 @@ pub fn load_installed_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<
 ///
 /// `runtime` 用于判断插件是否可在当前入口注册工具，填充 `unavailable_reason`。
 pub fn list_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let installed = discover_installed_plugins(storage_root);
     let configured = configured_model_capabilities();
     let snapshots = {
@@ -391,6 +394,10 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if loaded_plugin_matches(&installed)? {
+        return list_plugin_status_without_preload(&installed.manifest)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 当前状态丢失"));
+    }
 
     let result = reload_plugin_inner(storage_root, &installed);
     if let Err(error) = &result {
@@ -809,7 +816,6 @@ fn install_staged_plugin_inner(
     staged_path: &Path,
     allow_same_version: bool,
 ) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -840,7 +846,6 @@ pub fn set_plugin_enabled(
     plugin_id: &str,
     enabled: bool,
 ) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -906,7 +911,6 @@ pub fn set_plugin_enabled(
 
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -944,7 +948,6 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 
 /// 卸载插件。保留数据时，安装目录中只留下 data 目录。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -1563,4 +1566,21 @@ fn sidecar_connection(
         .get(&installed.directory)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("创建插件 sidecar 连接失败"))
+}
+
+fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
+    let bytes = read_wasm_bytes(installed)?;
+    let plugins = loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+    let Some(loaded) = plugins.get(&installed.manifest.id) else {
+        return Ok(false);
+    };
+    Ok(loaded.directory == installed.directory
+        && loaded.manifest.version == installed.manifest.version
+        && loaded.manifest.permissions == installed.manifest.permissions
+        && loaded
+            .wasm_bytes
+            .as_ref()
+            .is_some_and(|loaded_bytes| loaded_bytes.as_slice() == bytes.as_slice()))
 }
