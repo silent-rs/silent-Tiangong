@@ -309,10 +309,12 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     ));
     std::fs::copy(&wasm, &staged_wasm)?;
     std::fs::copy(&sidecar, &staged_sidecar)?;
-    std::fs::copy(
-        workspace_root.join(&config.plugin_manifest),
-        staging.join("plugin.json"),
-    )?;
+    let source_manifest = workspace_root.join(&config.plugin_manifest);
+    let normalized_manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&source_manifest)?).map_err(|error| {
+            invalid_data(format!("解析 {} 失败: {error}", source_manifest.display()))
+        })?;
+    write_json(&staging.join("plugin.json"), &normalized_manifest)?;
     for directory in PRESERVED_DIRS {
         std::fs::create_dir_all(staging.join(directory))?;
     }
