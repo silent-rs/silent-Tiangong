@@ -103,7 +103,18 @@ jobs:
         run: |
           $openssl = (Get-Command openssl).Source
           $root = Split-Path (Split-Path $openssl -Parent) -Parent
-          "OPENSSL_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $crypto = Get-ChildItem -Path $root -Recurse -Filter libcrypto.lib |
+            Where-Object { Test-Path (Join-Path $_.Directory.FullName 'libssl.lib') } |
+            Select-Object -First 1
+          if (-not $crypto) {
+            throw "Could not locate matching libcrypto.lib and libssl.lib under $root"
+          }
+          $include = Join-Path $root 'include'
+          if (-not (Test-Path (Join-Path $include 'openssl/ssl.h'))) {
+            throw "Could not locate OpenSSL headers under $include"
+          }
+          "OPENSSL_LIB_DIR=$($crypto.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENSSL_NO_VENDOR=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Prepare plugin signing key
         id: plugin_signing
