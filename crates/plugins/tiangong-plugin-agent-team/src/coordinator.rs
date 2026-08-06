@@ -13,7 +13,9 @@ use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::{now_text, Message, MessageRole, Session};
 use tiangong_core::tool::ToolResult;
-use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
+use tiangong_core::tool_override::{
+    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+};
 use tiangong_types::{ContentBlock, StreamEvent};
 
 use crate::child_runtime::{child_config, ChildRuntime, SharedFeedback};
@@ -834,6 +836,8 @@ impl PromptSectionProvider for ChildTeamClientPlugin {
         ]
     }
 }
+
+impl MentionCandidateProvider for ChildTeamClientPlugin {}
 
 impl Plugin for ChildTeamClientPlugin {
     fn id(&self) -> &str {

@@ -5,6 +5,7 @@
 
 pub mod attachment;
 pub mod event;
+pub mod mention;
 pub mod message;
 pub mod plugin_session;
 pub mod remote;
@@ -19,6 +20,7 @@ pub use attachment::{
     validate_ready_content_blocks,
 };
 pub use event::{EventSource, RuntimeEvent, RuntimeEventType};
+pub use mention::MentionCandidate;
 pub use message::{
     ContentBlock, DeferredToolInjection, MediaAsset, MediaKind, Message, MessagePhase, MessageRole,
     MessageToolCall, TurnStatus, now_text,

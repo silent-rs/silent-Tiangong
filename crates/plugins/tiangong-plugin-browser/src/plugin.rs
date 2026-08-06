@@ -188,3 +188,6 @@ impl tiangong_core::tool_override::ToolSpecProvider for BrowserPlugin {
 
 // PromptSectionProvider 使用默认空实现（浏览器不注入 prompt 段落）
 impl tiangong_core::tool_override::PromptSectionProvider for BrowserPlugin {}
+
+// MentionCandidateProvider 使用默认空实现（浏览器不贡献 mention 候选）
+impl tiangong_core::tool_override::MentionCandidateProvider for BrowserPlugin {}

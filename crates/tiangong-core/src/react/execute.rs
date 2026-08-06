@@ -1683,7 +1683,9 @@ mod tests {
     use crate::prompt::SystemPromptConfig;
     use crate::session::{Message, MessageRole, MessageToolCall, Session};
     use crate::tool::ToolResult;
-    use crate::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
+    use crate::tool_override::{
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    };
     use crate::turn_context::TurnContext;
     use std::collections::HashMap;
     use std::future::Future;
@@ -1970,6 +1972,7 @@ mod tests {
     impl ToolOverrideHandler for TrustTrackingPlugin {}
     impl ToolSpecProvider for TrustTrackingPlugin {}
     impl PromptSectionProvider for TrustTrackingPlugin {}
+    impl MentionCandidateProvider for TrustTrackingPlugin {}
 
     impl Plugin for TrustTrackingPlugin {
         fn id(&self) -> &str {

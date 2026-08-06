@@ -142,5 +142,4 @@ impl UiGuest for Component {
         Err(plugin_err("TTS 插件无设置页消息"))
     }
 }
-
 bindings::export!(Component with_types_in bindings);

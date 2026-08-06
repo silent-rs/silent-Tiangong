@@ -465,5 +465,4 @@ where
     let response = sidecar_client::invoke::<O>(request).map_err(|e| plugin_err(e.to_string()))?;
     serde_json::to_string(&response).map_err(|e| plugin_err(e.to_string()))
 }
-
 bindings::export!(Component with_types_in bindings);

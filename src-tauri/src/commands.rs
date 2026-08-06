@@ -1979,65 +1979,17 @@ pub async fn stop_audio() -> Result<(), String> {
     Ok(())
 }
 
-/// 获取 @提及补全候选列表（已启用的 Skill 和 MCP 服务器）
+/// 获取 @提及补全候选列表。
+///
+/// 经 Core 聚合（CoreManager::get_any_mentions 遍历任意活跃 Core 的全部插件，
+/// 含 native 与 WASM 插件经 mention 标准接口贡献的候选）。原硬编码的 skill/mcp
+/// 调用已迁入各自 WASM 插件的 mention-candidates 导出，host 不再区分插件类型。
+/// 无活跃 Core 时返回空列表。
 #[tauri::command]
 pub async fn get_mention_candidates(
-    _state: State<'_, TiangongApp>,
+    state: State<'_, TiangongApp>,
 ) -> Result<Vec<MentionCandidate>, String> {
-    // Skill + MCP servers + active tools 均由各自 plugin 自管，先读取快照。
-    let storage_root = tiangong_config::io::storage_root();
-    let skills = list_enabled_skills_for_mention(&storage_root);
-    let mcp_servers: Vec<tiangong_plugin_mcp_protocol::config::McpServerConfig> =
-        serde_json::from_value::<tiangong_plugin_mcp_protocol::management::ServersResponse>(
-            mcp_invoke("mcp.server.list", serde_json::json!({}))?,
-        )
-        .map_err(|e: serde_json::Error| e.to_string())?
-        .servers;
-    let active_tools: Vec<(String, usize)> =
-        serde_json::from_value::<tiangong_plugin_mcp_protocol::tool::ListToolsResponse>(
-            mcp_invoke("mcp.list_tools", serde_json::json!({}))?,
-        )
-        .map_err(|e: serde_json::Error| e.to_string())?
-        .servers
-        .into_iter()
-        .map(|entry| (entry.server, entry.tools.len()))
-        .collect();
-    let mut candidates = Vec::new();
-
-    // 已启用的 Skill（数据来自 skill plugin）
-    for skill in &skills {
-        if skill.enabled {
-            candidates.push(MentionCandidate {
-                value: format!("@skill:{}", skill.id),
-                label: skill.name.clone(),
-                kind: "skill".to_string(),
-                hint: if skill.description.is_empty() {
-                    format!("v{}", skill.version)
-                } else {
-                    skill.description.clone()
-                },
-            });
-        }
-    }
-
-    // 已启用的 MCP 服务器（数据来自 mcp plugin）
-    for server in &mcp_servers {
-        if server.enabled {
-            let tool_count = active_tools
-                .iter()
-                .find(|(name, _)| name == &server.name)
-                .map(|(_, count)| *count)
-                .unwrap_or(0);
-            candidates.push(MentionCandidate {
-                value: format!("@mcp:{}", server.name),
-                label: server.name.clone(),
-                kind: "mcp".to_string(),
-                hint: format!("{} 工具", tool_count),
-            });
-        }
-    }
-
-    Ok(candidates)
+    Ok(state.core_manager.get_any_mentions())
 }
 
 /// 获取输入框缓存。
@@ -3357,29 +3309,9 @@ pub async fn bot_upgrade(
 // Skill 管理
 //
 // skill 列表/详情/启停/删除/env 编辑等管理操作全部经插件设置页（WASM UI）
-// 走 handle_view_message 通道，不再暴露 Tauri 命令。@提及补全仍需列出已启用
-// skill，经 sidecar 通道查询。
+// 走 handle_view_message 通道，不再暴露 Tauri 命令。@提及补全候选由 skill
+// WASM 插件的 mention-candidates 导出贡献，经 Core.get_mentions 聚合。
 // ============================================================================
-
-/// 列出已启用的 Skill（供 @提及补全用，经 sidecar 通道查询）。
-pub fn list_enabled_skills_for_mention(
-    storage_root: &std::path::Path,
-) -> Vec<tiangong_plugin_skill_protocol::InstalledSkillConfig> {
-    let payload =
-        serde_json::to_value(tiangong_plugin_skill_protocol::Empty {}).unwrap_or_default();
-    tiangong_plugin_runtime::registry::invoke_sidecar(
-        storage_root,
-        "skill",
-        tiangong_plugin_skill_protocol::LIST_SKILLS_OPERATION,
-        payload,
-    )
-    .ok()
-    .and_then(|v| {
-        serde_json::from_value::<tiangong_plugin_skill_protocol::ListSkillsResponse>(v).ok()
-    })
-    .map(|r| r.skills)
-    .unwrap_or_default()
-}
 
 // ============================================================================
 // Server 管理
@@ -4060,7 +3992,7 @@ mod tests {
     };
     use tiangong_core::core::Plugin;
     use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4107,6 +4039,7 @@ mod tests {
     impl ToolSpecProvider for SlowTurnFinishedPlugin {}
     impl ToolOverrideHandler for SlowTurnFinishedPlugin {}
     impl PromptSectionProvider for SlowTurnFinishedPlugin {}
+    impl MentionCandidateProvider for SlowTurnFinishedPlugin {}
 
     impl Plugin for SlowTurnFinishedPlugin {
         fn id(&self) -> &str {

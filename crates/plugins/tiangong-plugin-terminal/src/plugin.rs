@@ -17,7 +17,9 @@ use tiangong_core::core::plugin::PluginFeedbackTx;
 use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::tool::ToolResult;
-use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler};
+use tiangong_core::tool_override::{
+    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler,
+};
 
 use crate::capability::TerminalProvider;
 use crate::handler::{TerminalPromptSectionProvider, TerminalToolOverride};
@@ -273,6 +275,9 @@ impl PromptSectionProvider for TerminalPlugin {
         PromptSectionProvider::prompt_sections(&self.prompt_provider)
     }
 }
+
+// MentionCandidateProvider 使用默认空实现（终端不贡献 mention 候选）
+impl MentionCandidateProvider for TerminalPlugin {}
 
 #[cfg(test)]
 mod tests {

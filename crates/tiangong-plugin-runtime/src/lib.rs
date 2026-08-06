@@ -25,5 +25,8 @@ pub mod signature;
 
 pub use adapter::WasmPluginAdapter;
 pub use config::PluginRuntimeConfig;
-pub use loader::{Contribution, Descriptor, Outcome, Spec, ToolCall, WasmPlugin, WasmPluginLoader};
+pub use loader::{
+    Contribution, Descriptor, MentionCandidate, Outcome, Spec, ToolCall, WasmPlugin,
+    WasmPluginLoader,
+};
 pub use sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};

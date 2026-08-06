@@ -98,14 +98,8 @@ pub struct TranscribeResult {
     pub duration: Option<f64>,
 }
 
-/// @提及候选项
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MentionCandidate {
-    pub value: String,
-    pub label: String,
-    pub kind: String,
-    pub hint: String,
-}
+/// @提及候选项（统一使用 tiangong_types::MentionCandidate，避免重复定义）。
+pub use tiangong_types::MentionCandidate;
 
 /// 会话列表项（前端使用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
