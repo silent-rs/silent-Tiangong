@@ -4229,12 +4229,124 @@ pub async fn webhook_list_runs(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::{
         cancel_after_session_send_boundary, done_event_keeps_turn_running,
         merge_agent_worker_messages, save_started_bot_state, stop_bot_with_state,
     };
+    use tiangong_core::core::Plugin;
+    use tiangong_core::tool_override::{
+        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SLOW_FINISH_SAFETY_LIMIT: Duration = Duration::from_secs(20);
+
+    struct SlowTurnFinishedState {
+        started: AtomicBool,
+        started_notify: tokio::sync::Notify,
+        finished: AtomicBool,
+        finished_notify: tokio::sync::Notify,
+        released: Mutex<bool>,
+        released_notify: Condvar,
+        safety_limit_reached: AtomicBool,
+    }
+
+    impl SlowTurnFinishedState {
+        fn new() -> Self {
+            Self {
+                started: AtomicBool::new(false),
+                started_notify: tokio::sync::Notify::new(),
+                finished: AtomicBool::new(false),
+                finished_notify: tokio::sync::Notify::new(),
+                released: Mutex::new(false),
+                released_notify: Condvar::new(),
+                safety_limit_reached: AtomicBool::new(false),
+            }
+        }
+
+        fn release(&self) {
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *released = true;
+            self.released_notify.notify_all();
+        }
+    }
+
+    struct SlowTurnFinishedPlugin {
+        state: Arc<SlowTurnFinishedState>,
+    }
+
+    impl ToolSpecProvider for SlowTurnFinishedPlugin {}
+    impl ToolOverrideHandler for SlowTurnFinishedPlugin {}
+    impl PromptSectionProvider for SlowTurnFinishedPlugin {}
+
+    impl Plugin for SlowTurnFinishedPlugin {
+        fn id(&self) -> &str {
+            "test-slow-turn-finished"
+        }
+
+        fn on_turn_started(
+            &self,
+            _session: &mut tiangong_core::session::Session,
+            _turn_start_idx: usize,
+        ) {
+            self.state.started.store(true, Ordering::Release);
+            self.state.started_notify.notify_one();
+        }
+
+        fn on_turn_finished(
+            &self,
+            _session: &mut tiangong_core::session::Session,
+            _turn_start_idx: usize,
+        ) {
+            self.state.finished.store(true, Ordering::Release);
+            self.state.finished_notify.notify_one();
+
+            let released = self
+                .state
+                .released
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (_released, wait_result) = self
+                .state
+                .released_notify
+                .wait_timeout_while(released, SLOW_FINISH_SAFETY_LIMIT, |released| !*released)
+                .unwrap_or_else(|error| error.into_inner());
+            if wait_result.timed_out() {
+                self.state
+                    .safety_limit_reached
+                    .store(true, Ordering::Release);
+            }
+        }
+    }
+
+    struct SlowTurnFinishedRelease(Arc<SlowTurnFinishedState>);
+
+    impl Drop for SlowTurnFinishedRelease {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    async fn wait_for_plugin_signal(
+        flag: &AtomicBool,
+        notify: &tokio::sync::Notify,
+        message: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !flag.load(Ordering::Acquire) {
+                notify.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{message}"));
+    }
 
     #[tokio::test]
     async fn cancel_waits_for_send_boundary_and_returns_delivery_result() {
@@ -4268,6 +4380,251 @@ mod tests {
     async fn cancel_reports_when_no_core_accepts_the_command() {
         let session_lock = Arc::new(tokio::sync::Mutex::new(()));
         assert!(!cancel_after_session_send_boundary(session_lock, || false).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "耗时故障诊断，包含真实 5 秒等待，仅在手动复测时执行"]
+    async fn slow_turn_finish_reproduces_append_cleanup_and_same_session_stall() {
+        use std::sync::mpsc;
+
+        use tiangong_core::agent_input::AgentInputKind;
+        use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+        use tiangong_core::session::Session;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(30))
+                    .set_body_raw("data: [DONE]\n\n", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let storage = tempfile::tempdir().expect("应创建隔离存储目录");
+        let workspace = storage.path().to_string_lossy().to_string();
+        let session_id = format!("running-append-stall-{}", scru128::new());
+        let healthy_session_id = format!("healthy-switch-{}", scru128::new());
+        let config = CoreConfig::builder()
+            .with_chat(&server.uri(), "test-key", "test-model")
+            .build();
+        let manager = tiangong_core_manager::CoreManager::new(
+            CoreConfigProvider::new(config.clone()),
+            storage.path(),
+        );
+
+        let slow_state = Arc::new(SlowTurnFinishedState::new());
+        let _slow_finish_release = SlowTurnFinishedRelease(slow_state.clone());
+        let slow_plugin: Arc<dyn Plugin> = Arc::new(SlowTurnFinishedPlugin {
+            state: slow_state.clone(),
+        });
+        let (stream_tx, _stream_rx) = mpsc::channel();
+        manager
+            .ensure_core(
+                &session_id,
+                config.clone(),
+                workspace.clone(),
+                stream_tx,
+                move || vec![slow_plugin],
+            )
+            .await
+            .expect("应创建测试 Core");
+        assert!(
+            manager.deliver_to_core_if_live(&session_id, AgentInputKind::message("first message"))
+        );
+
+        wait_for_plugin_signal(
+            &slow_state.started,
+            &slow_state.started_notify,
+            "首轮未在期限内进入插件启动钩子",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if server
+                    .received_requests()
+                    .await
+                    .is_some_and(|requests| !requests.is_empty())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("首轮模型请求未在期限内到达本地假服务");
+
+        let session_send_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let append_manager = manager.clone();
+        let append_session_id = session_id.clone();
+        let append_lock = session_send_lock.clone();
+        let (delivery_result_tx, delivery_result_rx) = tokio::sync::oneshot::channel();
+        let mut append_task = tokio::spawn(async move {
+            let _send_guard = append_lock.lock_owned().await;
+            let delivery_started = Instant::now();
+            let delivered = append_manager.deliver_to_core_if_live(
+                &append_session_id,
+                AgentInputKind::message("appended message"),
+            );
+            let delivery_elapsed = delivery_started.elapsed();
+            let _ = delivery_result_tx.send((delivered, delivery_elapsed));
+            let cleanup = if delivered {
+                Ok(())
+            } else {
+                append_manager.retire_core(&append_session_id, false).await
+            };
+            (delivered, cleanup)
+        });
+
+        wait_for_plugin_signal(
+            &slow_state.finished,
+            &slow_state.finished_notify,
+            "追加消息取消首轮后未进入同步收尾钩子",
+        )
+        .await;
+        let (delivered, delivery_elapsed) =
+            tokio::time::timeout(Duration::from_secs(7), delivery_result_rx)
+                .await
+                .expect("追加消息未在 Core 的 5 秒上限后返回")
+                .expect("追加消息结果通道不应提前关闭");
+        assert!(!delivered, "慢收尾期间追加消息应投递失败");
+        assert!(
+            delivery_elapsed >= Duration::from_secs(5) && delivery_elapsed < Duration::from_secs(7),
+            "追加消息应在 5 秒等待上限后失败，实际耗时 {delivery_elapsed:?}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.has_live_core(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("失败清理开始后 Core 应先从会话表移除");
+        assert!(
+            !append_task.is_finished(),
+            "Core 移除后失败清理仍应等待慢收尾"
+        );
+        assert!(
+            !manager.deliver_to_core_if_live(&session_id, AgentInputKind::message("direct retry")),
+            "清理等待期间当前会话已无 Core 可接收消息"
+        );
+
+        let retry_lock = session_send_lock.clone();
+        let retry_manager = manager.clone();
+        let retry_session_id = session_id.clone();
+        let (retry_entered_tx, retry_entered_rx) = tokio::sync::oneshot::channel();
+        let retry_task = tokio::spawn(async move {
+            let _send_guard = retry_lock.lock_owned().await;
+            let _ = retry_entered_tx.send(());
+            retry_manager.deliver_to_core_if_live(
+                &retry_session_id,
+                AgentInputKind::message("retry through host boundary"),
+            )
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), retry_entered_rx)
+                .await
+                .is_err(),
+            "再次发送应等待仍被失败清理持有的会话发送锁"
+        );
+        retry_task.abort();
+        let _ = retry_task.await;
+
+        let cancel_lock = session_send_lock.clone();
+        let cancel_manager = manager.clone();
+        let cancel_session_id = session_id.clone();
+        let (cancel_entered_tx, cancel_entered_rx) = tokio::sync::oneshot::channel();
+        let cancel_task = tokio::spawn(async move {
+            cancel_after_session_send_boundary(cancel_lock, || {
+                let _ = cancel_entered_tx.send(());
+                cancel_manager.cancel_core(&cancel_session_id)
+            })
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), cancel_entered_rx)
+                .await
+                .is_err(),
+            "取消命令应等待同一个会话发送锁"
+        );
+        cancel_task.abort();
+        let _ = cancel_task.await;
+
+        let reopen_manager = manager.clone();
+        let reopen_session_id = session_id.clone();
+        let reopen_config = config.clone();
+        let reopen_workspace = workspace.clone();
+        let (reopen_stream_tx, _reopen_stream_rx) = mpsc::channel();
+        let mut reopen_task = tokio::spawn(async move {
+            reopen_manager
+                .ensure_core(
+                    &reopen_session_id,
+                    reopen_config,
+                    reopen_workspace,
+                    reopen_stream_tx,
+                    Vec::new,
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut reopen_task)
+                .await
+                .is_err(),
+            "重新打开故障会话应等待失败清理持有的 Core 创建锁"
+        );
+
+        let mut healthy_session = Session::new("healthy switch target");
+        healthy_session.id = healthy_session_id.clone();
+        healthy_session.cwd = workspace.clone();
+        healthy_session.bind_storage_root(storage.path());
+        healthy_session
+            .try_persist_to_disk()
+            .expect("应持久化健康切换目标");
+        let (healthy_stream_tx, _healthy_stream_rx) = mpsc::channel();
+        let healthy_ensured = tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.ensure_core(
+                &healthy_session_id,
+                config.clone(),
+                workspace,
+                healthy_stream_tx,
+                Vec::new,
+            ),
+        )
+        .await
+        .expect("其他会话的后端 Core 创建不应被故障会话阻塞")
+        .expect("应创建健康会话 Core");
+        assert!(healthy_ensured.is_new);
+
+        slow_state.release();
+        let (append_delivered, cleanup_result) =
+            tokio::time::timeout(Duration::from_secs(2), &mut append_task)
+                .await
+                .expect("释放慢收尾后失败清理应结束")
+                .expect("追加清理任务不应 panic");
+        assert!(!append_delivered);
+        cleanup_result.expect("失败清理应正常结束");
+        let reopened = tokio::time::timeout(Duration::from_secs(2), &mut reopen_task)
+            .await
+            .expect("释放慢收尾后故障会话应能重新创建 Core")
+            .expect("重新创建任务不应 panic")
+            .expect("应重新创建故障会话 Core");
+        assert!(reopened.is_new);
+        assert!(
+            !slow_state.safety_limit_reached.load(Ordering::Acquire),
+            "测试应主动释放慢收尾，不应依赖 20 秒安全上限"
+        );
+
+        for cleanup_session_id in [&session_id, &healthy_session_id] {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                manager.retire_core(cleanup_session_id, true),
+            )
+            .await
+            .expect("测试 Core 清理不应超时")
+            .expect("测试 Core 应正常清理");
+        }
     }
 
     #[test]

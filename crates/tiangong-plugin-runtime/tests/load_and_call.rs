@@ -116,6 +116,93 @@ impl SidecarConnection for MockMemorySidecar {
     }
 }
 
+#[derive(Default)]
+struct BlockingMemorySidecarState {
+    calls: Vec<String>,
+    release_rumination: bool,
+    auto_released: bool,
+}
+
+#[derive(Default)]
+struct BlockingMemorySidecar {
+    state: Mutex<BlockingMemorySidecarState>,
+    changed: Condvar,
+}
+
+impl BlockingMemorySidecar {
+    fn wait_for_call(&self, operation: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        loop {
+            if state.calls.iter().any(|call| call == operation) {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (next, result) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poison| poison.into_inner());
+            state = next;
+            if result.timed_out() {
+                return state.calls.iter().any(|call| call == operation);
+            }
+        }
+    }
+
+    fn release_rumination(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.release_rumination = true;
+        self.changed.notify_all();
+    }
+
+    fn auto_released(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.auto_released)
+            .unwrap_or_else(|poison| poison.into_inner().auto_released)
+    }
+}
+
+impl SidecarConnection for BlockingMemorySidecar {
+    fn invoke(&self, operation: &str, _payload: &str) -> anyhow::Result<String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.calls.push(operation.to_string());
+        self.changed.notify_all();
+
+        if operation == "run_enhanced_micro_rumination" {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !state.release_rumination {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    state.auto_released = true;
+                    break;
+                };
+                let (next, result) = self
+                    .changed
+                    .wait_timeout(state, remaining)
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state = next;
+                if result.timed_out() && !state.release_rumination {
+                    state.auto_released = true;
+                    break;
+                }
+            }
+        }
+
+        Ok("{}".to_string())
+    }
+}
+
 /// 定位示例 memory wasm 组件文件。
 fn memory_wasm_path() -> PathBuf {
     if let Ok(p) = std::env::var("MEMORY_WASM_PATH") {
@@ -406,6 +493,83 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     assert_eq!(turn["user_input"], "测试用户输入");
     assert_eq!(turn["turn_messages"][0]["role"], "user");
     assert_eq!(turn["turn_id"].as_str().map(str::len), Some(25));
+}
+
+#[test]
+#[ignore = "耗时故障诊断，仅在手动复测运行中追加消息阻塞时执行"]
+fn detached_turn_finish_releases_caller_but_holds_wasm_instance_lock() {
+    let sidecar = Arc::new(BlockingMemorySidecar::default());
+    let Some(wasm) = wasm_or_skip() else {
+        return;
+    };
+    let config = PluginRuntimeConfig::default();
+    let loader =
+        WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
+    let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
+    let adapter = Arc::new(WasmPluginAdapter::new(plugin, config));
+    let mut session = test_session_with_user_message();
+
+    let turn_finish_started = Instant::now();
+    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    let turn_finish_elapsed = turn_finish_started.elapsed();
+    let rumination_entered =
+        sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1));
+
+    let (config_started_tx, config_started_rx) = std::sync::mpsc::sync_channel(1);
+    let (config_finished_tx, config_finished_rx) = std::sync::mpsc::sync_channel(1);
+    let config_adapter = Arc::clone(&adapter);
+    let config_thread = std::thread::spawn(move || {
+        let started = Instant::now();
+        let _ = config_started_tx.send(());
+        <WasmPluginAdapter as Plugin>::on_config_updated(&config_adapter, &CoreConfig::default());
+        let _ = config_finished_tx.send(started.elapsed());
+    });
+    let config_started = config_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .is_ok();
+    let blocked_result = config_finished_rx.recv_timeout(Duration::from_millis(250));
+    let config_was_blocked = matches!(
+        &blocked_result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+
+    sidecar.release_rumination();
+    let config_elapsed = match blocked_result {
+        Ok(elapsed) => elapsed,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => config_finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("释放慢 sidecar 后配置通知应在 2 秒内完成"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("配置通知线程在返回结果前断开")
+        }
+    };
+    config_thread.join().expect("配置通知线程不应异常退出");
+
+    assert!(
+        turn_finish_elapsed < Duration::from_secs(1),
+        "异步轮次收尾应在 1 秒内返回，实际耗时 {turn_finish_elapsed:?}"
+    );
+    assert!(
+        rumination_entered,
+        "后台轮次收尾应在 1 秒内进入真实 sidecar"
+    );
+    assert!(config_started, "同步配置通知线程应在 1 秒内开始调用");
+    assert!(
+        config_was_blocked,
+        "后台收尾持有 WASM 实例锁时，同步配置通知不应提前完成"
+    );
+    assert!(
+        config_elapsed >= Duration::from_millis(250),
+        "同步配置通知应等待后台收尾释放实例锁，实际耗时 {config_elapsed:?}"
+    );
+    assert!(
+        sidecar.wait_for_call("reconfigure", Duration::from_millis(100)),
+        "释放后台收尾后应完成真实 reconfigure 调用"
+    );
+    assert!(
+        !sidecar.auto_released(),
+        "测试必须由显式释放完成，不能依赖 10 秒自动释放上限"
+    );
 }
 
 #[test]

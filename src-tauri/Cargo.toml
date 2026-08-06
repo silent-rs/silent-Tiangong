@@ -63,6 +63,7 @@ wry = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }
 
 [build-dependencies]
 tauri-build = { workspace = true, features = [] }

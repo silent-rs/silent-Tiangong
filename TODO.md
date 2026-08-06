@@ -1144,3 +1144,31 @@ Memory 作为「重型、带 sidecar」的样板已迁移完成。按「从难�
 - Index 与 Scheduler 动态插件页的功能、信息和主要交互与迁移前页面一致。
 - 改动范围仅包含 `PLAN.md`、`TODO.md` 及两个插件目录。
 - 两个 WASM 组件和插件制品可正常构建。
+
+# 运行中追加消息阻塞复现 TODO
+
+## 集成测试
+
+- [x] 构造可控的同步慢 `on_turn_finished` 原生测试插件，建立 Core 面对阻塞插件时的容错基线；该结果不用于判断当前 WASM 插件是否仍会阻塞旧回复。
+- [x] 验证运行中追加消息在等待旧回复取消 5 秒后超时，并进入 Core 清理等待。
+- [x] 验证清理等待期间 Core 已从当前会话移除，当前会话无法再次发送消息。
+- [x] 验证取消命令会等待同一个会话发送边界，无法解除清理等待。
+- [x] 验证切换行为：重新打开故障会话会等待 Core 创建锁，其他会话的后端创建不受影响；前端一次未结束的切换会阻塞后续串行切换。
+- [x] 所有并发操作和测试清理均使用有限等待，释放慢插件后能够完整退出测试进程。
+
+## 真实插件路径验证
+
+- [x] 使用真实 Memory WASM 验证 `on_turn_finished` 在后台收尾阻塞时仍能及时返回，并确认慢 sidecar 调用确实已经开始。
+- [x] 验证 Memory WASM 后台收尾与下一轮同步配置通知共享插件实例锁，后者会等待到慢 sidecar 调用释放。
+- [x] 使用真实 Agent Team 子 Core 验证父会话结束会同步等待子插件的慢 `on_session_ended`，并在释放后完整退出。
+- [x] 核对本机实际日志，确认三次 5 秒超时均早于 WASM 收尾异步化提交，当前版本日志尚未再次出现同类超时。
+- [x] 所有真实路径测试均设置内部自动释放上限和外部命令期限，不依赖自动释放完成成功断言。
+- [x] 已区分三个阻塞阶段：当前 Memory WASM 的慢 sidecar 调用不会直接造成旧 turn 超过 5 秒，后台收尾会阻塞下一轮同步插件准备，Agent Team 会同步拖住失败清理；本任务未修改生产行为。
+- [x] 三项耗时故障诊断测试默认标记为忽略，避免 CI 重复执行；保留以下手动复测入口：
+
+```sh
+cargo build -p tiangong-plugin-memory-wasm --target wasm32-wasip2
+cargo test -p tiangong-plugin-runtime --test load_and_call detached_turn_finish_releases_caller_but_holds_wasm_instance_lock -- --ignored --exact --nocapture
+cargo test -p tiangong-plugin-agent-team --lib adapter::tests::parent_shutdown_waits_for_child_session_ended_hook -- --ignored --exact --nocapture
+cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_append_cleanup_and_same_session_stall -- --ignored --exact --nocapture
+```

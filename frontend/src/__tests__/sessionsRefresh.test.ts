@@ -277,4 +277,35 @@ describe('loadSessions refresh contract', () => {
     await ordinaryLoad;
     expect(useStore.getState().isLoadingSessions).toBe(false);
   });
+
+  it('一次未结束的后端切换会阻塞串行队列中的后续会话切换', async () => {
+    const stalledBackendSwitch = deferred<void>();
+    switchSessionMock
+      .mockReturnValueOnce(stalledBackendSwitch.promise)
+      .mockResolvedValueOnce(undefined);
+    loadSessionMock.mockImplementation(async (id: string) => loadedSession(id));
+
+    const stalledSwitch = useStore.getState().switchSession('stalled-session');
+    await vi.waitFor(() => {
+      expect(switchSessionMock).toHaveBeenCalledWith('stalled-session');
+    });
+
+    const healthySwitch = useStore.getState().switchSession('healthy-session');
+    let healthySettled = false;
+    void healthySwitch.finally(() => {
+      healthySettled = true;
+    });
+
+    try {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+      expect(healthySettled).toBe(false);
+      expect(switchSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      stalledBackendSwitch.resolve();
+      await Promise.allSettled([stalledSwitch, healthySwitch]);
+    }
+
+    expect(switchSessionMock).toHaveBeenNthCalledWith(2, 'healthy-session');
+    expect(useStore.getState().activeSessionId).toBe('healthy-session');
+  });
 });
