@@ -280,6 +280,13 @@ impl ProcessSidecarConnection {
         Ok(())
     }
 
+    /// 只读取 endpoint 文件判断 sidecar 是否已有运行记录，不发起网络连接或健康检查。
+    ///
+    /// 插件管理页状态查询必须保持纯读取，不能因为展示状态而触发 sidecar 业务。
+    pub fn has_runtime_endpoint(&self) -> bool {
+        self.config.endpoint.is_file()
+    }
+
     pub fn is_running(&self) -> bool {
         self.health_check().is_ok()
     }

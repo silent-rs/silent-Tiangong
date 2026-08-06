@@ -38,6 +38,10 @@ import { useToast } from './Toast';
 
 type Props = {
   onContributionsChanged: (entries: PluginContributionEntry[]) => void;
+  initialPlugins: PluginStatus[];
+  initialAvailable: AvailablePlugin[];
+  initialCatalogError: string | null;
+  onRefreshStateChange: (refreshing: boolean) => void;
 };
 
 type Operation =
@@ -65,15 +69,27 @@ const stateLabel: Record<PluginStatus['state'], string> = {
 const PLUGIN_DEVELOPMENT_DOC_URL =
   'https://github.com/silent-rs/silent-Tiangong/blob/main/docs/plugin-development.md';
 
-export function PluginManagerSettings({ onContributionsChanged }: Props) {
-  const [plugins, setPlugins] = useState<PluginStatus[]>([]);
-  const [available, setAvailable] = useState<AvailablePlugin[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [catalogError, setCatalogError] = useState<string | null>(null);
+export function PluginManagerSettings({
+  onContributionsChanged,
+  initialPlugins,
+  initialAvailable,
+  initialCatalogError,
+  onRefreshStateChange,
+}: Props) {
+  const [plugins, setPlugins] = useState<PluginStatus[]>(initialPlugins);
+  const [available, setAvailable] = useState<AvailablePlugin[]>(initialAvailable);
+  const [loading, setLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(initialCatalogError);
   const [activeOperation, setActiveOperation] = useState<ActiveOperation | null>(null);
   const [uninstallTarget, setUninstallTarget] = useState<PluginStatus | null>(null);
   const [keepData, setKeepData] = useState(true);
   const { showError, showSuccess } = useToast();
+
+  useEffect(() => {
+    setPlugins(initialPlugins);
+    setAvailable(initialAvailable);
+    setCatalogError(initialCatalogError);
+  }, [initialAvailable, initialCatalogError, initialPlugins]);
 
   const refreshContributions = useCallback(async () => {
     const contributions = await api.listPluginContributions();
@@ -82,27 +98,28 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const [installedResult, availableResult] = await Promise.allSettled([
-      api.listPlugins(),
-      api.listAvailablePlugins(),
-    ]);
-    if (installedResult.status === 'fulfilled') {
-      setPlugins(installedResult.value);
-    } else {
-      showError('读取失败', String(installedResult.reason));
+    onRefreshStateChange(true);
+    try {
+      const [installedResult, availableResult] = await Promise.allSettled([
+        api.listPlugins(),
+        api.listAvailablePlugins(),
+      ]);
+      if (installedResult.status === 'fulfilled') {
+        setPlugins(installedResult.value);
+      } else {
+        showError('读取失败', String(installedResult.reason));
+      }
+      if (availableResult.status === 'fulfilled') {
+        setAvailable(availableResult.value);
+        setCatalogError(null);
+      } else {
+        setCatalogError(String(availableResult.reason));
+      }
+    } finally {
+      setLoading(false);
+      onRefreshStateChange(false);
     }
-    if (availableResult.status === 'fulfilled') {
-      setAvailable(availableResult.value);
-      setCatalogError(null);
-    } else {
-      setCatalogError(String(availableResult.reason));
-    }
-    setLoading(false);
-  }, [showError]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  }, [onRefreshStateChange, showError]);
 
   const availableById = useMemo(
     () => new Map(available.map((plugin) => [plugin.id, plugin])),
@@ -340,19 +357,6 @@ export function PluginManagerSettings({ onContributionsChanged }: Props) {
             )}
           </TabsContent>
         </Tabs>
-        {loading && (
-          <div
-            className="absolute inset-0 z-50 flex items-center justify-center bg-background/75 backdrop-blur-[1px]"
-            role="status"
-            aria-live="polite"
-            aria-label="正在刷新插件状态"
-          >
-            <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm shadow-lg">
-              <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              正在刷新插件目录和运行状态…
-            </div>
-          </div>
-        )}
       </div>
 
       <Dialog open={uninstallTarget !== null} onOpenChange={(open) => !open && setUninstallTarget(null)}>

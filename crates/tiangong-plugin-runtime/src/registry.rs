@@ -309,78 +309,52 @@ pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec
 /// 返回已安装插件状态，并探测 sidecar 当前是否可用。
 ///
 /// `runtime` 用于判断插件是否可在当前入口注册工具，填充 `unavailable_reason`。
-pub fn list_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
-    let installed = discover_installed_plugins(storage_root);
+pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
     let configured = configured_model_capabilities();
-    let snapshots = {
-        let Ok(plugins) = loaded_plugins().lock() else {
-            return Vec::new();
-        };
-        installed
-            .into_iter()
-            .map(|item| {
-                let status = plugins.get(&item.manifest.id).map(|loaded| {
-                    (
-                        loaded.descriptor.clone(),
-                        loaded.generation,
-                        loaded.sidecar.clone(),
-                        loaded.last_error.clone(),
-                        loaded.ui_plugin.is_some(),
-                        loaded.enabled,
-                        loaded.directory.clone(),
-                    )
-                });
-                (item, status)
-            })
-            .collect::<Vec<_>>()
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return Vec::new();
     };
-
-    let mut statuses = snapshots
-        .into_iter()
-        .map(|(installed, loaded)| {
-            let manifest = installed.manifest;
-            let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = loaded
-                .unwrap_or((
-                    None,
-                    0,
-                    None,
-                    None,
-                    false,
-                    installed.enabled,
-                    installed.directory,
-                ));
-            let sidecar_running = sidecar
+    let mut statuses = plugins
+        .values()
+        .map(|loaded| {
+            let manifest = &loaded.manifest;
+            let sidecar_running = loaded
+                .sidecar
                 .as_ref()
-                .is_some_and(|connection| connection.is_running());
-            let state = if !enabled {
+                .is_some_and(|connection| connection.has_runtime_endpoint());
+            let state = if !loaded.enabled {
                 "disabled"
-            } else if !has_ui {
+            } else if loaded.ui_plugin.is_none() {
                 "error"
-            } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
+            } else if loaded.last_error.is_some() {
                 "degraded"
             } else {
                 "loaded"
             };
             PluginStatus {
-                unavailable_reason: if enabled {
-                    check_plugin_availability(&manifest, runtime, &configured)
+                unavailable_reason: if loaded.enabled {
+                    check_plugin_availability(manifest, runtime, &configured)
                 } else {
                     None
                 },
                 id: manifest.id.clone(),
-                name: descriptor
+                name: loaded
+                    .descriptor
                     .as_ref()
                     .map(|value| value.name.clone())
                     .unwrap_or_else(|| manifest.id.clone()),
-                manifest_version: manifest.version,
-                loaded_version: descriptor.map(|value| value.version),
+                manifest_version: manifest.version.clone(),
+                loaded_version: loaded
+                    .descriptor
+                    .as_ref()
+                    .map(|value| value.version.clone()),
                 state: state.to_string(),
-                generation,
-                enabled,
-                can_rollback: rollback_directory(&directory, &manifest.id).is_dir(),
+                generation: loaded.generation,
+                enabled: loaded.enabled,
+                can_rollback: rollback_directory(&loaded.directory, &manifest.id).is_dir(),
                 has_sidecar: manifest.sidecar.is_some(),
                 sidecar_running,
-                last_error,
+                last_error: loaded.last_error.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -767,7 +741,7 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     };
     let sidecar_running = sidecar
         .as_ref()
-        .is_some_and(|connection| connection.is_running());
+        .is_some_and(|connection| connection.has_runtime_endpoint());
     let state = if !enabled {
         "disabled"
     } else if !has_ui {
