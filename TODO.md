@@ -210,7 +210,7 @@
 - [ ] Memory sidecar 改用 Host 模型代理替换直接模型调用。
 - [x] 修复会话和工作区上下文（显式携带 session_id、workspace_id、turn_id）。
 - [x] 修复 Micro/Meso/Meta 反刍请求，恢复原版完整轮次提取和每 10 轮整理。
-- [x] 收尾钩子（`on_turn_finished` / `on_session_ended`）改为 fire-and-forget 投递，记忆反刍通知不再阻塞回复收尾关键路径。
+- [x] 收尾钩子（`on_turn_finished` / `on_session_ended`）改为 fire-and-forget 投递，不保存后台线程句柄，记忆反刍通知不再阻塞回复收尾关键路径或持续占用已结束线程资源。
 - [x] 保持原有 `~/.tiangong/memory` 数据、配置、索引和注入目录，不迁移到插件目录。
 - [x] Memory UI 改走新链路。
 - [x] 配置只保存逻辑模型键，不保存 API Key / Base URL。

@@ -38,12 +38,6 @@ pub struct WasmPluginAdapter {
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
     enabled: AtomicBool,
-    /// fire-and-forget 生命周期钩子的后台线程句柄。
-    ///
-    /// `on_turn_finished` / `on_session_ended` 投递到独立线程后立即返回，句柄存于此。
-    /// 生产路径不等待（这些钩子是 agent 对插件的单向收尾通知，发出即结束）；
-    /// [`join_pending_hooks`](Self::join_pending_hooks) 仅用于测试确定性地等待后台投递。
-    pending_hooks: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Clone, Default)]
@@ -76,7 +70,6 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
-            pending_hooks: Mutex::new(Vec::new()),
         }
     }
 
@@ -94,7 +87,6 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
-            pending_hooks: Mutex::new(Vec::new()),
         }
     }
 
@@ -104,24 +96,6 @@ impl WasmPluginAdapter {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
-    }
-
-    /// 等待所有 fire-and-forget 生命周期钩子（`on_turn_finished` / `on_session_ended`）
-    /// 的后台投递完成。
-    ///
-    /// 生产路径不调用本方法——这些钩子是 agent 对插件的单向收尾通知，发出即结束，
-    /// agent 不等回执。本方法仅供测试在断言前确定性地等待后台投递，避免 sleep。
-    pub fn join_pending_hooks(&self) {
-        let handles = self
-            .pending_hooks
-            .lock()
-            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
-            .unwrap_or_default();
-        for handle in handles {
-            if let Err(payload) = handle.join() {
-                tracing::warn!(plugin_id = %self.id, "wasm 钩子后台线程异常: {payload:?}");
-            }
-        }
     }
 
     /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
@@ -405,7 +379,7 @@ impl WasmPluginAdapter {
         let inner = self.current_inner();
         let plugin_id = self.id.clone();
         let hook_thread_id = plugin_id.clone();
-        match std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name(format!("wasm-hook-{plugin_id}-{hook}"))
             .spawn(move || {
                 if let Err(error) =
@@ -415,10 +389,7 @@ impl WasmPluginAdapter {
                 }
             })
         {
-            Ok(handle) => self.track_pending_hook(handle),
-            Err(error) => {
-                tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
-            }
+            tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
         }
     }
 
@@ -448,7 +419,7 @@ impl WasmPluginAdapter {
         let plugin_id = self.id.clone();
         let hook_thread_id = plugin_id.clone();
         let idx = turn_start_idx as u32;
-        match std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name(format!("wasm-hook-{plugin_id}-{hook}"))
             .spawn(move || {
                 if let Err(error) =
@@ -458,18 +429,7 @@ impl WasmPluginAdapter {
                 }
             })
         {
-            Ok(handle) => self.track_pending_hook(handle),
-            Err(error) => {
-                tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
-            }
-        }
-    }
-
-    /// 记录一个待回收的后台钩子句柄，供 [`join_pending_hooks`](Self::join_pending_hooks)
-    /// 在会话关闭前统一等待。
-    fn track_pending_hook(&self, handle: std::thread::JoinHandle<()>) {
-        if let Ok(mut pending) = self.pending_hooks.lock() {
-            pending.push(handle);
+            tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
         }
     }
 }
