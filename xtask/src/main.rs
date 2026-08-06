@@ -168,6 +168,12 @@ fn main() {
         [command, plugin] if command == "validate-plugin" => {
             plugin_config(plugin).and_then(|config| validate_versions(&workspace_root(), &config))
         }
+        [command, plugin, output] if command == "build-plugin-wasm" => {
+            match plugin_config(plugin) {
+                Ok(config) => build_plugin_wasm(&config, Path::new(output)),
+                Err(error) => Err(error),
+            }
+        }
         [command, plugin] if command == "build-plugin" => match plugin_config(plugin) {
             Ok(config) => build_plugin(&config),
             Err(error) => Err(error),
@@ -215,6 +221,7 @@ fn print_help() {
     eprintln!("用法:");
     eprintln!("  cargo run -p xtask -- list-plugins");
     eprintln!("  cargo run -p xtask -- validate-plugin <id>");
+    eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
     eprintln!("  cargo run -p xtask -- build-plugin <id>");
     eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
     eprintln!(
@@ -252,28 +259,33 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
         ],
     )?;
     eprintln!("[xtask] 构建 {plugin_name} WASM...");
-    run_cargo(
-        &workspace_root,
-        &[
-            "build",
-            "-p",
-            &config.wasm_crate,
-            "--target",
-            WASM_TARGET,
-            "--release",
-        ],
-    )?;
+    let prebuilt_wasm = std::env::var_os("TIANGONG_PLUGIN_PREBUILT_WASM").map(PathBuf::from);
+    if prebuilt_wasm.is_none() {
+        run_cargo(
+            &workspace_root,
+            &[
+                "build",
+                "-p",
+                &config.wasm_crate,
+                "--target",
+                WASM_TARGET,
+                "--release",
+            ],
+        )?;
+    }
     eprintln!("[xtask] 构建 {plugin_name} sidecar...");
     run_cargo(
         &workspace_root,
         &["build", "-p", &config.sidecar_crate, "--release"],
     )?;
 
-    let wasm = workspace_root
-        .join("target")
-        .join(WASM_TARGET)
-        .join("release")
-        .join(&config.wasm_artifact);
+    let wasm = prebuilt_wasm.unwrap_or_else(|| {
+        workspace_root
+            .join("target")
+            .join(WASM_TARGET)
+            .join("release")
+            .join(&config.wasm_artifact)
+    });
     let sidecar = workspace_root.join("target").join("release").join(format!(
         "{}{}",
         config.sidecar_artifact,
@@ -1037,5 +1049,33 @@ fn merge_plugin_catalog(
         "[xtask] 已将插件 {incoming_id}@{incoming_version} 合并到目录: {}",
         output_catalog.display()
     );
+    Ok(())
+}
+
+fn build_plugin_wasm(config: &PluginConfig, output: &Path) -> io::Result<()> {
+    let workspace_root = workspace_root();
+    validate_versions(&workspace_root, config)?;
+    run_cargo(
+        &workspace_root,
+        &[
+            "build",
+            "-p",
+            &config.wasm_crate,
+            "--target",
+            WASM_TARGET,
+            "--release",
+        ],
+    )?;
+    let built = workspace_root
+        .join("target")
+        .join(WASM_TARGET)
+        .join("release")
+        .join(&config.wasm_artifact);
+    require_file(&built)?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&built, output)?;
+    eprintln!("[xtask] 已生成共享 WASM: {}", output.display());
     Ok(())
 }

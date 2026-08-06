@@ -42,9 +42,31 @@ jobs:
           fi
           echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
 
+  build-wasm:
+    name: Build shared WASM
+    needs: resolve-plugin
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Build deterministic shared WASM
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: cargo run -p xtask -- build-plugin-wasm "$PLUGIN_ID" "target/shared-wasm/${PLUGIN_ID}.wasm"
+      - name: Upload shared WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
+          if-no-files-found: error
+          retention-days: 7
   build-plugin:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
-    needs: resolve-plugin
+    needs: [resolve-plugin, build-wasm]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -73,6 +95,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli
+      - name: Download shared WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-wasm
       - name: Validate plugin from repository configuration
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
@@ -135,6 +162,7 @@ jobs:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TIANGONG_PLUGIN_PREBUILT_WASM: ${{ github.workspace }}/target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
         run: cargo run -p xtask -- build-plugin "$PLUGIN_ID"
 
       - name: Verify platform output
