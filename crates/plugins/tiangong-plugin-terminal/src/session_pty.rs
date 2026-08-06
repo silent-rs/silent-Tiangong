@@ -18,6 +18,12 @@ use crate::session_store::{TerminalSessionPersisted, TerminalSessionStore, Termi
 use crate::types::TerminalCommand;
 use crate::util::shell_quote;
 
+const EXEC_RESPONSE_GRACE_SECS: u64 = 5;
+
+fn exec_response_wait_secs(timeout_secs: u64) -> u64 {
+    timeout_secs.saturating_add(EXEC_RESPONSE_GRACE_SECS)
+}
+
 /// 单个对话的 PTY 槽位
 #[derive(Clone)]
 pub struct SessionPty {
@@ -35,6 +41,8 @@ pub struct SessionTabs {
     pub tabs: Mutex<HashMap<String, SessionPty>>,
     pub active_tab_id: Mutex<Option<String>>,
     pub activity: Arc<TerminalActivityTracker>,
+    /// 同一会话内，终端的空闲检查和命令占用必须是一个原子步骤。
+    command_selection: Mutex<()>,
 }
 
 impl SessionTabs {
@@ -43,6 +51,7 @@ impl SessionTabs {
             tabs: Mutex::new(HashMap::new()),
             active_tab_id: Mutex::new(None),
             activity: Arc::new(TerminalActivityTracker::new()),
+            command_selection: Mutex::new(()),
         }
     }
 
@@ -97,6 +106,17 @@ fn parse_terminal_id(value: &str) -> Option<TerminalRoute> {
 
 fn terminal_instance_id(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}:{tab_id}")
+}
+
+fn compare_terminal_order(
+    left_created_at: &str,
+    left_id: &str,
+    right_created_at: &str,
+    right_id: &str,
+) -> std::cmp::Ordering {
+    left_created_at
+        .cmp(right_created_at)
+        .then_with(|| left_id.cmp(right_id))
 }
 
 fn sanitize_path_segment(value: &str) -> String {
@@ -279,7 +299,12 @@ impl SessionPtyRegistry {
     /// `cmd_tx` 失效），会先销毁陈旧条目再重建，避免复用死掉的 PTY 导致
     /// 「终端未就绪」（草稿态固定 id 复用场景的根因，见 issue #156 后续修复）。
     pub fn ensure(&self, terminal_id: &str, cwd: &str) -> bool {
-        self.ensure_with_title(terminal_id, cwd, None, true)
+        self.ensure_with_title(terminal_id, cwd, None, true, false)
+    }
+
+    /// Agent 明确执行新命令或用户主动重置时允许恢复失效 PTY。
+    pub fn recover(&self, terminal_id: &str, cwd: &str) -> bool {
+        self.ensure_with_title(terminal_id, cwd, None, true, true)
     }
 
     fn ensure_with_title(
@@ -288,6 +313,7 @@ impl SessionPtyRegistry {
         cwd: &str,
         title: Option<String>,
         activate: bool,
+        allow_dead_recovery: bool,
     ) -> bool {
         let Some(route) = parse_terminal_id(terminal_id) else {
             return false;
@@ -323,6 +349,9 @@ impl SessionPtyRegistry {
                     }
                     self.persist_session_metadata(&route.session_id);
                     return true;
+                }
+                Some(_) if !allow_dead_recovery => {
+                    return false;
                 }
                 Some(_) => {
                     tabs.remove(&tab_id);
@@ -377,6 +406,9 @@ impl SessionPtyRegistry {
                 for line in &tail {
                     output_processor::backfill_line(&mut state, line.clone());
                 }
+                // 恢复 Core / PTY 时，磁盘历史已经属于旧上下文，不应作为新增消息
+                // 再次注入 Agent；游标直接落到回填后的末尾，只推送恢复后新产生的输出。
+                state.agent_injection_cursor = state.total_lines_pushed;
                 drop(state);
             }
             manager.set_logger(Arc::new(logger));
@@ -517,7 +549,8 @@ impl SessionPtyRegistry {
                 .or(active_tab_id);
         }
         let mut tab_infos = tab_infos.into_values().collect::<Vec<_>>();
-        tab_infos.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        tab_infos
+            .sort_by(|a, b| compare_terminal_order(&a.created_at, &a.id, &b.created_at, &b.id));
         let active_tab_id = active_tab_id
             .filter(|active| tab_infos.iter().any(|tab| tab.id == *active))
             .or_else(|| tab_infos.first().map(|tab| tab.id.clone()));
@@ -536,24 +569,49 @@ impl SessionPtyRegistry {
     /// **纯读取，绝不创建 PTY**：全程不调 `ensure` 或 `TerminalProvider` 的懒创建
     /// 方法（`recent_output`/`current_cwd` 会触发 `ensure`）。仅用 registry 层的
     /// `list_tabs` + `get`（返回 None 不创建）+ manager 层的 `recent_output`。
+    pub fn baseline_agent_injection(&self, session_id: &str) {
+        let Some(session_tabs) = self.existing_session_tabs(session_id) else {
+            return;
+        };
+        let managers = session_tabs
+            .tabs
+            .lock()
+            .unwrap()
+            .values()
+            .map(|slot| Arc::clone(&slot.manager))
+            .collect::<Vec<_>>();
+        for manager in managers {
+            manager.baseline_agent_injection();
+        }
+    }
+
     pub fn snapshot_for_injection(
         &self,
         session_id: &str,
-    ) -> crate::collaboration::TerminalStateData {
+    ) -> (
+        crate::collaboration::TerminalStateData,
+        Vec<(Arc<TerminalManager>, usize)>,
+    ) {
         const INJECT_OUTPUT_LINES: usize = 40;
         let tab_list = self.list_tabs(session_id);
+        let mut commits = Vec::new();
         let tabs = tab_list
             .tabs
             .into_iter()
             .map(|info| {
-                let recent_output = if info.alive {
-                    let terminal_id = terminal_instance_id(session_id, &info.id);
-                    self.get(&terminal_id)
-                        .map(|slot| slot.manager.recent_output(INJECT_OUTPUT_LINES))
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let (recent_output, output_cursor_start, output_cursor_end, output_truncated) =
+                    if info.alive {
+                        let terminal_id = terminal_instance_id(session_id, &info.id);
+                        if let Some(slot) = self.get(&terminal_id) {
+                            let pending = slot.manager.pending_agent_output(INJECT_OUTPUT_LINES);
+                            commits.push((Arc::clone(&slot.manager), pending.2));
+                            pending
+                        } else {
+                            (String::new(), 0, 0, false)
+                        }
+                    } else {
+                        (String::new(), 0, 0, false)
+                    };
                 crate::collaboration::TerminalTabSnapshot {
                     id: info.id,
                     title: info.title,
@@ -562,13 +620,19 @@ impl SessionPtyRegistry {
                     phase: info.phase,
                     alive: info.alive,
                     recent_output,
+                    output_cursor_start,
+                    output_cursor_end,
+                    output_truncated,
                 }
             })
             .collect();
-        crate::collaboration::TerminalStateData {
-            tabs,
-            active_tab_id: tab_list.active_tab_id,
-        }
+        (
+            crate::collaboration::TerminalStateData {
+                tabs,
+                active_tab_id: tab_list.active_tab_id,
+            },
+            commits,
+        )
     }
 
     pub fn tab_new(
@@ -583,7 +647,7 @@ impl SessionPtyRegistry {
         let tab_id = scru128::new().to_string();
         let terminal_id = terminal_instance_id(session_id, &tab_id);
         let cwd = cwd.unwrap_or_default();
-        if !self.ensure_with_title(&terminal_id, &cwd, title, true) {
+        if !self.ensure_with_title(&terminal_id, &cwd, title, true, true) {
             return Err(format!("终端 Tab PTY 启动失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.clone()), "user");
@@ -602,7 +666,7 @@ impl SessionPtyRegistry {
         }
         let terminal_id = terminal_instance_id(session_id, tab_id);
         let cwd = cwd.unwrap_or_default();
-        if !self.ensure_with_title(&terminal_id, &cwd, title, false) {
+        if !self.ensure_with_title(&terminal_id, &cwd, title, false, false) {
             return Err(format!("终端 Tab PTY 恢复失败：{session_id}:{tab_id}"));
         }
         self.emit_tab_updated(session_id, Some(tab_id.to_string()), "restore");
@@ -640,72 +704,79 @@ impl SessionPtyRegistry {
     ) -> Option<crate::capability::TerminalSelection> {
         let route = parse_terminal_id(session_id)?;
         let session_tabs = self.session_tabs(&route.session_id);
-
-        if let Some(tab_id) = route.tab_id {
+        let _selection_guard = session_tabs.command_selection.lock().ok()?;
+        let reserve = |tab_id: String,
+                       slot: &SessionPty,
+                       created_new: bool,
+                       reason: crate::capability::TerminalSelectionReason| {
             let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
-            let slot = self.get(&terminal_id);
-            if let Some(slot) = slot {
-                if slot.manager.is_alive() {
-                    if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
+            crate::capability::TerminalSelection::reserve(
+                route.session_id.clone(),
+                tab_id,
+                terminal_id,
+                created_new,
+                reason,
+                Arc::clone(&slot.activity),
+            )
+        };
+
+        if let Some(tab_id) = route.tab_id.clone() {
+            let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
+            match self.get(&terminal_id) {
+                Some(slot) if slot.manager.is_alive() => {
+                    if let Some(selection) = reserve(
+                        tab_id.clone(),
+                        &slot,
+                        false,
+                        crate::capability::TerminalSelectionReason::ReusedIdle,
+                    ) {
                         session_tabs.set_active_tab(tab_id.clone());
                         self.persist_session_metadata(&route.session_id);
-                        self.emit_tab_updated(
-                            &route.session_id,
-                            Some(tab_id.clone()),
-                            "agent_command",
-                        );
-                        return Some(crate::capability::TerminalSelection {
-                            session_id: route.session_id,
-                            tab_id,
-                            terminal_id,
-                            created_new: false,
-                            reason: crate::capability::TerminalSelectionReason::ReusedIdle,
-                        });
+                        self.emit_tab_updated(&route.session_id, Some(tab_id), "agent_command");
+                        return Some(selection);
                     }
                     // 指定 Tab 存活但正在忙，避开它，后续走空闲 Tab / 新建 Tab。
-                } else {
-                    if !self.ensure(&terminal_id, "") {
+                }
+                _ => {
+                    if !self.recover(&terminal_id, "") {
                         return None;
                     }
+                    let slot = self.get(&terminal_id)?;
+                    let selection = reserve(
+                        tab_id.clone(),
+                        &slot,
+                        true,
+                        crate::capability::TerminalSelectionReason::NoAvailableTerminal,
+                    )?;
                     session_tabs.set_active_tab(tab_id.clone());
-                    self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                    return Some(crate::capability::TerminalSelection {
-                        session_id: route.session_id,
-                        tab_id,
-                        terminal_id,
-                        created_new: true,
-                        reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
-                    });
+                    self.emit_tab_updated(&route.session_id, Some(tab_id), "agent_command");
+                    return Some(selection);
                 }
-            } else {
-                if !self.ensure(&terminal_id, "") {
-                    return None;
-                }
-                session_tabs.set_active_tab(tab_id.clone());
-                self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-                return Some(crate::capability::TerminalSelection {
-                    session_id: route.session_id,
-                    tab_id,
-                    terminal_id,
-                    created_new: true,
-                    reason: crate::capability::TerminalSelectionReason::NoAvailableTerminal,
-                });
             }
         }
 
         let mut had_live_terminal = false;
         let mut dead_tabs = Vec::new();
-        let mut idle_tab_id = None;
+        let mut idle_selection = None;
         {
             let tabs = session_tabs.tabs.lock().unwrap();
-            for (tab_id, slot) in tabs.iter() {
+            let mut ordered_tabs = tabs.iter().collect::<Vec<_>>();
+            ordered_tabs.sort_by(|(left_id, left), (right_id, right)| {
+                compare_terminal_order(&left.created_at, left_id, &right.created_at, right_id)
+            });
+            for (tab_id, slot) in ordered_tabs {
                 if !slot.manager.is_alive() {
                     dead_tabs.push(tab_id.clone());
                     continue;
                 }
                 had_live_terminal = true;
-                if matches!(slot.activity.busy_state(), TerminalBusyState::Idle) {
-                    idle_tab_id = Some(tab_id.clone());
+                if let Some(selection) = reserve(
+                    tab_id.clone(),
+                    slot,
+                    false,
+                    crate::capability::TerminalSelectionReason::ReusedIdle,
+                ) {
+                    idle_selection = Some(selection);
                     break;
                 }
             }
@@ -718,17 +789,15 @@ impl SessionPtyRegistry {
             }
         }
 
-        if let Some(tab_id) = idle_tab_id {
-            session_tabs.set_active_tab(tab_id.clone());
+        if let Some(selection) = idle_selection {
+            session_tabs.set_active_tab(selection.tab_id.clone());
             self.persist_session_metadata(&route.session_id);
-            self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-            return Some(crate::capability::TerminalSelection {
-                session_id: route.session_id.clone(),
-                tab_id: tab_id.clone(),
-                terminal_id: terminal_instance_id(&route.session_id, &tab_id),
-                created_new: false,
-                reason: crate::capability::TerminalSelectionReason::ReusedIdle,
-            });
+            self.emit_tab_updated(
+                &route.session_id,
+                Some(selection.tab_id.clone()),
+                "agent_command",
+            );
+            return Some(selection);
         }
 
         let reason = if had_live_terminal {
@@ -738,18 +807,14 @@ impl SessionPtyRegistry {
         };
         let tab_id = scru128::new().to_string();
         let terminal_id = terminal_instance_id(&route.session_id, &tab_id);
-        if !self.ensure(&terminal_id, "") {
+        if !self.recover(&terminal_id, "") {
             return None;
         }
+        let slot = self.get(&terminal_id)?;
+        let selection = reserve(tab_id.clone(), &slot, true, reason)?;
         session_tabs.set_active_tab(tab_id.clone());
         self.emit_tab_updated(&route.session_id, Some(tab_id.clone()), "agent_command");
-        Some(crate::capability::TerminalSelection {
-            session_id: route.session_id,
-            tab_id,
-            terminal_id,
-            created_new: true,
-            reason,
-        })
+        Some(selection)
     }
 
     /// 销毁指定 session 或终端 Tab 的 PTY（drop cmd_tx → 命令循环退出 → 子进程终止）。
@@ -857,39 +922,24 @@ impl SessionAwareTerminalProvider {
         Self { registry }
     }
 
-    /// 获取指定 session 的 cmd_tx（懒创建）
-    fn tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
+    /// 获取指定 session 的现有存活 PTY；读取和输入不得隐式恢复已退出终端。
+    fn slot(&self, session_id: &str) -> Option<SessionPty> {
         if session_id.trim().is_empty() {
             return None;
         }
-        // 懒创建：若不存在则用 default cwd 创建
-        if self.registry.get(session_id).is_none() {
-            let default_cwd = self
-                .registry
-                .default_cwd
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            self.registry.ensure(session_id, &default_cwd);
-        }
-        self.registry.get(session_id).map(|s| s.cmd_tx)
+        self.registry
+            .get(session_id)
+            .filter(|slot| slot.manager.is_alive())
+    }
+
+    /// 获取指定 session 的 cmd_tx（懒创建）
+    fn tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
+        self.slot(session_id).map(|slot| slot.cmd_tx)
     }
 
     /// 获取指定 session 的 manager（懒创建）
     fn manager(&self, session_id: &str) -> Option<Arc<TerminalManager>> {
-        if session_id.trim().is_empty() {
-            return None;
-        }
-        if self.registry.get(session_id).is_none() {
-            let default_cwd = self
-                .registry
-                .default_cwd
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            self.registry.ensure(session_id, &default_cwd);
-        }
-        self.registry.get(session_id).map(|s| s.manager)
+        self.slot(session_id).map(|slot| slot.manager)
     }
 
     fn interactive_tx(&self, session_id: &str) -> Option<mpsc::Sender<TerminalCommand>> {
@@ -908,7 +958,7 @@ impl SessionAwareTerminalProvider {
         // 2. 回退到 active tab（任意存活状态）：与用户输入路由（registry.get →
         //    active_or_first_tab_id）一致，使 agent 能接手用户已手动启动的交互程序
         //    （ssh/vim/REPL 等）。此前这里返回 None → terminal pty unavailable。
-        self.registry.get(session_id).map(|s| s.cmd_tx)
+        self.tx(session_id)
     }
 }
 
@@ -962,6 +1012,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
             None => return Box::pin(async { None }),
         };
         let command = command.to_string();
+        let response_wait_secs = timeout_secs.map(exec_response_wait_secs);
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
             let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
@@ -982,10 +1033,15 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
                 return None;
             }
             cancel_on_drop.arm();
-            let resp = tokio::time::timeout(std::time::Duration::from_secs(180), response_rx)
-                .await
-                .ok()?
-                .ok()?;
+            let resp = match response_wait_secs {
+                Some(wait_secs) => {
+                    tokio::time::timeout(std::time::Duration::from_secs(wait_secs), response_rx)
+                        .await
+                        .ok()?
+                        .ok()?
+                }
+                None => response_rx.await.ok()?,
+            };
             cancel_on_drop.disarm();
             Some(resp.into())
         })
@@ -1091,7 +1147,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
         let input = input.to_string();
         Box::pin(async move {
             let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-            send_and_wait!(
+            let result: Result<(), String> = send_and_wait!(
                 tx,
                 TerminalCommand::SendInput {
                     input,
@@ -1101,6 +1157,7 @@ impl crate::capability::TerminalProvider for SessionAwareTerminalProvider {
                 response_rx,
                 5
             );
+            result.ok()?;
             Some(())
         })
     }
@@ -1185,6 +1242,24 @@ impl Drop for CancelTerminalExecOnDrop {
 #[cfg(test)]
 mod cancellation_tests {
     use super::*;
+
+    #[test]
+    fn terminal_order_prefers_earlier_created_tab_then_id() {
+        let mut tabs = [
+            ("tab-c", "2026-08-06 09:00:02"),
+            ("tab-b", "2026-08-06 09:00:01"),
+            ("tab-a", "2026-08-06 09:00:01"),
+        ];
+        tabs.sort_by(|left, right| compare_terminal_order(left.1, left.0, right.1, right.0));
+        assert_eq!(tabs.map(|(id, _)| id), ["tab-a", "tab-b", "tab-c"]);
+    }
+
+    #[test]
+    fn exec_response_wait_follows_requested_timeout() {
+        assert_eq!(exec_response_wait_secs(30), 35);
+        assert_eq!(exec_response_wait_secs(3600), 3605);
+        assert_eq!(exec_response_wait_secs(u64::MAX), u64::MAX);
+    }
 
     #[test]
     fn dropping_accepted_exec_waits_for_command_loop_cleanup() {

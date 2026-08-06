@@ -4,6 +4,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+pub(crate) type SharedPtyWriter = Arc<Mutex<Box<dyn std::io::Write + Send>>>;
+
 // Marker 前缀常量
 pub(crate) const MARKER_START: &str = "__TIANGONG_START_";
 pub(crate) const MARKER_END: &str = "__TIANGONG_END_";
@@ -20,7 +22,7 @@ pub(crate) fn contains_marker(text: &str) -> bool {
 
 /// PTY 进程状态（writer/reader/master/child）
 pub(crate) struct PtyState {
-    pub writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    pub writer: SharedPtyWriter,
     pub reader: Arc<Mutex<Box<dyn std::io::Read + Send>>>,
     #[allow(dead_code)]
     pub master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
@@ -59,7 +61,7 @@ pub enum TerminalCommand {
     SendInput {
         input: String,
         source: crate::collaboration::InputSource,
-        response_tx: oneshot::Sender<()>,
+        response_tx: oneshot::Sender<Result<(), String>>,
     },
     /// 交互式输入：向已进入交互态的终端发送按键/文本，等待屏幕变化后返回快照
     SendInteractive {

@@ -11,7 +11,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use crate::collaboration::TerminalActivityTracker;
 use crate::types::TerminalExecResponse;
 
 /// 终端选择结果。
@@ -25,6 +27,27 @@ pub struct TerminalSelection {
     pub terminal_id: String,
     pub created_new: bool,
     pub reason: TerminalSelectionReason,
+    _reservation: Option<Arc<TerminalSelectionReservation>>,
+}
+
+struct TerminalSelectionReservation {
+    activity: Arc<TerminalActivityTracker>,
+    command_id: String,
+}
+
+impl std::fmt::Debug for TerminalSelectionReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalSelectionReservation")
+            .field("command_id", &self.command_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TerminalSelectionReservation {
+    fn drop(&mut self) {
+        self.activity.release_agent_reservation(&self.command_id);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +58,42 @@ pub enum TerminalSelectionReason {
 }
 
 impl TerminalSelection {
+    fn unreserved(session_id: String) -> Self {
+        Self {
+            session_id: session_id.clone(),
+            tab_id: String::new(),
+            terminal_id: session_id,
+            created_new: false,
+            reason: TerminalSelectionReason::ReusedIdle,
+            _reservation: None,
+        }
+    }
+
+    pub(crate) fn reserve(
+        session_id: String,
+        tab_id: String,
+        terminal_id: String,
+        created_new: bool,
+        reason: TerminalSelectionReason,
+        activity: Arc<TerminalActivityTracker>,
+    ) -> Option<Self> {
+        let command_id = format!("reserved-{}", scru128::new());
+        if !activity.try_reserve_agent_command(command_id.clone()) {
+            return None;
+        }
+        Some(Self {
+            session_id,
+            tab_id,
+            terminal_id,
+            created_new,
+            reason,
+            _reservation: Some(Arc::new(TerminalSelectionReservation {
+                activity,
+                command_id,
+            })),
+        })
+    }
+
     pub fn feedback_text(&self) -> String {
         let reason = match self.reason {
             TerminalSelectionReason::ReusedIdle => "复用空闲终端",
@@ -63,15 +122,7 @@ pub trait TerminalProvider: Send + Sync + 'static {
         session_id: &str,
     ) -> Pin<Box<dyn Future<Output = Option<TerminalSelection>> + Send>> {
         let session_id = session_id.to_string();
-        Box::pin(async move {
-            Some(TerminalSelection {
-                session_id: session_id.clone(),
-                tab_id: String::new(),
-                terminal_id: session_id,
-                created_new: false,
-                reason: TerminalSelectionReason::ReusedIdle,
-            })
-        })
+        Box::pin(async move { Some(TerminalSelection::unreserved(session_id)) })
     }
 
     /// 在指定对话的终端会话中执行 shell 脚本（run_shell 用），返回执行结果。

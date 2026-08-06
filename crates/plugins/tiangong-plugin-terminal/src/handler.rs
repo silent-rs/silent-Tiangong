@@ -246,7 +246,6 @@ impl TerminalToolOverride {
                 });
             }
         };
-        let timeout_secs = call.arguments.get("timeout").and_then(|v| v.as_u64());
         // 读取 interactive 标志：Agent 显式声明要启动交互程序。
         // true 时走 exec_interactive 进入 AgentInteractive 态；false 时保持基础终端语义。
         let interactive = call
@@ -254,6 +253,11 @@ impl TerminalToolOverride {
             .get("interactive")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let timeout_secs = call
+            .arguments
+            .get("timeout")
+            .and_then(|v| v.as_u64())
+            .filter(|v| *v > 0);
         // 读取 agent 指定的工作目录（run_shell schema 含 cwd 字段）。
         // 与 run_command_via_pty 一致：cwd 与终端当前目录不同时，把 script
         // 包装成 `cd <cwd> && <script>`，避免命令在错误的目录执行。
@@ -526,11 +530,45 @@ pub struct TerminalPromptSectionProvider;
 
 impl tiangong_core::tool_override::PromptSectionProvider for TerminalPromptSectionProvider {
     fn prompt_sections(&self) -> Vec<String> {
+        #[cfg(target_os = "windows")]
+        let background_command_prompt = "对于服务、监听器等无需持续交互且没有自然结束时间的任务，不要让工具一直等待：在 Windows PowerShell 使用 `Start-Process` 脱手运行，设置 `-WindowStyle Hidden`、`-PassThru`，并用 `-RedirectStandardOutput`、`-RedirectStandardError` 写入两个不同的绝对日志文件；在同一脚本中输出返回对象的 `Id` 进程编号和两条日志路径。不要使用 `Start-Job` 或单独的 `&`。启动命令成功只表示进程已经提交；宣告服务可用前，根据任务实际需要检查进程、日志末尾、端口或健康接口。后续只读取必要的日志末尾内容，需要停止时使用 `taskkill /PID <pid> /T /F` 清理整个进程树。";
+        #[cfg(not(target_os = "windows"))]
+        let background_command_prompt = "对于服务、监听器等无需持续交互且没有自然结束时间的任务，不要让工具一直等待：在 macOS/Linux 使用 `nohup <command> >\"<absolute-log-path>\" 2>&1 </dev/null &` 脱手运行，并在同一脚本中输出 `$!` 进程编号和日志绝对路径。不要使用默认 `nohup.out`，也不要只使用 `&`。启动命令成功只表示进程已经提交；宣告服务可用前，根据任务实际需要检查进程、日志末尾、端口或健康接口。后续只读取必要的日志末尾内容，需要停止时按已记录的进程编号处理。";
+
         vec![
             "当用户请求涉及命令行操作（安装依赖、创建项目、编译构建、文件操作等），必须逐步使用 `run_shell` 实际执行命令，不要仅以文本或代码块形式展示命令给用户。每步执行一条命令，根据执行结果决定下一步操作。回复中可以用代码块展示已执行的命令，但必须先通过 `run_shell` 实际执行。".to_string(),
+            "`run_command` 和非交互 `run_shell` 的 `timeout` 是可选的：只有任务存在明确时间边界时才根据实际需要设置；预计会结束但耗时难以预估时省略该参数，命令会持续到完成、用户中断或任务取消。不要为避免等待而随意填写偏短时间；长时间任务占用当前终端时，其他调用会使用空闲终端，全部繁忙时会新建终端。没有自然结束时间的非交互任务按下一条后台规则执行。".to_string(),
+            background_command_prompt.to_string(),
             "如果命令会启动需要持续输入的交互程序（例如编辑器、REPL、TUI、远程会话、确认流程等），使用 `run_shell{interactive:true, script:\"<command>\"}` 显式声明交互意图。返回的 stdout 是终端当前显示内容，请阅读后用 `terminal_send{input:\"<按键>\"}` 持续操作；每次发送后都会返回新快照。".to_string(),
             "文件编辑优先使用 write_file / replace_in_file；只有用户明确要求在终端程序里操作，或确实需要交互式程序时才用 `run_shell{interactive:true}`。".to_string(),
-            "每轮对话开始时会收到 `terminal_data` 工具结果，包含当前各终端 Tab 的工作目录、shell 类型、运行阶段和最近输出。据此判断用户已在终端做了什么、当前处于什么环境，避免重复执行已知命令。".to_string(),
+            "每轮对话开始时会收到 `terminal_data` 工具结果，包含当前各终端 Tab 的工作目录、shell 类型、运行阶段，以及自上次成功推送后的新增输出。输出携带单调游标标记；没有新增输出时不要把旧内容当作新消息。终端已结束时不要尝试通过输入或查询自动恢复，只能主动重置或重新执行命令。".to_string(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_core::tool_override::PromptSectionProvider as _;
+
+    #[test]
+    fn prompt_sections_only_include_current_platform_background_rule() {
+        let sections = TerminalPromptSectionProvider.prompt_sections();
+        let combined = sections.join("\n");
+
+        #[cfg(target_os = "windows")]
+        {
+            assert!(combined.contains("Start-Process"));
+            assert!(combined.contains("-RedirectStandardOutput"));
+            assert!(combined.contains("taskkill /PID"));
+            assert!(!combined.contains("nohup"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(combined.contains("nohup"));
+            assert!(combined.contains("</dev/null"));
+            assert!(combined.contains("$!"));
+            assert!(!combined.contains("Start-Process"));
+        }
     }
 }

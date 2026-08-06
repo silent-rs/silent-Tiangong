@@ -7,8 +7,6 @@ use tokio::sync::oneshot;
 use crate::manager::TerminalManager;
 use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
-const DEFAULT_PROMPT_WAIT_SECS: u64 = 120;
-
 /// 发送命令到 PTY
 fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyhow::Result<()> {
     writer.write_all(input.as_bytes())?;
@@ -70,19 +68,20 @@ fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> 
     tracing::info!(session_id = %session_id, "系统 PTY 不可用，尝试重新启动");
     match crate::manager::start_pty(&session_id, &cwd, &shell, &pty_env) {
         Ok(new_ps) => {
-            manager.set_alive(true);
             {
                 let mut state = manager.state.lock().unwrap();
                 state.output_buffer.clear();
                 state.last_read_line = 0;
                 state.current_line.clear();
             }
+            let generation = manager.activate_pty(new_ps.writer.clone());
             crate::output_processor::spawn_output_reader(
                 new_ps.reader.clone(),
                 manager.clone_state(),
                 app.clone(),
                 session_id.clone(),
                 manager.logger.clone(),
+                generation,
             );
             tracing::info!(session_id = %session_id, "系统 PTY 已重新启动");
             Some(new_ps)
@@ -196,17 +195,63 @@ fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
     }
 }
 
-fn wrap_non_interactive_command(
+fn prepare_non_interactive_command(
     start_marker: &str,
     command: &str,
     cwd_marker: &str,
     rc_marker: &str,
     end_marker: &str,
-) -> String {
-    format!(
-        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX; {}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
+) -> anyhow::Result<(tempfile::NamedTempFile, String)> {
+    let command = if command_requires_isolation(command) {
+        format!("(\n{command}\n)")
+    } else {
+        command.to_string()
+    };
+    let mut script = tempfile::Builder::new()
+        .prefix(&format!("{start_marker}_SCRIPT_"))
+        .tempfile()?;
+    write!(
+        script,
+        "__TIANGONG_= echo '{}'; __tiangong_had_PAGER=${{PAGER+x}}; __tiangong_old_PAGER=${{PAGER-}}; __tiangong_had_GIT_PAGER=${{GIT_PAGER+x}}; __tiangong_old_GIT_PAGER=${{GIT_PAGER-}}; __tiangong_had_GH_PAGER=${{GH_PAGER+x}}; __tiangong_old_GH_PAGER=${{GH_PAGER-}}; __tiangong_had_LESS=${{LESS+x}}; __tiangong_old_LESS=${{LESS-}}; export PAGER=cat GIT_PAGER=cat GH_PAGER=cat LESS=FRX\n{}\n__TIANGONG_= __rc=$?; if [ -n \"$__tiangong_had_PAGER\" ]; then PAGER=\"$__tiangong_old_PAGER\"; export PAGER; else unset PAGER; fi; if [ -n \"$__tiangong_had_GIT_PAGER\" ]; then GIT_PAGER=\"$__tiangong_old_GIT_PAGER\"; export GIT_PAGER; else unset GIT_PAGER; fi; if [ -n \"$__tiangong_had_GH_PAGER\" ]; then GH_PAGER=\"$__tiangong_old_GH_PAGER\"; export GH_PAGER; else unset GH_PAGER; fi; if [ -n \"$__tiangong_had_LESS\" ]; then LESS=\"$__tiangong_old_LESS\"; export LESS; else unset LESS; fi; printf '\\n{}'; pwd; echo '{}'$__rc; echo '{}'\n",
         start_marker, command, cwd_marker, rc_marker, end_marker
-    )
+    )?;
+    script.flush()?;
+    let path = script.path().to_string_lossy();
+    let invocation = format!(". {}\r", crate::util::shell_quote(path.as_ref()));
+    Ok((script, invocation))
+}
+
+/// 会退出或改变长期 shell 错误处理行为的控制语句放入子 shell 执行。
+/// 普通命令仍在当前 shell 执行，以保留 cwd、环境变量和函数等会话状态。
+fn command_requires_isolation(command: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        return false;
+    }
+
+    command
+        .lines()
+        .flat_map(|line| line.split(';'))
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty() && !statement.starts_with('#'))
+        .any(|statement| {
+            let mut words = statement.split_whitespace();
+            let Some(first) = words.next() else {
+                return false;
+            };
+            match first {
+                "exit" | "logout" | "return" | "exec" | "trap" => true,
+                "set" => match words.next() {
+                    Some(option) if option.starts_with('-') && option[1..].contains('e') => true,
+                    Some("-o") => words.next().is_some_and(|name| name == "errexit"),
+                    _ => false,
+                },
+                "setopt" => words.any(|option| {
+                    option.eq_ignore_ascii_case("errexit")
+                        || option.eq_ignore_ascii_case("err_exit")
+                }),
+                _ => false,
+            }
+        })
 }
 
 /// 取得 PTY 当前前台进程组。交互 shell 开启 job control 后，运行中的用户命令
@@ -326,31 +371,28 @@ pub(crate) async fn handle_exec(
     if cancellation.is_requested() || response_tx.is_closed() {
         return;
     }
-    let ps = match pty_state {
-        Some(ps) => ps,
-        None => {
-            // 系统 PTY 启动失败或已退出的恢复路径：尝试重新拉起一次再执行，
-            // 避免用户全程只能得到"终端会话不可用"。重试仍失败才返回错误。
-            match ensure_system_pty(manager, app) {
-                Some(new_ps) => {
-                    *pty_state = Some(new_ps);
-                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
-                }
-                None => {
-                    let _ = response_tx.send(TerminalExecResponse {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "终端会话不可用".to_string(),
-                        timed_out: false,
-                        cwd_after: manager.cwd(),
-                        interrupted_by_user: false,
-                        interactive_mode: false,
-                    });
-                    return;
-                }
-            }
+    if !manager.is_alive() {
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
         }
-    };
+    }
+    if pty_state.is_none() {
+        // 系统 PTY 启动失败或已退出的恢复路径：尝试重新拉起一次再执行，
+        // 避免用户全程只能得到"终端会话不可用"。重试仍失败才返回错误。
+        *pty_state = ensure_system_pty(manager, app);
+    }
+    if pty_state.is_none() {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端会话不可用".to_string(),
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
 
     // 生成 start marker 和 end marker
     let marker_id = scru128::new();
@@ -360,6 +402,30 @@ pub(crate) async fn handle_exec(
     let cwd_marker = format!("__TIANGONG_CWD_{}__", marker_id);
     let rc_marker = format!("__TIANGONG_RC_{}__", marker_id);
 
+    // 包装脚本从独立文件读取，PTY 只接收一条短 source 命令。这样前台程序无法
+    // 从 stdin 吞掉收尾标记，zsh 也不会把多行内部包装拆成残缺语句执行。
+    let (_command_script, combined) = match prepare_non_interactive_command(
+        &start_marker,
+        command,
+        &cwd_marker,
+        &rc_marker,
+        &end_marker,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: String::new(),
+                stderr: format!("准备终端命令失败: {error}"),
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: false,
+                interactive_mode: false,
+            });
+            return;
+        }
+    };
+
     // 先设置协作状态为 AgentRunning，再发送命令
     if let Some(tracker) = activity {
         tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentRunning {
@@ -367,18 +433,24 @@ pub(crate) async fn handle_exec(
         });
     }
 
-    // 向前端推送用户命令首行回显（shell 回显被 marker 过滤，需要手动补回）
-    // 多行命令（如 heredoc）只回显首行，后续内容由 shell 回显自然展示
-    {
-        let first_line = command.lines().next().unwrap_or("");
-        if !first_line.is_empty() {
-            let echo = TerminalOutputEvent {
-                session_id: manager.session_id(),
-                text: format!("{}\n", first_line),
-                is_echo: false,
-            };
-            let _ = app.emit("terminal:output", &echo);
+    // 内部 source 命令会被 marker 过滤，向前端和持久日志补回用户实际提交的完整命令。
+    if !command.is_empty() {
+        let mut display_text = command
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', "\r\n");
+        if !display_text.ends_with("\r\n") {
+            display_text.push_str("\r\n");
         }
+        if let Some(logger) = &manager.logger {
+            logger.append(&display_text);
+        }
+        let echo = TerminalOutputEvent {
+            session_id: manager.session_id(),
+            text: display_text,
+            is_echo: true,
+        };
+        let _ = app.emit("terminal:output", &echo);
     }
 
     // 在发送命令前读取 total_lines_pushed，避免竞态条件：
@@ -396,20 +468,15 @@ pub(crate) async fn handle_exec(
     // 因此这里用 (当前累计行 - 命令起点累计行) 反推缓冲区索引。
     let fallback_start_pushed = last_seen_pushed;
 
-    // 发送组合命令：start marker → 用户命令（禁用 pager）→ 捕获退出码 → pwd → end marker
+    // 发送临时脚本调用：start marker → 用户命令（禁用 pager）→ 捕获退出码 → pwd → end marker
     // 临时导出 PAGER/GIT_PAGER 指向 cat，避免 git diff/log 等命令落入 less；
     // 命令结束后恢复原环境，避免污染用户终端。
     // printf '\nmarker' 强制换行：即使命令输出不以 \n 结尾，marker 也独占新行
     // 换行分隔用户命令和 marker 捕获命令，确保 marker 行以 __TIANGONG_= 前缀开头
     // 这样多行命令（heredoc）的最后一行不会和 marker 命令混在一起泄漏
-    let combined =
-        wrap_non_interactive_command(&start_marker, command, &cwd_marker, &rc_marker, &end_marker);
-    let send_result = {
-        match ps.writer.lock() {
-            Ok(mut writer) => send_to_pty(&mut writer, &combined),
-            Err(e) => Err(anyhow::anyhow!("获取 writer 锁失败: {}", e)),
-        }
-    };
+    let send_result = manager
+        .write_input(combined.as_bytes())
+        .map_err(anyhow::Error::msg);
     if let Err(e) = send_result {
         if let Some(tracker) = activity {
             tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
@@ -423,13 +490,15 @@ pub(crate) async fn handle_exec(
             interrupted_by_user: false,
             interactive_mode: false,
         });
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
+        }
         return;
     }
 
     // 等待 end marker 出现在输出中
-    let timeout = timeout_secs.unwrap_or(DEFAULT_PROMPT_WAIT_SECS);
     let start_time = std::time::Instant::now();
-    let timeout_dur = std::time::Duration::from_secs(timeout);
+    let timeout_dur = timeout_secs.map(std::time::Duration::from_secs);
     // 跨轮询持久状态：start marker 已出现
     let mut start_seen = false;
     let mut cwd_value = String::new();
@@ -528,12 +597,48 @@ pub(crate) async fn handle_exec(
             return;
         }
 
+        if !manager.is_alive() {
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
+            let (stdout_text, interrupted) = collect_command_output(
+                manager,
+                &start_marker,
+                &end_marker,
+                &cwd_marker,
+                &rc_marker,
+                true,
+                Some(fallback_idx),
+            );
+            let tracker_interrupted = activity.map(|t| t.take_user_intervened()).unwrap_or(false);
+            if let Some(tracker) = activity {
+                tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+            }
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: stdout_text,
+                stderr: "终端进程已退出，下一次执行将自动重建".to_string(),
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: interrupted || tracker_interrupted,
+                interactive_mode: false,
+            });
+            if let Some(ps) = pty_state.take() {
+                crate::manager::shutdown_pty(ps);
+            }
+            return;
+        }
+
         let cancelled = cancellation.is_requested() || response_tx.is_closed();
-        if cancelled || start_time.elapsed() >= timeout_dur {
+        let timed_out = timeout_dur.is_some_and(|timeout| start_time.elapsed() >= timeout);
+        if cancelled || timed_out {
             // 完成栅栏只会在命令边界闭合，或前台进程组收到不可忽略终止后释放。
             // 因此即使用户命令捕获/忽略 SIGINT，也不能越过 Agent Team 文件锁。
-            let shell_stopped =
-                stop_cancelled_command(manager, ps, &start_marker, &end_marker).await;
+            let shell_stopped = match pty_state.as_mut() {
+                Some(ps) => stop_cancelled_command(manager, ps, &start_marker, &end_marker).await,
+                None => true,
+            };
 
             // 收集已捕获的输出
             let fallback_idx = {
@@ -569,7 +674,10 @@ pub(crate) async fn handle_exec(
             });
             if shell_stopped {
                 // 强制终止 shell 后丢弃失效 PTY；下一条命令会走统一恢复入口重建。
-                *pty_state = None;
+                manager.deactivate_pty();
+                if let Some(ps) = pty_state.take() {
+                    crate::manager::shutdown_pty(ps);
+                }
             }
             return;
         }
@@ -1087,13 +1195,15 @@ mod tests {
 
     #[test]
     fn non_interactive_command_wrapper_disables_pagers() {
-        let combined = wrap_non_interactive_command(
+        let (script, invocation) = prepare_non_interactive_command(
             "__TIANGONG_START_x__",
             "git diff HEAD",
             "__TIANGONG_CWD_x__",
             "__TIANGONG_RC_x__",
             "__TIANGONG_END_x__",
-        );
+        )
+        .unwrap();
+        let combined = std::fs::read_to_string(script.path()).unwrap();
         assert!(combined.contains("PAGER="));
         assert!(combined.contains("GIT_PAGER="));
         assert!(combined.contains("GH_PAGER="));
@@ -1104,6 +1214,194 @@ mod tests {
         assert!(combined.contains("LESS=FRX"));
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
+        assert!(combined.contains("\ngit diff HEAD\n__TIANGONG_= __rc=$?"));
+        assert!(invocation.starts_with(". "));
+        assert!(invocation.ends_with('\r'));
+        assert!(script
+            .path()
+            .to_string_lossy()
+            .contains("__TIANGONG_START_x___SCRIPT_"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_stdin_reader_cannot_consume_completion_markers() {
+        use std::io::Read as _;
+        use std::sync::mpsc;
+
+        use portable_pty::{CommandBuilder, PtySize};
+
+        let start_marker = "__TIANGONG_START_stdin__";
+        let end_marker = "__TIANGONG_END_stdin__";
+        let (script, combined) = prepare_non_interactive_command(
+            start_marker,
+            "if IFS= read -r -t 1 stolen; then printf 'stdin-consumed:%s\\n' \"$stolen\"; else echo stdin-empty; fi",
+            "__TIANGONG_CWD_stdin__",
+            "__TIANGONG_RC_stdin__",
+            end_marker,
+        )
+        .unwrap();
+        let pty_system = portable_pty::native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        #[cfg(target_os = "macos")]
+        let mut shell = {
+            let mut shell = CommandBuilder::new("/bin/zsh");
+            shell.args(["-f", "-i"]);
+            shell
+        };
+        #[cfg(not(target_os = "macos"))]
+        let mut shell = {
+            let mut shell = CommandBuilder::new("/bin/bash");
+            shell.args(["--noprofile", "--norc", "-i"]);
+            shell
+        };
+        shell.env("PS1", "__TIANGONG_TEST_READY__ ");
+        let mut child = pair.slave.spawn_command(shell).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                if output_tx.send(buffer[..read].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut output = String::new();
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output.contains("__TIANGONG_TEST_READY__") {
+            let remaining = ready_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("测试 shell 未就绪");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
+        let command_started = std::time::Instant::now();
+        writer.write_all(combined.as_bytes()).unwrap();
+        writer.flush().unwrap();
+        let completed_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let completed = loop {
+            if output
+                .lines()
+                .any(|line| line_matches_marker(line, end_marker))
+            {
+                break true;
+            }
+            let remaining = completed_deadline.saturating_duration_since(std::time::Instant::now());
+            match output_rx.recv_timeout(remaining) {
+                Ok(chunk) => output.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(_) => break false,
+            }
+        };
+
+        assert!(
+            completed,
+            "前台程序结束后应立即收到完成标记，PTY 输出: {output}"
+        );
+        assert!(
+            command_started.elapsed() < std::time::Duration::from_secs(4),
+            "命令已结束却未及时返回完成标记，PTY 输出: {output}"
+        );
+        assert!(output.contains("stdin-empty"), "PTY 输出异常: {output}");
+        assert!(!output.contains("stdin-consumed:__TIANGONG_"));
+        assert!(!output.contains("parse error"), "PTY 输出异常: {output}");
+
+        drop(script);
+        let second_start = "__TIANGONG_START_reuse__";
+        let second_end = "__TIANGONG_END_reuse__";
+        let (_second_script, second_command) = prepare_non_interactive_command(
+            second_start,
+            "echo same-shell-reused",
+            "__TIANGONG_CWD_reuse__",
+            "__TIANGONG_RC_reuse__",
+            second_end,
+        )
+        .unwrap();
+        writer.write_all(second_command.as_bytes()).unwrap();
+        writer.flush().unwrap();
+        let reuse_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output
+            .lines()
+            .any(|line| line_matches_marker(line, second_end))
+        {
+            let remaining = reuse_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("完成后未能复用同一个终端");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(
+            output.contains("same-shell-reused"),
+            "PTY 输出异常: {output}"
+        );
+
+        let mut filter = crate::output_processor::RawOutputFilter::new();
+        let visible = filter.filter(&output);
+        assert!(!visible.contains(start_marker), "内部调用泄漏: {visible}");
+        assert!(!visible.contains(end_marker), "内部调用泄漏: {visible}");
+        assert!(!visible.contains(second_start), "内部调用泄漏: {visible}");
+        assert!(!visible.contains(second_end), "内部调用泄漏: {visible}");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(writer);
+        drop(pair.master);
+        reader_thread.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_interactive_wrapper_isolates_errexit_from_long_lived_shell() {
+        let (_script, combined) = prepare_non_interactive_command(
+            "__TIANGONG_START_x__",
+            "set -e\nfalse\necho should-not-run",
+            "__TIANGONG_CWD_x__",
+            "__TIANGONG_RC_x__",
+            "__TIANGONG_END_x__",
+        )
+        .unwrap();
+        let script_path = combined.trim_end_matches('\r').strip_prefix(". ").unwrap();
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(". {script_path}"))
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "父 shell 被 errexit 带走: {stdout}"
+        );
+        assert!(stdout.contains("__TIANGONG_RC_x__1"));
+        assert!(stdout.contains("__TIANGONG_END_x__"));
+        assert!(!stdout.contains("should-not-run\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_commands_keep_current_shell_semantics() {
+        assert!(!command_requires_isolation("cd /tmp\nexport MODE=test"));
+        assert!(command_requires_isolation("set -euo pipefail\nfalse"));
+        assert!(command_requires_isolation("set -o errexit; false"));
+        assert!(command_requires_isolation("setopt ERR_EXIT\nfalse"));
+        assert!(command_requires_isolation("trap 'echo done' EXIT"));
+        assert!(command_requires_isolation("return 1"));
+        assert!(command_requires_isolation("exec cargo check"));
     }
 
     #[cfg(unix)]

@@ -79,6 +79,38 @@ impl TerminalActivityTracker {
         }
     }
 
+    /// 仅在终端空闲时为即将提交的 Agent 命令占用终端。
+    pub(crate) fn try_reserve_agent_command(&self, command_id: String) -> bool {
+        let Ok(mut state) = self.busy_state.lock() else {
+            return false;
+        };
+        if !matches!(*state, TerminalBusyState::Idle) {
+            return false;
+        }
+        *state = TerminalBusyState::AgentRunning { command_id };
+        drop(state);
+        if let Ok(mut flag) = self.user_intervened.lock() {
+            *flag = false;
+        }
+        true
+    }
+
+    /// 选择结果未进入实际执行时，只释放仍属于该选择结果的占用。
+    pub(crate) fn release_agent_reservation(&self, command_id: &str) {
+        let Ok(mut state) = self.busy_state.lock() else {
+            return;
+        };
+        let owned = matches!(
+            &*state,
+            TerminalBusyState::AgentRunning {
+                command_id: current
+            } if current == command_id
+        );
+        if owned {
+            *state = TerminalBusyState::Idle;
+        }
+    }
+
     /// 获取当前协作状态
     pub(crate) fn busy_state(&self) -> TerminalBusyState {
         self.busy_state
@@ -112,6 +144,56 @@ impl TerminalBusyState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn concurrent_agent_reservations_only_claim_idle_terminal_once() {
+        let tracker = Arc::new(TerminalActivityTracker::new());
+        let barrier = Arc::new(Barrier::new(8));
+        let workers = (0..8)
+            .map(|index| {
+                let tracker = Arc::clone(&tracker);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let command_id = format!("reservation-{index}");
+                    barrier.wait();
+                    tracker
+                        .try_reserve_agent_command(command_id.clone())
+                        .then_some(command_id)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let winners = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(winners.len(), 1);
+        tracker.release_agent_reservation("not-the-owner");
+        assert!(matches!(
+            tracker.busy_state(),
+            TerminalBusyState::AgentRunning { .. }
+        ));
+        tracker.release_agent_reservation(&winners[0]);
+        assert_eq!(tracker.busy_state(), TerminalBusyState::Idle);
+
+        let next_command = "next-command".to_string();
+        assert!(tracker.try_reserve_agent_command(next_command.clone()));
+        tracker.release_agent_reservation(&winners[0]);
+        assert_eq!(
+            tracker.busy_state(),
+            TerminalBusyState::AgentRunning {
+                command_id: next_command.clone()
+            }
+        );
+        tracker.release_agent_reservation(&next_command);
+        assert_eq!(tracker.busy_state(), TerminalBusyState::Idle);
+    }
+}
+
 /// 用户终端操作注入（ToolInput 实现）。
 ///
 /// 用户在终端提交命令（回车截断）时，通过 AgentInput trait 统一投递到 Agent 对话链。
@@ -142,8 +224,13 @@ pub struct TerminalTabSnapshot {
     pub shell: String,
     pub phase: String,
     pub alive: bool,
-    /// 该 Tab 最近 N 行输出（已过滤 marker 行）。仅存活 Tab 填充。
+    /// 本轮新增输出；没有新增内容时为空。
     pub recent_output: String,
+    /// 本段新增输出的单调游标区间 `[output_cursor_start, output_cursor_end)`。
+    pub output_cursor_start: usize,
+    pub output_cursor_end: usize,
+    /// 起始游标之前的输出已被环形缓冲淘汰或受注入上限截断。
+    pub output_truncated: bool,
 }
 
 /// 终端状态快照注入（ToolInput 实现）。
@@ -176,6 +263,9 @@ impl tiangong_core::agent_input::ToolInput for TerminalStateData {
                     "phase": t.phase,
                     "alive": t.alive,
                     "recent_output": t.recent_output,
+                    "output_cursor_start": t.output_cursor_start,
+                    "output_cursor_end": t.output_cursor_end,
+                    "output_truncated": t.output_truncated,
                 })
             })
             .collect::<Vec<_>>();
