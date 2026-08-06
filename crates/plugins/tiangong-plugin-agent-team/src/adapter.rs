@@ -160,7 +160,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
     use serde_json::{json, Value};
@@ -169,10 +169,98 @@ mod tests {
     use tiangong_core::core_config::{CoreConfig, CoreConfigProvider, ModelEndpoint};
     use tiangong_core::permission::TrustMode;
     use tiangong_core::session::Session;
+    use tiangong_core::tool_override::{
+        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+    };
     use tiangong_types::{ContentBlock, MessagePhase, MessageRole, StreamEvent};
 
     use crate::build_plugin;
     use crate::test_support::storage_test_guard;
+
+    const SLOW_SESSION_END_SAFETY_LIMIT: Duration = Duration::from_secs(10);
+
+    struct SlowSessionEndedState {
+        started: AtomicBool,
+        released: Mutex<bool>,
+        changed: Condvar,
+        safety_limit_reached: AtomicBool,
+    }
+
+    impl SlowSessionEndedState {
+        fn new() -> Self {
+            Self {
+                started: AtomicBool::new(false),
+                released: Mutex::new(false),
+                changed: Condvar::new(),
+                safety_limit_reached: AtomicBool::new(false),
+            }
+        }
+
+        fn wait_until_started(&self, timeout: Duration) -> bool {
+            let released = self
+                .released
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let _ = self
+                .changed
+                .wait_timeout_while(released, timeout, |_| !self.started.load(Ordering::Acquire))
+                .unwrap_or_else(|poison| poison.into_inner());
+            self.started.load(Ordering::Acquire)
+        }
+
+        fn release(&self) {
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            *released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct SlowSessionEndedPlugin {
+        state: Arc<SlowSessionEndedState>,
+    }
+
+    impl ToolSpecProvider for SlowSessionEndedPlugin {}
+    impl ToolOverrideHandler for SlowSessionEndedPlugin {}
+    impl PromptSectionProvider for SlowSessionEndedPlugin {}
+
+    impl Plugin for SlowSessionEndedPlugin {
+        fn id(&self) -> &str {
+            "test-slow-session-ended"
+        }
+
+        fn on_session_ended(&self, _session: &mut Session) {
+            let released = self
+                .state
+                .released
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            self.state.started.store(true, Ordering::Release);
+            self.state.changed.notify_all();
+            let (released, wait_result) = self
+                .state
+                .changed
+                .wait_timeout_while(released, SLOW_SESSION_END_SAFETY_LIMIT, |released| {
+                    !*released
+                })
+                .unwrap_or_else(|poison| poison.into_inner());
+            if wait_result.timed_out() && !*released {
+                self.state
+                    .safety_limit_reached
+                    .store(true, Ordering::Release);
+            }
+        }
+    }
+
+    struct SlowSessionEndedRelease(Arc<SlowSessionEndedState>);
+
+    impl Drop for SlowSessionEndedRelease {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
 
     struct ParentChildSseServer {
         base_url: String,
@@ -525,5 +613,108 @@ mod tests {
                         && message.text_content().contains("主 Agent 已读取子 Agent 的检查结果")
             )
         }));
+    }
+
+    #[test]
+    #[ignore = "耗时故障诊断，仅在手动复测 Agent Team 关闭阻塞时执行"]
+    fn parent_shutdown_waits_for_child_session_ended_hook() {
+        let _guard = storage_test_guard();
+        let storage = tempfile::tempdir().unwrap();
+        let server = ParentChildSseServer::start();
+        let slow_state = Arc::new(SlowSessionEndedState::new());
+        let _slow_release = SlowSessionEndedRelease(Arc::clone(&slow_state));
+        let factory_state = Arc::clone(&slow_state);
+        let child_factory: Arc<dyn Fn() -> Vec<Arc<dyn Plugin>> + Send + Sync> =
+            Arc::new(move || {
+                vec![Arc::new(SlowSessionEndedPlugin {
+                    state: Arc::clone(&factory_state),
+                }) as Arc<dyn Plugin>]
+            });
+
+        let mut config = CoreConfig::default();
+        config.llm.chat = ModelEndpoint {
+            base_url: server.base_url.clone(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        config.trust_mode = TrustMode::FullTrust;
+        config.default_trust_mode = TrustMode::FullTrust;
+
+        let mut parent_session = Session::new("Parent shutdown");
+        parent_session.cwd = storage.path().to_string_lossy().into_owned();
+        parent_session.trust_mode = TrustMode::FullTrust;
+        parent_session.bind_storage_root(storage.path());
+        parent_session.try_persist_to_disk().unwrap();
+        let plugin = build_plugin(storage.path().to_path_buf(), child_factory);
+        let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
+        let parent_core = TiangongCore::builder()
+            .config(CoreConfigProvider::new(config))
+            .workspace_dir(parent_session.cwd.clone())
+            .session_id(parent_session.id)
+            .stream_tx(event_tx)
+            .plugins(vec![plugin])
+            .storage_root(storage.path())
+            .trust_mode(parent_session.trust_mode)
+            .build();
+        parent_core
+            .deliver(AgentInputKind::prepared_with_id(
+                "parent-shutdown-turn",
+                vec![ContentBlock::text(
+                    "创建检查 Agent，让它完成检查，再根据结果回复我",
+                )],
+            ))
+            .unwrap();
+
+        let turn_deadline = Instant::now() + Duration::from_secs(8);
+        let mut parent_turn_completed = false;
+        while Instant::now() < turn_deadline {
+            match event_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(StreamEvent::Done { .. }) if server.requests().len() >= 3 => {
+                    parent_turn_completed = true;
+                    break;
+                }
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::sync_channel(1);
+        let shutdown_thread = std::thread::spawn(move || {
+            let _ = shutdown_tx.send(parent_core.shutdown_join());
+        });
+        let child_hook_started = slow_state.wait_until_started(Duration::from_secs(2));
+        let early_shutdown = shutdown_rx.recv_timeout(Duration::from_millis(250));
+        let shutdown_was_blocked = matches!(
+            &early_shutdown,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+
+        slow_state.release();
+        let shutdown_result = match early_shutdown {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => shutdown_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("释放子插件后父 Core 应在 2 秒内完成关闭"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("父 Core 关闭线程在返回结果前断开")
+            }
+        };
+        shutdown_thread
+            .join()
+            .expect("父 Core 关闭线程不应异常退出");
+
+        assert!(parent_turn_completed, "父子 Agent 完整轮次应在 8 秒内结束");
+        assert!(child_hook_started, "父 Core 关闭应进入子插件会话结束钩子");
+        assert!(
+            shutdown_was_blocked,
+            "子插件会话结束钩子未释放前，父 Core 关闭不应完成"
+        );
+        shutdown_result.expect("释放子插件后父 Core 应正常关闭");
+        assert!(
+            !slow_state.safety_limit_reached.load(Ordering::Acquire),
+            "测试必须由显式释放完成，不能依赖 10 秒自动释放上限"
+        );
     }
 }
