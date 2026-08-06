@@ -46,6 +46,9 @@ jobs:
     name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
     needs: resolve-plugin
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -66,6 +69,10 @@ jobs:
         with:
           targets: wasm32-wasip2
 
+      - name: Install Tauri signer
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
       - name: Validate plugin from repository configuration
         env:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
