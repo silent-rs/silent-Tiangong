@@ -7,6 +7,8 @@ use tokio::sync::oneshot;
 use crate::manager::TerminalManager;
 use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
+const COMMAND_START_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 发送命令到 PTY
 fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyhow::Result<()> {
     writer.write_all(input.as_bytes())?;
@@ -56,7 +58,13 @@ fn buf_idx_from_pushed(state: &crate::manager::TerminalState, pushed: usize) -> 
 
 /// 系统 PTY 启动失败或退出后的恢复：尝试重新拉起一次。
 /// 成功时重置输出缓冲并启动输出读取线程，返回新的 PtyState；失败返回 None。
-fn ensure_system_pty(manager: &Arc<TerminalManager>, app: &tauri::AppHandle) -> Option<PtyState> {
+fn ensure_system_pty<R: tauri::Runtime>(
+    manager: &Arc<TerminalManager>,
+    app: &tauri::AppHandle<R>,
+) -> Option<PtyState> {
+    if manager.is_closed() {
+        return None;
+    }
     let session_id = manager.session_id();
     let cwd = manager.cwd();
     let shell = manager.shell();
@@ -217,7 +225,8 @@ fn prepare_non_interactive_command(
     )?;
     script.flush()?;
     let path = script.path().to_string_lossy();
-    let invocation = format!(". {}\r", crate::util::shell_quote(path.as_ref()));
+    // Ctrl+U 清掉终端查询响应等尚未提交的残留输入，保证 source 从空行开始。
+    let invocation = format!("\x15. {}\r", crate::util::shell_quote(path.as_ref()));
     Ok((script, invocation))
 }
 
@@ -256,34 +265,6 @@ fn command_requires_isolation(command: &str) -> bool {
 
 /// 取得 PTY 当前前台进程组。交互 shell 开启 job control 后，运行中的用户命令
 /// 位于该进程组；取消升级时必须终止整个组，不能只终止 shell 或只发送 Ctrl+C。
-#[cfg(unix)]
-fn foreground_process_group(ps: &crate::types::PtyState) -> Option<libc::pid_t> {
-    ps.master
-        .lock()
-        .ok()
-        .and_then(|master| master.process_group_leader())
-        .filter(|process_group| *process_group > 0)
-}
-
-/// 对已确认仍占用 PTY 前台的进程组发送不可忽略的终止信号。
-///
-/// `kill(-pgid, SIGKILL)` 成功返回后，该组中的进程不能再执行用户态代码；即使
-/// 尚待父进程回收，也不会在文件锁释放后继续写入工作区。`ESRCH` 表示进程组已
-/// 自行退出，同样是安全终态。
-#[cfg(unix)]
-fn force_stop_process_group(process_group: libc::pid_t) -> std::io::Result<()> {
-    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    if result == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error)
-    }
-}
-
 fn command_boundary_seen(manager: &TerminalManager, start_marker: &str, end_marker: &str) -> bool {
     let state = manager
         .state
@@ -311,7 +292,7 @@ async fn stop_cancelled_command(
     end_marker: &str,
 ) -> bool {
     #[cfg(unix)]
-    let process_group = foreground_process_group(ps);
+    let process_group = crate::manager::foreground_process_group(ps);
     #[cfg(unix)]
     let shell_process_id = ps.child.process_id().map(|pid| pid as libc::pid_t);
 
@@ -336,19 +317,33 @@ async fn stop_cancelled_command(
 
     #[cfg(unix)]
     if let Some(process_group) = process_group {
-        if force_stop_process_group(process_group).is_ok() {
+        if crate::manager::force_stop_process_group(process_group).is_ok() {
             return shell_process_id == Some(process_group);
         }
     }
 
     // 非 Unix 平台没有可移植的前台进程组接口；Unix 上查询/终止进程组异常时，
-    // 关闭 PTY shell 是最后一道保险。portable-pty 的 kill 会升级到不可忽略终止。
-    // 只有 kill 成功或 shell 已退出才返回；瞬时失败则重试，避免栅栏提前放行。
+    // 直接终止 PTY shell 是最后一道保险。只有不可忽略信号成功投递或 shell 已退出
+    // 才返回，避免 portable-pty 在 Unix 上只发 SIGHUP、被 shell 忽略后永久等待。
+    #[cfg(unix)]
+    if let Some(shell_process_id) = shell_process_id {
+        if crate::manager::force_stop_process(shell_process_id).is_ok() {
+            return true;
+        }
+    }
+
     loop {
         if let Ok(Some(_)) = ps.child.try_wait() {
             return true;
         }
-        if ps.child.kill().is_ok() {
+        #[cfg(unix)]
+        let kill_result = ps
+            .child
+            .process_id()
+            .map(|pid| crate::manager::force_stop_process(pid as libc::pid_t));
+        #[cfg(not(unix))]
+        let kill_result = Some(ps.child.kill());
+        if kill_result.is_some_and(|result| result.is_ok()) {
             return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -357,10 +352,10 @@ async fn stop_cancelled_command(
 
 /// 非交互式命令执行：通过 marker 检测命令边界，捕获退出码和 cwd
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_exec(
+pub(crate) async fn handle_exec<R: tauri::Runtime>(
     manager: &Arc<TerminalManager>,
     pty_state: &mut Option<PtyState>,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     command: &str,
     timeout_secs: Option<u64>,
     response_tx: oneshot::Sender<TerminalExecResponse>,
@@ -369,6 +364,22 @@ pub(crate) async fn handle_exec(
     activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
     if cancellation.is_requested() || response_tx.is_closed() {
+        return;
+    }
+    if manager.is_closed() {
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
+        }
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端已关闭，命令未执行".to_string(),
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
         return;
     }
     if !manager.is_alive() {
@@ -386,6 +397,7 @@ pub(crate) async fn handle_exec(
             exit_code: -1,
             stdout: String::new(),
             stderr: "终端会话不可用".to_string(),
+            terminal_error: true,
             timed_out: false,
             cwd_after: manager.cwd(),
             interrupted_by_user: false,
@@ -417,6 +429,7 @@ pub(crate) async fn handle_exec(
                 exit_code: -1,
                 stdout: String::new(),
                 stderr: format!("准备终端命令失败: {error}"),
+                terminal_error: true,
                 timed_out: false,
                 cwd_after: manager.cwd(),
                 interrupted_by_user: false,
@@ -485,6 +498,7 @@ pub(crate) async fn handle_exec(
             exit_code: -1,
             stdout: String::new(),
             stderr: format!("发送命令到终端失败: {}", e),
+            terminal_error: true,
             timed_out: false,
             cwd_after: manager.cwd(),
             interrupted_by_user: false,
@@ -501,6 +515,8 @@ pub(crate) async fn handle_exec(
     let timeout_dur = timeout_secs.map(std::time::Duration::from_secs);
     // 跨轮询持久状态：start marker 已出现
     let mut start_seen = false;
+    // 极高输出量可能在第一次轮询前就淘汰 start marker；这种情况不能误判为未启动。
+    let mut start_boundary_may_have_scrolled = false;
     let mut cwd_value = String::new();
     let mut rc_value: Option<i32> = None;
 
@@ -514,6 +530,9 @@ pub(crate) async fn handle_exec(
                 // 计算自上次以来新增的行数，从缓冲区末尾取
                 let new_count = pushed - last_seen_pushed;
                 let buf_len = state.output_buffer.len();
+                if new_count > buf_len {
+                    start_boundary_may_have_scrolled = true;
+                }
                 let start_idx = buf_len.saturating_sub(new_count);
                 let mut found_end = false;
                 for i in start_idx..buf_len {
@@ -589,6 +608,7 @@ pub(crate) async fn handle_exec(
                 exit_code: collect.exit_code,
                 stdout: stdout_text,
                 stderr: String::new(),
+                terminal_error: false,
                 timed_out: false,
                 cwd_after: cwd,
                 interrupted_by_user: interrupted || tracker_interrupted,
@@ -618,7 +638,12 @@ pub(crate) async fn handle_exec(
             let _ = response_tx.send(TerminalExecResponse {
                 exit_code: -1,
                 stdout: stdout_text,
-                stderr: "终端进程已退出，下一次执行将自动重建".to_string(),
+                stderr: if manager.is_closed() {
+                    "终端已关闭，命令已中止".to_string()
+                } else {
+                    "终端进程已退出，下一次执行将自动重建".to_string()
+                },
+                terminal_error: true,
                 timed_out: false,
                 cwd_after: manager.cwd(),
                 interrupted_by_user: interrupted || tracker_interrupted,
@@ -667,6 +692,7 @@ pub(crate) async fn handle_exec(
                 } else {
                     "命令执行超时".to_string()
                 },
+                terminal_error: false,
                 timed_out: !cancelled,
                 cwd_after: manager.cwd(),
                 interrupted_by_user: cancelled || interrupted || tracker_interrupted,
@@ -679,6 +705,51 @@ pub(crate) async fn handle_exec(
                     crate::manager::shutdown_pty(ps);
                 }
             }
+            return;
+        }
+
+        if !start_seen
+            && !start_boundary_may_have_scrolled
+            && start_time.elapsed() >= COMMAND_START_CONFIRM_TIMEOUT
+        {
+            tracing::warn!(
+                session_id = %manager.session_id(),
+                "终端命令未收到启动标记，停止当前 PTY"
+            );
+            if let Some(ps) = pty_state.as_mut() {
+                let _ = stop_cancelled_command(manager, ps, &start_marker, &end_marker).await;
+            }
+
+            let fallback_idx = {
+                let state = manager.state.lock().unwrap();
+                buf_idx_from_pushed(&state, fallback_start_pushed)
+            };
+            let (stdout_text, _) = collect_command_output(
+                manager,
+                &start_marker,
+                &end_marker,
+                &cwd_marker,
+                &rc_marker,
+                true,
+                Some(fallback_idx),
+            );
+            if let Some(tracker) = activity {
+                tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+            }
+            manager.deactivate_pty();
+            if let Some(ps) = pty_state.take() {
+                crate::manager::shutdown_pty(ps);
+            }
+            let _ = response_tx.send(TerminalExecResponse {
+                exit_code: -1,
+                stdout: stdout_text,
+                stderr: "命令未能在终端中启动，已停止该终端".to_string(),
+                terminal_error: true,
+                timed_out: false,
+                cwd_after: manager.cwd(),
+                interrupted_by_user: false,
+                interactive_mode: false,
+            });
             return;
         }
 
@@ -721,6 +792,9 @@ async fn wait_for_screen_change(
     let mut screen_changed_at: Option<std::time::Instant> = None;
 
     loop {
+        if !manager.is_alive() {
+            break;
+        }
         let now_pushed = manager.total_lines_pushed();
         let now_updates = manager.screen_updates();
         if output_changed_at.is_none() && now_pushed > baseline_pushed {
@@ -748,38 +822,51 @@ async fn wait_for_screen_change(
     }
 }
 
-pub(crate) async fn handle_exec_interactive(
+pub(crate) async fn handle_exec_interactive<R: tauri::Runtime>(
     manager: &Arc<TerminalManager>,
     pty_state: &mut Option<PtyState>,
-    app: &tauri::AppHandle,
+    app: &tauri::AppHandle<R>,
     command: &str,
     wait_secs: u64,
     response_tx: oneshot::Sender<TerminalExecResponse>,
     activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
-    let ps = match pty_state {
-        Some(ps) => ps,
-        None => {
-            // PTY 不可用时尝试恢复一次，逻辑与 handle_exec 一致
-            match ensure_system_pty(manager, app) {
-                Some(new_ps) => {
-                    *pty_state = Some(new_ps);
-                    pty_state.as_mut().expect("PTY 刚写入，必然存在")
-                }
-                None => {
-                    let _ = response_tx.send(TerminalExecResponse {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "终端会话不可用".to_string(),
-                        timed_out: false,
-                        cwd_after: manager.cwd(),
-                        interrupted_by_user: false,
-                        interactive_mode: false,
-                    });
-                    return;
-                }
-            }
+    if manager.is_closed() {
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
         }
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端已关闭，命令未执行".to_string(),
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+    if !manager.is_alive() {
+        if let Some(ps) = pty_state.take() {
+            crate::manager::shutdown_pty(ps);
+        }
+    }
+    if pty_state.is_none() {
+        *pty_state = ensure_system_pty(manager, app);
+    }
+    let Some(ps) = pty_state.as_mut() else {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端会话不可用".to_string(),
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
     };
 
     // 发送命令前记录双信号基线：
@@ -815,6 +902,7 @@ pub(crate) async fn handle_exec_interactive(
             exit_code: -1,
             stdout: String::new(),
             stderr: format!("发送命令到终端失败: {}", e),
+            terminal_error: true,
             timed_out: false,
             cwd_after: manager.cwd(),
             interrupted_by_user: false,
@@ -835,6 +923,27 @@ pub(crate) async fn handle_exec_interactive(
     // 双信号等待：交互程序首屏渲染（见 wait_for_screen_change）
     wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
 
+    if !manager.is_alive() {
+        if let Some(tracker) = activity {
+            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+        }
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: manager.recent_output(80),
+            stderr: if manager.is_closed() {
+                "终端已关闭，交互命令已中止".to_string()
+            } else {
+                "终端进程已退出".to_string()
+            },
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
     // 返回终端当前可见内容：优先前端 xterm 回传的屏幕快照（与用户看到的画面一致，
     // 全屏 TUI 和交互提示都能完整呈现），若前端尚未回传（面板未挂载等）
     // 则回退到后端 output_buffer 的可见内容（recent_output 兜底，保证即时可见性）。
@@ -847,6 +956,7 @@ pub(crate) async fn handle_exec_interactive(
         exit_code: 0,
         stdout: stdout_text,
         stderr: String::new(),
+        terminal_error: false,
         timed_out: false,
         cwd_after: manager.cwd(),
         interrupted_by_user: false,
@@ -860,10 +970,10 @@ pub(crate) async fn handle_exec_interactive(
 /// 当前可见内容。Agent 据此观察程序反应，形成"输入→观察→输入"闭环。
 /// 不发 marker、不设置协作状态（交互程序启动时已是 AgentInteractive 态）。
 /// 复用 `handle_exec_interactive` 的"等待 screen_updates 变化 + 稳定窗口"轮询逻辑。
-pub(crate) async fn handle_send_interactive(
+pub(crate) async fn handle_send_interactive<R: tauri::Runtime>(
     manager: &Arc<TerminalManager>,
     pty_state: &mut Option<PtyState>,
-    _app: &tauri::AppHandle,
+    _app: &tauri::AppHandle<R>,
     input: &str,
     wait_secs: u64,
     response_tx: oneshot::Sender<TerminalExecResponse>,
@@ -871,6 +981,23 @@ pub(crate) async fn handle_send_interactive(
     // 此时协作状态在 exec_interactive 启动时已设为 AgentInteractive，无需重复设置。
     _activity: Option<&Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
+    if manager.is_closed() || !manager.is_alive() {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: if manager.is_closed() {
+                "终端已关闭，无法发送交互输入".to_string()
+            } else {
+                "终端会话不可用".to_string()
+            },
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
     let ps = match pty_state {
         Some(ps) => ps,
         None => {
@@ -878,6 +1005,7 @@ pub(crate) async fn handle_send_interactive(
                 exit_code: -1,
                 stdout: String::new(),
                 stderr: "终端会话不可用".to_string(),
+                terminal_error: true,
                 timed_out: false,
                 cwd_after: manager.cwd(),
                 interrupted_by_user: false,
@@ -908,6 +1036,7 @@ pub(crate) async fn handle_send_interactive(
             exit_code: -1,
             stdout: String::new(),
             stderr: format!("发送输入到终端失败: {}", e),
+            terminal_error: true,
             timed_out: false,
             cwd_after: manager.cwd(),
             interrupted_by_user: false,
@@ -919,6 +1048,24 @@ pub(crate) async fn handle_send_interactive(
     // 双信号等待：交互程序对输入的响应（见 wait_for_screen_change）
     wait_for_screen_change(manager, baseline_pushed, baseline_updates, wait_secs).await;
 
+    if !manager.is_alive() {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: manager.recent_output(80),
+            stderr: if manager.is_closed() {
+                "终端已关闭，交互输入已中止".to_string()
+            } else {
+                "终端进程已退出".to_string()
+            },
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+
     let stdout_text = manager
         .screen_snapshot()
         .filter(|s| !s.trim().is_empty())
@@ -928,6 +1075,7 @@ pub(crate) async fn handle_send_interactive(
         exit_code: 0,
         stdout: stdout_text,
         stderr: String::new(),
+        terminal_error: false,
         timed_out: false,
         cwd_after: manager.cwd(),
         interrupted_by_user: false,
@@ -1215,7 +1363,7 @@ mod tests {
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
         assert!(combined.contains("\ngit diff HEAD\n__TIANGONG_= __rc=$?"));
-        assert!(invocation.starts_with(". "));
+        assert!(invocation.starts_with("\x15. "));
         assert!(invocation.ends_with('\r'));
         assert!(script
             .path()
@@ -1292,6 +1440,8 @@ mod tests {
         }
 
         let command_started = std::time::Instant::now();
+        // 复现历史终端查询响应残留在 zsh 输入行、随后 Agent 提交命令的现场。
+        writer.write_all(b"11;rgb:1e1e/1e1e/2e2e;52R").unwrap();
         writer.write_all(combined.as_bytes()).unwrap();
         writer.flush().unwrap();
         let completed_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1318,6 +1468,10 @@ mod tests {
             "命令已结束却未及时返回完成标记，PTY 输出: {output}"
         );
         assert!(output.contains("stdin-empty"), "PTY 输出异常: {output}");
+        assert!(
+            !output.contains("command not found"),
+            "残留输入未清理: {output}"
+        );
         assert!(!output.contains("stdin-consumed:__TIANGONG_"));
         assert!(!output.contains("parse error"), "PTY 输出异常: {output}");
 
@@ -1375,7 +1529,10 @@ mod tests {
             "__TIANGONG_END_x__",
         )
         .unwrap();
-        let script_path = combined.trim_end_matches('\r').strip_prefix(". ").unwrap();
+        let script_path = combined
+            .trim_end_matches('\r')
+            .strip_prefix("\x15. ")
+            .unwrap();
 
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -1439,7 +1596,7 @@ mod tests {
             "测试命令必须证明普通 Ctrl+C 不足以停止它"
         );
 
-        force_stop_process_group(process_group).unwrap();
+        crate::manager::force_stop_process_group(process_group).unwrap();
         let _ = child.wait();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(

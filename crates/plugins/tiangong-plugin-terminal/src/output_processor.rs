@@ -111,17 +111,25 @@ fn rotate_tail(file: &mut File, len: u64) -> std::io::Result<()> {
 }
 
 /// 读取日志文件末尾最多 `max_lines` 行，用于启动时回填环形缓冲区。
-/// 返回 (按行分割的 Vec<String>, 完整文本)。失败返回空。
+///
+/// 日志保存的是曾经发给 xterm 的原始输出，其中可能包含颜色查询、光标位置查询等
+/// 会触发终端响应的控制序列。恢复时必须先按实时输出相同的规则解析成静态文本，
+/// 否则 xterm 重放历史后会把响应写进当前 PTY，污染下一条命令的输入行。
 pub(crate) fn read_log_tail(path: &Path, max_lines: usize) -> Vec<String> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut lines: Vec<&str> = content.lines().collect();
+    let mut processor = TerminalLineProcessor::new();
+    let mut lines = processor.process(&content);
+    let current_line = processor.current_line();
+    if !current_line.trim().is_empty() {
+        lines.push(current_line);
+    }
     if lines.len() > max_lines {
         lines = lines.split_off(lines.len() - max_lines);
     }
-    lines.into_iter().map(String::from).collect()
+    lines
 }
 
 /// 把一行历史输出回填进环形缓冲区（启动时从日志恢复历史用）。
@@ -371,10 +379,10 @@ impl RawOutputFilter {
 
 /// 后台读取 PTY 输出并推送到环形缓冲区和前端。
 /// `logger` 为 Some 时同时把 marker 过滤后的输出落盘（仅系统 PTY 传 Some）。
-pub(crate) fn spawn_output_reader(
+pub(crate) fn spawn_output_reader<R: tauri::Runtime>(
     reader: Arc<Mutex<Box<dyn std::io::Read + Send>>>,
     state: Arc<Mutex<TerminalState>>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
     session_id: String,
     logger: Option<Arc<OutputLogger>>,
     pty_generation: u64,
@@ -480,6 +488,21 @@ mod tests {
         let mut p = TerminalLineProcessor::new();
         let lines = p.process("hello\nworld\n");
         assert_eq!(lines, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn restored_log_is_inert_terminal_text() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            log.path(),
+            "before\r\n\x1b]11;?\x1b\\\x1b[6nafter\r\n\x1b[31mpartial\x1b[0m",
+        )
+        .unwrap();
+
+        let lines = read_log_tail(log.path(), 10);
+
+        assert_eq!(lines, vec!["before", "after", "partial"]);
+        assert!(lines.iter().all(|line| !line.contains('\x1b')));
     }
 
     #[test]

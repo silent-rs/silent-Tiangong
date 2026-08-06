@@ -209,6 +209,8 @@ pub struct TerminalExecResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// 终端或命令提交链路失败，而不是 shell 命令自身返回失败。
+    pub terminal_error: bool,
     pub timed_out: bool,
     pub cwd_after: String,
     /// 命令被用户中断（如 Ctrl+C）
@@ -223,6 +225,7 @@ impl From<TerminalExecResponse> for TerminalExecResult {
             exit_code: r.exit_code,
             stdout: r.stdout,
             stderr: r.stderr,
+            terminal_error: r.terminal_error,
             timed_out: r.timed_out,
             cwd_after: r.cwd_after,
             interrupted_by_user: r.interrupted_by_user,

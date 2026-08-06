@@ -191,7 +191,9 @@ impl TerminalToolOverride {
             // summary 反馈命令的执行状态信息，但不影响 ok：退出码、超时等都是
             // 命令的业务结果，由 agent 阅读 stdout/summary 自行判断是否符合预期。
             // 只有工具层故障（PTY 不可用等）才标记 ok:false。
-            let mut summary = if result.interactive_mode {
+            let mut summary = if result.terminal_error {
+                result.stderr.clone()
+            } else if result.interactive_mode {
                 "命令进入交互模式（未声明 interactive:true）".to_string()
             } else if result.timed_out {
                 "命令执行超时".to_string()
@@ -212,8 +214,8 @@ impl TerminalToolOverride {
             // 退出码非 0（如 grep 无匹配、测试失败）是命令的业务结果，不是工具故障。
             // 超时也只是状态信息（summary/stderr 说明），数据照常返回，agent 看
             // stdout 自行判断是否符合预期——不应触发 recovery 封禁工具。
-            // 只有非预期的 interactive_mode（命令卡在交互态）才是真正的工具层异常。
-            let ok = !result.interactive_mode;
+            // 终端链路失败或非预期进入交互态才是真正的工具层异常。
+            let ok = !result.terminal_error && !result.interactive_mode;
 
             Some(ToolResult {
                 ok,
@@ -314,7 +316,9 @@ impl TerminalToolOverride {
             // summary 反馈命令的执行状态信息，但不影响 ok：退出码、超时等都是
             // 命令的业务结果，由 agent 阅读 stdout/summary 自行判断是否符合预期。
             // 只有工具层故障（PTY 不可用等）才标记 ok:false。
-            let mut summary = if interactive && result.interactive_mode {
+            let mut summary = if result.terminal_error {
+                result.stderr.clone()
+            } else if interactive && result.interactive_mode {
                 "命令已进入交互态（终端当前显示见 stdout）".to_string()
             } else if result.interactive_mode {
                 "命令进入交互模式（未声明 interactive:true）".to_string()
@@ -360,8 +364,10 @@ impl TerminalToolOverride {
             // - 非交互模式：命令提交了、PTY 正常即为 true。退出码非 0（如 grep
             //   无匹配、测试失败）是命令的业务结果，不是工具故障，不应触发 recovery。
             // - 超时也只是状态信息，数据照常返回，agent 看 stdout 判断。
-            // - 只有非预期的 interactive_mode（命令卡在交互态）才是真正的工具层异常。
-            let ok = if interactive && result.interactive_mode {
+            // - 终端链路失败或非预期进入交互态才是真正的工具层异常。
+            let ok = if result.terminal_error {
+                false
+            } else if interactive && result.interactive_mode {
                 true
             } else {
                 !result.interactive_mode

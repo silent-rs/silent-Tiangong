@@ -160,6 +160,22 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
           const term = new Terminal(TERMINAL_CONFIG);
           const fitAddon = new FitAddon();
           term.loadAddon(fitAddon);
+          term.onResize(({ cols, rows }) => {
+            api.terminalSessionResize(terminalId, cols, rows).catch(() => {});
+          });
+          const container = containerRef.current;
+          if (!container) return;
+          term.open(container);
+
+          const history = await api.terminalSessionRecentOutput(terminalId, 5000).catch(() => '');
+          if (history) {
+            await new Promise<void>((resolve) => {
+              term.write(history.replace(/\n/g, '\r\n'), resolve);
+            });
+          }
+
+          // 历史回放期间不连接 PTY 输入。历史日志可能来自旧版本并带有终端查询，
+          // xterm 对查询生成的响应只能用于实时输出，不能写进当前 shell 输入行。
           term.onData((data) => {
             api
               .terminalSessionSendInput(terminalId, data)
@@ -203,17 +219,6 @@ export function TerminalTabContent({ sessionId, tabId, isActive }: TerminalTabCo
               });
             }
           });
-          term.onResize(({ cols, rows }) => {
-            api.terminalSessionResize(terminalId, cols, rows).catch(() => {});
-          });
-          const container = containerRef.current;
-          if (!container) return;
-          term.open(container);
-
-          const history = await api.terminalSessionRecentOutput(terminalId, 5000).catch(() => '');
-          if (history) {
-            term.write(history.replace(/\n/g, '\r\n'));
-          }
           terminalRef.current = term;
           fitAddonRef.current = fitAddon;
         }

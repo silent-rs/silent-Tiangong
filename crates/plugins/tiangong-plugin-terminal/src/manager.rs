@@ -31,6 +31,8 @@ pub(crate) struct TerminalState {
     pub cwd: String,
     pub shell: String,
     pub alive: bool,
+    /// 用户已关闭该终端。与 PTY 意外退出分开记录，避免关闭后被执行路径自动恢复。
+    pub closed: bool,
     /// 当前 PTY 实例代次。重置或恢复会递增，防止旧 reader 退出后误标记新 PTY 死亡。
     pub pty_generation: u64,
     /// 当前 PTY writer。用户键盘输入通过这里直接写入，不受命令队列阻塞。
@@ -75,6 +77,7 @@ impl TerminalManager {
                 cwd,
                 shell,
                 alive: false,
+                closed: false,
                 pty_generation: 0,
                 writer: None,
                 output_buffer: VecDeque::with_capacity(DEFAULT_BUFFER_LINES),
@@ -146,6 +149,27 @@ impl TerminalManager {
         self.state.lock().unwrap().alive
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state.lock().unwrap().closed
+    }
+
+    /// 标记终端已被用户关闭，并立即切断后续写入。
+    pub(crate) fn close(&self) {
+        let writer = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.closed = true;
+            state.alive = false;
+            state.writer.take()
+        };
+        // 与已经取得 writer 引用的并发写入同步；close 返回后不会再有输入落到 PTY。
+        if let Some(writer) = writer {
+            let _writer_guard = writer.lock().unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+
     /// 激活一个新 PTY writer 并返回对应代次。
     pub(crate) fn activate_pty(&self, writer: SharedPtyWriter) -> u64 {
         let mut state = self.state.lock().unwrap();
@@ -187,10 +211,21 @@ impl TerminalManager {
         };
 
         let write_result = match writer.lock() {
-            Ok(mut writer) => writer
-                .write_all(input)
-                .and_then(|_| writer.flush())
-                .map_err(|e| e.to_string()),
+            Ok(mut writer) => {
+                let still_active = self
+                    .state
+                    .lock()
+                    .map(|state| state.alive && state.pty_generation == generation)
+                    .unwrap_or(false);
+                if !still_active {
+                    Err("终端进程已退出".to_string())
+                } else {
+                    writer
+                        .write_all(input)
+                        .and_then(|_| writer.flush())
+                        .map_err(|e| e.to_string())
+                }
+            }
             Err(e) => Err(format!("终端输入通道锁定失败: {e}")),
         };
         if let Err(error) = write_result {
@@ -201,11 +236,11 @@ impl TerminalManager {
     }
 
     /// 启动 PTY 并在成功时启动输出读取线程，返回 PtyState
-    pub(crate) fn start_and_spawn_reader(
+    pub(crate) fn start_and_spawn_reader<R: tauri::Runtime>(
         &self,
         session_id: &str,
         cwd: &str,
-        app: tauri::AppHandle,
+        app: tauri::AppHandle<R>,
     ) -> Option<PtyState> {
         let shell = self.shell();
         let pty_env = self.pty_env.lock().map(|g| g.clone()).unwrap_or_default();
@@ -332,16 +367,19 @@ pub(crate) fn push_output(state: &mut TerminalState, line: String) {
 }
 
 /// 命令处理循环（PTY 已在 setup 阶段同步启动）
-pub(crate) async fn spawn_command_loop(
+pub(crate) async fn spawn_command_loop<R: tauri::Runtime>(
     mut rx: mpsc::Receiver<TerminalCommand>,
     manager: Arc<TerminalManager>,
-    app: tauri::AppHandle,
+    app: tauri::AppHandle<R>,
     mut pty_state: Option<PtyState>,
     activity: Option<Arc<crate::collaboration::TerminalActivityTracker>>,
 ) {
     let session_id = manager.session_id();
 
     while let Some(cmd) = rx.recv().await {
+        if manager.is_closed() {
+            break;
+        }
         match cmd {
             TerminalCommand::Exec {
                 command,
@@ -629,20 +667,88 @@ pub(crate) fn start_pty(
     })
 }
 
-/// 终止并回收 PTY shell，避免只 drop Child 后留下未回收进程。
-pub(crate) fn shutdown_pty(mut ps: PtyState) {
-    match ps.child.try_wait() {
-        Ok(Some(_)) => {}
+/// 取得 PTY 当前前台进程组。交互 shell 开启 job control 后，当前用户命令通常
+/// 位于独立进程组；关闭终端时必须先终止该组，不能只杀登录 shell。
+#[cfg(unix)]
+pub(crate) fn foreground_process_group(ps: &PtyState) -> Option<libc::pid_t> {
+    ps.master
+        .lock()
+        .ok()
+        .and_then(|master| master.process_group_leader())
+        .filter(|process_group| *process_group > 0)
+}
+
+#[cfg(unix)]
+pub(crate) fn force_stop_process_group(process_group: libc::pid_t) -> std::io::Result<()> {
+    force_stop_target(-process_group)
+}
+
+#[cfg(unix)]
+pub(crate) fn force_stop_process(process_id: libc::pid_t) -> std::io::Result<()> {
+    force_stop_target(process_id)
+}
+
+#[cfg(unix)]
+fn force_stop_target(target: libc::pid_t) -> std::io::Result<()> {
+    let result = unsafe { libc::kill(target, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+/// 终止前台任务并回收 PTY shell，避免关闭终端后留下孤立命令或未回收进程。
+pub(crate) fn shutdown_pty(ps: PtyState) {
+    #[cfg(unix)]
+    if let Some(process_group) = foreground_process_group(&ps) {
+        if let Err(error) = force_stop_process_group(process_group) {
+            tracing::warn!(%error, process_group, "终止 PTY 前台进程组失败");
+        }
+    }
+
+    let PtyState {
+        writer,
+        reader,
+        master,
+        mut child,
+    } = ps;
+
+    let should_wait = match child.try_wait() {
+        Ok(Some(_)) => false,
         Ok(None) => {
-            if let Err(error) = ps.child.kill() {
+            #[cfg(unix)]
+            let kill_result = child
+                .process_id()
+                .map(|pid| force_stop_process(pid as libc::pid_t))
+                .unwrap_or_else(|| Err(std::io::Error::other("PTY 子进程 PID 不可用")));
+            #[cfg(not(unix))]
+            let kill_result = child.kill();
+            let kill_succeeded = kill_result.is_ok();
+            if let Err(error) = kill_result {
                 tracing::warn!(%error, "终止 PTY 子进程失败");
             }
-            if let Err(error) = ps.child.wait() {
-                tracing::warn!(%error, "回收 PTY 子进程失败");
-            }
+            kill_succeeded
         }
         Err(error) => {
             tracing::warn!(%error, "查询 PTY 子进程状态失败");
+            false
+        }
+    };
+
+    // macOS 上会话首进程收到终止信号后，可能要等 PTY master 的全部句柄关闭
+    // 才能完成退出。持有这些句柄调用 wait 会让关闭流程永久卡住。
+    drop(writer);
+    drop(reader);
+    drop(master);
+
+    if should_wait {
+        if let Err(error) = child.wait() {
+            tracing::warn!(%error, "回收 PTY 子进程失败");
         }
     }
 }
@@ -686,6 +792,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             shell: "/bin/bash".to_string(),
             alive: false,
+            closed: false,
             pty_generation: 0,
             writer: None,
             output_buffer: VecDeque::with_capacity(5),
@@ -824,6 +931,88 @@ mod tests {
         assert!(!manager.is_alive());
     }
 
+    #[test]
+    fn closed_terminal_cannot_accept_input() {
+        let manager = TerminalManager::new("test".to_string(), "/tmp".to_string());
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer: SharedPtyWriter =
+            Arc::new(Mutex::new(Box::new(RecordingWriter(output.clone()))));
+        manager.activate_pty(writer);
+
+        manager.close();
+
+        assert!(manager.is_closed());
+        assert!(!manager.is_alive());
+        assert!(manager.write_input(b"should-not-run").is_err());
+        assert!(output.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_terminal_finishes_running_command_wait() {
+        let app = tauri::test::mock_app();
+        let temp = tempfile::tempdir().unwrap();
+        let ready_path = temp.path().join("command-ready");
+        let manager = Arc::new(TerminalManager::new(
+            "test-close-command".to_string(),
+            "/tmp".to_string(),
+        ));
+        manager.state.lock().unwrap().shell = "/bin/sh".to_string();
+        let pty_state = manager
+            .start_and_spawn_reader("test-close-command", "/tmp", app.handle().clone())
+            .expect("测试 PTY 应成功启动");
+        let command = format!(
+            "sh -c 'printf ready > \"$1\"; exec sleep 60' _ {}",
+            shell_quote(&ready_path.to_string_lossy())
+        );
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+        let completion = crate::types::TerminalExecCompletion::new(Arc::clone(&cancellation));
+        let task_manager = Arc::clone(&manager);
+        let app_handle = app.handle().clone();
+        let command_task = tokio::spawn(async move {
+            let mut pty_state = Some(pty_state);
+            crate::command_protocol::handle_exec(
+                &task_manager,
+                &mut pty_state,
+                &app_handle,
+                &command,
+                None,
+                response_tx,
+                cancellation,
+                completion,
+                None,
+            )
+            .await;
+            assert!(pty_state.is_none(), "关闭后不应保留旧 PTY");
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !ready_path.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("测试命令未启动");
+
+        let closed_at = std::time::Instant::now();
+        manager.close();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), response_rx)
+            .await
+            .expect("关闭终端后命令响应仍在等待")
+            .expect("命令响应发送端意外关闭");
+        assert!(response.terminal_error);
+        assert!(response.stderr.contains("终端已关闭"));
+        tokio::time::timeout(std::time::Duration::from_secs(2), command_task)
+            .await
+            .expect("关闭终端后命令处理任务仍在等待")
+            .expect("命令处理任务异常退出");
+        assert!(
+            closed_at.elapsed() < std::time::Duration::from_secs(2),
+            "关闭终端后命令等待未及时结束"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn shutdown_pty_reaps_shell_process() {
@@ -844,6 +1033,55 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_pty_stops_foreground_command_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_path = temp.path().join("foreground.pid");
+        let ps = start_pty(
+            "test",
+            "/tmp",
+            "/bin/sh",
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        {
+            let mut writer = ps.writer.lock().unwrap();
+            let command = format!(
+                "sh -c 'echo $$ > \"$1\"; exec sleep 60' _ {}\r",
+                shell_quote(&pid_path.to_string_lossy())
+            );
+            writer.write_all(command.as_bytes()).unwrap();
+            writer.flush().unwrap();
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !pid_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let foreground_pid = std::fs::read_to_string(&pid_path)
+            .expect("前台命令未启动")
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(foreground_pid, 0) }, 0);
+
+        shutdown_pty(ps);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let result = unsafe { libc::kill(foreground_pid, 0) };
+            if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "关闭 PTY 后前台命令仍在运行: {foreground_pid}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     // login_shell_args 仅在非 Windows 上产出登录参数，相关断言限定平台编译，

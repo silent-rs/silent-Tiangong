@@ -147,6 +147,8 @@ pub struct TerminalExecResponse {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// 命令协议或 PTY 本身失败；不是用户命令返回的普通非零退出码。
+    pub terminal_error: bool,
     pub timed_out: bool,
     pub cwd_after: String,
     pub interrupted_by_user: bool,
