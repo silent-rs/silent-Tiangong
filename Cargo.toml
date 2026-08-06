@@ -26,7 +26,9 @@ members = [
     "crates/plugins/tiangong-plugin-fetch/protocol",
     "crates/plugins/tiangong-plugin-fetch/sidecar",
     "crates/plugins/tiangong-plugin-fetch/wasm",
-    "crates/plugins/tiangong-plugin-fs",
+    "crates/plugins/tiangong-plugin-fs/protocol",
+    "crates/plugins/tiangong-plugin-fs/sidecar",
+    "crates/plugins/tiangong-plugin-fs/wasm",
     "crates/plugins/tiangong-plugin-index/protocol",
     "crates/plugins/tiangong-plugin-index/sidecar",
     "crates/plugins/tiangong-plugin-index/wasm",
@@ -94,7 +96,9 @@ tiangong-plugin-command = { path = "crates/plugins/tiangong-plugin-command" }
 tiangong-plugin-fetch-protocol = { path = "crates/plugins/tiangong-plugin-fetch/protocol" }
 tiangong-plugin-fetch-sidecar = { path = "crates/plugins/tiangong-plugin-fetch/sidecar" }
 tiangong-plugin-fetch-wasm = { path = "crates/plugins/tiangong-plugin-fetch/wasm" }
-tiangong-plugin-fs = { path = "crates/plugins/tiangong-plugin-fs" }
+tiangong-plugin-fs-protocol = { path = "crates/plugins/tiangong-plugin-fs/protocol" }
+tiangong-plugin-fs-sidecar = { path = "crates/plugins/tiangong-plugin-fs/sidecar" }
+tiangong-plugin-fs-wasm = { path = "crates/plugins/tiangong-plugin-fs/wasm" }
 tiangong-plugin-index-protocol = { path = "crates/plugins/tiangong-plugin-index/protocol" }
 tiangong-plugin-index-wasm = { path = "crates/plugins/tiangong-plugin-index/wasm" }
 tiangong-plugin-index-sidecar = { path = "crates/plugins/tiangong-plugin-index/sidecar" }

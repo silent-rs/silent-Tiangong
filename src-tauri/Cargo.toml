@@ -18,7 +18,6 @@ tiangong-cli = { workspace = true }
 tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-browser = { workspace = true }
-tiangong-plugin-fs = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-task = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }

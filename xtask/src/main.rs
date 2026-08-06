@@ -139,6 +139,20 @@ const PROMPT: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-prompt/protocol/Cargo.toml",
 };
 
+const FS: PluginConfig = PluginConfig {
+    id: "fs",
+    name: "Fs",
+    description: "基础文件工具（读写/补丁/目录树）+ 进程级文件锁表",
+    protocol_crate: "tiangong-plugin-fs-protocol",
+    wasm_crate: "tiangong-plugin-fs-wasm",
+    wasm_artifact: "tiangong_plugin_fs_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-fs-sidecar",
+    sidecar_artifact: "tiangong-fs-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-fs",
+    plugin_manifest: "crates/plugins/tiangong-plugin-fs/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-fs/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -149,6 +163,12 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "skill" => Ok(&SKILL),
         "coding" => Ok(&CODING),
         "prompt" => Ok(&PROMPT),
+        "text-to-speech" => Ok(&TEXT_TO_SPEECH),
+        "generate-image" => Ok(&GENERATE_IMAGE),
+        "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
+        "speech-to-text" => Ok(&SPEECH_TO_TEXT),
+        "generate-video" => Ok(&GENERATE_VIDEO),
+        "fs" => Ok(&FS),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
