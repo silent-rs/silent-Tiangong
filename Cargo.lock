@@ -10592,7 +10592,6 @@ dependencies = [
  "tiangong-llm",
  "tiangong-plugin-agent-team",
  "tiangong-plugin-command",
- "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
@@ -10913,20 +10912,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-fetch"
+name = "tiangong-plugin-fetch-protocol"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-fetch-sidecar"
 version = "0.13.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "reqwest 0.13.4",
  "scraper",
  "scru128",
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
- "tiangong-core",
+ "tiangong-plugin-fetch-protocol",
+ "tiangong-plugin-runtime",
+ "tiangong-plugin-sidecar",
  "tiangong-toolkit",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tiangong-plugin-fetch-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-fetch-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11433,7 +11454,6 @@ dependencies = [
  "tiangong-media-archive",
  "tiangong-plugin-agent-team",
  "tiangong-plugin-command",
- "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",

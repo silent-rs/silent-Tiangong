@@ -1,0 +1,28 @@
+[package]
+name = "tiangong-plugin-fetch-sidecar"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "Fetch 独立 sidecar 进程（承载 reqwest 阻塞抓取、SSRF 防护、落盘）"
+publish = false
+
+[[bin]]
+name = "tiangong-fetch-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+tiangong-plugin-fetch-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+tiangong-toolkit = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "io-util", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls"] }
+scraper = { workspace = true }
+sha2 = { workspace = true }
+scru128 = { workspace = true }

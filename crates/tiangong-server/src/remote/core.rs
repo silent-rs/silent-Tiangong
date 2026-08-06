@@ -348,7 +348,7 @@ impl ServerCoreManager {
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Server,
             ));
-            plugins.extend(tiangong_plugin_fetch::default_plugins());
+            // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
             plugins.extend(tiangong_plugin_command::default_plugins());
             plugins.extend(tiangong_plugin_task::default_plugins());
             // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
@@ -369,7 +369,6 @@ impl ServerCoreManager {
                             tiangong_plugin_runtime::registry::RuntimeKind::Server,
                         ),
                     );
-                    child_plugins.extend(tiangong_plugin_fetch::default_plugins());
                     child_plugins.extend(tiangong_plugin_command::default_plugins());
                     child_plugins.extend(tiangong_plugin_task::default_plugins());
                     child_plugins
