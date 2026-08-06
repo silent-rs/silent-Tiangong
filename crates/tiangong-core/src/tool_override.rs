@@ -48,3 +48,15 @@ pub trait PromptSectionProvider: Send + Sync + 'static {
         Vec::new()
     }
 }
+
+/// @提及候选提供者。
+///
+/// Plugin 通过此机制向 UI 输入框贡献 @补全候选（如 skill 列表、mcp server 列表）。
+/// Core 在 [`get_mentions`](crate::core::TiangongCore::get_mentions) 中遍历全部插件
+/// 收集；native 插件直接实现本 trait，WASM 插件经 WIT mention interface 由
+/// `WasmPluginAdapter` 桥接到本 trait。默认返回空，不贡献 mention 的插件无需覆写。
+pub trait MentionCandidateProvider: Send + Sync + 'static {
+    fn mention_candidates(&self) -> Vec<crate::MentionCandidate> {
+        Vec::new()
+    }
+}

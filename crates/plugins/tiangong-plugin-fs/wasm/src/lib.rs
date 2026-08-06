@@ -464,5 +464,4 @@ impl UiGuest for Component {
         Err(plugin_err("Fs 插件暂无页面消息"))
     }
 }
-
 bindings::export!(Component with_types_in bindings);

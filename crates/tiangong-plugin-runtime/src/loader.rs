@@ -349,6 +349,30 @@ impl WasmPlugin {
             .collect())
     }
 
+    /// 返回插件贡献的 @提及候选。
+    ///
+    /// 复用 0.1.0 world 已有的 plugin-ui 消息通道，避免给现有 world 增加强制导出：
+    /// 旧插件收到未知方法会返回 plugin-error，此处按“不支持 Mention”降级为空列表；
+    /// 新插件返回 MentionCandidate JSON 数组。
+    pub fn mention_candidates(&mut self) -> Result<Vec<MentionCandidate>> {
+        const METHOD: &str = "__tiangong.mention_candidates.v1";
+        let request = crate::bindings::exports::tiangong::plugin::plugin_ui::ViewMessageRequest {
+            method: METHOD.to_string(),
+            payload: "{}".to_string(),
+        };
+        let response = self
+            .instance
+            .tiangong_plugin_plugin_ui()
+            .call_handle_view_message(&mut self.store, &request)
+            .map_err(|e| anyhow::anyhow!("mention-candidates 调用失败: {e}"))?;
+        let payload = match response {
+            Ok(response) => response.payload,
+            Err(_) => return Ok(Vec::new()),
+        };
+        serde_json::from_str(&payload)
+            .map_err(|e| anyhow::anyhow!("mention-candidates 响应格式错误: {e}"))
+    }
+
     /// 打开页面，返回入口 HTML。
     pub fn open_view(&mut self, contribution_id: String) -> Result<String> {
         Ok(self
@@ -444,7 +468,7 @@ pub struct OutcomeExecution {
 }
 
 /// 设置页贡献项（镜像 WIT record）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Contribution {
     pub id: String,
     pub title: String,
@@ -452,6 +476,15 @@ pub struct Contribution {
     pub icon: String,
     pub group: String,
     pub has_view: bool,
+}
+
+/// @提及候选项（镜像 WIT record）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MentionCandidate {
+    pub value: String,
+    pub label: String,
+    pub kind: String,
+    pub hint: String,
 }
 
 /// 把 WIT 层的 `plugin-error` 转为 anyhow。

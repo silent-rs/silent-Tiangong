@@ -3,6 +3,9 @@ pub const MAX_TOOL_ROUNDS: usize = 30;
 /// 总结阶段后重新进入工具执行阶段的最大次数。
 pub const MAX_OUTER_ITERATIONS: u32 = 3;
 
+/// @提及候选（见 [`tiangong_types::MentionCandidate`]）。
+pub use tiangong_types::MentionCandidate;
+
 pub mod agent_config;
 pub mod agent_input;
 pub mod context;

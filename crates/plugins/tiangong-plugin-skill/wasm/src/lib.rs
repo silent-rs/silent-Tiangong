@@ -17,7 +17,7 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
 use serde_json::Value;
 use tiangong_plugin_skill_protocol::{
     Empty, GetSkillDetail, GetSkillDetailRequest, GetSkillEnv, GetSkillEnvRequest, GetSkillSummary,
-    ListSkills, RefreshSkills, RemoveSkill, RemoveSkillRequest, RevealSkillDir,
+    ListSkills, ListSkillsResponse, RefreshSkills, RemoveSkill, RemoveSkillRequest, RevealSkillDir,
     RevealSkillDirRequest, SetSkillEnabled, SetSkillEnabledRequest, SetSkillEnv,
     SetSkillEnvRequest, SkillOperation, SkillSummaryResponse, TOOL_GET_SKILL_DETAIL, UpdateSkillMd,
     UpdateSkillMdRequest,
@@ -286,6 +286,7 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
+            "__tiangong.mention_candidates.v1" => skill_mention_candidates()?,
             "list" => invoke_for_ui::<ListSkills>(&Empty {})?,
             "detail" => {
                 let req: GetSkillDetailRequest = serde_json::from_str(&request.payload)
@@ -335,6 +336,29 @@ impl UiGuest for Component {
     }
 }
 
+fn skill_mention_candidates() -> Result<String, PluginError> {
+    let response: ListSkillsResponse =
+        sidecar_client::invoke::<ListSkills>(&Empty {}).map_err(|e| plugin_err(e.to_string()))?;
+    let candidates = response
+        .skills
+        .into_iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| {
+            serde_json::json!({
+                "value": format!("@skill:{}", skill.id),
+                "label": skill.name,
+                "kind": "skill",
+                "hint": if skill.description.is_empty() {
+                    format!("v{}", skill.version)
+                } else {
+                    skill.description
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
+}
+
 /// 通用 sidecar 转发器：调用操作 O 并把响应序列化成 JSON 字符串（供 iframe 消费）。
 fn invoke_for_ui<O>(request: &O::Request) -> Result<String, PluginError>
 where
@@ -344,5 +368,4 @@ where
     let response = sidecar_client::invoke::<O>(request).map_err(|e| plugin_err(e.to_string()))?;
     serde_json::to_string(&response).map_err(|e| plugin_err(e.to_string()))
 }
-
 bindings::export!(Component with_types_in bindings);

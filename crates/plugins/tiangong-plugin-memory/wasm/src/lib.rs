@@ -709,5 +709,4 @@ fn recall_tool_result(
         }),
     }
 }
-
 bindings::export!(Component with_types_in bindings);

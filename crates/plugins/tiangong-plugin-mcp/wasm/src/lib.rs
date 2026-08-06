@@ -15,10 +15,12 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     ViewResponse,
 };
 use tiangong_plugin_mcp_protocol::capability::Reconfigure;
-use tiangong_plugin_mcp_protocol::config::{RegisterMcpServerRequest, UpdateConfigEntryRequest};
+use tiangong_plugin_mcp_protocol::config::{
+    McpServerConfig, RegisterMcpServerRequest, UpdateConfigEntryRequest,
+};
 use tiangong_plugin_mcp_protocol::management::{
     ConfigGet, ConfigSnapshot, RemoveServerRequest, ServerMergeDisk, ServerRegister, ServerRemove,
-    ServerSetEnabled, ServerUpdate, SetEnabledRequest, UpdateServerRequest,
+    ServerSetEnabled, ServerUpdate, ServersResponse, SetEnabledRequest, UpdateServerRequest,
 };
 use tiangong_plugin_mcp_protocol::query::{
     ServerCachedTools, ServerDetail, ServerHealth, ServerList, ServerNameRequest, ServerSummary,
@@ -226,6 +228,7 @@ impl UiGuest for Component {
         request: ViewMessageRequest,
     ) -> Result<ViewMessageResponse, PluginError> {
         let payload = match request.method.as_str() {
+            "__tiangong.mention_candidates.v1" => mcp_mention_candidates()?,
             "bootstrap" => invoke_for_ui::<ConfigSnapshot>(&Empty {})?,
             "config.get" => invoke_for_ui::<ConfigGet>(&Empty {})?,
             "config.update_entry" => {
@@ -342,6 +345,34 @@ fn parse_mcp_function_name(function_name: &str) -> Option<(String, String)> {
     Some((server.to_string(), tool.to_string()))
 }
 
+fn mcp_mention_candidates() -> Result<String, PluginError> {
+    let servers: ServersResponse =
+        sidecar_client::invoke::<ServerList>(&Empty {}).map_err(|e| plugin_err(e.to_string()))?;
+    let tool_counts: std::collections::HashMap<String, usize> =
+        match sidecar_client::invoke::<ListTools>(&Empty {}) {
+            Ok(response) => response
+                .servers
+                .into_iter()
+                .map(|entry| (entry.server, entry.tools.len()))
+                .collect(),
+            Err(_) => std::collections::HashMap::new(),
+        };
+    let candidates = servers
+        .servers
+        .into_iter()
+        .filter(|server: &McpServerConfig| server.enabled)
+        .map(|server| {
+            serde_json::json!({
+                "value": format!("@mcp:{}", server.name),
+                "label": server.name,
+                "kind": "mcp",
+                "hint": format!("{} 工具", tool_counts.get(&server.name).copied().unwrap_or(0)),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&candidates).map_err(|e| plugin_err(e.to_string()))
+}
+
 fn sanitize_fn_name(value: &str) -> String {
     let mut out = String::new();
     for ch in value.chars() {
@@ -358,5 +389,4 @@ fn sanitize_fn_name(value: &str) -> String {
         trimmed
     }
 }
-
 bindings::export!(Component with_types_in bindings);

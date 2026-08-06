@@ -149,6 +149,32 @@ impl CoreManager {
         }
     }
 
+    /// 获取指定会话 Core 全部插件贡献的 @提及候选。
+    ///
+    /// 经 [`TiangongCore::get_mentions`] 聚合（遍历 native + WASM 插件）。
+    /// 会话不存在 Core 时返回空列表（mention 与会话绑定，无 Core 即无候选）。
+    pub fn get_core_mentions(&self, session_id: &str) -> Vec<tiangong_types::MentionCandidate> {
+        let registry = self.registry();
+        registry
+            .get(session_id)
+            .map(|core| core.get_mentions())
+            .unwrap_or_default()
+    }
+
+    /// 获取任意一个活跃 Core 的 @提及候选。
+    ///
+    /// mention 候选（skill/mcp 列表等）与具体会话内容无关——同一宿主内各 Core 注册
+    /// 的插件集合一致，故任意活跃 Core 返回的结果相同。供无 session_id 上下文的
+    /// 宿主命令（如 `get_mention_candidates`）使用；无任何活跃 Core 时返回空。
+    pub fn get_any_mentions(&self) -> Vec<tiangong_types::MentionCandidate> {
+        let registry = self.registry();
+        registry
+            .iter()
+            .next()
+            .map(|(_, core)| core.get_mentions())
+            .unwrap_or_default()
+    }
+
     /// 更新指定会话标题（落盘始终由 Core 负责，保证不与 turn 对 session 的读写竞争）。
     ///
     /// 必须存在 live Core（标题可编辑意味着 Core 应已创建）；不存在则视为异常并报错。

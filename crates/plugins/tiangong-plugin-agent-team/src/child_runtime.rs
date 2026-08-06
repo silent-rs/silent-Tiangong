@@ -1088,7 +1088,7 @@ mod tests {
     use tiangong_core::core::Plugin;
     use tiangong_core::core_config::ModelEndpoint;
     use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
 
     #[derive(Default)]
@@ -1097,6 +1097,7 @@ mod tests {
     impl ToolOverrideHandler for EmptyPlugin {}
     impl ToolSpecProvider for EmptyPlugin {}
     impl PromptSectionProvider for EmptyPlugin {}
+    impl MentionCandidateProvider for EmptyPlugin {}
 
     impl Plugin for EmptyPlugin {
         fn id(&self) -> &str {
@@ -1112,6 +1113,7 @@ mod tests {
     impl ToolOverrideHandler for FeedbackCapturePlugin {}
     impl ToolSpecProvider for FeedbackCapturePlugin {}
     impl PromptSectionProvider for FeedbackCapturePlugin {}
+    impl MentionCandidateProvider for FeedbackCapturePlugin {}
 
     impl Plugin for FeedbackCapturePlugin {
         fn id(&self) -> &str {

@@ -387,5 +387,4 @@ const CODING_WORKFLOW: &str = r#"## Coding 工作模式
 9. 只有需求全部完成且相关验证通过后才结束，并用简单直白的语言说明完成内容和结果。
 
 通用文件、检索、命令和终端能力继续由现有工具提供；Coding 插件只补充开发工作流、项目上下文、进度记录和交付审查，不重复实现这些原子能力。"#;
-
 bindings::export!(Component with_types_in bindings);

@@ -8,7 +8,9 @@ use tiangong_core::core::Plugin;
 use tiangong_core::model::{ToolCall, ToolSpec};
 use tiangong_core::session::Session;
 use tiangong_core::tool::ToolResult;
-use tiangong_core::tool_override::{PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider};
+use tiangong_core::tool_override::{
+    MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+};
 
 use crate::constants::{PLUGIN_ID, TOOL_CREATE_AGENT, TOOL_DISMISS_AGENT};
 use crate::coordinator::Coordinator;
@@ -96,6 +98,8 @@ impl PromptSectionProvider for AgentTeamPlugin {
     }
 }
 
+impl MentionCandidateProvider for AgentTeamPlugin {}
+
 impl Plugin for AgentTeamPlugin {
     fn id(&self) -> &str {
         PLUGIN_ID
@@ -170,7 +174,7 @@ mod tests {
     use tiangong_core::permission::TrustMode;
     use tiangong_core::session::Session;
     use tiangong_core::tool_override::{
-        PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
+        MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
     };
     use tiangong_types::{ContentBlock, MessagePhase, MessageRole, StreamEvent};
 
@@ -225,6 +229,7 @@ mod tests {
     impl ToolSpecProvider for SlowSessionEndedPlugin {}
     impl ToolOverrideHandler for SlowSessionEndedPlugin {}
     impl PromptSectionProvider for SlowSessionEndedPlugin {}
+    impl MentionCandidateProvider for SlowSessionEndedPlugin {}
 
     impl Plugin for SlowSessionEndedPlugin {
         fn id(&self) -> &str {

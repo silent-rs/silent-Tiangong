@@ -193,5 +193,4 @@ fn write_custom_prompt(content: &str) -> Result<(), PluginError> {
 
 // 从 ToolSpec 的 WIT 类型引用（prompt 不暴露工具，但 WIT 要求实现 Guest trait 全部方法）
 use bindings::exports::tiangong::plugin::plugin::ToolSpec;
-
 bindings::export!(Component with_types_in bindings);
