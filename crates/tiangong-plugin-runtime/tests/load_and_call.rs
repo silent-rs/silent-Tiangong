@@ -355,6 +355,8 @@ fn lifecycle_hooks_forward_session_without_panic() {
     <WasmPluginAdapter as Plugin>::on_turn_started(&adapter, &mut session, 0);
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
     <WasmPluginAdapter as Plugin>::on_session_ended(&adapter, &mut session);
+    // 回收 fire-and-forget 后台线程，避免测试退出时被打断。
+    adapter.join_pending_hooks();
 }
 
 #[test]
@@ -371,7 +373,9 @@ fn on_turn_finished_with_connection_forwards_rumination() {
 
     let mut session = test_session_with_user_message();
     // 有用户消息时，on_turn_finished 应触发反刍（best-effort）。
+    // 反刍通知以 fire-and-forget 投递到后台线程，join 后再断言。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    adapter.join_pending_hooks();
     assert!(sidecar.called("run_enhanced_micro_rumination"));
     let payload = sidecar.payload("run_enhanced_micro_rumination");
     let turn = &payload["turn_result"];
@@ -398,8 +402,10 @@ fn every_tenth_turn_forwards_meta_rumination() {
     for _ in 0..9 {
         <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
     }
+    adapter.join_pending_hooks();
     assert!(!sidecar.called("run_meta_rumination"));
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
+    adapter.join_pending_hooks();
     assert!(sidecar.called("run_meta_rumination"));
 }
 

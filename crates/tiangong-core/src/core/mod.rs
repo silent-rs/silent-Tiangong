@@ -287,9 +287,15 @@ impl TiangongCore {
     }
 
     /// 遍历插件调用 on_session_ended（worker 退出前的 finalize 钩子）。
+    ///
+    /// 收尾钩子（如记忆 meso 反刍）以 fire-and-forget 投递后立即返回，这里在所有
+    /// 插件投递完毕后统一 join，确保后台通知在会话关闭前尽量送达 sidecar。
     fn finalize_plugins(&self, session: &mut Session) {
         for plugin in &self.plugins {
             plugin.on_session_ended(session);
+        }
+        for plugin in &self.plugins {
+            plugin.join_pending_async();
         }
     }
 }

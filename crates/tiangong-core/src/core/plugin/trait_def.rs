@@ -152,4 +152,13 @@ pub trait Plugin: ToolSpecProvider + ToolOverrideHandler + PromptSectionProvider
     ///
     /// 注意：此时 stream 通道可能已关闭，钩子内不应再投递流事件。
     fn on_session_ended(&self, _session: &mut crate::session::Session) {}
+
+    /// 等待本插件以 fire-and-forget 方式投递的收尾任务完成。
+    ///
+    /// `on_turn_finished` / `on_session_ended` 等钩子可能把耗时通知（如记忆反刍的
+    /// sidecar 往返）投递到后台，不阻塞回复收尾关键路径。Core 在 finalize 阶段
+    /// 遍历插件调用本方法，确保这些后台投递尽量在进程/会话关闭前送达，避免丢失。
+    ///
+    /// 默认空实现——只做同步收尾、没有后台投递的插件无需覆写。
+    fn join_pending_async(&self) {}
 }

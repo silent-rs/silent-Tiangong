@@ -38,6 +38,12 @@ pub struct WasmPluginAdapter {
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
     enabled: AtomicBool,
+    /// fire-and-forget 生命周期钩子的后台线程句柄。
+    ///
+    /// `on_turn_finished` / `on_session_ended` 投递到独立线程后立即返回，句柄存于此。
+    /// [`join_pending_hooks`](Self::join_pending_hooks) 在会话关闭前回收，确保通知
+    /// 尽量送达 sidecar，避免进程退出打断后台投递。
+    pending_hooks: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +76,7 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
+            pending_hooks: Mutex::new(Vec::new()),
         }
     }
 
@@ -87,6 +94,7 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
+            pending_hooks: Mutex::new(Vec::new()),
         }
     }
 
@@ -96,6 +104,25 @@ impl WasmPluginAdapter {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
+    }
+
+    /// 等待所有 fire-and-forget 生命周期钩子（`on_turn_finished` / `on_session_ended`）
+    /// 的后台投递完成。
+    ///
+    /// 这些钩子投递后立即返回，正常路径无需等待；但在会话关闭前调用本方法可确保
+    /// 通知尽量送达 sidecar，避免进程退出打断后台投递。失败（线程 panic）仅记录，
+    /// 不向上传播——这些钩子本就是 best-effort。
+    pub fn join_pending_hooks(&self) {
+        let handles = self
+            .pending_hooks
+            .lock()
+            .map(|mut handles| handles.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+        for handle in handles {
+            if let Err(payload) = handle.join() {
+                tracing::warn!(plugin_id = %self.id, "wasm 钩子后台线程异常: {payload:?}");
+            }
+        }
     }
 
     /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
@@ -210,8 +237,12 @@ impl Plugin for WasmPluginAdapter {
     }
 
     /// 轮次结束：序列化 session 转发（WASM 内部触发 micro 反刍）。
+    ///
+    /// 采用 fire-and-forget：WASM 调用（含 sidecar 往返）投递到独立 OS 线程，
+    /// 调用方立即返回，避免把 sidecar 建连与往返开销堆在发布终态前的关键路径上。
+    /// 反刍在 sidecar 端本就是后台异步执行，这里只需保证"通知发出"，不阻塞即可。
     fn on_turn_finished(&self, session: &mut Session, turn_start_idx: usize) {
-        self.forward_session_hook_with_idx(
+        self.forward_session_hook_with_idx_detached(
             "on_turn_finished",
             session,
             turn_start_idx,
@@ -220,10 +251,18 @@ impl Plugin for WasmPluginAdapter {
     }
 
     /// 会话结束：序列化 session 转发（WASM 内部触发 meso 反刍）。
+    ///
+    /// 同样采用 fire-and-forget：投递到独立线程立即返回，不阻塞 finalize 关键路径。
     fn on_session_ended(&self, session: &mut Session) {
-        self.forward_session_hook("on_session_ended", session, |plugin, json| {
+        self.forward_session_hook_detached("on_session_ended", session, |plugin, json| {
             plugin.on_session_ended(json)
         });
+    }
+
+    /// finalize 阶段由 Core 调用：等待 fire-and-forget 投递的后台钩子完成，
+    /// 确保记忆反刍等通知在进程关闭前尽量送达 sidecar。
+    fn join_pending_async(&self) {
+        self.join_pending_hooks();
     }
 
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
@@ -338,6 +377,106 @@ impl WasmPluginAdapter {
         let idx = turn_start_idx as u32;
         if let Err(error) = self.call_wasm_off_runtime(move |plugin| call(plugin, json, idx)) {
             tracing::warn!(plugin_id = %self.id, hook, %error, "wasm 生命周期钩子失败");
+        }
+    }
+
+    /// 与 [`forward_session_hook`](Self::forward_session_hook) 相同的序列化逻辑，
+    /// 但把 WASM 调用投递到独立 OS 线程后立即返回，不阻塞调用方。
+    ///
+    /// 用于收尾类钩子（`on_turn_finished` / `on_session_ended`）：这类钩子只需保证
+    /// 通知最终送达 sidecar，结果对当前路径无影响（失败本就只 warn），因此可以
+    /// 完全脱离关键路径，避免 sidecar 建连与往返开销拖慢回复收尾。
+    ///
+    /// 使用 `std::thread::spawn` 而非 `tokio::spawn_blocking`，是为了在 session
+    /// end 等 `spawn_blocking` 上下文中同样安全（那里没有 tokio runtime）。
+    fn forward_session_hook_detached(
+        &self,
+        hook: &'static str,
+        session: &Session,
+        call: impl Fn(&mut WasmPlugin, String) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
+        if !self.is_enabled() {
+            return;
+        }
+        let inner = self.current_inner();
+        let plugin_id = self.id.clone();
+        let hook_thread_id = plugin_id.clone();
+        match std::thread::Builder::new()
+            .name(format!("wasm-hook-{plugin_id}-{hook}"))
+            .spawn(move || {
+                if let Err(error) =
+                    call_wasm_off_runtime(inner, move |plugin| call(plugin, json))
+                {
+                    tracing::warn!(plugin_id = %hook_thread_id, hook, %error, "wasm 生命周期钩子失败");
+                }
+            })
+        {
+            Ok(handle) => self.track_pending_hook(handle),
+            Err(error) => {
+                tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
+            }
+        }
+    }
+
+    /// 同上，但带 turn_start_idx 参数。
+    fn forward_session_hook_with_idx_detached(
+        &self,
+        hook: &'static str,
+        session: &Session,
+        turn_start_idx: usize,
+        call: impl Fn(&mut WasmPlugin, String, u32) -> anyhow::Result<()> + Send + Sync + 'static,
+    ) {
+        let plugin_session = tiangong_types::PluginSession::from(session);
+        let json = match serde_json::to_string(&plugin_session) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("序列化 PluginSession 失败，跳过 wasm 钩子: {e}");
+                return;
+            }
+        };
+        if let Ok(mut context) = self.context.lock() {
+            context.session_json = Some(json.clone());
+        }
+        if !self.is_enabled() {
+            return;
+        }
+        let inner = self.current_inner();
+        let plugin_id = self.id.clone();
+        let hook_thread_id = plugin_id.clone();
+        let idx = turn_start_idx as u32;
+        match std::thread::Builder::new()
+            .name(format!("wasm-hook-{plugin_id}-{hook}"))
+            .spawn(move || {
+                if let Err(error) =
+                    call_wasm_off_runtime(inner, move |plugin| call(plugin, json, idx))
+                {
+                    tracing::warn!(plugin_id = %hook_thread_id, hook, %error, "wasm 生命周期钩子失败");
+                }
+            })
+        {
+            Ok(handle) => self.track_pending_hook(handle),
+            Err(error) => {
+                tracing::warn!(plugin_id = %plugin_id, hook, %error, "启动 wasm 钩子后台线程失败");
+            }
+        }
+    }
+
+    /// 记录一个待回收的后台钩子句柄，供 [`join_pending_hooks`](Self::join_pending_hooks)
+    /// 在会话关闭前统一等待。
+    fn track_pending_hook(&self, handle: std::thread::JoinHandle<()>) {
+        if let Ok(mut pending) = self.pending_hooks.lock() {
+            pending.push(handle);
         }
     }
 }
