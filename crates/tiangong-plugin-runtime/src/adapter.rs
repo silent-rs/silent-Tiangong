@@ -41,8 +41,8 @@ pub struct WasmPluginAdapter {
     /// fire-and-forget 生命周期钩子的后台线程句柄。
     ///
     /// `on_turn_finished` / `on_session_ended` 投递到独立线程后立即返回，句柄存于此。
-    /// [`join_pending_hooks`](Self::join_pending_hooks) 在会话关闭前回收，确保通知
-    /// 尽量送达 sidecar，避免进程退出打断后台投递。
+    /// 生产路径不等待（这些钩子是 agent 对插件的单向收尾通知，发出即结束）；
+    /// [`join_pending_hooks`](Self::join_pending_hooks) 仅用于测试确定性地等待后台投递。
     pending_hooks: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -109,9 +109,8 @@ impl WasmPluginAdapter {
     /// 等待所有 fire-and-forget 生命周期钩子（`on_turn_finished` / `on_session_ended`）
     /// 的后台投递完成。
     ///
-    /// 这些钩子投递后立即返回，正常路径无需等待；但在会话关闭前调用本方法可确保
-    /// 通知尽量送达 sidecar，避免进程退出打断后台投递。失败（线程 panic）仅记录，
-    /// 不向上传播——这些钩子本就是 best-effort。
+    /// 生产路径不调用本方法——这些钩子是 agent 对插件的单向收尾通知，发出即结束，
+    /// agent 不等回执。本方法仅供测试在断言前确定性地等待后台投递，避免 sleep。
     pub fn join_pending_hooks(&self) {
         let handles = self
             .pending_hooks
@@ -257,12 +256,6 @@ impl Plugin for WasmPluginAdapter {
         self.forward_session_hook_detached("on_session_ended", session, |plugin, json| {
             plugin.on_session_ended(json)
         });
-    }
-
-    /// finalize 阶段由 Core 调用：等待 fire-and-forget 投递的后台钩子完成，
-    /// 确保记忆反刍等通知在进程关闭前尽量送达 sidecar。
-    fn join_pending_async(&self) {
-        self.join_pending_hooks();
     }
 
     /// 注入工作目录：传给 WASM 缓存，供 prompt_sections 拉注入用。
