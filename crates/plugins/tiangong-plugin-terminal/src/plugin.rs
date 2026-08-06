@@ -7,6 +7,7 @@
 //! [`TerminalPlugin`] 上实现，core 通过 supertrait 自动收集。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde_json::json;
@@ -40,6 +41,8 @@ pub struct TerminalPlugin {
     /// turn 结束后接收端释放，迟到注入会 send 失败（注入发生在 Agent Loop 启动前，
     /// 时序上通道必然存活）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
+    /// 每个 Core 实例首次接管会话时先把已有终端输出设为基线。
+    core_initialized: AtomicBool,
 }
 
 impl TerminalPlugin {
@@ -63,6 +66,7 @@ impl TerminalPlugin {
             runtime_env,
             registry,
             feedback_tx: RwLock::new(None),
+            core_initialized: AtomicBool::new(false),
         })
     }
 }
@@ -104,14 +108,12 @@ impl Plugin for TerminalPlugin {
         }
     }
 
-    /// session 就绪：每轮注入终端状态快照（对齐 browser_data 范式）。
+    /// session 就绪：每轮注入终端元状态和未推送的增量输出。
     ///
-    /// `on_session_ready` 每轮触发，每次都注入当前终端全貌（各 Tab 的 cwd/shell/
-    /// phase/recent_output）。这样：
-    /// - 首轮：agent 看到初始终端状态；
-    /// - 后续每轮：agent 看到「截至本轮开始时」的终端状态，自然包含上一轮结束后
-    ///   用户在终端敲的命令及其输出——无需依赖 `terminal_user_input` 的实时注入
-    ///   （后者在两轮之间 / turn 收尾窗口可能丢失，但下一轮的 terminal_data 会补全）。
+    /// 每个 Core 实例首次接管已有会话时先把已有输出设为基线，避免 Core 恢复后重复
+    /// 注入历史内容；新会话仍保留首条消息前产生的终端增量。后续每轮只携带上次成功
+    /// 入队后产生的新输出。cwd/shell/phase/alive 等元状态始终完整提供。注入失败不提交
+    /// 游标，下一轮会继续补发。
     ///
     /// 当会话尚未打开任何终端 Tab 时（pre session 阶段），跳过注入——此时没有真实
     /// 终端上下文，空快照对 agent 无意义，反而引入一条空的 `terminal_data` 反馈。
@@ -122,7 +124,12 @@ impl Plugin for TerminalPlugin {
         let Some(tx) = self.feedback_tx.read().ok().and_then(|g| g.clone()) else {
             return;
         };
-        let state = self.registry.snapshot_for_injection(&session.id);
+        // Core 恢复已有会话时，当前用户消息之前已经存在历史消息；首次新建会话只有
+        // 本轮刚追加的一条用户消息，仍需把首条消息前的终端输出注入 Agent。
+        if !self.core_initialized.swap(true, Ordering::AcqRel) && session.messages.len() > 1 {
+            self.registry.baseline_agent_injection(&session.id);
+        }
+        let (state, commits) = self.registry.snapshot_for_injection(&session.id);
         if state.tabs.is_empty() {
             tracing::debug!(session_id = %session.id, "terminal_data 跳过注入（无终端 Tab）");
             return;
@@ -132,7 +139,10 @@ impl Plugin for TerminalPlugin {
             tracing::debug!(session_id = %session.id, "terminal_data 注入失败（通道未就绪）");
             return;
         }
-        tracing::debug!(session_id = %session.id, "terminal_data 已注入");
+        for (manager, end_cursor) in commits {
+            manager.commit_agent_injection(end_cursor);
+        }
+        tracing::debug!(session_id = %session.id, "terminal_data 增量状态已注入");
     }
 }
 

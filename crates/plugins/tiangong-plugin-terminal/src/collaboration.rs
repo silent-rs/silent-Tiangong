@@ -224,8 +224,13 @@ pub struct TerminalTabSnapshot {
     pub shell: String,
     pub phase: String,
     pub alive: bool,
-    /// 该 Tab 最近 N 行输出（已过滤 marker 行）。仅存活 Tab 填充。
+    /// 本轮新增输出；没有新增内容时为空。
     pub recent_output: String,
+    /// 本段新增输出的单调游标区间 `[output_cursor_start, output_cursor_end)`。
+    pub output_cursor_start: usize,
+    pub output_cursor_end: usize,
+    /// 起始游标之前的输出已被环形缓冲淘汰或受注入上限截断。
+    pub output_truncated: bool,
 }
 
 /// 终端状态快照注入（ToolInput 实现）。
@@ -258,6 +263,9 @@ impl tiangong_core::agent_input::ToolInput for TerminalStateData {
                     "phase": t.phase,
                     "alive": t.alive,
                     "recent_output": t.recent_output,
+                    "output_cursor_start": t.output_cursor_start,
+                    "output_cursor_end": t.output_cursor_end,
+                    "output_truncated": t.output_truncated,
                 })
             })
             .collect::<Vec<_>>();

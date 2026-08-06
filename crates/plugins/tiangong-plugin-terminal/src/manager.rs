@@ -41,6 +41,8 @@ pub(crate) struct TerminalState {
     pub last_read_line: usize,
     /// 累计总行数（用于 start marker 定位，不受环形缓冲区 pop_front 影响）
     pub total_lines_pushed: usize,
+    /// 最近一次成功注入 Agent 的输出游标；注入失败时不推进。
+    pub agent_injection_cursor: usize,
     /// 当前尚未换行的屏幕行（如 Password:、Proceed? [Y/n] 等提示）
     pub current_line: String,
     /// 前端 xterm.js 回传的屏幕快照（终端可见区域的文本序列化）。
@@ -79,6 +81,7 @@ impl TerminalManager {
                 buffer_limit: DEFAULT_BUFFER_LINES,
                 last_read_line: 0,
                 total_lines_pushed: 0,
+                agent_injection_cursor: 0,
                 current_line: String::new(),
                 screen_snapshot: None,
                 screen_updates: 0,
@@ -252,6 +255,48 @@ impl TerminalManager {
             output.push(current_line);
         }
         output.join("\n")
+    }
+
+    /// 读取尚未成功注入 Agent 的完整行，不推进游标。
+    ///
+    /// 返回 `(输出, 起始游标, 结束游标, 是否截断)`。调用方只有在 terminal_data
+    /// 成功入队后才能提交结束游标；快照后新增的输出自然留到下一轮。
+    pub fn pending_agent_output(&self, max_lines: usize) -> (String, usize, usize, bool) {
+        let state = self.state.lock().unwrap();
+        let end = state.total_lines_pushed;
+        let oldest = end.saturating_sub(state.output_buffer.len());
+        let requested_start = state.agent_injection_cursor.min(end);
+        let available_start = requested_start.max(oldest);
+        let limited_start = if max_lines == 0 {
+            end
+        } else {
+            available_start.max(end.saturating_sub(max_lines))
+        };
+        let truncated = limited_start > requested_start;
+        let offset = limited_start.saturating_sub(oldest);
+        let output = state
+            .output_buffer
+            .iter()
+            .skip(offset)
+            .filter(|line| !contains_marker(line))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        (output, limited_start, end, truncated)
+    }
+
+    /// 提交已成功入队的 Agent 输出游标；迟到提交不会让游标倒退。
+    pub fn commit_agent_injection(&self, end_cursor: usize) {
+        let mut state = self.state.lock().unwrap();
+        state.agent_injection_cursor = state
+            .agent_injection_cursor
+            .max(end_cursor.min(state.total_lines_pushed));
+    }
+
+    /// Core 新实例接管已有终端时，从当前末尾开始观察，避免把历史输出重新注入。
+    pub fn baseline_agent_injection(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.agent_injection_cursor = state.total_lines_pushed;
     }
 
     /// 获取自上次读取以来的增量输出，并重置标记
@@ -647,6 +692,7 @@ mod tests {
             buffer_limit: 5,
             last_read_line: 0,
             total_lines_pushed: 0,
+            agent_injection_cursor: 0,
             current_line: String::new(),
             screen_snapshot: None,
             screen_updates: 0,
@@ -659,6 +705,59 @@ mod tests {
         assert_eq!(state.output_buffer.len(), 5);
         assert_eq!(state.output_buffer[0], "line 3");
         assert_eq!(state.output_buffer[4], "line 7");
+    }
+
+    #[test]
+    fn agent_output_cursor_only_advances_after_commit() {
+        let manager = TerminalManager::new("test".to_string(), "/tmp".to_string());
+        {
+            let mut state = manager.state.lock().unwrap();
+            push_output(&mut state, "line 1".to_string());
+            push_output(&mut state, "line 2".to_string());
+        }
+
+        let first = manager.pending_agent_output(40);
+        assert_eq!(first, ("line 1\nline 2".to_string(), 0, 2, false));
+        assert_eq!(manager.pending_agent_output(40), first);
+
+        manager.commit_agent_injection(first.2);
+        assert_eq!(
+            manager.pending_agent_output(40),
+            (String::new(), 2, 2, false)
+        );
+
+        {
+            let mut state = manager.state.lock().unwrap();
+            push_output(&mut state, "line 3".to_string());
+        }
+        assert_eq!(
+            manager.pending_agent_output(40),
+            ("line 3".to_string(), 2, 3, false)
+        );
+    }
+
+    #[test]
+    fn restored_core_baselines_agent_output_at_current_end() {
+        let manager = TerminalManager::new("test".to_string(), "/tmp".to_string());
+        {
+            let mut state = manager.state.lock().unwrap();
+            push_output(&mut state, "historical".to_string());
+        }
+
+        manager.baseline_agent_injection();
+        assert_eq!(
+            manager.pending_agent_output(40),
+            (String::new(), 1, 1, false)
+        );
+
+        {
+            let mut state = manager.state.lock().unwrap();
+            push_output(&mut state, "new".to_string());
+        }
+        assert_eq!(
+            manager.pending_agent_output(40),
+            ("new".to_string(), 1, 2, false)
+        );
     }
 
     #[test]

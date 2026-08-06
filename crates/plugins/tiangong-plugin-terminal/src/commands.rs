@@ -14,32 +14,20 @@ async fn await_response<T: std::fmt::Debug>(
     }
 }
 
-/// 获取指定 session 的 PTY，不存在则用 default cwd 懒创建。
+/// 获取指定 session 的现有存活 PTY。
 ///
-/// 正常流程下前端会先调 `terminal_ensure_session`，但 agent 执行后直接查状态、
-/// 或面板恢复时跳过 ensure 的情况下，这里兜底懒创建，避免直接报错。
-fn ensure_pty(
+/// 状态查询、输入和屏幕上报是隐式操作，不得在 interactive 任务或 PTY 退出后
+/// 自动创建新 Shell。新建由 terminal_ensure_session，恢复由用户主动 reset 或 Agent
+/// 明确执行新命令负责。
+fn existing_alive_pty(
     state: &State<'_, TerminalPluginState>,
     session_id: &str,
 ) -> Result<SessionPty, String> {
-    let existing = state.registry.get(session_id);
-    if let Some(ref pty) = existing {
-        if pty.manager.is_alive() {
-            return Ok(pty.clone());
-        }
-    }
-
-    let cwd = existing
-        .as_ref()
-        .map(|pty| pty.manager.cwd())
-        .unwrap_or_default();
-    if !state.registry.ensure(session_id, &cwd) {
-        return Err(format!("终端会话 {session_id} 创建失败"));
-    }
     state
         .registry
         .get(session_id)
-        .ok_or(format!("终端会话 {session_id} 创建失败"))
+        .filter(|pty| pty.manager.is_alive())
+        .ok_or_else(|| format!("终端会话 {session_id} 已结束，请主动重置或重新执行命令"))
 }
 
 // ===== 按对话 session 命令（按 session_id 路由到对应对话的 PTY）=====
@@ -70,25 +58,15 @@ pub async fn terminal_session_send_input(
     input: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     match pty.manager.write_input(input.as_bytes()) {
         Ok(()) => {
             pty.activity.record_user_input();
             Ok(())
         }
-        Err(first_error) => {
-            // reader 尚未来得及报告 EOF 时，写失败会把当前代次标记为死亡；
-            // 重新走 ensure 一次，让用户的首个按键也能落入新 shell。
-            let replacement = ensure_pty(&state, &session_id)?;
-            replacement
-                .manager
-                .write_input(input.as_bytes())
-                .map_err(|retry_error| {
-                    format!("终端输入失败: {first_error}; 自动恢复后重试失败: {retry_error}")
-                })?;
-            replacement.activity.record_user_input();
-            Ok(())
-        }
+        Err(error) => Err(format!(
+            "终端输入失败且不会自动恢复：{error}；请主动重置终端"
+        )),
     }
 }
 
@@ -101,7 +79,7 @@ pub async fn terminal_report_user_command(
     state: State<'_, TerminalPluginState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let _ = ensure_pty(&state, &session_id)?;
+    let _ = existing_alive_pty(&state, &session_id)?;
     let _ = app_handle.emit(
         "terminal:user_command",
         serde_json::json!({ "session_id": session_id, "command": command }),
@@ -115,7 +93,7 @@ pub async fn terminal_session_recent_output(
     lines: Option<usize>,
     state: State<'_, TerminalPluginState>,
 ) -> Result<String, String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     Ok(pty.manager.recent_output(lines.unwrap_or(50)))
 }
 
@@ -124,7 +102,7 @@ pub async fn terminal_session_info(
     session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<TerminalSessionInfo, String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     let manager = &pty.manager;
     Ok(TerminalSessionInfo {
         session_id: manager.session_id(),
@@ -139,7 +117,7 @@ pub async fn terminal_session_status(
     session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<TerminalSessionStatus, String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     let manager = &pty.manager;
     Ok(TerminalSessionStatus {
         session_id: manager.session_id(),
@@ -218,7 +196,7 @@ pub async fn terminal_session_set_cwd(
     cwd: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     let _ = pty
         .cmd_tx
         .send(crate::types::TerminalCommand::SetCwd { cwd })
@@ -233,7 +211,7 @@ pub async fn terminal_session_resize(
     rows: u16,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     let _ = pty
         .cmd_tx
         .send(crate::types::TerminalCommand::Resize { cols, rows })
@@ -246,13 +224,20 @@ pub async fn terminal_session_reset(
     session_id: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    pty.cmd_tx
-        .send(crate::types::TerminalCommand::Reset { response_tx })
-        .await
-        .map_err(|e| e.to_string())?;
-    await_response(response_rx).await
+    if let Ok(pty) = existing_alive_pty(&state, &session_id) {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        pty.cmd_tx
+            .send(crate::types::TerminalCommand::Reset { response_tx })
+            .await
+            .map_err(|e| e.to_string())?;
+        return await_response(response_rx).await;
+    }
+
+    if state.registry.recover(&session_id, "") {
+        Ok(())
+    } else {
+        Err(format!("终端会话 {session_id} 重置失败"))
+    }
 }
 
 /// 面板 session 选择（按对话 PTY 模型下无需后端选择，恒为 no-op）。
@@ -276,7 +261,7 @@ pub async fn terminal_session_update_screen(
     snapshot: String,
     state: State<'_, TerminalPluginState>,
 ) -> Result<(), String> {
-    let pty = ensure_pty(&state, &session_id)?;
+    let pty = existing_alive_pty(&state, &session_id)?;
     pty.manager.update_screen_snapshot(snapshot);
     Ok(())
 }

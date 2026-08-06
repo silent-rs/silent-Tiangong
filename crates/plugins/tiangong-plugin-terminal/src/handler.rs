@@ -541,7 +541,7 @@ impl tiangong_core::tool_override::PromptSectionProvider for TerminalPromptSecti
             background_command_prompt.to_string(),
             "如果命令会启动需要持续输入的交互程序（例如编辑器、REPL、TUI、远程会话、确认流程等），使用 `run_shell{interactive:true, script:\"<command>\"}` 显式声明交互意图。返回的 stdout 是终端当前显示内容，请阅读后用 `terminal_send{input:\"<按键>\"}` 持续操作；每次发送后都会返回新快照。".to_string(),
             "文件编辑优先使用 write_file / replace_in_file；只有用户明确要求在终端程序里操作，或确实需要交互式程序时才用 `run_shell{interactive:true}`。".to_string(),
-            "每轮对话开始时会收到 `terminal_data` 工具结果，包含当前各终端 Tab 的工作目录、shell 类型、运行阶段和最近输出。据此判断用户已在终端做了什么、当前处于什么环境，避免重复执行已知命令。".to_string(),
+            "每轮对话开始时会收到 `terminal_data` 工具结果，包含当前各终端 Tab 的工作目录、shell 类型、运行阶段，以及自上次成功推送后的新增输出。输出携带单调游标标记；没有新增输出时不要把旧内容当作新消息。终端已结束时不要尝试通过输入或查询自动恢复，只能主动重置或重新执行命令。".to_string(),
         ]
     }
 }
