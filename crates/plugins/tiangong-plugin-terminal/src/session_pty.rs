@@ -841,7 +841,21 @@ impl SessionPtyRegistry {
 
     /// 仅销毁运行中的 PTY，不删除插件持久化的 Tab 元数据。
     fn destroy_runtime_session(&self, session_id: &str) -> Option<Arc<SessionTabs>> {
-        self.sessions.lock().unwrap().remove(session_id)
+        let removed = self.sessions.lock().unwrap().remove(session_id);
+        if let Some(session_tabs) = &removed {
+            let slots = session_tabs
+                .tabs
+                .lock()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for slot in slots {
+                slot.manager.close();
+                slot.activity.set_busy_state(TerminalBusyState::Idle);
+            }
+        }
+        removed
     }
 
     fn close_tab_persisted(&self, session_id: &str, tab_id: &str) -> Result<bool, String> {
@@ -872,17 +886,21 @@ impl SessionPtyRegistry {
             .filter(|active| state.tabs.iter().any(|tab| tab.id == *active))
             .or_else(|| state.tabs.first().map(|tab| tab.id.clone()));
         if let Err(error) = TerminalSessionStore::save(session_id, &state) {
-            if let (Some(session_tabs), Some(removed)) = (session_tabs.as_ref(), removed) {
+            if let (Some(session_tabs), Some(removed)) = (session_tabs.as_ref(), removed.as_ref()) {
                 session_tabs
                     .tabs
                     .lock()
                     .unwrap()
-                    .insert(tab_id.to_string(), removed);
+                    .insert(tab_id.to_string(), removed.clone());
             }
             if let Some(session_tabs) = session_tabs {
                 *session_tabs.active_tab_id.lock().unwrap() = previous_active;
             }
             return Err(format!("持久化终端 Tab 删除失败：{error}"));
+        }
+        if let Some(removed) = removed {
+            removed.manager.close();
+            removed.activity.set_busy_state(TerminalBusyState::Idle);
         }
         info!(session_id, tab_id, "终端 Tab 已删除");
         Ok(true)

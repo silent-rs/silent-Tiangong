@@ -28,3 +28,6 @@ libc = { workspace = true }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
+
+[dev-dependencies]
+tauri = { workspace = true, features = ["test"] }
