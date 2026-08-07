@@ -100,6 +100,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
     title: tab.title || '终端',
     url: '',
     created_at: tab.created_at || new Date().toISOString(),
+    phase: tab.phase,
   };
 }
 

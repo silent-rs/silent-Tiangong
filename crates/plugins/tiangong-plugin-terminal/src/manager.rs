@@ -554,6 +554,9 @@ pub(crate) async fn spawn_command_loop<R: tauri::Runtime>(
                         error!(error = %e, "PTY 重置失败");
                     }
                 }
+                if let Some(tracker) = &activity {
+                    tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+                }
                 let _ = response_tx.send(());
             }
         }

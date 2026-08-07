@@ -30,6 +30,7 @@ pub struct TerminalActivityTracker {
     busy_state: Mutex<TerminalBusyState>,
     /// 当前 Agent 命令期间用户是否干预过
     user_intervened: Mutex<bool>,
+    on_idle: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl TerminalActivityTracker {
@@ -38,6 +39,14 @@ impl TerminalActivityTracker {
             last_user_input: Mutex::new(Instant::now() - std::time::Duration::from_secs(3600)),
             busy_state: Mutex::new(TerminalBusyState::Idle),
             user_intervened: Mutex::new(false),
+            on_idle: None,
+        }
+    }
+
+    pub(crate) fn with_idle_callback(callback: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            on_idle: Some(Box::new(callback)),
+            ..Self::new()
         }
     }
 
@@ -70,12 +79,20 @@ impl TerminalActivityTracker {
 
     /// 设置协作状态，同时清除干预标记（新命令开始）
     pub(crate) fn set_busy_state(&self, state: TerminalBusyState) {
-        if let Ok(mut s) = self.busy_state.lock() {
+        let became_idle = if let Ok(mut s) = self.busy_state.lock() {
+            let became_idle =
+                !matches!(*s, TerminalBusyState::Idle) && matches!(&state, TerminalBusyState::Idle);
             *s = state;
-        }
+            became_idle
+        } else {
+            false
+        };
         // 进入新命令时清除干预标记
         if let Ok(mut flag) = self.user_intervened.lock() {
             *flag = false;
+        }
+        if became_idle {
+            self.notify_idle();
         }
     }
 
@@ -109,6 +126,10 @@ impl TerminalActivityTracker {
         if owned {
             *state = TerminalBusyState::Idle;
         }
+        drop(state);
+        if owned {
+            self.notify_idle();
+        }
     }
 
     /// 获取当前协作状态
@@ -117,6 +138,12 @@ impl TerminalActivityTracker {
             .lock()
             .map(|s| s.clone())
             .unwrap_or(TerminalBusyState::Idle)
+    }
+
+    fn notify_idle(&self) {
+        if let Some(callback) = &self.on_idle {
+            callback();
+        }
     }
 
     /// 取出并重置用户干预标记
