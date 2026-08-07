@@ -62,8 +62,8 @@ const FETCH: PluginConfig = PluginConfig {
     protocol_crate: "tiangong-plugin-fetch-protocol",
     wasm_crate: "tiangong-plugin-fetch-wasm",
     wasm_artifact: "tiangong_plugin_fetch_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-fetch-sidecar",
-    sidecar_artifact: "tiangong-fetch-sidecar",
+    sidecar_crate: Some("tiangong-plugin-fetch-sidecar"),
+    sidecar_artifact: Some("tiangong-fetch-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fetch",
     plugin_manifest: "plugins/tiangong-plugin-fetch/plugin.json",
     protocol_manifest: "plugins/tiangong-plugin-fetch/protocol/Cargo.toml",
@@ -146,8 +146,8 @@ const FS: PluginConfig = PluginConfig {
     protocol_crate: "tiangong-plugin-fs-protocol",
     wasm_crate: "tiangong-plugin-fs-wasm",
     wasm_artifact: "tiangong_plugin_fs_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-fs-sidecar",
-    sidecar_artifact: "tiangong-fs-sidecar",
+    sidecar_crate: Some("tiangong-plugin-fs-sidecar"),
+    sidecar_artifact: Some("tiangong-fs-sidecar"),
     plugin_root: "plugins/tiangong-plugin-fs",
     plugin_manifest: "plugins/tiangong-plugin-fs/plugin.json",
     protocol_manifest: "plugins/tiangong-plugin-fs/protocol/Cargo.toml",
@@ -160,11 +160,81 @@ const COMMAND: PluginConfig = PluginConfig {
     protocol_crate: "tiangong-plugin-command-protocol",
     wasm_crate: "tiangong-plugin-command-wasm",
     wasm_artifact: "tiangong_plugin_command_wasm.wasm",
-    sidecar_crate: "tiangong-plugin-command-sidecar",
-    sidecar_artifact: "tiangong-command-sidecar",
+    sidecar_crate: Some("tiangong-plugin-command-sidecar"),
+    sidecar_artifact: Some("tiangong-command-sidecar"),
     plugin_root: "plugins/tiangong-plugin-command",
     plugin_manifest: "plugins/tiangong-plugin-command/plugin.json",
     protocol_manifest: "plugins/tiangong-plugin-command/protocol/Cargo.toml",
+};
+
+const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
+    id: "text-to-speech",
+    name: "Text To Speech",
+    description: "Text to Speech",
+    protocol_crate: "tiangong-plugin-text-to-speech-protocol",
+    wasm_crate: "tiangong-plugin-text-to-speech-wasm",
+    wasm_artifact: "tiangong_plugin_text_to_speech_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-text-to-speech-sidecar"),
+    sidecar_artifact: Some("tiangong-text-to-speech-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-text-to-speech",
+    plugin_manifest: "plugins/tiangong-plugin-text-to-speech/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-text-to-speech/protocol/Cargo.toml",
+};
+
+const GENERATE_IMAGE: PluginConfig = PluginConfig {
+    id: "generate-image",
+    name: "Generate Image",
+    description: "Generate Image",
+    protocol_crate: "tiangong-plugin-generate-image-protocol",
+    wasm_crate: "tiangong-plugin-generate-image-wasm",
+    wasm_artifact: "tiangong_plugin_generate_image_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-generate-image-sidecar"),
+    sidecar_artifact: Some("tiangong-generate-image-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-generate-image",
+    plugin_manifest: "plugins/tiangong-plugin-generate-image/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
+};
+
+const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
+    id: "analyze-attachment",
+    name: "Analyze Attachment",
+    description: "Analyze Attachment",
+    protocol_crate: "tiangong-plugin-analyze-attachment-protocol",
+    wasm_crate: "tiangong-plugin-analyze-attachment-wasm",
+    wasm_artifact: "tiangong_plugin_analyze_attachment_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-analyze-attachment-sidecar"),
+    sidecar_artifact: Some("tiangong-analyze-attachment-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-analyze-attachment",
+    plugin_manifest: "plugins/tiangong-plugin-analyze-attachment/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-analyze-attachment/protocol/Cargo.toml",
+};
+
+const SPEECH_TO_TEXT: PluginConfig = PluginConfig {
+    id: "speech-to-text",
+    name: "Speech To Text",
+    description: "Speech To Text",
+    protocol_crate: "tiangong-plugin-speech-to-text-protocol",
+    wasm_crate: "tiangong-plugin-speech-to-text-wasm",
+    wasm_artifact: "tiangong_plugin_speech_to_text_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-speech-to-text-sidecar"),
+    sidecar_artifact: Some("tiangong-speech-to-text-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-speech-to-text",
+    plugin_manifest: "plugins/tiangong-plugin-speech-to-text/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-speech-to-text/protocol/Cargo.toml",
+};
+
+const GENERATE_VIDEO: PluginConfig = PluginConfig {
+    id: "generate-video",
+    name: "Generate Video",
+    description: "Generate Video",
+    protocol_crate: "tiangong-plugin-generate-video-protocol",
+    wasm_crate: "tiangong-plugin-generate-video-wasm",
+    wasm_artifact: "tiangong_plugin_generate_video_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-generate-video-sidecar"),
+    sidecar_artifact: Some("tiangong-generate-video-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-generate-video",
+    plugin_manifest: "plugins/tiangong-plugin-generate-video/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-generate-video/protocol/Cargo.toml",
 };
 
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
@@ -470,13 +540,12 @@ fn current_platform_key() -> String {
 }
 
 fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result<()> {
-    let workspace = read_toml(&workspace_root.join("Cargo.toml"))?;
-    let workspace_version = workspace
-        .get("workspace")
-        .and_then(|value| value.get("package"))
+    let protocol = read_toml(&workspace_root.join(config.protocol_manifest))?;
+    let crate_version = protocol
+        .get("package")
         .and_then(|value| value.get("version"))
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| invalid_data("无法读取 workspace.package.version"))?;
+        .ok_or_else(|| invalid_data("无法读取 protocol package.version"))?;
 
     let manifest_path = workspace_root.join(config.plugin_manifest);
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
@@ -485,9 +554,9 @@ fn validate_versions(workspace_root: &Path, config: &PluginConfig) -> io::Result
         .get("version")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
-    if manifest_version != workspace_version {
+    if manifest_version != crate_version {
         return Err(invalid_data(format!(
-            "插件版本不一致: workspace={workspace_version}, plugin.json={manifest_version}"
+            "插件版本不一致: crate={crate_version}, plugin.json={manifest_version}"
         )));
     }
 
