@@ -428,8 +428,6 @@ fn run_gui() {
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_default_trust_mode,
             tiangong_app::commands::set_default_trust_mode,
-            tiangong_app::commands::get_custom_system_prompt,
-            tiangong_app::commands::set_custom_system_prompt,
             tiangong_app::commands::get_reasoning_effort,
             tiangong_app::commands::set_reasoning_effort,
             tiangong_app::commands::get_provider_balance,

@@ -1,7 +1,7 @@
 //! Prompt 插件的 WASM 组件。
 //!
 //! 注入 identity/rules/custom_prompt 三段 system prompt。
-//! custom_prompt 从 host 经 on_config_updated push 的 config_json 缓存。
+//! custom_prompt 经 WASI 直接读写 custom-prompt.md。
 //! 设置页经 WASI 直接读写 ~/.tiangong/custom-prompt.md（映射为 /storage/custom-prompt.md）。
 
 mod bindings;
@@ -13,7 +13,6 @@ use bindings::exports::tiangong::plugin::plugin_ui::{
     Contribution, Guest as UiGuest, ResourceResponse, ViewMessageRequest, ViewMessageResponse,
     ViewResponse,
 };
-use serde_json::Value;
 use tiangong_plugin_prompt_protocol::{
     GetPromptResponse, METHOD_GET_PROMPT, METHOD_SET_PROMPT, PLUGIN_ID, PLUGIN_VERSION,
     SetPromptRequest,
@@ -26,11 +25,6 @@ fn plugin_err(message: impl Into<String>) -> PluginError {
 /// custom-prompt.md 在 WASI preopen 映射中的路径。
 /// storage_root（~/.tiangong）被 preopen 为 /storage。
 const CUSTOM_PROMPT_PATH: &str = "/storage/custom-prompt.md";
-
-// 缓存 host push 的 custom_system_prompt（从 on_config_updated 的 config_json 提取）。
-thread_local! {
-    static CUSTOM_PROMPT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
 
 struct Component;
 
@@ -76,7 +70,7 @@ impl Guest for Component {
 
     fn prompt_sections() -> Result<Vec<String>, PluginError> {
         let mut sections = vec![identity_section().to_string(), rules_section().to_string()];
-        let custom = CUSTOM_PROMPT.with(|c| c.borrow().clone());
+        let custom = read_custom_prompt();
         if let Some(section) = custom_prompt_section(&custom) {
             sections.push(section);
         }
@@ -95,15 +89,7 @@ impl Guest for Component {
         Ok(())
     }
 
-    fn on_config_updated(config_json: String) -> Result<(), PluginError> {
-        // 从 config_json 提取 custom_system_prompt 缓存。
-        if let Ok(config) = serde_json::from_str::<Value>(&config_json)
-            && let Some(custom) = config.get("custom_system_prompt").and_then(Value::as_str)
-        {
-            CUSTOM_PROMPT.with(|c| {
-                *c.borrow_mut() = custom.to_string();
-            });
-        }
+    fn on_config_updated(_config_json: String) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -178,10 +164,6 @@ impl UiGuest for Component {
                 let req: SetPromptRequest = serde_json::from_str(&request.payload)
                     .map_err(|e| plugin_err(format!("解析请求失败: {e}")))?;
                 write_custom_prompt(&req.content)?;
-                // 刷新本地缓存的 custom_prompt。
-                CUSTOM_PROMPT.with(|c| {
-                    *c.borrow_mut() = req.content;
-                });
                 Ok(ViewMessageResponse {
                     payload: "true".to_string(),
                 })
