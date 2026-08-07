@@ -19,52 +19,52 @@ members = [
     "crates/tiangong-config",
     "crates/tiangong-scheduler",
     "crates/plugins/tiangong-plugin-browser",
-    "crates/plugins/tiangong-plugin-coding/protocol",
-    "crates/plugins/tiangong-plugin-coding/sidecar",
-    "crates/plugins/tiangong-plugin-coding/wasm",
-    "crates/plugins/tiangong-plugin-command/protocol",
-    "crates/plugins/tiangong-plugin-command/sidecar",
-    "crates/plugins/tiangong-plugin-command/wasm",
-    "crates/plugins/tiangong-plugin-fetch/protocol",
-    "crates/plugins/tiangong-plugin-fetch/sidecar",
-    "crates/plugins/tiangong-plugin-fetch/wasm",
-    "crates/plugins/tiangong-plugin-fs/protocol",
-    "crates/plugins/tiangong-plugin-fs/sidecar",
-    "crates/plugins/tiangong-plugin-fs/wasm",
-    "crates/plugins/tiangong-plugin-index/protocol",
-    "crates/plugins/tiangong-plugin-index/sidecar",
-    "crates/plugins/tiangong-plugin-index/wasm",
-    "crates/plugins/tiangong-plugin-generate-image/protocol",
-    "crates/plugins/tiangong-plugin-generate-image/sidecar",
-    "crates/plugins/tiangong-plugin-generate-image/wasm",
-    "crates/plugins/tiangong-plugin-generate-video/protocol",
-    "crates/plugins/tiangong-plugin-generate-video/sidecar",
-    "crates/plugins/tiangong-plugin-generate-video/wasm",
-    "crates/plugins/tiangong-plugin-text-to-speech/protocol",
-    "crates/plugins/tiangong-plugin-text-to-speech/sidecar",
-    "crates/plugins/tiangong-plugin-text-to-speech/wasm",
-    "crates/plugins/tiangong-plugin-speech-to-text/protocol",
-    "crates/plugins/tiangong-plugin-speech-to-text/sidecar",
-    "crates/plugins/tiangong-plugin-speech-to-text/wasm",
-    "crates/plugins/tiangong-plugin-memory/protocol",
-    "crates/plugins/tiangong-plugin-memory/wasm",
-    "crates/plugins/tiangong-plugin-memory/sidecar",
-    "crates/plugins/tiangong-plugin-scheduler/protocol",
-    "crates/plugins/tiangong-plugin-scheduler/wasm",
-    "crates/plugins/tiangong-plugin-scheduler/sidecar",
+    "plugins/tiangong-plugin-coding/protocol",
+    "plugins/tiangong-plugin-coding/sidecar",
+    "plugins/tiangong-plugin-coding/wasm",
+    "plugins/tiangong-plugin-command/protocol",
+    "plugins/tiangong-plugin-command/sidecar",
+    "plugins/tiangong-plugin-command/wasm",
+    "plugins/tiangong-plugin-fetch/protocol",
+    "plugins/tiangong-plugin-fetch/sidecar",
+    "plugins/tiangong-plugin-fetch/wasm",
+    "plugins/tiangong-plugin-fs/protocol",
+    "plugins/tiangong-plugin-fs/sidecar",
+    "plugins/tiangong-plugin-fs/wasm",
+    "plugins/tiangong-plugin-index/protocol",
+    "plugins/tiangong-plugin-index/sidecar",
+    "plugins/tiangong-plugin-index/wasm",
+    "plugins/tiangong-plugin-generate-image/protocol",
+    "plugins/tiangong-plugin-generate-image/sidecar",
+    "plugins/tiangong-plugin-generate-image/wasm",
+    "plugins/tiangong-plugin-generate-video/protocol",
+    "plugins/tiangong-plugin-generate-video/sidecar",
+    "plugins/tiangong-plugin-generate-video/wasm",
+    "plugins/tiangong-plugin-text-to-speech/protocol",
+    "plugins/tiangong-plugin-text-to-speech/sidecar",
+    "plugins/tiangong-plugin-text-to-speech/wasm",
+    "plugins/tiangong-plugin-speech-to-text/protocol",
+    "plugins/tiangong-plugin-speech-to-text/sidecar",
+    "plugins/tiangong-plugin-speech-to-text/wasm",
+    "plugins/tiangong-plugin-memory/protocol",
+    "plugins/tiangong-plugin-memory/wasm",
+    "plugins/tiangong-plugin-memory/sidecar",
+    "plugins/tiangong-plugin-scheduler/protocol",
+    "plugins/tiangong-plugin-scheduler/wasm",
+    "plugins/tiangong-plugin-scheduler/sidecar",
     "crates/plugins/tiangong-plugin-terminal",
-    "crates/plugins/tiangong-plugin-analyze-attachment/protocol",
-    "crates/plugins/tiangong-plugin-analyze-attachment/sidecar",
-    "crates/plugins/tiangong-plugin-analyze-attachment/wasm",
-    "crates/plugins/tiangong-plugin-skill/protocol",
-    "crates/plugins/tiangong-plugin-skill/sidecar",
-    "crates/plugins/tiangong-plugin-skill/wasm",
-    "crates/plugins/tiangong-plugin-mcp/protocol",
-    "crates/plugins/tiangong-plugin-mcp/sidecar",
-    "crates/plugins/tiangong-plugin-mcp/wasm",
+    "plugins/tiangong-plugin-analyze-attachment/protocol",
+    "plugins/tiangong-plugin-analyze-attachment/sidecar",
+    "plugins/tiangong-plugin-analyze-attachment/wasm",
+    "plugins/tiangong-plugin-skill/protocol",
+    "plugins/tiangong-plugin-skill/sidecar",
+    "plugins/tiangong-plugin-skill/wasm",
+    "plugins/tiangong-plugin-mcp/protocol",
+    "plugins/tiangong-plugin-mcp/sidecar",
+    "plugins/tiangong-plugin-mcp/wasm",
     "crates/plugins/tiangong-plugin-agent-team",
-    "crates/plugins/tiangong-plugin-prompt/protocol",
-    "crates/plugins/tiangong-plugin-prompt/wasm",
+    "plugins/tiangong-plugin-prompt/protocol",
+    "plugins/tiangong-plugin-prompt/wasm",
     "crates/tiangong-plugin-runtime",
     "crates/tiangong-plugin-sidecar",
     "src-tauri",
@@ -87,51 +87,51 @@ tiangong-llm = { path = "crates/tiangong-llm" }
 tiangong-media = { path = "crates/tiangong-media" }
 tiangong-media-archive = { path = "crates/tiangong-media-archive" }
 tiangong-memory = { path = "crates/tiangong-memory" }
-tiangong-plugin-memory-sidecar = { path = "crates/plugins/tiangong-plugin-memory/sidecar" }
-tiangong-plugin-memory-protocol = { path = "crates/plugins/tiangong-plugin-memory/protocol" }
+tiangong-plugin-memory-sidecar = { path = "plugins/tiangong-plugin-memory/sidecar" }
+tiangong-plugin-memory-protocol = { path = "plugins/tiangong-plugin-memory/protocol" }
 tiangong-plugin-browser = { path = "crates/plugins/tiangong-plugin-browser" }
-tiangong-plugin-coding-protocol = { path = "crates/plugins/tiangong-plugin-coding/protocol" }
-tiangong-plugin-coding-sidecar = { path = "crates/plugins/tiangong-plugin-coding/sidecar" }
-tiangong-plugin-coding-wasm = { path = "crates/plugins/tiangong-plugin-coding/wasm" }
-tiangong-plugin-command-protocol = { path = "crates/plugins/tiangong-plugin-command/protocol" }
-tiangong-plugin-command-sidecar = { path = "crates/plugins/tiangong-plugin-command/sidecar" }
-tiangong-plugin-command-wasm = { path = "crates/plugins/tiangong-plugin-command/wasm" }
-tiangong-plugin-fetch-protocol = { path = "crates/plugins/tiangong-plugin-fetch/protocol" }
-tiangong-plugin-fetch-sidecar = { path = "crates/plugins/tiangong-plugin-fetch/sidecar" }
-tiangong-plugin-fetch-wasm = { path = "crates/plugins/tiangong-plugin-fetch/wasm" }
-tiangong-plugin-fs-protocol = { path = "crates/plugins/tiangong-plugin-fs/protocol" }
-tiangong-plugin-fs-sidecar = { path = "crates/plugins/tiangong-plugin-fs/sidecar" }
-tiangong-plugin-fs-wasm = { path = "crates/plugins/tiangong-plugin-fs/wasm" }
-tiangong-plugin-index-protocol = { path = "crates/plugins/tiangong-plugin-index/protocol" }
-tiangong-plugin-index-wasm = { path = "crates/plugins/tiangong-plugin-index/wasm" }
-tiangong-plugin-index-sidecar = { path = "crates/plugins/tiangong-plugin-index/sidecar" }
-tiangong-plugin-generate-image-protocol = { path = "crates/plugins/tiangong-plugin-generate-image/protocol" }
-tiangong-plugin-generate-image-sidecar = { path = "crates/plugins/tiangong-plugin-generate-image/sidecar" }
-tiangong-plugin-generate-image-wasm = { path = "crates/plugins/tiangong-plugin-generate-image/wasm" }
-tiangong-plugin-generate-video-protocol = { path = "crates/plugins/tiangong-plugin-generate-video/protocol" }
-tiangong-plugin-generate-video-sidecar = { path = "crates/plugins/tiangong-plugin-generate-video/sidecar" }
-tiangong-plugin-generate-video-wasm = { path = "crates/plugins/tiangong-plugin-generate-video/wasm" }
-tiangong-plugin-text-to-speech-protocol = { path = "crates/plugins/tiangong-plugin-text-to-speech/protocol" }
-tiangong-plugin-text-to-speech-sidecar = { path = "crates/plugins/tiangong-plugin-text-to-speech/sidecar" }
-tiangong-plugin-text-to-speech-wasm = { path = "crates/plugins/tiangong-plugin-text-to-speech/wasm" }
-tiangong-plugin-speech-to-text-protocol = { path = "crates/plugins/tiangong-plugin-speech-to-text/protocol" }
-tiangong-plugin-speech-to-text-sidecar = { path = "crates/plugins/tiangong-plugin-speech-to-text/sidecar" }
-tiangong-plugin-speech-to-text-wasm = { path = "crates/plugins/tiangong-plugin-speech-to-text/wasm" }
-tiangong-plugin-scheduler-protocol = { path = "crates/plugins/tiangong-plugin-scheduler/protocol" }
-tiangong-plugin-scheduler-wasm = { path = "crates/plugins/tiangong-plugin-scheduler/wasm" }
-tiangong-plugin-scheduler-sidecar = { path = "crates/plugins/tiangong-plugin-scheduler/sidecar" }
+tiangong-plugin-coding-protocol = { path = "plugins/tiangong-plugin-coding/protocol" }
+tiangong-plugin-coding-sidecar = { path = "plugins/tiangong-plugin-coding/sidecar" }
+tiangong-plugin-coding-wasm = { path = "plugins/tiangong-plugin-coding/wasm" }
+tiangong-plugin-command-protocol = { path = "plugins/tiangong-plugin-command/protocol" }
+tiangong-plugin-command-sidecar = { path = "plugins/tiangong-plugin-command/sidecar" }
+tiangong-plugin-command-wasm = { path = "plugins/tiangong-plugin-command/wasm" }
+tiangong-plugin-fetch-protocol = { path = "plugins/tiangong-plugin-fetch/protocol" }
+tiangong-plugin-fetch-sidecar = { path = "plugins/tiangong-plugin-fetch/sidecar" }
+tiangong-plugin-fetch-wasm = { path = "plugins/tiangong-plugin-fetch/wasm" }
+tiangong-plugin-fs-protocol = { path = "plugins/tiangong-plugin-fs/protocol" }
+tiangong-plugin-fs-sidecar = { path = "plugins/tiangong-plugin-fs/sidecar" }
+tiangong-plugin-fs-wasm = { path = "plugins/tiangong-plugin-fs/wasm" }
+tiangong-plugin-index-protocol = { path = "plugins/tiangong-plugin-index/protocol" }
+tiangong-plugin-index-wasm = { path = "plugins/tiangong-plugin-index/wasm" }
+tiangong-plugin-index-sidecar = { path = "plugins/tiangong-plugin-index/sidecar" }
+tiangong-plugin-generate-image-protocol = { path = "plugins/tiangong-plugin-generate-image/protocol" }
+tiangong-plugin-generate-image-sidecar = { path = "plugins/tiangong-plugin-generate-image/sidecar" }
+tiangong-plugin-generate-image-wasm = { path = "plugins/tiangong-plugin-generate-image/wasm" }
+tiangong-plugin-generate-video-protocol = { path = "plugins/tiangong-plugin-generate-video/protocol" }
+tiangong-plugin-generate-video-sidecar = { path = "plugins/tiangong-plugin-generate-video/sidecar" }
+tiangong-plugin-generate-video-wasm = { path = "plugins/tiangong-plugin-generate-video/wasm" }
+tiangong-plugin-text-to-speech-protocol = { path = "plugins/tiangong-plugin-text-to-speech/protocol" }
+tiangong-plugin-text-to-speech-sidecar = { path = "plugins/tiangong-plugin-text-to-speech/sidecar" }
+tiangong-plugin-text-to-speech-wasm = { path = "plugins/tiangong-plugin-text-to-speech/wasm" }
+tiangong-plugin-speech-to-text-protocol = { path = "plugins/tiangong-plugin-speech-to-text/protocol" }
+tiangong-plugin-speech-to-text-sidecar = { path = "plugins/tiangong-plugin-speech-to-text/sidecar" }
+tiangong-plugin-speech-to-text-wasm = { path = "plugins/tiangong-plugin-speech-to-text/wasm" }
+tiangong-plugin-scheduler-protocol = { path = "plugins/tiangong-plugin-scheduler/protocol" }
+tiangong-plugin-scheduler-wasm = { path = "plugins/tiangong-plugin-scheduler/wasm" }
+tiangong-plugin-scheduler-sidecar = { path = "plugins/tiangong-plugin-scheduler/sidecar" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
-tiangong-plugin-analyze-attachment-protocol = { path = "crates/plugins/tiangong-plugin-analyze-attachment/protocol" }
-tiangong-plugin-analyze-attachment-sidecar = { path = "crates/plugins/tiangong-plugin-analyze-attachment/sidecar" }
-tiangong-plugin-analyze-attachment-wasm = { path = "crates/plugins/tiangong-plugin-analyze-attachment/wasm" }
-tiangong-plugin-skill-protocol = { path = "crates/plugins/tiangong-plugin-skill/protocol" }
-tiangong-plugin-skill-sidecar = { path = "crates/plugins/tiangong-plugin-skill/sidecar" }
-tiangong-plugin-skill-wasm = { path = "crates/plugins/tiangong-plugin-skill/wasm" }
-tiangong-plugin-mcp-protocol = { path = "crates/plugins/tiangong-plugin-mcp/protocol" }
+tiangong-plugin-analyze-attachment-protocol = { path = "plugins/tiangong-plugin-analyze-attachment/protocol" }
+tiangong-plugin-analyze-attachment-sidecar = { path = "plugins/tiangong-plugin-analyze-attachment/sidecar" }
+tiangong-plugin-analyze-attachment-wasm = { path = "plugins/tiangong-plugin-analyze-attachment/wasm" }
+tiangong-plugin-skill-protocol = { path = "plugins/tiangong-plugin-skill/protocol" }
+tiangong-plugin-skill-sidecar = { path = "plugins/tiangong-plugin-skill/sidecar" }
+tiangong-plugin-skill-wasm = { path = "plugins/tiangong-plugin-skill/wasm" }
+tiangong-plugin-mcp-protocol = { path = "plugins/tiangong-plugin-mcp/protocol" }
 tiangong-plugin-agent-team = { path = "crates/plugins/tiangong-plugin-agent-team" }
-tiangong-plugin-prompt-protocol = { path = "crates/plugins/tiangong-plugin-prompt/protocol" }
-tiangong-plugin-prompt-wasm = { path = "crates/plugins/tiangong-plugin-prompt/wasm" }
-tiangong-plugin-memory-wasm = { path = "crates/plugins/tiangong-plugin-memory/wasm" }
+tiangong-plugin-prompt-protocol = { path = "plugins/tiangong-plugin-prompt/protocol" }
+tiangong-plugin-prompt-wasm = { path = "plugins/tiangong-plugin-prompt/wasm" }
+tiangong-plugin-memory-wasm = { path = "plugins/tiangong-plugin-memory/wasm" }
 tiangong-plugin-runtime = { path = "crates/tiangong-plugin-runtime" }
 tiangong-plugin-sidecar = { path = "crates/tiangong-plugin-sidecar" }
 tiangong-server = { path = "crates/tiangong-server" }

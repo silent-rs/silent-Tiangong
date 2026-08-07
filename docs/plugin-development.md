@@ -70,7 +70,7 @@ yarn --cwd frontend dev
 建议把同一插件的源码放在一个目录中：
 
 ```text
-crates/plugins/tiangong-plugin-example/
+plugins/tiangong-plugin-example/
 ├── plugin.json
 ├── protocol/          # 可选，WASM 与 sidecar 共用的私有协议
 ├── wasm/
@@ -173,7 +173,7 @@ wit_bindgen::generate!({
 - `sidecar.invoke`：向当前插件绑定的 sidecar 转发操作名和 JSON。
 - `feedback.emit-stream-event`：向当前 turn 发送通用 `StreamEvent` JSON；Runtime 只验证公共事件结构，不理解具体插件业务。
 
-完整实现可参考 [Memory WASM](../crates/plugins/tiangong-plugin-memory/wasm/src/lib.rs) 和它的 [绑定入口](../crates/plugins/tiangong-plugin-memory/wasm/src/bindings.rs)。
+完整实现可参考 [Memory WASM](../plugins/tiangong-plugin-memory/wasm/src/lib.rs) 和它的 [绑定入口](../plugins/tiangong-plugin-memory/wasm/src/bindings.rs)。
 
 构建命令：
 
@@ -203,7 +203,7 @@ sidecar 必须：
 4. 实现 `runtime.handshake`，返回插件 ID、插件版本、传输协议版本、业务协议版本和运行状态。
 5. 保证握手中的插件版本与 `plugin.json`、WASM `describe()` 一致。
 
-协议类型见 [`protocol.rs`](../crates/tiangong-plugin-runtime/src/protocol.rs)，进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../crates/plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
+协议类型见 [`protocol.rs`](../crates/tiangong-plugin-runtime/src/protocol.rs)，进程行为见 [`sidecar.rs`](../crates/tiangong-plugin-runtime/src/sidecar.rs)。可运行示例见 [Memory sidecar](../plugins/tiangong-plugin-memory/sidecar/src/main.rs)。
 
 ## 本地导入与调试
 
@@ -253,7 +253,7 @@ TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=~/.tiangong/keys/plugin-signing.key \
 target/plugin-dist/
 ```
 
-Memory 的目录和构建说明见 [`crates/plugins/tiangong-plugin-memory/README.md`](../crates/plugins/tiangong-plugin-memory/README.md)。
+Memory 的目录和构建说明见 [`plugins/tiangong-plugin-memory/README.md`](../plugins/tiangong-plugin-memory/README.md)。
 
 ## 常见问题
 
@@ -275,7 +275,7 @@ Memory 的目录和构建说明见 [`crates/plugins/tiangong-plugin-memory/READM
 
 ## GitHub Actions 发布到 OSS
 
-短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `crates/plugins/` 下完整的 `plugin.json`、WASM、protocol 和 sidecar；每次只构建、签名和上传所选插件。可通过 `cargo run -p xtask -- list-plugins` 查询当前可发布插件。
+短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `plugins/` 下完整的 `plugin.json`、WASM、protocol 和 sidecar；每次只构建、签名和上传所选插件。可通过 `cargo run -p xtask -- list-plugins` 查询当前可发布插件。
 
 仓库需要配置以下 GitHub Actions Secrets：
 
