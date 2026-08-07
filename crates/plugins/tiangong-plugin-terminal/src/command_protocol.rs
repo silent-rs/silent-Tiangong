@@ -211,9 +211,8 @@ enum ShellPreparationError {
     Unavailable(String),
 }
 
-fn shell_ready_probe(marker: &str, interrupt: bool) -> String {
-    let interrupt = if interrupt { "\x03" } else { "" };
-    format!("{interrupt}echo '{marker}'\r")
+fn shell_ready_probe(marker: &str) -> String {
+    format!("echo '{marker}'\r")
 }
 
 fn shell_ready_marker_seen(manager: &TerminalManager, marker: &str) -> bool {
@@ -237,8 +236,13 @@ async fn confirm_shell_ready(
     }
 
     let marker = format!("{}{}__", crate::types::MARKER_READY, scru128::new());
+    if interrupt {
+        manager
+            .write_input(b"\x03")
+            .map_err(ShellPreparationError::Unavailable)?;
+    }
     manager
-        .write_input(shell_ready_probe(&marker, interrupt).as_bytes())
+        .write_input(shell_ready_probe(&marker).as_bytes())
         .map_err(ShellPreparationError::Unavailable)?;
 
     let deadline = std::time::Instant::now() + SHELL_READY_CONFIRM_TIMEOUT;
@@ -1631,8 +1635,10 @@ mod tests {
 
         let command_started = std::time::Instant::now();
         let ready_marker = "__TIANGONG_READY_multiline__";
+        writer.write_all(b"\x03").unwrap();
+        writer.flush().unwrap();
         writer
-            .write_all(shell_ready_probe(ready_marker, true).as_bytes())
+            .write_all(shell_ready_probe(ready_marker).as_bytes())
             .unwrap();
         writer.flush().unwrap();
         let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1692,8 +1698,10 @@ mod tests {
         )
         .unwrap();
         let second_ready = "__TIANGONG_READY_reuse__";
+        writer.write_all(b"\x03").unwrap();
+        writer.flush().unwrap();
         writer
-            .write_all(shell_ready_probe(second_ready, true).as_bytes())
+            .write_all(shell_ready_probe(second_ready).as_bytes())
             .unwrap();
         writer.flush().unwrap();
         let second_ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
