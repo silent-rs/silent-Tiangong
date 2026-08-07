@@ -417,7 +417,19 @@ impl SessionPtyRegistry {
         let manager = Arc::new(manager);
         let (tx, rx) = mpsc::channel::<TerminalCommand>(16);
         // 每个终端 Tab 独立协作状态机：用户在该 Tab 打断 agent 不会影响其它 Tab
-        let activity = Arc::new(TerminalActivityTracker::new());
+        let activity_app = self.app.clone();
+        let activity_session_id = session_id.to_string();
+        let activity_tab_id = tab_id.to_string();
+        let activity = Arc::new(TerminalActivityTracker::with_idle_callback(move || {
+            let _ = activity_app.emit(
+                "terminal:tab_updated",
+                &crate::types::TerminalTabUpdatedEvent {
+                    session_id: activity_session_id.clone(),
+                    active_tab_id: Some(activity_tab_id.clone()),
+                    source: "agent_command".to_string(),
+                },
+            );
+        }));
 
         let pty_state =
             manager.start_and_spawn_reader(instance_id, &effective_cwd, self.app.clone());
@@ -520,7 +532,7 @@ impl SessionPtyRegistry {
                         alive: false,
                         cwd: String::new(),
                         shell: String::new(),
-                        phase: "idle".to_string(),
+                        phase: "Idle".to_string(),
                     },
                 )
             })

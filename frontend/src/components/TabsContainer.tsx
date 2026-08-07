@@ -20,6 +20,7 @@ interface TabsContainerProps {
 
 const DEFAULT_BROWSER_URL = 'about:blank';
 const TABS_PERSIST_DEBOUNCE_MS = 500;
+const BUSY_TERMINAL_PHASES = new Set(['UserActive', 'Running', 'Interactive']);
 
 function nowText(): string {
   return new Date().toISOString();
@@ -211,6 +212,7 @@ export function TabsContainer({
         title: tab.title || '终端',
         url: '',
         created_at: tab.created_at || nowText(),
+        phase: tab.phase,
       }));
       const preferredExists = Boolean(
         preferredTabId && terminalTabs.some((tab) => tab.id === preferredTabId),
@@ -230,7 +232,12 @@ export function TabsContainer({
         const updatedTabs = nonTerminalTabs.map((tab) => {
           if (tab.kind !== 'terminal') return tab;
           const backendTab = terminalTabs.find((item) => item.id === tab.id);
-          return backendTab ? { ...tab, title: backendTab.title, created_at: backendTab.created_at } : tab;
+          return backendTab ? {
+            ...tab,
+            title: backendTab.title,
+            created_at: backendTab.created_at,
+            phase: backendTab.phase,
+          } : tab;
         });
         const newTabs = terminalTabs.filter((tab) => !existingIds.has(tab.id));
         return [...updatedTabs, ...newTabs];
@@ -658,6 +665,8 @@ export function TabsContainer({
           {tabs.map((tab) => {
             const active = tab.id === activeTab?.id;
             const Icon = tab.kind === 'browser' ? Globe : TerminalSquare;
+            const busy = tab.kind === 'terminal'
+              && Boolean(tab.phase && BUSY_TERMINAL_PHASES.has(tab.phase));
             return (
               <div
                 key={tab.id}
@@ -674,6 +683,13 @@ export function TabsContainer({
                   onClick={() => handleSwitchTab(tab.id)}
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0" />
+                  {busy && (
+                    <span
+                      className="h-2 w-2 shrink-0 rounded-full bg-yellow-400 ring-1 ring-yellow-600/40"
+                      title="终端繁忙"
+                      aria-label="终端繁忙"
+                    />
+                  )}
                   <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
                 </button>
                 <button
