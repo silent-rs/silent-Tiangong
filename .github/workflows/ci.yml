@@ -26,6 +26,7 @@ jobs:
       # 需要校验的 crate 列表（JSON 数组），仅含被直接改动的 crate。
       # 不做反向依赖闭包扩散，避免底层改动触发几乎全部上游作业。
       matrix: ${{ steps.resolve.outputs.matrix }}
+      wasm_matrix: ${{ steps.resolve.outputs.wasm_matrix }}
       # 独立 workspace 的 Bot 列表，使用各自 Cargo.toml 单独校验。
       bots: ${{ steps.resolve.outputs.bots }}
     steps:
@@ -182,11 +183,12 @@ jobs:
           order = list(crate_to_prefix.keys())
           affected = [c for c in order if any(f.startswith(crate_to_prefix[c]) for f in file_list)]
 
-          # WASM-only crates 只能在 wasm32-wasip2 目标下编译，
-          # 排除它们避免 native clippy/check/nextest 失败。
-          affected = [c for c in affected if not c.endswith('-wasm')]
+          # Split native and WASM-only crates.
+          wasm_crates = [c for c in affected if c.endswith('-wasm')]
+          native_crates = [c for c in affected if not c.endswith('-wasm')]
 
-          print(json.dumps(affected))
+          print(json.dumps(native_crates))
+          print('WASM_MATRIX:' + json.dumps(wasm_crates))
           PY
           )"
 
@@ -211,11 +213,17 @@ jobs:
           PY
           )"
 
+          # Extract WASM matrix from Python output (second print line)
+          wasm_matrix_json="$(echo "$matrix_json" | grep '^WASM_MATRIX:' | sed 's/^WASM_MATRIX://')"
+          matrix_json="$(echo "$matrix_json" | grep -v '^WASM_MATRIX:')"
+
           echo "Affected crates: $matrix_json"
+          echo "Affected WASM crates: $wasm_matrix_json"
           echo "Affected bots: $bots_json"
           echo "rust=${rust_flag}" >> "$GITHUB_OUTPUT"
           echo "frontend=${frontend_flag}" >> "$GITHUB_OUTPUT"
           echo "matrix=${matrix_json}" >> "$GITHUB_OUTPUT"
+          echo "wasm_matrix=${wasm_matrix_json}" >> "$GITHUB_OUTPUT"
           echo "bots=${bots_json}" >> "$GITHUB_OUTPUT"
 
   rust-fmt:
@@ -290,6 +298,44 @@ jobs:
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C linker-features=-lld"
         run: cargo nextest run $PKGS --no-tests pass
+
+
+  rust-wasm-check:
+    name: Rust check (WASM crates)
+    needs: changes
+    if: needs.changes.outputs.wasm_matrix != '[]' && needs.changes.outputs.wasm_matrix != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Check WASM crates
+        env:
+          MATRIX: ${{ needs.changes.outputs.wasm_matrix }}
+        run: |
+          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
+          cargo check $pkgs --target wasm32-wasip2
+
+  rust-wasm-clippy:
+    name: Rust clippy (WASM crates)
+    needs: changes
+    if: needs.changes.outputs.wasm_matrix != '[]' && needs.changes.outputs.wasm_matrix != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Run clippy on WASM crates
+        env:
+          MATRIX: ${{ needs.changes.outputs.wasm_matrix }}
+        run: |
+          pkgs="$(printf '%s' "$MATRIX" | jq -r '.[] | "-p \(.)"' | paste -sd ' ' -)"
+          cargo clippy $pkgs --target wasm32-wasip2 -- -D warnings
 
   bot-check:
     name: Bot Check (${{ matrix.bot }})
