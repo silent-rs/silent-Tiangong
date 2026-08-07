@@ -457,6 +457,9 @@ pub(crate) fn spawn_output_reader<R: tauri::Runtime>(
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                if state.pty_generation != pty_generation {
+                    break;
+                }
                 state.current_line = processor.current_line();
                 for line in &complete_lines {
                     push_output(&mut state, line.clone());

@@ -192,6 +192,7 @@ impl TerminalManager {
 
     pub(crate) fn deactivate_pty(&self) {
         let mut state = self.state.lock().unwrap();
+        state.pty_generation = state.pty_generation.wrapping_add(1);
         state.alive = false;
         state.writer = None;
     }
@@ -908,6 +909,10 @@ mod tests {
 
         manager.write_input(b"first").unwrap();
         assert_eq!(&*first_output.lock().unwrap(), b"first");
+
+        manager.deactivate_pty();
+        assert!(!manager.mark_pty_stopped(first_generation));
+        assert!(!manager.is_alive());
 
         let second_output = Arc::new(Mutex::new(Vec::new()));
         let second_writer: SharedPtyWriter =

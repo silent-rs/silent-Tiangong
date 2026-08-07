@@ -262,7 +262,7 @@ async fn confirm_shell_ready(
 
     let deadline = std::time::Instant::now() + SHELL_READY_CONFIRM_TIMEOUT;
     wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
-        state.total_lines_pushed > 0 || !state.current_line.is_empty()
+        !state.output_buffer.is_empty() || !state.current_line.is_empty()
     })
     .await?;
 
