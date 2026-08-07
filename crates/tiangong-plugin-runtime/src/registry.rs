@@ -18,6 +18,7 @@ use crate::loader::{
 };
 use crate::manifest::{MANIFEST_FILE, PluginManifest};
 use crate::sidecar::{ProcessSidecarConnection, SidecarConfig, SidecarConnection};
+use crate::signature::{SignedPluginRelease, verify_signed_release};
 
 static LOADED_PLUGINS: OnceLock<Mutex<HashMap<String, LoadedPlugin>>> = OnceLock::new();
 static SIDECAR_CONNECTIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<ProcessSidecarConnection>>>> =
@@ -168,6 +169,7 @@ struct InstalledPlugin {
     directory: PathBuf,
     manifest: PluginManifest,
     enabled: bool,
+    signed_release: Option<SignedPluginRelease>,
 }
 
 struct LoadedPlugin {
@@ -268,31 +270,35 @@ pub fn preload_installed_plugins(storage_root: &Path) -> usize {
 ///
 /// `runtime` 用于按入口过滤：插件声明了 `entrypoints` 但不含当前入口时不注册。
 /// 同时按 `model_requirements` 过滤：必需模型能力未配置时不注册工具（插件保持已安装）。
-pub fn load_installed_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
-    preload_installed_plugins(storage_root);
+pub fn load_installed_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<Arc<dyn Plugin>> {
     let Ok(_operation) = LOAD_OPERATION.lock() else {
         tracing::warn!("插件加载操作锁已损坏");
         return Vec::new();
     };
 
     let configured = configured_model_capabilities();
-    let plugin_ids = discover_installed_plugins(storage_root)
-        .into_iter()
-        .filter_map(|installed| {
-            if let Some(reason) =
-                check_plugin_availability(&installed.manifest, runtime, &configured)
-            {
-                tracing::info!(
-                    plugin_id = %installed.manifest.id,
-                    reason,
-                    "插件未注册工具（仍保持已安装）"
-                );
-                None
-            } else {
-                Some(installed.manifest.id)
-            }
-        })
-        .collect::<Vec<_>>();
+    let plugin_ids = {
+        let Ok(plugins) = loaded_plugins().lock() else {
+            return Vec::new();
+        };
+        plugins
+            .values()
+            .filter_map(|loaded| {
+                if let Some(reason) =
+                    check_plugin_availability(&loaded.manifest, runtime, &configured)
+                {
+                    tracing::info!(
+                        plugin_id = %loaded.manifest.id,
+                        reason,
+                        "插件未注册工具（仍保持已安装）"
+                    );
+                    None
+                } else {
+                    Some(loaded.manifest.id.clone())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
 
     plugin_ids
         .into_iter()
@@ -303,79 +309,52 @@ pub fn load_installed_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<
 /// 返回已安装插件状态，并探测 sidecar 当前是否可用。
 ///
 /// `runtime` 用于判断插件是否可在当前入口注册工具，填充 `unavailable_reason`。
-pub fn list_plugins(storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
-    preload_installed_plugins(storage_root);
-    let installed = discover_installed_plugins(storage_root);
+pub fn list_plugins(_storage_root: &Path, runtime: RuntimeKind) -> Vec<PluginStatus> {
     let configured = configured_model_capabilities();
-    let snapshots = {
-        let Ok(plugins) = loaded_plugins().lock() else {
-            return Vec::new();
-        };
-        installed
-            .into_iter()
-            .map(|item| {
-                let status = plugins.get(&item.manifest.id).map(|loaded| {
-                    (
-                        loaded.descriptor.clone(),
-                        loaded.generation,
-                        loaded.sidecar.clone(),
-                        loaded.last_error.clone(),
-                        loaded.ui_plugin.is_some(),
-                        loaded.enabled,
-                        loaded.directory.clone(),
-                    )
-                });
-                (item, status)
-            })
-            .collect::<Vec<_>>()
+    let Ok(plugins) = loaded_plugins().lock() else {
+        return Vec::new();
     };
-
-    let mut statuses = snapshots
-        .into_iter()
-        .map(|(installed, loaded)| {
-            let manifest = installed.manifest;
-            let (descriptor, generation, sidecar, last_error, has_ui, enabled, directory) = loaded
-                .unwrap_or((
-                    None,
-                    0,
-                    None,
-                    None,
-                    false,
-                    installed.enabled,
-                    installed.directory,
-                ));
-            let sidecar_running = sidecar
+    let mut statuses = plugins
+        .values()
+        .map(|loaded| {
+            let manifest = &loaded.manifest;
+            let sidecar_running = loaded
+                .sidecar
                 .as_ref()
-                .is_some_and(|connection| connection.is_running());
-            let state = if !enabled {
+                .is_some_and(|connection| connection.has_runtime_endpoint());
+            let state = if !loaded.enabled {
                 "disabled"
-            } else if !has_ui {
+            } else if loaded.ui_plugin.is_none() {
                 "error"
-            } else if last_error.is_some() || (manifest.sidecar.is_some() && !sidecar_running) {
+            } else if loaded.last_error.is_some() {
                 "degraded"
             } else {
                 "loaded"
             };
             PluginStatus {
-                unavailable_reason: if enabled {
-                    check_plugin_availability(&manifest, runtime, &configured)
+                unavailable_reason: if loaded.enabled {
+                    check_plugin_availability(manifest, runtime, &configured)
                 } else {
                     None
                 },
                 id: manifest.id.clone(),
-                name: descriptor
+                name: loaded
+                    .descriptor
                     .as_ref()
                     .map(|value| value.name.clone())
                     .unwrap_or_else(|| manifest.id.clone()),
-                manifest_version: manifest.version,
-                loaded_version: descriptor.map(|value| value.version),
+                manifest_version: manifest.version.clone(),
+                loaded_version: loaded
+                    .descriptor
+                    .as_ref()
+                    .map(|value| value.version.clone()),
                 state: state.to_string(),
-                generation,
-                enabled,
-                can_rollback: rollback_directory(&directory, &manifest.id).is_dir(),
+                generation: loaded.generation,
+                enabled: loaded.enabled,
+                can_rollback: rollback_directory(&loaded.directory, &manifest.id).is_dir(),
                 has_sidecar: manifest.sidecar.is_some(),
                 sidecar_running,
-                last_error,
+                last_error: loaded.last_error.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -389,6 +368,10 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
     let installed = find_installed_plugin(storage_root, plugin_id)?;
+    if loaded_plugin_matches(&installed)? {
+        return list_plugin_status_without_preload(&installed.manifest)
+            .ok_or_else(|| anyhow::anyhow!("插件 {plugin_id} 当前状态丢失"));
+    }
 
     let result = reload_plugin_inner(storage_root, &installed);
     if let Err(error) = &result {
@@ -758,7 +741,7 @@ fn list_plugin_status_without_preload(manifest: &PluginManifest) -> Option<Plugi
     };
     let sidecar_running = sidecar
         .as_ref()
-        .is_some_and(|connection| connection.is_running());
+        .is_some_and(|connection| connection.has_runtime_endpoint());
     let state = if !enabled {
         "disabled"
     } else if !has_ui {
@@ -807,7 +790,6 @@ fn install_staged_plugin_inner(
     staged_path: &Path,
     allow_same_version: bool,
 ) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -838,7 +820,6 @@ pub fn set_plugin_enabled(
     plugin_id: &str,
     enabled: bool,
 ) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -904,7 +885,6 @@ pub fn set_plugin_enabled(
 
 /// 将插件切换到本地保留的上一个版本，失败时恢复当前版本。
 pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatus> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -942,7 +922,6 @@ pub fn rollback_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginSta
 
 /// 卸载插件。保留数据时，安装目录中只留下 data 目录。
 pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -> Result<()> {
-    preload_installed_plugins(storage_root);
     let _operation = LOAD_OPERATION
         .lock()
         .map_err(|_| anyhow::anyhow!("插件加载操作锁已损坏"))?;
@@ -1003,10 +982,12 @@ fn validate_staged_plugin(storage_root: &Path, staged_path: &Path) -> Result<Ins
     }
     ensure_directory(staged_path)?;
     let manifest = PluginManifest::load(&staged_path.join(MANIFEST_FILE))?;
+    let signed_release = verify_signed_release(staged_path, &manifest)?;
     let installed = InstalledPlugin {
         directory: staged_path.to_path_buf(),
         manifest,
         enabled: true,
+        signed_release,
     };
     let result = (|| {
         let wasm_bytes = Arc::new(read_wasm_bytes(&installed)?);
@@ -1061,6 +1042,7 @@ fn install_new_plugin(
         directory: destination.clone(),
         manifest: manifest.clone(),
         enabled: true,
+        signed_release: verify_signed_release(&destination, &manifest)?,
     };
     let loaded = load_plugin_record(storage_root, installed);
     if loaded.ui_plugin.is_none() || loaded.last_error.is_some() {
@@ -1125,6 +1107,7 @@ fn replace_installed_plugin(
         directory: current.directory.clone(),
         manifest: manifest.clone(),
         enabled: current.enabled,
+        signed_release: verify_signed_release(&current.directory, &manifest)?,
     };
     if let Err(error) = reload_plugin_inner(storage_root, &upgraded) {
         let _ = stop_connection_for_directory(&current.directory);
@@ -1440,10 +1423,18 @@ fn discover_installed_plugins(storage_root: &Path) -> Vec<InstalledPlugin> {
         .filter_map(|path| match PluginManifest::load(&path) {
             Ok(manifest) => {
                 let directory = path.parent()?.to_path_buf();
+                let signed_release = match verify_signed_release(&directory, &manifest) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "忽略签名无效的插件");
+                        return None;
+                    }
+                };
                 Some(InstalledPlugin {
                     enabled: !directory.join(DISABLED_MARKER).is_file(),
                     directory,
                     manifest,
+                    signed_release,
                 })
             }
             Err(error) => {
@@ -1482,6 +1473,18 @@ fn sidecar_connection(
         .sidecar
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("插件 {} 未声明 sidecar", installed.manifest.id))?;
+    let signed_release = installed.signed_release.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "未签名插件 {} 不允许启动原生 sidecar",
+            installed.manifest.id
+        )
+    })?;
+    if !signed_release.has_permission("sidecar.invoke") {
+        bail!(
+            "插件 {} 的官方签名未授权 sidecar.invoke",
+            installed.manifest.id
+        );
+    }
     if !installed.manifest.permissions.is_empty()
         && !installed.manifest.has_permission("sidecar.invoke")
     {
@@ -1513,6 +1516,10 @@ fn sidecar_connection(
         data_dir,
         storage_root,
     )
+    .with_sensitive_storage(
+        signed_release.has_permission("model-config.read")
+            || signed_release.has_permission("app-storage.read"),
+    )
     .with_protocols(&sidecar.transport_protocol, sidecar.business_protocol)
     .with_timeouts(
         Duration::from_millis(sidecar.startup_timeout_ms),
@@ -1533,4 +1540,21 @@ fn sidecar_connection(
         .get(&installed.directory)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("创建插件 sidecar 连接失败"))
+}
+
+fn loaded_plugin_matches(installed: &InstalledPlugin) -> Result<bool> {
+    let bytes = read_wasm_bytes(installed)?;
+    let plugins = loaded_plugins()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("插件注册表已损坏"))?;
+    let Some(loaded) = plugins.get(&installed.manifest.id) else {
+        return Ok(false);
+    };
+    Ok(loaded.directory == installed.directory
+        && loaded.manifest.version == installed.manifest.version
+        && loaded.manifest.permissions == installed.manifest.permissions
+        && loaded
+            .wasm_bytes
+            .as_ref()
+            .is_some_and(|loaded_bytes| loaded_bytes.as_slice() == bytes.as_slice()))
 }

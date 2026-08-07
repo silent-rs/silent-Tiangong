@@ -1,0 +1,299 @@
+name: Publish Official Plugin to OSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin_id:
+        description: "插件 ID（以 plugin.json 的 id 为准）"
+        required: true
+        type: string
+  push:
+    tags:
+      - "plugin/*/v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TIANGONG_PLUGIN_OSS_BASE_URL: https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com
+
+jobs:
+  resolve-plugin:
+    name: Resolve plugin
+    runs-on: ubuntu-22.04
+    outputs:
+      plugin_id: ${{ steps.plugin.outputs.plugin_id }}
+    steps:
+      - name: Resolve plugin ID
+        id: plugin
+        env:
+          INPUT_PLUGIN_ID: ${{ inputs.plugin_id }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            plugin_id="${GITHUB_REF_NAME#plugin/}"
+            plugin_id="${plugin_id%/v*}"
+          else
+            plugin_id="$INPUT_PLUGIN_ID"
+          fi
+          if [[ -z "$plugin_id" || "$plugin_id" == */* || "$plugin_id" == *..* ]]; then
+            echo "Invalid plugin ID: $plugin_id"
+            exit 1
+          fi
+          echo "plugin_id=$plugin_id" >> "$GITHUB_OUTPUT"
+
+  build-wasm:
+    name: Build shared WASM
+    needs: resolve-plugin
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Build deterministic shared WASM
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: cargo run -p xtask -- build-plugin-wasm "$PLUGIN_ID" "target/shared-wasm/${PLUGIN_ID}.wasm"
+      - name: Upload shared WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
+          if-no-files-found: error
+          retention-days: 7
+  build-plugin:
+    name: Build ${{ needs.resolve-plugin.outputs.plugin_id }} (${{ matrix.plugin_platform }})
+    needs: [resolve-plugin, build-wasm]
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            plugin_platform: darwin-aarch64
+          - runner: ubuntu-22.04
+            plugin_platform: linux-x86_64
+          - runner: windows-latest
+            plugin_platform: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - name: Install Tauri signer
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+      - name: Download shared WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-wasm
+      - name: Validate plugin from repository configuration
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: cargo run -p xtask -- validate-plugin "$PLUGIN_ID"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Install protoc on macOS
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc on Windows
+        if: runner.os == 'Windows'
+        run: choco install protoc -y
+
+      - name: Configure OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $openssl = (Get-Command openssl).Source
+          $root = Split-Path (Split-Path $openssl -Parent) -Parent
+          $crypto = Get-ChildItem -Path $root -Recurse -Filter libcrypto.lib |
+            Where-Object { Test-Path (Join-Path $_.Directory.FullName 'libssl.lib') } |
+            Select-Object -First 1
+          if (-not $crypto) {
+            throw "Could not locate matching libcrypto.lib and libssl.lib under $root"
+          }
+          $include = Join-Path $root 'include'
+          if (-not (Test-Path (Join-Path $include 'openssl/ssl.h'))) {
+            throw "Could not locate OpenSSL headers under $include"
+          }
+          "OPENSSL_LIB_DIR=$($crypto.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_NO_VENDOR=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare plugin signing key
+        id: plugin_signing
+        env:
+          PLUGIN_SIGNING_PRIVATE_KEY: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$PLUGIN_SIGNING_PRIVATE_KEY" ]]; then
+            echo "TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY is required."
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/tiangong-plugin-signing.key"
+          printf '%s' "$PLUGIN_SIGNING_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Build and sign plugin
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+          TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TIANGONG_PLUGIN_PREBUILT_WASM: ${{ github.workspace }}/target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
+        run: cargo run -p xtask -- build-plugin "$PLUGIN_ID"
+
+      - name: Verify platform output
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          EXPECTED_PLATFORM: ${{ matrix.plugin_platform }}
+        run: |
+          fragment="target/plugin-dist/plugins-index/fragments/${PLUGIN_ID}-${EXPECTED_PLATFORM}.json"
+          test -f "$fragment"
+          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json"
+          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json.sig"
+
+      - name: Remove plugin signing key
+        if: always() && steps.plugin_signing.outputs.key_path != ''
+        env:
+          PLUGIN_SIGNING_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
+        run: rm -f "$PLUGIN_SIGNING_KEY_PATH"
+
+      - name: Upload platform plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-dist-${{ needs.resolve-plugin.outputs.plugin_id }}-${{ matrix.plugin_platform }}
+          path: |
+            target/plugin-dist/plugins/${{ needs.resolve-plugin.outputs.plugin_id }}/
+            target/plugin-dist/plugins-index/fragments/${{ needs.resolve-plugin.outputs.plugin_id }}-${{ matrix.plugin_platform }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  prepare-release:
+    name: Prepare independent plugin release
+    needs: [resolve-plugin, build-plugin]
+    runs-on: ubuntu-22.04
+    outputs:
+      plugin_id: ${{ needs.resolve-plugin.outputs.plugin_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-dist-${{ needs.resolve-plugin.outputs.plugin_id }}-*
+          path: target/plugin-platforms
+
+      - name: Merge and validate selected plugin
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+          TIANGONG_PLUGIN_EXPECTED_PLATFORMS: darwin-aarch64,linux-x86_64,windows-x86_64
+        run: |
+          cargo run -p xtask -- merge-plugin-dist "$PLUGIN_ID" target/plugin-platforms target/plugin-release
+          test "$(find target/plugin-release/plugins -name release.json | wc -l | tr -d ' ')" = "3"
+          test "$(find target/plugin-release/plugins -name release.json.sig | wc -l | tr -d ' ')" = "3"
+
+      - name: Upload independent release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-release-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/plugin-release/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-plugin:
+    name: Publish independent plugin
+    needs: [resolve-plugin, prepare-release]
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: plugin-oss-catalog-publish
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download independent release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-release-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/plugin-release
+
+      - name: Install ossutil
+        run: |
+          curl -fsSL https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip -o /tmp/ossutil.zip
+          unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+          sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
+
+      - name: Configure ossutil
+        run: |
+          ossutil config \
+            -e oss-cn-hangzhou.aliyuncs.com \
+            -i "${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}" \
+            -k "${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}"
+
+      - name: Download current catalog
+        run: |
+          curl -fsSL "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}" \
+            -o target/current-catalog.json || printf '{"version":1,"plugins":[]}\n' > target/current-catalog.json
+
+      - name: Merge selected plugin into catalog
+        run: |
+          cargo run -p xtask -- merge-plugin-catalog \
+            target/current-catalog.json \
+            target/plugin-release/plugins-index/catalog.json \
+            target/plugin-release/plugins-index/catalog.merged.json
+
+      - name: Upload immutable selected plugin version
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: |
+          ossutil cp -r "target/plugin-release/plugins/${PLUGIN_ID}/" "oss://silent-tiangong/plugins/${PLUGIN_ID}/" -f
+          ossutil cp "target/plugin-release/plugins-index/catalog.json" \
+            "oss://silent-tiangong/plugins-index/releases/${PLUGIN_ID}.json" -f
+
+      - name: Publish aggregate catalog last
+        run: |
+          catalog=target/plugin-release/plugins-index/catalog.merged.json
+          ossutil cp "$catalog" oss://silent-tiangong/plugins-index/catalog.json.next -f
+          ossutil cp "$catalog" oss://silent-tiangong/plugins-index/catalog.json -f
+
+      - name: Verify published catalog
+        run: |
+          expected="$(sha256sum target/plugin-release/plugins-index/catalog.merged.json | awk '{print $1}')"
+          curl -fsSL "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}-verify" -o /tmp/published-catalog.json
+          actual="$(sha256sum /tmp/published-catalog.json | awk '{print $1}')"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "Published catalog checksum mismatch: expected=${expected}, actual=${actual}"
+            exit 1
+          fi

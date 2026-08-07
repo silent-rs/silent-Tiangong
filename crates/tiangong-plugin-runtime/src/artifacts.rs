@@ -34,9 +34,16 @@ pub struct PluginRelease {
     pub manifest: RemoteArtifact,
     pub wasm: RemoteArtifact,
     #[serde(default)]
+    pub signed_releases: BTreeMap<String, RemoteSignedRelease>,
+    #[serde(default)]
     pub sidecars: BTreeMap<String, RemoteArtifact>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSignedRelease {
+    pub url: String,
+    pub signature_url: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteArtifact {
     pub url: String,
@@ -95,6 +102,14 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
         let binary = with_executable_suffix(&sidecar.binary)?;
         let destination = copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
         set_executable(&destination)?;
+    }
+
+    for file in ["release.json", "release.json.sig"] {
+        let source_file = source.join(file);
+        if source_file.exists() {
+            ensure_regular_file(&source_file, "插件签名制品")?;
+            copy_regular_file(&source_file, &staged.path.join(file), "插件签名制品")?;
+        }
     }
 
     for directory in ["runtime", "logs", "data"] {
@@ -237,12 +252,37 @@ impl PluginRepository {
             None => {}
         }
 
+        if manifest.sidecar.is_some() || !release.signed_releases.is_empty() {
+            let platform = current_platform_key();
+            let signed = release
+                .signed_releases
+                .get(&platform)
+                .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的签名清单", release.id))?;
+            self.download_unchecked(&signed.url, &staged.path.join("release.json"))
+                .await?;
+            self.download_unchecked(&signed.signature_url, &staged.path.join("release.json.sig"))
+                .await?;
+        }
         for directory in ["runtime", "logs", "data"] {
             std::fs::create_dir_all(staged.path.join(directory))?;
         }
         Ok(staged)
     }
 
+    async fn download_unchecked(&self, url: &str, destination: &Path) -> Result<()> {
+        validate_download_url(url, "插件签名制品")?;
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("下载插件签名制品失败: {url}"))?;
+        if !response.status().is_success() {
+            bail!("插件签名制品下载响应异常: {}", response.status());
+        }
+        std::fs::write(destination, response.bytes().await?)
+            .with_context(|| format!("写入插件签名制品失败: {}", destination.display()))
+    }
     async fn download_file(&self, artifact: &RemoteArtifact, destination: &Path) -> Result<()> {
         let expected = parse_checksum(&artifact.checksum)?;
         validate_download_url(&artifact.url, "插件制品")?;
@@ -401,9 +441,25 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
         validate_download_url(&plugin.wasm.url, "WASM 制品")?;
         parse_checksum(&plugin.manifest.checksum)?;
         parse_checksum(&plugin.wasm.checksum)?;
-        for artifact in plugin.sidecars.values() {
+        for (platform, artifact) in &plugin.sidecars {
             validate_download_url(&artifact.url, "sidecar 制品")?;
             parse_checksum(&artifact.checksum)?;
+            let signed = plugin
+                .signed_releases
+                .get(platform)
+                .ok_or_else(|| anyhow!("插件 {} 的平台 {platform} 缺少签名清单", plugin.id))?;
+            validate_download_url(&signed.url, "插件签名清单")?;
+            validate_download_url(&signed.signature_url, "插件签名文件")?;
+        }
+        for (platform, signed) in &plugin.signed_releases {
+            if !plugin.sidecars.contains_key(platform) {
+                bail!(
+                    "插件 {} 的平台 {platform} 只有签名清单而没有 sidecar",
+                    plugin.id
+                );
+            }
+            validate_download_url(&signed.url, "插件签名清单")?;
+            validate_download_url(&signed.signature_url, "插件签名文件")?;
         }
     }
     Ok(())

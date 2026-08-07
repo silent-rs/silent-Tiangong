@@ -123,7 +123,8 @@ fn run_gui() {
             let state = app.state::<tiangong_app::TiangongApp>();
             state.set_app_handle(app.handle().clone());
 
-            // 预加载 WASM 插件的 UI 实例，Core 实例仍在创建会话时独立构造。
+            // 启动阶段一次性预加载插件快照。后续状态查询、设置页和 Core 创建
+            // 只复用该快照，不隐式扫描、编译或热加载插件。
             {
                 let storage_root = tiangong_config::io::storage_root();
                 tiangong_plugin_runtime::registry::preload_installed_plugins(&storage_root);

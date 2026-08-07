@@ -4,7 +4,7 @@
 
 ## 插件组成
 
-一个可安装插件至少包含 WASM Component，也可以带一个原生 sidecar：
+一个可安装插件至少包含 WASM Component。未签名的第三方插件只允许使用纯 WASM；原生 sidecar 仅对带有效天工官方签名的发布包开放：
 
 ```text
 WASM Component
@@ -77,13 +77,15 @@ crates/plugins/tiangong-plugin-example/
 └── sidecar/           # 可选
 ```
 
-最终导入的是构建后的完整目录，不是源码目录：
+最终导入的是构建后的完整目录，不是源码目录。纯 WASM 插件无需签名；官方 sidecar 插件还必须包含签名清单：
 
 ```text
 example-plugin/
 ├── plugin.json
 ├── example_plugin.wasm
-└── example-sidecar    # 清单声明 sidecar 时必须提供
+├── example-sidecar      # 清单声明 sidecar 时必须提供
+├── release.json         # 官方 sidecar 插件必须提供
+└── release.json.sig     # 官方 sidecar 插件必须提供
 ```
 
 `runtime`、`logs` 和 `data` 由天工管理，不需要放进导入目录。
@@ -118,7 +120,10 @@ example-plugin/
 - `version` 必须是语义版本，例如 `0.1.0`。
 - `wasm.binary` 和 `sidecar.binary` 必须是插件目录内的安全相对路径。
 - WASM `describe()` 返回的 ID、版本必须与清单完全一致。
-- 声明 sidecar 时，插件权限需要包含 `sidecar.invoke`。
+- 声明 sidecar 时，插件权限必须包含 `sidecar.invoke`，且发布包必须带有效官方签名。
+- `model-config.read` 允许 sidecar 取得包含模型配置的应用存储根目录，仅用于需要直接调用模型的官方插件。
+- `app-storage.read` 允许 sidecar 取得应用共享存储根目录，用于兼容 Index、Scheduler、Skill、MCP 等既有业务数据；该权限同样只接受官方签名授权。
+- `model-config.read` 与 `app-storage.read` 都是敏感权限，不得仅通过修改 `plugin.json` 自行获取。
 - Windows 制品在清单名称后自动使用 `.exe` 后缀，清单本身不要重复添加平台后缀。
 
 不需要 sidecar 的插件应删除整个 `sidecar` 字段，并可将 `permissions` 留空。
@@ -180,7 +185,7 @@ cargo build -p tiangong-plugin-example-wasm --target wasm32-wasip2 --release
 
 ## 接入 sidecar
 
-sidecar 启动时由天工注入以下环境变量：
+sidecar 启动时由天工注入以下环境变量。前三项始终可用；共享存储根只有签名权限授权后才会注入：
 
 | 环境变量 | 内容 |
 | --- | --- |
@@ -188,6 +193,7 @@ sidecar 启动时由天工注入以下环境变量：
 | `TIANGONG_PLUGIN_VERSION` | 插件发布版本 |
 | `TIANGONG_PLUGIN_ENDPOINT` | sidecar 写入 endpoint 的文件路径 |
 | `TIANGONG_PLUGIN_DATA_DIR` | 插件独立数据目录 |
+| `TIANGONG_STORAGE_ROOT` | 天工应用共享存储根；仅官方签名的 `model-config.read` 或 `app-storage.read` 插件可获得 |
 
 sidecar 必须：
 
@@ -212,6 +218,8 @@ sidecar 必须：
 
 - 清单格式和语义版本；
 - 清单声明的 WASM 与当前平台 sidecar 是否为实际文件；
+- `release.json` 与 `release.json.sig` 是否成对存在；
+- 带 sidecar 时是否为有效官方签名，签名权限是否与清单一致，签名覆盖的清单、WASM 和 sidecar 哈希是否匹配；
 - WASM 是否能实例化；
 - WASM 描述符与清单 ID、版本是否一致；
 - sidecar 是否能启动并通过身份、版本和协议握手。
@@ -226,15 +234,18 @@ sidecar 必须：
 - 更低版本会被拒绝，需要使用“回滚”或修改插件版本。
 - 替换时保留当前插件的 `runtime`、`logs` 和 `data`；开发目录中的这些内容不会被导入。
 
-本地目录由用户主动选择，因此不要求 OSS SHA-256。只应导入可信源码构建出的插件。OSS 安装仍会验证目录中声明的 SHA-256。
+本地目录由用户主动选择，但本地选择不能绕过原生代码边界：未签名纯 WASM 可以导入；任何带 sidecar 的插件都必须携带有效官方签名。第三方开发者应使用纯 WASM 和受限 Host 接口，不应获得官方签名私钥。OSS 安装还会先校验目录声明的 SHA-256，再执行统一签名验证。
 
 ## Memory 参考构建
 
 Memory 插件同时包含私有协议、WASM 和 sidecar，可用一条命令完成检查、构建、本地部署和 OSS 制品生成：
 
 ```bash
-cargo run -p xtask -- build-plugin memory
+TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH=~/.tiangong/keys/plugin-signing.key \
+  cargo run -p xtask -- build-plugin memory
 ```
+
+该命令会生成 `release.json` 与 `release.json.sig`。签名私钥只应保存在天工官方发布环境或本地受保护的开发密钥目录，绝不能写入插件包或提交到仓库；签名密码可通过 `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD` 提供。
 
 生成的 OSS 上传目录位于：
 
@@ -261,3 +272,38 @@ Memory 的目录和构建说明见 [`crates/plugins/tiangong-plugin-memory/READM
 ### 导入同版本后代码没有变化
 
 确认选择的是构建制品目录而不是源码目录，并先重新构建 WASM 或 sidecar。导入成功后插件会立即替换，无需重启天工。
+
+## GitHub Actions 发布到 OSS
+
+短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `crates/plugins/` 下完整的 `plugin.json`、WASM、protocol 和 sidecar；每次只构建、签名和上传所选插件。可通过 `cargo run -p xtask -- list-plugins` 查询当前可发布插件。
+
+仓库需要配置以下 GitHub Actions Secrets：
+
+- `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY`：插件专用签名私钥内容，不得与应用更新私钥复用。
+- `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD`：插件签名私钥密码；无密码时可留空。
+- `ALIYUN_OSS_ACCESS_KEY_ID`、`ALIYUN_OSS_ACCESS_KEY_SECRET`：OSS 上传凭据。
+
+发布顺序为：
+
+1. macOS Apple Silicon、Linux x86_64、Windows x86_64 分别构建并签名所选插件。
+2. 三个平台产物上传为短期 Actions Artifact，签名临时文件立即删除。
+3. Linux 汇总任务只合并所选插件，校验其 ID、版本、清单与 WASM 完全一致，并要求具备三个平台的 sidecar 和签名清单。
+4. 发布任务使用所有插件共享的串行锁，读取 OSS 当前总目录并仅替换本次插件条目。
+5. 先上传 `plugins/<id>/<version>/` 不可变制品及 `plugins-index/releases/<id>.json` 独立入口。
+6. 最后更新 `plugins-index/catalog.json`，并从 OSS 回读核对 SHA-256。
+
+任何平台构建、单插件目录合并或上传失败都不会执行最后的总目录更新，因此客户端不会发现半发布版本。不同插件可以同时构建，但发布阶段串行读取和更新总目录，不会互相覆盖；无关插件失败也不会阻塞本次插件。合并逻辑可在本地对一个插件准备好的平台目录执行：
+
+```bash
+TIANGONG_PLUGIN_EXPECTED_PLATFORMS=darwin-aarch64,linux-x86_64,windows-x86_64 \
+  cargo run -p xtask -- merge-plugin-dist memory target/plugin-platforms target/plugin-release
+```
+
+将该插件独立发布目录合入现有总目录：
+
+```bash
+cargo run -p xtask -- merge-plugin-catalog \
+  current-catalog.json \
+  target/plugin-release/plugins-index/catalog.json \
+  catalog.merged.json
+```

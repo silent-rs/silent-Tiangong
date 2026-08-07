@@ -38,6 +38,12 @@ export function SettingsDialog() {
   const [activeTab, setActiveTab] = useState('agent');
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [pluginContributions, setPluginContributions] = useState<PluginContributionEntry[]>([]);
+  const [pluginStatuses, setPluginStatuses] = useState<import('../api/tauri').PluginStatus[]>([]);
+  const [availablePlugins, setAvailablePlugins] = useState<import('../api/tauri').AvailablePlugin[]>([]);
+  const [pluginCatalogError, setPluginCatalogError] = useState<string | null>(null);
+  const [pluginDataLoaded, setPluginDataLoaded] = useState(false);
+  const [pluginDataLoading, setPluginDataLoading] = useState(false);
+  const [pluginRefreshMask, setPluginRefreshMask] = useState(false);
   const pendingSettingsTab = useStore((s) => s.pendingSettingsTab);
   const setPendingSettingsTab = useStore((s) => s.setPendingSettingsTab);
 
@@ -49,6 +55,28 @@ export function SettingsDialog() {
         .catch(() => {});
     }
   }, [open, pluginContributions.length]);
+
+  useEffect(() => {
+    if (open && activeTab === 'plugin-manager' && !pluginDataLoaded && !pluginDataLoading) {
+      setPluginDataLoading(true);
+      setPluginRefreshMask(true);
+      Promise.allSettled([api.listPlugins(), api.listAvailablePlugins()])
+        .then(([installed, available]) => {
+          if (installed.status === 'fulfilled') setPluginStatuses(installed.value);
+          if (available.status === 'fulfilled') {
+            setAvailablePlugins(available.value);
+            setPluginCatalogError(null);
+          } else {
+            setPluginCatalogError(String(available.reason));
+          }
+          setPluginDataLoaded(true);
+        })
+        .finally(() => {
+          setPluginDataLoading(false);
+          setPluginRefreshMask(false);
+        });
+    }
+  }, [activeTab, open, pluginDataLoaded, pluginDataLoading]);
 
   // 响应外部触发打开设置页
   useEffect(() => {
@@ -170,7 +198,13 @@ export function SettingsDialog() {
                 <BotPanel />
               </TabsContent>
               <TabsContent value="plugin-manager" className="m-0 flex-1 min-h-0 overflow-hidden">
-                <PluginManagerSettings onContributionsChanged={setPluginContributions} />
+                <PluginManagerSettings
+                  onContributionsChanged={setPluginContributions}
+                  initialPlugins={pluginStatuses}
+                  initialAvailable={availablePlugins}
+                  initialCatalogError={pluginCatalogError}
+                  onRefreshStateChange={setPluginRefreshMask}
+                />
               </TabsContent>
               {pluginContributions.map((entry) => (
                 <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -182,6 +216,19 @@ export function SettingsDialog() {
               </TabsContent>
             </div>
           </Tabs>
+          {pluginRefreshMask && (
+            <div
+              className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-[2px]"
+              role="status"
+              aria-live="polite"
+              aria-label="正在刷新插件状态"
+            >
+              <div className="flex items-center gap-2 rounded-md border bg-background px-4 py-3 text-sm shadow-xl">
+                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                正在刷新插件目录和运行状态…
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </>
