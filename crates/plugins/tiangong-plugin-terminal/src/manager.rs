@@ -949,6 +949,122 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_exec_cancels_pending_multiline_input() {
+        let app = tauri::test::mock_app();
+        let manager = Arc::new(TerminalManager::new(
+            "test-multiline-cleanup".to_string(),
+            "/tmp".to_string(),
+        ));
+        manager.state.lock().unwrap().shell = "/bin/sh".to_string();
+        let mut pty_state = Some(
+            manager
+                .start_and_spawn_reader("test-multiline-cleanup", "/tmp", app.handle().clone())
+                .expect("测试 PTY 应成功启动"),
+        );
+
+        manager.write_input(b"if true; then\r").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !manager.recent_output(20).contains("if true; then") {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("测试 Shell 未进入多行续写状态");
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+        let completion = crate::types::TerminalExecCompletion::new(Arc::clone(&cancellation));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::command_protocol::handle_exec(
+                &manager,
+                &mut pty_state,
+                app.handle(),
+                "echo command-after-multiline",
+                None,
+                response_tx,
+                cancellation,
+                completion,
+                None,
+            ),
+        )
+        .await
+        .expect("Agent 命令在多行清理后仍未完成");
+
+        let response = response_rx.await.expect("命令响应发送端意外关闭");
+        assert!(!response.terminal_error, "{}", response.stderr);
+        assert_eq!(response.exit_code, 0);
+        assert!(response.stdout.contains("command-after-multiline"));
+        assert!(manager.is_alive());
+        assert!(pty_state.is_some());
+
+        manager.deactivate_pty();
+        shutdown_pty(pty_state.take().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_exec_rebuilds_terminal_when_cleanup_cannot_restore_shell() {
+        let app = tauri::test::mock_app();
+        let temp = tempfile::tempdir().unwrap();
+        let foreground_ready = temp.path().join("foreground-ready");
+        let manager = Arc::new(TerminalManager::new(
+            "test-cleanup-recovery".to_string(),
+            "/tmp".to_string(),
+        ));
+        manager.state.lock().unwrap().shell = "/bin/sh".to_string();
+        let mut pty_state = Some(
+            manager
+                .start_and_spawn_reader("test-cleanup-recovery", "/tmp", app.handle().clone())
+                .expect("测试 PTY 应成功启动"),
+        );
+
+        let blocking_command = format!(
+            "sh -c 'trap \"\" INT HUP TERM; printf ready > \"$1\"; exec sleep 60' _ {}\r",
+            shell_quote(&foreground_ready.to_string_lossy())
+        );
+        manager.write_input(blocking_command.as_bytes()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !foreground_ready.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("测试前台任务未启动");
+
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let cancellation = Arc::new(crate::types::TerminalExecCancellation::default());
+        let completion = crate::types::TerminalExecCompletion::new(Arc::clone(&cancellation));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            crate::command_protocol::handle_exec(
+                &manager,
+                &mut pty_state,
+                app.handle(),
+                "echo command-after-recovery",
+                None,
+                response_tx,
+                cancellation,
+                completion,
+                None,
+            ),
+        )
+        .await
+        .expect("旧终端清理失败后没有完成重建执行");
+
+        let response = response_rx.await.expect("命令响应发送端意外关闭");
+        assert!(!response.terminal_error, "{}", response.stderr);
+        assert_eq!(response.exit_code, 0);
+        assert!(response.stdout.contains("command-after-recovery"));
+        assert!(manager.is_alive());
+        assert!(pty_state.is_some());
+
+        manager.deactivate_pty();
+        shutdown_pty(pty_state.take().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn closing_terminal_finishes_running_command_wait() {
         let app = tauri::test::mock_app();
         let temp = tempfile::tempdir().unwrap();
