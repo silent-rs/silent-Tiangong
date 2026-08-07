@@ -1,3 +1,20 @@
+# 插件目录结构调整
+
+- [x] 从 main 创建 `feature/plugins-directory-restructure` 分支。
+- [x] 在根目录创建 `plugins/` 目录，将 15 个 WASM 化插件从 `crates/plugins/` 移入。
+- [x] 非 WASM 插件（agent-team、browser、terminal）保留在 `crates/plugins/`。
+- [x] 更新 `Cargo.toml` workspace members 和 workspace.dependencies 路径。
+- [x] 更新 `xtask/src/main.rs` 插件路径定义。
+- [x] 更新 `scripts/pre-commit-affected-crates.sh` 路径匹配规则。
+- [x] 更新 `.github/workflows/ci.yml` CI 路径映射。
+- [x] 更新文档中的路径引用。
+- [x] 通过 `cargo check` 验证。
+
+## 完成标准
+
+- WASM 化插件位于根目录 `plugins/`，非 WASM 插件仍在 `crates/plugins/`。
+- 所有路径引用已同步更新，工作区编译通过。
+
 # 思考强度运行时即时更新
 
 - [x] 已有对话切换思考强度后，当前任务中下一次尚未发出的模型请求立即使用新值。

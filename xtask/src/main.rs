@@ -36,9 +36,9 @@ const MEMORY: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_memory_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-memory-sidecar"),
     sidecar_artifact: Some("tiangong-memory-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-memory",
-    plugin_manifest: "crates/plugins/tiangong-plugin-memory/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-memory/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-memory",
+    plugin_manifest: "plugins/tiangong-plugin-memory/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-memory/protocol/Cargo.toml",
 };
 
 const MCP: PluginConfig = PluginConfig {
@@ -50,9 +50,9 @@ const MCP: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_mcp_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-mcp-sidecar"),
     sidecar_artifact: Some("tiangong-mcp-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-mcp",
-    plugin_manifest: "crates/plugins/tiangong-plugin-mcp/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-mcp/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-mcp",
+    plugin_manifest: "plugins/tiangong-plugin-mcp/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-mcp/protocol/Cargo.toml",
 };
 
 const FETCH: PluginConfig = PluginConfig {
@@ -64,9 +64,9 @@ const FETCH: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_fetch_wasm.wasm",
     sidecar_crate: "tiangong-plugin-fetch-sidecar",
     sidecar_artifact: "tiangong-fetch-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-fetch",
-    plugin_manifest: "crates/plugins/tiangong-plugin-fetch/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-fetch/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-fetch",
+    plugin_manifest: "plugins/tiangong-plugin-fetch/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-fetch/protocol/Cargo.toml",
 };
 
 const INDEX: PluginConfig = PluginConfig {
@@ -78,9 +78,9 @@ const INDEX: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_index_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-index-sidecar"),
     sidecar_artifact: Some("tiangong-index-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-index",
-    plugin_manifest: "crates/plugins/tiangong-plugin-index/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-index/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-index",
+    plugin_manifest: "plugins/tiangong-plugin-index/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-index/protocol/Cargo.toml",
 };
 
 const SCHEDULER: PluginConfig = PluginConfig {
@@ -92,9 +92,9 @@ const SCHEDULER: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_scheduler_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-scheduler-sidecar"),
     sidecar_artifact: Some("tiangong-scheduler-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-scheduler",
-    plugin_manifest: "crates/plugins/tiangong-plugin-scheduler/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-scheduler/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-scheduler",
+    plugin_manifest: "plugins/tiangong-plugin-scheduler/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-scheduler/protocol/Cargo.toml",
 };
 
 const SKILL: PluginConfig = PluginConfig {
@@ -106,9 +106,9 @@ const SKILL: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_skill_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-skill-sidecar"),
     sidecar_artifact: Some("tiangong-skill-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-skill",
-    plugin_manifest: "crates/plugins/tiangong-plugin-skill/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-skill/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-skill",
+    plugin_manifest: "plugins/tiangong-plugin-skill/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-skill/protocol/Cargo.toml",
 };
 
 const CODING: PluginConfig = PluginConfig {
@@ -120,9 +120,9 @@ const CODING: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_coding_wasm.wasm",
     sidecar_crate: Some("tiangong-plugin-coding-sidecar"),
     sidecar_artifact: Some("tiangong-coding-sidecar"),
-    plugin_root: "crates/plugins/tiangong-plugin-coding",
-    plugin_manifest: "crates/plugins/tiangong-plugin-coding/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-coding/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-coding",
+    plugin_manifest: "plugins/tiangong-plugin-coding/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-coding/protocol/Cargo.toml",
 };
 
 const PROMPT: PluginConfig = PluginConfig {
@@ -134,9 +134,9 @@ const PROMPT: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_prompt_wasm.wasm",
     sidecar_crate: None,
     sidecar_artifact: None,
-    plugin_root: "crates/plugins/tiangong-plugin-prompt",
-    plugin_manifest: "crates/plugins/tiangong-plugin-prompt/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-prompt/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-prompt",
+    plugin_manifest: "plugins/tiangong-plugin-prompt/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-prompt/protocol/Cargo.toml",
 };
 
 const FS: PluginConfig = PluginConfig {
@@ -148,9 +148,9 @@ const FS: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_fs_wasm.wasm",
     sidecar_crate: "tiangong-plugin-fs-sidecar",
     sidecar_artifact: "tiangong-fs-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-fs",
-    plugin_manifest: "crates/plugins/tiangong-plugin-fs/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-fs/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-fs",
+    plugin_manifest: "plugins/tiangong-plugin-fs/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-fs/protocol/Cargo.toml",
 };
 
 const COMMAND: PluginConfig = PluginConfig {
@@ -162,9 +162,9 @@ const COMMAND: PluginConfig = PluginConfig {
     wasm_artifact: "tiangong_plugin_command_wasm.wasm",
     sidecar_crate: "tiangong-plugin-command-sidecar",
     sidecar_artifact: "tiangong-command-sidecar",
-    plugin_root: "crates/plugins/tiangong-plugin-command",
-    plugin_manifest: "crates/plugins/tiangong-plugin-command/plugin.json",
-    protocol_manifest: "crates/plugins/tiangong-plugin-command/protocol/Cargo.toml",
+    plugin_root: "plugins/tiangong-plugin-command",
+    plugin_manifest: "plugins/tiangong-plugin-command/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-command/protocol/Cargo.toml",
 };
 
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {

@@ -14,37 +14,40 @@ shift || true
 
 # 从文件路径提取 crate 名并去重：
 #   crates/<name>/...           → <name>
-#   crates/plugins/tiangong-plugin-memory/<part>/... → tiangong-plugin-memory-<part>
+#   plugins/tiangong-plugin-memory/<part>/... → tiangong-plugin-memory-<part>
 #   crates/plugins/<name>/...   → <name>（插件 crate 嵌套在 plugins/ 子目录下）
 #   src-tauri/...               → tiangong-app
 #   src/...                     → tiangong
 # 用 if [[ ]] 模式匹配 + sort -u 去重，兼容老版本 bash，避免 case 在命令替换内的解析问题
 crates="$(
   for f in "$@"; do
-    if [[ "$f" == crates/plugins/tiangong-plugin-memory/protocol/* ]]; then
+    if [[ "$f" == plugins/tiangong-plugin-memory/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-protocol"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-memory/sidecar/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-memory/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-sidecar"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-memory/wasm/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-memory/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-memory-wasm"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/protocol/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-mcp/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-mcp-protocol"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/sidecar/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-mcp/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-mcp-sidecar"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-mcp/wasm/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-mcp/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-mcp-wasm"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-index/protocol/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-index/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-index-protocol"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-index/sidecar/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-index/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-index-sidecar"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-index/wasm/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-index/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-index-wasm"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-scheduler/protocol/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-scheduler/protocol/* ]]; then
       printf '%s\n' "tiangong-plugin-scheduler-protocol"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-scheduler/sidecar/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-scheduler/sidecar/* ]]; then
       printf '%s\n' "tiangong-plugin-scheduler-sidecar"
-    elif [[ "$f" == crates/plugins/tiangong-plugin-scheduler/wasm/* ]]; then
+    elif [[ "$f" == plugins/tiangong-plugin-scheduler/wasm/* ]]; then
       printf '%s\n' "tiangong-plugin-scheduler-wasm"
+    elif [[ "$f" == plugins/*/* ]]; then
+      rest="${f#plugins/}"
+      printf '%s\n' "${rest%%/*}"
     elif [[ "$f" == crates/plugins/*/* ]]; then
       rest="${f#crates/plugins/}"
       printf '%s\n' "${rest%%/*}"

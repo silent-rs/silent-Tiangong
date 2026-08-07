@@ -40,8 +40,8 @@ Bot 注册完成后并不会自动知道收件人。首期要求目标移动端�
 本方案的主要代码核对依据：
 
 - [Bot 开发协议](../bots/README.md)：当前 Bot 只声明配置、扫码和入站转发协议。
-- [MCP 客户端](../crates/plugins/tiangong-plugin-mcp/src/client.rs)：stdio 调用会启动子进程，HTTP 使用独立传输。
-- [MCP 管理](../crates/plugins/tiangong-plugin-mcp/src/management.rs)：注册会写入 `mcp.json` 并立即探测工具。
+- [MCP 客户端](../plugins/tiangong-plugin-mcp/src/client.rs)：stdio 调用会启动子进程，HTTP 使用独立传输。
+- [MCP 管理](../plugins/tiangong-plugin-mcp/src/management.rs)：注册会写入 `mcp.json` 并立即探测工具。
 - [Server MCP API](../crates/tiangong-server/src/api/mcp.rs)：当前 Server 只提供 MCP 列表查询，没有供 Bot 自助注册的接口。
 - [定时任务执行](../crates/tiangong-scheduler/src/executor.rs)：当前只把任务消息稳定投递给会话，不等待 Agent 最终结果。
 - [飞书发送](../bots/feishu/src/main.rs)、[QQ 发送](../bots/qq/src/main.rs)、[微信发送](../bots/weixin/src/ilink.rs)：三端分别依赖 `chat_id`、`msg_id` 和 `context_token`。
