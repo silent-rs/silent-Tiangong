@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-speech-to-text-wasm"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Speech-To-Text 插件的 WASM 组件"

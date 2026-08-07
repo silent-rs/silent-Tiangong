@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-text-to-speech-sidecar"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Text-To-Speech 独立 sidecar（读取模型配置、调用 TTS 供应商、音频落盘）"
