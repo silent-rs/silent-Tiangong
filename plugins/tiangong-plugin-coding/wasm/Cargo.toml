@@ -1,6 +1,6 @@
 [package]
 name = "tiangong-plugin-coding-wasm"
-version.workspace = true
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Coding 专用工作模式 WASM 插件"

@@ -10833,7 +10833,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10841,7 +10841,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10863,7 +10863,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-analyze-attachment-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10894,7 +10894,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10902,7 +10902,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10921,7 +10921,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-coding-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10931,7 +10931,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10939,7 +10939,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10957,7 +10957,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-command-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10967,7 +10967,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10975,7 +10975,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10996,7 +10996,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fetch-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11006,7 +11006,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11014,7 +11014,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11035,7 +11035,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-fs-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -11046,7 +11046,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11054,7 +11054,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11074,7 +11074,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-image-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11084,7 +11084,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11092,7 +11092,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11112,7 +11112,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-generate-video-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11122,7 +11122,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11130,7 +11130,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11153,7 +11153,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-index-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11164,7 +11164,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11172,7 +11172,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11194,7 +11194,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-mcp-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11204,7 +11204,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11212,7 +11212,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "tiangong-memory",
@@ -11224,7 +11224,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "scru128",
  "serde",
@@ -11236,7 +11236,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-prompt-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11244,7 +11244,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-prompt-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11280,7 +11280,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11288,7 +11288,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11310,7 +11310,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-scheduler-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11340,7 +11340,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11348,7 +11348,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11366,7 +11366,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-skill-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11376,7 +11376,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11384,7 +11384,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11403,7 +11403,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-speech-to-text-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11437,7 +11437,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech-protocol"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11445,7 +11445,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech-sidecar"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11465,7 +11465,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-text-to-speech-wasm"
-version = "0.13.4"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
