@@ -156,7 +156,7 @@ impl CoreManager {
 
     /// 同步配置快照到所有存活 Core。
     ///
-    /// 对每个存活 Core 调用 `replace_config` + `set_trust_mode`。host 负责在调用
+    /// 对每个存活 Core 调用 `replace_config`，并即时同步会话级运行配置。host 负责在调用
     /// 前构建好 `session_id -> CoreConfig` 映射（通常读 app-state 的配置缓存）。
     /// 同时把 `template` 替换为全局 provider 的最新模板（仅作新建 Core 的辅助，
     /// 不承载任一会话的 trust/reasoning 覆盖）。
@@ -167,6 +167,7 @@ impl CoreManager {
             if let Some(config) = session_configs.get(session_id) {
                 let _ = core.replace_config(config.clone());
                 core.set_trust_mode(config.trust_mode);
+                core.set_reasoning_effort(config.reasoning_effort.clone());
             }
         }
     }

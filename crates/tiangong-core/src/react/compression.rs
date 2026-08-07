@@ -127,22 +127,26 @@ pub(crate) async fn run_manual_context_compression(
         Some(ctx.session.messages.len()),
     );
 
-    let wait_for_cancel = async {
-        loop {
-            match cmd_rx.recv().await {
-                Some(Command::Cancel | Command::Shutdown) | None => return,
+    let result = loop {
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv() => match command {
+                Some(Command::Cancel | Command::Shutdown) | None => {
+                    cancel_task(task, &ctx).await;
+                    return;
+                }
+                Some(Command::SetReasoningEffort(effort)) => {
+                    ctx.agent_config.reasoning_effort = effort.clone();
+                    ctx.session.reasoning_effort = Some(effort);
+                }
+                Some(Command::SetTrustMode(mode)) => {
+                    ctx.trust_mode = mode;
+                    ctx.session.trust_mode = mode;
+                }
                 Some(_) => {}
-            }
+            },
+            task_result = &mut task => break resolve_task_result(task_result),
         }
-    };
-    tokio::pin!(wait_for_cancel);
-    let result = tokio::select! {
-        biased;
-        _ = &mut wait_for_cancel => {
-            cancel_task(task, &ctx).await;
-            return;
-        }
-        result = &mut task => resolve_task_result(result)
     };
     complete_manual(&mut ctx, result);
 }

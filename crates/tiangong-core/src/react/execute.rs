@@ -955,6 +955,10 @@ pub(super) async fn execute_turn(
                         state.next_step = NextStep::DriveTools;
                     }
                 }
+                Some(Command::SetReasoningEffort(effort)) => {
+                    ctx.agent_config.reasoning_effort = effort.clone();
+                    ctx.session.reasoning_effort = Some(effort);
+                }
                 Some(Command::InjectTool { tool_name, payload }) => {
                     injections.receive(&stream_tx, tool_name, payload);
                 }
@@ -1620,9 +1624,10 @@ pub(super) async fn execute_turn(
         }
     };
 
-    // 信任模式运行时即时生效，Session 仍只在本轮唯一出口接收最终值。
+    // 运行配置即时生效，Session 在本轮唯一出口接收最终值。
     ctx.trust_mode = trust_mode;
     ctx.session.trust_mode = trust_mode;
+    ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort.clone());
     injections.commit(ctx);
     result
 }
@@ -1899,6 +1904,35 @@ mod tests {
                     ok: true,
                     summary: format!("{name} 已完成"),
                     stdout: name,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    execution: None,
+                })
+            })
+        }
+    }
+
+    struct PausedTool {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl ToolOverrideHandler for PausedTool {
+        fn handle(
+            &self,
+            _call: &ToolCall,
+            _session: &mut Session,
+            _actor_id: &str,
+        ) -> Pin<Box<dyn Future<Output = Option<ToolResult>> + Send>> {
+            let started = self.started.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                Some(ToolResult {
+                    ok: true,
+                    summary: "测试工具已完成".to_string(),
+                    stdout: "done".to_string(),
                     stderr: String::new(),
                     exit_code: 0,
                     execution: None,
@@ -2402,6 +2436,64 @@ mod tests {
         )));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_context_compression_preserves_runtime_settings() {
+        let server = MockServer::start().await;
+        mount_completion(
+            &server,
+            "[[SUMMARY]]\n历史摘要",
+            "stop",
+            100,
+            20,
+            Some(Duration::from_millis(200)),
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            ctx,
+            stream_rx,
+            cmd_tx,
+            cmd_rx,
+        } = harness;
+        let storage_root = ctx
+            .session
+            .bound_storage_root()
+            .expect("测试 Session 必须绑定存储目录")
+            .to_path_buf();
+        let session_id = ctx.session.id.clone();
+        let _cmd_tx_guard = cmd_tx.clone();
+        let update_task = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = stream_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("等待手动压缩开始事件超时");
+                if matches!(event, StreamEvent::ContextCompressing { .. }) {
+                    cmd_tx
+                        .send(Command::SetReasoningEffort("max".to_string()))
+                        .unwrap();
+                    cmd_tx
+                        .send(Command::SetTrustMode(TrustMode::Supervised))
+                        .unwrap();
+                    break;
+                }
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx),
+        )
+        .await
+        .expect("手动压缩应及时完成");
+        update_task.await.unwrap();
+
+        let persisted =
+            Session::load_from_storage(&storage_root, &session_id).expect("手动压缩结果应持久化");
+        assert_eq!(persisted.reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(persisted.trust_mode, TrustMode::Supervised);
+    }
+
     /// 发送 `Command::Cancel` 应中断执行并返回 `Cancelled`(覆盖本次重构的
     /// oneshot 取消传播路径)。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2434,6 +2526,7 @@ mod tests {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             let _ = cmd_tx.send(Command::SetTrustMode(TrustMode::Supervised));
+            let _ = cmd_tx.send(Command::SetReasoningEffort("max".to_string()));
             let _ = cmd_tx.send(Command::InjectTool {
                 tool_name: "cancelled_probe".to_string(),
                 payload: serde_json::json!({"value": 1}),
@@ -2451,6 +2544,8 @@ mod tests {
         assert_eq!(*trust_modes.lock().unwrap(), vec![TrustMode::Supervised]);
         assert_eq!(harness.ctx.trust_mode, TrustMode::Supervised);
         assert_eq!(harness.ctx.session.trust_mode, TrustMode::Supervised);
+        assert_eq!(harness.ctx.agent_config.reasoning_effort, "max");
+        assert_eq!(harness.ctx.session.reasoning_effort.as_deref(), Some("max"));
         assert!(harness.ctx.session.deferred_tool_injections.is_empty());
         assert!(harness.ctx.session.messages.iter().any(|message| {
             message.role == MessageRole::Tool && message.text_content().contains("cancelled_probe")
@@ -2529,6 +2624,62 @@ mod tests {
             "echo 工具应被调用一次"
         );
         harness.drain_stream();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reasoning_effort_update_applies_to_next_model_request() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("好的，已完成。"), usage_chunk(20, 4)],
+        )
+        .await;
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        let mut harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let cmd_tx = harness.cmd_tx.clone();
+        let update_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started.notified())
+                .await
+                .expect("工具应在期限内开始执行");
+            cmd_tx
+                .send(Command::SetReasoningEffort("max".to_string()))
+                .expect("运行中的 turn 应接收思考强度更新");
+            release.notify_one();
+        });
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        update_task.await.unwrap();
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(harness.ctx.agent_config.reasoning_effort, "max");
+        assert_eq!(harness.ctx.session.reasoning_effort.as_deref(), Some("max"));
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let first_body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let second_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert!(first_body.get("reasoning_effort").is_none());
+        assert_eq!(first_body["thinking"]["type"], "disabled");
+        assert_eq!(second_body["reasoning_effort"], "max");
+        assert_eq!(second_body["thinking"]["type"], "enabled");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

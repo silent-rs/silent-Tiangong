@@ -696,7 +696,7 @@ impl TiangongApp {
 
     /// 获取或创建会话对应的 TiangongCore。
     ///
-    /// 已存在的 Core 直接复用（热更配置/trust）；不存在时调用 `create_core` 新建。
+    /// 已存在的 Core 直接复用并同步运行设置；不存在时调用 `create_core` 新建。
     ///
     /// Core 是会话级资源，空闲只表示当前没有 turn task，并不表示实例已经停止。
     /// 关闭和移除是删除会话、失败回滚等显式流程的职责。
@@ -724,17 +724,25 @@ impl TiangongApp {
             .unwrap_or_default();
         let mut session_config = app_config.to_core_config();
         session_config.default_trust_mode = app_config.default_trust_mode;
-        // trust_mode / reasoning_effort / cwd 都由 Core 从磁盘 session 真相源自行读取
-        // （core/mod.rs:load_session / build_turn_context）。host 这里只用调用方传入的
-        // 初始值（全新对话首次创建时由前端提供），不再全量加载所有 session metadata。
-        // 详见 ensure.rs:41 注释“cwd 由磁盘真相源维护，无需投递”。
+        let existing_session = self.core_manager.load_session(session_id).ok();
         let workspace_dir = workspace_dir
             .filter(|cwd| !cwd.trim().is_empty())
             .unwrap_or(default_workspace_dir);
-        session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
-        session_config.reasoning_effort = initial_reasoning_effort
-            .filter(|effort| !effort.trim().is_empty())
-            .unwrap_or(agent_config.reasoning_effort);
+        if let Some(session) = existing_session {
+            session_config.trust_mode = session.trust_mode;
+            session_config.reasoning_effort = session
+                .reasoning_effort
+                .as_deref()
+                .map(str::trim)
+                .filter(|effort| !effort.is_empty())
+                .unwrap_or(&agent_config.reasoning_effort)
+                .to_string();
+        } else {
+            session_config.trust_mode = initial_trust_mode.unwrap_or(app_config.default_trust_mode);
+            session_config.reasoning_effort = initial_reasoning_effort
+                .filter(|effort| !effort.trim().is_empty())
+                .unwrap_or(agent_config.reasoning_effort);
+        }
         // 桌面插件集合由 DesktopCoreFactory 构造（host 专属）。
         // 改为按需回调：只有 Core 不存在（需新建）时才会调用 build_plugins，
         // 避免每次发送消息都重复构造插件集合（含 WASM 实例化）。

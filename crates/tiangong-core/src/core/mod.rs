@@ -105,6 +105,15 @@ impl TiangongCore {
         let _ = self.send_cmd(Command::SetTrustMode(mode));
     }
 
+    /// 设置会话思考强度。
+    ///
+    /// 已经发出的模型请求不变；活跃 turn 会在下一次构建模型请求时使用新值。
+    pub fn set_reasoning_effort(&self, effort: String) {
+        self.config
+            .update(|config| config.reasoning_effort = effort.clone());
+        let _ = self.send_cmd(Command::SetReasoningEffort(effort));
+    }
+
     /// 更新会话标题。用于用户手动编辑（不可放弃）。
     ///
     /// 与 trust_mode 一致的双分支协调：
