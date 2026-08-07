@@ -154,6 +154,11 @@ jobs:
               "tiangong-plugin-skill-protocol": "crates/plugins/tiangong-plugin-skill/protocol/",
               "tiangong-plugin-skill-sidecar":  "crates/plugins/tiangong-plugin-skill/sidecar/",
               "tiangong-plugin-skill-wasm":     "crates/plugins/tiangong-plugin-skill/wasm/",
+              "tiangong-plugin-coding-protocol": "crates/plugins/tiangong-plugin-coding/protocol/",
+              "tiangong-plugin-coding-sidecar":  "crates/plugins/tiangong-plugin-coding/sidecar/",
+              "tiangong-plugin-coding-wasm":     "crates/plugins/tiangong-plugin-coding/wasm/",
+              "tiangong-plugin-prompt-protocol": "crates/plugins/tiangong-plugin-prompt/protocol/",
+              "tiangong-plugin-prompt-wasm":     "crates/plugins/tiangong-plugin-prompt/wasm/",
               "tiangong-app":             "src-tauri/",
               "tiangong":                 "src/",
           }

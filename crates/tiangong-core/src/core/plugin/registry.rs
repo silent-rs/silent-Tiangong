@@ -20,6 +20,11 @@ pub(crate) fn prepare_plugins(
     trust_mode: TrustMode,
     session: &Session,
 ) -> PreparedPlugins {
+    // 保证 prompt 插件排在最前（identity/rules 段落必须在 system prompt 开头）。
+    let mut sorted: Vec<Arc<dyn Plugin>> = plugins.to_vec();
+    sorted.sort_by_key(|p| p.id() != "prompt");
+
+    let plugins = sorted.as_slice();
     let workspace_path = std::path::Path::new(&session.cwd);
     let workspace = workspace_path.is_dir().then_some(workspace_path);
 

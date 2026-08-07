@@ -10527,7 +10527,6 @@ dependencies = [
  "tiangong-plugin-fs",
  "tiangong-plugin-index-protocol",
  "tiangong-plugin-mcp-protocol",
- "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-task",
@@ -10596,7 +10595,6 @@ dependencies = [
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-mcp-protocol",
- "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-task",
@@ -11139,10 +11137,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-prompt"
+name = "tiangong-plugin-prompt-protocol"
 version = "0.13.4"
 dependencies = [
- "tiangong-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tiangong-plugin-prompt-wasm"
+version = "0.13.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tiangong-plugin-prompt-protocol",
+ "wit-bindgen 0.46.0",
 ]
 
 [[package]]
@@ -11427,7 +11436,6 @@ dependencies = [
  "tiangong-plugin-fetch",
  "tiangong-plugin-fs",
  "tiangong-plugin-mcp-protocol",
- "tiangong-plugin-prompt",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-task",
