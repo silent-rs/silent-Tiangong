@@ -401,12 +401,12 @@ fn handle_current_time() -> ToolResult {
     let output = serde_json::json!({
         "unix_timestamp": unix_timestamp,
         "rfc3339": rfc3339,
-        "local_time": naive,
+        "utc_time": naive,
         "timezone_offset": "UTC".to_string(),
     });
     ToolResult {
         ok: true,
-        summary: format!("当前时间：{naive}"),
+        summary: format!("当前时间（UTC）：{naive}"),
         stdout: serde_json::to_string_pretty(&output).unwrap_or_default(),
         stderr: String::new(),
         exit_code: 0,
