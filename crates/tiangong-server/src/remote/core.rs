@@ -343,7 +343,6 @@ impl ServerCoreManager {
             // 看到的能力与该 Core 实际注册插件一致。
             // prompt 等 WASM 插件由 load_installed_plugins 自动加载。
             let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-            plugins.extend(tiangong_plugin_fs::default_plugins());
             plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Server,
@@ -362,7 +361,6 @@ impl ServerCoreManager {
                 move || {
                     let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
                         Vec::new();
-                    child_plugins.extend(tiangong_plugin_fs::default_plugins());
                     child_plugins.extend(
                         tiangong_plugin_runtime::registry::load_installed_plugins(
                             &storage_root,

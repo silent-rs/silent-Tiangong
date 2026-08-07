@@ -158,7 +158,6 @@ fn build_cli_plugins(
     let storage_root = storage_root.to_path_buf();
 
     let mut plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> = Vec::new();
-    plugins.extend(tiangong_plugin_fs::default_plugins());
     plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
         &storage_root,
         tiangong_plugin_runtime::registry::RuntimeKind::Cli,
@@ -174,7 +173,6 @@ fn build_cli_plugins(
         move || {
             let mut child_plugins: Vec<std::sync::Arc<dyn tiangong_core::core::Plugin>> =
                 Vec::new();
-            child_plugins.extend(tiangong_plugin_fs::default_plugins());
             child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                 &storage_root,
                 tiangong_plugin_runtime::registry::RuntimeKind::Cli,

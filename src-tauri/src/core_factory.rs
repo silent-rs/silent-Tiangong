@@ -65,8 +65,8 @@ impl DesktopCoreFactory {
                 warn!("终端插件构造失败（Tauri state 未就绪），终端能力将缺失");
                 false
             };
-        plugins.push(tiangong_plugin_fs::build_plugin());
         // 所有媒体插件（image/video/tts/stt/attachment）由 load_installed_plugins 自动加载。
+        // fs（基础文件工具）也由 load_installed_plugins 自动加载（issue #330）。
         let wasm_plugins = tiangong_plugin_runtime::registry::load_installed_plugins(
             &self.storage_root,
             tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
@@ -91,7 +91,6 @@ impl DesktopCoreFactory {
                         child_plugins.push(terminal);
                     }
                 }
-                child_plugins.push(tiangong_plugin_fs::build_plugin());
                 child_plugins.extend(tiangong_plugin_runtime::registry::load_installed_plugins(
                     &storage_root,
                     tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
