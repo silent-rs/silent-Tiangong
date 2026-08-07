@@ -25,6 +25,7 @@ pub const PLUGIN_VERSION_ENV: &str = "TIANGONG_PLUGIN_VERSION";
 pub const PLUGIN_ENDPOINT_ENV: &str = "TIANGONG_PLUGIN_ENDPOINT";
 pub const PLUGIN_DATA_DIR_ENV: &str = "TIANGONG_PLUGIN_DATA_DIR";
 pub const STORAGE_ROOT_ENV: &str = "TIANGONG_STORAGE_ROOT";
+pub const EXEC_ENV_JSON_ENV: &str = "TIANGONG_EXEC_ENV_JSON";
 
 /// 本机 server 的 HTTP 地址（如 `http://127.0.0.1:8080`），供需要回调 host 的
 /// sidecar（如 scheduler 到点投递消息）使用。
@@ -68,6 +69,9 @@ pub trait SidecarConnection: Send + Sync {
         let _ = on_progress;
         self.invoke(operation, payload)
     }
+
+    /// 更新 exec_env（下次 spawn 时注入子进程环境）。默认空实现。
+    fn update_exec_env(&self, _env: std::collections::BTreeMap<String, String>) {}
 }
 
 /// 一个插件 sidecar 的本地运行配置。
@@ -151,6 +155,7 @@ impl SidecarConfig {
 pub struct ProcessSidecarConnection {
     config: SidecarConfig,
     start_lock: Mutex<()>,
+    exec_env: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 impl ProcessSidecarConnection {
@@ -158,12 +163,20 @@ impl ProcessSidecarConnection {
         Self {
             config,
             start_lock: Mutex::new(()),
+            exec_env: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
     /// 当前 sidecar 的插件 ID。
     pub fn plugin_id(&self) -> &str {
         &self.config.plugin_id
+    }
+
+    /// 更新 exec_env（下次 spawn 时注入子进程环境）。
+    pub fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut guard) = self.exec_env.lock() {
+            *guard = env;
+        }
     }
 
     pub fn ensure_running(&self) -> Result<()> {
@@ -399,6 +412,14 @@ impl ProcessSidecarConnection {
         if let Some(token) = self.config.server_token.as_deref() {
             command.env(SERVER_TOKEN_ENV, token);
         }
+        // 通过单独的 JSON 信封传递 exec_env，避免把贡献值直接暴露给所有 sidecar。
+        if self.config.plugin_id == "command"
+            && let Ok(env) = self.exec_env.lock()
+            && !env.is_empty()
+            && let Ok(json) = serde_json::to_string(&*env)
+        {
+            command.env(EXEC_ENV_JSON_ENV, json);
+        }
         configure_detached(&mut command);
 
         let mut child = command
@@ -549,6 +570,12 @@ impl SidecarConnection for ProcessSidecarConnection {
             .invoke_protocol_once_with_progress(operation, payload, on_progress)
             .map_err(classify_transport_error)?;
         serde_json::to_string(&response).with_context(|| "序列化 sidecar 响应失败")
+    }
+
+    fn update_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
+        if let Ok(mut guard) = self.exec_env.lock() {
+            *guard = env;
+        }
     }
 }
 

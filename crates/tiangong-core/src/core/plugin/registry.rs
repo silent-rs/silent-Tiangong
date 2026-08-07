@@ -28,12 +28,8 @@ pub(crate) fn prepare_plugins(
     let workspace_path = std::path::Path::new(&session.cwd);
     let workspace = workspace_path.is_dir().then_some(workspace_path);
 
-    for plugin in plugins {
-        plugin.on_config_updated(config);
-        plugin.set_workspace(workspace);
-        plugin.set_trust_mode(trust_mode);
-    }
-
+    // 先汇总 exec_env，使依赖 sidecar 的插件能在首次生命周期调用触发启动前
+    // 把受控环境注入 sidecar 进程。
     let mut exec_env = BTreeMap::new();
     for plugin in plugins {
         for (key, value) in plugin.exec_env() {
@@ -42,6 +38,11 @@ pub(crate) fn prepare_plugins(
     }
     for plugin in plugins {
         plugin.set_exec_env(exec_env.clone());
+    }
+    for plugin in plugins {
+        plugin.on_config_updated(config);
+        plugin.set_workspace(workspace);
+        plugin.set_trust_mode(trust_mode);
     }
 
     let mut tools = vec![injection_tool_spec()];

@@ -8,7 +8,6 @@ license = "Apache-2.0"
 tiangong-app-state = { workspace = true }
 tiangong-core = { workspace = true }
 tiangong-llm = { workspace = true }
-tiangong-plugin-command = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
 tiangong-plugin-task = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }

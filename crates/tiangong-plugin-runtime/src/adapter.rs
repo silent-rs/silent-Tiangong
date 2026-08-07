@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::sidecar::SidecarConnection;
 use serde_json::Value;
 use tiangong_core::core::Plugin;
 use tiangong_core::core::plugin::PluginFeedbackTx;
@@ -38,6 +39,7 @@ pub struct WasmPluginAdapter {
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
     context: Mutex<ReloadContext>,
     enabled: AtomicBool,
+    sidecar: Option<Arc<dyn SidecarConnection>>,
 }
 
 #[derive(Clone, Default)]
@@ -51,13 +53,14 @@ struct ReloadContext {
 
 impl WasmPluginAdapter {
     pub fn new(plugin: WasmPlugin, config: PluginRuntimeConfig) -> Self {
-        Self::new_with_enabled(plugin, config, true)
+        Self::new_with_enabled(plugin, config, true, None)
     }
 
     pub(crate) fn new_with_enabled(
         plugin: WasmPlugin,
         config: PluginRuntimeConfig,
         enabled: bool,
+        sidecar: Option<Arc<dyn SidecarConnection>>,
     ) -> Self {
         let inner = Arc::new(Mutex::new(plugin));
         let id_string = call_wasm_off_runtime(inner.clone(), |plugin| plugin.describe())
@@ -70,6 +73,7 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
+            sidecar,
         }
     }
 
@@ -79,6 +83,7 @@ impl WasmPluginAdapter {
         config: PluginRuntimeConfig,
         enabled: bool,
         id: String,
+        sidecar: Option<Arc<dyn SidecarConnection>>,
     ) -> Self {
         Self {
             inner: RwLock::new(Arc::new(Mutex::new(plugin))),
@@ -87,6 +92,7 @@ impl WasmPluginAdapter {
             feedback_tx: RwLock::new(None),
             context: Mutex::new(ReloadContext::default()),
             enabled: AtomicBool::new(enabled),
+            sidecar,
         }
     }
 
@@ -271,7 +277,11 @@ impl Plugin for WasmPluginAdapter {
 
     fn set_exec_env(&self, env: std::collections::BTreeMap<String, String>) {
         if let Ok(mut context) = self.context.lock() {
-            context.exec_env = env;
+            context.exec_env = env.clone();
+        }
+        // 转发给 sidecar（下次 spawn 时注入子进程环境）。
+        if let Some(sidecar) = &self.sidecar {
+            sidecar.update_exec_env(env);
         }
     }
 }

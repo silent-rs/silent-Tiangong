@@ -153,6 +153,20 @@ const FS: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-fs/protocol/Cargo.toml",
 };
 
+const COMMAND: PluginConfig = PluginConfig {
+    id: "command",
+    name: "Command",
+    description: "基础命令执行（run_command/run_shell）+ 命令校验策略",
+    protocol_crate: "tiangong-plugin-command-protocol",
+    wasm_crate: "tiangong-plugin-command-wasm",
+    wasm_artifact: "tiangong_plugin_command_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-command-sidecar",
+    sidecar_artifact: "tiangong-command-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-command",
+    plugin_manifest: "crates/plugins/tiangong-plugin-command/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-command/protocol/Cargo.toml",
+};
+
 fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
@@ -169,6 +183,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "speech-to-text" => Ok(&SPEECH_TO_TEXT),
         "generate-video" => Ok(&GENERATE_VIDEO),
         "fs" => Ok(&FS),
+        "command" => Ok(&COMMAND),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
