@@ -9,6 +9,8 @@ pub enum Command {
     Approval { request_id: String, approved: bool },
     /// 运行时切换信任模式(即时生效到活跃 turn task)
     SetTrustMode(crate::permission::TrustMode),
+    /// 运行时切换思考强度（下一次尚未发出的模型请求生效）。
+    SetReasoningEffort(String),
     /// 更新会话标题。
     /// `only_if_default=true` 时仅当当前标题仍是默认值（"新对话"/"会话 X"）才覆盖，
     /// 用于 lite 自动生成（用户手动改过则不覆盖）；false 时无条件覆盖（用户手动编辑）。

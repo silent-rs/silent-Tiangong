@@ -1,7 +1,7 @@
 //! ensure / retire：Core 生命周期入口。
 //!
 //! `ensure_core` 复刻桌面 `app.rs` 的逻辑（issue #241/#234 已收窄）：先取创建锁，
-//! 命中既有 Core 则 replace_config + 同步 trust_mode；否则用 host 传入的 plugins
+//! 命中既有 Core 则 replace_config + 同步会话级运行配置；否则用 host 传入的 plugins
 //! 构造新 TiangongCore 并插入 registry。`retire_core` 先 cancel（可选）再 take +
 //! shutdown_join。
 
@@ -22,7 +22,7 @@ impl CoreManager {
     /// **线程安全保证**：覆盖同一会话从首次检查到 Core 插入的完整创建区间
     /// （`creation_lock`），避免落选 Core 仍执行插件恢复钩子。
     ///
-    /// - 命中既有 Core：`replace_config(session_config)` + `set_trust_mode`，返回 `is_new=false`
+    /// - 命中既有 Core：替换配置并同步会话级运行配置，返回 `is_new=false`
     /// - 未命中：调用 `build_plugins` 构造插件集合，构造全新 TiangongCore 并插入 registry
     ///
     /// `build_plugins` 是**按需回调**：只有 Core 不存在（需要新建）时才会被调用。
@@ -42,13 +42,14 @@ impl CoreManager {
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
 
-        // 命中既有 Core：只刷新配置与 trust_mode（cwd 由磁盘真相源维护，无需投递）。
+        // 命中既有 Core：刷新配置和会话运行设置（cwd 由磁盘真相源维护，无需投递）。
         // build_plugins 回调不会被调用，避免每次发送都重新构造插件集合。
         {
             let registry = self.registry();
             if let Some(core) = registry.get(session_id) {
                 let _ = core.replace_config(session_config.clone());
                 core.set_trust_mode(session_config.trust_mode);
+                core.set_reasoning_effort(session_config.reasoning_effort.clone());
                 return Ok(EnsuredCore {
                     session_id: session_id.to_string(),
                     is_new: false,
@@ -137,6 +138,14 @@ impl CoreManager {
         let registry = self.registry();
         if let Some(core) = registry.get(session_id) {
             core.set_trust_mode(mode);
+        }
+    }
+
+    /// 设置指定会话 Core 的思考强度（下一次尚未发出的模型请求生效）。
+    pub fn set_core_reasoning_effort(&self, session_id: &str, effort: String) {
+        let registry = self.registry();
+        if let Some(core) = registry.get(session_id) {
+            core.set_reasoning_effort(effort);
         }
     }
 
