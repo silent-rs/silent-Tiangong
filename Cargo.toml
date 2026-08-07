@@ -52,7 +52,6 @@ members = [
     "crates/plugins/tiangong-plugin-scheduler/protocol",
     "crates/plugins/tiangong-plugin-scheduler/wasm",
     "crates/plugins/tiangong-plugin-scheduler/sidecar",
-    "crates/plugins/tiangong-plugin-task",
     "crates/plugins/tiangong-plugin-terminal",
     "crates/plugins/tiangong-plugin-analyze-attachment/protocol",
     "crates/plugins/tiangong-plugin-analyze-attachment/sidecar",
@@ -121,7 +120,6 @@ tiangong-plugin-speech-to-text-wasm = { path = "crates/plugins/tiangong-plugin-s
 tiangong-plugin-scheduler-protocol = { path = "crates/plugins/tiangong-plugin-scheduler/protocol" }
 tiangong-plugin-scheduler-wasm = { path = "crates/plugins/tiangong-plugin-scheduler/wasm" }
 tiangong-plugin-scheduler-sidecar = { path = "crates/plugins/tiangong-plugin-scheduler/sidecar" }
-tiangong-plugin-task = { path = "crates/plugins/tiangong-plugin-task" }
 tiangong-plugin-terminal = { path = "crates/plugins/tiangong-plugin-terminal" }
 tiangong-plugin-analyze-attachment-protocol = { path = "crates/plugins/tiangong-plugin-analyze-attachment/protocol" }
 tiangong-plugin-analyze-attachment-sidecar = { path = "crates/plugins/tiangong-plugin-analyze-attachment/sidecar" }

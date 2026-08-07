@@ -348,7 +348,6 @@ impl ServerCoreManager {
                 tiangong_plugin_runtime::registry::RuntimeKind::Server,
             ));
             // web_fetch 由 runtime 按 plugin.json 自动加载 fetch WASM 插件（issue #326）。
-            plugins.extend(tiangong_plugin_task::default_plugins());
             // skill/analyze-attachment 等 WASM 插件由 load_installed_plugins 自动加载。
             // MCP 工具（动态收集 MCP server 工具 + 执行分发）：
             // 共享 ServerAppContext 持有的同一 plugin 实例，确保 API 管理操作
@@ -366,7 +365,6 @@ impl ServerCoreManager {
                             tiangong_plugin_runtime::registry::RuntimeKind::Server,
                         ),
                     );
-                    child_plugins.extend(tiangong_plugin_task::default_plugins());
                     child_plugins
                 }
             });

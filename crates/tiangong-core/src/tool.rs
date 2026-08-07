@@ -4,7 +4,6 @@
 //! - list_dir / read_file / write_file 等 8 个 → tiangong-plugin-fs
 //! - web_fetch → tiangong-plugin-fetch（CLI/Server）/ browser 插件（GUI）
 //! - run_command / run_shell → tiangong-plugin-command（CLI/Server）/ terminal 插件（GUI）
-//! - spawn_task / query_task / list_tasks / cancel_task / wait_tasks → tiangong-plugin-task
 //!
 //! core 不再直接执行任何工具，仅保留 ToolResult 供插件 handler 返回。
 //! 路径沙箱/命令白名单（原 common）已迁出为独立 crate tiangong-toolkit。
