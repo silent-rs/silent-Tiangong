@@ -29,7 +29,6 @@ tiangong-plugin-agent-team = { workspace = true }
 tiangong-plugin-prompt = { workspace = true }
 tiangong-media = { workspace = true }
 tiangong-config = { workspace = true }
-tiangong-scheduler = { workspace = true }
 silent = { workspace = true, features = ["scheduler"] }
 async-trait = { workspace = true }
 

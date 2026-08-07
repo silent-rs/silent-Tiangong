@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type JobRun, type WebhookRun } from '../../api/tauri';
+import { api, type WebhookRun } from '../../api/tauri';
 import { Badge } from '../ui/badge';
 import {
   Dialog,
@@ -9,12 +9,11 @@ import {
 } from '../ui/dialog';
 
 interface Props {
-  type: 'job' | 'webhook';
   id: string;
   onClose: () => void;
 }
 
-type RunItem = (JobRun | WebhookRun) & {
+type RunItem = WebhookRun & {
   started_at: string;
   finished_at: string | null;
   status: string;
@@ -39,25 +38,20 @@ const statusLabel = (status: string) => {
   }
 };
 
-export function RunHistoryDialog({ type, id, onClose }: Props) {
+export function RunHistoryDialog({ id, onClose }: Props) {
   const [runs, setRuns] = useState<RunItem[]>([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      if (type === 'job') {
-        const list = await api.jobListRuns(id, 50);
-        setRuns(list);
-      } else {
-        const list = await api.webhookListRuns(id, 50);
-        setRuns(list);
-      }
+      const list = await api.webhookListRuns(id, 50);
+      setRuns(list);
     } catch (e) {
       console.error('加载执行历史失败', e);
     } finally {
       setLoading(false);
     }
-  }, [type, id]);
+  }, [id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -65,7 +59,7 @@ export function RunHistoryDialog({ type, id, onClose }: Props) {
     <Dialog open onOpenChange={() => onClose()}>
       <DialogContent className="max-w-2xl max-h-[70vh]">
         <DialogHeader>
-          <DialogTitle>{type === 'job' ? '任务' : 'Webhook'}执行历史</DialogTitle>
+          <DialogTitle>Webhook执行历史</DialogTitle>
         </DialogHeader>
         <div className="overflow-auto">
           {loading ? (
