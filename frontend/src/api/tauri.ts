@@ -486,30 +486,6 @@ export interface CapabilityAvailabilityInfo {
 // 定时任务 & Webhook
 // ============================================================================
 
-export interface Job {
-  id: string;
-  name: string;
-  description: string;
-  trigger_type: 'cron';
-  schedule: string | null;
-  session_id: string | null;
-  payload: string;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export type JobRunStatus = 'running' | 'succeeded' | 'failed';
-
-export interface JobRun {
-  id: string;
-  job_id: string;
-  session_id: string;
-  status: JobRunStatus;
-  started_at: string;
-  finished_at: string | null;
-  result_summary: string | null;
-}
 
 export interface Webhook {
   id: string;
@@ -900,42 +876,6 @@ export const api = {
   // ----------------------------------------------------------------
   onStreamEvent: (callback: (event: SessionStreamEvent) => void) =>
     listen<SessionStreamEvent>('stream_event', (event) => callback(event.payload)),
-
-  // ----------------------------------------------------------------
-  // 定时任务管理
-  // ----------------------------------------------------------------
-  jobList: (): Promise<Job[]> =>
-    invoke('job_list'),
-
-  jobCreate: (params: {
-    name: string;
-    description: string;
-    schedule: string;
-    sessionId?: string;
-    payload: string;
-    enabled?: boolean;
-  }): Promise<Job> =>
-    invoke('job_create', params),
-
-  jobUpdate: (params: {
-    id: string;
-    name?: string;
-    description?: string;
-    schedule?: string;
-    sessionId?: string;
-    payload?: string;
-    enabled?: boolean;
-  }): Promise<Job> =>
-    invoke('job_update', params),
-
-  jobDelete: (id: string): Promise<void> =>
-    invoke('job_delete', { id }),
-
-  jobTrigger: (id: string): Promise<{ job_id: string; session_id: string; status: string }> =>
-    invoke('job_trigger', { id }),
-
-  jobListRuns: (id: string, limit?: number): Promise<JobRun[]> =>
-    invoke('job_list_runs', { id, limit }),
 
   // ----------------------------------------------------------------
   // Webhook 管理

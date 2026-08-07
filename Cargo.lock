@@ -10532,7 +10532,6 @@ dependencies = [
  "tiangong-plugin-skill-protocol",
  "tiangong-plugin-task",
  "tiangong-plugin-terminal",
- "tiangong-scheduler",
  "tiangong-server",
  "tiangong-toolkit",
  "tiangong-types",

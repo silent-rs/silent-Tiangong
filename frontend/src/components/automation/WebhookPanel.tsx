@@ -114,7 +114,6 @@ export function WebhookPanel({ serverRunning }: WebhookPanelProps) {
 
         {runHistoryId && (
           <RunHistoryDialog
-            type="webhook"
             id={runHistoryId}
             onClose={() => setRunHistoryId(null)}
           />
