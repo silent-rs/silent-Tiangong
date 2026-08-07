@@ -265,6 +265,16 @@ fn main() {
             Ok(config) => build_plugin(config),
             Err(error) => Err(error),
         },
+        [command, plugin, output] if command == "build-plugin-wasm" => {
+            match plugin_config(plugin) {
+                Ok(config) => build_plugin_wasm(config, &output),
+                Err(error) => Err(error),
+            }
+        }
+        [command, plugin] if command == "validate-plugin" => match plugin_config(plugin) {
+            Ok(config) => validate_plugin(config),
+            Err(error) => Err(error),
+        },
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -295,6 +305,55 @@ fn print_help() {
     eprintln!("支持的插件: memory, mcp, index, scheduler, skill, coding, prompt");
 }
 
+fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
+    let workspace_root = workspace_root();
+    validate_versions(&workspace_root, config)?;
+    eprintln!("[xtask] validation passed");
+    Ok(())
+}
+
+fn build_plugin_wasm(config: &PluginConfig, output: &str) -> io::Result<()> {
+    let workspace_root = workspace_root();
+    validate_versions(&workspace_root, config)?;
+    eprintln!("[xtask] CI build-plugin-wasm");
+    run_cargo(&workspace_root, &["check", "-p", config.protocol_crate])?;
+    run_cargo(
+        &workspace_root,
+        &[
+            "check",
+            "-p",
+            config.protocol_crate,
+            "--target",
+            WASM_TARGET,
+        ],
+    )?;
+    run_cargo(
+        &workspace_root,
+        &[
+            "build",
+            "-p",
+            config.wasm_crate,
+            "--target",
+            WASM_TARGET,
+            "--release",
+        ],
+    )?;
+    eprintln!("[xtask] WASM check ok");
+    let wasm = workspace_root
+        .join("target")
+        .join(WASM_TARGET)
+        .join("release")
+        .join(config.wasm_artifact);
+    require_file(&wasm)?;
+    let dest = Path::new(output);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&wasm, dest)?;
+    eprintln!("[xtask] WASM copied to: {}", dest.display());
+    Ok(())
+}
+
 fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     let workspace_root = workspace_root();
     validate_versions(&workspace_root, config)?;
@@ -313,25 +372,35 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
             WASM_TARGET,
         ],
     )?;
-    eprintln!("[xtask] 构建 {plugin_name} WASM...");
-    run_cargo(
-        &workspace_root,
-        &[
-            "build",
-            "-p",
-            config.wasm_crate,
-            "--target",
-            WASM_TARGET,
-            "--release",
-        ],
-    )?;
-
-    let wasm = workspace_root
-        .join("target")
-        .join(WASM_TARGET)
-        .join("release")
-        .join(config.wasm_artifact);
-    require_file(&wasm)?;
+    let wasm = match std::env::var("TIANGONG_PLUGIN_PREBUILT_WASM") {
+        Ok(path) => {
+            eprintln!("[xtask] using prebuilt wasm");
+            let p = PathBuf::from(path);
+            require_file(&p)?;
+            p
+        }
+        Err(_) => {
+            eprintln!("[xtask] build wasm...");
+            run_cargo(
+                &workspace_root,
+                &[
+                    "build",
+                    "-p",
+                    config.wasm_crate,
+                    "--target",
+                    WASM_TARGET,
+                    "--release",
+                ],
+            )?;
+            let p = workspace_root
+                .join("target")
+                .join(WASM_TARGET)
+                .join("release")
+                .join(config.wasm_artifact);
+            require_file(&p)?;
+            p
+        }
+    };
 
     let plugins_dir = storage_root().join("plugins");
     std::fs::create_dir_all(&plugins_dir)?;
@@ -508,6 +577,23 @@ fn generate_oss_distribution(
         release_root.join(format!("SHA256SUMS-{platform}")),
         checksums,
     )?;
+    let release_json_path = platform_root.join("release.json");
+    write_json(&release_json_path, &release)?;
+    let sig_path = platform_root.join("release.json.sig");
+    if let Ok(key_path) = std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH") {
+        let pwd = std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
+        let status = Command::new("cargo")
+            .args(["tauri", "signer", "sign", "-k", &key_path, "-p", &pwd])
+            .arg(&release_json_path)
+            .status();
+        match status {
+            Ok(s) if s.success() => eprintln!("[xtask] release.json signed"),
+            _ => std::fs::write(&sig_path, "")?,
+        }
+    } else {
+        std::fs::write(&sig_path, "")?;
+    }
+
     eprintln!("[xtask] OSS 制品已生成: {}", dist_root.display());
     Ok(())
 }
