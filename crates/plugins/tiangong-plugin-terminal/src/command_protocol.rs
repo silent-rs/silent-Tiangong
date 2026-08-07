@@ -215,14 +215,39 @@ fn shell_ready_probe(marker: &str) -> String {
     format!("echo '{marker}'\r")
 }
 
-fn shell_ready_marker_seen(manager: &TerminalManager, marker: &str) -> bool {
-    manager
-        .state
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .output_buffer
-        .iter()
-        .any(|line| line_matches_marker(line, marker))
+async fn wait_for_shell_condition(
+    manager: &TerminalManager,
+    deadline: std::time::Instant,
+    cancellation: Option<&crate::types::TerminalExecCancellation>,
+    response_tx: &oneshot::Sender<TerminalExecResponse>,
+    condition: impl Fn(&crate::manager::TerminalState) -> bool,
+) -> Result<(), ShellPreparationError> {
+    loop {
+        if response_tx.is_closed() || cancellation.is_some_and(|value| value.is_requested()) {
+            return Err(ShellPreparationError::Cancelled);
+        }
+        if !manager.is_alive() {
+            return Err(ShellPreparationError::Unavailable(
+                "终端进程已退出".to_string(),
+            ));
+        }
+        let condition_met = {
+            let state = manager
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            condition(&state)
+        };
+        if condition_met {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ShellPreparationError::Unavailable(
+                "等待 Shell 就绪超时".to_string(),
+            ));
+        }
+        tokio::time::sleep(SHELL_READY_POLL_INTERVAL).await;
+    }
 }
 
 async fn confirm_shell_ready(
@@ -235,36 +260,36 @@ async fn confirm_shell_ready(
         return Err(ShellPreparationError::Cancelled);
     }
 
-    let marker = format!("{}{}__", crate::types::MARKER_READY, scru128::new());
+    let deadline = std::time::Instant::now() + SHELL_READY_CONFIRM_TIMEOUT;
+    wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+        state.total_lines_pushed > 0 || !state.current_line.is_empty()
+    })
+    .await?;
+
     if interrupt {
+        let baseline_lines = manager.total_lines_pushed();
         manager
             .write_input(b"\x03")
             .map_err(ShellPreparationError::Unavailable)?;
+        // Linux Shell 会在异步处理 SIGINT 时再次清空输入队列。等它输出 Ctrl+C
+        // 对应的完整行后再发探针，避免探针的开头仍落在清理窗口中。
+        wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+            state.total_lines_pushed > baseline_lines
+        })
+        .await?;
     }
+
+    let marker = format!("{}{}__", crate::types::MARKER_READY, scru128::new());
     manager
         .write_input(shell_ready_probe(&marker).as_bytes())
         .map_err(ShellPreparationError::Unavailable)?;
-
-    let deadline = std::time::Instant::now() + SHELL_READY_CONFIRM_TIMEOUT;
-    loop {
-        if response_tx.is_closed() || cancellation.is_some_and(|value| value.is_requested()) {
-            return Err(ShellPreparationError::Cancelled);
-        }
-        if !manager.is_alive() {
-            return Err(ShellPreparationError::Unavailable(
-                "终端进程已退出".to_string(),
-            ));
-        }
-        if shell_ready_marker_seen(manager, &marker) {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(ShellPreparationError::Unavailable(
-                "等待 Shell 就绪超时".to_string(),
-            ));
-        }
-        tokio::time::sleep(SHELL_READY_POLL_INTERVAL).await;
-    }
+    wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+        state
+            .output_buffer
+            .iter()
+            .any(|line| line_matches_marker(line, &marker))
+    })
+    .await
 }
 
 fn discard_current_pty(manager: &TerminalManager, pty_state: &mut Option<PtyState>) {
@@ -1637,6 +1662,17 @@ mod tests {
         let ready_marker = "__TIANGONG_READY_multiline__";
         writer.write_all(b"\x03").unwrap();
         writer.flush().unwrap();
+        let mut interrupt_output = String::new();
+        let interrupt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !interrupt_output.contains('\n') {
+            let remaining = interrupt_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("Shell 未确认 Ctrl+C 已处理");
+            let text = String::from_utf8_lossy(&chunk);
+            interrupt_output.push_str(&text);
+            output.push_str(&text);
+        }
         writer
             .write_all(shell_ready_probe(ready_marker).as_bytes())
             .unwrap();
@@ -1700,6 +1736,17 @@ mod tests {
         let second_ready = "__TIANGONG_READY_reuse__";
         writer.write_all(b"\x03").unwrap();
         writer.flush().unwrap();
+        let mut interrupt_output = String::new();
+        let interrupt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !interrupt_output.contains('\n') {
+            let remaining = interrupt_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("复用前 Shell 未确认 Ctrl+C 已处理");
+            let text = String::from_utf8_lossy(&chunk);
+            interrupt_output.push_str(&text);
+            output.push_str(&text);
+        }
         writer
             .write_all(shell_ready_probe(second_ready).as_bytes())
             .unwrap();
