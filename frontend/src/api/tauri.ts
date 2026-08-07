@@ -644,11 +644,6 @@ export const api = {
   setDefaultTrustMode: (mode: string): Promise<void> =>
     invoke('set_default_trust_mode', { mode }),
 
-  getCustomSystemPrompt: (): Promise<string> =>
-    invoke('get_custom_system_prompt'),
-
-  setCustomSystemPrompt: (prompt: string): Promise<void> =>
-    invoke('set_custom_system_prompt', { prompt }),
 
   getReasoningEffort: (sessionId?: string): Promise<string> =>
     invoke('get_reasoning_effort', { sessionId }),

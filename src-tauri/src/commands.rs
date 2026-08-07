@@ -1577,34 +1577,6 @@ pub async fn set_default_trust_mode(
 }
 
 #[tauri::command]
-pub async fn get_custom_system_prompt(state: State<'_, TiangongApp>) -> Result<String, String> {
-    state
-        .with_state_read(|core_state| Ok(core_state.config.custom_system_prompt.clone()))
-        .await
-}
-
-#[tauri::command]
-pub async fn set_custom_system_prompt(
-    prompt: String,
-    state: State<'_, TiangongApp>,
-) -> Result<(), String> {
-    let mut config = state
-        .with_state_read(|core_state| Ok(core_state.config.clone()))
-        .await?;
-    config.custom_system_prompt = prompt;
-    tiangong_config::registry::update(config.clone()).map_err(|error| error.to_string())?;
-    state
-        .with_state(|core_state| {
-            core_state.config = config;
-            core_state.agent_config.custom_system_prompt.clear();
-            Ok(())
-        })
-        .await?;
-    state.sync_core_config_from_state().await?;
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn get_reasoning_effort(
     session_id: Option<String>,
     state: State<'_, TiangongApp>,
