@@ -45,6 +45,7 @@ jobs:
               - '.github/workflows/**'
             rust_any:
               - 'crates/**'
+              - 'plugins/**'
               - 'src-tauri/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -180,6 +181,10 @@ jobs:
           # 与单次 workspace check 兜底。
           order = list(crate_to_prefix.keys())
           affected = [c for c in order if any(f.startswith(crate_to_prefix[c]) for f in file_list)]
+
+          # WASM-only crates 只能在 wasm32-wasip2 目标下编译，
+          # 排除它们避免 native clippy/check/nextest 失败。
+          affected = [c for c in affected if not c.endswith('-wasm')]
 
           print(json.dumps(affected))
           PY
