@@ -55,6 +55,20 @@ const MCP: PluginConfig = PluginConfig {
     protocol_manifest: "crates/plugins/tiangong-plugin-mcp/protocol/Cargo.toml",
 };
 
+const FETCH: PluginConfig = PluginConfig {
+    id: "fetch",
+    name: "Fetch",
+    description: "URL 获取（text 提取正文 / download 落盘），含 SSRF 防护",
+    protocol_crate: "tiangong-plugin-fetch-protocol",
+    wasm_crate: "tiangong-plugin-fetch-wasm",
+    wasm_artifact: "tiangong_plugin_fetch_wasm.wasm",
+    sidecar_crate: "tiangong-plugin-fetch-sidecar",
+    sidecar_artifact: "tiangong-fetch-sidecar",
+    plugin_root: "crates/plugins/tiangong-plugin-fetch",
+    plugin_manifest: "crates/plugins/tiangong-plugin-fetch/plugin.json",
+    protocol_manifest: "crates/plugins/tiangong-plugin-fetch/protocol/Cargo.toml",
+};
+
 const INDEX: PluginConfig = PluginConfig {
     id: "index",
     name: "Index",
@@ -129,6 +143,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
     match id {
         "memory" => Ok(&MEMORY),
         "mcp" => Ok(&MCP),
+        "fetch" => Ok(&FETCH),
         "index" => Ok(&INDEX),
         "scheduler" => Ok(&SCHEDULER),
         "skill" => Ok(&SKILL),
