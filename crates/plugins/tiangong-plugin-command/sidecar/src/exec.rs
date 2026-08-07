@@ -127,14 +127,27 @@ pub fn split_command(raw: &str) -> (String, Vec<String>) {
     (cmd, parts)
 }
 
-/// 收集 runtime_env：从 sidecar 进程环境读取各插件贡献的变量。
+/// 收集 runtime_env：解析 host 在 sidecar 启动时注入的受控 JSON 信封。
 ///
-/// 当前 host 经 `TIANGONG_EXEC_ENV_*` 系列变量注入（若未注入则返回空）。
-/// TODO：未来接通 exec_env 后改为受控来源 + 危险 key 过滤（沙箱预留点 C）。
+/// 再过滤动态加载器、shell 初始化和追踪类危险 key，避免命令执行环境被劫持。
 fn collect_runtime_env() -> BTreeMap<String, String> {
-    // 当前无插件贡献 exec_env（原进程内 runtime_env 恒空），返回空保持等价语义。
-    // 未来 exec_env 接通后，host 会经环境变量或协议注入，此处读取并过滤危险 key。
-    BTreeMap::new()
+    const DENIED_EXACT: &[&str] = &["BASH_ENV", "ENV", "PS4"];
+    const DENIED_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+    let Ok(raw) = std::env::var(tiangong_plugin_runtime::sidecar::EXEC_ENV_JSON_ENV) else {
+        return BTreeMap::new();
+    };
+    let Ok(env) = serde_json::from_str::<BTreeMap<String, String>>(&raw) else {
+        return BTreeMap::new();
+    };
+    env.into_iter()
+        .filter(|(key, _)| {
+            let upper = key.to_ascii_uppercase();
+            !DENIED_EXACT.contains(&upper.as_str())
+                && !DENIED_PREFIXES
+                    .iter()
+                    .any(|prefix| upper.starts_with(prefix))
+        })
+        .collect()
 }
 
 /// 加载 cwd 下的 .env.local / .env 文件（搬迁自原 handler.rs）。

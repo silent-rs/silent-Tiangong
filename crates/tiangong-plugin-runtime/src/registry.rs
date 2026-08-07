@@ -386,12 +386,14 @@ pub fn reload_plugin(storage_root: &Path, plugin_id: &str) -> Result<PluginStatu
 fn reload_plugin_inner(storage_root: &Path, installed: &InstalledPlugin) -> Result<()> {
     let wasm_bytes = Arc::new(read_wasm_bytes(installed)?);
     let sidecar = resolve_sidecar(storage_root, installed, true)?;
+    // Command sidecar 等 Core 汇总 exec_env 后再首次启动；其他常驻 sidecar
+    //（如 scheduler）继续在预加载/热加载阶段启动。
     if installed.enabled
+        && installed.manifest.id != "command"
         && let Some(connection) = &sidecar
     {
         connection.ensure_running()?;
     }
-
     let (instances, next_generation) = {
         let plugins = loaded_plugins()
             .lock()
@@ -573,13 +575,13 @@ fn load_plugin_record(storage_root: &Path, installed: InstalledPlugin) -> Loaded
         Err(error) => (None, Some(error.to_string())),
     };
     if installed.enabled
+        && installed.manifest.id != "command"
         && let Some(connection) = &sidecar
         && let Err(error) = connection.ensure_running()
     {
         tracing::warn!(plugin_id = %installed.manifest.id, %error, "插件 sidecar 暂不可用");
         last_error = Some(error.to_string());
     }
-
     let load_result = read_wasm_bytes(&installed).and_then(|bytes| {
         let bytes = Arc::new(bytes);
         compile_plugin(
@@ -645,7 +647,7 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
     };
     let plugin = match instantiate_from_compiled(
         component,
-        sidecar,
+        sidecar.clone(),
         PluginRuntimeConfig::default(),
         plugin_id.to_string(),
         storage_access,
@@ -662,6 +664,7 @@ fn load_core_plugin(plugin_id: &str) -> Option<Arc<dyn Plugin>> {
         PluginRuntimeConfig::default(),
         enabled,
         descriptor_id,
+        sidecar.map(|s| s as Arc<dyn SidecarConnection>),
     ));
     if let Ok(mut plugins) = loaded_plugins().lock()
         && let Some(loaded) = plugins.get_mut(plugin_id)
