@@ -19,7 +19,6 @@ tiangong-entry = { workspace = true }
 tiangong-server = { workspace = true }
 tiangong-plugin-browser = { workspace = true }
 tiangong-plugin-runtime = { workspace = true }
-tiangong-plugin-task = { workspace = true }
 tiangong-plugin-terminal = { workspace = true }
 tiangong-plugin-skill-protocol = { workspace = true }
 tiangong-plugin-mcp-protocol = { workspace = true }

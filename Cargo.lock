@@ -10564,7 +10564,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-task",
  "tiangong-plugin-terminal",
  "tiangong-server",
  "tiangong-toolkit",
@@ -10629,7 +10628,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-task",
  "tiangong-types",
  "tokio",
  "tracing",
@@ -11414,19 +11412,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiangong-plugin-task"
-version = "0.13.4"
-dependencies = [
- "scru128",
- "serde",
- "serde_json",
- "tiangong-core",
- "tiangong-toolkit",
- "tiangong-types",
- "tracing",
-]
-
-[[package]]
 name = "tiangong-plugin-terminal"
 version = "0.13.4"
 dependencies = [
@@ -11535,7 +11520,6 @@ dependencies = [
  "tiangong-plugin-mcp-protocol",
  "tiangong-plugin-runtime",
  "tiangong-plugin-skill-protocol",
- "tiangong-plugin-task",
  "tiangong-scheduler",
  "tiangong-types",
  "tokio",

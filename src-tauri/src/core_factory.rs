@@ -73,7 +73,6 @@ impl DesktopCoreFactory {
         );
         info!(count = wasm_plugins.len(), "已加载 WASM 插件");
         plugins.extend(wasm_plugins);
-        plugins.push(tiangong_plugin_task::build_plugin());
         // skill/analyze-attachment 等 WASM 插件由上面的 load_installed_plugins 自动加载。
         // Agent Team 插件：子 Agent 管理 + 文件锁工具（issue #200）。
         let child_plugin_factory = Arc::new({
@@ -95,7 +94,6 @@ impl DesktopCoreFactory {
                     &storage_root,
                     tiangong_plugin_runtime::registry::RuntimeKind::Desktop,
                 ));
-                child_plugins.push(tiangong_plugin_task::build_plugin());
                 child_plugins
             }
         });

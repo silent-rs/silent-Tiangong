@@ -1747,27 +1747,6 @@ pub async fn list_workers(state: State<'_, TiangongApp>) -> Result<Vec<serde_jso
     state.with_state_read(|_core_state| Ok(Vec::new())).await
 }
 
-/// 获取后台任务列表
-#[tauri::command]
-pub async fn get_background_tasks() -> Result<Vec<serde_json::Value>, String> {
-    let reg = tiangong_plugin_task::task_registry();
-    let mut guard = reg.lock().map_err(|e| e.to_string())?;
-    let tasks = guard.list();
-    tasks
-        .into_iter()
-        .map(|t| serde_json::to_value(t).map_err(|e| e.to_string()))
-        .collect()
-}
-
-/// 取消后台任务
-#[tauri::command]
-pub async fn cancel_background_task(task_id: String) -> Result<(), String> {
-    let reg = tiangong_plugin_task::task_registry();
-    let mut guard = reg.lock().map_err(|e| e.to_string())?;
-    guard.cancel(&task_id);
-    Ok(())
-}
-
 /// 语音合成：将文本转换为音频，返回 base64 编码的音频数据
 #[tauri::command]
 pub async fn synthesize_speech(

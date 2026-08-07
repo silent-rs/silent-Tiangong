@@ -382,8 +382,6 @@ fn run_gui() {
             tiangong_app::commands::read_attachment_as_data_url,
             tiangong_app::commands::cancel_turn,
             tiangong_app::commands::cancel_agent,
-            tiangong_app::commands::get_background_tasks,
-            tiangong_app::commands::cancel_background_task,
             tiangong_app::commands::get_input_cache,
             tiangong_app::commands::set_input_cache,
             tiangong_app::commands::new_session_id,

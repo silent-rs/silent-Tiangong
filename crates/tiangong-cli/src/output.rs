@@ -224,8 +224,6 @@ fn tool_icon(name: &str) -> &'static str {
         "search_code" => "🔍",
         "run_command" | "run_shell" => "⚡",
         "apply_patch" => "🩹",
-        "spawn_task" => "🚀",
-        "query_task" | "cancel_task" | "wait_tasks" | "list_tasks" => "📋",
         "generate_image" => "🎨",
         "text_to_speech" => "🔊",
         "speech_to_text" => "🎤",
