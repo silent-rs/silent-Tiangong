@@ -2105,16 +2105,18 @@ fn use_stream_mode() -> bool {
 /// 工具调用阶段使用的超时时间。
 ///
 /// - 若设置了 `API_FUNCTION_TIMEOUT_MS` 环境变量，直接采用（必须 > 0）；
-/// - 否则取 `base_timeout_ms` 与 120s 的较小值——工具调用阶段默认用更保守的超时，
-///   避免长时间卡住导致后续 plan 看似不执行。
+/// - 否则使用模型供应商配置的超时时间，不再附加更短的隐藏上限。
 fn function_timeout_ms(base_timeout_ms: u64) -> u64 {
-    if let Ok(custom) = std::env::var("API_FUNCTION_TIMEOUT_MS")
-        && let Ok(parsed) = custom.trim().parse::<u64>()
-        && parsed > 0
-    {
-        return parsed;
-    }
-    base_timeout_ms.min(120_000)
+    let custom_timeout_ms = std::env::var("API_FUNCTION_TIMEOUT_MS")
+        .ok()
+        .and_then(|custom| custom.trim().parse::<u64>().ok());
+    resolve_function_timeout_ms(base_timeout_ms, custom_timeout_ms)
+}
+
+fn resolve_function_timeout_ms(base_timeout_ms: u64, custom_timeout_ms: Option<u64>) -> u64 {
+    custom_timeout_ms
+        .filter(|timeout_ms| *timeout_ms > 0)
+        .unwrap_or(base_timeout_ms)
 }
 
 #[cfg(test)]
@@ -2125,6 +2127,18 @@ mod tests {
     };
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn function_timeout_uses_provider_timeout_without_override() {
+        assert_eq!(resolve_function_timeout_ms(300_000, None), 300_000);
+        assert_eq!(resolve_function_timeout_ms(60_000, None), 60_000);
+    }
+
+    #[test]
+    fn function_timeout_uses_only_positive_override() {
+        assert_eq!(resolve_function_timeout_ms(300_000, Some(180_000)), 180_000);
+        assert_eq!(resolve_function_timeout_ms(300_000, Some(0)), 300_000);
+    }
 
     fn provider_tool_call(id: &str) -> LlmMessageContent {
         LlmMessageContent::ToolCall(LlmToolCall {
