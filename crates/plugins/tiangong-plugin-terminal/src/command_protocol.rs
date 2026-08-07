@@ -8,6 +8,8 @@ use crate::manager::TerminalManager;
 use crate::types::{PtyState, TerminalExecResponse, TerminalOutputEvent};
 
 const COMMAND_START_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const SHELL_READY_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const SHELL_READY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// 发送命令到 PTY
 fn send_to_pty(writer: &mut Box<dyn std::io::Write + Send>, input: &str) -> anyhow::Result<()> {
@@ -203,6 +205,142 @@ fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
     }
 }
 
+#[derive(Debug)]
+enum ShellPreparationError {
+    Cancelled,
+    Unavailable(String),
+}
+
+fn shell_ready_probe(marker: &str) -> String {
+    format!("echo '{marker}'\r")
+}
+
+async fn wait_for_shell_condition(
+    manager: &TerminalManager,
+    deadline: std::time::Instant,
+    cancellation: Option<&crate::types::TerminalExecCancellation>,
+    response_tx: &oneshot::Sender<TerminalExecResponse>,
+    condition: impl Fn(&crate::manager::TerminalState) -> bool,
+) -> Result<(), ShellPreparationError> {
+    loop {
+        if response_tx.is_closed() || cancellation.is_some_and(|value| value.is_requested()) {
+            return Err(ShellPreparationError::Cancelled);
+        }
+        if !manager.is_alive() {
+            return Err(ShellPreparationError::Unavailable(
+                "终端进程已退出".to_string(),
+            ));
+        }
+        let condition_met = {
+            let state = manager
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            condition(&state)
+        };
+        if condition_met {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ShellPreparationError::Unavailable(
+                "等待 Shell 就绪超时".to_string(),
+            ));
+        }
+        tokio::time::sleep(SHELL_READY_POLL_INTERVAL).await;
+    }
+}
+
+async fn confirm_shell_ready(
+    manager: &Arc<TerminalManager>,
+    interrupt: bool,
+    cancellation: Option<&crate::types::TerminalExecCancellation>,
+    response_tx: &oneshot::Sender<TerminalExecResponse>,
+) -> Result<(), ShellPreparationError> {
+    if response_tx.is_closed() || cancellation.is_some_and(|value| value.is_requested()) {
+        return Err(ShellPreparationError::Cancelled);
+    }
+
+    let deadline = std::time::Instant::now() + SHELL_READY_CONFIRM_TIMEOUT;
+    wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+        !state.output_buffer.is_empty() || !state.current_line.is_empty()
+    })
+    .await?;
+
+    if interrupt {
+        let baseline_lines = manager.total_lines_pushed();
+        manager
+            .write_input(b"\x03")
+            .map_err(ShellPreparationError::Unavailable)?;
+        // Linux Shell 会在异步处理 SIGINT 时再次清空输入队列。等它输出 Ctrl+C
+        // 对应的完整行后再发探针，避免探针的开头仍落在清理窗口中。
+        wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+            state.total_lines_pushed > baseline_lines
+        })
+        .await?;
+    }
+
+    let marker = format!("{}{}__", crate::types::MARKER_READY, scru128::new());
+    manager
+        .write_input(shell_ready_probe(&marker).as_bytes())
+        .map_err(ShellPreparationError::Unavailable)?;
+    wait_for_shell_condition(manager, deadline, cancellation, response_tx, |state| {
+        state
+            .output_buffer
+            .iter()
+            .any(|line| line_matches_marker(line, &marker))
+    })
+    .await
+}
+
+fn discard_current_pty(manager: &TerminalManager, pty_state: &mut Option<PtyState>) {
+    manager.deactivate_pty();
+    if let Some(ps) = pty_state.take() {
+        crate::manager::shutdown_pty(ps);
+    }
+}
+
+async fn prepare_shell_for_agent_command<R: tauri::Runtime>(
+    manager: &Arc<TerminalManager>,
+    pty_state: &mut Option<PtyState>,
+    app: &tauri::AppHandle<R>,
+    cancellation: Option<&crate::types::TerminalExecCancellation>,
+    response_tx: &oneshot::Sender<TerminalExecResponse>,
+) -> Result<(), ShellPreparationError> {
+    match confirm_shell_ready(manager, true, cancellation, response_tx).await {
+        Ok(()) => return Ok(()),
+        Err(ShellPreparationError::Cancelled) => {
+            discard_current_pty(manager, pty_state);
+            return Err(ShellPreparationError::Cancelled);
+        }
+        Err(ShellPreparationError::Unavailable(error)) => {
+            tracing::warn!(
+                session_id = %manager.session_id(),
+                %error,
+                "终端清理后未就绪，重建 PTY"
+            );
+            discard_current_pty(manager, pty_state);
+        }
+    }
+
+    if manager.is_closed() {
+        return Err(ShellPreparationError::Unavailable("终端已关闭".to_string()));
+    }
+    *pty_state = ensure_system_pty(manager, app);
+    if pty_state.is_none() {
+        return Err(ShellPreparationError::Unavailable(
+            "终端会话不可用".to_string(),
+        ));
+    }
+
+    match confirm_shell_ready(manager, false, cancellation, response_tx).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            discard_current_pty(manager, pty_state);
+            Err(error)
+        }
+    }
+}
+
 fn prepare_non_interactive_command(
     start_marker: &str,
     command: &str,
@@ -225,8 +363,7 @@ fn prepare_non_interactive_command(
     )?;
     script.flush()?;
     let path = script.path().to_string_lossy();
-    // Ctrl+U 清掉终端查询响应等尚未提交的残留输入，保证 source 从空行开始。
-    let invocation = format!("\x15. {}\r", crate::util::shell_quote(path.as_ref()));
+    let invocation = format!(". {}\r", crate::util::shell_quote(path.as_ref()));
     Ok((script, invocation))
 }
 
@@ -414,6 +551,45 @@ pub(crate) async fn handle_exec<R: tauri::Runtime>(
     let cwd_marker = format!("__TIANGONG_CWD_{}__", marker_id);
     let rc_marker = format!("__TIANGONG_RC_{}__", marker_id);
 
+    // 先占用终端，再清理完整输入缓冲并确认 Shell 已重新接管。Ctrl+U 只能清理
+    // 当前编辑行，无法取消未闭合的多行命令；就绪标记确认前不得发送真实命令。
+    if let Some(tracker) = activity {
+        tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentRunning {
+            command_id: command_id.clone(),
+        });
+    }
+    if let Err(error) = prepare_shell_for_agent_command(
+        manager,
+        pty_state,
+        app,
+        Some(cancellation.as_ref()),
+        &response_tx,
+    )
+    .await
+    {
+        if let Some(tracker) = activity {
+            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+        }
+        let cancelled = matches!(&error, ShellPreparationError::Cancelled);
+        let stderr = match error {
+            ShellPreparationError::Cancelled => "命令执行已取消".to_string(),
+            ShellPreparationError::Unavailable(error) => {
+                format!("终端清理后无法恢复，命令未发送: {error}")
+            }
+        };
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr,
+            terminal_error: !cancelled,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: cancelled,
+            interactive_mode: false,
+        });
+        return;
+    }
+
     // 包装脚本从独立文件读取，PTY 只接收一条短 source 命令。这样前台程序无法
     // 从 stdin 吞掉收尾标记，zsh 也不会把多行内部包装拆成残缺语句执行。
     let (_command_script, combined) = match prepare_non_interactive_command(
@@ -425,6 +601,9 @@ pub(crate) async fn handle_exec<R: tauri::Runtime>(
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
+            if let Some(tracker) = activity {
+                tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+            }
             let _ = response_tx.send(TerminalExecResponse {
                 exit_code: -1,
                 stdout: String::new(),
@@ -438,13 +617,6 @@ pub(crate) async fn handle_exec<R: tauri::Runtime>(
             return;
         }
     };
-
-    // 先设置协作状态为 AgentRunning，再发送命令
-    if let Some(tracker) = activity {
-        tracker.set_busy_state(crate::collaboration::TerminalBusyState::AgentRunning {
-            command_id: command_id.clone(),
-        });
-    }
 
     // 内部 source 命令会被 marker 过滤，向前端和持久日志补回用户实际提交的完整命令。
     if !command.is_empty() {
@@ -855,6 +1027,44 @@ pub(crate) async fn handle_exec_interactive<R: tauri::Runtime>(
     if pty_state.is_none() {
         *pty_state = ensure_system_pty(manager, app);
     }
+    if pty_state.is_none() {
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr: "终端会话不可用".to_string(),
+            terminal_error: true,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: false,
+            interactive_mode: false,
+        });
+        return;
+    }
+    if let Err(error) =
+        prepare_shell_for_agent_command(manager, pty_state, app, None, &response_tx).await
+    {
+        if let Some(tracker) = activity {
+            tracker.set_busy_state(crate::collaboration::TerminalBusyState::Idle);
+        }
+        let cancelled = matches!(&error, ShellPreparationError::Cancelled);
+        let stderr = match error {
+            ShellPreparationError::Cancelled => "交互命令执行已取消".to_string(),
+            ShellPreparationError::Unavailable(error) => {
+                format!("终端清理后无法恢复，交互命令未发送: {error}")
+            }
+        };
+        let _ = response_tx.send(TerminalExecResponse {
+            exit_code: -1,
+            stdout: String::new(),
+            stderr,
+            terminal_error: !cancelled,
+            timed_out: false,
+            cwd_after: manager.cwd(),
+            interrupted_by_user: cancelled,
+            interactive_mode: false,
+        });
+        return;
+    }
     let Some(ps) = pty_state.as_mut() else {
         let _ = response_tx.send(TerminalExecResponse {
             exit_code: -1,
@@ -875,19 +1085,13 @@ pub(crate) async fn handle_exec_interactive<R: tauri::Runtime>(
     let baseline_pushed = manager.total_lines_pushed();
     let baseline_updates = manager.screen_updates();
 
-    // 清理残留进程 + 发送命令
+    // Shell 已通过就绪标记确认，发送真实命令。
     // 注意：用 `\r`（CR）而非 `\n`（LF）作为回车键。zsh 的 ZLE、vim、less 等
     // TUI 程序在 raw 模式下只识别 CR 作为"提交本行"，发 LF 会导致命令停留在
     // 输入行不执行。
-    // 先发 \x03(Ctrl+C) 清理可能残留的前台进程，再发 \x15(Ctrl+U) 清空当前行，
-    // 最后以 CR 提交命令。
     let send_result = {
         match ps.writer.lock() {
             Ok(mut writer) => {
-                let _ = writer.write_all(b"\x03");
-                let _ = writer.flush();
-                let _ = writer.write_all(b"\x15");
-                let _ = writer.flush();
                 let cmd = format!("{}\r", command);
                 send_to_pty(&mut writer, &cmd)
             }
@@ -1363,7 +1567,7 @@ mod tests {
         assert!(!combined.contains("TERM=dumb"));
         assert!(combined.contains("git diff HEAD"));
         assert!(combined.contains("\ngit diff HEAD\n__TIANGONG_= __rc=$?"));
-        assert!(invocation.starts_with("\x15. "));
+        assert!(invocation.starts_with(". "));
         assert!(invocation.ends_with('\r'));
         assert!(script
             .path()
@@ -1411,6 +1615,7 @@ mod tests {
             shell
         };
         shell.env("PS1", "__TIANGONG_TEST_READY__ ");
+        shell.env("PS2", "__TIANGONG_TEST_CONTINUE__ ");
         let mut child = pair.slave.spawn_command(shell).unwrap();
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
@@ -1439,9 +1644,51 @@ mod tests {
             output.push_str(&String::from_utf8_lossy(&chunk));
         }
 
+        // 先让 Shell 进入多行续写状态。Ctrl+U 只能清掉当前行，无法取消已经提交的
+        // `if`；Ctrl+C 必须让整个多行输入作废，然后就绪探针才能独立执行。
+        writer.write_all(b"if true; then\r").unwrap();
+        writer.flush().unwrap();
+        let continuation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output.contains("__TIANGONG_TEST_CONTINUE__") {
+            let remaining =
+                continuation_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("测试 shell 未进入多行续写状态");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
         let command_started = std::time::Instant::now();
-        // 复现历史终端查询响应残留在 zsh 输入行、随后 Agent 提交命令的现场。
-        writer.write_all(b"11;rgb:1e1e/1e1e/2e2e;52R").unwrap();
+        let ready_marker = "__TIANGONG_READY_multiline__";
+        writer.write_all(b"\x03").unwrap();
+        writer.flush().unwrap();
+        let mut interrupt_output = String::new();
+        let interrupt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !interrupt_output.contains('\n') {
+            let remaining = interrupt_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("Shell 未确认 Ctrl+C 已处理");
+            let text = String::from_utf8_lossy(&chunk);
+            interrupt_output.push_str(&text);
+            output.push_str(&text);
+        }
+        writer
+            .write_all(shell_ready_probe(ready_marker).as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+        let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output
+            .lines()
+            .any(|line| line_matches_marker(line, ready_marker))
+        {
+            let remaining = probe_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("Ctrl+C 后 Shell 未恢复就绪");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
+
         writer.write_all(combined.as_bytes()).unwrap();
         writer.flush().unwrap();
         let completed_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1486,6 +1733,36 @@ mod tests {
             second_end,
         )
         .unwrap();
+        let second_ready = "__TIANGONG_READY_reuse__";
+        writer.write_all(b"\x03").unwrap();
+        writer.flush().unwrap();
+        let mut interrupt_output = String::new();
+        let interrupt_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !interrupt_output.contains('\n') {
+            let remaining = interrupt_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("复用前 Shell 未确认 Ctrl+C 已处理");
+            let text = String::from_utf8_lossy(&chunk);
+            interrupt_output.push_str(&text);
+            output.push_str(&text);
+        }
+        writer
+            .write_all(shell_ready_probe(second_ready).as_bytes())
+            .unwrap();
+        writer.flush().unwrap();
+        let second_ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !output
+            .lines()
+            .any(|line| line_matches_marker(line, second_ready))
+        {
+            let remaining =
+                second_ready_deadline.saturating_duration_since(std::time::Instant::now());
+            let chunk = output_rx
+                .recv_timeout(remaining)
+                .expect("复用前 Shell 未恢复就绪");
+            output.push_str(&String::from_utf8_lossy(&chunk));
+        }
         writer.write_all(second_command.as_bytes()).unwrap();
         writer.flush().unwrap();
         let reuse_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -1510,6 +1787,8 @@ mod tests {
         assert!(!visible.contains(end_marker), "内部调用泄漏: {visible}");
         assert!(!visible.contains(second_start), "内部调用泄漏: {visible}");
         assert!(!visible.contains(second_end), "内部调用泄漏: {visible}");
+        assert!(!visible.contains(ready_marker), "就绪探针泄漏: {visible}");
+        assert!(!visible.contains(second_ready), "就绪探针泄漏: {visible}");
 
         let _ = child.kill();
         let _ = child.wait();
@@ -1529,10 +1808,7 @@ mod tests {
             "__TIANGONG_END_x__",
         )
         .unwrap();
-        let script_path = combined
-            .trim_end_matches('\r')
-            .strip_prefix("\x15. ")
-            .unwrap();
+        let script_path = combined.trim_end_matches('\r').strip_prefix(". ").unwrap();
 
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")

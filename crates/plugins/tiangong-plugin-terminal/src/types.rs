@@ -11,6 +11,7 @@ pub(crate) const MARKER_START: &str = "__TIANGONG_START_";
 pub(crate) const MARKER_END: &str = "__TIANGONG_END_";
 pub(crate) const MARKER_CWD: &str = "__TIANGONG_CWD_";
 pub(crate) const MARKER_RC: &str = "__TIANGONG_RC_";
+pub(crate) const MARKER_READY: &str = "__TIANGONG_READY_";
 
 /// 判断文本是否包含任何内部 marker
 pub(crate) fn contains_marker(text: &str) -> bool {
@@ -18,6 +19,7 @@ pub(crate) fn contains_marker(text: &str) -> bool {
         || text.contains(MARKER_END)
         || text.contains(MARKER_CWD)
         || text.contains(MARKER_RC)
+        || text.contains(MARKER_READY)
 }
 
 /// PTY 进程状态（writer/reader/master/child）

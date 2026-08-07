@@ -457,6 +457,9 @@ pub(crate) fn spawn_output_reader<R: tauri::Runtime>(
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                if state.pty_generation != pty_generation {
+                    break;
+                }
                 state.current_line = processor.current_line();
                 for line in &complete_lines {
                     push_output(&mut state, line.clone());
@@ -550,6 +553,13 @@ mod tests {
         let mut f = RawOutputFilter::new();
         let out = f.filter("hello\n__TIANGONG_START_abc123__\nworld\n");
         assert_eq!(out, "hello\nworld\n");
+    }
+
+    #[test]
+    fn test_filter_ready_probe_removed() {
+        let mut f = RawOutputFilter::new();
+        let out = f.filter("before\n__TIANGONG_READY_abc123__\nafter\n");
+        assert_eq!(out, "before\nafter\n");
     }
 
     #[test]

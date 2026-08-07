@@ -27,6 +27,7 @@ export interface LoadedSession {
 }
 
 export type TabKind = 'browser' | 'terminal';
+export type TerminalPhase = 'Idle' | 'UserActive' | 'Running' | 'Interactive';
 
 export interface TabState {
   id: string;
@@ -34,6 +35,7 @@ export interface TabState {
   title: string;
   url: string;
   created_at: string;
+  phase?: TerminalPhase;
 }
 
 export interface SessionTabs {
@@ -48,7 +50,7 @@ export interface TerminalTabInfo {
   alive: boolean;
   cwd: string;
   shell: string;
-  phase: string;
+  phase: TerminalPhase;
 }
 
 export interface TerminalTabListResponse {
