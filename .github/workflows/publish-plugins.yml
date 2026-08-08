@@ -95,15 +95,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: tauri-cli
-      - name: Download shared WASM
-        uses: actions/download-artifact@v4
-        with:
-          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
-          path: target/shared-wasm
-      - name: Validate plugin from repository configuration
-        env:
-          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
-        run: cargo run -p xtask -- validate-plugin "$PLUGIN_ID"
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -143,6 +134,16 @@ jobs:
           "OPENSSL_LIB_DIR=$($crypto.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENSSL_INCLUDE_DIR=$include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "OPENSSL_NO_VENDOR=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Download shared WASM
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-wasm-${{ needs.resolve-plugin.outputs.plugin_id }}
+          path: target/shared-wasm
+      - name: Validate plugin from repository configuration
+        env:
+          PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
+        run: cargo run -p xtask -- validate-plugin "$PLUGIN_ID"
+
       - name: Prepare plugin signing key
         id: plugin_signing
         env:
