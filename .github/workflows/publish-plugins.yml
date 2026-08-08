@@ -240,6 +240,7 @@ jobs:
     name: Publish independent plugin
     needs: [resolve-plugin, prepare-release]
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     concurrency:
       group: plugin-oss-catalog-publish
       cancel-in-progress: false
@@ -259,7 +260,9 @@ jobs:
 
       - name: Install ossutil
         run: |
-          curl -fsSL https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip -o /tmp/ossutil.zip
+          curl --connect-timeout 10 --max-time 120 --retry 3 --retry-all-errors -fsSL \
+            https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip \
+            -o /tmp/ossutil.zip
           unzip -o /tmp/ossutil.zip -d /tmp/ossutil
           sudo cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
 
@@ -272,8 +275,9 @@ jobs:
 
       - name: Download current catalog
         run: |
-          curl -fsSL "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}" \
-            -o target/current-catalog.json || printf '{"version":1,"plugins":[]}\n' > target/current-catalog.json
+          curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}" \
+            -o target/current-catalog.json
 
       - name: Merge selected plugin into catalog
         run: |
@@ -293,15 +297,39 @@ jobs:
       - name: Publish aggregate catalog last
         run: |
           catalog=target/plugin-release/plugins-index/catalog.merged.json
+          timeout 5m ossutil cp target/current-catalog.json \
+            oss://silent-tiangong/plugins-index/catalog.json.previous -f
           ossutil cp "$catalog" oss://silent-tiangong/plugins-index/catalog.json.next -f
           ossutil cp "$catalog" oss://silent-tiangong/plugins-index/catalog.json -f
 
       - name: Verify published catalog
         run: |
+          rollback_catalog() {
+            echo "Catalog verification failed; restoring previous catalog."
+            timeout 5m ossutil cp target/current-catalog.json \
+              oss://silent-tiangong/plugins-index/catalog.json -f
+            curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+              "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}-rollback" \
+              -o /tmp/rolled-back-catalog.json
+            rollback_expected="$(sha256sum target/current-catalog.json | awk '{print $1}')"
+            rollback_actual="$(sha256sum /tmp/rolled-back-catalog.json | awk '{print $1}')"
+            test "$rollback_expected" = "$rollback_actual"
+          }
+
           expected="$(sha256sum target/plugin-release/plugins-index/catalog.merged.json | awk '{print $1}')"
-          curl -fsSL "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}-verify" -o /tmp/published-catalog.json
+          if ! curl --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors -fsSL \
+            "${TIANGONG_PLUGIN_OSS_BASE_URL}/plugins-index/catalog.json?run=${GITHUB_RUN_ID}-verify" \
+            -o /tmp/published-catalog.json; then
+            rollback_catalog
+            exit 1
+          fi
+          if ! cargo run -p xtask -- validate-plugin-catalog /tmp/published-catalog.json; then
+            rollback_catalog
+            exit 1
+          fi
           actual="$(sha256sum /tmp/published-catalog.json | awk '{print $1}')"
           if [[ "$expected" != "$actual" ]]; then
             echo "Published catalog checksum mismatch: expected=${expected}, actual=${actual}"
+            rollback_catalog
             exit 1
           fi

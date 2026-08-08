@@ -277,6 +277,8 @@ Memory 的目录和构建说明见 [`plugins/tiangong-plugin-memory/README.md`](
 
 短期官方插件只通过 OSS 静态目录独立发布，不建设插件服务平台。独立工作流位于 [`.github/workflows/publish-plugins.yml`](../.github/workflows/publish-plugins.yml)，可手动填写一个插件 ID，或使用 `plugin/<plugin-id>/v<version>` 标签触发。工作流不维护插件下拉白名单，而是让仓库构建配置核对该 ID 是否对应 `plugins/` 下完整的 `plugin.json`、WASM、protocol 和 sidecar；每次只构建、签名和上传所选插件。可通过 `cargo run -p xtask -- list-plugins` 查询当前可发布插件。
 
+日常发布一次只触发一个插件，并等待任务结束后再发布下一个。首次集中发布多个插件时每批最多触发两个，确认本批任务全部结束后再触发下一批；不要同时推送大量插件标签，因为共享发布锁只负责串行写入，等待中的任务可能被后续任务取消。
+
 仓库需要配置以下 GitHub Actions Secrets：
 
 - `TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY`：插件专用签名私钥内容，不得与应用更新私钥复用。
@@ -285,14 +287,15 @@ Memory 的目录和构建说明见 [`plugins/tiangong-plugin-memory/README.md`](
 
 发布顺序为：
 
-1. macOS Apple Silicon、Linux x86_64、Windows x86_64 分别构建并签名所选插件。
+1. macOS Apple Silicon、Linux x86_64、Windows x86_64 分别构建所选插件；带 sidecar 的插件同时生成平台签名，纯 WASM 插件不生成签名清单。
 2. 三个平台产物上传为短期 Actions Artifact，签名临时文件立即删除。
-3. Linux 汇总任务只合并所选插件，校验其 ID、版本、清单与 WASM 完全一致，并要求具备三个平台的 sidecar 和签名清单。
-4. 发布任务使用所有插件共享的串行锁，读取 OSS 当前总目录并仅替换本次插件条目。
+3. Linux 汇总任务只合并所选插件，校验其 ID、版本、清单与 WASM 完全一致；带 sidecar 的插件必须具备三个平台的 sidecar 和签名清单，纯 WASM 插件的 sidecar 为空且不要求签名清单。
+4. 发布任务使用所有插件共享的串行锁，读取 OSS 当前总目录并仅替换本次插件条目；读取失败时直接停止，不允许用空目录继续发布。
 5. 先上传 `plugins/<id>/<version>/` 不可变制品及 `plugins-index/releases/<id>.json` 独立入口。
-6. 最后更新 `plugins-index/catalog.json`，并从 OSS 回读核对 SHA-256。
+6. 合并后的完整目录按客户端结构、版本、地址和校验值规则验证通过后，保存上一份目录，再更新 `plugins-index/catalog.json`。
+7. 从 OSS 回读正式目录并再次验证结构和 SHA-256；失败时立即恢复上一份目录并核对恢复结果。
 
-任何平台构建、单插件目录合并或上传失败都不会执行最后的总目录更新，因此客户端不会发现半发布版本。不同插件可以同时构建，但发布阶段串行读取和更新总目录，不会互相覆盖；无关插件失败也不会阻塞本次插件。合并逻辑可在本地对一个插件准备好的平台目录执行：
+任何平台构建、单插件目录合并、旧目录下载或制品上传失败都不会执行最后的总目录更新，因此客户端不会发现半发布版本。完整目录包含任何无效插件条目时也会在上传前终止。不同插件可以同时构建，但必须按上述批次限制进入发布阶段；发布阶段串行读取和更新总目录，不会互相覆盖。合并逻辑可在本地对一个插件准备好的平台目录执行：
 
 ```bash
 TIANGONG_PLUGIN_EXPECTED_PLATFORMS=darwin-aarch64,linux-x86_64,windows-x86_64 \
@@ -306,4 +309,10 @@ cargo run -p xtask -- merge-plugin-catalog \
   current-catalog.json \
   target/plugin-release/plugins-index/catalog.json \
   catalog.merged.json
+```
+
+单独验证一个完整目录：
+
+```bash
+cargo run -p xtask -- validate-plugin-catalog catalog.json
 ```
