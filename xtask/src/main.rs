@@ -1,17 +1,52 @@
 //! 天工辅助构建任务。
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const WASM_TARGET: &str = "wasm32-wasip2";
 const RUNTIME_MANIFEST: &str = "crates/tiangong-plugin-runtime/Cargo.toml";
 const PLUGIN_DIST: &str = "target/plugin-dist";
 const DEFAULT_OSS_BASE_URL: &str = "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com";
+const PLUGIN_CATALOG_VERSION: u32 = 1;
 const PRESERVED_DIRS: [&str; 3] = ["runtime", "logs", "data"];
+
+#[derive(Debug, Deserialize)]
+struct PublishedPluginCatalog {
+    version: u32,
+    plugins: Vec<PublishedPluginRelease>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishedPluginRelease {
+    id: String,
+    name: String,
+    version: String,
+    #[serde(default, rename = "description")]
+    _description: String,
+    manifest: PublishedRemoteArtifact,
+    wasm: PublishedRemoteArtifact,
+    #[serde(default)]
+    signed_releases: BTreeMap<String, PublishedSignedRelease>,
+    #[serde(default)]
+    sidecars: BTreeMap<String, PublishedRemoteArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishedSignedRelease {
+    url: String,
+    signature_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishedRemoteArtifact {
+    url: String,
+    checksum: String,
+}
 
 /// 单个 WASM 插件的构建配置。
 struct PluginConfig {
@@ -290,6 +325,9 @@ fn main() {
                 Path::new(output),
             )
         }
+        [command, catalog] if command == "validate-plugin-catalog" => {
+            validate_plugin_catalog_file(Path::new(catalog))
+        }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -324,6 +362,7 @@ fn print_help() {
     eprintln!(
         "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
     );
+    eprintln!("  cargo run -p xtask -- validate-plugin-catalog <catalog或->");
 }
 
 fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
@@ -647,7 +686,7 @@ fn generate_oss_distribution(
             "url": format!("{release_url}/{}", config.wasm_artifact),
             "checksum": wasm_checksum,
         },
-        "sidecars": sidecar_entry.unwrap_or(serde_json::Value::Null),
+        "sidecars": sidecar_entry.unwrap_or_else(|| serde_json::json!({})),
     });
     // 签名清单仅对 sidecar 插件生成，纯 WASM 插件不携带签名。
     if has_sidecar {
@@ -702,6 +741,102 @@ fn write_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
         .map_err(|error| invalid_data(format!("生成 {} 失败: {error}", path.display())))?;
     content.push(b'\n');
     std::fs::write(path, content)
+}
+
+fn validate_plugin_catalog_file(path: &Path) -> io::Result<()> {
+    let mut content = Vec::new();
+    if path == Path::new("-") {
+        io::stdin().read_to_end(&mut content)?;
+    } else {
+        content = std::fs::read(path)?;
+    }
+    let value: serde_json::Value = serde_json::from_slice(&content)
+        .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", path.display())))?;
+    let plugin_count = validate_plugin_catalog_value(&value, path)?;
+    eprintln!(
+        "[xtask] 插件目录验证通过: {}（{plugin_count} 个插件）",
+        path.display()
+    );
+    Ok(())
+}
+
+fn validate_plugin_catalog_value(value: &serde_json::Value, path: &Path) -> io::Result<usize> {
+    let catalog: PublishedPluginCatalog = serde_json::from_value(value.clone())
+        .map_err(|error| invalid_data(format!("插件目录结构无效: {}: {error}", path.display())))?;
+    if catalog.version != PLUGIN_CATALOG_VERSION {
+        return Err(invalid_data(format!(
+            "插件目录版本无效: expected={PLUGIN_CATALOG_VERSION}, actual={}",
+            catalog.version
+        )));
+    }
+
+    let mut ids = BTreeSet::new();
+    for plugin in &catalog.plugins {
+        if plugin.id.trim().is_empty() || !ids.insert(plugin.id.as_str()) {
+            return Err(invalid_data(format!(
+                "插件目录包含空 ID 或重复 ID: {}",
+                plugin.id
+            )));
+        }
+        if plugin.name.trim().is_empty() {
+            return Err(invalid_data(format!("插件 {} 的名称为空", plugin.id)));
+        }
+        semver::Version::parse(&plugin.version).map_err(|error| {
+            invalid_data(format!(
+                "插件 {} 版本 {} 无效: {error}",
+                plugin.id, plugin.version
+            ))
+        })?;
+        validate_catalog_artifact(&plugin.manifest, "插件清单")?;
+        validate_catalog_artifact(&plugin.wasm, "WASM 制品")?;
+
+        for (platform, artifact) in &plugin.sidecars {
+            if platform.trim().is_empty() {
+                return Err(invalid_data(format!(
+                    "插件 {} 包含空 sidecar 平台",
+                    plugin.id
+                )));
+            }
+            validate_catalog_artifact(artifact, "sidecar 制品")?;
+            let signed = plugin.signed_releases.get(platform).ok_or_else(|| {
+                invalid_data(format!("插件 {} 的平台 {platform} 缺少签名清单", plugin.id))
+            })?;
+            validate_catalog_url(&signed.url, "插件签名清单")?;
+            validate_catalog_url(&signed.signature_url, "插件签名文件")?;
+        }
+        for signed in plugin.signed_releases.values() {
+            validate_catalog_url(&signed.url, "插件签名清单")?;
+            validate_catalog_url(&signed.signature_url, "插件签名文件")?;
+        }
+    }
+    Ok(catalog.plugins.len())
+}
+
+fn validate_catalog_artifact(artifact: &PublishedRemoteArtifact, label: &str) -> io::Result<()> {
+    validate_catalog_url(&artifact.url, label)?;
+    let checksum = artifact
+        .checksum
+        .strip_prefix("sha256:")
+        .ok_or_else(|| invalid_data(format!("{label} checksum 必须使用 sha256:<hex> 格式")))?;
+    let bytes = hex::decode(checksum)
+        .map_err(|error| invalid_data(format!("{label} checksum 不是有效十六进制: {error}")))?;
+    if bytes.len() != 32 {
+        return Err(invalid_data(format!("{label} SHA-256 长度无效")));
+    }
+    Ok(())
+}
+
+fn validate_catalog_url(value: &str, label: &str) -> io::Result<()> {
+    let parsed = url::Url::parse(value)
+        .map_err(|error| invalid_data(format!("{label} URL 无效: {value}: {error}")))?;
+    let local_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1"));
+    if parsed.scheme() != "https" && !local_http {
+        return Err(invalid_data(format!("{label} 必须使用 HTTPS: {value}")));
+    }
+    Ok(())
 }
 
 fn current_platform_key() -> String {
@@ -1058,13 +1193,14 @@ fn merge_plugin_distributions(
         copy_distribution_files(input_root, output_root)?;
     }
     let plugins = releases.into_values().collect::<Vec<_>>();
-    write_json(
-        &output_root.join("plugins-index/catalog.json"),
-        &serde_json::json!({"version": 1, "plugins": plugins}),
-    )?;
+    let plugin_count = plugins.len();
+    let catalog_path = output_root.join("plugins-index/catalog.json");
+    let catalog = serde_json::json!({"version": PLUGIN_CATALOG_VERSION, "plugins": plugins});
+    validate_plugin_catalog_value(&catalog, &catalog_path)?;
+    write_json(&catalog_path, &catalog)?;
     eprintln!(
         "[xtask] 已合并 {} 个插件的多平台 OSS 制品: {}",
-        plugins.len(),
+        plugin_count,
         output_root.display()
     );
     Ok(())
@@ -1196,6 +1332,7 @@ fn merge_plugin_catalog(
         .map_err(|error| {
             invalid_data(format!("解析 {} 失败: {error}", plugin_release.display()))
         })?;
+    validate_plugin_catalog_value(&incoming_root, plugin_release)?;
     let incoming_plugins = incoming_root
         .get("plugins")
         .and_then(serde_json::Value::as_array)
@@ -1236,10 +1373,12 @@ fn merge_plugin_catalog(
     if let Some(parent) = output_catalog.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_json(
-        output_catalog,
-        &serde_json::json!({"version": 1, "plugins": plugins.into_values().collect::<Vec<_>>() }),
-    )?;
+    let merged = serde_json::json!({
+        "version": PLUGIN_CATALOG_VERSION,
+        "plugins": plugins.into_values().collect::<Vec<_>>()
+    });
+    validate_plugin_catalog_value(&merged, output_catalog)?;
+    write_json(output_catalog, &merged)?;
     eprintln!(
         "[xtask] 已将插件 {incoming_id}@{incoming_version} 合并到目录: {}",
         output_catalog.display()

@@ -13737,9 +13737,11 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "semver",
+ "serde",
  "serde_json",
  "sha2",
  "toml 1.1.4+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
