@@ -173,8 +173,11 @@ jobs:
         run: |
           fragment="target/plugin-dist/plugins-index/fragments/${PLUGIN_ID}-${EXPECTED_PLATFORM}.json"
           test -f "$fragment"
-          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json"
-          test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json.sig"
+          # release.json / release.json.sig 仅对 sidecar 插件生成；
+          # 纯 WASM 插件不产出签名清单，只要求 fragment 存在。
+          if compgen -G "target/plugin-dist/plugins/${PLUGIN_ID}/*/${EXPECTED_PLATFORM}/release.json" > /dev/null; then
+            test -f "target/plugin-dist/plugins/${PLUGIN_ID}"/*/"${EXPECTED_PLATFORM}/release.json.sig"
+          fi
 
       - name: Remove plugin signing key
         if: always() && steps.plugin_signing.outputs.key_path != ''
