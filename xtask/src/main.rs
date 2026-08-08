@@ -1,5 +1,6 @@
 //! 天工辅助构建任务。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -275,6 +276,20 @@ fn main() {
             Ok(config) => validate_plugin(config),
             Err(error) => Err(error),
         },
+        [command, input, output] if command == "merge-plugin-dist" => {
+            merge_plugin_distributions(Path::new(input), Path::new(output), None)
+        }
+        [command, plugin, input, output] if command == "merge-plugin-dist" => plugin_config(plugin)
+            .and_then(|_| {
+                merge_plugin_distributions(Path::new(input), Path::new(output), Some(plugin))
+            }),
+        [command, current, plugin_release, output] if command == "merge-plugin-catalog" => {
+            merge_plugin_catalog(
+                Path::new(current),
+                Path::new(plugin_release),
+                Path::new(output),
+            )
+        }
         [command] if command == "build-wasm" || command == "build-sidecar" => {
             eprintln!("[xtask] {command} 已合并到 build-plugin <id>");
             Err(invalid_input("请使用 build-plugin <id>"))
@@ -301,8 +316,14 @@ fn main() {
 
 fn print_help() {
     eprintln!("xtask - 天工辅助构建任务\n");
-    eprintln!("用法: cargo run -p xtask -- build-plugin <id>");
-    eprintln!("支持的插件: memory, mcp, index, scheduler, skill, coding, prompt");
+    eprintln!("用法:");
+    eprintln!("  cargo run -p xtask -- validate-plugin <id>");
+    eprintln!("  cargo run -p xtask -- build-plugin-wasm <id> <输出WASM>");
+    eprintln!("  cargo run -p xtask -- build-plugin <id>");
+    eprintln!("  cargo run -p xtask -- merge-plugin-dist [plugin-id] <输入目录> <输出目录>");
+    eprintln!(
+        "  cargo run -p xtask -- merge-plugin-catalog <当前catalog或-> <插件release> <输出catalog>"
+    );
 }
 
 fn validate_plugin(config: &PluginConfig) -> io::Result<()> {
@@ -838,4 +859,311 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn merge_plugin_distributions(
+    input_root: &Path,
+    output_root: &Path,
+    expected_plugin: Option<&str>,
+) -> io::Result<()> {
+    if !input_root.is_dir() {
+        return Err(invalid_input(format!(
+            "插件平台制品输入目录不存在: {}",
+            input_root.display()
+        )));
+    }
+    remove_dir_if_exists(output_root)?;
+    std::fs::create_dir_all(output_root.join("plugins-index"))?;
+
+    let mut fragments = Vec::new();
+    collect_fragment_files(input_root, &mut fragments)?;
+    if fragments.is_empty() {
+        return Err(invalid_data("没有找到插件目录片段"));
+    }
+    fragments.sort();
+
+    let mut releases = BTreeMap::<String, serde_json::Value>::new();
+    let mut fragment_platforms = BTreeMap::<String, BTreeSet<String>>::new();
+    for fragment_path in fragments {
+        let release: serde_json::Value = serde_json::from_slice(&std::fs::read(&fragment_path)?)
+            .map_err(|error| {
+                invalid_data(format!("解析 {} 失败: {error}", fragment_path.display()))
+            })?;
+        let id = required_json_string(&release, "id", &fragment_path)?;
+        if expected_plugin.is_some_and(|expected| expected != id) {
+            continue;
+        }
+        let version = required_json_string(&release, "version", &fragment_path)?;
+        let file_stem = fragment_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| invalid_data(format!("{} 文件名无效", fragment_path.display())))?;
+        let prefix = format!("{id}-");
+        let platform = file_stem
+            .strip_prefix(&prefix)
+            .ok_or_else(|| {
+                invalid_data(format!(
+                    "{} 文件名缺少 {prefix} 前缀",
+                    fragment_path.display()
+                ))
+            })?
+            .to_string();
+
+        let manifest = release
+            .get("manifest")
+            .cloned()
+            .ok_or_else(|| invalid_data(format!("{} 缺少 manifest", fragment_path.display())))?;
+        let wasm = release
+            .get("wasm")
+            .cloned()
+            .ok_or_else(|| invalid_data(format!("{} 缺少 wasm", fragment_path.display())))?;
+
+        let key = format!("{id}@{version}");
+        fragment_platforms
+            .entry(key.clone())
+            .or_default()
+            .insert(platform);
+
+        if let Some(existing) = releases.get_mut(&key) {
+            for field in ["id", "name", "version", "description"] {
+                if existing.get(field) != release.get(field) {
+                    return Err(invalid_data(format!(
+                        "插件 {key} 的 {field} 在不同平台不一致"
+                    )));
+                }
+            }
+            if existing.get("manifest") != Some(&manifest) || existing.get("wasm") != Some(&wasm) {
+                return Err(invalid_data(format!(
+                    "插件 {key} 的 plugin.json 或 WASM 在不同平台不一致"
+                )));
+            }
+            merge_platform_map(existing, &release, "sidecars", &key)?;
+        } else {
+            releases.insert(key, release);
+        }
+    }
+
+    if let Some(plugin) = expected_plugin {
+        if releases.is_empty() {
+            return Err(invalid_data(format!("没有找到插件 {plugin} 的目录片段")));
+        }
+        if releases.len() != 1 {
+            return Err(invalid_data(format!(
+                "插件 {plugin} 的输入包含多个版本，独立发布一次只能发布一个版本"
+            )));
+        }
+    }
+
+    let expected_platforms = std::env::var("TIANGONG_PLUGIN_EXPECTED_PLATFORMS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    for (key, platforms) in &fragment_platforms {
+        if !expected_platforms.is_empty() && platforms != &expected_platforms {
+            return Err(invalid_data(format!(
+                "插件 {key} 平台不完整: expected={expected_platforms:?}, actual={platforms:?}"
+            )));
+        }
+    }
+
+    if let Some(plugin) = expected_plugin {
+        copy_plugin_distribution_files(input_root, output_root, plugin)?;
+    } else {
+        copy_distribution_files(input_root, output_root)?;
+    }
+    let plugins = releases.into_values().collect::<Vec<_>>();
+    write_json(
+        &output_root.join("plugins-index/catalog.json"),
+        &serde_json::json!({"version": 1, "plugins": plugins}),
+    )?;
+    eprintln!(
+        "[xtask] 已合并 {} 个插件的多平台 OSS 制品: {}",
+        plugins.len(),
+        output_root.display()
+    );
+    Ok(())
+}
+
+fn collect_fragment_files(directory: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_fragment_files(&path, output)?;
+        } else if path.extension().and_then(|value| value.to_str()) == Some("json")
+            && path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str())
+                == Some("fragments")
+        {
+            output.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn required_json_string<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    path: &Path,
+) -> io::Result<&'a str> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_data(format!("{} 缺少 {field}", path.display())))
+}
+
+fn merge_platform_map(
+    existing: &mut serde_json::Value,
+    incoming: &serde_json::Value,
+    field: &str,
+    key: &str,
+) -> io::Result<()> {
+    let incoming = match incoming[field].as_object() {
+        Some(map) => map,
+        // sidecars 为 null（无 sidecar 插件）时无需合并。
+        None => return Ok(()),
+    };
+    let existing = existing[field]
+        .as_object_mut()
+        .ok_or_else(|| invalid_data(format!("插件 {key} 的 {field} 无效")))?;
+    for (platform, artifact) in incoming {
+        if existing
+            .insert(platform.clone(), artifact.clone())
+            .is_some()
+        {
+            return Err(invalid_data(format!("插件 {key} 的平台 {platform} 重复")));
+        }
+    }
+    Ok(())
+}
+
+fn copy_distribution_files(input_root: &Path, output_root: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(input_root)? {
+        let entry = entry?;
+        let source = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry.file_name() == "plugins" {
+            merge_directory(&source, &output_root.join("plugins"))?;
+        } else {
+            copy_distribution_files(&source, output_root)?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_directory(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            merge_directory(&source_path, &destination_path)?;
+        } else if destination_path.exists() {
+            if std::fs::read(&source_path)? != std::fs::read(&destination_path)? {
+                return Err(invalid_data(format!(
+                    "多平台制品内容冲突: {}",
+                    destination_path.display()
+                )));
+            }
+        } else {
+            std::fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_plugin_distribution_files(
+    input_root: &Path,
+    output_root: &Path,
+    plugin: &str,
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(input_root)? {
+        let entry = entry?;
+        let source = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry.file_name() == "plugins" {
+            let plugin_source = source.join(plugin);
+            if plugin_source.is_dir() {
+                merge_directory(&plugin_source, &output_root.join("plugins").join(plugin))?;
+            }
+        } else {
+            copy_plugin_distribution_files(&source, output_root, plugin)?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_plugin_catalog(
+    current_catalog: &Path,
+    plugin_release: &Path,
+    output_catalog: &Path,
+) -> io::Result<()> {
+    let incoming_root: serde_json::Value = serde_json::from_slice(&std::fs::read(plugin_release)?)
+        .map_err(|error| {
+            invalid_data(format!("解析 {} 失败: {error}", plugin_release.display()))
+        })?;
+    let incoming_plugins = incoming_root
+        .get("plugins")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| invalid_data("插件发布目录缺少 plugins"))?;
+    if incoming_plugins.len() != 1 {
+        return Err(invalid_data("独立插件发布目录必须只包含一个插件"));
+    }
+    let incoming = incoming_plugins[0].clone();
+    let incoming_id = required_json_string(&incoming, "id", plugin_release)?.to_string();
+    let incoming_version = required_json_string(&incoming, "version", plugin_release)?.to_string();
+    semver::Version::parse(&incoming_version).map_err(|error| {
+        invalid_data(format!(
+            "插件 {incoming_id} 版本 {incoming_version} 无效: {error}"
+        ))
+    })?;
+
+    let mut plugins = BTreeMap::<String, serde_json::Value>::new();
+    if current_catalog != Path::new("-") && current_catalog.is_file() {
+        let current: serde_json::Value = serde_json::from_slice(&std::fs::read(current_catalog)?)
+            .map_err(|error| {
+            invalid_data(format!("解析 {} 失败: {error}", current_catalog.display()))
+        })?;
+        if current.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err(invalid_data("当前插件目录版本无效"));
+        }
+        for release in current
+            .get("plugins")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| invalid_data("当前插件目录缺少 plugins"))?
+        {
+            let id = required_json_string(release, "id", current_catalog)?.to_string();
+            if plugins.insert(id.clone(), release.clone()).is_some() {
+                return Err(invalid_data(format!("当前插件目录包含重复 ID: {id}")));
+            }
+        }
+    }
+    plugins.insert(incoming_id.clone(), incoming);
+    if let Some(parent) = output_catalog.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_json(
+        output_catalog,
+        &serde_json::json!({"version": 1, "plugins": plugins.into_values().collect::<Vec<_>>() }),
+    )?;
+    eprintln!(
+        "[xtask] 已将插件 {incoming_id}@{incoming_version} 合并到目录: {}",
+        output_catalog.display()
+    );
+    Ok(())
 }
