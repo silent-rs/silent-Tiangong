@@ -221,8 +221,12 @@ jobs:
           TIANGONG_PLUGIN_EXPECTED_PLATFORMS: darwin-aarch64,linux-x86_64,windows-x86_64
         run: |
           cargo run -p xtask -- merge-plugin-dist "$PLUGIN_ID" target/plugin-platforms target/plugin-release
-          test "$(find target/plugin-release/plugins -name release.json | wc -l | tr -d ' ')" = "3"
-          test "$(find target/plugin-release/plugins -name release.json.sig | wc -l | tr -d ' ')" = "3"
+          # 纯 WASM 插件不生成 release.json/sig，只在有签名清单时验证数量。
+          release_count=$(find target/plugin-release/plugins -name release.json | wc -l | tr -d ' ')
+          if [ "$release_count" -gt 0 ]; then
+            test "$release_count" = "3"
+            test "$(find target/plugin-release/plugins -name release.json.sig | wc -l | tr -d ' ')" = "3"
+          fi
 
       - name: Upload independent release artifact
         uses: actions/upload-artifact@v4
