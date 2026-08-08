@@ -556,8 +556,12 @@ fn generate_oss_distribution(
     plugin: &Path,
     config: &PluginConfig,
 ) -> io::Result<()> {
-    // 先生成签名发布清单；无签名私钥或验签失败直接终止，避免发布未签名制品。
-    write_signed_release(plugin, config)?;
+    // 只有带 sidecar 的插件才生成签名发布清单：签名用于建立 sidecar 信任边界，
+    // 纯 WASM 插件（如 prompt）不需要 sidecar，运行时不强制要求签名。
+    let has_sidecar = config.sidecar_artifact.is_some();
+    if has_sidecar {
+        write_signed_release(plugin, config)?;
+    }
 
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
@@ -578,15 +582,17 @@ fn generate_oss_distribution(
     let dist_wasm = release_root.join(config.wasm_artifact);
     std::fs::copy(&manifest_path, &dist_manifest)?;
     std::fs::copy(plugin.join(config.wasm_artifact), &dist_wasm)?;
-    // 签名清单与签名文件复制到分平台目录，供运行时验签。
-    std::fs::copy(
-        plugin.join("release.json"),
-        platform_root.join("release.json"),
-    )?;
-    std::fs::copy(
-        plugin.join("release.json.sig"),
-        platform_root.join("release.json.sig"),
-    )?;
+    // 签名清单与签名文件复制到分平台目录，供运行时验签（仅 sidecar 插件）。
+    if has_sidecar {
+        std::fs::copy(
+            plugin.join("release.json"),
+            platform_root.join("release.json"),
+        )?;
+        std::fs::copy(
+            plugin.join("release.json.sig"),
+            platform_root.join("release.json.sig"),
+        )?;
+    }
 
     let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
         .trim_end_matches('/')
@@ -628,7 +634,7 @@ fn generate_oss_distribution(
 
     let manifest_checksum = format!("sha256:{}", sha256(&dist_manifest)?);
     let wasm_checksum = format!("sha256:{}", sha256(&dist_wasm)?);
-    let release = serde_json::json!({
+    let mut release = serde_json::json!({
         "id": config.id,
         "name": config.name,
         "version": version,
@@ -637,18 +643,21 @@ fn generate_oss_distribution(
             "url": format!("{release_url}/plugin.json"),
             "checksum": manifest_checksum,
         },
-        "signed_releases": {
-            platform.clone(): {
-                "url": format!("{release_url}/{platform}/release.json"),
-                "signature_url": format!("{release_url}/{platform}/release.json.sig"),
-            }
-        },
         "wasm": {
             "url": format!("{release_url}/{}", config.wasm_artifact),
             "checksum": wasm_checksum,
         },
         "sidecars": sidecar_entry.unwrap_or(serde_json::Value::Null),
     });
+    // 签名清单仅对 sidecar 插件生成，纯 WASM 插件不携带签名。
+    if has_sidecar {
+        release["signed_releases"] = serde_json::json!({
+            platform.clone(): {
+                "url": format!("{release_url}/{platform}/release.json"),
+                "signature_url": format!("{release_url}/{platform}/release.json.sig"),
+            }
+        });
+    }
     write_json(
         &index_root.join("catalog.json"),
         &serde_json::json!({"version": 1, "plugins": [release.clone()]}),

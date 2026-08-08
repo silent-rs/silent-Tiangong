@@ -451,13 +451,9 @@ fn validate_catalog(catalog: &PluginCatalog) -> Result<()> {
             validate_download_url(&signed.url, "插件签名清单")?;
             validate_download_url(&signed.signature_url, "插件签名文件")?;
         }
-        for (platform, signed) in &plugin.signed_releases {
-            if !plugin.sidecars.contains_key(platform) {
-                bail!(
-                    "插件 {} 的平台 {platform} 只有签名清单而没有 sidecar",
-                    plugin.id
-                );
-            }
+        // 纯 WASM 插件（如 prompt）没有 sidecar 但同样需要官方签名建立信任，
+        // 因此签名清单不强制要求对应 sidecar，这里只校验签名 URL 合法性。
+        for signed in plugin.signed_releases.values() {
             validate_download_url(&signed.url, "插件签名清单")?;
             validate_download_url(&signed.signature_url, "插件签名文件")?;
         }
