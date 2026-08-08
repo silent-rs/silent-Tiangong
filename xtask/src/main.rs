@@ -484,11 +484,81 @@ fn build_plugin(config: &PluginConfig) -> io::Result<()> {
     Ok(())
 }
 
+/// 生成插件签名发布清单（release.json）并对它做 minisign 数字签名。
+///
+/// 清单结构与运行时 `signature.rs::SignedPluginRelease` 对齐，覆盖
+/// schema、id、version、publisher、permissions 以及 plugin.json、WASM
+/// 和（若有）sidecar 的 sha256。签名失败直接报错，绝不写空签名文件。
+fn write_signed_release(plugin: &Path, config: &PluginConfig) -> io::Result<()> {
+    let manifest_path = plugin.join("plugin.json");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
+        .map_err(|error| invalid_data(format!("解析 plugin.json 失败: {error}")))?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid_data("plugin.json 缺少 version"))?;
+    let permissions = manifest
+        .get("permissions")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let mut release = serde_json::json!({
+        "schema_version": 1,
+        "id": config.id,
+        "version": version,
+        "publisher": "tiangong-official",
+        "permissions": permissions,
+        "manifest": {
+            "path": "plugin.json",
+            "sha256": sha256(&manifest_path)?,
+        },
+        "wasm": {
+            "path": config.wasm_artifact,
+            "sha256": sha256(&plugin.join(config.wasm_artifact))?,
+        },
+    });
+
+    // sidecar 声明（无 sidecar 的插件跳过，保持清单与 plugin.json 一致）。
+    if let Some(sidecar_artifact) = config.sidecar_artifact {
+        let sidecar_name = format!("{sidecar_artifact}{}", std::env::consts::EXE_SUFFIX);
+        release["sidecar"] = serde_json::json!({
+            "path": sidecar_name,
+            "sha256": sha256(&plugin.join(&sidecar_name))?,
+        });
+    }
+
+    let release_path = plugin.join("release.json");
+    write_json(&release_path, &release)?;
+
+    let key_path = std::env::var_os("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .ok_or_else(|| {
+            invalid_input("缺少插件签名私钥，请设置 TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH")
+        })?;
+    let password =
+        std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
+    let status = Command::new("cargo")
+        .args(["tauri", "signer", "sign", "-f"])
+        .arg(&key_path)
+        .args(["-p", &password])
+        .arg(&release_path)
+        .status()?;
+    if !status.success() {
+        return Err(invalid_data("插件发布清单签名失败"));
+    }
+    eprintln!("[xtask] release.json 已签名");
+    Ok(())
+}
+
 fn generate_oss_distribution(
     workspace_root: &Path,
     plugin: &Path,
     config: &PluginConfig,
 ) -> io::Result<()> {
+    // 先生成签名发布清单；无签名私钥或验签失败直接终止，避免发布未签名制品。
+    write_signed_release(plugin, config)?;
+
     let manifest_path = plugin.join("plugin.json");
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)
         .map_err(|error| invalid_data(format!("解析 {} 失败: {error}", manifest_path.display())))?;
@@ -508,6 +578,15 @@ fn generate_oss_distribution(
     let dist_wasm = release_root.join(config.wasm_artifact);
     std::fs::copy(&manifest_path, &dist_manifest)?;
     std::fs::copy(plugin.join(config.wasm_artifact), &dist_wasm)?;
+    // 签名清单与签名文件复制到分平台目录，供运行时验签。
+    std::fs::copy(
+        plugin.join("release.json"),
+        platform_root.join("release.json"),
+    )?;
+    std::fs::copy(
+        plugin.join("release.json.sig"),
+        platform_root.join("release.json.sig"),
+    )?;
 
     let base_url = env_var_or("TIANGONG_PLUGIN_OSS_BASE_URL", DEFAULT_OSS_BASE_URL)
         .trim_end_matches('/')
@@ -558,6 +637,12 @@ fn generate_oss_distribution(
             "url": format!("{release_url}/plugin.json"),
             "checksum": manifest_checksum,
         },
+        "signed_releases": {
+            platform.clone(): {
+                "url": format!("{release_url}/{platform}/release.json"),
+                "signature_url": format!("{release_url}/{platform}/release.json.sig"),
+            }
+        },
         "wasm": {
             "url": format!("{release_url}/{}", config.wasm_artifact),
             "checksum": wasm_checksum,
@@ -598,22 +683,6 @@ fn generate_oss_distribution(
         release_root.join(format!("SHA256SUMS-{platform}")),
         checksums,
     )?;
-    let release_json_path = platform_root.join("release.json");
-    write_json(&release_json_path, &release)?;
-    let sig_path = platform_root.join("release.json.sig");
-    if let Ok(key_path) = std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH") {
-        let pwd = std::env::var("TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD").unwrap_or_default();
-        let status = Command::new("cargo")
-            .args(["tauri", "signer", "sign", "-k", &key_path, "-p", &pwd])
-            .arg(&release_json_path)
-            .status();
-        match status {
-            Ok(s) if s.success() => eprintln!("[xtask] release.json signed"),
-            _ => std::fs::write(&sig_path, "")?,
-        }
-    } else {
-        std::fs::write(&sig_path, "")?;
-    }
 
     eprintln!("[xtask] OSS 制品已生成: {}", dist_root.display());
     Ok(())
@@ -938,6 +1007,7 @@ fn merge_plugin_distributions(
                 )));
             }
             merge_platform_map(existing, &release, "sidecars", &key)?;
+            merge_platform_map(existing, &release, "signed_releases", &key)?;
         } else {
             releases.insert(key, release);
         }
