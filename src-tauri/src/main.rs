@@ -422,6 +422,8 @@ fn run_gui() {
             tiangong_app::commands::reload_plugin,
             tiangong_app::commands::plugin_open_view,
             tiangong_app::commands::plugin_call,
+            tiangong_app::commands::check_default_plugins,
+            tiangong_app::commands::complete_first_launch,
             tiangong_app::commands::get_trust_mode,
             tiangong_app::commands::set_trust_mode,
             tiangong_app::commands::get_default_trust_mode,

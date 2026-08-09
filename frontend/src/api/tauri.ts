@@ -430,6 +430,13 @@ export interface BotTransferProgress {
   total: number;
 }
 
+/// 插件安装/升级下载进度事件。
+export interface PluginInstallProgress {
+  plugin_id: string;
+  downloaded: number;
+  total: number;
+}
+
 export type ProvisionStatus =
   | { status: 'pending'; retry_after?: number }
   | { status: 'success' }
@@ -749,6 +756,9 @@ export const api = {
 
   onBotInstallProgress: (callback: (progress: BotTransferProgress) => void) =>
     listen<BotTransferProgress>('bot_install_progress', (event) => callback(event.payload)),
+
+  onPluginInstallProgress: (callback: (progress: PluginInstallProgress) => void) =>
+    listen<PluginInstallProgress>('plugin_install_progress', (event) => callback(event.payload)),
 
   botStart: (id: string): Promise<string> =>
     invoke('bot_start', { id }),
@@ -1116,6 +1126,10 @@ export const api = {
 
   listAvailablePlugins: (): Promise<AvailablePlugin[]> => invoke('list_available_plugins'),
 
+  checkDefaultPlugins: (): Promise<DefaultPluginCheck> => invoke('check_default_plugins'),
+
+  completeFirstLaunch: (): Promise<void> => invoke('complete_first_launch'),
+
   importLocalPlugin: (path: string): Promise<PluginStatus> =>
     invoke('import_local_plugin', { path }),
 
@@ -1181,4 +1195,17 @@ export interface AvailablePlugin {
   supported: boolean;
   installed_version: string | null;
   update_available: boolean;
+  is_default: boolean;
+  /// 场景分类标签（多标签，`daily` / `coding` 的任意组合）。
+  categories: string[];
+}
+
+/// 首次启动推荐安装检测结果。
+export interface DefaultPluginCheck {
+  /// 是否需要弹出首次启动推荐引导。
+  first_launch_pending: boolean;
+  /// 缺失的默认插件。
+  missing: AvailablePlugin[];
+  /// OSS 目录拉取失败原因。
+  catalog_error: string | null;
 }

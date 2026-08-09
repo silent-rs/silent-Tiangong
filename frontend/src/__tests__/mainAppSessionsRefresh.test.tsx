@@ -80,6 +80,9 @@ vi.mock('@tauri-apps/api/window', () => ({
   },
 }));
 vi.mock('@/components/AppSidebar', () => ({ AppSidebar: () => null }));
+vi.mock('@/components/DefaultPluginOnboarding', () => ({
+  DefaultPluginOnboarding: () => null,
+}));
 vi.mock('@/components/LazyComponents', () => ({
   LazyMessageInput: () => null,
   LazyMessageList: () => null,

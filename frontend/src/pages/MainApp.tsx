@@ -2,12 +2,14 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/store/useStore';
 import {
   api,
+  type AvailablePlugin,
   type SessionStreamEvent,
   type TabKind,
   type TabState,
   type TerminalTabInfo,
 } from '@/api/tauri';
 import { AppSidebar } from '@/components/AppSidebar';
+import { DefaultPluginOnboarding } from '@/components/DefaultPluginOnboarding';
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { LazyMessageList, LazyMessageInput, LazyStatusPanel } from '@/components/LazyComponents';
 import { TabsContainer } from '@/components/TabsContainer';
@@ -115,6 +117,8 @@ export function MainApp() {
   const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // 首次启动推荐安装的缺失默认插件列表；为 null 时不显示引导对话框。
+  const [onboardingMissing, setOnboardingMissing] = useState<AvailablePlugin[] | null>(null);
   const showWorkspacePanelRef = useRef(false);
   const workspaceTabKindRef = useRef<TabKind>('browser');
   const workspaceOpenRequestIdRef = useRef(0);
@@ -329,6 +333,16 @@ export function MainApp() {
     }).catch(console.warn);
 
     loadSessions();
+
+    // 首次启动时检测缺失的默认插件，有缺失则弹出推荐安装引导。
+    // 独立 catch，网络异常或检测失败都不影响主初始化流程。
+    api.checkDefaultPlugins()
+      .then((check) => {
+        if (check.first_launch_pending && check.missing.length > 0) {
+          setOnboardingMissing(check.missing);
+        }
+      })
+      .catch((error) => console.warn('默认插件检测失败', error));
 
     const flushStreamEvents = () => {
       streamEventTimerRef.current = null;
@@ -591,6 +605,16 @@ export function MainApp() {
           </main>
         </div>
       </div>
+
+      <DefaultPluginOnboarding
+        missing={onboardingMissing}
+        onOpenChange={(open) => {
+          if (!open) setOnboardingMissing(null);
+        }}
+        onComplete={() => {
+          /* 安装后 registry 会热加载，Core 创建时按需感知已装插件，无需额外刷新 */
+        }}
+      />
     </SidebarProvider>
   );
 }

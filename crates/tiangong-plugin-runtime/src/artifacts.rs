@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -17,6 +18,55 @@ pub const PLUGIN_CATALOG_ENDPOINT: &str =
     "https://silent-tiangong.oss-cn-hangzhou.aliyuncs.com/plugins-index/catalog.json";
 const CATALOG_VERSION: u32 = 1;
 const TRANSACTIONS_DIR: &str = ".transactions";
+const FIRST_LAUNCH_MARKER: &str = ".first_launch_completed";
+
+/// 默认插件 ID 列表。
+///
+/// 这些插件提供 Agent 的基础能力（系统提示词、文件操作、命令执行、网络获取、
+/// 索引搜索、技能管理、MCP 工具桥接），确保用户安装后即可获得基本体验。
+pub const DEFAULT_PLUGIN_IDS: &[&str] =
+    &["prompt", "fs", "command", "fetch", "index", "skill", "mcp"];
+
+/// 场景分类常量：日常工作。
+pub const CATEGORY_DAILY: &str = "daily";
+/// 场景分类常量：编程开发。
+pub const CATEGORY_CODING: &str = "coding";
+
+/// 返回某插件的场景分类标签（多标签，可同时属于多个分类）。
+///
+/// 未在映射中声明的插件默认归入日常分类，保证插件市场不会出现无分类的孤立条目。
+pub fn plugin_categories(id: &str) -> Vec<&'static str> {
+    match id {
+        // 基础能力：日常与编程通用。
+        "prompt" | "fs" | "command" | "fetch" | "index" | "skill" | "mcp" | "memory" => {
+            vec![CATEGORY_DAILY, CATEGORY_CODING]
+        }
+        // 编程开发专属。
+        "coding" => vec![CATEGORY_CODING],
+        // 其余（定时任务、多媒体生成/分析）默认归入日常。
+        _ => vec![CATEGORY_DAILY],
+    }
+}
+
+/// 判断插件是否属于默认插件集合。
+pub fn is_default_plugin(id: &str) -> bool {
+    DEFAULT_PLUGIN_IDS.contains(&id)
+}
+
+/// 首次启动引导是否已完成（标记文件存在即视为完成）。
+pub fn is_first_launch_completed(storage_root: &Path) -> bool {
+    storage_root.join(FIRST_LAUNCH_MARKER).is_file()
+}
+
+/// 写入首次启动完成标记。内容为当前本地时间，便于排查。
+pub fn mark_first_launch_completed(storage_root: &Path) -> Result<()> {
+    let marker = storage_root.join(FIRST_LAUNCH_MARKER);
+    std::fs::create_dir_all(storage_root)
+        .with_context(|| format!("创建存储目录失败: {}", storage_root.display()))?;
+    let timestamp = chrono::Local::now().naive_local().to_string();
+    std::fs::write(&marker, timestamp)
+        .with_context(|| format!("写入首次启动标记失败: {}", marker.display()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginCatalog {
@@ -59,6 +109,12 @@ pub struct AvailablePlugin {
     pub supported: bool,
     pub installed_version: Option<String>,
     pub update_available: bool,
+    /// 是否为默认插件（基础能力，首次启动时会推荐安装）。
+    #[serde(default)]
+    pub is_default: bool,
+    /// 场景分类标签（多标签，值为 `daily` / `coding` 的任意组合）。
+    #[serde(default)]
+    pub categories: Vec<&'static str>,
 }
 
 pub struct StagedPlugin {
@@ -118,6 +174,9 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
     Ok(staged)
 }
 
+/// 下载进度回调：`(downloaded_bytes, total_bytes)`。total 为 0 表示总大小未知。
+pub type ProgressFn = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
 pub struct PluginRepository {
     http: reqwest::Client,
 }
@@ -148,6 +207,8 @@ impl PluginRepository {
                 AvailablePlugin {
                     supported: plugin.sidecars.is_empty()
                         || plugin.sidecars.contains_key(&platform),
+                    is_default: is_default_plugin(&plugin.id),
+                    categories: plugin_categories(&plugin.id),
                     id: plugin.id,
                     name: plugin.name,
                     version: plugin.version,
@@ -159,14 +220,20 @@ impl PluginRepository {
             .collect())
     }
 
-    pub async fn download(&self, storage_root: &Path, plugin_id: &str) -> Result<StagedPlugin> {
+    pub async fn download(
+        &self,
+        storage_root: &Path,
+        plugin_id: &str,
+        progress: Option<ProgressFn>,
+    ) -> Result<StagedPlugin> {
         let catalog = self.fetch_catalog().await?;
         let release = catalog
             .plugins
             .into_iter()
             .find(|plugin| plugin.id == plugin_id)
             .ok_or_else(|| anyhow!("OSS 插件目录中不存在: {plugin_id}"))?;
-        self.download_release(storage_root, &release).await
+        self.download_release(storage_root, &release, progress)
+            .await
     }
 
     async fn fetch_catalog(&self) -> Result<PluginCatalog> {
@@ -196,12 +263,14 @@ impl PluginRepository {
         &self,
         storage_root: &Path,
         release: &PluginRelease,
+        progress: Option<ProgressFn>,
     ) -> Result<StagedPlugin> {
         let staged = create_staged_plugin(storage_root)?;
 
+        // manifest 体积小，先单独下载（不纳入分段进度统计）。
         let manifest_path = staged.path.join(MANIFEST_FILE);
         validate_artifact_file_name(&release.manifest.url, MANIFEST_FILE)?;
-        self.download_file(&release.manifest, &manifest_path)
+        self.download_file(&release.manifest, &manifest_path, None)
             .await?;
         let manifest = PluginManifest::load(&manifest_path)?;
         if manifest.id != release.id {
@@ -219,6 +288,37 @@ impl PluginRepository {
             );
         }
 
+        // 统计需要下载的制品文件，用于把进度按文件均分到 [0, 100]。
+        let platform = current_platform_key();
+        let mut steps: Vec<(usize, usize)> = Vec::new();
+        // (wasm 必有)
+        steps.push((0, 0));
+        let has_sidecar = manifest.sidecar.is_some();
+        if has_sidecar {
+            steps.push((0, 0));
+        }
+        let has_signed = manifest.sidecar.is_some() || !release.signed_releases.is_empty();
+        if has_signed {
+            // release.json + release.json.sig 合并视为一个进度段。
+            steps.push((0, 0));
+        }
+        let total_steps = steps.len().max(1);
+        // 复用闭包：把单文件内的字节进度映射到全局百分比区间。
+        let make_file_progress = |index: usize| -> Option<ProgressFn> {
+            let progress = progress.clone()?;
+            let start = (index * 100 / total_steps) as u64;
+            let end = ((index + 1) * 100 / total_steps) as u64;
+            Some(Arc::new(move |downloaded: u64, content_len: u64| {
+                let ratio = if content_len > 0 {
+                    downloaded as f64 / content_len as f64
+                } else {
+                    1.0
+                };
+                let percent = start as f64 + ratio * (end - start) as f64;
+                progress(percent.round() as u64, 100);
+            }))
+        };
+
         let wasm_path = staged.path.join(manifest.wasm_binary());
         let wasm_name = manifest
             .wasm_binary()
@@ -226,42 +326,46 @@ impl PluginRepository {
             .and_then(|value| value.to_str())
             .ok_or_else(|| anyhow!("WASM 制品文件名无效"))?;
         validate_artifact_file_name(&release.wasm.url, wasm_name)?;
-        self.download_file(&release.wasm, &wasm_path).await?;
+        self.download_file(&release.wasm, &wasm_path, make_file_progress(0))
+            .await?;
 
-        match &manifest.sidecar {
-            Some(sidecar) => {
-                let platform = current_platform_key();
-                let artifact = release.sidecars.get(&platform).ok_or_else(|| {
-                    anyhow!("插件 {} 没有当前平台 {platform} 的 sidecar", release.id)
-                })?;
-                let sidecar_path = staged.path.join(with_executable_suffix(&sidecar.binary)?);
-                let sidecar_name = sidecar_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| anyhow!("sidecar 文件名无效"))?;
-                validate_artifact_file_name(&artifact.url, sidecar_name)?;
-                self.download_file(artifact, &sidecar_path).await?;
-                set_executable(&sidecar_path)?;
-            }
-            None if !release.sidecars.is_empty() => {
-                bail!(
-                    "插件 {} 未声明 sidecar，但 OSS 目录包含 sidecar",
-                    release.id
-                );
-            }
-            None => {}
+        if has_sidecar {
+            let artifact = release
+                .sidecars
+                .get(&platform)
+                .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的 sidecar", release.id))?;
+            let sidecar_binary = manifest.sidecar.as_ref().expect("已确认存在 sidecar");
+            let sidecar_path = staged
+                .path
+                .join(with_executable_suffix(&sidecar_binary.binary)?);
+            let sidecar_name = sidecar_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| anyhow!("sidecar 文件名无效"))?;
+            validate_artifact_file_name(&artifact.url, sidecar_name)?;
+            self.download_file(artifact, &sidecar_path, make_file_progress(1))
+                .await?;
+            set_executable(&sidecar_path)?;
+        } else if !release.sidecars.is_empty() {
+            bail!(
+                "插件 {} 未声明 sidecar，但 OSS 目录包含 sidecar",
+                release.id
+            );
         }
 
-        if manifest.sidecar.is_some() || !release.signed_releases.is_empty() {
-            let platform = current_platform_key();
+        if has_signed {
             let signed = release
                 .signed_releases
                 .get(&platform)
                 .ok_or_else(|| anyhow!("插件 {} 没有当前平台 {platform} 的签名清单", release.id))?;
+            let signed_index = if has_sidecar { 2 } else { 1 };
             self.download_unchecked(&signed.url, &staged.path.join("release.json"))
                 .await?;
             self.download_unchecked(&signed.signature_url, &staged.path.join("release.json.sig"))
                 .await?;
+            if let Some(cb) = make_file_progress(signed_index) {
+                cb(100, 100);
+            }
         }
         for directory in ["runtime", "logs", "data"] {
             std::fs::create_dir_all(staged.path.join(directory))?;
@@ -283,7 +387,12 @@ impl PluginRepository {
         std::fs::write(destination, response.bytes().await?)
             .with_context(|| format!("写入插件签名制品失败: {}", destination.display()))
     }
-    async fn download_file(&self, artifact: &RemoteArtifact, destination: &Path) -> Result<()> {
+    async fn download_file(
+        &self,
+        artifact: &RemoteArtifact,
+        destination: &Path,
+        progress: Option<ProgressFn>,
+    ) -> Result<()> {
         let expected = parse_checksum(&artifact.checksum)?;
         validate_download_url(&artifact.url, "插件制品")?;
         if let Some(parent) = destination.parent() {
@@ -306,6 +415,7 @@ impl PluginRepository {
                 artifact.url
             );
         }
+        let content_len = response.content_length();
 
         let mut stream = response.bytes_stream();
         let mut hasher = Sha256::new();
@@ -314,11 +424,16 @@ impl PluginRepository {
             .create_new(true)
             .open(destination)
             .with_context(|| format!("创建插件制品失败: {}", destination.display()))?;
+        let mut downloaded: u64 = 0;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("读取插件制品失败: {}", artifact.url))?;
             hasher.update(&chunk);
             file.write_all(&chunk)
                 .with_context(|| format!("写入插件制品失败: {}", destination.display()))?;
+            if let Some(cb) = &progress {
+                downloaded += chunk.len() as u64;
+                cb(downloaded, content_len.unwrap_or(0));
+            }
         }
         file.sync_all()
             .with_context(|| format!("同步插件制品失败: {}", destination.display()))?;
