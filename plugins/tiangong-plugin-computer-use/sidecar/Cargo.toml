@@ -1,0 +1,32 @@
+[package]
+name = "tiangong-plugin-computer-use-sidecar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Computer Use 独立 sidecar 进程（访问 Windows UI Automation / macOS AXUIElement / Linux AT-SPI2）"
+publish = false
+
+[[bin]]
+name = "tiangong-computer-use-sidecar"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tiangong-plugin-computer-use-protocol = { workspace = true }
+tiangong-plugin-runtime = { workspace = true }
+tiangong-plugin-sidecar = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "signal", "macros", "time", "io-util", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# macOS 后端：使用与项目一致的 objc2 系列。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow"] }

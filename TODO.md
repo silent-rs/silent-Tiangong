@@ -1395,3 +1395,150 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - `cargo run -p xtask -- validate-plugin generate-image-openai` 校验通过。
 - 提图逻辑单测覆盖三种响应形态 + 无图片错误。
 - 设置页能看到「OpenAI 生图」入口，配置页能加载并保存。
+
+# #350 跨平台桌面应用控制 Computer Use 插件 TODO
+
+关联 Issue #350、#301。将 Windows UI Automation、macOS AXUIElement、Linux AT-SPI2 统一为同一组 Agent 工具，按 WASM + sidecar + 私有协议组织。
+
+## 目标与边界
+
+- [ ] 新增 `computer-use` 插件（目录 `plugins/tiangong-plugin-computer-use/`），把三平台系统无障碍能力统一为 `desktop_status`、`desktop_list_windows`、`desktop_snapshot`、`desktop_find`、`desktop_action`、`desktop_wait` 六个工具。
+- [ ] 按 WASM + sidecar + 私有协议组织：WASM 声明工具、校验参数、编排调用、统一结果与提示词；sidecar 访问原生无障碍接口；私有协议定义操作名、请求、响应、平台能力和错误类型。
+- [ ] 以语义定位为主，按控件含义读取界面树、按稳定标识与类型匹配，不以坐标作为主要定位方式。
+- [ ] 操作后等待预期窗口或控件状态出现，形成“读取 → 操作 → 确认”闭环。
+- [ ] 不实现截图识别、OCR、图像匹配和坐标点击；不替代内嵌浏览器插件；不为单个应用编写专属流程。
+- [ ] 不控制 UAC、安全桌面、锁屏、登录界面等受保护界面，不自动提升进程权限。
+- [ ] 插件停用或当前环境不可用时，不影响 Desktop、CLI、Server 启动和其他工具。
+- [ ] Runtime、App 不增加 Computer Use 专用分支、类型或平台判断。
+
+## 当前任务：插件骨架与构建接入
+
+- [x] 创建 `plugins/tiangong-plugin-computer-use/`，包含 `plugin.json`、`protocol`、`wasm`、`sidecar` 四个子结构。
+- [x] 编写 `plugin.json`：id `computer-use`、版本、WASM/sidecar 二进制名、`permissions: ["sidecar.invoke"]`、`entrypoints`。
+- [x] 创建私有协议 crate，定义操作名、请求/响应结构、平台能力和错误类型枚举（含 `unsupported_platform`、`desktop_session_unavailable`、`permission_denied`、`application_not_found`、`window_not_found`、`element_not_found`、`ambiguous_match`、`stale_element`、`action_not_supported`、`sensitive_value_redacted`、`timeout`、`backend_unavailable`）。
+- [x] 创建 WASM crate，声明六个工具的输入/输出 schema、校验通用参数、编排 sidecar 调用并统一结果格式。
+- [x] 创建 sidecar crate 骨架，预留平台后端 trait 与当前平台能力探测，未实现平台返回 `unsupported_platform`。
+- [x] 在根 `Cargo.toml` 注册 protocol/wasm/sidecar 三个 workspace member 与 workspace.dependencies 路径。
+- [x] 在 `xtask/src/main.rs` 注册 `build-plugin computer-use`，复用现有协议检查、WASM/sidecar 构建与制品生成流程。
+
+### 当前任务完成标准
+
+- `cargo check --workspace` 通过，三个新 crate 能正常编译。
+- `cargo run -p xtask -- build-plugin computer-use` 能完成协议检查、WASM 与 sidecar 构建、部署和 OSS 制品生成（本地构建已生成 wasm/sidecar 产物，OSS 签名需发布密钥）。
+- 插件可被现有运行时加载，描述符、sidecar 握手与清单 ID、版本一致；未实现平台返回 `unsupported_platform` 且不影响宿主启动。
+
+## 当前任务：六个工具的输入、输出与临时引用规则
+
+- [x] 定义 `desktop_status`：返回当前平台、图形会话状态、无障碍能力是否可用、授权状态和受支持的动作类型；不触发应用动作。
+- [x] 定义 `desktop_list_windows`：按应用名称、进程编号和是否前台筛选；每个窗口返回应用标识、进程编号、临时窗口引用、标题、是否前台、边界、可见性、可用状态和平台稳定标识。
+- [x] 定义 `desktop_snapshot`：必须提供目标应用或窗口范围，支持限制最大深度、最大节点数及是否包含不可见控件；每个控件返回临时引用、role/control type、名称、稳定标识、当前值、可见/可用/焦点状态、边界、支持动作、父子关系；密码框和敏感控件不返回真实值。
+- [x] 定义 `desktop_find`：按稳定标识、控件类型、名称或描述、当前值、可见/可用/焦点状态组合查找，支持精确或包含匹配；匹配优先级为“稳定标识 + 类型”，名称仅作补充；无匹配或多匹配均返回候选，不默认操作第一个同名控件。
+- [x] 定义 `desktop_action`：对明确临时控件引用执行 `focus`、`press`、`set_value`、`toggle`、`select`、`expand`、`collapse`、`scroll_into_view`；执行前重新确认目标进程、窗口和控件身份。
+- [x] 定义 `desktop_wait`：等待窗口或控件满足出现、消失、获得焦点、可用状态变化或值变化；优先平台事件，事件不可用时有限轮询；所有等待有明确超时，不用固定 `sleep` 作成功判断。
+- [x] 明确临时控件引用仅在短时间和对应快照内有效，不持久化；每次动作重新校验身份。
+
+### 当前任务完成标准
+
+- 六个工具的请求/响应结构和错误类型在私有协议中完整定义，并有可序列化示例。
+- 控件树遍历受深度、节点数和耗时限制，超限返回截断结果；单个控件读取失败不影响整棵树，保留可用节点并返回告警。
+- 密码框和受保护输入不返回真实值，统一标记为 `sensitive_value_redacted`。
+
+## 当前任务：Windows UI Automation 后端
+
+- [ ] 使用 Windows UI Automation 实现，不以 PowerShell 脚本作为正式调用链。
+- [ ] 从桌面根节点按进程编号和顶层窗口缩小范围，优先使用 Control View，避免无边界遍历整个桌面。
+- [ ] 读取 `AutomationId`、`Name`、`ControlType`、可见性、可用状态、边界和支持的 Pattern。
+- [ ] 动作按控件支持情况调用 `Invoke`、`Value`、`Toggle`、`SelectionItem`、`ExpandCollapse`、`ScrollItem` 等 Pattern。
+- [ ] 目标窗口属于更高权限进程或安全桌面时返回权限受限，不提升权限绕过。
+
+### 当前任务完成标准
+
+- 选择至少一个 Windows 原生应用，能够列出窗口、读取嵌套按钮、执行按钮动作并确认新状态。
+- 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
+- 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
+
+## 当前任务：macOS AXUIElement 后端
+
+- [ ] 使用 `AXUIElement` / `AXObserver`，AppleScript 仅用于开发验证，不作为正式调用链。
+- [ ] 通过目标进程创建应用对象，递归读取 `AXChildren`，优先匹配 `AXIdentifier`、`AXRole`、`AXTitle` 和 `AXDescription`。
+- [ ] 使用 `AXPress`、`AXSetValue`、`AXRaise` 等目标控件实际支持的动作。
+- [x] 启动时检查辅助功能授权，未授权时返回可操作的提示，并允许用户触发系统授权入口。
+- [ ] 验证 sidecar 签名身份，避免每次插件升级都要求用户重新授权。
+
+### 当前任务完成标准
+
+- 选择至少一个 macOS 原生应用，能够列出窗口、读取嵌套按钮、执行按钮动作并确认新状态。
+- 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
+- 未授权时返回明确错误，宿主保持正常运行。
+
+> 当前进度：已通过 `objc2-app-kit` 的 `NSWorkspace` 实现 `desktop_list_windows`（列举运行中的应用窗口），通过 ApplicationServices 的 `AXIsProcessTrusted` 探测辅助功能授权并区分未授权错误（已在本机诊断程序验证）。完整的 `AXChildren` 控件树递归遍历、控件动作与 AXObserver 事件等待为后续增量工作。
+
+## 当前任务：Linux AT-SPI2 后端
+
+- [ ] 使用 AT-SPI2，通过桌面会话的 accessibility bus 读取应用、窗口和控件。
+- [ ] 使用 Accessible、Action、Value、Selection、Component 等接口完成读取和动作。
+- [ ] 支持 GTK、Qt、Electron 等正常暴露 AT-SPI 信息的应用。
+- [ ] Wayland 下仍以 AT-SPI 语义动作为主，不依赖 `xdotool`、`wmctrl` 等 X11 坐标工具。
+- [ ] 没有 accessibility bus、运行在纯 SSH/容器环境或受 Flatpak/Snap 策略限制时，返回环境不可用及原因。
+
+### 当前任务完成标准
+
+- 选择至少一个 Linux 原生应用，能够列出窗口、读取嵌套按钮、执行按钮动作并确认新状态。
+- 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
+- 无图形会话时返回明确错误，宿主保持正常运行。
+
+## 当前任务：事件等待、引用有效性与新窗口重新发现
+
+- [ ] 实现事件等待、超时、节点数量限制和过期引用处理。
+- [ ] 动作打开新顶层窗口或新进程时，重新从桌面根节点发现目标，不只搜索旧窗口后代。
+- [ ] 控件已销毁或属性变化时返回 `stale_element`，不误操作其他控件。
+- [ ] 进程编号只用于缩小当前范围，不作为跨启动稳定身份。
+
+### 当前任务完成标准
+
+- 同名控件存在多个候选时返回歧义，不执行动作。
+- 操作后产生新顶层窗口或新进程时，能够重新发现并读取新窗口。
+- 控件已销毁或属性变化时返回过期引用，不误操作其他控件。
+
+## 当前任务：权限、敏感信息与操作记录
+
+- [ ] 读取控件树同样视为有风险操作，不当作无风险。
+- [ ] 遵循现有会话信任模式，监督模式下执行动作必须经过用户批准。
+- [ ] 密码框、令牌输入框和系统标记为受保护的内容统一隐藏。
+- [ ] 不静默选择同名控件，不在目标应用之外扩大搜索范围，不自动提升进程权限。
+- [ ] 系统拒绝授权时停止操作并说明原因，不自动反复弹出授权请求。
+- [ ] 工具执行记录至少包含会话、应用身份、进程编号、窗口、控件摘要、动作、结果和真实时间。
+
+### 当前任务完成标准
+
+- 密码和受保护输入内容不出现在工具结果、错误或日志中。
+- 监督模式下动作未获批准时不执行。
+- 执行记录可追溯，且不含原始敏感值。
+
+## 当前任务：插件生命周期与多入口兼容
+
+- [ ] 插件停用后立即移除工具和提示，重新启用无需重启应用。
+- [ ] Desktop 中插件能力正常；CLI/Server 在无桌面环境下返回不可用但可以正常启动。
+- [ ] 完成当前平台完整插件构建，并验证本地导入、热加载、停用和卸载。
+- [ ] Runtime、App 和其他插件中不存在 Computer Use 专用平台分支。
+
+### 当前任务完成标准
+
+- WASM、私有协议、sidecar 和完整插件制品均能正常构建。
+- 插件可完成本地导入、启停和热加载。
+- 不支持无障碍控件树的应用返回能力不足，不自动退化为坐标点击。
+
+## 整体验收标准
+
+- Windows、macOS、Linux 各选择至少一个系统原生应用，能够列出窗口、读取嵌套按钮、执行按钮动作并确认新状态。
+- 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
+- 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
+- 同名控件存在多个候选时返回歧义，不执行动作。
+- 操作后产生新顶层窗口或新进程时，能够重新发现并读取新窗口。
+- 控件已销毁或属性变化时返回过期引用，不误操作其他控件。
+- macOS 未授权、Linux 无图形会话或 Windows 权限等级不匹配时返回明确错误，宿主保持正常运行。
+- 密码和受保护输入内容不会出现在工具结果、错误或日志中。
+- 不支持无障碍控件树的应用返回能力不足，不自动退化为坐标点击。
+- Desktop 中插件能力正常；CLI/Server 在无桌面环境下返回不可用但可以正常启动。
+- Runtime、App 和其他插件中不存在 Computer Use 专用平台分支。
+- WASM、私有协议、sidecar 和完整插件制品均能够正常构建，插件可完成本地导入、启停和热加载。

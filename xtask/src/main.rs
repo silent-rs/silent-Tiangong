@@ -203,6 +203,20 @@ const COMMAND: PluginConfig = PluginConfig {
     protocol_manifest: "plugins/tiangong-plugin-command/protocol/Cargo.toml",
 };
 
+const COMPUTER_USE: PluginConfig = PluginConfig {
+    id: "computer-use",
+    name: "Computer Use",
+    description: "跨平台桌面应用控制（Windows UI Automation / macOS AXUIElement / Linux AT-SPI2）",
+    protocol_crate: "tiangong-plugin-computer-use-protocol",
+    wasm_crate: "tiangong-plugin-computer-use-wasm",
+    wasm_artifact: "tiangong_plugin_computer_use_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-computer-use-sidecar"),
+    sidecar_artifact: Some("tiangong-computer-use-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-computer-use",
+    plugin_manifest: "plugins/tiangong-plugin-computer-use/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-computer-use/protocol/Cargo.toml",
+};
+
 const TEXT_TO_SPEECH: PluginConfig = PluginConfig {
     id: "text-to-speech",
     name: "Text To Speech",
@@ -305,6 +319,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "generate-video" => Ok(&GENERATE_VIDEO),
         "fs" => Ok(&FS),
         "command" => Ok(&COMMAND),
+        "computer-use" => Ok(&COMPUTER_USE),
         other => Err(invalid_input(format!("暂不支持插件: {other}"))),
     }
 }
