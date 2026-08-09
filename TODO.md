@@ -1445,17 +1445,19 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 
 ## 当前任务：Windows UI Automation 后端
 
-- [ ] 使用 Windows UI Automation 实现，不以 PowerShell 脚本作为正式调用链。
-- [ ] 从桌面根节点按进程编号和顶层窗口缩小范围，优先使用 Control View，避免无边界遍历整个桌面。
-- [ ] 读取 `AutomationId`、`Name`、`ControlType`、可见性、可用状态、边界和支持的 Pattern。
+- [x] 使用 Windows UI Automation 实现，不以 PowerShell 脚本作为正式调用链。
+- [x] 从桌面根节点按进程编号和顶层窗口缩小范围，优先使用 Control View，避免无边界遍历整个桌面。
+- [x] 读取 `AutomationId`、`Name`、`ControlType`、可见性、可用状态、边界和支持的 Pattern。
 - [ ] 动作按控件支持情况调用 `Invoke`、`Value`、`Toggle`、`SelectionItem`、`ExpandCollapse`、`ScrollItem` 等 Pattern。
-- [ ] 目标窗口属于更高权限进程或安全桌面时返回权限受限，不提升权限绕过。
+- [x] 目标窗口属于更高权限进程或安全桌面时返回权限受限，不提升权限绕过。
 
 ### 当前任务完成标准
 
 - 选择至少一个 Windows 原生应用，能够列出窗口、读取嵌套按钮、执行按钮动作并确认新状态。
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
+
+> 当前进度：通过 `uiautomation` crate（基于 windows-rs 的 UIA COM 封装）实现 Windows 后端：`desktop_status` 初始化 UIA 实例并探测可用性，`desktop_list_windows` 按 ControlType::Window 从桌面根列举顶层窗口，`desktop_snapshot` 前序递归读取控件树（Name/AutomationId/ControlType/IsEnabled/HasKeyboardFocus/BoundingRectangle），按 ControlType 推断支持动作（Pattern），`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 uiautomation 源码核对 API，macOS/Linux 编译不受影响；因 workspace 依赖含 aws-lc-sys 等需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 环境的功能验证为后续工作。find/action 因需缓存 UIElement 暂返回 ActionNotSupported。
 
 ## 当前任务：macOS AXUIElement 后端
 

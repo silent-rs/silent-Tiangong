@@ -112,9 +112,7 @@ fn cfg_if_current_backend() -> Box<dyn Backend> {
 
 #[cfg(target_os = "windows")]
 fn cfg_if_current_backend() -> Box<dyn Backend> {
-    Box::new(crate::backend::stub::StubBackend::unsupported(
-        Platform::Windows,
-    ))
+    Box::new(crate::backend::windows::WindowsBackend::new())
 }
 
 #[cfg(target_os = "linux")]
@@ -137,10 +135,9 @@ pub mod ax;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 /// 通用存根后端：用于尚未实现原生能力的平台，返回明确的能力不足结果。
-#[cfg(any(
-    target_os = "windows",
-    not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
-))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub mod stub;
