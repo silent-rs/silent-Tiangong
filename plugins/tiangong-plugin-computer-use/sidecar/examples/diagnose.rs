@@ -53,28 +53,26 @@ async fn main() {
 
     // 控件树快照：选一个前台且有界面的应用。
     println!("\n--- desktop_snapshot ---");
-    // 优先选访达（常驻、有按钮，便于验证 find/action），其次前台应用。
-    let target_name = match backend.list_windows(&ListWindowsRequest::default()).await {
+    // 选一个窗口：优先前台应用，用其窗口引用（含 pid）定位快照，避免应用名歧义。
+    let target_window = match backend.list_windows(&ListWindowsRequest::default()).await {
         DesktopResult::Ok(r) => r
             .windows
             .iter()
-            .find(|w| w.app_name.contains("访达") || w.app_name.contains("Finder"))
-            .or_else(|| {
-                r.windows
-                    .iter()
-                    .find(|w| w.is_foreground && !w.app_name.is_empty())
-            })
+            .find(|w| w.is_foreground && !w.app_name.is_empty())
             .or_else(|| r.windows.iter().find(|w| !w.app_name.is_empty()))
-            .map(|w| w.app_name.clone()),
+            .cloned(),
         _ => None,
     };
-    match target_name {
-        Some(name) => {
-            println!("快照目标应用: {name}");
+    match target_window {
+        Some(window) => {
+            println!(
+                "快照目标窗口: {} (pid={}, 引用 {})",
+                window.app_name, window.pid, window.element.id
+            );
             let snap_req = SnapshotRequest {
                 scope: tiangong_plugin_computer_use_protocol::ops::SnapshotScope {
-                    window: None,
-                    app_name: Some(name.clone()),
+                    window: Some(window.element.clone()),
+                    app_name: None,
                     pid: None,
                 },
                 max_depth: 0,
@@ -134,25 +132,22 @@ async fn main() {
         ActionRequest, ActionRequestKind, FindConditions, FindRequest, SnapshotScope,
     };
     // 先取应用快照，再用快照版本调 find。优先访达。
-    let target_app = match backend.list_windows(&ListWindowsRequest::default()).await {
+    // find：用前台窗口引用取快照，再用快照版本调真实 find API。
+    let target_window = match backend.list_windows(&ListWindowsRequest::default()).await {
         DesktopResult::Ok(r) => r
             .windows
             .iter()
-            .find(|w| w.app_name.contains("访达") || w.app_name.contains("Finder"))
-            .or_else(|| {
-                r.windows
-                    .iter()
-                    .find(|w| w.is_foreground && !w.app_name.is_empty())
-            })
-            .map(|w| w.app_name.clone()),
+            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .or_else(|| r.windows.iter().find(|w| !w.app_name.is_empty()))
+            .cloned(),
         _ => None,
     };
-    let find_result = if let Some(name) = target_app {
+    let find_result = if let Some(window) = target_window {
         let snap = backend
             .snapshot(&SnapshotRequest {
                 scope: SnapshotScope {
-                    window: None,
-                    app_name: Some(name),
+                    window: Some(window.element.clone()),
+                    app_name: None,
                     pid: None,
                 },
                 max_depth: 0,

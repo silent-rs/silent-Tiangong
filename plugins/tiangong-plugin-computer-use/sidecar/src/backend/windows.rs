@@ -110,7 +110,9 @@ impl Backend for WindowsBackend {
                     available: true,
                     reason: None,
                 },
-                supported_actions: all_supported_actions(),
+                // Windows 后端当前处于只读阶段：desktop_find/desktop_action 未实现，
+                // 因此不报告可执行动作（控件粒度的 pattern 仍在 snapshot 节点中呈现）。
+                supported_actions: Vec::new(),
             }),
             Err(e) => DesktopResult::Ok(StatusInfo {
                 session: DesktopSession::Unavailable,
@@ -118,7 +120,7 @@ impl Backend for WindowsBackend {
                     available: false,
                     reason: Some(e.agent_message().to_string()),
                 },
-                supported_actions: all_supported_actions(),
+                supported_actions: Vec::new(),
             }),
         }
     }
@@ -150,7 +152,8 @@ impl Backend for WindowsBackend {
                 app_name: app_name.clone(),
                 pid: pid as u32,
                 element: ElementRef {
-                    id: format!("uia-win-{idx}"),
+                    // id 编码 pid，供 snapshot 通过窗口引用定位（格式 uia-win-{pid}-{idx}）。
+                    id: format!("uia-win-{pid}-{idx}"),
                     snapshot,
                 },
                 title: name,
@@ -179,27 +182,59 @@ impl Backend for WindowsBackend {
             Ok(a) => a,
             Err(e) => return DesktopResult::Err(e),
         };
-        // 定位根元素：必须指定 scope（pid 或 app_name），从顶层窗口中筛选，
+        // 定位根元素：优先用窗口引用（解析 pid），其次 pid，最后 app_name。
         // 避免无边界遍历整个桌面导致跨应用且超出节点上限。
-        let target_pid = req.scope.pid.or_else(|| {
-            req.scope
-                .app_name
-                .as_ref()
-                .and_then(|name| find_window_pid_by_name(&automation, name))
-        });
+        let windows = match Self::top_level_windows(&automation) {
+            Ok(ws) => ws,
+            Err(e) => return DesktopResult::Err(e),
+        };
+        // 确定目标 pid：窗口引用 > 显式 pid > 应用名匹配。
+        let target_pid = match req
+            .scope
+            .window
+            .as_ref()
+            .and_then(|w| parse_pid_from_id(&w.id))
+        {
+            Some(pid) => Some(pid),
+            None => req.scope.pid.or_else(|| {
+                req.scope
+                    .app_name
+                    .as_ref()
+                    .and_then(|name| find_window_pid_by_name(&automation, name))
+            }),
+        };
+        // 按应用名匹配时收集所有候选，多于一个则返回歧义错误。
+        if let Some(name) = req.scope.app_name.as_deref() {
+            let candidates: Vec<String> = windows
+                .iter()
+                .filter_map(|w| {
+                    let title = w.get_name().unwrap_or_default();
+                    if title.to_lowercase().contains(&name.to_lowercase()) {
+                        Some(title)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if candidates.len() > 1 && req.scope.pid.is_none() && req.scope.window.is_none() {
+                return DesktopResult::Err(DesktopError::AmbiguousMatch { candidates });
+            }
+        }
         let root = match target_pid {
-            Some(pid) => match Self::top_level_windows(&automation) {
-                Ok(windows) => windows
-                    .into_iter()
-                    .find(|w| w.get_process_id().unwrap_or(0) == pid as i32)
-                    .ok_or_else(|| DesktopError::WindowNotFound {
+            Some(pid) => match windows
+                .into_iter()
+                .find(|w| w.get_process_id().unwrap_or(0) == pid as i32)
+            {
+                Some(w) => w,
+                None => {
+                    return DesktopResult::Err(DesktopError::WindowNotFound {
                         query: format!("pid {pid}"),
-                    })?,
-                Err(e) => return DesktopResult::Err(e),
+                    });
+                }
             },
             None => {
                 return DesktopResult::Err(DesktopError::WindowNotFound {
-                    query: "snapshot 需要指定 pid 或 app_name".to_string(),
+                    query: "snapshot 需要指定 window、pid 或 app_name".to_string(),
                 });
             }
         };
@@ -262,6 +297,7 @@ impl Backend for WindowsBackend {
                 let start = std::time::Instant::now();
                 loop {
                     let list_req = ListWindowsRequest::default();
+                    // 区分"确实不存在"与"枚举失败"：失败时返回错误，避免 disappear 误判成功。
                     let exists = match self.list_windows(&list_req).await {
                         DesktopResult::Ok(r) => r.windows.iter().any(|w| {
                             target.app_name.as_deref().is_some_and(|n| {
@@ -271,7 +307,7 @@ impl Backend for WindowsBackend {
                                 .as_deref()
                                 .is_some_and(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
                         }),
-                        _ => false,
+                        DesktopResult::Err(e) => return DesktopResult::Err(e),
                     };
                     if looking_appear == exists {
                         return DesktopResult::Ok(WaitResult {
@@ -329,7 +365,8 @@ impl WindowsBackend {
         let enabled = element.is_enabled().unwrap_or(true);
         let focused = element.has_keyboard_focus().unwrap_or(false);
         let bounds = Self::bounds_of(element);
-        let actions = supported_actions_for(&control_type);
+        // desktop_action 未实现，节点不报告可执行动作，避免误导调用方。
+        let actions: Vec<ActionKind> = Vec::new();
 
         let id = format!("uia-{snapshot}-{}", nodes.len());
         let parent_index = nodes.len();
@@ -389,7 +426,19 @@ impl WindowsBackend {
     }
 }
 
+/// 从 element id（格式 uia-win-{pid}-{idx}）解析 pid。
+fn parse_pid_from_id(id: &str) -> Option<u32> {
+    let parts: Vec<&str> = id.split('-').collect();
+    if parts.len() >= 3 && parts[0] == "uia" && parts[1] == "win" {
+        parts[2].parse().ok()
+    } else {
+        None
+    }
+}
+
 /// 按 UIA ControlType 推断控件支持的动作。
+/// 当前 desktop_action 未实现，节点不报告动作；此函数保留供未来实现使用。
+#[allow(dead_code)]
 fn supported_actions_for(control_type: &ControlType) -> Vec<ActionKind> {
     use ActionKind::*;
     match control_type {

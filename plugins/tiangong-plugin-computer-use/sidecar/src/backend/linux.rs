@@ -126,7 +126,9 @@ impl Backend for LinuxBackend {
                     available: true,
                     reason: None,
                 },
-                supported_actions: all_supported_actions(),
+                // AT-SPI 后端当前处于只读阶段：desktop_find/desktop_action 未实现，
+                // 因此不报告可执行动作（控件粒度的 Action 接口仍在 snapshot 节点中呈现）。
+                supported_actions: Vec::new(),
             }),
             Err(e) => DesktopResult::Ok(StatusInfo {
                 session: DesktopSession::Unavailable,
@@ -134,7 +136,7 @@ impl Backend for LinuxBackend {
                     available: false,
                     reason: Some(e.agent_message().to_string()),
                 },
-                supported_actions: all_supported_actions(),
+                supported_actions: Vec::new(),
             }),
         }
     }
@@ -216,6 +218,7 @@ impl Backend for LinuxBackend {
             }
         };
         // 从桌面根的子应用中按名称找到对应应用的代理作为遍历根。
+        // 收集所有候选，多于一个则返回歧义错误，不静默选第一个。
         let children = match desktop.get_children().await {
             Ok(c) => c,
             Err(e) => {
@@ -225,15 +228,23 @@ impl Backend for LinuxBackend {
             }
         };
         let needle = app_name.to_lowercase();
+        let mut matches: Vec<String> = Vec::new();
         let mut root = None;
         for child_ref in children {
             if let Ok(proxy) = child_ref.as_accessible_proxy(zbus).await {
                 let name = proxy.name().await.unwrap_or_default();
                 if name.to_lowercase().contains(&needle) {
-                    root = Some(proxy);
-                    break;
+                    matches.push(name);
+                    if root.is_none() {
+                        root = Some(proxy);
+                    }
                 }
             }
+        }
+        if matches.len() > 1 {
+            return DesktopResult::Err(DesktopError::AmbiguousMatch {
+                candidates: matches,
+            });
         }
         let root = match root {
             Some(p) => p,
@@ -304,6 +315,7 @@ impl Backend for LinuxBackend {
                 let start = std::time::Instant::now();
                 loop {
                     let list_req = ListWindowsRequest::default();
+                    // 区分"确实不存在"与"枚举失败"：失败时返回错误，避免 disappear 误判成功。
                     let exists = match self.list_windows(&list_req).await {
                         DesktopResult::Ok(r) => r.windows.iter().any(|w| {
                             target.app_name.as_deref().is_some_and(|n| {
@@ -313,7 +325,7 @@ impl Backend for LinuxBackend {
                                 .as_deref()
                                 .is_some_and(|t| w.title.to_lowercase().contains(&t.to_lowercase()))
                         }),
-                        _ => false,
+                        DesktopResult::Err(e) => return DesktopResult::Err(e),
                     };
                     if looking_appear == exists {
                         return DesktopResult::Ok(WaitResult {
@@ -378,7 +390,8 @@ impl LinuxBackend {
             .get_interfaces()
             .await
             .unwrap_or_else(|_| InterfaceSet::empty());
-        let actions = supported_actions_for(role, &interfaces);
+        // desktop_action 未实现，节点不报告可执行动作，避免误导调用方。
+        let actions: Vec<ActionKind> = Vec::new();
 
         let id = format!("atspi-{snapshot}-{}", nodes.len());
         let parent_index = nodes.len();

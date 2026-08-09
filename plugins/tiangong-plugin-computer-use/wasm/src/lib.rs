@@ -228,7 +228,10 @@ impl Guest for Component {
 // ── 工具处理 ───────────────────────────────────────────────────
 
 fn handle_desktop_status(arguments: String) -> Result<ToolResult, PluginError> {
-    let _args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
+    // desktop_status 无必填参数，但仍校验 JSON 合法性，非法输入返回错误。
+    if let Err(f) = parse_args("desktop_status", &arguments) {
+        return Ok(f);
+    }
     let request = DesktopStatusRequest {
         access: state::access_context(),
     };
@@ -236,13 +239,21 @@ fn handle_desktop_status(arguments: String) -> Result<ToolResult, PluginError> {
 }
 
 fn handle_list_windows(arguments: String) -> Result<ToolResult, PluginError> {
-    let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
+    let args = match parse_args("desktop_list_windows", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    let pid = args.get("pid").and_then(as_u32_bounded);
+    // pid 超范围（超 u32）时返回参数错误，而非截断成另一个有效值。
+    if args.get("pid").is_some() && pid.is_none() {
+        return Ok(tool_failure(
+            "desktop_list_windows 的 pid 超出有效范围",
+            "pid out of range",
+        ));
+    }
     let request = ListWindowsRequest {
         app_name: args.get("app_name").and_then(as_str_owned),
-        pid: args
-            .get("pid")
-            .and_then(serde_json::Value::as_u64)
-            .map(|v| v as u32),
+        pid,
         foreground_only: args
             .get("foreground_only")
             .and_then(serde_json::Value::as_bool)
@@ -253,24 +264,51 @@ fn handle_list_windows(arguments: String) -> Result<ToolResult, PluginError> {
 }
 
 fn handle_snapshot(arguments: String) -> Result<ToolResult, PluginError> {
-    let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
+    let args = match parse_args("desktop_snapshot", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    // pid 超范围返回参数错误，而非截断。
+    let pid = args.get("pid").and_then(as_u32_bounded);
+    if args.get("pid").is_some() && pid.is_none() {
+        return Ok(tool_failure(
+            "desktop_snapshot 的 pid 超出有效范围",
+            "pid out of range",
+        ));
+    }
+    // max_depth/max_nodes 超范围返回参数错误，而非截断。
+    let max_depth = match args.get("max_depth") {
+        Some(v) if !v.is_null() => match as_u32_bounded(v) {
+            Some(d) => d,
+            None => {
+                return Ok(tool_failure(
+                    "desktop_snapshot 的 max_depth 超出有效范围",
+                    "max_depth out of range",
+                ));
+            }
+        },
+        _ => 0,
+    };
+    let max_nodes = match args.get("max_nodes") {
+        Some(v) if !v.is_null() => match as_u32_bounded(v) {
+            Some(n) => n,
+            None => {
+                return Ok(tool_failure(
+                    "desktop_snapshot 的 max_nodes 超出有效范围",
+                    "max_nodes out of range",
+                ));
+            }
+        },
+        _ => 0,
+    };
     let request = SnapshotRequest {
         scope: tiangong_plugin_computer_use_protocol::ops::SnapshotScope {
             window: args.get("window").and_then(parse_element_ref),
             app_name: args.get("app_name").and_then(as_str_owned),
-            pid: args
-                .get("pid")
-                .and_then(serde_json::Value::as_u64)
-                .map(|v| v as u32),
+            pid,
         },
-        max_depth: args
-            .get("max_depth")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u32,
-        max_nodes: args
-            .get("max_nodes")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u32,
+        max_depth,
+        max_nodes,
         include_invisible: args
             .get("include_invisible")
             .and_then(serde_json::Value::as_bool)
@@ -281,8 +319,20 @@ fn handle_snapshot(arguments: String) -> Result<ToolResult, PluginError> {
 }
 
 fn handle_find(arguments: String) -> Result<ToolResult, PluginError> {
-    let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
-    let conditions_raw = args.get("conditions").cloned().unwrap_or(json!({}));
+    let args = match parse_args("desktop_find", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
+    // conditions 缺失时返回参数错误（它是必填字段）。
+    let conditions_raw = match args.get("conditions") {
+        Some(c) if !c.is_null() => c.clone(),
+        _ => {
+            return Ok(tool_failure(
+                "desktop_find 缺少必填的 conditions 参数",
+                "missing conditions",
+            ));
+        }
+    };
     let request = FindRequest {
         window: args.get("window").and_then(parse_element_ref),
         snapshot: args.get("snapshot").and_then(serde_json::Value::as_u64),
@@ -319,7 +369,10 @@ fn handle_find(arguments: String) -> Result<ToolResult, PluginError> {
 }
 
 fn handle_action(arguments: String) -> Result<ToolResult, PluginError> {
-    let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
+    let args = match parse_args("desktop_action", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
     let element = match args.get("element").and_then(parse_element_ref) {
         Some(e) => e,
         None => {
@@ -353,7 +406,10 @@ fn handle_action(arguments: String) -> Result<ToolResult, PluginError> {
 }
 
 fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
-    let args: serde_json::Value = serde_json::from_str(&arguments).unwrap_or(json!({}));
+    let args = match parse_args("desktop_wait", &arguments) {
+        Ok(v) => v,
+        Err(f) => return Ok(f),
+    };
     let condition = match parse_wait_condition(&args) {
         Some(c) => c,
         None => {
@@ -426,6 +482,27 @@ fn desktop_result_to_tool_result<T: Serialize>(result: DesktopResult<T>) -> Tool
 }
 
 // ── 参数解析辅助 ───────────────────────────────────────────────
+
+/// 解析工具参数 JSON。非法 JSON 返回参数错误 ToolResult，而非当作空对象。
+#[allow(clippy::result_large_err)]
+fn parse_args(tool: &str, arguments: &str) -> Result<serde_json::Value, ToolResult> {
+    serde_json::from_str(arguments).map_err(|e| {
+        tool_failure(
+            &format!("{tool} 参数不是合法 JSON: {e}"),
+            "invalid json arguments",
+        )
+    })
+}
+
+/// 把 JSON 数值校验后转为 u32，超范围返回 None（调用方决定如何处理）。
+fn as_u32_bounded(v: &serde_json::Value) -> Option<u32> {
+    let n = v.as_u64()?;
+    if n <= u32::MAX as u64 {
+        Some(n as u32)
+    } else {
+        None
+    }
+}
 
 /// 把 JSON 值的字符串视图转为 owned String。
 fn as_str_owned(v: &serde_json::Value) -> Option<String> {

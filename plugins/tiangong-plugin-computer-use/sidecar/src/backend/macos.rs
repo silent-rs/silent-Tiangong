@@ -278,7 +278,8 @@ fn supported_actions_for(role: &str) -> Vec<ActionKind> {
         "AXSlider" | "AXIncrementor" => vec![SetValue],
         "AXRadioButton" => vec![Select],
         "AXOutline" | "AXRow" | "AXCell" => vec![Select],
-        "AXDisclosureTriangle" | "AXPopOver" => vec![Expand, Collapse],
+        // AXDisclosureTriangle/AXPopOver 的展开折叠在 AX 中无语义动作（AXPress 是
+        // 切换，无法保证方向），暂不声明，避免误导。
         _ => vec![],
     }
 }
@@ -287,7 +288,6 @@ fn supported_actions_for(role: &str) -> Vec<ActionKind> {
 const AX_PRESS: &str = "AXPress";
 const AX_SET_VALUE: &str = "AXValue";
 const AX_FOCUSED: &str = "AXFocused";
-const AX_RAISE: &str = "AXRaise";
 
 #[async_trait]
 impl Backend for MacosBackend {
@@ -375,12 +375,25 @@ impl Backend for MacosBackend {
                 }
             },
             None => {
-                let pid = req.scope.pid.or_else(|| {
-                    req.scope
-                        .app_name
-                        .as_ref()
-                        .and_then(|name| find_app_pid_by_name(name))
-                });
+                // 按应用名匹配时收集所有候选，多于一个返回歧义错误，不静默选第一个。
+                let pid = match req.scope.pid {
+                    Some(pid) => Some(pid),
+                    None => match &req.scope.app_name {
+                        Some(name) => {
+                            let matches = find_app_pids_by_name(name);
+                            if matches.len() > 1 {
+                                return DesktopResult::Err(DesktopError::AmbiguousMatch {
+                                    candidates: vec![format!(
+                                        "{name}（{} 个匹配进程）",
+                                        matches.len()
+                                    )],
+                                });
+                            }
+                            matches.first().copied()
+                        }
+                        None => None,
+                    },
+                };
                 match pid {
                     Some(pid) => AxElement::for_application(pid as i32),
                     None => {
@@ -396,11 +409,13 @@ impl Backend for MacosBackend {
             }
         };
 
+        // 先分配版本号并构建节点，完成后再登记版本与写节点表。
+        // 避免先登记导致并发请求在慢快照构建期间将其淘汰，而慢请求随后仍写回残留缓存。
         let snapshot = self.next_snapshot();
-        self.remember_snapshot(snapshot);
         let (nodes, truncated, warnings) =
             self.build_snapshot(root, snapshot, max_depth, max_nodes, req.include_invisible);
-        // 缓存节点表，供 find 在该快照内筛选。
+        // 构建完成后一次性登记并提交节点表；walk 写入的 elements 也以此版本号为准。
+        self.remember_snapshot(snapshot);
         self.snapshot_nodes
             .write()
             .unwrap()
@@ -521,9 +536,12 @@ impl Backend for MacosBackend {
             },
             ActionKind::Toggle => element.perform_action(AX_PRESS),
             ActionKind::Select => element.perform_action(AX_PRESS),
-            ActionKind::Expand => element.perform_action(AX_PRESS),
-            ActionKind::Collapse => element.perform_action(AX_PRESS),
-            ActionKind::ScrollIntoView => element.perform_action(AX_RAISE),
+            // Expand/Collapse 在 AX 中无法按语义区分（AXPress 是切换，无法保证
+            // 折叠已折叠控件不变成展开）；ScrollIntoView 无对应 AX 动作（AXRaise
+            // 是提升窗口而非滚动控件）。无法保证语义时返回不支持，而非错误执行。
+            ActionKind::Expand | ActionKind::Collapse | ActionKind::ScrollIntoView => {
+                Err(ax::AxError::ActionUnsupported)
+            }
         };
 
         // 重新缓存控件（动作后控件仍可用）。
@@ -698,21 +716,24 @@ fn parse_pid_from_id(id: &str) -> Option<i32> {
     }
 }
 
-/// 按应用名查找进程号。
-fn find_app_pid_by_name(name: &str) -> Option<u32> {
+/// 按应用名查找所有匹配的进程号（包含匹配），供调用方判断歧义。
+fn find_app_pids_by_name(name: &str) -> Vec<u32> {
     let workspace = NSWorkspace::sharedWorkspace();
     let apps = workspace.runningApplications();
     let needle = name.to_lowercase();
-    for app in apps.iter() {
-        let app_name: String = app
-            .localizedName()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        if app_name.to_lowercase().contains(&needle) {
-            return Some(app.processIdentifier() as u32);
-        }
-    }
-    None
+    apps.iter()
+        .filter_map(|app| {
+            let app_name: String = app
+                .localizedName()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if app_name.to_lowercase().contains(&needle) {
+                Some(app.processIdentifier() as u32)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// 按条件筛选节点。
