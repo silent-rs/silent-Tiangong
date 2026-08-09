@@ -57,15 +57,23 @@ impl LinuxBackend {
     }
 
     /// 尝试连接 accessibility bus。连接失败说明无图形会话或未启用无障碍。
+    /// 加 5 秒超时，防止无 D-Bus 环境下连接调用阻塞。
     async fn connect(&self) -> Result<AccessibilityConnection, DesktopError> {
-        if let Err(e) = atspi::connection::set_session_accessibility(true).await {
-            tracing::debug!(error = %e, "启用会话无障碍失败，继续尝试连接");
-        }
-        AccessibilityConnection::new()
-            .await
-            .map_err(|e| DesktopError::DesktopSessionUnavailable {
+        let connect = async {
+            if let Err(e) = atspi::connection::set_session_accessibility(true).await {
+                tracing::debug!(error = %e, "启用会话无障碍失败，继续尝试连接");
+            }
+            AccessibilityConnection::new().await
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(5), connect).await {
+            Ok(Ok(conn)) => Ok(conn),
+            Ok(Err(e)) => Err(DesktopError::DesktopSessionUnavailable {
                 reason: format!("无法连接 AT-SPI accessibility bus: {e}"),
-            })
+            }),
+            Err(_) => Err(DesktopError::DesktopSessionUnavailable {
+                reason: "连接 AT-SPI accessibility bus 超时（5 秒）".to_string(),
+            }),
+        }
     }
 
     /// 构造根桌面对象代理。
