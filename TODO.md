@@ -1459,9 +1459,9 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 
 ## 当前任务：macOS AXUIElement 后端
 
-- [ ] 使用 `AXUIElement` / `AXObserver`，AppleScript 仅用于开发验证，不作为正式调用链。
-- [ ] 通过目标进程创建应用对象，递归读取 `AXChildren`，优先匹配 `AXIdentifier`、`AXRole`、`AXTitle` 和 `AXDescription`。
-- [ ] 使用 `AXPress`、`AXSetValue`、`AXRaise` 等目标控件实际支持的动作。
+- [x] 使用 `AXUIElement` / `AXObserver`，AppleScript 仅用于开发验证，不作为正式调用链。
+- [x] 通过目标进程创建应用对象，递归读取 `AXChildren`，优先匹配 `AXIdentifier`、`AXRole`、`AXTitle` 和 `AXDescription`。
+- [x] 使用 `AXPress`、`AXSetValue`、`AXFocused` 等目标控件实际支持的动作。
 - [x] 启动时检查辅助功能授权，未授权时返回可操作的提示，并允许用户触发系统授权入口。
 - [ ] 验证 sidecar 签名身份，避免每次插件升级都要求用户重新授权。
 
@@ -1471,7 +1471,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 未授权时返回明确错误，宿主保持正常运行。
 
-> 当前进度：已通过 `objc2-app-kit` 的 `NSWorkspace` 实现 `desktop_list_windows`（列举运行中的应用窗口），通过 ApplicationServices 的 `AXIsProcessTrusted` 探测辅助功能授权并区分未授权错误（已在本机诊断程序验证）。完整的 `AXChildren` 控件树递归遍历、控件动作与 AXObserver 事件等待为后续增量工作。
+> 当前进度：AXUIElement C API 安全封装（`ax.rs`）已完成，`desktop_snapshot` 前序递归读取 `AXChildren` 控件树（受深度/节点数限制，叶子控件无子节点静默处理），`desktop_find` 按稳定标识+类型优先、名称补充筛选并标记歧义，`desktop_action` 按 `AXPress`/`AXSetValue`/`AXFocused` 执行并校验控件身份。本机诊断程序真实验证：授权后 `list_windows` 列出 134 个运行应用、`snapshot` 读出 165 个控件（AXWindow/AXButton/AXMenuItem 等真实节点）、`find` 定位按钮、`focus` 动作真实执行成功。完整 `AXObserver` 事件等待、边界坐标读取、Tauri/Electron 兼容性回归为后续增量工作。
 
 ## 当前任务：Linux AT-SPI2 后端
 
