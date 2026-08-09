@@ -10,6 +10,8 @@ import {
   Loader2,
   RefreshCw,
   RotateCw,
+  Search,
+  Sparkles,
   Trash2,
   Undo2,
 } from 'lucide-react';
@@ -22,6 +24,7 @@ import {
 } from '@/api/tauri';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
+import { DefaultPluginOnboarding } from './DefaultPluginOnboarding';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from './ui/dialog';
+import { Input } from './ui/input';
 import { Separator } from './ui/separator';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
@@ -83,7 +87,35 @@ export function PluginManagerSettings({
   const [activeOperation, setActiveOperation] = useState<ActiveOperation | null>(null);
   const [uninstallTarget, setUninstallTarget] = useState<PluginStatus | null>(null);
   const [keepData, setKeepData] = useState(true);
+  const [query, setQuery] = useState('');
+  // 安装/升级下载进度，按 pluginId 存百分比（0-100）。
+  const [installProgress, setInstallProgress] = useState<Record<string, number>>({});
+  // 推荐安装引导的缺失默认插件列表；为 null 时不显示。
+  const [recommendMissing, setRecommendMissing] = useState<AvailablePlugin[] | null>(null);
   const { showError, showSuccess } = useToast();
+
+  // 监听后端推送的下载进度事件，更新对应插件的进度。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void api
+      .onPluginInstallProgress(({ plugin_id, downloaded, total }) => {
+        if (disposed) return;
+        const percent = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
+        setInstallProgress((prev) => ({ ...prev, [plugin_id]: percent }));
+      })
+      .then((stop) => {
+        if (disposed) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     setPlugins(initialPlugins);
@@ -126,6 +158,26 @@ export function PluginManagerSettings({
     [available],
   );
 
+  // 关键字过滤：匹配插件名称或描述，对已安装和可安装列表同时生效。
+  const normalizedQuery = query.trim().toLowerCase();
+  const matches = (text: string) => text.toLowerCase().includes(normalizedQuery);
+  const filteredPlugins = useMemo(
+    () =>
+      normalizedQuery === ''
+        ? plugins
+        : plugins.filter((plugin) => matches(plugin.name) || matches(plugin.id)),
+    [plugins, normalizedQuery],
+  );
+  const filteredAvailable = useMemo(() => {
+    // 隐藏已安装且无更新的插件（已安装且无更新的不再出现在可安装列表）。
+    const installable = available.filter(
+      (plugin) => plugin.installed_version === null || plugin.update_available,
+    );
+    return normalizedQuery === ''
+      ? installable
+      : installable.filter((plugin) => matches(plugin.name) || matches(plugin.description));
+  }, [available, normalizedQuery]);
+
   const finishOperation = async () => {
     const [, contributionsResult] = await Promise.allSettled([
       refresh(),
@@ -155,6 +207,12 @@ export function PluginManagerSettings({
       return false;
     } finally {
       setActiveOperation(null);
+      setInstallProgress((prev) => {
+        if (!(pluginId in prev)) return prev;
+        const next = { ...prev };
+        delete next[pluginId];
+        return next;
+      });
     }
   };
 
@@ -212,6 +270,22 @@ export function PluginManagerSettings({
       await refresh();
     } finally {
       setActiveOperation(null);
+    }
+  };
+
+  // 打开默认插件推荐引导：检测缺失的默认插件并弹出安装对话框。
+  const openRecommend = async () => {
+    try {
+      const check = await api.checkDefaultPlugins();
+      if (check.missing.length > 0) {
+        setRecommendMissing(check.missing);
+      } else if (check.catalog_error) {
+        showError('无法获取插件目录', check.catalog_error);
+      } else {
+        showSuccess('默认插件已齐全', '无需额外安装');
+      }
+    } catch (error) {
+      showError('检测失败', String(error));
     }
   };
 
@@ -277,6 +351,16 @@ export function PluginManagerSettings({
               </TooltipTrigger>
               <TooltipContent>插件开发文档</TooltipContent>
             </Tooltip>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-xs"
+              onClick={() => void openRecommend()}
+              disabled={loading || isBusy}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              推荐
+            </Button>
             <IconAction
               label="导入本地插件"
               onClick={() => void importLocal()}
@@ -296,8 +380,8 @@ export function PluginManagerSettings({
         </div>
 
         <Tabs defaultValue="installed" className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 border-b px-4 py-2 sm:px-6">
-            <TabsList className="grid h-9 w-full max-w-72 grid-cols-2">
+          <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 sm:px-6">
+            <TabsList className="grid h-9 w-full max-w-56 grid-cols-2">
               <TabsTrigger value="installed" className="py-1 text-xs">
                 已安装
               </TabsTrigger>
@@ -305,6 +389,15 @@ export function PluginManagerSettings({
                 可安装
               </TabsTrigger>
             </TabsList>
+            <div className="relative ml-auto w-full max-w-48">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索插件"
+                className="h-9 pl-8 text-xs"
+              />
+            </div>
           </div>
 
           <TabsContent value="installed" className="m-0 min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
@@ -312,14 +405,17 @@ export function PluginManagerSettings({
               <LoadingState label="正在读取插件状态" />
             ) : plugins.length === 0 ? (
               <EmptyState label="暂无已安装插件" />
+            ) : filteredPlugins.length === 0 ? (
+              <EmptyState label="没有匹配的插件" />
             ) : (
-              plugins.map((plugin) => (
+              filteredPlugins.map((plugin) => (
                 <InstalledPluginRow
                   key={plugin.id}
                   plugin={plugin}
                   release={availableById.get(plugin.id)}
                   activeOperation={activeOperation}
                   disabled={isBusy}
+                  progress={installProgress[plugin.id] ?? null}
                   onToggle={toggleEnabled}
                   onReload={reload}
                   onUpgrade={upgrade}
@@ -343,14 +439,17 @@ export function PluginManagerSettings({
               </div>
             ) : available.length === 0 ? (
               <EmptyState label="暂无可安装插件" />
+            ) : filteredAvailable.length === 0 ? (
+              <EmptyState label="没有匹配的插件" />
             ) : (
-              available.map((plugin, index) => (
+              filteredAvailable.map((plugin, index) => (
                 <AvailablePluginRow
                   key={plugin.id}
                   plugin={plugin}
                   index={index}
                   activeOperation={activeOperation}
                   disabled={isBusy}
+                  progress={installProgress[plugin.id] ?? null}
                   onInstall={install}
                 />
               ))
@@ -388,6 +487,17 @@ export function PluginManagerSettings({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <DefaultPluginOnboarding
+        missing={recommendMissing}
+        onOpenChange={(open) => {
+          if (!open) setRecommendMissing(null);
+        }}
+        onComplete={() => {
+          void refresh();
+          void refreshContributions();
+        }}
+      />
     </TooltipProvider>
   );
 }
@@ -397,6 +507,7 @@ function InstalledPluginRow({
   release,
   activeOperation,
   disabled,
+  progress,
   onToggle,
   onReload,
   onUpgrade,
@@ -407,6 +518,7 @@ function InstalledPluginRow({
   release?: AvailablePlugin;
   activeOperation: ActiveOperation | null;
   disabled: boolean;
+  progress: number | null;
   onToggle: (plugin: PluginStatus, enabled: boolean) => Promise<void>;
   onReload: (plugin: PluginStatus) => Promise<void>;
   onUpgrade: (plugin: PluginStatus) => Promise<void>;
@@ -421,10 +533,10 @@ function InstalledPluginRow({
   const StatusIcon = healthy ? CheckCircle2 : plugin.state === 'disabled' ? Circle : AlertCircle;
 
   return (
-    <div className="border-b py-4 last:border-b-0">
-      <div className="flex items-start gap-3 rounded-lg border border-transparent px-3 py-3 transition-colors hover:border-border/70 hover:bg-muted/20">
+    <div className="border-b py-2.5 last:border-b-0">
+      <div className="flex items-center gap-2.5">
         <StatusIcon
-          className={`mt-0.5 h-5 w-5 shrink-0 ${
+          className={`h-4 w-4 shrink-0 ${
             healthy
               ? 'text-emerald-500'
               : plugin.state === 'disabled'
@@ -433,74 +545,88 @@ function InstalledPluginRow({
           }`}
         />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="break-words text-sm font-medium">{plugin.name}</span>
-            <Badge variant={healthy ? 'secondary' : 'outline'}>{stateLabel[plugin.state]}</Badge>
-            {canUpgrade && <Badge className="border-primary/30 bg-primary/10 text-primary">发现新版本</Badge>}
-          </div>
-
-          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
-            <VersionInfo label="当前版本" value={currentVersion} />
-            {canUpgrade && release && (
-              <VersionInfo label="可升级至" value={release.version} emphasized />
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <span className="break-words text-sm font-medium text-foreground">{plugin.name}</span>
+            <Badge variant={healthy ? 'secondary' : 'outline'} className="px-1.5 py-0 text-[10px]">
+              {stateLabel[plugin.state]}
+            </Badge>
+            {canUpgrade && (
+              <Badge className="border-primary/30 bg-primary/10 px-1.5 py-0 text-[10px] text-primary">
+                发现新版本
+              </Badge>
             )}
-            <span className={`inline-flex items-center gap-1.5 ${sidecar.className}`}>
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground/70">v{currentVersion}</span>
+              {canUpgrade && release && (
+                <span className="font-medium text-primary">→ {release.version}</span>
+              )}
+            </span>
+            <span className={`inline-flex items-center gap-1 ${sidecar.className}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${sidecar.dotClassName}`} />
               {sidecar.label}
             </span>
           </div>
 
           {plugin.last_error && (
-            <p className="mt-2 break-words text-xs leading-5 text-destructive">{plugin.last_error}</p>
+            <p className="mt-1 break-words text-xs leading-5 text-destructive">{plugin.last_error}</p>
           )}
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
+          {progress !== null && (
+            <div className="mt-1.5 h-1 w-full max-w-64 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full bg-primary transition-[width] duration-150"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          )}
+
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {canUpgrade && (
               <Button
                 size="sm"
-                className="h-8"
+                className="h-7 gap-1 px-2 text-xs"
                 onClick={() => void onUpgrade(plugin)}
                 disabled={disabled}
               >
                 {working && activeOperation?.operation === 'upgrade' ? (
-                  <Loader2 className="animate-spin" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <ArrowUpCircle />
+                  <ArrowUpCircle className="h-3.5 w-3.5" />
                 )}
-                升级到 {release?.version}
+                升级
               </Button>
             )}
             <IconAction
               label="重新加载插件"
+              className="h-7 w-7"
               onClick={() => void onReload(plugin)}
               disabled={disabled || !plugin.enabled}
               working={working && activeOperation?.operation === 'reload'}
             >
-              <RotateCw />
+              <RotateCw className="h-3.5 w-3.5" />
             </IconAction>
             <IconAction
               label="回滚到上一版本"
+              className="h-7 w-7"
               onClick={() => void onRollback(plugin)}
               disabled={disabled || !plugin.can_rollback}
               working={working && activeOperation?.operation === 'rollback'}
             >
-              <Undo2 />
+              <Undo2 className="h-3.5 w-3.5" />
             </IconAction>
             <IconAction
               label="卸载插件"
+              className="h-7 w-7"
               onClick={() => onUninstall(plugin)}
               disabled={disabled}
               destructive
             >
-              <Trash2 />
+              <Trash2 className="h-3.5 w-3.5" />
             </IconAction>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2 pl-2">
-          <span className="hidden text-xs text-muted-foreground sm:inline">
-            {plugin.enabled ? '已启用' : '已停用'}
-          </span>
           {working && ['enable', 'disable'].includes(activeOperation?.operation ?? '') ? (
             <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
           ) : (
@@ -514,25 +640,6 @@ function InstalledPluginRow({
         </div>
       </div>
     </div>
-  );
-}
-
-function VersionInfo({
-  label,
-  value,
-  emphasized = false,
-}: {
-  label: string;
-  value: string;
-  emphasized?: boolean;
-}) {
-  return (
-    <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-      <span>{label}</span>
-      <span className={emphasized ? 'font-medium text-primary' : 'font-medium text-foreground'}>
-        {value}
-      </span>
-    </span>
   );
 }
 
@@ -577,39 +684,50 @@ function AvailablePluginRow({
   index,
   activeOperation,
   disabled,
+  progress,
   onInstall,
 }: {
   plugin: AvailablePlugin;
   index: number;
   activeOperation: ActiveOperation | null;
   disabled: boolean;
+  progress: number | null;
   onInstall: (plugin: AvailablePlugin) => Promise<void>;
 }) {
   const installing = activeOperation?.pluginId === plugin.id && activeOperation.operation === 'install';
   return (
     <div>
       {index > 0 && <Separator />}
-      <div className="flex min-h-28 items-start gap-4 py-5">
+      <div className="flex items-start gap-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="break-words text-sm font-medium">{plugin.name}</span>
-            <Badge variant="outline">{plugin.version}</Badge>
-            {!plugin.supported && <Badge variant="outline">当前平台不可用</Badge>}
-            {plugin.installed_version && <Badge variant="secondary">已安装</Badge>}
+            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">{plugin.version}</Badge>
+            {!plugin.supported && <Badge variant="outline" className="px-1.5 py-0 text-[10px]">当前平台不可用</Badge>}
+            {plugin.installed_version && <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">已安装</Badge>}
           </div>
           {plugin.description && (
-            <p className="mt-2 break-words text-xs leading-5 text-muted-foreground">
+            <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
               {plugin.description}
             </p>
+          )}
+          {progress !== null && (
+            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full bg-primary transition-[width] duration-150"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
           )}
         </div>
         <IconAction
           label="安装插件"
+          className="h-7 w-7 shrink-0"
           onClick={() => void onInstall(plugin)}
           disabled={disabled || !plugin.supported || plugin.installed_version !== null}
           working={installing}
         >
-          <Download />
+          <Download className="h-3.5 w-3.5" />
         </IconAction>
       </div>
     </div>

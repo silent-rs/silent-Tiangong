@@ -180,6 +180,33 @@
 - 开发者能够按文档完成目录组织、清单编写、WASM 构建、可选 sidecar 接入和本地调试。
 - 设置页的开发文档入口能够打开 GitHub 中的权威文档。
 
+# 默认插件与首次启动推荐
+
+- [x] 在 `artifacts.rs` 中定义默认插件 ID 列表（prompt、fs、command、fetch、index、skill）。
+- [x] `AvailablePlugin` 添加 `is_default` 字段，`list_available` 返回时标记默认插件。
+- [x] 添加 `check_default_plugins` Tauri 命令，返回缺失的默认插件信息。
+- [x] 添加首次启动完成标记文件（`~/.tiangong/.first_launch_completed`）的读写逻辑。
+- [x] 前端添加首次启动推荐安装对话框组件。
+- [x] MainApp 初始化时检测缺失默认插件并触发推荐引导。
+- [x] 通过 Rust 检查和前端构建验证。
+
+## 插件场景分类与 mcp 补充
+
+- [x] `DEFAULT_PLUGIN_IDS` 补充 mcp，默认推荐范围扩展为 7 个基础插件。
+- [x] `AvailablePlugin` 添加 `categories` 字段（多标签，`daily` / `coding` 任意组合）。
+- [x] 定义插件分类映射：fs、command、prompt、fetch、index、skill、mcp、memory 同时归入日常与编程；scheduler、多媒体生成类归入日常；coding 归入编程。
+- [x] 推荐对话框按分类分组展示缺失的默认插件。
+- [x] 插件市场可安装列表暂不进行分类筛选。
+- [x] 通过 Rust 检查和前端构建验证。
+
+## 完成标准
+
+- OSS 目录返回的可用插件列表中，默认插件带有 `is_default` 标记。
+- 用户首次打开且缺少默认插件时，弹出推荐安装引导。
+- 推荐引导支持一键安装全部缺失的默认插件，也可跳过。
+- 已安装全部默认插件或已完成首次启动引导后不再弹出。
+- 推荐安装复用现有 OSS 下载安装链路，安装后插件立即可用。
+
 ## 后续阶段
 
 - [ ] 实现零权限探测、授权实例化和权限扩大确认。

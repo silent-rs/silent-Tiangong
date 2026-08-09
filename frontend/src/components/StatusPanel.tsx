@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useStore } from '@/store/useStore';
 import { api } from '@/api/tauri';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search, TerminalSquare } from 'lucide-react';
+import { Sun, Moon, Monitor, PanelLeft, SquarePen, Volume2, VolumeX, AudioLines, Globe, ArrowUpCircle, Search, TerminalSquare, Puzzle } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme';
 import { useSearchStore } from '@/store/useSearchStore';
 import { useStreamingTts } from '@/hooks/useStreamingTts';
@@ -256,6 +256,14 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
           </button>
         )}
         <SearchButton />
+        <button
+          data-no-drag
+          onClick={() => setPendingSettingsTab('plugin-manager')}
+          className="text-muted-foreground transition-colors hover:text-foreground"
+          title="插件管理"
+        >
+          <Puzzle className="w-4 h-4" />
+        </button>
         {onOpenTerminal && (
           <button
             data-no-drag

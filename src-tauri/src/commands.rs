@@ -4598,14 +4598,96 @@ pub async fn list_available_plugins(
         .map_err(|error| error.to_string())
 }
 
+/// 首次启动推荐安装检测结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DefaultPluginCheck {
+    /// 是否需要弹出首次启动推荐引导（标记未完成且存在缺失的默认插件）。
+    pub first_launch_pending: bool,
+    /// 缺失的默认插件（OSS 目录中存在、当前平台支持且尚未安装）。
+    pub missing: Vec<tiangong_plugin_runtime::artifacts::AvailablePlugin>,
+    /// OSS 目录拉取失败原因。网络异常时不强弹引导，下次启动再试。
+    pub catalog_error: Option<String>,
+}
+
+/// 检测是否需要首次启动推荐安装默认插件。
+#[tauri::command]
+pub async fn check_default_plugins(
+    state: State<'_, TiangongApp>,
+) -> Result<DefaultPluginCheck, String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+
+    // 已完成首次启动引导，直接跳过，不再打扰用户。
+    if tiangong_plugin_runtime::artifacts::is_first_launch_completed(&storage_root) {
+        return Ok(DefaultPluginCheck {
+            first_launch_pending: false,
+            missing: Vec::new(),
+            catalog_error: None,
+        });
+    }
+
+    let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
+        .map_err(|error| error.to_string())?;
+    let available = match repository.list_available(&storage_root).await {
+        Ok(list) => list,
+        Err(error) => {
+            // 网络或 OSS 不可达时不强弹引导，避免离线首启打扰用户。
+            return Ok(DefaultPluginCheck {
+                first_launch_pending: false,
+                missing: Vec::new(),
+                catalog_error: Some(error.to_string()),
+            });
+        }
+    };
+
+    let missing: Vec<_> = available
+        .into_iter()
+        .filter(|plugin| {
+            plugin.is_default && plugin.supported && plugin.installed_version.is_none()
+        })
+        .collect();
+
+    Ok(DefaultPluginCheck {
+        first_launch_pending: !missing.is_empty(),
+        missing,
+        catalog_error: None,
+    })
+}
+
+/// 标记首次启动引导已完成（用户跳过或安装结束后调用）。
+#[tauri::command]
+pub async fn complete_first_launch(state: State<'_, TiangongApp>) -> Result<(), String> {
+    let storage_root = state
+        .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
+        .await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tiangong_plugin_runtime::artifacts::mark_first_launch_completed(&storage_root)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("写入首次启动标记任务失败: {error}"))?
+}
+
 async fn download_and_install_plugin(
     storage_root: std::path::PathBuf,
     plugin_id: String,
+    app: AppHandle,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let repository = tiangong_plugin_runtime::artifacts::PluginRepository::new()
         .map_err(|error| error.to_string())?;
+    let progress: tiangong_plugin_runtime::artifacts::ProgressFn = std::sync::Arc::new({
+        let app = app.clone();
+        let plugin_id = plugin_id.clone();
+        move |downloaded, total| {
+            let _ = app.emit(
+                "plugin_install_progress",
+                serde_json::json!({ "plugin_id": plugin_id, "downloaded": downloaded, "total": total }),
+            );
+        }
+    });
     let staged = repository
-        .download(&storage_root, &plugin_id)
+        .download(&storage_root, &plugin_id, Some(progress))
         .await
         .map_err(|error| error.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -4642,24 +4724,26 @@ pub async fn import_local_plugin(
 #[tauri::command]
 pub async fn install_plugin(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    download_and_install_plugin(storage_root, plugin_id).await
+    download_and_install_plugin(storage_root, plugin_id, app).await
 }
 
 /// 从 OSS 下载并升级插件，运行时负责失败恢复和本地回滚版本保留。
 #[tauri::command]
 pub async fn upgrade_plugin(
     plugin_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<tiangong_plugin_runtime::registry::PluginStatus, String> {
     let storage_root = state
         .with_state_read(|core_state| Ok(core_state.config.storage_root.clone()))
         .await?;
-    download_and_install_plugin(storage_root, plugin_id).await
+    download_and_install_plugin(storage_root, plugin_id, app).await
 }
 
 /// 启用或停用已安装插件。
