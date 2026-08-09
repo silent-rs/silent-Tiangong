@@ -3,9 +3,7 @@
 //!
 //! 用法：cargo run -p tiangong-plugin-computer-use-sidecar --example diagnose
 
-use tiangong_plugin_computer_use_protocol::ops::{
-    ListWindowsRequest, SnapshotRequest, SnapshotScope,
-};
+use tiangong_plugin_computer_use_protocol::ops::{ListWindowsRequest, SnapshotRequest};
 use tiangong_plugin_computer_use_protocol::{DesktopResult, Platform};
 use tiangong_plugin_computer_use_sidecar::backend::{self, Backend};
 
@@ -68,7 +66,7 @@ async fn main() {
         Some(name) => {
             println!("快照目标应用: {name}");
             let snap_req = SnapshotRequest {
-                scope: SnapshotScope {
+                scope: tiangong_plugin_computer_use_protocol::ops::SnapshotScope {
                     window: None,
                     app_name: Some(name.clone()),
                     pid: None,
@@ -110,5 +108,98 @@ async fn main() {
             }
         }
         None => println!("未找到可快照的应用"),
+    }
+
+    // find + action：查找一个按钮并对其执行 focus（最安全的动作，不触发功能）。
+    println!("\n--- desktop_find + desktop_action(focus) ---");
+    use tiangong_plugin_computer_use_protocol::ops::{
+        ActionRequest, ActionRequestKind, FindConditions, FindRequest, SnapshotScope,
+    };
+    let find_req = FindRequest {
+        window: None,
+        snapshot: None,
+        conditions: FindConditions {
+            role: Some("AXButton".to_string()),
+            ..Default::default()
+        },
+        max_candidates: 1,
+        access: Default::default(),
+    };
+    // find 不带 window 时需通过快照目标定位，这里用前台应用名。
+    let target_app = match backend.list_windows(&ListWindowsRequest::default()).await {
+        DesktopResult::Ok(r) => r
+            .windows
+            .iter()
+            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .map(|w| w.app_name.clone()),
+        _ => None,
+    };
+    // find 当前实现要求有窗口/快照范围；用快照目标应用的窗口引用构造请求。
+    let find_result = if let Some(name) = target_app {
+        // 先取该应用快照，再用快照版本 + 按钮角色查找。
+        let snap = backend
+            .snapshot(&SnapshotRequest {
+                scope: SnapshotScope {
+                    window: None,
+                    app_name: Some(name),
+                    pid: None,
+                },
+                max_depth: 0,
+                max_nodes: 0,
+                include_invisible: false,
+                access: Default::default(),
+            })
+            .await;
+        match snap {
+            DesktopResult::Ok(info) => {
+                let mut req = find_req.clone();
+                req.snapshot = Some(info.snapshot);
+                // 把快照节点交给 find：当前 find 实现不读节点表，这里直接在节点上筛。
+                let matches: Vec<_> = info
+                    .nodes
+                    .iter()
+                    .filter(|n| n.identifiers.role.as_deref() == Some("AXButton"))
+                    .take(1)
+                    .cloned()
+                    .collect();
+                println!("找到按钮数: {}", matches.len());
+                if let Some(target) = matches.first() {
+                    println!(
+                        "目标按钮: [{}] {} (引用 {}, 快照 {})",
+                        target.role, target.name, target.element.id, target.element.snapshot
+                    );
+                    Some(target.element.clone())
+                } else {
+                    None
+                }
+            }
+            DesktopResult::Err(e) => {
+                println!("快照错误: {}", e.agent_message());
+                None
+            }
+        }
+    } else {
+        println!("未找到前台应用");
+        None
+    };
+
+    // 对找到的按钮执行 focus 动作。
+    if let Some(element) = find_result {
+        let action_req = ActionRequest {
+            element,
+            action: ActionRequestKind::Focus,
+            value: None,
+            selection: None,
+            access: Default::default(),
+        };
+        match backend.action(&action_req).await {
+            DesktopResult::Ok(r) => {
+                println!(
+                    "focus 动作结果: performed={}, 说明={}",
+                    r.performed, r.summary
+                );
+            }
+            DesktopResult::Err(e) => println!("focus 动作错误: {}", e.agent_message()),
+        }
     }
 }

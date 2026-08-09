@@ -178,8 +178,11 @@ impl MacosBackend {
 
         // 先读子控件（返回独立的 owned Vec），再读属性，最后 cache element。
         // children() 返回的 AxElement 与父元素相互独立，不共享所有权。
+        // AttributeUnsupported 是正常的（叶子控件无子节点），静默处理；
+        // 其余错误（如 CannotComplete）才记入告警，避免整棵树失败。
         let children = match element.children() {
             Ok(cs) => cs,
+            Err(crate::backend::ax::AxError::AttributeUnsupported) => Vec::new(),
             Err(_) => {
                 warnings.push(format!("读取子控件失败（深度 {depth}）"));
                 Vec::new()
@@ -204,30 +207,9 @@ impl MacosBackend {
         let id = self.cache_element(snapshot, element);
         let actions = supported_actions_for(&role);
 
-        // 先递归子节点（填充 nodes 并获得各自 id），再收集子引用。
-        let mut child_refs = Vec::with_capacity(children.len());
-        for child in children {
-            // 预留 id 位置：walk 内部会 cache 子控件并 push 节点。
-            // 为建立父子关系，先记录“当前节点数 +1”处将作为子节点。
-            let child_index_before = nodes.len();
-            self.walk(
-                child,
-                snapshot,
-                depth + 1,
-                max_depth,
-                max_nodes,
-                include_invisible,
-                Some(id.clone()),
-                nodes,
-                truncated,
-                warnings,
-            );
-            // 若子节点成功 push，用其 element id 建立引用。
-            if nodes.len() > child_index_before {
-                child_refs.push(nodes[child_index_before].element.clone());
-            }
-        }
-
+        // 前序遍历：先 push 父节点（children 暂空），记录索引后递归子节点，
+        // 递归结束回填 children，保证输出顺序为“父→子→孙”。
+        let parent_index = nodes.len();
         nodes.push(ControlNode {
             element: ElementRef {
                 id: id.clone(),
@@ -247,8 +229,33 @@ impl MacosBackend {
             bounds: Bounds::default(),
             actions,
             parent: parent_id.map(|pid| ElementRef { id: pid, snapshot }),
-            children: child_refs,
+            children: Vec::new(),
         });
+
+        // 递归子节点，收集其 element 引用并回填到父节点 children。
+        let mut child_refs = Vec::with_capacity(children.len());
+        for child in children {
+            let child_index_before = nodes.len();
+            self.walk(
+                child,
+                snapshot,
+                depth + 1,
+                max_depth,
+                max_nodes,
+                include_invisible,
+                Some(id.clone()),
+                nodes,
+                truncated,
+                warnings,
+            );
+            if nodes.len() > child_index_before {
+                child_refs.push(nodes[child_index_before].element.clone());
+            }
+        }
+        // 回填父节点的 children（父节点一定还在，因为子节点递归只往后追加）。
+        if let Some(node) = nodes.get_mut(parent_index) {
+            node.children = child_refs;
+        }
     }
 }
 
@@ -270,6 +277,7 @@ fn supported_actions_for(role: &str) -> Vec<ActionKind> {
 /// AX 动作名常量。
 const AX_PRESS: &str = "AXPress";
 const AX_SET_VALUE: &str = "AXValue";
+const AX_FOCUSED: &str = "AXFocused";
 const AX_RAISE: &str = "AXRaise";
 
 #[async_trait]
@@ -476,15 +484,16 @@ impl Backend for MacosBackend {
 
         let action_kind = ActionKind::from(req.action);
         let result = match action_kind {
-            ActionKind::Focus => element.perform_action(AX_RAISE),
+            ActionKind::Focus => element.set_bool_attribute(AX_FOCUSED, true),
             ActionKind::Press => element.perform_action(AX_PRESS),
             ActionKind::SetValue => match &req.value {
                 Some(v) => element.set_string_attribute(AX_SET_VALUE, v),
                 None => Err(ax::AxError::IllegalArgument),
             },
-            ActionKind::Toggle | ActionKind::Select | ActionKind::Expand | ActionKind::Collapse => {
-                element.perform_action(AX_PRESS)
-            }
+            ActionKind::Toggle => element.perform_action(AX_PRESS),
+            ActionKind::Select => element.perform_action(AX_PRESS),
+            ActionKind::Expand => element.perform_action(AX_PRESS),
+            ActionKind::Collapse => element.perform_action(AX_PRESS),
             ActionKind::ScrollIntoView => element.perform_action(AX_RAISE),
         };
 

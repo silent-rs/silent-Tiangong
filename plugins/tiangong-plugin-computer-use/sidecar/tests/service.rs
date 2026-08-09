@@ -110,24 +110,24 @@ async fn list_windows_without_permission_returns_permission_denied_on_macos() {
 }
 
 #[tokio::test]
-async fn unsupported_action_returns_action_not_supported() {
-    // snapshot/find/action 在当前实现返回 ActionNotSupported，验证该错误能完整往返。
+async fn find_with_empty_scope_returns_business_error_or_result() {
+    // 空 scope 的 find 请求：未授权返回 permission_denied，授权后因无目标范围
+    // 返回 application_not_found；测试环境授权状态不确定，统一断言为合法往返
+    // （协议层成功，payload 为 DesktopResult 的成功或业务错误）。
     let service = tiangong_plugin_computer_use_sidecar::ComputerUseService::new().unwrap();
     let req = FindRequest::default();
     let resp = service
         .dispatch(request(DESKTOP_FIND_OPERATION, serde_json::json!(req)))
         .await;
-    assert!(resp.success);
+    assert!(resp.success, "协议层应成功，业务结果在 payload 内");
     let payload = resp.payload.expect("应有 payload");
-    // 当前后端返回 ActionNotSupported 错误。
+    // payload 要么是成功结果（含 matches 字段），要么是业务错误（含 kind 字段）。
+    let has_matches = payload.get("matches").is_some();
     let kind = payload.get("kind").and_then(|v| v.as_str());
-    if let Some(k) = kind {
-        // 错误响应含 kind 字段；非错误响应不含。
-        assert!(
-            k == "action_not_supported" || k == "permission_denied" || k == "backend_unavailable",
-            "未预期的错误 kind: {k}"
-        );
-    }
+    assert!(
+        has_matches || kind.is_some(),
+        "payload 应为成功结果或业务错误，实际: {payload}"
+    );
 }
 
 #[tokio::test]

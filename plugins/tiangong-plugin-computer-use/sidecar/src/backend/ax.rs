@@ -214,6 +214,25 @@ impl AxElement {
         if err.is_success() { Ok(()) } else { Err(err) }
     }
 
+    /// 设置布尔属性（如设置 AXFocused 为 true 以聚焦控件）。
+    pub fn set_bool_attribute(&self, name: &str, value: bool) -> Result<(), AxError> {
+        let cf_value = if value {
+            CFBoolean::true_value()
+        } else {
+            CFBoolean::false_value()
+        };
+        let cf_attr = CFString::new(name);
+        let code = unsafe {
+            AXUIElementSetAttributeValue(
+                self.raw,
+                cf_attr.as_concrete_TypeRef(),
+                cf_value.as_concrete_TypeRef() as CFTypeRef,
+            )
+        };
+        let err = AxError::from_raw(code);
+        if err.is_success() { Ok(()) } else { Err(err) }
+    }
+
     /// 底层拷贝属性值，返回 caller-owned CFTypeRef（成功时）。
     fn copy_attribute_value(&self, name: &str) -> Option<CFTypeRef> {
         let cf_name = CFString::new(name);
