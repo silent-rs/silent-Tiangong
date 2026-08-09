@@ -57,15 +57,19 @@ DialogTrigger.displayName = "DialogTrigger"
 
 const DialogContent = React.forwardRef<
   HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement> & { showCloseButton?: boolean }
->(({ className, children, showCloseButton = true, ...props }, ref) => {
+  React.HTMLAttributes<HTMLDivElement> & {
+    showCloseButton?: boolean
+    /** 外层遮罩容器的类名，用于覆盖默认 z-index（如嵌套 Dialog 需要更高层级）。 */
+    overlayClassName?: string
+  }
+>(({ className, children, showCloseButton = true, overlayClassName, ...props }, ref) => {
   const context = React.useContext(DialogContext)
   if (!context) throw new Error("DialogContent must be used within Dialog")
 
   if (!context.open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-center justify-center">
+    <div className={cn("fixed inset-0 z-[70] flex items-center justify-center", overlayClassName)}>
       <div className="fixed inset-0 bg-black/50" />
       <div
         ref={ref}

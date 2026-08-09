@@ -273,17 +273,16 @@ export function PluginManagerSettings({
     }
   };
 
-  // 打开默认插件推荐引导：检测缺失的默认插件并弹出安装对话框。
+  // 打开默认插件推荐引导：拉取全部默认插件（含已安装与未安装），总是弹出对话框。
   const openRecommend = async () => {
     try {
-      const check = await api.checkDefaultPlugins();
-      if (check.missing.length > 0) {
-        setRecommendMissing(check.missing);
-      } else if (check.catalog_error) {
-        showError('无法获取插件目录', check.catalog_error);
-      } else {
-        showSuccess('默认插件已齐全', '无需额外安装');
+      const list = await api.listAvailablePlugins();
+      const defaults = list.filter((plugin) => plugin.is_default && plugin.supported);
+      if (defaults.length === 0) {
+        showError('无法获取默认插件', '插件目录为空或网络不可达');
+        return;
       }
+      setRecommendMissing(defaults);
     } catch (error) {
       showError('检测失败', String(error));
     }
@@ -490,6 +489,7 @@ export function PluginManagerSettings({
 
       <DefaultPluginOnboarding
         missing={recommendMissing}
+        writeCompletionMarker={false}
         onOpenChange={(open) => {
           if (!open) setRecommendMissing(null);
         }}

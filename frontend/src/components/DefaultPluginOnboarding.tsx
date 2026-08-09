@@ -33,16 +33,23 @@ type ItemState = {
 };
 
 type Props = {
-  /** 缺失的默认插件列表；为 null 时不显示对话框。 */
+  /** 默认插件列表（含已安装与未安装）；为 null 时不显示对话框。 */
   missing: AvailablePlugin[] | null;
   /** 关闭/打开变化。关闭后父组件应清空 missing。 */
   onOpenChange: (open: boolean) => void;
   /** 引导结束后回调（用于刷新插件贡献项等全局状态）。 */
   onComplete: () => void;
+  /** 是否在跳过/完成时写入首次启动标记。首次启动场景为 true，插件管理手动打开时为 false。 */
+  writeCompletionMarker?: boolean;
 };
 
-export function DefaultPluginOnboarding({ missing, onOpenChange, onComplete }: Props) {
-  const open = missing !== null && missing.length > 0;
+export function DefaultPluginOnboarding({
+  missing,
+  onOpenChange,
+  onComplete,
+  writeCompletionMarker = true,
+}: Props) {
+  const open = missing !== null;
   const [items, setItems] = useState<ItemState[]>([]);
   const [batchRunning, setBatchRunning] = useState(false);
   const { showSuccess, showError } = useToast();
@@ -134,7 +141,9 @@ export function DefaultPluginOnboarding({ missing, onOpenChange, onComplete }: P
       if (await installOne(plugin)) succeeded += 1;
     }
     setBatchRunning(false);
-    await api.completeFirstLaunch().catch((error) => console.warn('写入首次启动标记失败', error));
+    if (writeCompletionMarker) {
+      await api.completeFirstLaunch().catch((error) => console.warn('写入首次启动标记失败', error));
+    }
     if (succeeded === targets.length) {
       showSuccess('默认插件已全部安装', '可以开始使用天工了');
     } else if (succeeded > 0) {
@@ -146,20 +155,30 @@ export function DefaultPluginOnboarding({ missing, onOpenChange, onComplete }: P
     onOpenChange(false);
   };
 
-  // 跳过：直接写入完成标记并关闭，本次启动不再弹出。
+  // 跳过/关闭：首次启动场景写入完成标记，插件管理手动打开时不写。
   const skip = async () => {
     if (batchRunning) return;
-    await api.completeFirstLaunch().catch((error) => console.warn('写入首次启动标记失败', error));
+    if (writeCompletionMarker) {
+      await api.completeFirstLaunch().catch((error) => console.warn('写入首次启动标记失败', error));
+    }
     onOpenChange(false);
   };
 
+  const hasMissing = items.some((item) => item.state !== 'installed');
+
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? null : onOpenChange(false))}>
-      <DialogContent className="max-w-lg" showCloseButton={!batchRunning}>
+      <DialogContent
+        className="max-w-lg"
+        overlayClassName="z-[80]"
+        showCloseButton={!batchRunning}
+      >
         <DialogHeader>
-          <DialogTitle>欢迎使用天工</DialogTitle>
+          <DialogTitle>{hasMissing ? '推荐安装默认插件' : '默认插件已全部安装'}</DialogTitle>
           <DialogDescription>
-            为获得基础体验，建议安装以下默认插件。它们提供系统提示词、文件操作、命令执行等基础能力。
+            {hasMissing
+              ? '为获得基础体验，建议安装以下默认插件。它们提供系统提示词、文件操作、命令执行等基础能力。'
+              : '所有默认插件均已就绪，可随时在插件管理中查看或调整。'}
           </DialogDescription>
         </DialogHeader>
 
@@ -191,22 +210,30 @@ export function DefaultPluginOnboarding({ missing, onOpenChange, onComplete }: P
         </Tabs>
 
         <DialogFooter className="gap-2 sm:gap-2">
-          <Button variant="ghost" onClick={() => void skip()} disabled={batchRunning}>
-            跳过
-          </Button>
-          <Button onClick={() => void installAll()} disabled={batchRunning || !hasPending}>
-            {batchRunning ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                正在安装...
-              </>
-            ) : (
-              <>
-                <Download className="mr-2 h-4 w-4" />
-                一键安装{hasPending ? `（${installableCount}）` : ''}
-              </>
-            )}
-          </Button>
+          {hasMissing ? (
+            <>
+              <Button variant="ghost" onClick={() => void skip()} disabled={batchRunning}>
+                {writeCompletionMarker ? '跳过' : '关闭'}
+              </Button>
+              <Button onClick={() => void installAll()} disabled={batchRunning || !hasPending}>
+                {batchRunning ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    正在安装...
+                  </>
+                ) : (
+                  <>
+                    <Download className="mr-2 h-4 w-4" />
+                    一键安装{hasPending ? `（${installableCount}）` : ''}
+                  </>
+                )}
+              </Button>
+            </>
+          ) : (
+            <Button onClick={() => void skip()} disabled={batchRunning}>
+              完成
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
