@@ -32,3 +32,7 @@ objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow"] }
 core-foundation = "0.10"
+
+# Linux 后端：纯 Rust AT-SPI2 实现（zbus 基于 D-Bus）。
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = { version = "0.22", features = ["tokio", "proxies", "connection", "zbus"] }
