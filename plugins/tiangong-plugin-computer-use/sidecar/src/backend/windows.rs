@@ -179,22 +179,28 @@ impl Backend for WindowsBackend {
             Ok(a) => a,
             Err(e) => return DesktopResult::Err(e),
         };
-        // 定位根元素：优先用窗口引用对应的 pid 创建应用根，否则用桌面根。
-        let root = match &req.scope.window {
-            Some(_window_ref) => {
-                // 完整实现应按 window 引用还原 UIElement；当前简化为从桌面根遍历。
-                automation
-                    .get_root_element()
-                    .map_err(|e| DesktopError::BackendUnavailable {
-                        reason: format!("获取桌面根元素失败: {e}"),
-                    })?
-            }
+        // 定位根元素：必须指定 scope（pid 或 app_name），从顶层窗口中筛选，
+        // 避免无边界遍历整个桌面导致跨应用且超出节点上限。
+        let target_pid = req.scope.pid.or_else(|| {
+            req.scope
+                .app_name
+                .as_ref()
+                .and_then(|name| find_window_pid_by_name(&automation, name))
+        });
+        let root = match target_pid {
+            Some(pid) => match Self::top_level_windows(&automation) {
+                Ok(windows) => windows
+                    .into_iter()
+                    .find(|w| w.get_process_id().unwrap_or(0) == pid as i32)
+                    .ok_or_else(|| DesktopError::WindowNotFound {
+                        query: format!("pid {pid}"),
+                    })?,
+                Err(e) => return DesktopResult::Err(e),
+            },
             None => {
-                automation
-                    .get_root_element()
-                    .map_err(|e| DesktopError::BackendUnavailable {
-                        reason: format!("获取桌面根元素失败: {e}"),
-                    })?
+                return DesktopResult::Err(DesktopError::WindowNotFound {
+                    query: "snapshot 需要指定 pid 或 app_name".to_string(),
+                });
             }
         };
         let max_depth = if req.max_depth > 0 {
@@ -232,20 +238,18 @@ impl Backend for WindowsBackend {
     }
 
     async fn find(&self, _req: &FindRequest) -> DesktopResult<FindInfo> {
-        // find 需基于快照节点表；Windows 后端当前未缓存节点表，返回未实现。
-        DesktopResult::Err(DesktopError::ActionNotSupported {
-            action: "desktop_find".to_string(),
-            supported: vec![],
+        // Windows 后端的 find 需缓存快照节点表，当前尚未实现。
+        // 返回 BackendUnavailable 表示后端能力未实现（而非控件不支持动作）。
+        DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: "Windows 后端的 find 尚未实现".to_string(),
         })
     }
 
     async fn action(&self, req: &ActionRequest) -> DesktopResult<ActionResult> {
-        // action 需从缓存还原 UIElement 并调对应 pattern。
-        // Windows 后端当前未缓存 UIElement，返回未实现。
+        // Windows 后端的 action 需从缓存还原 UIElement 并调 pattern，当前尚未实现。
         let _ = req;
-        DesktopResult::Err(DesktopError::ActionNotSupported {
-            action: "desktop_action".to_string(),
-            supported: vec![],
+        DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: "Windows 后端的 action 尚未实现".to_string(),
         })
     }
 
@@ -286,11 +290,14 @@ impl Backend for WindowsBackend {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
-            _ => DesktopResult::Ok(WaitResult {
-                satisfied: false,
-                waited_ms: req.timeout_ms,
-                matched_element: None,
-            }),
+            _ => {
+                // 控件级等待（focus/available/value）需缓存 UIElement 并轮询，当前未实现。
+                // 返回 BackendUnavailable 明确表示能力未实现，而非假装等待了完整时间。
+                let _ = req;
+                DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: "Windows 后端的控件级等待尚未实现".to_string(),
+                })
+            }
         }
     }
 }
@@ -406,4 +413,18 @@ fn _pattern_types() {
     let _: Option<UIExpandCollapsePattern> = None;
     let _: Option<UIScrollItemPattern> = None;
     let _: Option<Rect> = None;
+}
+
+/// 按应用名（窗口标题包含匹配）从顶层窗口中查找进程号。
+fn find_window_pid_by_name(automation: &UIAutomation, name: &str) -> Option<u32> {
+    let windows = WindowsBackend::top_level_windows(automation).ok()?;
+    let needle = name.to_lowercase();
+    windows.into_iter().find_map(|w| {
+        let title = w.get_name().unwrap_or_default();
+        if title.to_lowercase().contains(&needle) {
+            w.get_process_id().ok().map(|p| p as u32)
+        } else {
+            None
+        }
+    })
 }

@@ -373,6 +373,10 @@ fn handle_wait(arguments: String) -> Result<ToolResult, PluginError> {
             "bad timeout",
         ));
     }
+    // 限制等待不超过 host 请求期限（plugin.json 的 request_timeout_ms=60000）。
+    // 超过时截断到 55 秒（留 5 秒余量），避免 host 在 60 秒断开后 sidecar 仍悬挂。
+    const MAX_WAIT_MS: u64 = 55_000;
+    let timeout_ms = timeout_ms.min(MAX_WAIT_MS);
     let request = WaitRequest {
         condition,
         timeout_ms,

@@ -31,9 +31,11 @@ use tiangong_plugin_computer_use_protocol::{
 
 const DEFAULT_MAX_DEPTH: u32 = 8;
 const DEFAULT_MAX_NODES: usize = 400;
-/// 根桌面对象路径与默认服务名（AT-SPI 注册表）。
+/// 根桌面对象路径与 AT-SPI 注册表的 well-known 服务名。
+/// 注意：`:1.x` 是动态 D-Bus unique name，会随服务启动顺序变化，不可使用；
+/// 必须用 well-known name `org.a11y.atspi.Registry`，zbus 会解析到当前注册表实例。
 const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
-const ROOT_DEST: &str = ":1.1";
+const ROOT_DEST: &str = "org.a11y.atspi.Registry";
 
 pub struct LinuxBackend {
     snapshot_seq: AtomicU64,
@@ -81,7 +83,8 @@ impl LinuxBackend {
         conn: &atspi::zbus::Connection,
     ) -> Result<AccessibleProxy<'_>, DesktopError> {
         // 用 builder 直接构造，避免 ObjectRefExt 返回值借用局部 ObjectRef。
-        let dest = atspi::zbus::names::UniqueName::from_static_str(ROOT_DEST).map_err(|e| {
+        // destination 用 well-known name（org.a11y.atspi.Registry），由 zbus 解析到当前注册表实例。
+        let dest = atspi::zbus::names::WellKnownName::from_static_str(ROOT_DEST).map_err(|e| {
             DesktopError::BackendUnavailable {
                 reason: format!("无效根服务名: {e}"),
             }
@@ -203,6 +206,43 @@ impl Backend for LinuxBackend {
             Ok(d) => d,
             Err(e) => return DesktopResult::Err(e),
         };
+        // 必须指定 app_name 才能定位到具体应用，避免遍历整个桌面。
+        let app_name = match req.scope.app_name.as_deref() {
+            Some(n) => n,
+            None => {
+                return DesktopResult::Err(DesktopError::ApplicationNotFound {
+                    query: "AT-SPI snapshot 需要指定 app_name".to_string(),
+                });
+            }
+        };
+        // 从桌面根的子应用中按名称找到对应应用的代理作为遍历根。
+        let children = match desktop.get_children().await {
+            Ok(c) => c,
+            Err(e) => {
+                return DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: format!("读取桌面子应用失败: {e}"),
+                });
+            }
+        };
+        let needle = app_name.to_lowercase();
+        let mut root = None;
+        for child_ref in children {
+            if let Ok(proxy) = child_ref.as_accessible_proxy(zbus).await {
+                let name = proxy.name().await.unwrap_or_default();
+                if name.to_lowercase().contains(&needle) {
+                    root = Some(proxy);
+                    break;
+                }
+            }
+        }
+        let root = match root {
+            Some(p) => p,
+            None => {
+                return DesktopResult::Err(DesktopError::ApplicationNotFound {
+                    query: app_name.to_string(),
+                });
+            }
+        };
         let max_depth = if req.max_depth > 0 {
             req.max_depth
         } else {
@@ -218,7 +258,7 @@ impl Backend for LinuxBackend {
         let mut truncated = false;
         let warnings = Vec::new();
         self.walk(
-            &desktop,
+            &root,
             zbus,
             snapshot,
             0,
@@ -239,20 +279,18 @@ impl Backend for LinuxBackend {
     }
 
     async fn find(&self, _req: &FindRequest) -> DesktopResult<FindInfo> {
-        // find 需基于快照节点表；AT-SPI 后端当前未缓存节点表，返回未实现。
-        DesktopResult::Err(DesktopError::ActionNotSupported {
-            action: "desktop_find".to_string(),
-            supported: vec![],
+        // AT-SPI 后端的 find 需缓存快照节点表，当前尚未实现。
+        // 返回 BackendUnavailable 表示后端能力未实现（而非控件不支持动作）。
+        DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: "AT-SPI 后端的 find 尚未实现".to_string(),
         })
     }
 
     async fn action(&self, req: &ActionRequest) -> DesktopResult<ActionResult> {
-        // action 需从缓存还原对象引用并调 Action 接口的 do_action。
-        // AT-SPI 后端当前未缓存 ObjectRef，返回未实现。
+        // AT-SPI 后端的 action 需从缓存还原 ObjectRef 并调 Action 接口，当前尚未实现。
         let _ = req;
-        DesktopResult::Err(DesktopError::ActionNotSupported {
-            action: "desktop_action".to_string(),
-            supported: vec![],
+        DesktopResult::Err(DesktopError::BackendUnavailable {
+            reason: "AT-SPI 后端的 action 尚未实现".to_string(),
         })
     }
 
@@ -294,11 +332,14 @@ impl Backend for LinuxBackend {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
             }
-            _ => DesktopResult::Ok(WaitResult {
-                satisfied: false,
-                waited_ms: req.timeout_ms,
-                matched_element: None,
-            }),
+            _ => {
+                // 控件级等待（focus/available/value）需缓存 ObjectRef 并轮询，当前未实现。
+                // 返回 BackendUnavailable 明确表示能力未实现，而非假装等待了完整时间。
+                let _ = req;
+                DesktopResult::Err(DesktopError::BackendUnavailable {
+                    reason: "AT-SPI 后端的控件级等待尚未实现".to_string(),
+                })
+            }
         }
     }
 }

@@ -104,13 +104,10 @@ impl MacosBackend {
                 continue;
             }
             let pid = app.processIdentifier();
-            // 缓存应用根元素，便于后续 snapshot 复用。
-            let element = AxElement::for_application(pid);
-            let id = format!("macos-app-{pid}-{}", idx);
-            self.elements
-                .write()
-                .unwrap()
-                .insert((snapshot, id.clone()), element);
+            // element ref 用基于 pid 的确定性 id（格式 macos-app-{pid}-{idx}）。
+            // 不在此缓存 AxElement：list_windows 可能在 wait 轮询中高频调用，
+            // 缓存会导致原生对象累积。snapshot 时通过 parse_pid_from_id 重新创建应用根。
+            let id = format!("macos-app-{pid}-{idx}");
             idx += 1;
             windows.push(WindowInfo {
                 app_name: name.clone(),
@@ -620,6 +617,14 @@ impl Backend for MacosBackend {
                         });
                     }
                 };
+                // 记录初始值：value 等待无期望值时，需等到值真正发生变化才算成功。
+                let initial_value = if expected_value.is_none()
+                    && matches!(&req.condition, WaitCondition::Value { .. })
+                {
+                    ax_element.string_attribute("AXValue")
+                } else {
+                    None
+                };
                 loop {
                     let satisfied = match &req.condition {
                         WaitCondition::Focus { .. } => {
@@ -632,7 +637,11 @@ impl Backend for MacosBackend {
                             Some(want) => ax_element
                                 .string_attribute("AXValue")
                                 .is_some_and(|v| v == *want),
-                            None => ax_element.string_attribute("AXValue").is_some(),
+                            None => {
+                                // 无期望值：比较当前值与初始值，不同才算变化。
+                                let current = ax_element.string_attribute("AXValue");
+                                current != initial_value
+                            }
                         },
                         // Appear/Disappear 已在外层处理，这里不会到达。
                         _ => false,

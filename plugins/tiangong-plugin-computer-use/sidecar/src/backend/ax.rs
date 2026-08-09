@@ -99,6 +99,19 @@ unsafe extern "C" {
 const AX_VALUE_TYPE_CG_POINT: u32 = 1;
 const AX_VALUE_TYPE_CG_SIZE: u32 = 2;
 
+// CoreFoundation 类型判断（用于按真实类型解释 CFTypeRef，避免类型误判）。
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFStringGetTypeID() -> usize;
+    fn CFNumberGetTypeID() -> usize;
+    fn CFNumberGetValue(number: *const c_void, the_type: u32, value_ptr: *mut c_void) -> u8;
+}
+
+/// CFNumber 类型常量（kCFNumberIntType=9, kCFNumberFloat64Type=13, kCFNumberDoubleType=13）。
+const CF_NUMBER_FLOAT64_TYPE: u32 = 13;
+const CF_NUMBER_INT_TYPE: u32 = 9;
+
 /// CGPoint（64 位下 CGFloat = f64）。
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -408,14 +421,60 @@ fn retain(ptr: *const c_void) -> *const c_void {
     unsafe { CFRetain(ptr as CFTypeRef) }
 }
 
-/// 把 CFTypeRef 当作 CFString 解释并转 owned String。
+/// 把 CFTypeRef 按真实类型解释为字符串。
+/// 仅当值为 CFString 或 CFNumber 时转换；其他类型释放后返回 None，
+/// 避免把数字/数组等误当作 CFString 解释导致类型错误。
 fn cf_type_as_string(ptr: *const c_void) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    // SAFETY：ptr 为 CFTypeRef，wrap_under_create_rule 接管所有权。
-    let cf_string = unsafe { CFString::wrap_under_create_rule(ptr as CFStringRef) };
-    Some(cf_string.to_string())
+    // SAFETY：CFGetTypeID 读取 CF 对象类型 ID，无副作用。
+    let type_id = unsafe { CFGetTypeID(ptr) };
+    let string_type = unsafe { CFStringGetTypeID() };
+    let number_type = unsafe { CFNumberGetTypeID() };
+    if type_id == string_type {
+        // SAFETY：ptr 已确认是 CFString，wrap_under_create_rule 接管所有权。
+        let cf_string = unsafe { CFString::wrap_under_create_rule(ptr as CFStringRef) };
+        Some(cf_string.to_string())
+    } else if type_id == number_type {
+        // SAFETY：ptr 已确认是 CFNumber，尝试读为 f64 再转字符串。
+        let value = unsafe { read_cf_number_as_f64(ptr) };
+        unsafe { CFRelease(ptr) };
+        value.map(|v| v.to_string())
+    } else {
+        // 未知类型：释放并返回 None。
+        unsafe { CFRelease(ptr) };
+        None
+    }
+}
+
+/// 将 CFNumber 读为 f64（优先 float64，回退 int）。
+unsafe fn read_cf_number_as_f64(ptr: *const c_void) -> Option<f64> {
+    let mut float_val: f64 = 0.0;
+    // SAFETY：ptr 已确认为 CFNumber，按 float64 类型读取。
+    if unsafe {
+        CFNumberGetValue(
+            ptr,
+            CF_NUMBER_FLOAT64_TYPE,
+            &mut float_val as *mut f64 as *mut c_void,
+        )
+    } != 0
+    {
+        return Some(float_val);
+    }
+    let mut int_val: i64 = 0;
+    // SAFETY：回退按 int 类型读取。
+    if unsafe {
+        CFNumberGetValue(
+            ptr,
+            CF_NUMBER_INT_TYPE,
+            &mut int_val as *mut i64 as *mut c_void,
+        )
+    } != 0
+    {
+        return Some(int_val as f64);
+    }
+    None
 }
 
 /// 把 CFTypeRef 当作 CFBoolean 判断真值（不接管所有权，仅读取）。

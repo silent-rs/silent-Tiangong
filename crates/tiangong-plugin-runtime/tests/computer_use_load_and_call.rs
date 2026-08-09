@@ -71,17 +71,40 @@ fn computer_use_wasm_path() -> PathBuf {
     path
 }
 
-/// 若 wasm 文件不存在则提示并跳过当前测试。
+/// 定位 computer-use wasm 组件，缺失时尝试构建。
+///
+/// 静默跳过会让干净环境显示"通过"但实际覆盖为零。这里改为：缺失时用 cargo
+/// 构建 wasm debug 产物；设了 COMPUTER_USE_WASM_SKIP=1 才允许显式跳过；
+/// 构建仍失败则 panic，避免假通过。
 fn wasm_or_skip() -> Option<PathBuf> {
     let path = computer_use_wasm_path();
-    if !path.exists() {
+    if path.exists() {
+        return Some(path);
+    }
+    if std::env::var("COMPUTER_USE_WASM_SKIP").is_ok() {
         eprintln!(
-            "跳过测试：未找到 computer-use wasm 组件 {}，请先执行构建",
+            "跳过测试：未找到 {} 且 COMPUTER_USE_WASM_SKIP 已设置",
             path.display()
         );
         return None;
     }
-    Some(path)
+    eprintln!("未找到 computer-use wasm，尝试构建...");
+    let status = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "tiangong-plugin-computer-use-wasm",
+            "--target",
+            "wasm32-wasip2",
+        ])
+        .status()
+        .expect("无法执行 cargo build");
+    assert!(status.success(), "构建 computer-use wasm 失败");
+    if path.exists() {
+        Some(path)
+    } else {
+        panic!("构建后仍未找到 {}，请检查产物路径", path.display());
+    }
 }
 
 #[test]
