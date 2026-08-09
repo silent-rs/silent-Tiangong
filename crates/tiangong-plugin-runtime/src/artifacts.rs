@@ -155,6 +155,20 @@ pub fn stage_local_plugin(storage_root: &Path, source: &Path) -> Result<StagedPl
     copy_local_artifact(source, manifest.wasm_binary(), &staged.path, "WASM 制品")?;
 
     if let Some(sidecar) = &manifest.sidecar {
+        let release = source.join(crate::signature::SIGNED_RELEASE_FILE);
+        let signature = source.join(crate::signature::SIGNATURE_FILE);
+        ensure_regular_file(&release, "插件签名清单")?;
+        ensure_regular_file(&signature, "插件签名")?;
+        copy_regular_file(
+            &release,
+            &staged.path.join(crate::signature::SIGNED_RELEASE_FILE),
+            "插件签名清单",
+        )?;
+        copy_regular_file(
+            &signature,
+            &staged.path.join(crate::signature::SIGNATURE_FILE),
+            "插件签名",
+        )?;
         let binary = with_executable_suffix(&sidecar.binary)?;
         let destination = copy_local_artifact(source, &binary, &staged.path, "sidecar 制品")?;
         set_executable(&destination)?;
