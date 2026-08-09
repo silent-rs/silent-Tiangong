@@ -32,6 +32,8 @@ pub struct MacosBackend {
     /// 快照内控件引用缓存：((snapshot, id) -> AxElement)。
     /// 仅保留最近若干个快照，避免内存无限增长。
     elements: RwLock<HashMap<(u64, String), AxElement>>,
+    /// 快照节点表缓存：(snapshot -> Vec<ControlNode>)，供 find 在指定快照内筛选。
+    snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于清理过期缓存。
     recent_snapshots: Mutex<Vec<u64>>,
 }
@@ -47,6 +49,7 @@ impl MacosBackend {
         Self {
             snapshot_seq: AtomicU64::new(1),
             elements: RwLock::new(HashMap::new()),
+            snapshot_nodes: RwLock::new(HashMap::new()),
             recent_snapshots: Mutex::new(Vec::new()),
         }
     }
@@ -70,6 +73,7 @@ impl MacosBackend {
             let old = recent.remove(0);
             let mut elements = self.elements.write().unwrap();
             elements.retain(|(s, _), _| *s != old);
+            self.snapshot_nodes.write().unwrap().remove(&old);
         }
     }
 
@@ -195,6 +199,8 @@ impl MacosBackend {
         let enabled = element.bool_attribute("AXEnabled").unwrap_or(true);
         let focused = element.bool_attribute("AXFocused").unwrap_or(false);
         let value = element.string_attribute("AXValue");
+        // 读取控件边界（AXPosition + AXSize）；失败返回默认零值，不影响整棵树。
+        let ax_bounds = element.bounds();
         // 敏感控件（密码框）的值不返回。
         let sensitive = matches!(role.as_str(), "AXSecureTextField");
         let safe_value = if sensitive { None } else { value };
@@ -206,6 +212,12 @@ impl MacosBackend {
         // 缓存控件引用（消费 element），递归时按 children 独立处理。
         let id = self.cache_element(snapshot, element);
         let actions = supported_actions_for(&role);
+        let bounds = Bounds {
+            x: ax_bounds.x,
+            y: ax_bounds.y,
+            width: ax_bounds.width,
+            height: ax_bounds.height,
+        };
 
         // 前序遍历：先 push 父节点（children 暂空），记录索引后递归子节点，
         // 递归结束回填 children，保证输出顺序为“父→子→孙”。
@@ -226,7 +238,7 @@ impl MacosBackend {
             visible,
             enabled,
             focused,
-            bounds: Bounds::default(),
+            bounds,
             actions,
             parent: parent_id.map(|pid| ElementRef { id: pid, snapshot }),
             children: Vec::new(),
@@ -391,6 +403,11 @@ impl Backend for MacosBackend {
         self.remember_snapshot(snapshot);
         let (nodes, truncated, warnings) =
             self.build_snapshot(root, snapshot, max_depth, max_nodes, req.include_invisible);
+        // 缓存节点表，供 find 在该快照内筛选。
+        self.snapshot_nodes
+            .write()
+            .unwrap()
+            .insert(snapshot, nodes.clone());
         DesktopResult::Ok(SnapshotInfo {
             snapshot,
             nodes,
@@ -403,16 +420,31 @@ impl Backend for MacosBackend {
         &self,
         req: &tiangong_plugin_computer_use_protocol::ops::FindRequest,
     ) -> DesktopResult<FindInfo> {
-        // find 基于 snapshot：若指定 snapshot，则在该快照节点内筛选；否则先取一次快照。
+        // find 基于 snapshot：若指定 snapshot 版本，从缓存的节点表筛选；
+        // 否则需要 window 引用先取一次快照。
         let (nodes, snapshot) = match req.snapshot {
             Some(s) => {
-                // 直接基于已有快照查找需要缓存节点表；当前简化为返回未找到。
-                (Vec::new(), s)
+                // 从缓存的节点表读取；快照已过期则报 stale。
+                let cached = self.snapshot_nodes.read().unwrap().get(&s).cloned();
+                match cached {
+                    Some(n) => (n, s),
+                    None => {
+                        return DesktopResult::Err(DesktopError::StaleElement { snapshot: s });
+                    }
+                }
             }
             None => {
+                let window = match &req.window {
+                    Some(w) => w.clone(),
+                    None => {
+                        return DesktopResult::Err(DesktopError::ApplicationNotFound {
+                            query: "find 需要指定 window 或 snapshot".to_string(),
+                        });
+                    }
+                };
                 let snap_req = tiangong_plugin_computer_use_protocol::ops::SnapshotRequest {
                     scope: tiangong_plugin_computer_use_protocol::ops::SnapshotScope {
-                        window: req.window.clone(),
+                        window: Some(window),
                         app_name: None,
                         pid: None,
                     },
@@ -568,12 +600,59 @@ impl Backend for MacosBackend {
             WaitCondition::Focus { element }
             | WaitCondition::Available { element }
             | WaitCondition::Value { element, .. } => {
-                let _ = element;
-                DesktopResult::Ok(WaitResult {
-                    satisfied: false,
-                    waited_ms: req.timeout_ms,
-                    matched_element: None,
-                })
+                // 控件级等待：从缓存取回控件引用，轮询对应属性直到满足或超时。
+                let expected_value = match &req.condition {
+                    WaitCondition::Value { expected, .. } => expected.clone(),
+                    _ => None,
+                };
+                let start = Instant::now();
+                let cached = self
+                    .elements
+                    .read()
+                    .unwrap()
+                    .get(&(element.snapshot, element.id.clone()))
+                    .cloned();
+                let ax_element = match cached {
+                    Some(e) => e,
+                    None => {
+                        return DesktopResult::Err(DesktopError::StaleElement {
+                            snapshot: element.snapshot,
+                        });
+                    }
+                };
+                loop {
+                    let satisfied = match &req.condition {
+                        WaitCondition::Focus { .. } => {
+                            ax_element.bool_attribute("AXFocused").unwrap_or(false)
+                        }
+                        WaitCondition::Available { .. } => {
+                            ax_element.bool_attribute("AXEnabled").unwrap_or(false)
+                        }
+                        WaitCondition::Value { .. } => match &expected_value {
+                            Some(want) => ax_element
+                                .string_attribute("AXValue")
+                                .is_some_and(|v| v == *want),
+                            None => ax_element.string_attribute("AXValue").is_some(),
+                        },
+                        // Appear/Disappear 已在外层处理，这里不会到达。
+                        _ => false,
+                    };
+                    if satisfied {
+                        return DesktopResult::Ok(WaitResult {
+                            satisfied: true,
+                            waited_ms: start.elapsed().as_millis() as u64,
+                            matched_element: Some(element.clone()),
+                        });
+                    }
+                    if Instant::now() >= deadline {
+                        return DesktopResult::Ok(WaitResult {
+                            satisfied: false,
+                            waited_ms: start.elapsed().as_millis() as u64,
+                            matched_element: None,
+                        });
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
             }
         }
     }

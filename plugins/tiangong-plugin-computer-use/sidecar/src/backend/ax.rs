@@ -91,14 +91,59 @@ unsafe extern "C" {
         y: c_float,
         element: *mut AXUIElementRef,
     ) -> i32;
+    fn AXValueGetType(value: AXValueRef) -> u32;
+    fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> u8;
+}
+
+/// AXValue 类型常量（与 HIServices AXValue.h 对齐）。
+const AX_VALUE_TYPE_CG_POINT: u32 = 1;
+const AX_VALUE_TYPE_CG_SIZE: u32 = 2;
+
+/// CGPoint（64 位下 CGFloat = f64）。
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+/// CGSize。
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+/// 屏幕边界（与 protocol Bounds 对齐）。
+#[derive(Default, Clone, Copy)]
+pub struct AxBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 /// AXUIElementRef 即 CFTypeRef。
 pub type AXUIElementRef = *const c_void;
+/// AXValueRef 即 CFTypeRef。
+pub type AXValueRef = *const c_void;
 
 /// 持有 AXUIElement 引用的 RAII 包装。
 pub struct AxElement {
     raw: AXUIElementRef,
+}
+
+impl Clone for AxElement {
+    fn clone(&self) -> Self {
+        // SAFETY：对非空 CF 对象增引用计数，产生一个新的独立引用。
+        let raw = if self.raw.is_null() {
+            self.raw
+        } else {
+            unsafe { CFRetain(self.raw as CFTypeRef) }
+        };
+        Self { raw }
+    }
 }
 
 // SAFETY：AXUIElement 是 CoreFoundation 引用计数对象，可跨线程传递与访问。
@@ -148,23 +193,77 @@ impl AxElement {
     }
 
     /// 读取字符串属性。
+    /// 整体用 ax_catch 包裹：某些控件的属性值类型异常，CFString 转换会抛 NSException。
     pub fn string_attribute(&self, name: &str) -> Option<String> {
         let value = self.copy_attribute_value(name)?;
-        cf_type_as_string(value)
+        ax_catch(|| cf_type_as_string(value)).flatten()
     }
 
     /// 读取布尔属性。
+    /// 整体用 ax_catch 包裹：类型不匹配时 CFBoolean 转换会抛 NSException。
     pub fn bool_attribute(&self, name: &str) -> Option<bool> {
         let value = self.copy_attribute_value(name)?;
-        // SAFETY：value 为 caller-owned CFTypeRef，作为 CFBoolean 解释。
-        let cf_bool = unsafe { CFBoolean::wrap_under_create_rule(value as CFBooleanRef) };
-        Some(bool::from(cf_bool))
+        ax_catch(|| unsafe {
+            let cf_bool = CFBoolean::wrap_under_create_rule(value as CFBooleanRef);
+            bool::from(cf_bool)
+        })
     }
 
-    /// 读取 AXValue 包装的属性（如 AXPosition/AXSize，返回 CGRect），暂以边界解析。
-    /// 返回原始 CFTypeRef，调用方按需解释。
-    pub fn raw_attribute(&self, name: &str) -> Option<CFTypeRef> {
-        self.copy_attribute_value(name)
+    /// 读取控件边界（合并 AXPosition 与 AXSize）。
+    /// 读取失败时返回默认（全零）边界，不抛错，避免单个控件拖垮整棵树。
+    pub fn bounds(&self) -> AxBounds {
+        let position = self.read_point("AXPosition");
+        let size = self.read_size("AXSize");
+        AxBounds {
+            x: position.map(|p| p.x).unwrap_or_default(),
+            y: position.map(|p| p.y).unwrap_or_default(),
+            width: size.map(|s| s.width).unwrap_or_default(),
+            height: size.map(|s| s.height).unwrap_or_default(),
+        }
+    }
+
+    /// 读取 CGPoint 属性。
+    fn read_point(&self, name: &str) -> Option<CGPoint> {
+        let value = self.copy_attribute_value(name)?;
+        // SAFETY：value 为 caller-owned CFTypeRef，作为 AXValue 解释后释放。
+        // 用 ax_catch 包裹，防止异常控件抛 NSException。
+        ax_catch(|| unsafe {
+            let ax_value = value as AXValueRef;
+            if AXValueGetType(ax_value) != AX_VALUE_TYPE_CG_POINT {
+                CFRelease(value);
+                return None;
+            }
+            let mut point = CGPoint::default();
+            let ok = AXValueGetValue(
+                ax_value,
+                AX_VALUE_TYPE_CG_POINT,
+                &mut point as *mut CGPoint as *mut c_void,
+            );
+            CFRelease(value);
+            if ok != 0 { Some(point) } else { None }
+        })
+        .flatten()
+    }
+
+    /// 读取 CGSize 属性。
+    fn read_size(&self, name: &str) -> Option<CGSize> {
+        let value = self.copy_attribute_value(name)?;
+        ax_catch(|| unsafe {
+            let ax_value = value as AXValueRef;
+            if AXValueGetType(ax_value) != AX_VALUE_TYPE_CG_SIZE {
+                CFRelease(value);
+                return None;
+            }
+            let mut size = CGSize::default();
+            let ok = AXValueGetValue(
+                ax_value,
+                AX_VALUE_TYPE_CG_SIZE,
+                &mut size as *mut CGSize as *mut c_void,
+            );
+            CFRelease(value);
+            if ok != 0 { Some(size) } else { None }
+        })
+        .flatten()
     }
 
     /// 读取子控件数组（AXChildren）。
@@ -177,74 +276,99 @@ impl AxElement {
             return Ok(Vec::new());
         }
         // SAFETY：value 为 caller-owned CFTypeRef，这里作为 CFArray 解释。
-        let cf_array =
-            unsafe { CFArray::<*const c_void>::wrap_under_create_rule(value as CFArrayRef) };
-        let range = core_foundation::base::CFRange::init(0, cf_array.len());
-        let ptrs = cf_array.get_values(range);
-        let mut children = Vec::with_capacity(ptrs.len());
-        for child_ptr in ptrs {
-            // 数组中的元素是未 retain 的引用，需要 retain 后再用。
-            if let Some(child) = Self::from_retained(retain(child_ptr)) {
-                children.push(child);
+        // 数组解析用 ax_catch 包裹，防止异常控件抛 NSException。
+        let children = ax_catch(|| unsafe {
+            let cf_array = CFArray::<*const c_void>::wrap_under_create_rule(value as CFArrayRef);
+            let range = core_foundation::base::CFRange::init(0, cf_array.len());
+            let ptrs = cf_array.get_values(range);
+            let mut children = Vec::with_capacity(ptrs.len());
+            for child_ptr in ptrs {
+                // 数组中的元素是未 retain 的引用，需要 retain 后再用。
+                if let Some(child) = Self::from_retained(retain(child_ptr)) {
+                    children.push(child);
+                }
             }
-        }
-        Ok(children)
+            children
+        });
+        Ok(children.unwrap_or_default())
     }
 
     /// 执行动作（如 AXPress）。
     pub fn perform_action(&self, action: &str) -> Result<(), AxError> {
+        let raw = self.raw;
         let cf_action = CFString::new(action);
-        let code = unsafe { AXUIElementPerformAction(self.raw, cf_action.as_concrete_TypeRef()) };
-        let err = AxError::from_raw(code);
-        if err.is_success() { Ok(()) } else { Err(err) }
+        match ax_catch(|| unsafe { AXUIElementPerformAction(raw, cf_action.as_concrete_TypeRef()) })
+        {
+            Some(code) => {
+                let err = AxError::from_raw(code);
+                if err.is_success() { Ok(()) } else { Err(err) }
+            }
+            None => Err(AxError::Failure),
+        }
     }
 
     /// 设置字符串属性（如 AXValue）。
     pub fn set_string_attribute(&self, name: &str, value: &str) -> Result<(), AxError> {
+        let raw = self.raw;
         let cf_value = CFString::new(value);
         let cf_attr = CFString::new(name);
-        let code = unsafe {
+        match ax_catch(|| unsafe {
             AXUIElementSetAttributeValue(
-                self.raw,
+                raw,
                 cf_attr.as_concrete_TypeRef(),
                 cf_value.as_concrete_TypeRef() as CFTypeRef,
             )
-        };
-        let err = AxError::from_raw(code);
-        if err.is_success() { Ok(()) } else { Err(err) }
+        }) {
+            Some(code) => {
+                let err = AxError::from_raw(code);
+                if err.is_success() { Ok(()) } else { Err(err) }
+            }
+            None => Err(AxError::Failure),
+        }
     }
 
     /// 设置布尔属性（如设置 AXFocused 为 true 以聚焦控件）。
     pub fn set_bool_attribute(&self, name: &str, value: bool) -> Result<(), AxError> {
+        let raw = self.raw;
         let cf_value = if value {
             CFBoolean::true_value()
         } else {
             CFBoolean::false_value()
         };
         let cf_attr = CFString::new(name);
-        let code = unsafe {
+        match ax_catch(|| unsafe {
             AXUIElementSetAttributeValue(
-                self.raw,
+                raw,
                 cf_attr.as_concrete_TypeRef(),
                 cf_value.as_concrete_TypeRef() as CFTypeRef,
             )
-        };
-        let err = AxError::from_raw(code);
-        if err.is_success() { Ok(()) } else { Err(err) }
+        }) {
+            Some(code) => {
+                let err = AxError::from_raw(code);
+                if err.is_success() { Ok(()) } else { Err(err) }
+            }
+            None => Err(AxError::Failure),
+        }
     }
 
     /// 底层拷贝属性值，返回 caller-owned CFTypeRef（成功时）。
+    /// 用 ax_catch 包裹，防止异常控件抛 NSException 导致进程 abort。
     fn copy_attribute_value(&self, name: &str) -> Option<CFTypeRef> {
+        let raw = self.raw;
         let cf_name = CFString::new(name);
-        let mut value: CFTypeRef = std::ptr::null();
-        let code = unsafe {
-            AXUIElementCopyAttributeValue(self.raw, cf_name.as_concrete_TypeRef(), &mut value)
-        };
-        let err = AxError::from_raw(code);
-        if !err.is_success() || value.is_null() {
-            return None;
-        }
-        Some(value)
+        ax_catch(|| {
+            let mut value: CFTypeRef = std::ptr::null();
+            let code = unsafe {
+                AXUIElementCopyAttributeValue(raw, cf_name.as_concrete_TypeRef(), &mut value)
+            };
+            let err = AxError::from_raw(code);
+            if !err.is_success() || value.is_null() {
+                None
+            } else {
+                Some(value)
+            }
+        })
+        .flatten()
     }
 }
 
@@ -305,4 +429,13 @@ fn cf_type_as_bool_ref(ptr: *const c_void) -> bool {
         let b = CFBoolean::wrap_under_create_rule(ptr as CFBooleanRef);
         bool::from(b)
     }
+}
+
+/// 包裹可能抛 Objective-C NSException 的 AX 调用。
+///
+/// macOS 辅助功能 API 在访问某些异常控件时会抛 NSException（而非返回错误码），
+/// Rust 无法捕获 foreign exception，会导致进程 abort。本函数用 objc2 的
+/// `exception::catch` 捕获异常，异常时返回 None，保证宿主不崩溃。
+pub fn ax_catch<R: Default>(closure: impl FnOnce() -> R) -> Option<R> {
+    objc2::exception::catch(std::panic::AssertUnwindSafe(closure)).ok()
 }

@@ -28,7 +28,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # macOS 后端：objc2 系列用于 NSWorkspace 列举应用，core-foundation 用于处理
 # AXUIElement C API 返回的 CFString/CFArray/CFBoolean/CFNumber 值。
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", features = ["NSString", "NSEnumerator", "NSProcessInfo"] }
 objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication", "NSWindow"] }
 core-foundation = "0.10"

@@ -53,11 +53,17 @@ async fn main() {
 
     // 控件树快照：选一个前台且有界面的应用。
     println!("\n--- desktop_snapshot ---");
+    // 优先选访达（常驻、有按钮，便于验证 find/action），其次前台应用。
     let target_name = match backend.list_windows(&ListWindowsRequest::default()).await {
         DesktopResult::Ok(r) => r
             .windows
             .iter()
-            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .find(|w| w.app_name.contains("访达") || w.app_name.contains("Finder"))
+            .or_else(|| {
+                r.windows
+                    .iter()
+                    .find(|w| w.is_foreground && !w.app_name.is_empty())
+            })
             .or_else(|| r.windows.iter().find(|w| !w.app_name.is_empty()))
             .map(|w| w.app_name.clone()),
         _ => None,
@@ -93,12 +99,24 @@ async fn main() {
                             .as_deref()
                             .map(|v| format!("值={v}"))
                             .unwrap_or_default();
+                        let bounds = if n.bounds.width > 0.0 || n.bounds.height > 0.0 {
+                            format!(
+                                " 边界=({},{},{},{})",
+                                n.bounds.x as i32,
+                                n.bounds.y as i32,
+                                n.bounds.width as i32,
+                                n.bounds.height as i32
+                            )
+                        } else {
+                            String::new()
+                        };
                         println!(
-                            "  - [{}] {} {} {}",
+                            "  - [{}] {} {} {}{}",
                             n.role,
                             n.name,
                             if n.sensitive { "(敏感)" } else { "" },
-                            value
+                            value,
+                            bounds
                         );
                     }
                 }
@@ -110,33 +128,26 @@ async fn main() {
         None => println!("未找到可快照的应用"),
     }
 
-    // find + action：查找一个按钮并对其执行 focus（最安全的动作，不触发功能）。
+    // find + action：取快照后用 find 在快照内查找按钮，再对其执行 focus。
     println!("\n--- desktop_find + desktop_action(focus) ---");
     use tiangong_plugin_computer_use_protocol::ops::{
         ActionRequest, ActionRequestKind, FindConditions, FindRequest, SnapshotScope,
     };
-    let find_req = FindRequest {
-        window: None,
-        snapshot: None,
-        conditions: FindConditions {
-            role: Some("AXButton".to_string()),
-            ..Default::default()
-        },
-        max_candidates: 1,
-        access: Default::default(),
-    };
-    // find 不带 window 时需通过快照目标定位，这里用前台应用名。
+    // 先取应用快照，再用快照版本调 find。优先访达。
     let target_app = match backend.list_windows(&ListWindowsRequest::default()).await {
         DesktopResult::Ok(r) => r
             .windows
             .iter()
-            .find(|w| w.is_foreground && !w.app_name.is_empty())
+            .find(|w| w.app_name.contains("访达") || w.app_name.contains("Finder"))
+            .or_else(|| {
+                r.windows
+                    .iter()
+                    .find(|w| w.is_foreground && !w.app_name.is_empty())
+            })
             .map(|w| w.app_name.clone()),
         _ => None,
     };
-    // find 当前实现要求有窗口/快照范围；用快照目标应用的窗口引用构造请求。
     let find_result = if let Some(name) = target_app {
-        // 先取该应用快照，再用快照版本 + 按钮角色查找。
         let snap = backend
             .snapshot(&SnapshotRequest {
                 scope: SnapshotScope {
@@ -152,25 +163,41 @@ async fn main() {
             .await;
         match snap {
             DesktopResult::Ok(info) => {
-                let mut req = find_req.clone();
-                req.snapshot = Some(info.snapshot);
-                // 把快照节点交给 find：当前 find 实现不读节点表，这里直接在节点上筛。
-                let matches: Vec<_> = info
-                    .nodes
-                    .iter()
-                    .filter(|n| n.identifiers.role.as_deref() == Some("AXButton"))
-                    .take(1)
-                    .cloned()
-                    .collect();
-                println!("找到按钮数: {}", matches.len());
-                if let Some(target) = matches.first() {
-                    println!(
-                        "目标按钮: [{}] {} (引用 {}, 快照 {})",
-                        target.role, target.name, target.element.id, target.element.snapshot
-                    );
-                    Some(target.element.clone())
-                } else {
-                    None
+                // 用快照版本调真实 find API。
+                let find_req = FindRequest {
+                    window: None,
+                    snapshot: Some(info.snapshot),
+                    conditions: FindConditions {
+                        role: Some("AXButton".to_string()),
+                        ..Default::default()
+                    },
+                    max_candidates: 1,
+                    access: Default::default(),
+                };
+                match backend.find(&find_req).await {
+                    DesktopResult::Ok(find_info) => {
+                        println!(
+                            "find 命中按钮数: {}, 歧义: {}",
+                            find_info.matches.len(),
+                            find_info.ambiguous
+                        );
+                        if let Some(target) = find_info.matches.first() {
+                            println!(
+                                "目标按钮: [{}] {} (引用 {}, 快照 {})",
+                                target.role,
+                                target.name,
+                                target.element.id,
+                                target.element.snapshot
+                            );
+                            Some(target.element.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    DesktopResult::Err(e) => {
+                        println!("find 错误: {}", e.agent_message());
+                        None
+                    }
                 }
             }
             DesktopResult::Err(e) => {
