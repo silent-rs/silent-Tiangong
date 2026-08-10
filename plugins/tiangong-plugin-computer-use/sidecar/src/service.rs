@@ -25,7 +25,9 @@ use crate::backend::{self, Backend};
 pub struct ComputerUseService {
     /// 平台无障碍后端。
     backend: Box<dyn Backend>,
-    /// 当前会话是否完全信任模式（监督模式下动作需经用户批准，由 WASM 注入）。
+    /// 当前会话是否完全信任模式（由 WASM 注入）。
+    /// 注意：监督模式下的动作审批由宿主（Core）在工具调用层统一处理，
+    /// sidecar 当前不做二次判断；此字段保留供未来在 sidecar 层增加细粒度限制。
     full_trust: RwLock<bool>,
 }
 

@@ -174,6 +174,13 @@ impl Backend for WindowsBackend {
         if let Some(pid) = req.pid {
             windows.retain(|w| w.pid == pid);
         }
+        // foreground_only 当前无法可靠实现（UIA 判断前台窗口需额外查询），
+        // 不静默忽略，明确返回能力不足，避免调用方误以为筛选已生效。
+        if req.foreground_only {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: "Windows 后端暂不支持 foreground_only 筛选".to_string(),
+            });
+        }
         DesktopResult::Ok(tiangong_plugin_computer_use_protocol::ListWindowsResponse { windows })
     }
 

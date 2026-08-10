@@ -1457,7 +1457,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
 
-> 当前进度：通过 `uiautomation` crate（基于 windows-rs 的 UIA COM 封装）实现 Windows 后端：`desktop_status` 初始化 UIA 实例并探测可用性，`desktop_list_windows` 按 ControlType::Window 从桌面根列举顶层窗口，`desktop_snapshot` 前序递归读取控件树（Name/AutomationId/ControlType/IsEnabled/HasKeyboardFocus/BoundingRectangle），按 ControlType 推断支持动作（Pattern），`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 uiautomation 源码核对 API，macOS/Linux 编译不受影响；因 workspace 依赖含 aws-lc-sys 等需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 环境的功能验证为后续工作。find/action 因需缓存 UIElement 暂返回 ActionNotSupported。
+> 当前进度（阶段性只读版本）：通过 `uiautomation` crate 实现 Windows 后端：`desktop_status` 初始化 UIA 实例并探测可用性，`desktop_list_windows` 按 ControlType::Window 列举顶层窗口（id 编码 pid，支持窗口引用定位），`desktop_snapshot` 前序递归读取控件树，`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 uiautomation 源码核对 API，macOS/Linux 编译不受影响。**find/action/控件级等待尚未实现**，返回 BackendUnavailable；因 workspace 依赖含需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 功能验证为后续工作。本分支定位为 macOS 完整 + Windows/Linux 只读的阶段性版本。
 
 ## 当前任务：macOS AXUIElement 后端
 
@@ -1478,7 +1478,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 ## 当前任务：Linux AT-SPI2 后端
 
 - [x] 使用 AT-SPI2，通过桌面会话的 accessibility bus 读取应用、窗口和控件。
-- [x] 使用 Accessible、Action、Value、Selection、Component 等接口完成读取和动作。
+- [ ] 使用 Accessible、Action、Value、Selection、Component 等接口完成读取和动作。
 - [x] 支持 GTK、Qt、Electron 等正常暴露 AT-SPI 信息的应用。
 - [x] Wayland 下仍以 AT-SPI 语义动作为主，不依赖 `xdotool`、`wmctrl` 等 X11 坐标工具。
 - [x] 没有 accessibility bus、运行在纯 SSH/容器环境或受 Flatpak/Snap 策略限制时，返回环境不可用及原因。
@@ -1489,7 +1489,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 无图形会话时返回明确错误，宿主保持正常运行。
 
-> 当前进度：通过 `atspi` crate（纯 Rust、zbus/D-Bus）实现 Linux 后端：`desktop_status` 探测 accessibility bus 可用性，`desktop_list_windows` 从根桌面对象列举应用，`desktop_snapshot` 前序递归读取控件树（Role/State/可见性），`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码已在 macOS 交叉验证编译通过（atspi 跨平台），find/action 因需缓存 ObjectRef 暂返回 ActionNotSupported。真实 Linux 环境的功能验证为后续工作。
+> 当前进度（阶段性只读版本）：通过 `atspi` crate 实现 Linux 后端：`desktop_status` 探测 accessibility bus，`desktop_list_windows` 列举应用（支持 window 引用定位），`desktop_snapshot` 前序递归读取控件树，`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 macOS 交叉验证编译通过。**find/action/控件级等待尚未实现**，返回 BackendUnavailable；真实 Linux 环境的功能验证为后续工作。本分支定位为 macOS 完整 + Windows/Linux 只读的阶段性版本。
 
 ## 当前任务：事件等待、引用有效性与新窗口重新发现
 

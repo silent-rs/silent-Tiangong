@@ -195,6 +195,18 @@ impl Backend for LinuxBackend {
             let needle = app_name.to_lowercase();
             windows.retain(|w| w.app_name.to_lowercase().contains(&needle));
         }
+        // pid 和 foreground_only 当前无法可靠实现（AT-SPI 需 Application 接口读 pid，
+        // 前台判断需窗口管理器配合），不静默忽略，明确返回能力不足。
+        if req.pid.is_some() {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: "AT-SPI 后端暂不支持 pid 筛选，请用 app_name".to_string(),
+            });
+        }
+        if req.foreground_only {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: "AT-SPI 后端暂不支持 foreground_only 筛选".to_string(),
+            });
+        }
         DesktopResult::Ok(tiangong_plugin_computer_use_protocol::ListWindowsResponse { windows })
     }
 
@@ -208,17 +220,6 @@ impl Backend for LinuxBackend {
             Ok(d) => d,
             Err(e) => return DesktopResult::Err(e),
         };
-        // 必须指定 app_name 才能定位到具体应用，避免遍历整个桌面。
-        let app_name = match req.scope.app_name.as_deref() {
-            Some(n) => n,
-            None => {
-                return DesktopResult::Err(DesktopError::ApplicationNotFound {
-                    query: "AT-SPI snapshot 需要指定 app_name".to_string(),
-                });
-            }
-        };
-        // 从桌面根的子应用中按名称找到对应应用的代理作为遍历根。
-        // 收集所有候选，多于一个则返回歧义错误，不静默选第一个。
         let children = match desktop.get_children().await {
             Ok(c) => c,
             Err(e) => {
@@ -227,31 +228,71 @@ impl Backend for LinuxBackend {
                 });
             }
         };
-        let needle = app_name.to_lowercase();
-        let mut matches: Vec<String> = Vec::new();
-        let mut root = None;
-        for child_ref in children {
-            if let Ok(proxy) = child_ref.as_accessible_proxy(zbus).await {
-                let name = proxy.name().await.unwrap_or_default();
-                if name.to_lowercase().contains(&needle) {
-                    matches.push(name);
-                    if root.is_none() {
-                        root = Some(proxy);
+        // 定位根元素：优先 window 引用（解析 atspi-app-{idx} 索引），其次 app_name。
+        // pid 在 AT-SPI 下不直接可用（需 Application 接口），暂不支持。
+        let root = if req.scope.pid.is_some() {
+            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                reason: "AT-SPI 后端暂不支持按 pid 定位，请用 window 或 app_name".to_string(),
+            });
+        } else if let Some(window_ref) = &req.scope.window {
+            match parse_index_from_id(&window_ref.id) {
+                Some(idx) => match children.get(idx) {
+                    Some(child_ref) => match child_ref.as_accessible_proxy(zbus).await {
+                        Ok(proxy) => proxy,
+                        Err(e) => {
+                            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                                reason: format!("定位窗口应用失败: {e}"),
+                            });
+                        }
+                    },
+                    None => {
+                        return DesktopResult::Err(DesktopError::WindowNotFound {
+                            query: window_ref.id.clone(),
+                        });
+                    }
+                },
+                None => {
+                    return DesktopResult::Err(DesktopError::WindowNotFound {
+                        query: window_ref.id.clone(),
+                    });
+                }
+            }
+        } else {
+            let app_name = match req.scope.app_name.as_deref() {
+                Some(n) => n,
+                None => {
+                    return DesktopResult::Err(DesktopError::ApplicationNotFound {
+                        query: "AT-SPI snapshot 需要指定 window 或 app_name".to_string(),
+                    });
+                }
+            };
+            // 按 app_name 匹配，收集所有候选，多于一个返回歧义，不静默选第一个。
+            let needle = app_name.to_lowercase();
+            let mut matches: Vec<String> = Vec::new();
+            let mut matched = None;
+            for child_ref in &children {
+                if let Ok(proxy) = child_ref.as_accessible_proxy(zbus).await {
+                    let name = proxy.name().await.unwrap_or_default();
+                    if name.to_lowercase().contains(&needle) {
+                        matches.push(name);
+                        if matched.is_none() {
+                            matched = Some(proxy);
+                        }
                     }
                 }
             }
-        }
-        if matches.len() > 1 {
-            return DesktopResult::Err(DesktopError::AmbiguousMatch {
-                candidates: matches,
-            });
-        }
-        let root = match root {
-            Some(p) => p,
-            None => {
-                return DesktopResult::Err(DesktopError::ApplicationNotFound {
-                    query: app_name.to_string(),
+            if matches.len() > 1 {
+                return DesktopResult::Err(DesktopError::AmbiguousMatch {
+                    candidates: matches,
                 });
+            }
+            match matched {
+                Some(p) => p,
+                None => {
+                    return DesktopResult::Err(DesktopError::ApplicationNotFound {
+                        query: app_name.to_string(),
+                    });
+                }
             }
         };
         let max_depth = if req.max_depth > 0 {
@@ -449,6 +490,16 @@ impl LinuxBackend {
         if let Some(node) = nodes.get_mut(parent_index) {
             node.children = child_refs;
         }
+    }
+}
+
+/// 从 element id（格式 atspi-app-{idx}）解析子应用索引。
+fn parse_index_from_id(id: &str) -> Option<usize> {
+    let parts: Vec<&str> = id.split('-').collect();
+    if parts.len() >= 3 && parts[0] == "atspi" && parts[1] == "app" {
+        parts[2].parse().ok()
+    } else {
+        None
     }
 }
 

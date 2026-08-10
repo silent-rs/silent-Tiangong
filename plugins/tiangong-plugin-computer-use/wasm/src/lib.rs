@@ -359,10 +359,19 @@ fn handle_find(arguments: String) -> Result<ToolResult, PluginError> {
                 })
                 .unwrap_or_default(),
         },
-        max_candidates: args
-            .get("max_candidates")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0) as u32,
+        // max_candidates 超范围返回参数错误，而非截断（与 pid/depth/nodes 一致）。
+        max_candidates: match args.get("max_candidates") {
+            Some(v) if !v.is_null() => match as_u32_bounded(v) {
+                Some(n) => n,
+                None => {
+                    return Ok(tool_failure(
+                        "desktop_find 的 max_candidates 超出有效范围",
+                        "max_candidates out of range",
+                    ));
+                }
+            },
+            _ => 0,
+        },
         access: state::access_context(),
     };
     run_desktop_op::<Find, _>(&request, "desktop_find")
@@ -557,12 +566,19 @@ fn parse_wait_condition(
     let cond = args.get("condition")?;
     let kind = cond.get("kind")?.as_str()?;
     Some(match kind {
-        "appear" => WaitCondition::Appear {
-            target: parse_wait_target(cond.get("target")?)?,
-        },
-        "disappear" => WaitCondition::Disappear {
-            target: parse_wait_target(cond.get("target")?)?,
-        },
+        "appear" | "disappear" => {
+            let target = parse_wait_target(cond.get("target")?)?;
+            // appear/disappear 的目标必须至少提供 app_name 或 title，
+            // 否则 appear 会一直等到超时、disappear 会立即误判成功。
+            if target.app_name.is_none() && target.title.is_none() {
+                return None;
+            }
+            if kind == "appear" {
+                WaitCondition::Appear { target }
+            } else {
+                WaitCondition::Disappear { target }
+            }
+        }
         "focus" => WaitCondition::Focus {
             element: parse_element_ref(cond.get("element")?)?,
         },
