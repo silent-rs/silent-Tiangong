@@ -1457,7 +1457,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
 
-> 当前进度（主体能力已实现，待真机验证）：通过 `uiautomation` crate 实现 Windows 后端：`desktop_status`/`desktop_list_windows`（多窗口用 pid+序号定位），`desktop_snapshot` 读取控件树（含非敏感控件值），`desktop_find`/`desktop_action`/`desktop_wait` 完整闭环。select 暂未实现。因 workspace 依赖含需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 真机验证为后续工作。
+> 当前进度（主体能力已实现，待真机验证）：通过 `uiautomation` crate 实现 Windows 后端：`desktop_status`/`desktop_list_windows`（窗口引用缓存真实 UIElement，不依赖易变枚举顺序），`desktop_snapshot` 读取控件树（含非敏感控件值），`desktop_find`/`desktop_action`/`desktop_wait` 完整闭环，包含 `UISelectionItemPattern` 的 select。因 workspace 依赖含需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 真机验证为后续工作。
 
 ## 当前任务：macOS AXUIElement 后端
 

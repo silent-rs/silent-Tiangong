@@ -50,6 +50,8 @@ pub struct LinuxBackend {
     snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于淘汰旧缓存。
     recent_snapshots: Mutex<Vec<u64>>,
+    /// 最近的窗口列表版本；窗口引用与控件快照分别管理。
+    recent_window_snapshots: Mutex<Vec<u64>>,
 }
 
 impl Default for LinuxBackend {
@@ -65,6 +67,7 @@ impl LinuxBackend {
             elements: RwLock::new(HashMap::new()),
             snapshot_nodes: RwLock::new(HashMap::new()),
             recent_snapshots: Mutex::new(Vec::new()),
+            recent_window_snapshots: Mutex::new(Vec::new()),
         }
     }
 
@@ -81,6 +84,17 @@ impl LinuxBackend {
             let old = recent.remove(0);
             self.elements.write().unwrap().retain(|(s, _), _| *s != old);
             self.snapshot_nodes.write().unwrap().remove(&old);
+        }
+    }
+
+    /// 保留最近 4 次窗口枚举引用，避免长期运行时缓存无界增长。
+    fn remember_window_snapshot(&self, snapshot: u64) {
+        let mut recent = self.recent_window_snapshots.lock().unwrap();
+        recent.retain(|&s| s != snapshot);
+        recent.push(snapshot);
+        while recent.len() > 4 {
+            let old = recent.remove(0);
+            self.elements.write().unwrap().retain(|(s, _), _| *s != old);
         }
     }
 
@@ -146,22 +160,21 @@ impl LinuxBackend {
             actions.push(Focus);
         }
         // Action 接口：按动作名映射统一动作。
-        if interfaces.contains(Interface::Action) {
-            if let Ok(action_proxy) = build_proxy::<ActionProxy<'_>>(element).await {
-                if let Ok(raw_actions) = action_proxy.get_actions().await {
-                    for (name, _, _) in &raw_actions {
-                        match name.to_lowercase().as_str() {
-                            "click" | "press" | "activate" | "jump" => {
-                                if !actions.contains(&Press) {
-                                    actions.push(Press);
-                                }
-                            }
-                            "toggle" if !actions.contains(&Toggle) => actions.push(Toggle),
-                            "expand" if !actions.contains(&Expand) => actions.push(Expand),
-                            "collapse" if !actions.contains(&Collapse) => actions.push(Collapse),
-                            _ => {}
+        if interfaces.contains(Interface::Action)
+            && let Ok(action_proxy) = build_proxy::<ActionProxy<'_>>(element).await
+            && let Ok(raw_actions) = action_proxy.get_actions().await
+        {
+            for (name, _, _) in &raw_actions {
+                match name.to_lowercase().as_str() {
+                    "click" | "press" | "activate" | "jump" => {
+                        if !actions.contains(&Press) {
+                            actions.push(Press);
                         }
                     }
+                    "toggle" if !actions.contains(&Toggle) => actions.push(Toggle),
+                    "expand" if !actions.contains(&Expand) => actions.push(Expand),
+                    "collapse" if !actions.contains(&Collapse) => actions.push(Collapse),
+                    _ => {}
                 }
             }
         }
@@ -179,18 +192,19 @@ impl LinuxBackend {
 
     /// 校验控件身份：role 和 name 是否与快照时一致。
     /// 单独比对 role 不够（同角色控件可能复用同一对象路径），联合 name 提高可靠性。
-    fn verify_identity(element: &AccessibleProxy<'_>, node: &ControlNode) -> bool {
+    async fn verify_identity(element: &AccessibleProxy<'_>, node: &ControlNode) -> bool {
         let expected_role = node.identifiers.role.as_deref().unwrap_or("");
-        let current_role = format!(
-            "{:?}",
-            element.get_role().map(|r| r).unwrap_or(Role::Unknown)
-        );
-        if !expected_role.is_empty() && expected_role != current_role {
+        let Ok(role) = element.get_role().await else {
+            return false;
+        };
+        if !expected_role.is_empty() && expected_role != format!("{role:?}") {
             return false;
         }
         // 名称一致性（空名称控件放宽，避免误判）。
         if !node.name.is_empty() {
-            let current_name = element.name().map(|n| n).unwrap_or_default();
+            let Ok(current_name) = element.name().await else {
+                return false;
+            };
             if current_name != node.name {
                 return false;
             }
@@ -292,6 +306,7 @@ impl Backend for LinuxBackend {
                 },
             });
         }
+        self.remember_window_snapshot(snapshot);
         if let Some(app_name) = req.app_name.as_deref() {
             let needle = app_name.to_lowercase();
             windows.retain(|w| w.app_name.to_lowercase().contains(&needle));
@@ -328,31 +343,32 @@ impl Backend for LinuxBackend {
             }
         };
         // 定位根元素：优先 window 引用（从缓存取回 ObjectRef 还原），其次 app_name。
+        // ObjectRef 必须在 root 代理整个使用期间存活，因此在分支外持有所有权。
+        let cached_window_object = req.scope.window.as_ref().and_then(|window_ref| {
+            self.elements
+                .read()
+                .unwrap()
+                .get(&(window_ref.snapshot, window_ref.id.clone()))
+                .cloned()
+        });
         // 不依赖列表序号定位，避免应用启动/退出导致序号错位。
         let root = if req.scope.pid.is_some() {
             return DesktopResult::Err(DesktopError::BackendUnavailable {
                 reason: "AT-SPI 后端暂不支持按 pid 定位，请用 window 或 app_name".to_string(),
             });
         } else if let Some(window_ref) = &req.scope.window {
-            // 从 elements 缓存取回 ObjectRef，再用服务名+路径还原。
-            let cached = self
-                .elements
-                .read()
-                .unwrap()
-                .get(&(window_ref.snapshot, window_ref.id.clone()))
-                .cloned();
-            match cached {
+            match cached_window_object.as_ref() {
                 Some(obj_ref) => match obj_ref.as_accessible_proxy(zbus).await {
                     Ok(proxy) => proxy,
-                    Err(e) => {
-                        return DesktopResult::Err(DesktopError::BackendUnavailable {
-                            reason: format!("定位窗口应用失败: {e}"),
+                    Err(_) => {
+                        return DesktopResult::Err(DesktopError::StaleElement {
+                            snapshot: window_ref.snapshot,
                         });
                     }
                 },
                 None => {
-                    return DesktopResult::Err(DesktopError::WindowNotFound {
-                        query: window_ref.id.clone(),
+                    return DesktopResult::Err(DesktopError::StaleElement {
+                        snapshot: window_ref.snapshot,
                     });
                 }
             }
@@ -507,24 +523,30 @@ impl Backend for LinuxBackend {
         };
         let element = match object_ref.as_accessible_proxy(zbus).await {
             Ok(p) => p,
-            Err(e) => {
-                return DesktopResult::Err(DesktopError::BackendUnavailable {
-                    reason: format!("还原控件失败: {e}"),
+            Err(_) => {
+                return DesktopResult::Err(DesktopError::StaleElement {
+                    snapshot: req.element.snapshot,
                 });
             }
         };
         // 动作前重新确认控件身份（role + name 一致）。
-        let identity_ok = self
+        let identity_node = self
             .snapshot_nodes
             .read()
             .unwrap()
             .get(&req.element.snapshot)
             .and_then(|nodes| {
-                nodes.iter().find(|n| {
-                    n.element.id == req.element.id && n.element.snapshot == req.element.snapshot
-                })
-            })
-            .is_some_and(|node| Self::verify_identity(&element, node));
+                nodes
+                    .iter()
+                    .find(|n| {
+                        n.element.id == req.element.id && n.element.snapshot == req.element.snapshot
+                    })
+                    .cloned()
+            });
+        let identity_ok = match identity_node {
+            Some(node) => Self::verify_identity(&element, &node).await,
+            None => false,
+        };
         if !identity_ok {
             return DesktopResult::Err(DesktopError::StaleElement {
                 snapshot: req.element.snapshot,
@@ -692,45 +714,77 @@ impl Backend for LinuxBackend {
                 };
                 let element = match object_ref.as_accessible_proxy(zbus).await {
                     Ok(p) => p,
-                    Err(e) => {
-                        return DesktopResult::Err(DesktopError::BackendUnavailable {
-                            reason: format!("还原控件失败: {e}"),
+                    Err(_) => {
+                        return DesktopResult::Err(DesktopError::StaleElement {
+                            snapshot: element_ref.snapshot,
                         });
                     }
                 };
+                // 等待开始前重新确认控件仍与原快照身份一致。
+                let identity_node = self
+                    .snapshot_nodes
+                    .read()
+                    .unwrap()
+                    .get(&element_ref.snapshot)
+                    .and_then(|nodes| nodes.iter().find(|n| n.element == element_ref).cloned());
+                let identity_ok = match identity_node {
+                    Some(node) => Self::verify_identity(&element, &node).await,
+                    None => false,
+                };
+                if !identity_ok {
+                    return DesktopResult::Err(DesktopError::StaleElement {
+                        snapshot: element_ref.snapshot,
+                    });
+                }
                 let expected_value = match &req.condition {
                     WaitCondition::Value { expected, .. } => expected.clone(),
                     _ => None,
                 };
+                // 无期望值时必须成功读取初始值，否则无法可靠判断变化。
                 let initial_value = if expected_value.is_none()
                     && matches!(req.condition, WaitCondition::Value { .. })
                 {
-                    read_text_value(&element).await
+                    match read_text_value_result(&element).await {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                                reason: format!("读取等待初始值失败: {error}"),
+                            });
+                        }
+                    }
                 } else {
                     None
                 };
                 let deadline = Instant::now() + Duration::from_millis(req.timeout_ms);
                 let start = Instant::now();
                 loop {
-                    let satisfied = match &req.condition {
-                        WaitCondition::Focus { .. } => element
-                            .get_state()
-                            .await
-                            .is_ok_and(|s| s.contains(State::Focused)),
-                        WaitCondition::Available { .. } => element
-                            .get_state()
-                            .await
-                            .is_ok_and(|s| s.contains(State::Enabled)),
-                        WaitCondition::Value { .. } => match &expected_value {
-                            Some(want) => {
-                                read_text_value(&element).await.is_some_and(|v| v == *want)
-                            }
-                            None => {
-                                let current = read_text_value(&element).await;
-                                current != initial_value
-                            }
-                        },
-                        _ => false,
+                    let state: Result<bool, String> =
+                        match &req.condition {
+                            WaitCondition::Focus { .. } => element
+                                .get_state()
+                                .await
+                                .map(|s| s.contains(State::Focused))
+                                .map_err(|e| e.to_string()),
+                            WaitCondition::Available { .. } => element
+                                .get_state()
+                                .await
+                                .map(|s| s.contains(State::Enabled))
+                                .map_err(|e| e.to_string()),
+                            WaitCondition::Value { .. } => read_text_value_result(&element)
+                                .await
+                                .map(|current| match &expected_value {
+                                    Some(want) => current == *want,
+                                    None => initial_value.as_ref().is_some_and(|v| current != *v),
+                                }),
+                            _ => Ok(false),
+                        };
+                    let satisfied = match state {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return DesktopResult::Err(DesktopError::StaleElement {
+                                snapshot: element_ref.snapshot,
+                            });
+                        }
                     };
                     if satisfied {
                         return DesktopResult::Ok(WaitResult {
@@ -892,12 +946,25 @@ where
 
 /// 从 Text 接口读取控件文本值（非 Text 控件返回 None）。
 async fn read_text_value(element: &AccessibleProxy<'_>) -> Option<String> {
-    let text_proxy = build_proxy::<TextProxy<'_>>(element).await.ok()?;
-    let count = text_proxy.character_count().await.ok()?;
+    read_text_value_result(element).await.ok()
+}
+
+/// 严格读取 Text 接口，用于等待逻辑区分“未满足”和“对象读取失败”。
+async fn read_text_value_result(element: &AccessibleProxy<'_>) -> Result<String, String> {
+    let text_proxy = build_proxy::<TextProxy<'_>>(element)
+        .await
+        .map_err(|e| e.to_string())?;
+    let count = text_proxy
+        .character_count()
+        .await
+        .map_err(|e| e.to_string())?;
     if count <= 0 {
-        return Some(String::new());
+        return Ok(String::new());
     }
-    text_proxy.get_text(0, count).await.ok()
+    text_proxy
+        .get_text(0, count)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 从 Component 接口读取控件边界。
@@ -918,16 +985,6 @@ async fn read_bounds(element: &AccessibleProxy<'_>, interfaces: &InterfaceSet) -
         y: y as f64,
         width: width as f64,
         height: height as f64,
-    }
-}
-
-/// 从 element id（格式 atspi-app-{idx}）解析子应用索引。
-fn parse_index_from_id(id: &str) -> Option<usize> {
-    let parts: Vec<&str> = id.split('-').collect();
-    if parts.len() >= 3 && parts[0] == "atspi" && parts[1] == "app" {
-        parts[2].parse().ok()
-    } else {
-        None
     }
 }
 

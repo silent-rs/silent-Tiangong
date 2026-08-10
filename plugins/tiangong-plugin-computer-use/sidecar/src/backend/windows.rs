@@ -38,10 +38,14 @@ pub struct WindowsBackend {
     /// 快照内控件引用缓存：((snapshot, id) -> UIElement)。
     /// UIElement 内部持有 COM 对象引用，Clone 增引用计数。
     elements: RwLock<HashMap<(u64, String), UIElement>>,
+    /// `list_windows` 返回的真实窗口引用，避免后续按易变的枚举序号重新猜测目标。
+    window_elements: RwLock<HashMap<(u64, String), UIElement>>,
     /// 快照节点表缓存：(snapshot -> Vec<ControlNode>)，供 find 筛选。
     snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于淘汰旧缓存。
     recent_snapshots: Mutex<Vec<u64>>,
+    /// 最近的窗口列表版本；窗口引用与控件快照分别管理。
+    recent_window_snapshots: Mutex<Vec<u64>>,
 }
 
 impl Default for WindowsBackend {
@@ -55,8 +59,10 @@ impl WindowsBackend {
         Self {
             snapshot_seq: AtomicU64::new(1),
             elements: RwLock::new(HashMap::new()),
+            window_elements: RwLock::new(HashMap::new()),
             snapshot_nodes: RwLock::new(HashMap::new()),
             recent_snapshots: Mutex::new(Vec::new()),
+            recent_window_snapshots: Mutex::new(Vec::new()),
         }
     }
 
@@ -73,6 +79,20 @@ impl WindowsBackend {
             let old = recent.remove(0);
             self.elements.write().unwrap().retain(|(s, _), _| *s != old);
             self.snapshot_nodes.write().unwrap().remove(&old);
+        }
+    }
+
+    /// 记录窗口列表版本，保留最近 4 次枚举返回的真实窗口对象。
+    fn remember_window_snapshot(&self, snapshot: u64) {
+        let mut recent = self.recent_window_snapshots.lock().unwrap();
+        recent.retain(|&s| s != snapshot);
+        recent.push(snapshot);
+        while recent.len() > 4 {
+            let old = recent.remove(0);
+            self.window_elements
+                .write()
+                .unwrap()
+                .retain(|(s, _), _| *s != old);
         }
     }
 
@@ -230,13 +250,15 @@ impl Backend for WindowsBackend {
             } else {
                 name.clone()
             };
+            let id = format!("uia-win-{pid}-{idx}");
+            self.window_elements
+                .write()
+                .unwrap()
+                .insert((snapshot, id.clone()), element.clone());
             windows.push(WindowInfo {
                 app_name: app_name.clone(),
                 pid: pid as u32,
-                element: ElementRef {
-                    id: format!("uia-win-{pid}-{idx}"),
-                    snapshot,
-                },
+                element: ElementRef { id, snapshot },
                 title: name,
                 is_foreground: false,
                 bounds: Self::bounds_of(&element),
@@ -248,6 +270,7 @@ impl Backend for WindowsBackend {
                 },
             });
         }
+        self.remember_window_snapshot(snapshot);
         if let Some(app_name) = req.app_name.as_deref() {
             let needle = app_name.to_lowercase();
             windows.retain(|w| w.app_name.to_lowercase().contains(&needle));
@@ -272,27 +295,22 @@ impl Backend for WindowsBackend {
             Ok(ws) => ws,
             Err(e) => return DesktopResult::Err(e),
         };
-        // 定位根元素：优先 window 引用（解析 pid+idx 精确定位），其次 pid，最后 app_name。
-        // 同进程多窗口时，必须用窗口序号 + 身份核对定位到正确窗口，不能只取第一个。
+        // 定位根元素：窗口引用必须从 list_windows 缓存还原真实 UIElement，不能依赖
+        // 两次枚举之间可能变化的窗口顺序。其次才允许按 pid 或 app_name 重新发现。
         let root = if let Some(window_ref) = &req.scope.window {
-            if let Some((pid, idx)) = parse_window_ref(&window_ref.id) {
-                // 按 pid 过滤窗口，再用 idx 定位，最后核对进程号一致。
-                let pid_windows: Vec<&UIElement> = windows
-                    .iter()
-                    .filter(|w| w.get_process_id().unwrap_or(0) == pid as i32)
-                    .collect();
-                match pid_windows.get(idx) {
-                    Some(w) => (*w).clone(),
-                    None => {
-                        return DesktopResult::Err(DesktopError::WindowNotFound {
-                            query: window_ref.id.clone(),
-                        });
-                    }
+            let cached = self
+                .window_elements
+                .read()
+                .unwrap()
+                .get(&(window_ref.snapshot, window_ref.id.clone()))
+                .cloned();
+            match cached {
+                Some(window) if window.get_process_id().is_ok() => window,
+                _ => {
+                    return DesktopResult::Err(DesktopError::StaleElement {
+                        snapshot: window_ref.snapshot,
+                    });
                 }
-            } else {
-                return DesktopResult::Err(DesktopError::WindowNotFound {
-                    query: window_ref.id.clone(),
-                });
             }
         } else if let Some(pid) = req.scope.pid {
             // 按 pid 匹配：收集候选，多于一个返回歧义。
@@ -585,44 +603,63 @@ impl Backend for WindowsBackend {
                         });
                     }
                 };
+                // 等待开始前重新确认控件仍属于原快照，避免缓存对象被替换后继续轮询。
+                let identity_ok = self
+                    .snapshot_nodes
+                    .read()
+                    .unwrap()
+                    .get(&element.snapshot)
+                    .and_then(|nodes| nodes.iter().find(|n| n.element == element))
+                    .is_some_and(|node| Self::verify_identity(&uia_elem, node));
+                if !identity_ok {
+                    return DesktopResult::Err(DesktopError::StaleElement {
+                        snapshot: element.snapshot,
+                    });
+                }
                 let expected_value = match &req.condition {
                     WaitCondition::Value { expected, .. } => expected.clone(),
                     _ => None,
                 };
-                // 无期望值时记录初始值，等待真正变化。
+                // 无期望值时必须成功读取初始值；否则无法判断后续是否真的发生变化。
                 let initial_value = if expected_value.is_none()
                     && matches!(req.condition, WaitCondition::Value { .. })
                 {
-                    uia_elem
+                    match uia_elem
                         .get_pattern::<UIValuePattern>()
-                        .ok()
-                        .and_then(|p| p.get_value().ok())
+                        .and_then(|p| p.get_value())
+                    {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            return DesktopResult::Err(DesktopError::BackendUnavailable {
+                                reason: format!("读取等待初始值失败: {error}"),
+                            });
+                        }
+                    }
                 } else {
                     None
                 };
                 let deadline = Instant::now() + Duration::from_millis(req.timeout_ms);
                 let start = Instant::now();
                 loop {
-                    let satisfied = match &req.condition {
-                        WaitCondition::Focus { .. } => {
-                            uia_elem.has_keyboard_focus().unwrap_or(false)
+                    let state = match &req.condition {
+                        WaitCondition::Focus { .. } => uia_elem.has_keyboard_focus(),
+                        WaitCondition::Available { .. } => uia_elem.is_enabled(),
+                        WaitCondition::Value { .. } => uia_elem
+                            .get_pattern::<UIValuePattern>()
+                            .and_then(|p| p.get_value())
+                            .map(|current| match &expected_value {
+                                Some(want) => current == *want,
+                                None => initial_value.as_ref().is_some_and(|v| current != *v),
+                            }),
+                        _ => Ok(false),
+                    };
+                    let satisfied = match state {
+                        Ok(value) => value,
+                        Err(_) => {
+                            return DesktopResult::Err(DesktopError::StaleElement {
+                                snapshot: element.snapshot,
+                            });
                         }
-                        WaitCondition::Available { .. } => uia_elem.is_enabled().unwrap_or(false),
-                        WaitCondition::Value { .. } => match &expected_value {
-                            Some(want) => uia_elem
-                                .get_pattern::<UIValuePattern>()
-                                .ok()
-                                .and_then(|p| p.get_value().ok())
-                                .is_some_and(|v| v == *want),
-                            None => {
-                                let current = uia_elem
-                                    .get_pattern::<UIValuePattern>()
-                                    .ok()
-                                    .and_then(|p| p.get_value().ok());
-                                current != initial_value
-                            }
-                        },
-                        _ => false,
                     };
                     if satisfied {
                         return DesktopResult::Ok(WaitResult {
@@ -746,26 +783,6 @@ impl WindowsBackend {
         if let Some(node) = nodes.get_mut(parent_index) {
             node.children = child_refs;
         }
-    }
-}
-
-/// 从 element id（格式 uia-win-{pid}-{idx}）解析 pid。
-fn parse_pid_from_id(id: &str) -> Option<u32> {
-    parse_window_ref(id).map(|(pid, _)| pid)
-}
-
-/// 从 element id（格式 uia-win-{pid}-{idx}）解析 pid 和窗口序号。
-fn parse_window_ref(id: &str) -> Option<(u32, usize)> {
-    let parts: Vec<&str> = id.split('-').collect();
-    if parts.len() >= 4 && parts[0] == "uia" && parts[1] == "win" {
-        let pid = parts[2].parse().ok()?;
-        let idx = parts[3].parse().ok()?;
-        Some((pid, idx))
-    } else if parts.len() >= 3 && parts[0] == "uia" && parts[1] == "win" {
-        // 兼容旧格式 uia-win-{pid}（无 idx，取第一个）。
-        parts[2].parse().ok().map(|pid| (pid, 0))
-    } else {
-        None
     }
 }
 
