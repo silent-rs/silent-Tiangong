@@ -272,39 +272,40 @@ impl Backend for WindowsBackend {
             Ok(ws) => ws,
             Err(e) => return DesktopResult::Err(e),
         };
-        // 定位根元素：优先 window 引用（解析 pid），其次 pid，最后 app_name。
-        let target_pid = match req
-            .scope
-            .window
-            .as_ref()
-            .and_then(|w| parse_pid_from_id(&w.id))
-        {
-            Some(pid) => Some(pid),
-            None => req.scope.pid.or_else(|| {
-                req.scope
-                    .app_name
-                    .as_ref()
-                    .and_then(|name| find_window_pid_by_name(&automation, name))
-            }),
-        };
-        // 按应用名匹配时收集候选，多于一个返回歧义。
-        if let Some(name) = req.scope.app_name.as_deref() {
+        // 定位根元素：优先 window 引用（解析 pid+idx 精确定位），其次 pid，最后 app_name。
+        // 同进程多窗口时，必须用窗口序号 + 身份核对定位到正确窗口，不能只取第一个。
+        let root = if let Some(window_ref) = &req.scope.window {
+            if let Some((pid, idx)) = parse_window_ref(&window_ref.id) {
+                // 按 pid 过滤窗口，再用 idx 定位，最后核对进程号一致。
+                let pid_windows: Vec<&UIElement> = windows
+                    .iter()
+                    .filter(|w| w.get_process_id().unwrap_or(0) == pid as i32)
+                    .collect();
+                match pid_windows.get(idx) {
+                    Some(w) => (*w).clone(),
+                    None => {
+                        return DesktopResult::Err(DesktopError::WindowNotFound {
+                            query: window_ref.id.clone(),
+                        });
+                    }
+                }
+            } else {
+                return DesktopResult::Err(DesktopError::WindowNotFound {
+                    query: window_ref.id.clone(),
+                });
+            }
+        } else if let Some(pid) = req.scope.pid {
+            // 按 pid 匹配：收集候选，多于一个返回歧义。
             let candidates: Vec<String> = windows
                 .iter()
-                .filter_map(|w| {
-                    let title = w.get_name().unwrap_or_default();
-                    title
-                        .to_lowercase()
-                        .contains(&name.to_lowercase())
-                        .then_some(title)
-                })
+                .filter(|w| w.get_process_id().unwrap_or(0) == pid as i32)
+                .map(|w| w.get_name().unwrap_or_default())
+                .filter(|n| !n.is_empty())
                 .collect();
-            if candidates.len() > 1 && req.scope.pid.is_none() && req.scope.window.is_none() {
+            if candidates.len() > 1 {
                 return DesktopResult::Err(DesktopError::AmbiguousMatch { candidates });
             }
-        }
-        let root = match target_pid {
-            Some(pid) => match windows
+            match windows
                 .into_iter()
                 .find(|w| w.get_process_id().unwrap_or(0) == pid as i32)
             {
@@ -314,12 +315,37 @@ impl Backend for WindowsBackend {
                         query: format!("pid {pid}"),
                     });
                 }
-            },
-            None => {
-                return DesktopResult::Err(DesktopError::WindowNotFound {
-                    query: "snapshot 需要指定 window、pid 或 app_name".to_string(),
-                });
             }
+        } else if let Some(name) = req.scope.app_name.as_deref() {
+            // 按 app_name 匹配，收集候选，多于一个返回歧义。
+            let needle = name.to_lowercase();
+            let candidates: Vec<String> = windows
+                .iter()
+                .filter_map(|w| {
+                    let title = w.get_name().unwrap_or_default();
+                    title.to_lowercase().contains(&needle).then_some(title)
+                })
+                .collect();
+            if candidates.len() > 1 {
+                return DesktopResult::Err(DesktopError::AmbiguousMatch { candidates });
+            }
+            match windows.into_iter().find(|w| {
+                w.get_name()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(&needle)
+            }) {
+                Some(w) => w,
+                None => {
+                    return DesktopResult::Err(DesktopError::WindowNotFound {
+                        query: name.to_string(),
+                    });
+                }
+            }
+        } else {
+            return DesktopResult::Err(DesktopError::WindowNotFound {
+                query: "snapshot 需要指定 window、pid 或 app_name".to_string(),
+            });
         };
         let max_depth = if req.max_depth > 0 {
             req.max_depth
@@ -647,6 +673,16 @@ impl WindowsBackend {
         let focused = element.has_keyboard_focus().unwrap_or(false);
         let bounds = Self::bounds_of(element);
         let actions = Self::detect_actions(element);
+        // 读取控件当前值：密码控件不读取（敏感），非敏感且支持 Value Pattern 时读取。
+        let sensitive = element.is_password().unwrap_or(false);
+        let value = if sensitive {
+            None
+        } else {
+            element
+                .get_pattern::<UIValuePattern>()
+                .ok()
+                .and_then(|p| p.get_value().ok())
+        };
 
         let id = format!("uia-{snapshot}-{}", nodes.len());
         let parent_index = nodes.len();
@@ -667,9 +703,8 @@ impl WindowsBackend {
                 automation_id,
                 role: Some(role),
             },
-            value: None,
-            // Edit/Document 类控件可能含敏感值，通过 IsPassword 属性判断。
-            sensitive: element.is_password().unwrap_or(false),
+            value,
+            sensitive,
             visible: true,
             enabled,
             focused,
@@ -716,9 +751,19 @@ impl WindowsBackend {
 
 /// 从 element id（格式 uia-win-{pid}-{idx}）解析 pid。
 fn parse_pid_from_id(id: &str) -> Option<u32> {
+    parse_window_ref(id).map(|(pid, _)| pid)
+}
+
+/// 从 element id（格式 uia-win-{pid}-{idx}）解析 pid 和窗口序号。
+fn parse_window_ref(id: &str) -> Option<(u32, usize)> {
     let parts: Vec<&str> = id.split('-').collect();
-    if parts.len() >= 3 && parts[0] == "uia" && parts[1] == "win" {
-        parts[2].parse().ok()
+    if parts.len() >= 4 && parts[0] == "uia" && parts[1] == "win" {
+        let pid = parts[2].parse().ok()?;
+        let idx = parts[3].parse().ok()?;
+        Some((pid, idx))
+    } else if parts.len() >= 3 && parts[0] == "uia" && parts[1] == "win" {
+        // 兼容旧格式 uia-win-{pid}（无 idx，取第一个）。
+        parts[2].parse().ok().map(|pid| (pid, 0))
     } else {
         None
     }

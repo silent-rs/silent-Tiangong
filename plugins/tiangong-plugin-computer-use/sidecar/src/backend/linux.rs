@@ -169,10 +169,7 @@ impl LinuxBackend {
         if interfaces.contains(Interface::EditableText) {
             actions.push(SetValue);
         }
-        // Selection 接口：支持选择。
-        if interfaces.contains(Interface::Selection) {
-            actions.push(Select);
-        }
+        // select 尚未实现（AT-SPI Selection 需父选择容器索引），不声明避免假承诺。
         // Component 接口的 scroll_to。
         if interfaces.contains(Interface::Component) {
             actions.push(ScrollIntoView);
@@ -180,10 +177,25 @@ impl LinuxBackend {
         actions
     }
 
-    /// 校验控件身份：role 是否与快照时一致。
-    fn verify_identity(node: &ControlNode, role: Role) -> bool {
+    /// 校验控件身份：role 和 name 是否与快照时一致。
+    /// 单独比对 role 不够（同角色控件可能复用同一对象路径），联合 name 提高可靠性。
+    fn verify_identity(element: &AccessibleProxy<'_>, node: &ControlNode) -> bool {
         let expected_role = node.identifiers.role.as_deref().unwrap_or("");
-        expected_role == format!("{role:?}")
+        let current_role = format!(
+            "{:?}",
+            element.get_role().map(|r| r).unwrap_or(Role::Unknown)
+        );
+        if !expected_role.is_empty() && expected_role != current_role {
+            return false;
+        }
+        // 名称一致性（空名称控件放宽，避免误判）。
+        if !node.name.is_empty() {
+            let current_name = element.name().map(|n| n).unwrap_or_default();
+            if current_name != node.name {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -208,7 +220,6 @@ impl Backend for LinuxBackend {
                         Press,
                         SetValue,
                         Toggle,
-                        Select,
                         Expand,
                         Collapse,
                         ScrollIntoView,
@@ -258,13 +269,18 @@ impl Backend for LinuxBackend {
             if name.is_empty() {
                 continue;
             }
+            // 缓存 ObjectRef，供 snapshot 通过窗口引用还原（而非依赖列表序号）。
+            let id = format!("atspi-app-{idx}");
+            if let Ok(obj_ref) = ObjectRef::try_from(&proxy) {
+                self.elements
+                    .write()
+                    .unwrap()
+                    .insert((snapshot, id.clone()), obj_ref);
+            }
             windows.push(WindowInfo {
                 app_name: name.clone(),
                 pid: 0,
-                element: ElementRef {
-                    id: format!("atspi-app-{idx}"),
-                    snapshot,
-                },
+                element: ElementRef { id, snapshot },
                 title: name,
                 is_foreground: false,
                 bounds: Bounds::default(),
@@ -311,25 +327,26 @@ impl Backend for LinuxBackend {
                 });
             }
         };
-        // 定位根元素：优先 window 引用（解析索引），其次 app_name。pid 暂不支持。
+        // 定位根元素：优先 window 引用（从缓存取回 ObjectRef 还原），其次 app_name。
+        // 不依赖列表序号定位，避免应用启动/退出导致序号错位。
         let root = if req.scope.pid.is_some() {
             return DesktopResult::Err(DesktopError::BackendUnavailable {
                 reason: "AT-SPI 后端暂不支持按 pid 定位，请用 window 或 app_name".to_string(),
             });
         } else if let Some(window_ref) = &req.scope.window {
-            match parse_index_from_id(&window_ref.id) {
-                Some(idx) => match children.get(idx) {
-                    Some(child_ref) => match child_ref.as_accessible_proxy(zbus).await {
-                        Ok(proxy) => proxy,
-                        Err(e) => {
-                            return DesktopResult::Err(DesktopError::BackendUnavailable {
-                                reason: format!("定位窗口应用失败: {e}"),
-                            });
-                        }
-                    },
-                    None => {
-                        return DesktopResult::Err(DesktopError::WindowNotFound {
-                            query: window_ref.id.clone(),
+            // 从 elements 缓存取回 ObjectRef，再用服务名+路径还原。
+            let cached = self
+                .elements
+                .read()
+                .unwrap()
+                .get(&(window_ref.snapshot, window_ref.id.clone()))
+                .cloned();
+            match cached {
+                Some(obj_ref) => match obj_ref.as_accessible_proxy(zbus).await {
+                    Ok(proxy) => proxy,
+                    Err(e) => {
+                        return DesktopResult::Err(DesktopError::BackendUnavailable {
+                            reason: format!("定位窗口应用失败: {e}"),
                         });
                     }
                 },
@@ -496,8 +513,7 @@ impl Backend for LinuxBackend {
                 });
             }
         };
-        // 动作前重新确认控件身份（role 一致）。
-        let current_role = element.get_role().await.unwrap_or(Role::Unknown);
+        // 动作前重新确认控件身份（role + name 一致）。
         let identity_ok = self
             .snapshot_nodes
             .read()
@@ -508,7 +524,7 @@ impl Backend for LinuxBackend {
                     n.element.id == req.element.id && n.element.snapshot == req.element.snapshot
                 })
             })
-            .is_some_and(|node| Self::verify_identity(node, current_role));
+            .is_some_and(|node| Self::verify_identity(&element, node));
         if !identity_ok {
             return DesktopResult::Err(DesktopError::StaleElement {
                 snapshot: req.element.snapshot,
@@ -526,7 +542,7 @@ impl Backend for LinuxBackend {
                     Err("控件不支持 Component 接口（focus）".to_string())
                 } else {
                     match build_proxy::<ComponentProxy<'_>>(&element).await {
-                        Ok(p) => p.grab_focus().await.map_err(|e| e.to_string()).map(|_| ()),
+                        Ok(p) => check_bool(p.grab_focus().await, "grab_focus 被目标拒绝"),
                         Err(e) => Err(e.to_string()),
                     }
                 }
@@ -537,24 +553,26 @@ impl Backend for LinuxBackend {
                 } else {
                     match build_proxy::<ActionProxy<'_>>(&element).await {
                         Ok(p) => {
-                            let needle = match action_kind {
-                                ActionKind::Press => "click",
-                                ActionKind::Toggle => "toggle",
-                                ActionKind::Expand => "expand",
-                                ActionKind::Collapse => "collapse",
-                                _ => "click",
+                            // 执行时检查所有探测时映射的动作名（与 detect_actions 一致）。
+                            let needles: &[&str] = match action_kind {
+                                ActionKind::Press => &["click", "press", "activate", "jump"],
+                                ActionKind::Toggle => &["toggle"],
+                                ActionKind::Expand => &["expand"],
+                                ActionKind::Collapse => &["collapse"],
+                                _ => &["click"],
                             };
                             match p.get_actions().await {
                                 Ok(acts) => {
-                                    match acts.iter().position(|(name, _, _)| {
-                                        name.to_lowercase().contains(needle)
-                                    }) {
-                                        Some(idx) => p
-                                            .do_action(idx as i32)
-                                            .await
-                                            .map_err(|e| e.to_string())
-                                            .map(|_| ()),
-                                        None => Err(format!("控件未暴露 {needle} 动作")),
+                                    let idx = acts.iter().position(|(name, _, _)| {
+                                        let lower = name.to_lowercase();
+                                        needles.iter().any(|n| lower.contains(n))
+                                    });
+                                    match idx {
+                                        Some(i) => check_bool(
+                                            p.do_action(i as i32).await,
+                                            "do_action 被目标拒绝",
+                                        ),
+                                        None => Err(format!("控件未暴露 {:?} 对应的动作", needles)),
                                     }
                                 }
                                 Err(e) => Err(e.to_string()),
@@ -567,11 +585,9 @@ impl Backend for LinuxBackend {
             ActionKind::SetValue => match &req.value {
                 Some(v) if interfaces.contains(Interface::EditableText) => {
                     match build_proxy::<EditableTextProxy<'_>>(&element).await {
-                        Ok(p) => p
-                            .set_text_contents(v)
-                            .await
-                            .map_err(|e| e.to_string())
-                            .map(|_| ()),
+                        Ok(p) => {
+                            check_bool(p.set_text_contents(v).await, "set_text_contents 被目标拒绝")
+                        }
                         Err(e) => Err(e.to_string()),
                     }
                 }
@@ -584,11 +600,10 @@ impl Backend for LinuxBackend {
                     Err("控件不支持 Component 接口（scroll）".to_string())
                 } else {
                     match build_proxy::<ComponentProxy<'_>>(&element).await {
-                        Ok(p) => p
-                            .scroll_to(atspi::ScrollType::Anywhere)
-                            .await
-                            .map_err(|e| e.to_string())
-                            .map(|_| ()),
+                        Ok(p) => check_bool(
+                            p.scroll_to(atspi::ScrollType::Anywhere).await,
+                            "scroll_to 被目标拒绝",
+                        ),
                         Err(e) => Err(e.to_string()),
                     }
                 }
@@ -647,7 +662,9 @@ impl Backend for LinuxBackend {
                 }
             }
             _ => {
-                // 控件级等待：还原 ObjectRef，轮询属性。
+                // 控件级等待：开始时从缓存还原 ObjectRef（取不到返回 stale），
+                // 循环中属性读取失败视为"条件未满足"继续等待，而非立即 stale——
+                // 因为等待场景可能包含控件短暂不可访问后又恢复的情况。
                 let element_ref = match &req.condition {
                     WaitCondition::Focus { element }
                     | WaitCondition::Available { element }
@@ -844,6 +861,15 @@ impl LinuxBackend {
         if let Some(node) = nodes.get_mut(parent_index) {
             node.children = child_refs;
         }
+    }
+}
+
+/// 检查 AT-SPI 布尔返回：Ok(true) 成功，Ok(false) 目标拒绝，Err 转错误字符串。
+fn check_bool(r: Result<bool, atspi::zbus::Error>, rejected_msg: &str) -> Result<(), String> {
+    match r {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(rejected_msg.to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 

@@ -1457,7 +1457,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
 
-> 当前进度（能力已实现，待真机验证）：通过 `uiautomation` crate 实现 Windows 后端完整闭环：`desktop_status` 探测 UIA 可用性，`desktop_list_windows` 按 ControlType::Window 列举顶层窗口（id 编码 pid，支持窗口引用定位），`desktop_snapshot` 前序递归读取控件树并缓存 UIElement，节点 actions 来自真实 pattern 支持（get_pattern 探测），`desktop_find` 基于快照节点表筛选（支持稳定标识/类型/名称/值/状态组合，多候选标记歧义，敏感控件排除），`desktop_action` 还原 UIElement 并按 Invoke/Value/Toggle/SelectionItem/ExpandCollapse/ScrollItem pattern 执行，动作前重新确认控件身份（automation_id/control_type），`desktop_wait` 的 focus/available/value 控件级等待采用有限轮询（value 无期望值时记录初始值比较变化）。因 workspace 依赖含需 Windows C 工具链的 crate（aws-lc-sys），无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 真机验证为后续工作。
+> 当前进度（主体能力已实现，待真机验证）：通过 `uiautomation` crate 实现 Windows 后端：`desktop_status`/`desktop_list_windows`（多窗口用 pid+序号定位），`desktop_snapshot` 读取控件树（含非敏感控件值），`desktop_find`/`desktop_action`/`desktop_wait` 完整闭环。select 暂未实现。因 workspace 依赖含需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 真机验证为后续工作。
 
 ## 当前任务：macOS AXUIElement 后端
 
@@ -1489,7 +1489,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 无图形会话时返回明确错误，宿主保持正常运行。
 
-> 当前进度（能力已实现，待真机验证）：通过 `atspi` crate 实现 Linux 后端完整闭环：`desktop_status` 探测 accessibility bus，`desktop_list_windows` 列举应用（支持 window 引用定位），`desktop_snapshot` 前序递归读取控件树并缓存 ObjectRef，节点 actions 来自真实接口探测（Action/Component/EditableText/Selection），Text 接口读值，Component 接口读边界，PasswordText 标记敏感，`desktop_find` 基于快照节点表筛选（多候选标记歧义，敏感控件排除），`desktop_action` 还原 ObjectRef 并按 Action/EditableText/Component 接口执行（focus=grab_focus、press/toggle/expand/collapse=do_action、set_value=set_text_contents、scroll=scroll_to），动作前重新确认控件身份（role 比对），`desktop_wait` 控件级等待采用有限轮询。select 因 AT-SPI 需父选择容器索引暂返回 ActionNotSupported。代码经 macOS 交叉验证编译通过，真实 Linux 真机验证为后续工作。
+> 当前进度（主体能力已实现，待真机验证）：通过 `atspi` crate 实现 Linux 后端：`desktop_status`/`desktop_list_windows`（窗口引用用 ObjectRef 还原），`desktop_snapshot` 读取控件树（Text 读值、Component 读边界），`desktop_find`/`desktop_action`/`desktop_wait` 完整闭环，动作检查布尔返回值避免假成功。select 暂未实现（需父选择容器索引）。代码经 macOS 交叉验证编译通过，真实 Linux 真机验证为后续工作。
 
 ## 当前任务：事件等待、引用有效性与新窗口重新发现
 
