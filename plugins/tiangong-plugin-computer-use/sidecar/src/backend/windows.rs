@@ -14,20 +14,21 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use uiautomation::controls::ControlType;
-use uiautomation::core::{TreeScope, UIAutomation, UIElement};
+use uiautomation::core::{UIAutomation, UIElement};
 use uiautomation::patterns::{
     UIExpandCollapsePattern, UIInvokePattern, UIScrollItemPattern, UISelectionItemPattern,
     UITogglePattern, UIValuePattern,
 };
+use uiautomation::types::TreeScope;
 
 use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
 use tiangong_plugin_computer_use_protocol::ops::{
-    ActionRequest, FindConditions, FindRequest, ListWindowsRequest, MatchMode, SnapshotRequest,
-    WaitCondition, WaitRequest,
+    ActionRequest, FindConditions, FindRequest, ListWindowsRequest, SnapshotRequest, WaitCondition,
+    WaitRequest,
 };
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, Bounds, ControlNode, DesktopError, DesktopResult,
-    DesktopSession, ElementRef, Platform, StableIdentifiers, WindowInfo,
+    DesktopSession, ElementRef, MatchMode, Platform, StableIdentifiers, WindowInfo,
 };
 
 const DEFAULT_MAX_DEPTH: u32 = 8;
@@ -125,7 +126,7 @@ impl WindowsBackend {
         let condition = automation
             .create_property_condition(
                 uiautomation::types::UIProperty::ControlType,
-                uiautomation::variants::Variant::from_i32(ControlType::Window as i32),
+                uiautomation::variants::Variant::from(ControlType::Window as i32),
                 None,
             )
             .map_err(|e| DesktopError::BackendUnavailable {
