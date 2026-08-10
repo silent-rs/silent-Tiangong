@@ -37,6 +37,9 @@ members = [
     "plugins/tiangong-plugin-generate-image/protocol",
     "plugins/tiangong-plugin-generate-image/sidecar",
     "plugins/tiangong-plugin-generate-image/wasm",
+    "plugins/tiangong-plugin-generate-image-openai/protocol",
+    "plugins/tiangong-plugin-generate-image-openai/sidecar",
+    "plugins/tiangong-plugin-generate-image-openai/wasm",
     "plugins/tiangong-plugin-generate-video/protocol",
     "plugins/tiangong-plugin-generate-video/sidecar",
     "plugins/tiangong-plugin-generate-video/wasm",
@@ -108,6 +111,9 @@ tiangong-plugin-index-sidecar = { path = "plugins/tiangong-plugin-index/sidecar"
 tiangong-plugin-generate-image-protocol = { path = "plugins/tiangong-plugin-generate-image/protocol" }
 tiangong-plugin-generate-image-sidecar = { path = "plugins/tiangong-plugin-generate-image/sidecar" }
 tiangong-plugin-generate-image-wasm = { path = "plugins/tiangong-plugin-generate-image/wasm" }
+tiangong-plugin-generate-image-openai-protocol = { path = "plugins/tiangong-plugin-generate-image-openai/protocol" }
+tiangong-plugin-generate-image-openai-sidecar = { path = "plugins/tiangong-plugin-generate-image-openai/sidecar" }
+tiangong-plugin-generate-image-openai-wasm = { path = "plugins/tiangong-plugin-generate-image-openai/wasm" }
 tiangong-plugin-generate-video-protocol = { path = "plugins/tiangong-plugin-generate-video/protocol" }
 tiangong-plugin-generate-video-sidecar = { path = "plugins/tiangong-plugin-generate-video/sidecar" }
 tiangong-plugin-generate-video-wasm = { path = "plugins/tiangong-plugin-generate-video/wasm" }
