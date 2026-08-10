@@ -98,6 +98,14 @@ pub fn all_supported_actions() -> Vec<ActionKind> {
     ]
 }
 
+/// macOS 实际能执行的动作子集。
+/// 排除 Expand/Collapse（AX 中 AXPress 是切换，无法保证方向）和
+/// ScrollIntoView（AX 无对应语义动作），避免 status 暗示支持但 action 失败。
+pub fn macos_supported_actions() -> Vec<ActionKind> {
+    use ActionKind::*;
+    vec![Focus, Press, SetValue, Toggle, Select]
+}
+
 /// 在运行时构造当前平台的后端实例。
 pub fn current_backend() -> Box<dyn Backend> {
     cfg_if_current_backend()

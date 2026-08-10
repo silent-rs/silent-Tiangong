@@ -14,9 +14,7 @@ use async_trait::async_trait;
 use objc2_app_kit::NSWorkspace;
 
 use super::ax::{self, AxElement};
-use super::{
-    ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult, all_supported_actions,
-};
+use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
 use tiangong_plugin_computer_use_protocol::{
     AccessibilityCapability, ActionKind, Bounds, ControlNode, DesktopError, DesktopResult,
     DesktopSession, ElementRef, Platform, StableIdentifiers, WindowInfo,
@@ -317,7 +315,7 @@ impl Backend for MacosBackend {
         DesktopResult::Ok(StatusInfo {
             session,
             accessibility,
-            supported_actions: all_supported_actions(),
+            supported_actions: super::macos_supported_actions(),
         })
     }
 
