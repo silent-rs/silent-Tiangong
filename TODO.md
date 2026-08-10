@@ -1478,7 +1478,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 ## 当前任务：Linux AT-SPI2 后端
 
 - [x] 使用 AT-SPI2，通过桌面会话的 accessibility bus 读取应用、窗口和控件。
-- [ ] 使用 Accessible、Action、Value、Selection、Component 等接口完成读取和动作。
+- [x] 使用 Accessible、Action、Value、Selection、Component 等接口完成读取和动作。
 - [x] 支持 GTK、Qt、Electron 等正常暴露 AT-SPI 信息的应用。
 - [x] Wayland 下仍以 AT-SPI 语义动作为主，不依赖 `xdotool`、`wmctrl` 等 X11 坐标工具。
 - [x] 没有 accessibility bus、运行在纯 SSH/容器环境或受 Flatpak/Snap 策略限制时，返回环境不可用及原因。
@@ -1489,7 +1489,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 无图形会话时返回明确错误，宿主保持正常运行。
 
-> 当前进度（阶段性只读版本）：通过 `atspi` crate 实现 Linux 后端：`desktop_status` 探测 accessibility bus，`desktop_list_windows` 列举应用（支持 window 引用定位），`desktop_snapshot` 前序递归读取控件树，`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 macOS 交叉验证编译通过。**find/action/控件级等待尚未实现**，返回 BackendUnavailable；真实 Linux 环境的功能验证为后续工作。本分支定位为 macOS 完整 + Windows/Linux 只读的阶段性版本。
+> 当前进度（能力已实现，待真机验证）：通过 `atspi` crate 实现 Linux 后端完整闭环：`desktop_status` 探测 accessibility bus，`desktop_list_windows` 列举应用（支持 window 引用定位），`desktop_snapshot` 前序递归读取控件树并缓存 ObjectRef，节点 actions 来自真实接口探测（Action/Component/EditableText/Selection），Text 接口读值，Component 接口读边界，PasswordText 标记敏感，`desktop_find` 基于快照节点表筛选（多候选标记歧义，敏感控件排除），`desktop_action` 还原 ObjectRef 并按 Action/EditableText/Component 接口执行（focus=grab_focus、press/toggle/expand/collapse=do_action、set_value=set_text_contents、scroll=scroll_to），动作前重新确认控件身份（role 比对），`desktop_wait` 控件级等待采用有限轮询。select 因 AT-SPI 需父选择容器索引暂返回 ActionNotSupported。代码经 macOS 交叉验证编译通过，真实 Linux 真机验证为后续工作。
 
 ## 当前任务：事件等待、引用有效性与新窗口重新发现
 
