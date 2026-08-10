@@ -1448,7 +1448,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - [x] 使用 Windows UI Automation 实现，不以 PowerShell 脚本作为正式调用链。
 - [x] 从桌面根节点按进程编号和顶层窗口缩小范围，优先使用 Control View，避免无边界遍历整个桌面。
 - [x] 读取 `AutomationId`、`Name`、`ControlType`、可见性、可用状态、边界和支持的 Pattern。
-- [ ] 动作按控件支持情况调用 `Invoke`、`Value`、`Toggle`、`SelectionItem`、`ExpandCollapse`、`ScrollItem` 等 Pattern。
+- [x] 动作按控件支持情况调用 `Invoke`、`Value`、`Toggle`、`SelectionItem`、`ExpandCollapse`、`ScrollItem` 等 Pattern。
 - [x] 目标窗口属于更高权限进程或安全桌面时返回权限受限，不提升权限绕过。
 
 ### 当前任务完成标准
@@ -1457,7 +1457,7 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 至少选择一个 Tauri 或 Electron 应用验证控件树兼容性。
 - 移动窗口、改变大小或调整显示缩放后，原有语义定位仍可完成相同操作。
 
-> 当前进度（阶段性只读版本）：通过 `uiautomation` crate 实现 Windows 后端：`desktop_status` 初始化 UIA 实例并探测可用性，`desktop_list_windows` 按 ControlType::Window 列举顶层窗口（id 编码 pid，支持窗口引用定位），`desktop_snapshot` 前序递归读取控件树，`desktop_wait` 的 appear/disappear 基于窗口存在性轮询。代码经 uiautomation 源码核对 API，macOS/Linux 编译不受影响。**find/action/控件级等待尚未实现**，返回 BackendUnavailable；因 workspace 依赖含需 Windows C 工具链的 crate，无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 功能验证为后续工作。本分支定位为 macOS 完整 + Windows/Linux 只读的阶段性版本。
+> 当前进度（能力已实现，待真机验证）：通过 `uiautomation` crate 实现 Windows 后端完整闭环：`desktop_status` 探测 UIA 可用性，`desktop_list_windows` 按 ControlType::Window 列举顶层窗口（id 编码 pid，支持窗口引用定位），`desktop_snapshot` 前序递归读取控件树并缓存 UIElement，节点 actions 来自真实 pattern 支持（get_pattern 探测），`desktop_find` 基于快照节点表筛选（支持稳定标识/类型/名称/值/状态组合，多候选标记歧义，敏感控件排除），`desktop_action` 还原 UIElement 并按 Invoke/Value/Toggle/SelectionItem/ExpandCollapse/ScrollItem pattern 执行，动作前重新确认控件身份（automation_id/control_type），`desktop_wait` 的 focus/available/value 控件级等待采用有限轮询（value 无期望值时记录初始值比较变化）。因 workspace 依赖含需 Windows C 工具链的 crate（aws-lc-sys），无法在 macOS 做 windows-msvc target 类型检查，真实 Windows 真机验证为后续工作。
 
 ## 当前任务：macOS AXUIElement 后端
 
