@@ -19,6 +19,7 @@ tiangong-config = { workspace = true }
 tiangong-media-archive = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -11058,6 +11058,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

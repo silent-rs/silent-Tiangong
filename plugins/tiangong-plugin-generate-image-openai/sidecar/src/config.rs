@@ -61,7 +61,6 @@ pub fn save_selection(selection: &ConfigSelection) -> Result<ImageGenConfig> {
         source: selection.source.clone(),
         global_model_key: selection.global_model_key.clone(),
         manual_endpoint: selection.manual_endpoint.clone(),
-        enable_modalities: selection.enable_modalities,
         extra_prompt: selection.extra_prompt.clone(),
     };
     save(&config)?;

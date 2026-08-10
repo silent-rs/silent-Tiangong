@@ -61,7 +61,6 @@ const globalHint = document.getElementById("global-hint");
 const manualBaseUrl = document.getElementById("manual-base-url");
 const manualApiKey = document.getElementById("manual-api-key");
 const manualModel = document.getElementById("manual-model");
-const enableModalities = document.getElementById("enable-modalities");
 const extraPrompt = document.getElementById("extra-prompt");
 const saveBtn = document.getElementById("save-btn");
 const statusEl = document.getElementById("status");
@@ -119,7 +118,6 @@ async function loadConfig() {
       manualApiKey.value = config.manual_endpoint.api_key || "";
       manualModel.value = config.manual_endpoint.model || "";
     }
-    enableModalities.checked = !!config.enable_modalities;
     extraPrompt.value = config.extra_prompt || "";
 
     globalHint.textContent = models.length > 0
@@ -144,7 +142,6 @@ async function saveConfig() {
         api_key: manualApiKey.value,
         model: manualModel.value.trim(),
       },
-      enable_modalities: enableModalities.checked,
       extra_prompt: extraPrompt.value.trim() || null,
     };
     await callHost("save_config", JSON.stringify(payload));

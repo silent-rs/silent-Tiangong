@@ -1,6 +1,6 @@
 //! Generate-Image-OpenAI 插件私有业务协议。
 //!
-//! 通过 OpenAI 兼容的 Chat Completions 接口生成图片。
+//! 通过 OpenAI Responses API 的 image_generation 工具生成图片。
 //! 支持两种模型来源：全局模型配置（models.json）或手动输入端点。
 
 use serde::de::DeserializeOwned;
@@ -77,7 +77,7 @@ pub struct ManualEndpoint {
     pub base_url: String,
     /// API Key，支持 `${ENV_VAR}` 形式的环境变量引用。
     pub api_key: String,
-    /// 模型 id，如 `gpt-4o-image`、`gpt-image-1`。
+    /// 主模型 id（支持 image_generation 工具的模型），如 `gpt-5.3-codex`。
     pub model: String,
 }
 
@@ -93,12 +93,6 @@ pub struct ImageGenConfig {
     /// 手动输入端点。
     #[serde(default)]
     pub manual_endpoint: ManualEndpoint,
-    /// 是否在请求中带 `modalities: ["text","image"]`。
-    ///
-    /// 形态一服务（返回 markdown 图片文本）不需要开；
-    /// 形态二服务（返回多模态 image part）需要开。
-    #[serde(default)]
-    pub enable_modalities: bool,
     /// 附加系统提示（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_prompt: Option<String>,
@@ -110,7 +104,6 @@ impl Default for ImageGenConfig {
             source: ModelSource::Global,
             global_model_key: None,
             manual_endpoint: ManualEndpoint::default(),
-            enable_modalities: false,
             extra_prompt: None,
         }
     }
@@ -125,8 +118,6 @@ pub struct ConfigSelection {
     pub global_model_key: Option<String>,
     #[serde(default)]
     pub manual_endpoint: ManualEndpoint,
-    #[serde(default)]
-    pub enable_modalities: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_prompt: Option<String>,
 }
@@ -137,7 +128,6 @@ impl From<&ImageGenConfig> for ConfigSelection {
             source: config.source.clone(),
             global_model_key: config.global_model_key.clone(),
             manual_endpoint: config.manual_endpoint.clone(),
-            enable_modalities: config.enable_modalities,
             extra_prompt: config.extra_prompt.clone(),
         }
     }
@@ -168,6 +158,12 @@ pub struct ConfigBootstrap {
 pub struct GenerateRequest {
     /// 图片描述。
     pub prompt: String,
+    /// 要编辑的原图本地路径列表（可选）。
+    ///
+    /// 传入时进入编辑模式（Responses API 的 `action: edit`），
+    /// 不传时为纯生成模式。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// 单张生成图片的归档结果。

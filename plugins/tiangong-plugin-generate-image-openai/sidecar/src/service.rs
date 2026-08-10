@@ -1,11 +1,12 @@
 //! Generate-Image-OpenAI sidecar 业务服务。
 //!
-//! 通过 OpenAI 兼容的 Chat Completions 接口生成图片，解析响应中的图片并归档落盘。
+//! 通过 OpenAI Responses API 的 image_generation 工具生成图片，解析响应并归档落盘。
 //! 支持两种模型来源：全局模型配置（models.json）或手动输入端点。
 
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 use serde_json::{Value, json};
 use tiangong_llm::{ModelCapability, ModelsConfig, ResolvedModel};
 use tiangong_plugin_generate_image_openai_protocol::{
@@ -100,7 +101,9 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
     }
 }
 
-/// 生成图片：读配置 → 解析端点 → 调 Chat Completions → 提取图片 → 归档落盘。
+/// 生成/编辑图片：读配置 → 解析端点 → 调 Responses API → 提取图片 → 归档落盘。
+///
+/// `req.images` 非空时为编辑模式，空时为生成模式。
 async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
     if req.prompt.trim().is_empty() {
         anyhow::bail!("prompt 不能为空");
@@ -108,9 +111,9 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
 
     let config = config::load_or_default();
     let resolved = resolve_endpoint(&config)?;
-    let payload = build_chat_request(&req.prompt, &resolved.model, &config);
+    let payload = build_responses_request(&req.prompt, &resolved.model, &config, &req.images)?;
 
-    let response = call_chat_completions(&resolved, payload).await?;
+    let response = call_responses_api(&resolved, payload).await?;
     let raw_images = extract::extract_images(&response)?;
     let model = response
         .get("model")
@@ -172,39 +175,82 @@ fn resolve_manual(endpoint: &ManualEndpoint) -> Result<ResolvedModel> {
     })
 }
 
-/// 构造 Chat Completions 请求体。
-fn build_chat_request(prompt: &str, model: &str, config: &ImageGenConfig) -> Value {
-    let mut messages = Vec::new();
-    // system 消息（可选附加提示）。
+/// 构造 Responses API 请求体。
+/// 构造 Responses API 请求体。
+///
+/// 使用 OpenAI Responses API 的内置 `image_generation` 工具。
+/// - 无图片时为生成模式（input 是字符串）。
+/// - 有图片时为编辑模式（input 是数组，含 input_text + 每张图的 input_image，tools 设 action: edit）。
+fn build_responses_request(
+    prompt: &str,
+    model: &str,
+    config: &ImageGenConfig,
+    images: &[String],
+) -> Result<Value> {
+    let mut body = if images.is_empty() {
+        // 生成模式
+        json!({
+            "model": model,
+            "tools": [{"type": "image_generation"}],
+            "input": prompt,
+        })
+    } else {
+        // 编辑模式：input 数组含文本 + 每张原图
+        let mut content = vec![json!({"type": "input_text", "text": prompt})];
+        for path in images {
+            let data_uri = read_image_as_data_uri(path)?;
+            content.push(json!({"type": "input_image", "image_url": data_uri}));
+        }
+        json!({
+            "model": model,
+            "tools": [{"type": "image_generation", "action": "edit"}],
+            "input": [{"role": "user", "content": content}],
+        })
+    };
+
     if let Some(extra) = config.extra_prompt.as_deref() {
         let trimmed = extra.trim();
         if !trimmed.is_empty() {
-            messages.push(json!({"role": "system", "content": trimmed}));
+            body["instructions"] = json!(trimmed);
         }
     }
-    messages.push(json!({"role": "user", "content": prompt}));
-
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": false,
-    });
-
-    if config.enable_modalities {
-        body["modalities"] = json!(["text", "image"]);
-    }
-
-    body
+    Ok(body)
 }
 
-/// 调用 Chat Completions 接口，返回原始响应 JSON。
-async fn call_chat_completions(resolved: &ResolvedModel, payload: Value) -> Result<Value> {
+/// 读取本地图片文件，编码为 `data:image/{mime};base64,...` 形式。
+fn read_image_as_data_uri(path: &str) -> Result<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("图片路径为空");
+    }
+    let bytes = std::fs::read(trimmed).with_context(|| format!("读取图片文件失败：{trimmed}"))?;
+    let mime = infer_image_mime(trimmed);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+/// 按扩展名推断图片 MIME。
+fn infer_image_mime(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/png"
+    }
+}
+
+/// 调用 Responses API（`POST {base_url}/responses`），返回原始响应 JSON。
+async fn call_responses_api(resolved: &ResolvedModel, payload: Value) -> Result<Value> {
     let base = resolved.base_url.trim_end_matches('/');
-    // 兼容用户填的 base_url 末尾是否带 /chat/completions。
-    let url = if base.ends_with("/chat/completions") {
+    // 兼容用户填的 base_url 末尾是否带 /responses。
+    let url = if base.ends_with("/responses") {
         base.to_string()
     } else {
-        format!("{base}/chat/completions")
+        format!("{base}/responses")
     };
 
     let client = reqwest::Client::builder()
@@ -212,7 +258,7 @@ async fn call_chat_completions(resolved: &ResolvedModel, payload: Value) -> Resu
         .build()
         .context("构造 HTTP 客户端失败")?;
 
-    tracing::debug!(url = %url, model = %resolved.model, "Chat Completions 生图请求");
+    tracing::debug!(url = %url, model = %resolved.model, "Responses API 生图请求");
 
     let resp = client
         .post(&url)
@@ -221,18 +267,18 @@ async fn call_chat_completions(resolved: &ResolvedModel, payload: Value) -> Resu
         .json(&payload)
         .send()
         .await
-        .context("请求 Chat Completions 接口失败")?;
+        .context("请求 Responses API 失败")?;
 
     let status = resp.status();
     let resp_text = resp.text().await.context("读取响应体失败")?;
 
     if !status.is_success() {
         let err_msg = extract_error_message(&resp_text).unwrap_or(resp_text.clone());
-        anyhow::bail!("Chat Completions 调用失败 ({status}): {err_msg}");
+        anyhow::bail!("Responses API 调用失败 ({status}): {err_msg}");
     }
 
     serde_json::from_str::<Value>(&resp_text)
-        .with_context(|| format!("解析 Chat Completions 响应失败：{resp_text}"))
+        .with_context(|| format!("解析 Responses API 响应失败：{resp_text}"))
 }
 
 /// 从错误响应里提取可读的 message 字段。

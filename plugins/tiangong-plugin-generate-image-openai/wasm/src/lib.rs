@@ -42,12 +42,13 @@ impl Guest for Component {
     fn tool_specs() -> Result<Vec<ToolSpec>, PluginError> {
         Ok(vec![ToolSpec {
             name: TOOL_GENERATE_IMAGE.to_string(),
-            description: "根据文字描述生成图片（通过 OpenAI 兼容的 Chat Completions 接口）。\
-            每次调用等待生成完成后返回图片路径。\
-            注意：同一轮次中不要重复调用相同 prompt 的 generate_image，\
+            description: "根据文字描述生成图片，或基于已有图片进行编辑（通过 OpenAI Responses API 的 image_generation 工具）。\
+            传入 images 参数时为编辑模式（修改/合成原图），不传时为生成模式。\
+            每次调用等待完成后返回图片路径。\
+            注意：同一轮次中不要重复调用相同参数的 generate_image，\
             拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。"
                 .to_string(),
-            input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"图片描述，建议使用英文以获得更好效果"}},"required":["prompt"]}"#
+            input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"图片描述或编辑指令，建议使用英文以获得更好效果。编辑时用 edit/draw 等动词描述要做的修改"},"images":{"type":"array","items":{"type":"string"},"description":"要编辑的原图本地路径列表（可选）。传入时进入编辑模式，不传为生成模式"}},"required":["prompt"]}"#
                 .to_string(),
         }])
     }
@@ -105,9 +106,24 @@ fn handle_generate(call: &ToolCall) -> Result<ToolResult, PluginError> {
         return Err(plugin_err("缺少必填参数 prompt"));
     }
 
-    let request = GenerateRequest { prompt };
-    let response: GenerateResponse = sidecar_client::invoke::<Generate>(&request)
-        .map_err(|e| plugin_err(format!("图片生成失败: {e}")))?;
+    let images: Vec<String> = args
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_edit = !images.is_empty();
+
+    let request = GenerateRequest { prompt, images };
+    let response: GenerateResponse = sidecar_client::invoke::<Generate>(&request).map_err(|e| {
+        plugin_err(format!(
+            "图片{}失败: {e}",
+            if is_edit { "编辑" } else { "生成" }
+        ))
+    })?;
 
     let markdown = response
         .images
@@ -116,7 +132,11 @@ fn handle_generate(call: &ToolCall) -> Result<ToolResult, PluginError> {
         .map(|(i, img)| format!("![图片 {}]({})", i + 1, img.reference))
         .collect::<Vec<_>>()
         .join("\n");
-    let summary = format!("图片生成成功（模型：{}）", response.model);
+    let summary = format!(
+        "图片{}成功（模型：{}）",
+        if is_edit { "编辑" } else { "生成" },
+        response.model
+    );
 
     Ok(ToolResult {
         ok: true,
@@ -145,7 +165,7 @@ impl UiGuest for Component {
         Ok(vec![Contribution {
             id: "generate-image-openai-settings".to_string(),
             title: "OpenAI 生图".to_string(),
-            description: "通过 Chat Completions 接口生成图片的配置".to_string(),
+            description: "通过 Responses API 生成图片的配置".to_string(),
             icon: "image".to_string(),
             group: "plugins".to_string(),
             has_view: true,

@@ -10,7 +10,7 @@
   <main class="page">
     <div class="header">
       <h2>OpenAI 生图</h2>
-      <p class="desc">通过 OpenAI 兼容的 Chat Completions 接口生成图片。可以选择模型配置中的模型，或手动输入端点。</p>
+      <p class="desc">通过 OpenAI Responses API 的 image_generation 工具生成图片。可以选择模型配置中的模型，或手动输入端点。</p>
     </div>
 
     <section class="card">
@@ -49,22 +49,16 @@
         </label>
         <label class="field">
           <span class="label">Model ID</span>
-          <input id="manual-model" class="input" type="text" placeholder="gpt-4o-image" autocomplete="off" />
+          <input id="manual-model" class="input" type="text" placeholder="gpt-5.4（支持 image_generation 工具的主模型）" autocomplete="off" />
         </label>
       </div>
     </section>
 
     <section class="card">
       <h3 class="card-title">生成选项</h3>
-      <label class="field checkbox-field">
-        <input type="checkbox" id="enable-modalities" />
-        <span class="label-inline">启用图片输出（modalities）</span>
-      </label>
-      <p class="hint">部分服务需要勾选此项以触发图片生成（请求带 modalities:["text","image"]）。如果生成的图片以 markdown 链接形式返回，通常无需勾选。</p>
-
       <label class="field">
-        <span class="label">附加系统提示（可选）</span>
-        <textarea id="extra-prompt" class="input textarea" rows="3" placeholder="留空则不附加系统提示"></textarea>
+        <span class="label">附加指令（可选）</span>
+        <textarea id="extra-prompt" class="input textarea" rows="3" placeholder="作为 Responses API 的 instructions 注入，留空则不附加"></textarea>
       </label>
     </section>
 
