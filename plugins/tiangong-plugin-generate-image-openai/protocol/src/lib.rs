@@ -70,6 +70,15 @@ pub enum ModelSource {
     Manual,
 }
 
+impl ModelSource {
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 /// 手动输入的端点信息。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ManualEndpoint {
@@ -79,6 +88,27 @@ pub struct ManualEndpoint {
     pub api_key: String,
     /// 主模型 id（支持 image_generation 工具的模型），如 `gpt-5.3-codex`。
     pub model: String,
+}
+
+/// 已解析的模型端点（保存配置时从 models.json 解析并缓存，运行时不再依赖 models.json）。
+///
+/// 与 memory 插件的做法一致：保存配置时一次性解析，避免运行时反复读 models.json。
+/// 含明文密钥，仅供 sidecar 内部使用，不返回给 UI。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEndpoint {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl From<&ManualEndpoint> for ResolvedEndpoint {
+    fn from(endpoint: &ManualEndpoint) -> Self {
+        Self {
+            base_url: endpoint.base_url.clone(),
+            api_key: endpoint.api_key.clone(),
+            model: endpoint.model.clone(),
+        }
+    }
 }
 
 /// 插件持久化配置（存于 `~/.tiangong/generate-image-openai/config.json`）。
@@ -93,6 +123,9 @@ pub struct ImageGenConfig {
     /// 手动输入端点。
     #[serde(default)]
     pub manual_endpoint: ManualEndpoint,
+    /// 已解析并缓存的端点（保存配置时写入，运行时直接使用）。
+    #[serde(default)]
+    pub resolved: ResolvedEndpoint,
     /// 附加系统提示（可选）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_prompt: Option<String>,
@@ -104,6 +137,7 @@ impl Default for ImageGenConfig {
             source: ModelSource::Global,
             global_model_key: None,
             manual_endpoint: ManualEndpoint::default(),
+            resolved: ResolvedEndpoint::default(),
             extra_prompt: None,
         }
     }

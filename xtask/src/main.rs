@@ -318,7 +318,7 @@ fn main() {
         },
         [command, plugin, output] if command == "build-plugin-wasm" => {
             match plugin_config(plugin) {
-                Ok(config) => build_plugin_wasm(config, &output),
+                Ok(config) => build_plugin_wasm(config, output),
                 Err(error) => Err(error),
             }
         }

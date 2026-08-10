@@ -12,14 +12,13 @@ use tiangong_llm::{ModelCapability, ModelsConfig, ResolvedModel};
 use tiangong_plugin_generate_image_openai_protocol::{
     Ack, ConfigBootstrap, ConfigSelection, Empty, GENERATE_OPERATION, GET_CONFIG_OPERATION,
     GenerateRequest, GenerateResponse, GeneratedImage, IMAGE_PROTOCOL_VERSION, ImageGenConfig,
-    ManualEndpoint, ModelInfo, ModelSource, PLUGIN_ID, PLUGIN_VERSION, RECONFIGURE_OPERATION,
+    ModelInfo, ModelSource, PLUGIN_ID, PLUGIN_VERSION, RECONFIGURE_OPERATION, ResolvedEndpoint,
     SET_CONFIG_OPERATION,
 };
 use tiangong_plugin_runtime::protocol::{
     ErrorCode, HANDSHAKE_OPERATION, HandshakeResponse, PROTOCOL_VERSION, Request, Response,
     ServiceStatus,
 };
-use tiangong_plugin_sidecar::model::{resolve_for_capability, resolve_for_model_key};
 
 use crate::config;
 use crate::extract;
@@ -87,13 +86,18 @@ async fn dispatch_operation(operation: &str, payload: Value) -> Result<Value> {
         SET_CONFIG_OPERATION => {
             let selection: ConfigSelection =
                 serde_json::from_value(payload).context("解析配置选择失败")?;
-            config::save_selection(&selection)?;
+            // 保存时立即解析端点并缓存，运行时不再依赖 models.json。
+            let resolved = resolve_selection_endpoint(&selection)?;
+            config::save_selection(&selection, resolved)?;
             serde_json::to_value(Ack::default()).context("序列化配置保存响应失败")
         }
 
         RECONFIGURE_OPERATION => {
-            // 重新读盘：on_config_updated 触发后确认最新配置。
-            let _ = config::load_or_default();
+            // on_config_updated 触发：重新读盘并尝试刷新已缓存的端点。
+            let existing = config::load_or_default();
+            if let Some(updated) = try_refresh_resolved(&existing)? {
+                config::save_resolved(&updated)?;
+            }
             serde_json::to_value(Ack::default()).context("序列化 reconfigure 响应失败")
         }
 
@@ -136,46 +140,101 @@ async fn generate(req: GenerateRequest) -> Result<GenerateResponse> {
     Ok(GenerateResponse { images, model })
 }
 
-/// 根据配置解析模型端点。
+/// 运行时解析模型端点：只读 config.json 里缓存的 resolved，不再依赖 models.json。
+///
+/// resolved 在保存配置时（SET_CONFIG_OPERATION）或 on_config_updated 触发时已写入。
 fn resolve_endpoint(config: &ImageGenConfig) -> Result<ResolvedModel> {
-    match config.source {
-        ModelSource::Global => {
-            // 优先按用户选择的 key 解析，未指定时回退到 chat 能力路由。
-            if let Some(key) = config.global_model_key.as_deref() {
-                return resolve_for_model_key(key);
-            }
-            resolve_for_capability(ModelCapability::Chat)
-        }
-        ModelSource::Manual => resolve_manual(&config.manual_endpoint),
+    let resolved = &config.resolved;
+    if resolved.base_url.trim().is_empty() {
+        anyhow::bail!("未配置有效端点，请在设置页选择模型或手动输入端点后保存");
     }
-}
-
-/// 解析手动输入的端点。
-fn resolve_manual(endpoint: &ManualEndpoint) -> Result<ResolvedModel> {
-    if endpoint.base_url.trim().is_empty() {
-        anyhow::bail!("手动端点缺少 base_url");
+    if resolved.model.trim().is_empty() {
+        anyhow::bail!("已缓存端点缺少 model");
     }
-    if endpoint.model.trim().is_empty() {
-        anyhow::bail!("手动端点缺少 model id");
-    }
-    // 支持 ${ENV_VAR} 形式的环境变量引用。
-    let api_key = ModelsConfig::resolve_api_key(&endpoint.api_key);
+    // api_key 支持 ${ENV_VAR}，在保存配置时已解析；这里兜底再解析一次（兼容旧配置）。
+    let api_key = ModelsConfig::resolve_api_key(&resolved.api_key);
     if api_key.trim().is_empty() {
-        anyhow::bail!("手动端点缺少 api_key");
+        anyhow::bail!("已缓存端点缺少 api_key");
     }
     Ok(ResolvedModel {
-        provider: "manual".to_string(),
-        base_url: endpoint.base_url.clone(),
+        provider: config.source.key().to_string(),
+        base_url: resolved.base_url.clone(),
         api_key,
         timeout_ms: 120_000,
         protocol: tiangong_llm::ProviderProtocol::OpenAiChatCompletions,
-        model: endpoint.model.clone(),
+        model: resolved.model.clone(),
         options: Value::Null,
         context_window: None,
     })
 }
 
-/// 构造 Responses API 请求体。
+/// 保存配置时解析选择对应的端点，写入 config.resolved 缓存。
+///
+/// - global：从 models.json 按 key（或 chat 能力回退）解析完整端点。
+/// - manual：直接用手动输入的 base_url/api_key/model（api_key 解析 ${ENV_VAR}）。
+///
+/// 解析失败时返回错误（不保存），让 UI 提示用户。
+fn resolve_selection_endpoint(selection: &ConfigSelection) -> Result<ResolvedEndpoint> {
+    match selection.source {
+        ModelSource::Global => {
+            let resolved = if let Some(key) = selection.global_model_key.as_deref() {
+                tiangong_plugin_sidecar::model::resolve_for_model_key(key)
+            } else {
+                tiangong_plugin_sidecar::model::resolve_for_capability(ModelCapability::Chat)
+            }?;
+            Ok(ResolvedEndpoint {
+                base_url: resolved.base_url,
+                api_key: resolved.api_key,
+                model: resolved.model,
+            })
+        }
+        ModelSource::Manual => {
+            let endpoint = &selection.manual_endpoint;
+            if endpoint.base_url.trim().is_empty() {
+                anyhow::bail!("手动端点缺少 base_url");
+            }
+            if endpoint.model.trim().is_empty() {
+                anyhow::bail!("手动端点缺少 model id");
+            }
+            let api_key = ModelsConfig::resolve_api_key(&endpoint.api_key);
+            if api_key.trim().is_empty() {
+                anyhow::bail!("手动端点缺少 api_key");
+            }
+            Ok(ResolvedEndpoint {
+                base_url: endpoint.base_url.clone(),
+                api_key,
+                model: endpoint.model.clone(),
+            })
+        }
+    }
+}
+
+/// on_config_updated 触发时尝试刷新已缓存的端点。
+///
+/// 仅 global 来源重新解析（用户可能改了 models.json）；manual 来源保持不变。
+/// 解析失败时返回 None（保留旧配置，不阻断服务）。
+fn try_refresh_resolved(existing: &ImageGenConfig) -> Result<Option<ImageGenConfig>> {
+    if existing.source != ModelSource::Global {
+        return Ok(None);
+    }
+    let selection = ConfigSelection::from(existing);
+    match resolve_selection_endpoint(&selection) {
+        Ok(new_resolved) => {
+            if new_resolved == existing.resolved {
+                Ok(None)
+            } else {
+                let mut updated = existing.clone();
+                updated.resolved = new_resolved;
+                Ok(Some(updated))
+            }
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "刷新全局端点失败，保留旧配置");
+            Ok(None)
+        }
+    }
+}
+
 /// 构造 Responses API 请求体。
 ///
 /// 使用 OpenAI Responses API 的内置 `image_generation` 工具。
