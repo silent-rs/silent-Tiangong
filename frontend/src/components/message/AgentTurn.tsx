@@ -29,6 +29,7 @@ import { StreamingMessage } from "./StreamingMessage";
 import { MessageActions } from "./MessageActions";
 import { ContentMedia } from "./ContentMedia";
 import { ToolGroup } from "./ToolGroup";
+import { CollapsibleUserText } from "./CollapsibleUserText";
 
 interface AgentTurnProps {
   messages: MessageItem[];
@@ -218,7 +219,11 @@ function AgentTurnView({
           return (
             <div key={frag.msg.id} className="flex flex-col items-end gap-0.5" title={formatMessageTime(frag.msg.created_at)}>
               <div className="flex justify-end">
-                <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-sm text-foreground whitespace-pre-wrap break-words">{textContent(frag.msg)}</div>
+                <div className="max-w-[85%] rounded-2xl bg-primary/10 px-4 py-2.5 text-foreground">
+                  <CollapsibleUserText messageId={frag.msg.id}>
+                    {textContent(frag.msg)}
+                  </CollapsibleUserText>
+                </div>
               </div>
               {(frag.msg.elapsed_ms != null || statusMeta) && (
                 <div className="flex items-center gap-1.5 pr-1 text-[11px] text-muted-foreground/80 tabular-nums">
