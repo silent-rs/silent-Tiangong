@@ -1,0 +1,437 @@
+//! Computer Use 插件私有业务协议。
+//!
+//! 本 crate 只定义 WASM 与 sidecar 共同使用的操作、请求、响应、平台能力与错误类型，
+//! 不包含 IPC、进程或 Wasmtime 依赖，可同时编译为本机与 `wasm32-wasip2`。
+//!
+//! 将 Windows UI Automation、macOS AXUIElement、Linux AT-SPI2 三套系统无障碍能力
+//! 统一为同一组语义结构，对 Agent 暴露一致的请求和返回，不以坐标作为主要定位方式。
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+pub mod ops;
+
+// 响应类型重新导出到 crate 根，便于 sidecar backend 以短路径引用。
+pub use ops::{
+    AccessContext, ActionResponse, DesktopStatusResponse, FindResponse, ListWindowsResponse,
+    SnapshotResponse, WaitResponse,
+};
+
+pub const PLUGIN_ID: &str = "computer-use";
+pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const COMPUTER_USE_PROTOCOL_VERSION: u32 = 1;
+
+/// 工具名常量（与工具规格、handle_tool 路由对齐）。
+pub const TOOL_DESKTOP_STATUS: &str = "desktop_status";
+pub const TOOL_DESKTOP_LIST_WINDOWS: &str = "desktop_list_windows";
+pub const TOOL_DESKTOP_SNAPSHOT: &str = "desktop_snapshot";
+pub const TOOL_DESKTOP_FIND: &str = "desktop_find";
+pub const TOOL_DESKTOP_ACTION: &str = "desktop_action";
+pub const TOOL_DESKTOP_WAIT: &str = "desktop_wait";
+
+/// 一个类型化 Computer Use 业务操作。
+///
+/// 每个操作由零字段 marker struct 实现，提供操作名常量与关联的请求/响应类型。
+/// WASM 端通过 `sidecar_client::invoke::<O>()` 泛型调用，以 `NAME` 作为 operation、
+/// 序列化 `Request`、反序列化 `Response`。
+pub trait ComputerUseOperation {
+    const NAME: &'static str;
+    type Request: Serialize;
+    type Response: DeserializeOwned;
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Ack {}
+
+/// 操作系统平台标识。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Platform {
+    Windows,
+    Macos,
+    Linux,
+}
+
+impl Platform {
+    /// 当前编译目标平台。
+    ///
+    /// 注意：本常量仅供 sidecar 在本机编译时使用；protocol crate 仍需可编译为
+    /// `wasm32-wasip2`（给 WASM 组件），因此非三平台 target 下返回占位值而非
+    /// `compile_error!`，避免 WASM 侧编译失败。
+    #[cfg(target_os = "windows")]
+    pub const CURRENT: Self = Self::Windows;
+    #[cfg(target_os = "macos")]
+    pub const CURRENT: Self = Self::Macos;
+    #[cfg(target_os = "linux")]
+    pub const CURRENT: Self = Self::Linux;
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    pub const CURRENT: Self = Self::Linux;
+}
+
+/// 当前桌面图形会话状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopSession {
+    /// 存在图形会话且无障碍后端可用。
+    Available,
+    /// 当前没有图形会话（纯 SSH、容器、无头环境）。
+    Unavailable,
+    /// 存在图形会话但无障碍能力未就绪（如未授权）。
+    NotReady,
+}
+
+/// 平台无障碍能力是否可用及原因。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityCapability {
+    /// 无障碍后端是否已就绪可用。
+    pub available: bool,
+    /// 不可用时的简短原因（available=true 时为空）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// 控件可执行的动作类型（对三平台统一）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    Focus,
+    Press,
+    SetValue,
+    Toggle,
+    Select,
+    Expand,
+    Collapse,
+    ScrollIntoView,
+}
+
+/// 屏幕边界（逻辑坐标，单位为平台逻辑像素/点）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Bounds {
+    #[serde(default)]
+    pub x: f64,
+    #[serde(default)]
+    pub y: f64,
+    #[serde(default)]
+    pub width: f64,
+    #[serde(default)]
+    pub height: f64,
+}
+
+/// 平台可提供的稳定控件标识集合。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StableIdentifiers {
+    /// Windows AutomationId / macOS AXIdentifier / Linux 应用自定义 id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_id: Option<String>,
+    /// 平台控件角色（UIA ControlType / AXRole / AT-SPI Role）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// 临时窗口或控件引用，仅在对应快照内短时间有效，不持久化。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ElementRef {
+    /// sidecar 内部分配的引用标识。
+    pub id: String,
+    /// 引用所属快照版本，用于检测过期。
+    pub snapshot: u64,
+}
+
+/// 顶层窗口信息。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// 应用展示名称。
+    pub app_name: String,
+    /// 进程编号（仅用于缩小当前范围，不作为跨启动稳定身份）。
+    pub pid: u32,
+    /// 临时窗口引用。
+    pub element: ElementRef,
+    /// 窗口标题。
+    pub title: String,
+    /// 是否前台窗口。
+    pub is_foreground: bool,
+    /// 窗口边界。
+    pub bounds: Bounds,
+    /// 是否可见。
+    pub visible: bool,
+    /// 是否可用（未被禁用）。
+    pub enabled: bool,
+    /// 平台稳定标识。
+    pub identifiers: StableIdentifiers,
+}
+
+/// 控件树节点。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ControlNode {
+    /// 临时控件引用。
+    pub element: ElementRef,
+    /// 平台控件角色或控件类型描述。
+    pub role: String,
+    /// 显示名称。
+    pub name: String,
+    /// 平台稳定标识。
+    pub identifiers: StableIdentifiers,
+    /// 当前值；密码框等受保护控件为 `sensitive_value_redacted` 标记时不返回真实值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// 是否为受保护控件（密码/令牌等），其值已被隐藏。
+    #[serde(default)]
+    pub sensitive: bool,
+    /// 是否可见。
+    pub visible: bool,
+    /// 是否可用。
+    pub enabled: bool,
+    /// 是否拥有焦点。
+    pub focused: bool,
+    /// 控件边界。
+    pub bounds: Bounds,
+    /// 支持的动作集合。
+    pub actions: Vec<ActionKind>,
+    /// 父控件引用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ElementRef>,
+    /// 子控件引用列表。
+    #[serde(default)]
+    pub children: Vec<ElementRef>,
+}
+
+/// 匹配模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    #[default]
+    Exact,
+    Contains,
+}
+
+/// Computer Use 业务错误类型，面向 Agent 的简短说明 + 结构化原因。
+///
+/// 错误返回不包含原始敏感值；密码框等受保护内容统一标记为 `sensitive_value_redacted`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopError {
+    /// 当前平台不支持（如 Windows 后端在非 Windows 编译产物上运行）。
+    UnsupportedPlatform { platform: String },
+    /// 没有图形会话（纯 SSH、容器或无头环境）。
+    DesktopSessionUnavailable { reason: String },
+    /// 系统拒绝授权或权限等级不匹配。
+    PermissionDenied { reason: String },
+    /// 目标应用未找到。
+    ApplicationNotFound { query: String },
+    /// 目标窗口未找到。
+    WindowNotFound { query: String },
+    /// 目标控件未找到。
+    ElementNotFound { query: String },
+    /// 同名控件存在多个候选，需用户/Agent 明确指定。
+    AmbiguousMatch { candidates: Vec<String> },
+    /// 控件引用已过期（界面变化导致），需重新读取快照。
+    StaleElement { snapshot: u64 },
+    /// 控件不支持请求的动作。
+    ActionNotSupported {
+        action: String,
+        supported: Vec<String>,
+    },
+    /// 受保护内容已被隐藏。
+    SensitiveValueRedacted,
+    /// 等待条件在超时内未满足。
+    Timeout { waited_ms: u64 },
+    /// 无障碍后端不可用。
+    BackendUnavailable { reason: String },
+}
+
+impl DesktopError {
+    /// 面向 Agent 的简短说明。
+    pub fn agent_message(&self) -> String {
+        match self {
+            Self::UnsupportedPlatform { platform } => {
+                format!("当前平台 {platform} 暂不支持桌面控制能力")
+            }
+            Self::DesktopSessionUnavailable { reason } => {
+                format!("当前没有可用的图形桌面会话：{reason}")
+            }
+            Self::PermissionDenied { reason } => {
+                format!("系统未授权桌面控制：{reason}")
+            }
+            Self::ApplicationNotFound { query } => format!("未找到目标应用：{query}"),
+            Self::WindowNotFound { query } => format!("未找到目标窗口：{query}"),
+            Self::ElementNotFound { query } => format!("未找到目标控件：{query}"),
+            Self::AmbiguousMatch { candidates } => {
+                format!("匹配到多个控件，请明确指定：{}", candidates.join("、"))
+            }
+            Self::StaleElement { snapshot } => {
+                format!("控件引用已过期（快照 {snapshot}），请重新读取界面")
+            }
+            Self::ActionNotSupported { action, supported } => {
+                if supported.is_empty() {
+                    format!("控件不支持动作 {action}")
+                } else {
+                    format!(
+                        "控件不支持动作 {action}，支持的动作：{}",
+                        supported.join("、")
+                    )
+                }
+            }
+            Self::SensitiveValueRedacted => "受保护内容已隐藏".to_string(),
+            Self::Timeout { waited_ms } => format!("等待条件在 {waited_ms} 毫秒内未满足"),
+            Self::BackendUnavailable { reason } => format!("无障碍后端不可用：{reason}"),
+        }
+    }
+}
+
+/// 工具执行结果：成功携带数据，失败携带业务错误。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DesktopResult<T> {
+    Ok(T),
+    Err(DesktopError),
+}
+
+impl<T> DesktopResult<T> {
+    pub fn ok(value: T) -> Self {
+        Self::Ok(value)
+    }
+    pub fn err(error: DesktopError) -> Self {
+        Self::Err(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::*;
+
+    #[test]
+    fn platform_current_matches_target() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(Platform::CURRENT, Platform::Macos);
+        #[cfg(target_os = "windows")]
+        assert_eq!(Platform::CURRENT, Platform::Windows);
+        #[cfg(target_os = "linux")]
+        assert_eq!(Platform::CURRENT, Platform::Linux);
+    }
+
+    #[test]
+    fn desktop_status_roundtrip() {
+        let resp = DesktopStatusResponse {
+            platform: Platform::Macos,
+            session: DesktopSession::Available,
+            accessibility: AccessibilityCapability {
+                available: true,
+                reason: None,
+            },
+            supported_actions: vec![ActionKind::Press, ActionKind::SetValue],
+        };
+        let result = DesktopResult::ok(resp);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: DesktopResult<DesktopStatusResponse> = serde_json::from_str(&json).unwrap();
+        match back {
+            DesktopResult::Ok(r) => {
+                assert_eq!(r.platform, Platform::Macos);
+                assert_eq!(r.session, DesktopSession::Available);
+                assert_eq!(r.supported_actions.len(), 2);
+            }
+            DesktopResult::Err(_) => panic!("应为成功"),
+        }
+    }
+
+    #[test]
+    fn list_windows_roundtrip() {
+        let resp = ListWindowsResponse {
+            windows: vec![WindowInfo {
+                app_name: "访达".to_string(),
+                pid: 501,
+                element: ElementRef {
+                    id: "macos-app-501-1".to_string(),
+                    snapshot: 7,
+                },
+                title: "访达".to_string(),
+                is_foreground: true,
+                bounds: Bounds::default(),
+                visible: true,
+                enabled: true,
+                identifiers: StableIdentifiers {
+                    automation_id: None,
+                    role: Some("AXApplication".to_string()),
+                },
+            }],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ListWindowsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.windows.len(), 1);
+        assert_eq!(back.windows[0].app_name, "访达");
+        assert_eq!(back.windows[0].element.snapshot, 7);
+    }
+
+    #[test]
+    fn desktop_error_roundtrip_and_message() {
+        let err = DesktopError::PermissionDenied {
+            reason: "未授权".to_string(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let back: DesktopError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, back);
+        assert!(err.agent_message().contains("未授权"));
+    }
+
+    #[test]
+    fn desktop_result_err_roundtrip() {
+        let result: DesktopResult<ListWindowsResponse> =
+            DesktopResult::Err(DesktopError::StaleElement { snapshot: 3 });
+        let json = serde_json::to_string(&result).unwrap();
+        // DesktopResult<ListWindowsResponse> 的 unagged 序列化：成功项含 windows，
+        // 失败项含 kind 字段。验证可正确还原为 Err。
+        let back: DesktopResult<ListWindowsResponse> = serde_json::from_str(&json).unwrap();
+        match back {
+            DesktopResult::Err(DesktopError::StaleElement { snapshot }) => {
+                assert_eq!(snapshot, 3);
+            }
+            other => panic!("期望 StaleElement，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_request_kind_default_and_from() {
+        assert_eq!(ActionRequestKind::default(), ActionRequestKind::Focus);
+        let kind: ActionKind = ActionRequestKind::Press.into();
+        assert_eq!(kind, ActionKind::Press);
+    }
+
+    #[test]
+    fn wait_condition_roundtrip() {
+        let cond = WaitCondition::Appear {
+            target: WaitTarget {
+                app_name: Some("终端".to_string()),
+                title: None,
+            },
+        };
+        let json = serde_json::to_string(&cond).unwrap();
+        let back: WaitCondition = serde_json::from_str(&json).unwrap();
+        assert_eq!(cond, back);
+    }
+
+    #[test]
+    fn match_mode_default_is_exact() {
+        assert_eq!(MatchMode::default(), MatchMode::Exact);
+    }
+
+    #[test]
+    fn operation_names_have_prefix() {
+        // 所有私有操作名都应以插件前缀开头，避免多插件冲突。
+        assert!(DESKTOP_STATUS_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_LIST_WINDOWS_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_SNAPSHOT_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_FIND_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_ACTION_OPERATION.starts_with("computer_use."));
+        assert!(DESKTOP_WAIT_OPERATION.starts_with("computer_use."));
+    }
+
+    #[test]
+    fn all_tool_constants_match_protocol() {
+        assert_eq!(TOOL_DESKTOP_STATUS, "desktop_status");
+        assert_eq!(TOOL_DESKTOP_LIST_WINDOWS, "desktop_list_windows");
+        assert_eq!(TOOL_DESKTOP_SNAPSHOT, "desktop_snapshot");
+        assert_eq!(TOOL_DESKTOP_FIND, "desktop_find");
+        assert_eq!(TOOL_DESKTOP_ACTION, "desktop_action");
+        assert_eq!(TOOL_DESKTOP_WAIT, "desktop_wait");
+    }
+}

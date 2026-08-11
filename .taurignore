@@ -1,0 +1,7 @@
+# Tauri dev 文件监控忽略规则。
+# 开发插件（plugins/）、bots（bots/）和构建工具（xtask/）时，不应触发 tauri dev
+# 重新编译重启主程序：这些目录的改动经独立构建流程（xtask build-plugin）部署，
+# 主程序通过运行时热加载发现变更，无需重编译 src-tauri。
+plugins/
+bots/
+xtask/
