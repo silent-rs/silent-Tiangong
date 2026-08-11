@@ -211,27 +211,25 @@ export function MainApp() {
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
-  // 查询指定会话的浏览器 tab 数量，决定是否在浏览器图标上显示"使用中"标记。
-  // 标记语义：当前会话浏览器存在 tab（即浏览器在使用中）。
-  // 圆点是否可见由 StatusPanel 按 `browserAgentActive && !browserActive` 控制，
-  // 因此用户已打开浏览器面板时圆点会自动隐藏，无需在此判断面板状态。
-  const refreshBrowserAgentActive = useCallback(async (sessionId: string) => {
+  // 刷新浏览器/终端的"使用中"标记。
+  // 数据源用持久化的 getSessionTabs（而非各插件的 runtime tab_list）：
+  // 历史会话切回来时 runtime state 尚未重建，runtime 查询会返回空，
+  // 而持久化数据真实记录了该会话拥有的 browser/terminal tab。
+  // 圆点是否可见由 StatusPanel 按 `<kind>AgentActive && !<kind>Active` 控制，
+  // 用户已打开对应面板时圆点自动隐藏，无需在此判断面板状态。
+  const refreshAgentActiveMarkers = useCallback(async (sessionId: string) => {
     try {
-      const result = await api.browserTabList(sessionId);
-      setBrowserAgentActive(result.tabs.length > 0);
+      const result = await api.getSessionTabs(sessionId);
+      let hasBrowser = false;
+      let hasTerminal = false;
+      for (const tab of result.tabs) {
+        if (tab.kind === 'browser') hasBrowser = true;
+        else if (tab.kind === 'terminal') hasTerminal = true;
+      }
+      setBrowserAgentActive(hasBrowser);
+      setTerminalAgentActive(hasTerminal);
     } catch {
-      // 浏览器插件未就绪或会话无浏览器状态时静默
-    }
-  }, []);
-
-  // 查询指定会话的终端 tab 数量，决定是否在终端图标上显示"使用中"标记。
-  // 标记语义与浏览器一致：当前会话存在终端 tab 即亮标记。
-  const refreshTerminalAgentActive = useCallback(async (sessionId: string) => {
-    try {
-      const result = await api.terminalTabList(sessionId);
-      setTerminalAgentActive(result.tabs.length > 0);
-    } catch {
-      // 终端插件未就绪或会话无终端状态时静默
+      // 会话 tabs 未就绪时静默
     }
   }, []);
 
@@ -262,10 +260,9 @@ export function MainApp() {
     // 面板关闭后浏览器/终端 tab 仍然存活（仅隐藏），刷新"使用中"标记让圆点重新亮起
     const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
     if (sessionId) {
-      void refreshBrowserAgentActive(sessionId);
-      void refreshTerminalAgentActive(sessionId);
+      void refreshAgentActiveMarkers(sessionId);
     }
-  }, [lockResize, refreshBrowserAgentActive, refreshTerminalAgentActive, setSidebarOpenByLayout, unlockResize]);
+  }, [lockResize, refreshAgentActiveMarkers, setSidebarOpenByLayout, unlockResize]);
 
   // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
   // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
@@ -370,9 +367,8 @@ export function MainApp() {
       setTerminalAgentActive(false);
       return;
     }
-    void refreshBrowserAgentActive(activeSessionId);
-    void refreshTerminalAgentActive(activeSessionId);
-  }, [activeSessionId, refreshBrowserAgentActive, refreshTerminalAgentActive]);
+    void refreshAgentActiveMarkers(activeSessionId);
+  }, [activeSessionId, refreshAgentActiveMarkers]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -479,21 +475,21 @@ export function MainApp() {
       track(await listen<{ session_id?: string }>('browser:tab_updated', (event) => {
         const sessionId = event.payload?.session_id;
         if (!sessionId || useStore.getState().activeSessionId !== sessionId) return;
-        void refreshBrowserAgentActive(sessionId);
+        void refreshAgentActiveMarkers(sessionId);
       }));
       guard();
       // 保留 browser:open 监听：后端首次初始化浏览器窗口时触发，同样刷新标记。
       track(await listen<{ session_id: string; url: string }>('browser:open', (event) => {
         const { session_id } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        void refreshBrowserAgentActive(session_id);
+        void refreshAgentActiveMarkers(session_id);
       }));
       guard();
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
       track(await listen<{ session_id: string }>('browser:agent_active', (event) => {
         const { session_id } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        void refreshBrowserAgentActive(session_id);
+        void refreshAgentActiveMarkers(session_id);
       }));
       guard();
       track(await listen<{
@@ -520,7 +516,7 @@ export function MainApp() {
         }
         // 当前会话的终端 tab 发生变化时刷新"使用中"标记
         if (isCurrentTerminalSession) {
-          void refreshTerminalAgentActive(session_id);
+          void refreshAgentActiveMarkers(session_id);
         }
         if (!isCurrentTerminalSession) {
           return;
@@ -622,8 +618,7 @@ export function MainApp() {
     closeWorkspacePanel,
     lockResize,
     unlockResize,
-    refreshBrowserAgentActive,
-    refreshTerminalAgentActive,
+    refreshAgentActiveMarkers,
     syncTerminalRuntimeTabsToSession,
   ]);
 
