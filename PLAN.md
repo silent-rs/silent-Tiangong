@@ -44,6 +44,7 @@
 - P1：推进 Issue #301 插件平台 PoC 与 Issue #321 Memory WASM 试迁移，先保证三入口和真实记忆链路稳定。
 - P1：完成 Issue #250 通讯网关闭环，并完成 Issue #270 QQ Bot 官方接入与直接扫码配置。
 - P1：开发 Coding 专用 WASM 插件，以提示词编排现有文件、检索、命令和终端能力，并通过 sidecar 补充项目上下文、任务隔离和覆盖分支差异的交付检查能力。
+- P1：开发 generate-image-openai 生图插件，通过 OpenAI 兼容的 Chat Completions 接口生成图片，配置页支持选择全局模型配置或手动输入端点，覆盖账号无 Images API 权限只能用 chat completions 生图的场景。
 - P2：将定时任务结果推送到指定通道，并继续扩展其他 IM 平台。
 
 ## 版本里程碑

@@ -1377,3 +1377,21 @@ cargo test -p tiangong-app --lib commands::tests::slow_turn_finish_reproduces_ap
 - 会话切换不会因为重新扫描或编译插件而卡顿。
 - 用户点击重新加载时，只有磁盘制品发生变化的插件才会切换运行实例。
 - 管理页刷新完成前用户无法触发与插件状态冲突的操作。
+
+## 当前任务：generate-image-openai 插件（Chat Completions 生图）
+
+新增独立插件 `generate-image-openai`，面向无 Images API 权限、只能用 Chat Completions 生图的 OpenAI 兼容服务（中转网关、聚合服务等）。不改动现有 `generate-image` 插件。
+
+- [x] 三子 crate（protocol/sidecar/wasm），照 generate-image + analyze-attachment 模板。
+- [x] sidecar 通过 reqwest 自包含实现：发 chat completions 请求（可选带 modalities），从响应 content 提取图片（markdown 文本 / 多模态 image part / images 字段三种形态），归档落盘。
+- [x] 配置持久化到 `~/.tiangong/generate-image-openai/config.json`，照 memory 模式。
+- [x] 配置页支持两种模型来源：选择全局模型配置（models.json chat 能力）/ 手动输入 base_url、api_key（支持 `${ENV}`）、model id。
+- [x] 配置页提供 modalities 开关和附加系统提示输入。
+- [x] 工程注册：根 Cargo.toml + xtask PluginConfig + ci.yml crate 映射。
+
+### 完成标准
+
+- `cargo check`、`cargo clippy -D warnings`、`cargo fmt --check` 全通过（含三子 crate）。
+- `cargo run -p xtask -- validate-plugin generate-image-openai` 校验通过。
+- 提图逻辑单测覆盖三种响应形态 + 无图片错误。
+- 设置页能看到「OpenAI 生图」入口，配置页能加载并保存。

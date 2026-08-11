@@ -231,6 +231,20 @@ const GENERATE_IMAGE: PluginConfig = PluginConfig {
     protocol_manifest: "plugins/tiangong-plugin-generate-image/protocol/Cargo.toml",
 };
 
+const GENERATE_IMAGE_OPENAI: PluginConfig = PluginConfig {
+    id: "generate-image-openai",
+    name: "Generate Image OpenAI",
+    description: "Generate Image OpenAI",
+    protocol_crate: "tiangong-plugin-generate-image-openai-protocol",
+    wasm_crate: "tiangong-plugin-generate-image-openai-wasm",
+    wasm_artifact: "tiangong_plugin_generate_image_openai_wasm.wasm",
+    sidecar_crate: Some("tiangong-plugin-generate-image-openai-sidecar"),
+    sidecar_artifact: Some("tiangong-generate-image-openai-sidecar"),
+    plugin_root: "plugins/tiangong-plugin-generate-image-openai",
+    plugin_manifest: "plugins/tiangong-plugin-generate-image-openai/plugin.json",
+    protocol_manifest: "plugins/tiangong-plugin-generate-image-openai/protocol/Cargo.toml",
+};
+
 const ANALYZE_ATTACHMENT: PluginConfig = PluginConfig {
     id: "analyze-attachment",
     name: "Analyze Attachment",
@@ -285,6 +299,7 @@ fn plugin_config(id: &str) -> io::Result<&'static PluginConfig> {
         "prompt" => Ok(&PROMPT),
         "text-to-speech" => Ok(&TEXT_TO_SPEECH),
         "generate-image" => Ok(&GENERATE_IMAGE),
+        "generate-image-openai" => Ok(&GENERATE_IMAGE_OPENAI),
         "analyze-attachment" => Ok(&ANALYZE_ATTACHMENT),
         "speech-to-text" => Ok(&SPEECH_TO_TEXT),
         "generate-video" => Ok(&GENERATE_VIDEO),
@@ -303,7 +318,7 @@ fn main() {
         },
         [command, plugin, output] if command == "build-plugin-wasm" => {
             match plugin_config(plugin) {
-                Ok(config) => build_plugin_wasm(config, &output),
+                Ok(config) => build_plugin_wasm(config, output),
                 Err(error) => Err(error),
             }
         }
