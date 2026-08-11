@@ -89,16 +89,18 @@ fn wasm_or_skip() -> Option<PathBuf> {
         return None;
     }
     eprintln!("未找到 computer-use wasm，尝试构建...");
-    let status = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "-p",
-            "tiangong-plugin-computer-use-wasm",
-            "--target",
-            "wasm32-wasip2",
-        ])
-        .status()
-        .expect("无法执行 cargo build");
+    let mut command = std::process::Command::new("cargo");
+    command.args([
+        "build",
+        "-p",
+        "tiangong-plugin-computer-use-wasm",
+        "--target",
+        "wasm32-wasip2",
+    ]);
+    // nextest 的本机链接参数不能传给 WASM 临时构建，否则 stable rustc 会拒绝。
+    command.env_remove("RUSTFLAGS");
+    command.env_remove("CARGO_ENCODED_RUSTFLAGS");
+    let status = command.status().expect("无法执行 cargo build");
     assert!(status.success(), "构建 computer-use wasm 失败");
     if path.exists() {
         Some(path)

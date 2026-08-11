@@ -34,13 +34,52 @@ use tiangong_plugin_computer_use_protocol::{
 const DEFAULT_MAX_DEPTH: u32 = 8;
 const DEFAULT_MAX_NODES: usize = 400;
 
+/// `UIElement` 的线程安全包装。
+///
+/// `uiautomation` crate 的 `UIElement` 内部持有 `IUIAutomationElement` COM 指针
+/// （`IUnknown` 包裹 `NonNull<c_void>`），默认不实现 `Send`/`Sync`。但 UIA
+/// COM 接口支持 MTA（多线程单元）访问，属性读取线程安全，与 macOS 后端的
+/// `AxElement` 处理方式一致。这里用 newtype 加 `unsafe impl` 让其可跨线程持有。
+struct SendElement(UIElement);
+
+// SAFETY：IUIAutomationElement 是线程安全的 COM 接口，支持跨线程属性读取与
+// pattern 调用；引用计数由 IUnknown 管理，Clone/Release 线程安全。
+unsafe impl Send for SendElement {}
+unsafe impl Sync for SendElement {}
+
+impl std::ops::Deref for SendElement {
+    type Target = UIElement;
+    fn deref(&self) -> &UIElement {
+        &self.0
+    }
+}
+
+impl Clone for SendElement {
+    fn clone(&self) -> Self {
+        SendElement(self.0.clone())
+    }
+}
+
+impl From<UIElement> for SendElement {
+    fn from(elem: UIElement) -> Self {
+        SendElement(elem)
+    }
+}
+
+impl SendElement {
+    /// 取出内部 `UIElement`（用于不跨线程的局部变量）。
+    fn into_inner(self) -> UIElement {
+        self.0
+    }
+}
+
 pub struct WindowsBackend {
     snapshot_seq: AtomicU64,
-    /// 快照内控件引用缓存：((snapshot, id) -> UIElement)。
+    /// 快照内控件引用缓存：((snapshot, id) -> SendElement)。
     /// UIElement 内部持有 COM 对象引用，Clone 增引用计数。
-    elements: RwLock<HashMap<(u64, String), UIElement>>,
+    elements: RwLock<HashMap<(u64, String), SendElement>>,
     /// `list_windows` 返回的真实窗口引用，避免后续按易变的枚举序号重新猜测目标。
-    window_elements: RwLock<HashMap<(u64, String), UIElement>>,
+    window_elements: RwLock<HashMap<(u64, String), SendElement>>,
     /// 快照节点表缓存：(snapshot -> Vec<ControlNode>)，供 find 筛选。
     snapshot_nodes: RwLock<HashMap<u64, Vec<ControlNode>>>,
     /// 已使用的快照版本，用于淘汰旧缓存。
@@ -255,7 +294,7 @@ impl Backend for WindowsBackend {
             self.window_elements
                 .write()
                 .unwrap()
-                .insert((snapshot, id.clone()), element.clone());
+                .insert((snapshot, id.clone()), SendElement::from(element.clone()));
             windows.push(WindowInfo {
                 app_name: app_name.clone(),
                 pid: pid as u32,
@@ -306,7 +345,7 @@ impl Backend for WindowsBackend {
                 .get(&(window_ref.snapshot, window_ref.id.clone()))
                 .cloned();
             match cached {
-                Some(window) if window.get_process_id().is_ok() => window,
+                Some(window) if window.get_process_id().is_ok() => window.into_inner(),
                 _ => {
                     return DesktopResult::Err(DesktopError::StaleElement {
                         snapshot: window_ref.snapshot,
@@ -729,7 +768,7 @@ impl WindowsBackend {
             .elements
             .write()
             .unwrap()
-            .insert((snapshot, id.clone()), element.clone());
+            .insert((snapshot, id.clone()), SendElement::from(element.clone()));
         nodes.push(ControlNode {
             element: ElementRef {
                 id: id.clone(),
