@@ -117,6 +117,8 @@ pub enum BrowserCommand {
         session_id: String,
         url: String,
         max_chars: usize,
+        /// 用户明确要求打开时为 true，触发前端弹出浏览器面板。
+        open: bool,
         response_tx: oneshot::Sender<BrowserResponse>,
     },
     /// 打开 URL（用于链接点击等场景）
