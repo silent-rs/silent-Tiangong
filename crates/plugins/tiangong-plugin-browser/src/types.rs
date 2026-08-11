@@ -46,6 +46,14 @@ pub struct BrowserOpenEvent {
     pub url: String,
 }
 
+/// Agent 正在使用浏览器（打开或导航页面）的信号。
+///
+/// 前端据此在浏览器图标上显示"使用中"标记，而不是自动弹出浏览器面板。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserAgentActiveEvent {
+    pub session_id: String,
+}
+
 /// 页面加载事件。所有消费者必须按 `session_id` 路由，不能回退到当前活动会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserPageLoadedEvent {

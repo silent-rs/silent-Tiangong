@@ -21,6 +21,7 @@ const appWindow = getCurrentWindow();
 
 interface StatusPanelProps {
   browserActive?: boolean;
+  browserAgentActive?: boolean;
   onOpenBrowser?: () => void;
   terminalActive?: boolean;
   onOpenTerminal?: () => void;
@@ -47,7 +48,7 @@ function SearchButton() {
   );
 }
 
-export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOpenTerminal }: StatusPanelProps) {
+export function StatusPanel({ browserActive, browserAgentActive, onOpenBrowser, terminalActive, onOpenTerminal }: StatusPanelProps) {
   const { activeSessionId, isNewConversation, sessions, startNewConversation, updateAvailable, setPendingSettingsTab } = useStore();
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -287,7 +288,7 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
         <button
           data-no-drag
           onClick={onOpenBrowser}
-          className={`transition-colors ${
+          className={`relative transition-colors ${
             browserActive
               ? 'text-primary'
               : 'text-muted-foreground hover:text-foreground'
@@ -295,6 +296,13 @@ export function StatusPanel({ browserActive, onOpenBrowser, terminalActive, onOp
           title={browserActive ? '浏览器已打开' : '打开浏览器'}
         >
           <Globe className="w-4 h-4" />
+          {browserAgentActive && !browserActive && (
+            <span
+              className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500"
+              title="Agent 正在使用浏览器"
+              aria-label="Agent 正在使用浏览器"
+            />
+          )}
         </button>
         <button
           data-no-drag

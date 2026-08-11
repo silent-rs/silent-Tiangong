@@ -20,9 +20,10 @@ fn resolve_agent_state(
 }
 
 use crate::types::{
-    format_browser_events, AnnotationExtractResult, BrowserCommand, BrowserEvent, BrowserOpenEvent,
-    BrowserPageSnapshot, BrowserResponse, ClickElementResult, FillFieldResult, FormExtractResult,
-    LocateElementResult, PageStatus, QueryDomResult, TabHistoryResult,
+    format_browser_events, AnnotationExtractResult, BrowserAgentActiveEvent, BrowserCommand,
+    BrowserEvent, BrowserOpenEvent, BrowserPageSnapshot, BrowserResponse, ClickElementResult,
+    FillFieldResult, FormExtractResult, LocateElementResult, PageStatus, QueryDomResult,
+    TabHistoryResult,
 };
 
 /// 轮询等待页面内容变化并稳定，返回最终的 after-digest。
@@ -141,6 +142,13 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
+                // 始终通知前端 agent 正在使用浏览器（用于图标标记），不再依赖面板是否展开
+                let _ = app.emit(
+                    "browser:agent_active",
+                    BrowserAgentActiveEvent {
+                        session_id: session_id.clone(),
+                    },
+                );
                 let ticket = match manager.navigate_for_agent(&app, &url) {
                     Ok(ticket) => ticket,
                     Err(error) => {
@@ -186,6 +194,13 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
+                // 始终通知前端 agent 正在使用浏览器（用于图标标记）
+                let _ = app.emit(
+                    "browser:agent_active",
+                    BrowserAgentActiveEvent {
+                        session_id: session_id.clone(),
+                    },
+                );
                 if let Err(error) = manager.navigate_for_agent(&app, &url) {
                     warn!(%error, %session_id, %url, "browser open URL failed");
                 }
@@ -527,6 +542,13 @@ pub async fn browser_command_handler(
                         },
                     );
                 }
+                // 始终通知前端 agent 正在使用浏览器（用于图标标记）
+                let _ = app.emit(
+                    "browser:agent_active",
+                    BrowserAgentActiveEvent {
+                        session_id: session_id.clone(),
+                    },
+                );
                 let result = tokio::task::spawn_blocking(move || manager.load_html(&html))
                     .await
                     .unwrap_or(Err("加载 HTML 任务失败".to_string()));
