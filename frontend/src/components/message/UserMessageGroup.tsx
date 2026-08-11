@@ -14,6 +14,7 @@ import type { MessageGroup } from "./types";
 import { VoiceBubble } from "./VoiceBubble";
 import { UserMessageActions } from "./UserMessageActions";
 import { ContentMedia } from "./ContentMedia";
+import { CollapsibleUserText } from "./CollapsibleUserText";
 
 export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessages, editingMessageId, editingContent, editingAttachments, editingTextareaRef, onStartEdit, onConfirmEdit, onCancelEdit, onSetEditingContent, onSetEditingAttachments, onAttachFiles, onEditPaste }: {
   group: MessageGroup;
@@ -195,7 +196,11 @@ export function UserMessageGroup({ group, runStatus, nonEditableIds, voiceMessag
               ) : (
                 <div>
                   <ContentMedia message={message} />
-                  {messageText && <p className="whitespace-pre-wrap break-words text-sm">{renderUserText(messageText)}</p>}
+                  {messageText && (
+                    <CollapsibleUserText messageId={message.id}>
+                      {renderUserText(messageText)}
+                    </CollapsibleUserText>
+                  )}
                 </div>
               )}
             </div>
