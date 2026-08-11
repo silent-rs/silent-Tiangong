@@ -121,6 +121,9 @@ export function MainApp() {
   // Agent 正在使用浏览器（打开/导航页面）时置位，用户点开浏览器面板后清除。
   // 用于在右上角浏览器图标上显示"使用中"标记，而不是自动弹出面板。
   const [browserAgentActive, setBrowserAgentActive] = useState(false);
+  // 当前会话存在终端 tab 时置位，用户点开终端面板后清除。
+  // 与浏览器标记策略一致：有 tab 即常亮。
+  const [terminalAgentActive, setTerminalAgentActive] = useState(false);
   // 首次启动推荐安装的缺失默认插件列表；为 null 时不显示引导对话框。
   const [onboardingMissing, setOnboardingMissing] = useState<AvailablePlugin[] | null>(null);
   const showWorkspacePanelRef = useRef(false);
@@ -221,6 +224,17 @@ export function MainApp() {
     }
   }, []);
 
+  // 查询指定会话的终端 tab 数量，决定是否在终端图标上显示"使用中"标记。
+  // 标记语义与浏览器一致：当前会话存在终端 tab 即亮标记。
+  const refreshTerminalAgentActive = useCallback(async (sessionId: string) => {
+    try {
+      const result = await api.terminalTabList(sessionId);
+      setTerminalAgentActive(result.tabs.length > 0);
+    } catch {
+      // 终端插件未就绪或会话无终端状态时静默
+    }
+  }, []);
+
   const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
     if (!showWorkspacePanelRef.current) return;
     workspaceOpenRequestIdRef.current += 1;
@@ -245,12 +259,13 @@ export function MainApp() {
       setSidebarOpenByLayout(true);
     }
     workspaceExpandedForBrowserRef.current = false;
-    // 面板关闭后浏览器 tab 仍然存活（仅隐藏 webview），刷新"使用中"标记让圆点重新亮起
+    // 面板关闭后浏览器/终端 tab 仍然存活（仅隐藏），刷新"使用中"标记让圆点重新亮起
     const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
     if (sessionId) {
       void refreshBrowserAgentActive(sessionId);
+      void refreshTerminalAgentActive(sessionId);
     }
-  }, [lockResize, refreshBrowserAgentActive, setSidebarOpenByLayout, unlockResize]);
+  }, [lockResize, refreshBrowserAgentActive, refreshTerminalAgentActive, setSidebarOpenByLayout, unlockResize]);
 
   // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
   // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
@@ -265,6 +280,8 @@ export function MainApp() {
   }, [openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
+    // 用户主动查看终端面板后，清除"使用中"标记
+    setTerminalAgentActive(false);
     void openWorkspacePanel('terminal');
   }, [openWorkspacePanel]);
 
@@ -350,10 +367,12 @@ export function MainApp() {
   useEffect(() => {
     if (!activeSessionId) {
       setBrowserAgentActive(false);
+      setTerminalAgentActive(false);
       return;
     }
     void refreshBrowserAgentActive(activeSessionId);
-  }, [activeSessionId, refreshBrowserAgentActive]);
+    void refreshTerminalAgentActive(activeSessionId);
+  }, [activeSessionId, refreshBrowserAgentActive, refreshTerminalAgentActive]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -499,6 +518,10 @@ export function MainApp() {
           setWorkspacePanelMounted(true);
           setTerminalSyncVersion((version) => version + 1);
         }
+        // 当前会话的终端 tab 发生变化时刷新"使用中"标记
+        if (isCurrentTerminalSession) {
+          void refreshTerminalAgentActive(session_id);
+        }
         if (!isCurrentTerminalSession) {
           return;
         }
@@ -600,6 +623,7 @@ export function MainApp() {
     lockResize,
     unlockResize,
     refreshBrowserAgentActive,
+    refreshTerminalAgentActive,
     syncTerminalRuntimeTabsToSession,
   ]);
 
@@ -611,6 +635,7 @@ export function MainApp() {
           browserAgentActive={browserAgentActive}
           onOpenBrowser={handleToggleBrowser}
           terminalActive={showWorkspacePanel && workspaceTabKind === 'terminal'}
+          terminalAgentActive={terminalAgentActive}
           onOpenTerminal={handleToggleTerminal}
         />
 
