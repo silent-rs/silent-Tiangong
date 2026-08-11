@@ -16,19 +16,27 @@
 
 | 能力         | 说明                                                                                         |
 | ------------ | -------------------------------------------------------------------------------------------- |
-| 桌面 Agent   | Tauri + React + shadcn/ui 桌面界面，支持会话、工作区、工具过程、模型配置和运行状态展示       |
-| 嵌入式浏览器 | 内置多标签浏览器，Agent 可自主浏览网页、读取页面内容、点击元素、填写表单，用户也可手动操作   |
-| CLI / Server | 同一个 `tiangong` 入口支持命令行、后台 Server、更新检查和安装                                |
-| 多智能体协作 | 主 Agent 可按任务创建 PM、Developer、Tester、Researcher 等 Sub Agent，并通过消息和文件锁协作 |
-| 工具执行     | 支持文件读写、命令执行、代码搜索、补丁应用、网页抓取、时间查询等本地工具                     |
-| MCP 与 Skill | 支持 MCP 工具接入、本地 Skill 安装启停、按任务意图匹配和详情加载                             |
-| 移动端控制   | 通过独立 Bot 制品接入飞书、微信、QQ，支持扫码配置、运行托管、日志查看和图片/文件收发         |
-| 定时与触发   | 内置 Cron 定时任务（简单/Cron 双模式）与 Webhook 触发，定时结果可推送到指定 Bot 通道         |
-| 长期记忆     | 基于 SQLite、Tantivy 和向量索引保存项目事实、偏好、决策、产物和历史问题                      |
-| 多媒体能力   | 支持图片、视频、语音识别、语音合成等能力路由，结果以结构化媒体资源进入会话                   |
-| DeepSeek V4  | 适配 V4 新版接口，支持思考模式分档、结构化与文本协议双通道工具调用解析、流式 KV cache 统计   |
-| 权限治理     | 桌面会话可在监督模式和信任模式之间切换，Server 模式使用受控的远程角色边界                    |
-| 发布更新     | GitHub Release 分发安装包，桌面设置页和 `tiangong update` 共用在线更新链路                   |
+| 桌面 Agent    | Tauri + React + shadcn/ui 桌面界面，支持会话、工作区、工具过程、模型配置和运行状态展示       |
+| 嵌入式浏览器  | 内置多标签浏览器，Agent 可自主浏览网页、读取页面内容、点击元素、填写表单，用户也可手动操作   |
+| CLI / Server  | 同一个 `tiangong` 入口支持命令行、后台 Server、更新检查和安装                                |
+| 多智能体协作  | 主 Agent 可按任务创建 PM、Developer、Tester、Researcher 等 Sub Agent，并通过消息和文件锁协作 |
+| WASM 插件生态 | 工具执行、MCP/Skill、定时任务（Cron/Webhook）、长期记忆、多媒体生成、Coding 工作模式、桌面应用控制等能力均以独立签名发布的 WASM 插件提供，支持默认推荐、安装进度、按需启停和本地导入开发 |
+| 移动端控制    | 通过独立 Bot 制品接入飞书、微信、QQ，支持扫码配置、运行托管、日志查看和图片/文件收发         |
+| DeepSeek V4   | 适配 V4 新版接口，支持思考模式分档、结构化与文本协议双通道工具调用解析、流式 KV cache 统计   |
+| 权限治理      | 桌面会话可在监督模式和信任模式之间切换，Server 模式使用受控的远程角色边界                    |
+| 发布更新      | GitHub Release 分发安装包，桌面设置页和 `tiangong update` 共用在线更新链路                   |
+
+## WASM 插件系统
+
+天工的所有内置能力（文件、命令、网页抓取、MCP、Skill、记忆、调度、索引、媒体、Prompt、Coding、Computer Use 等）均已 WASM 化，运行在独立 sidecar 中，通过 WIT 接口与主程序解耦：
+
+- **独立签名发布**：每个插件单独构建、签名和发布，CI 校验签名清单与目录结构，支持默认插件推荐与安装进度展示。
+- **按需启停**：插件可在桌面设置页或 CLI 中启停、卸载和更新，失败不影响主进程稳定性。
+- **能力声明过滤**：插件通过 WIT 声明自身能力（工具、媒体、记忆等），主程序按能力路由请求。
+- **mention 候选**：插件可通过 Core 接口聚合 mention 候选，统一接入提示补全。
+- **本地开发**：参考 [WASM 插件开发指南](docs/plugin-development.md) 编写清单、构建 sidecar 并本地导入。
+
+插件源码位于根目录 [`plugins/`](plugins/)，尚未 WASM 化的内置插件（多智能体团队、浏览器、终端）位于 [`crates/plugins/`](crates/plugins/)。
 
 ## 多智能体协作
 
@@ -76,9 +84,9 @@ Sub Agent 独立执行、互相发消息、必要时获取文件锁
 
 ## 定时与触发
 
-天工内置独立的调度与触发能力，用于按计划或外部事件驱动 Agent 执行：
+调度与触发能力通过 `scheduler` 插件提供（底层基于 `tiangong-scheduler` crate），用于按计划或外部事件驱动 Agent 执行：
 
-- **定时任务**：基于 `tiangong-scheduler` crate 和 JSON 文件存储（`~/.tiangong/scheduler/`），复用 silent 框架内置 Scheduler，Server 启动时自动恢复已启用的 Cron Job。
+- **定时任务**：JSON 文件存储（`~/.tiangong/scheduler/`），复用 silent 框架内置 Scheduler，Server 启动时自动恢复已启用的 Cron Job。
 - **双模式编辑**：桌面端提供简单模式和 Cron 模式两种编辑器，内置校验和下次触发预览，可关联已有会话复用上下文或自动创建新会话。
 - **Webhook 触发**：Server 内置独立于定时任务的 HTTP 触发能力（`~/.tiangong/webhooks/`），提供无需认证的外部触发端点和需认证的管理端点，支持可选签名验证。
 - **结果推送**：定时任务和 Webhook 触发的结果可推送到指定 Bot 通道，与移动端控制联动。
@@ -101,7 +109,10 @@ crates/
   tiangong-entry/       统一命令入口
   tiangong-server/      HTTP REST + WebSocket Server
   tiangong-media/       图片、视频、语音等多媒体能力
-  plugins/              工具/媒体/记忆等可插拔能力
+  plugins/              已 WASM 化的可插拔能力（fs/command/fetch/mcp/skill/
+                        memory/scheduler/index/media/prompt/coding/computer-use
+                        等，独立签名发布）
+  crates/plugins/       尚未 WASM 化的内置插件（agent-team/browser/terminal）
 frontend/               桌面前端
 src-tauri/              Tauri 桌面壳
 ```
