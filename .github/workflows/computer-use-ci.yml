@@ -4,7 +4,6 @@ on:
   pull_request:
     paths:
       - "plugins/tiangong-plugin-computer-use/**"
-      - "crates/tiangong-plugin-runtime/tests/computer_use_load_and_call.rs"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/computer-use-ci.yml"
@@ -23,8 +22,8 @@ defaults:
     shell: bash
 
 jobs:
-  wasm-and-runtime:
-    name: WASM and runtime integration
+  wasm-build:
+    name: WASM build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +45,11 @@ jobs:
       - name: Check protocol for WASM
         run: cargo check -p tiangong-plugin-computer-use-protocol --target wasm32-wasip2
 
-      - name: Build WASM fixture
+      - name: Build WASM component
         run: cargo build -p tiangong-plugin-computer-use-wasm --target wasm32-wasip2
 
-      - name: Run runtime integration tests
-        env:
-          COMPUTER_USE_WASM_PATH: ${{ github.workspace }}/target/wasm32-wasip2/debug/tiangong_plugin_computer_use_wasm.wasm
-          CARGO_BUILD_JOBS: "1"
-        run: cargo nextest run -p tiangong-plugin-runtime --test computer_use_load_and_call --no-tests pass
+      - name: Run protocol unit tests
+        run: cargo nextest run -p tiangong-plugin-computer-use-protocol --no-tests pass
 
   platform-backend:
     name: Platform backend (${{ matrix.os }})

@@ -889,17 +889,3 @@ fn filter_nodes(nodes: &[ControlNode], conditions: &FindConditions) -> Vec<Contr
         .cloned()
         .collect()
 }
-
-/// 按应用名（窗口标题包含匹配）从顶层窗口中查找进程号。
-fn find_window_pid_by_name(automation: &UIAutomation, name: &str) -> Option<u32> {
-    let windows = WindowsBackend::top_level_windows(automation).ok()?;
-    let needle = name.to_lowercase();
-    windows.into_iter().find_map(|w| {
-        let title = w.get_name().unwrap_or_default();
-        if title.to_lowercase().contains(&needle) {
-            w.get_process_id().ok().map(|p| p as u32)
-        } else {
-            None
-        }
-    })
-}

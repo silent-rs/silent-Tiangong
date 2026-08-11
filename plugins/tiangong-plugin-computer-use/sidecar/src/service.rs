@@ -3,7 +3,6 @@
 use std::sync::RwLock;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 
 use tiangong_plugin_computer_use_protocol::ops::{
     self, ActionRequest, ActionResponse, CAPABILITY, DESKTOP_ACTION_OPERATION,
@@ -221,12 +220,6 @@ fn map_wait(result: DesktopResult<crate::backend::WaitResult>) -> DesktopResult<
         }),
         DesktopResult::Err(error) => DesktopResult::Err(error),
     }
-}
-
-/// 把任意可序列化值序列化为 JSON Value（辅助）。
-#[allow(dead_code)]
-fn to_value<T: Serialize>(value: T) -> serde_json::Value {
-    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
 #[async_trait::async_trait]

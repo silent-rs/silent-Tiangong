@@ -9,7 +9,6 @@
 //! - 不暴露原始指针，调用方只接触安全类型。
 
 use std::ffi::c_void;
-use std::os::raw::c_float;
 
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFRelease, CFRetain, CFTypeRef, TCFType};
@@ -84,12 +83,6 @@ unsafe extern "C" {
         element: AXUIElementRef,
         attribute: CFStringRef,
         value: CFTypeRef,
-    ) -> i32;
-    fn AXUIElementCopyElementAtPosition(
-        application: AXUIElementRef,
-        x: c_float,
-        y: c_float,
-        element: *mut AXUIElementRef,
     ) -> i32;
     fn AXValueGetType(value: AXValueRef) -> u32;
     fn AXValueGetValue(value: AXValueRef, the_type: u32, value_ptr: *mut c_void) -> u8;
@@ -400,18 +393,6 @@ pub fn is_process_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
-/// 在 (x, y) 屏幕坐标处拷贝元素（用于未来按坐标定位，当前未直接使用）。
-#[allow(dead_code)]
-pub fn element_at_position(app: &AxElement, x: f32, y: f32) -> Result<AxElement, AxError> {
-    let mut element: AXUIElementRef = std::ptr::null();
-    let code = unsafe { AXUIElementCopyElementAtPosition(app.raw(), x, y, &mut element) };
-    let err = AxError::from_raw(code);
-    if !err.is_success() || element.is_null() {
-        return Err(err);
-    }
-    AxElement::from_retained(element).ok_or(AxError::Failure)
-}
-
 /// retain 一个 CFTypeRef 并返回新引用。
 fn retain(ptr: *const c_void) -> *const c_void {
     if ptr.is_null() {
@@ -475,19 +456,6 @@ unsafe fn read_cf_number_as_f64(ptr: *const c_void) -> Option<f64> {
         return Some(int_val as f64);
     }
     None
-}
-
-/// 把 CFTypeRef 当作 CFBoolean 判断真值（不接管所有权，仅读取）。
-#[allow(dead_code)]
-fn cf_type_as_bool_ref(ptr: *const c_void) -> bool {
-    if ptr.is_null() {
-        return false;
-    }
-    // SAFETY：ptr 为 CFTypeRef，wrap_under_create_rule 接管所有权，转为 bool 后释放。
-    unsafe {
-        let b = CFBoolean::wrap_under_create_rule(ptr as CFBooleanRef);
-        bool::from(b)
-    }
 }
 
 /// 包裹可能抛 Objective-C NSException 的 AX 调用。

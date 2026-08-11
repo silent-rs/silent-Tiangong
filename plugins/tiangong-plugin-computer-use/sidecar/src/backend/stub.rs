@@ -5,12 +5,8 @@
 
 use async_trait::async_trait;
 
-use super::{
-    ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult, all_supported_actions,
-};
-use tiangong_plugin_computer_use_protocol::{
-    AccessibilityCapability, DesktopError, DesktopResult, DesktopSession, Platform,
-};
+use super::{ActionResult, Backend, FindInfo, SnapshotInfo, StatusInfo, WaitResult};
+use tiangong_plugin_computer_use_protocol::{DesktopError, DesktopResult, Platform};
 
 pub struct StubBackend {
     platform: Platform,
@@ -77,13 +73,3 @@ impl Backend for StubBackend {
         DesktopResult::Err(unsupported(self.platform))
     }
 }
-
-/// 抑制未使用告警（all_supported_actions 在本模块保留供未来实现引用）。
-#[allow(dead_code)]
-fn _keep() -> Vec<tiangong_plugin_computer_use_protocol::ActionKind> {
-    all_supported_actions()
-}
-
-/// 保留会话/能力类型引用，便于后续实现复用。
-#[allow(dead_code)]
-type _Unused = (DesktopSession, AccessibilityCapability);
