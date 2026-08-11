@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url, Webview, WebviewBuilder,
@@ -45,6 +45,19 @@ const MAX_ZOOM: f64 = 5.0;
 /// 天工统一判定页面加载异常的固定截止时间。
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const PAGE_LOAD_ERROR_MESSAGE: &str = "页面未能在 30 秒内完成加载";
+/// 后台轮询（url_poll / event_poll / ObservePage）执行 eval 的超时上限。
+///
+/// 复杂页面上单个 eval 可能耗时数秒；此前统一沿用 15 秒，导致多轮询线程
+/// 同时挂起多个重量级 eval，webview 渲染线程饱和、桌面端冻结。缩短到 4 秒，
+/// 超时后直接跳过本轮（下一轮 tick 会补），从源头避免 eval 堆积。
+pub(crate) const POLL_EVAL_TIMEOUT: Duration = Duration::from_secs(4);
+/// url_poll 后台线程的 tick 间隔（URL 变化检测延迟）。
+const URL_POLL_TICK: Duration = Duration::from_millis(1000);
+/// url_poll 内容变化检测的 tick 周期（URL_POLL_TICK 的倍数）。
+const URL_POLL_CONTENT_TICKS: u32 = 8;
+/// full_text 缓存的有效期：TTL 内多个轮询线程的 getFullText 请求复用同一结果，
+/// 避免并发遍历 DOM。
+const FULL_TEXT_CACHE_TTL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavigationPhase {
@@ -257,6 +270,12 @@ pub struct BrowserState {
     pub session_id: String,
     /// 当前浏览器运行时绑定的对话会话 ID（兼容旧字段，T5 后由 registry.active_session_id 取代）
     pub active_session_id: Option<String>,
+    /// 最近一次 `getFullText` 的结果与时间戳，用于跨线程去重。
+    ///
+    /// url_poll、event_poll、watcher(ObservePage) 都可能调用 getFullText，
+    /// 复杂页面上单次执行耗时数秒。TTL 内的重复请求直接返回缓存，
+    /// 避免多线程并发遍历 DOM 导致渲染线程饱和。
+    pub(crate) full_text_cache: Mutex<Option<(Instant, String)>>,
 }
 
 /// 浏览器进程级共享状态。所有 session 通过同一个实例读写，避免磁盘共享但内存分叉。
@@ -298,6 +317,7 @@ impl BrowserState {
             tab_history_indices: HashMap::new(),
             session_id,
             active_session_id: None,
+            full_text_cache: Mutex::new(None),
         }
     }
 
@@ -340,6 +360,7 @@ impl BrowserManager {
                 tab_history_indices: HashMap::new(),
                 session_id: String::new(),
                 active_session_id: None,
+                full_text_cache: Mutex::new(None),
             })),
         }
     }
@@ -1191,7 +1212,7 @@ impl BrowserManager {
                 let mut tick: u32 = 0;
                 let mut no_webview_ticks: u32 = 0;
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(500));
+                    std::thread::sleep(URL_POLL_TICK);
                     tick += 1;
                     if stop.load(std::sync::atomic::Ordering::Relaxed) {
                         break;
@@ -1222,8 +1243,8 @@ impl BrowserManager {
                             }
                             None => {
                                 no_webview_ticks += 1;
-                                // 无 WebView 时等待最多 30 秒（60 个 tick），超时退出
-                                if no_webview_ticks > 60 {
+                                // 无 WebView 时等待最多 30 秒（30 个 tick × 1000ms），超时退出
+                                if no_webview_ticks > 30 {
                                     break;
                                 }
                                 continue;
@@ -1275,15 +1296,15 @@ impl BrowserManager {
                         );
                     }
 
-                    // 每 3 秒检测页面内容变化
-                    if tick.is_multiple_of(6) {
+                    // 每 URL_POLL_CONTENT_TICKS 个 tick 检测页面内容变化
+                    if tick.is_multiple_of(URL_POLL_CONTENT_TICKS) {
                         let mgr = BrowserManager {
                             state: state.clone(),
                         };
                         if let Some(sig) = mgr.eval_tab_with_result_timeout(
                             &active_tab_id,
                             "(function(){try{return(document.body.innerText||'').substring(0,500).trim()}catch(e){return''}})()",
-                            Duration::from_secs(15),
+                            POLL_EVAL_TIMEOUT,
                         ) {
                             let content_changed = {
                                 let mut s = match state.lock() {
@@ -1302,11 +1323,7 @@ impl BrowserManager {
                                 let mgr2 = BrowserManager {
                                     state: state.clone(),
                                 };
-                                if let Some(raw) = mgr2.eval_tab_with_result_timeout(
-                                    &active_tab_id,
-                                    "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);return JSON.stringify(t)}catch(e){return '{}'}})()",
-                                    Duration::from_secs(15),
-                                ) {
+                                if let Some(raw) = mgr2.eval_full_text_cached(&active_tab_id, 12000) {
                                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
                                         let still_loaded = {
                                             let state = match state.lock() {
@@ -1501,8 +1518,20 @@ impl BrowserManager {
                     let mgr = BrowserManager {
                         state: state.clone(),
                     };
-                    if let Some(raw) = mgr.eval_with_result(
+                    let active_tab_id_for_events = {
+                        let state = match state.lock() {
+                            Ok(state) => state,
+                            Err(error) => error.into_inner(),
+                        };
+                        match state.active_tab_id.clone() {
+                            Some(id) => id,
+                            None => continue,
+                        }
+                    };
+                    if let Some(raw) = mgr.eval_tab_with_result_timeout(
+                        &active_tab_id_for_events,
                         "(function(){try{return window.__tiangong_bridge.observer.drainAllEvents()}catch(e){return[]}})()",
+                        POLL_EVAL_TIMEOUT,
                     ) {
                         if raw == "[]" || raw.is_empty() {
                             continue;
@@ -1789,7 +1818,7 @@ impl BrowserManager {
         self.eval_with_result_timeout(js, Duration::from_secs(15))
     }
 
-    fn eval_with_result_timeout(&self, js: &str, timeout: Duration) -> Option<String> {
+    pub(crate) fn eval_with_result_timeout(&self, js: &str, timeout: Duration) -> Option<String> {
         let tab_id = self.state.lock().ok()?.active_tab_id.clone()?;
         self.eval_tab_with_result_timeout(&tab_id, js, timeout)
     }
@@ -1818,6 +1847,40 @@ impl BrowserManager {
         rx.recv_timeout(timeout).ok()
     }
 
+    /// 执行 `getFullText(max_chars)` 并带 TTL 缓存去重。
+    ///
+    /// url_poll / ObservePage 等多个轮询线程都会读取页面全文，复杂页面上单次
+    /// getFullText 耗时数秒。`FULL_TEXT_CACHE_TTL` 内的重复请求直接返回缓存，
+    /// 避免多线程并发遍历 DOM 导致渲染线程饱和。
+    pub(crate) fn eval_full_text_cached(&self, tab_id: &str, max_chars: usize) -> Option<String> {
+        let now = Instant::now();
+        // 先查缓存：TTL 内直接返回，避免并发遍历 DOM
+        let cached: Option<(Instant, String)> = {
+            let state = self.state.lock().ok()?;
+            state
+                .full_text_cache
+                .lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|(ts, raw)| (*ts, raw.clone())))
+        };
+        if let Some((ts, raw)) = cached {
+            if now.duration_since(ts) < FULL_TEXT_CACHE_TTL {
+                return Some(raw);
+            }
+        }
+        let js = format!(
+            "(function(){{try{{var t=window.__tiangong_bridge.getFullText({max_chars});return JSON.stringify(t)}}catch(e){{return '{{}}'}}}})()"
+        );
+        let raw = self.eval_tab_with_result_timeout(tab_id, &js, POLL_EVAL_TIMEOUT)?;
+        if let Ok(state) = self.state.lock() {
+            *state
+                .full_text_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((now, raw.clone()));
+        }
+        Some(raw)
+    }
+
     pub(crate) fn drain_events(&self) -> Vec<BrowserEvent> {
         let mut live_count = 0usize;
         let mut events = {
@@ -1829,8 +1892,9 @@ impl BrowserManager {
         };
         let cached_count = events.len();
 
-        if let Some(raw) = self.eval_with_result(
+        if let Some(raw) = self.eval_with_result_timeout(
             "(function(){try{return window.__tiangong_bridge.observer.drainAllEvents()}catch(e){return[]}})()",
+            POLL_EVAL_TIMEOUT,
         ) {
             if raw != "[]" && !raw.is_empty() {
                 if let Ok(mut current) = serde_json::from_str::<Vec<BrowserEvent>>(&raw) {

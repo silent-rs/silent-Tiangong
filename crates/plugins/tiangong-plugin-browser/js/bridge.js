@@ -2833,7 +2833,7 @@
                     subtree: true,
                     attributes: true,
                     attributeFilter: [
-                        'class', 'style', 'disabled', 'readonly',
+                        'class', 'disabled', 'readonly',
                         'aria-busy', 'aria-hidden', 'aria-disabled',
                         'aria-expanded', 'aria-selected'
                     ]

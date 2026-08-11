@@ -5,7 +5,7 @@ use tauri::{AppHandle, Emitter, Wry};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::manager::{default_browser_rect, BrowserManager};
+use crate::manager::{default_browser_rect, BrowserManager, POLL_EVAL_TIMEOUT};
 
 /// Agent 命令严格按 session_id 解析：空 session_id 返回 None（调用方应跳过/报错）。
 /// 不 fallback active/bootstrap——空 session_id 是调用方错误。
@@ -250,12 +250,33 @@ pub async fn browser_command_handler(
                         }
                     }
                     let events = manager.drain_events();
-                    manager
-                        .eval_with_result(
-                            "(function(){try{var t=window.__tiangong_bridge.getFullText(12000);var a=window.__tiangong_bridge.annotation.getAnnotations();if(a&&a.count>0){t.text+='\\n\\n[页面批注] '+JSON.stringify(a.annotations);}return t;}catch(e){return {title:'',url:'',text:'',error:e.message};}})()"
-                        )
+                    let tab_id = manager
+                        .clone_state()
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.active_tab_id.clone());
+                    let raw = tab_id
+                        .as_deref()
+                        .and_then(|id| manager.eval_full_text_cached(id, 12000));
+                    raw
                         .and_then(|raw| {
-                            let data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+                            let mut data = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+                            // 追加页面批注（仅在存在批注时取，大多数页面无批注可省一次 eval）
+                            let annotations = manager.eval_with_result_timeout(
+                                "(function(){try{var a=window.__tiangong_bridge.annotation.getAnnotations();return a&&a.count>0?JSON.stringify(a.annotations):''}catch(e){return ''}})()",
+                                POLL_EVAL_TIMEOUT,
+                            );
+                            if let Some(annotations) = annotations {
+                                if !annotations.is_empty() && !annotations.starts_with('"') {
+                                    if let Some(text) =
+                                        data.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                                    {
+                                        data["text"] = serde_json::Value::String(format!(
+                                            "{text}\n\n[页面批注] {annotations}"
+                                        ));
+                                    }
+                                }
+                            }
                             Some(BrowserPageSnapshot {
                                 title: data["title"].as_str().unwrap_or("").to_string(),
                                 url: data["url"].as_str().unwrap_or("").to_string(),
