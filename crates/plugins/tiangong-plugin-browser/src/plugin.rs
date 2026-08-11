@@ -123,7 +123,8 @@ impl tiangong_core::tool_override::ToolSpecProvider for BrowserPlugin {
                         "overwrite": { "type": "boolean", "description": "download 模式是否覆盖已有文件，默认 false" },
                         "timeout_ms": { "type": "integer", "description": "请求超时时间，默认 15000，最大 60000", "minimum": 1000, "maximum": 60000 },
                         "follow_redirects": { "type": "boolean", "description": "是否跟随重定向，默认 true" },
-                        "extract_mode": { "type": "string", "enum": ["auto", "text", "raw"], "description": "text 模式提取方式，默认 auto" }
+                        "extract_mode": { "type": "string", "enum": ["auto", "text", "raw"], "description": "text 模式提取方式，默认 auto" },
+                        "open": { "type": "boolean", "description": "是否为用户打开浏览器面板。用户明确要求打开浏览器/网页时设为 true，会弹出浏览器面板供用户查看；agent 自主抓取信息时保持 false（默认），不弹面板。", "default": false }
                     },
                     "required": ["url"]
                 }),

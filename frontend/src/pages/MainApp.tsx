@@ -478,11 +478,13 @@ export function MainApp() {
         void refreshAgentActiveMarkers(sessionId);
       }));
       guard();
-      // 保留 browser:open 监听：后端首次初始化浏览器窗口时触发，同样刷新标记。
-      track(await listen<{ session_id: string; url: string }>('browser:open', (event) => {
+      // browser:open 仅在用户明确要求打开浏览器时发出（web_fetch open=true），
+      // 此时需要弹出浏览器面板供用户查看。
+      track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
         const { session_id } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        void refreshAgentActiveMarkers(session_id);
+        setBrowserAgentActive(false);
+        await openWorkspacePanel('browser');
       }));
       guard();
       // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
