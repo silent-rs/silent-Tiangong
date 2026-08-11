@@ -108,6 +108,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
 
 export function MainApp() {
   const { applyStreamEvents, loadSessions } = useStore();
+  const activeSessionId = useStore((state) => state.activeSessionId);
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
   const [showWorkspacePanel, setShowWorkspacePanel] = useState(false);
@@ -117,6 +118,12 @@ export function MainApp() {
   const [terminalSyncVersion, setTerminalSyncVersion] = useState(0);
   const [chatPanelWidth, setChatPanelWidth] = useState(MIN_CHAT_WIDTH);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Agent 正在使用浏览器（打开/导航页面）时置位，用户点开浏览器面板后清除。
+  // 用于在右上角浏览器图标上显示"使用中"标记，而不是自动弹出面板。
+  const [browserAgentActive, setBrowserAgentActive] = useState(false);
+  // 当前会话存在终端 tab 时置位，用户点开终端面板后清除。
+  // 与浏览器标记策略一致：有 tab 即常亮。
+  const [terminalAgentActive, setTerminalAgentActive] = useState(false);
   // 首次启动推荐安装的缺失默认插件列表；为 null 时不显示引导对话框。
   const [onboardingMissing, setOnboardingMissing] = useState<AvailablePlugin[] | null>(null);
   const showWorkspacePanelRef = useRef(false);
@@ -204,6 +211,28 @@ export function MainApp() {
     }
   }, [lockResize, setSidebarOpenByLayout, unlockResize]);
 
+  // 刷新浏览器/终端的"使用中"标记。
+  // 数据源用持久化的 getSessionTabs（而非各插件的 runtime tab_list）：
+  // 历史会话切回来时 runtime state 尚未重建，runtime 查询会返回空，
+  // 而持久化数据真实记录了该会话拥有的 browser/terminal tab。
+  // 圆点是否可见由 StatusPanel 按 `<kind>AgentActive && !<kind>Active` 控制，
+  // 用户已打开对应面板时圆点自动隐藏，无需在此判断面板状态。
+  const refreshAgentActiveMarkers = useCallback(async (sessionId: string) => {
+    try {
+      const result = await api.getSessionTabs(sessionId);
+      let hasBrowser = false;
+      let hasTerminal = false;
+      for (const tab of result.tabs) {
+        if (tab.kind === 'browser') hasBrowser = true;
+        else if (tab.kind === 'terminal') hasTerminal = true;
+      }
+      setBrowserAgentActive(hasBrowser);
+      setTerminalAgentActive(hasTerminal);
+    } catch {
+      // 会话 tabs 未就绪时静默
+    }
+  }, []);
+
   const closeWorkspacePanel = useCallback(async (restoreSize = true) => {
     if (!showWorkspacePanelRef.current) return;
     workspaceOpenRequestIdRef.current += 1;
@@ -228,7 +257,12 @@ export function MainApp() {
       setSidebarOpenByLayout(true);
     }
     workspaceExpandedForBrowserRef.current = false;
-  }, [lockResize, setSidebarOpenByLayout, unlockResize]);
+    // 面板关闭后浏览器/终端 tab 仍然存活（仅隐藏），刷新"使用中"标记让圆点重新亮起
+    const sessionId = useStore.getState().activeSessionId ?? useStore.getState().newConversationId;
+    if (sessionId) {
+      void refreshAgentActiveMarkers(sessionId);
+    }
+  }, [lockResize, refreshAgentActiveMarkers, setSidebarOpenByLayout, unlockResize]);
 
   // 浏览器面板挂载后，显式触达后端以渲染浏览器表面。
   // 与 `browser:open` / `tiangong:open-browser` 入口保持一致，
@@ -237,10 +271,14 @@ export function MainApp() {
   const handleToggleBrowser = useCallback(async () => {
     // 标题栏按钮只表达"打开 browser 意图"——Tab 的查找/切换/创建统一由
     // TabsContainer.activateOrCreateTab 执行（不再调 ensureBrowserVisible）
+    // 用户主动查看浏览器面板后，清除"agent 使用中"标记
+    setBrowserAgentActive(false);
     await openWorkspacePanel('browser');
   }, [openWorkspacePanel]);
 
   const handleToggleTerminal = useCallback(() => {
+    // 用户主动查看终端面板后，清除"使用中"标记
+    setTerminalAgentActive(false);
     void openWorkspacePanel('terminal');
   }, [openWorkspacePanel]);
 
@@ -321,6 +359,16 @@ export function MainApp() {
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   }, [closeWorkspacePanel]);
+
+  // 会话切换时刷新浏览器"使用中"标记：新切到的会话可能已有浏览器 tab。
+  useEffect(() => {
+    if (!activeSessionId) {
+      setBrowserAgentActive(false);
+      setTerminalAgentActive(false);
+      return;
+    }
+    void refreshAgentActiveMarkers(activeSessionId);
+  }, [activeSessionId, refreshAgentActiveMarkers]);
 
   useEffect(() => {
     ensureDesktopNotificationPermission().catch(console.warn);
@@ -422,12 +470,26 @@ export function MainApp() {
       }));
       guard();
 
-      track(await listen<{ session_id: string; url: string }>('browser:open', async (event) => {
+      // 浏览器 tab 增删/更新时刷新"使用中"标记。
+      // 标记语义：当前会话浏览器存在 tab（即浏览器在使用），且用户尚未打开浏览器面板。
+      track(await listen<{ session_id?: string }>('browser:tab_updated', (event) => {
+        const sessionId = event.payload?.session_id;
+        if (!sessionId || useStore.getState().activeSessionId !== sessionId) return;
+        void refreshAgentActiveMarkers(sessionId);
+      }));
+      guard();
+      // 保留 browser:open 监听：后端首次初始化浏览器窗口时触发，同样刷新标记。
+      track(await listen<{ session_id: string; url: string }>('browser:open', (event) => {
         const { session_id } = event.payload;
         if (!session_id || useStore.getState().activeSessionId !== session_id) return;
-        await openWorkspacePanel('browser');
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        // browser:open 已在后端完成导航，前端不再重复 navigate
+        void refreshAgentActiveMarkers(session_id);
+      }));
+      guard();
+      // agent_active 信号：agent 打开/导航页面时发出，刷新标记。
+      track(await listen<{ session_id: string }>('browser:agent_active', (event) => {
+        const { session_id } = event.payload;
+        if (!session_id || useStore.getState().activeSessionId !== session_id) return;
+        void refreshAgentActiveMarkers(session_id);
       }));
       guard();
       track(await listen<{
@@ -451,6 +513,10 @@ export function MainApp() {
         if (synced && isCurrentTerminalSession) {
           setWorkspacePanelMounted(true);
           setTerminalSyncVersion((version) => version + 1);
+        }
+        // 当前会话的终端 tab 发生变化时刷新"使用中"标记
+        if (isCurrentTerminalSession) {
+          void refreshAgentActiveMarkers(session_id);
         }
         if (!isCurrentTerminalSession) {
           return;
@@ -552,6 +618,7 @@ export function MainApp() {
     closeWorkspacePanel,
     lockResize,
     unlockResize,
+    refreshAgentActiveMarkers,
     syncTerminalRuntimeTabsToSession,
   ]);
 
@@ -560,8 +627,10 @@ export function MainApp() {
       <div className="flex flex-col h-screen w-full overflow-hidden">
         <LazyStatusPanel
           browserActive={showWorkspacePanel && workspaceTabKind === 'browser'}
+          browserAgentActive={browserAgentActive}
           onOpenBrowser={handleToggleBrowser}
           terminalActive={showWorkspacePanel && workspaceTabKind === 'terminal'}
+          terminalAgentActive={terminalAgentActive}
           onOpenTerminal={handleToggleTerminal}
         />
 

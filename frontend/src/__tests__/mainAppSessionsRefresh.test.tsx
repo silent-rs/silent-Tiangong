@@ -285,7 +285,7 @@ describe('MainApp sessions_updated scheduling contract', () => {
     await advance(120);
 
     expect(getSessionsMock).not.toHaveBeenCalled();
-    expect(registeredUnlisteners.length).toBe(6);
+    expect(registeredUnlisteners.length).toBe(8);
     for (const unlisten of registeredUnlisteners) {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
@@ -298,7 +298,9 @@ describe('MainApp StrictMode 异步监听注册竞态', () => {
   const LISTENED_EVENTS = [
     'sessions_updated',
     'desktop_notification_open_session',
+    'browser:tab_updated',
     'browser:open',
+    'browser:agent_active',
     'terminal:tab_updated',
   ] as const;
 
