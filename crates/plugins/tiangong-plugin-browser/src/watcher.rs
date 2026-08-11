@@ -37,6 +37,11 @@ const OBSERVE_TIMEOUT: Duration = Duration::from_secs(3);
 const TEXT_DIFF_THRESHOLD: u64 = 500;
 /// 后台轮询的 tick 间隔（实际 observe 仍受 MIN_OBSERVE_INTERVAL 节流）。
 const POLL_TICK: Duration = Duration::from_secs(2);
+/// observe 连续超时/失败的最大允许次数；超过后进入退避，拉长 tick 间隔，
+/// 避免复杂页面持续触发 eval 堆积加剧卡顿。
+const MAX_CONSECUTIVE_FAILURES: u32 = 2;
+/// 退避倍数：连续失败达到阈值后，本轮 tick 间隔乘以该倍数。
+const BACKOFF_MULTIPLIER: u64 = 4;
 
 /// 浏览器页面观察器：持有 fetcher 与当前 session 的 feedback 通道，后台周期性观察，
 /// 变化时只向自己的通道投递 `browser_data`。
@@ -58,6 +63,8 @@ pub struct BrowserWatcher {
     /// 暂停标志：turn 被取消时置位，watcher 停止 observe/inject；
     /// 新 turn 开始时清除，恢复推送。
     paused: AtomicBool,
+    /// 连续 observe 失败/超时次数；超过阈值后退避，减少对卡顿页面的轮询压力。
+    consecutive_failures: std::sync::atomic::AtomicU32,
 }
 
 impl BrowserWatcher {
@@ -69,6 +76,7 @@ impl BrowserWatcher {
             last_snapshot: RwLock::new(None),
             last_check: RwLock::new(None),
             paused: AtomicBool::new(false),
+            consecutive_failures: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -112,7 +120,15 @@ impl BrowserWatcher {
     async fn run_loop(&self) {
         tracing::debug!("browser watcher started");
         loop {
-            sleep(POLL_TICK).await;
+            // 连续失败时退避：拉长 tick 间隔，减轻卡顿页面的轮询压力。
+            // 正常情况下连续失败为 0，按标准 POLL_TICK 间隔运行。
+            let failures = self.consecutive_failures.load(Ordering::Acquire);
+            let tick = if failures >= MAX_CONSECUTIVE_FAILURES {
+                POLL_TICK * BACKOFF_MULTIPLIER as u32
+            } else {
+                POLL_TICK
+            };
+            sleep(tick).await;
             // feedback channel 关闭时退出，避免 session 结束后 task 泄漏
             let closed = self
                 .feedback_tx
@@ -174,13 +190,21 @@ impl BrowserWatcher {
                 Ok(Some(s)) => s,
                 Ok(None) => return,
                 Err(_) => {
-                    tracing::warn!("browser watcher: observe timeout");
+                    self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+                    tracing::warn!(
+                        timeouts = self.consecutive_failures.load(Ordering::Acquire),
+                        "browser watcher: observe timeout"
+                    );
                     return;
                 }
             };
         if matches!(&snapshot.status, PageStatus::Loading | PageStatus::Error(_)) {
+            // 浏览器不可见时 handler 返回 Error status，计入失败用于触发退避
+            self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
             return;
         }
+        // 成功拿到有效快照，重置连续失败计数
+        self.consecutive_failures.store(0, Ordering::Release);
         if snapshot.url.is_empty() {
             return;
         }
