@@ -107,7 +107,7 @@ function terminalRuntimeTabToState(tab: TerminalTabInfo): TabState {
 }
 
 export function MainApp() {
-  const { applyStreamEvents, loadSessions } = useStore();
+  const { applyStreamEvents, loadSessions, updateSessionMeta } = useStore();
   const activeSessionId = useStore((state) => state.activeSessionId);
   useUpdateCheck();
   const [workspacePanelMounted, setWorkspacePanelMounted] = useState(false);
@@ -458,6 +458,15 @@ export function MainApp() {
           runProtectiveRefresh();
         }, 120);
       };
+      // turn 结束后精确更新单条会话（消息数/时间），不全量刷新列表。
+      track(await listen<string>('session_meta_updated', (event) => {
+        const sessionId = event.payload;
+        if (sessionId) {
+          updateSessionMeta(sessionId);
+        }
+      }));
+      guard();
+      // sessions_updated 仅用于低频全量刷新（如恢复会话）。
       track(await listen('sessions_updated', () => {
         scheduleSessionsRefresh();
       }));

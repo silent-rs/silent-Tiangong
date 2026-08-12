@@ -558,6 +558,9 @@ export const api = {
   loadSession: (sessionId: string): Promise<LoadedSession> =>
     invoke('load_session', { sessionId }),
 
+  getSessionMeta: (sessionId: string): Promise<Session | null> =>
+    invoke('get_session_meta', { sessionId }),
+
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
 

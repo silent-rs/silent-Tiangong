@@ -860,6 +860,7 @@ export interface AppState {
   // - 旧请求晚到时放弃写入；active 不在权威列表时执行完整的会话切换或新对话初始化。
   // 前端在 getSessions 失败时保留旧列表，避免瞬时请求错误清空侧栏。
   loadSessions: (options?: { protective?: boolean }) => Promise<void>;
+  updateSessionMeta: (sessionId: string) => Promise<void>;
   startNewConversation: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
   deleteSession: () => Promise<void>;
@@ -1076,6 +1077,26 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('加载会话失败:', error);
       finishOrdinary();
       return;
+    }
+  },
+
+  // 精确更新单条会话的元数据（消息数/更新时间），替代全量 loadSessions。
+  updateSessionMeta: async (sessionId: string) => {
+    try {
+      const meta = await api.getSessionMeta(sessionId);
+      if (!meta) return;
+      set((state) => {
+        const idx = state.sessions.findIndex((s) => s.id === sessionId);
+        if (idx < 0) {
+          // 会话不在列表中（如恢复后首次更新），加入列表
+          return { sessions: [...state.sessions, meta] };
+        }
+        const sessions = state.sessions.slice();
+        sessions[idx] = { ...sessions[idx], ...meta };
+        return { sessions };
+      });
+    } catch (error) {
+      console.error('更新会话元数据失败:', error);
     }
   },
 
