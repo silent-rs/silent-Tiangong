@@ -115,25 +115,11 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
 
-      - name: Configure OpenSSL on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $openssl = (Get-Command openssl).Source
-          $root = Split-Path (Split-Path $openssl -Parent) -Parent
-          $crypto = Get-ChildItem -Path $root -Recurse -Filter libcrypto.lib |
-            Where-Object { Test-Path (Join-Path $_.Directory.FullName 'libssl.lib') } |
-            Select-Object -First 1
-          if (-not $crypto) {
-            throw "Could not locate matching libcrypto.lib and libssl.lib under $root"
-          }
-          $include = Join-Path $root 'include'
-          if (-not (Test-Path (Join-Path $include 'openssl/ssl.h'))) {
-            throw "Could not locate OpenSSL headers under $include"
-          }
-          "OPENSSL_LIB_DIR=$($crypto.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_INCLUDE_DIR=$include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "OPENSSL_NO_VENDOR=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # memory sidecar 通过 bundled-sqlcipher-vendored-openssl 由 openssl-sys 从源码
+      # 静态编译 SQLCipher 与 OpenSSL 并链接进 sidecar.exe，产物自包含，运行时不再
+      # 依赖 libcrypto-3-x64.dll。因此 Windows 下既不需要配置系统 OpenSSL 路径，更不能
+      # 设置 OPENSSL_NO_VENDOR=1——那会让 openssl-sys 改用系统动态库，导致用户机器缺 DLL。
+      # GitHub windows-latest runner 预装 Perl/NASM/MSVC，足以完成 vendored 静态编译。
       - name: Download shared WASM
         uses: actions/download-artifact@v4
         with:
