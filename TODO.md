@@ -30,3 +30,10 @@
 - [x] 前端 handleConfirmEdit 去掉二次 structuredClone 深拷贝
 - [x] 后端 cargo check / clippy 通过
 - [x] 前端 build 通过
+
+## 插件会话生命周期钩子修正
+
+- [x] TiangongCore 增加 session_ready 状态，on_session_ready 改为每个 Core 实例只调一次
+- [x] 系统提示保持每轮重建（不放进只执行一次判断）
+- [x] 终端插件每轮终端状态注入从 on_session_ready 迁移到 on_turn_started
+- [x] 修正 commands.rs / 文档中关于 on_session_ready 的错误描述

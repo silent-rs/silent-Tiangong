@@ -26,7 +26,8 @@
 
 - 编辑历史用户消息并重发时复用既有 Core，不再每次销毁重建（与普通发送路径一致）。
 - 复用 Core 不得引入对话覆盖竞态：编辑重发已校验无活跃 turn，Core 不主动写盘。
-- 各插件会话钩子保持幂等，新一轮 turn 以截断后的最新 session 重新触发 `on_session_ready`。
+- `on_session_ready` 每个 Core 实例只调用一次（首次 turn），不随每轮 turn 或编辑重发重复触发；编辑重发复用 Core 时通过 `on_turn_started` 处理每轮增量。
+- 终端插件的每轮终端状态注入走 `on_turn_started`，`on_session_ready` 只保留首次基线设置。
 - deliver 失败时磁盘 session 能回滚到编辑前状态，且不销毁被复用的 Core。
 - 会话存在性校验使用单文件存在性判定，不再遍历解析全部会话文件。
 - 前端编辑重发前不再阻塞等待主输入框草稿同步（改为后台落盘），且不依赖该同步结果。
@@ -37,3 +38,5 @@
 - `tiangong-app` 编译和 clippy 检查通过。
 - 前端 `tsc -b` 和 `vite build` 通过。
 - 编辑重发后流式输出、连续多轮编辑、带附件编辑重发、deliver 失败回滚均正常。
+- 同一 Core 连续两轮：`on_session_ready` 仅调用 1 次，`on_turn_started`/`on_turn_finished` 各 2 次；编辑重发不增加 `on_session_ready` 次数。
+- 终端插件在连续轮次和编辑重发后均能注入最新终端状态，且不重复注入已推送输出。

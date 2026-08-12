@@ -37,9 +37,9 @@ pub struct TerminalPlugin {
     /// 插件贡献环境变量的共享句柄（与 `SessionPtyRegistry` 共享同一实例）。
     /// `set_exec_env` 写入此句柄，PTY 创建时读取快照注入。
     runtime_env: Arc<RwLock<std::collections::BTreeMap<String, String>>>,
-    /// 全局 PTY 注册表句柄：`on_session_ready` 时读取终端状态快照注入会话。
+    /// 全局 PTY 注册表句柄：`on_session_ready` 建基线、`on_turn_started` 注入快照时读取。
     registry: Arc<SessionPtyRegistry>,
-    /// 当前 turn 的反馈通道：`on_session_ready` 注入 `terminal_data` 终端状态快照用。
+    /// 当前 turn 的反馈通道：`on_turn_started` 注入 `terminal_data` 终端状态快照用。
     /// turn 结束后接收端释放，迟到注入会 send 失败（注入发生在 Agent Loop 启动前，
     /// 时序上通道必然存活）。
     feedback_tx: RwLock<Option<PluginFeedbackTx>>,
@@ -103,34 +103,40 @@ impl Plugin for TerminalPlugin {
         }
     }
 
-    /// 注入当前 turn 的反馈通道，供 `on_session_ready` 投递首轮终端状态快照。
+    /// 注入当前 turn 的反馈通道，供 `on_turn_started` 投递本轮终端状态快照。
     fn set_feedback_tx(&self, tx: PluginFeedbackTx) {
         if let Ok(mut guard) = self.feedback_tx.write() {
             *guard = Some(tx);
         }
     }
 
-    /// session 就绪：每轮注入终端元状态和未推送的增量输出。
+    /// session 就绪（每个 Core 实例仅一次）：把已有终端输出设为基线。
     ///
-    /// 每个 Core 实例首次接管已有会话时先把已有输出设为基线，避免 Core 恢复后重复
-    /// 注入历史内容；新会话仍保留首条消息前产生的终端增量。后续每轮只携带上次成功
-    /// 入队后产生的新输出。cwd/shell/phase/alive 等元状态始终完整提供。注入失败不提交
-    /// 游标，下一轮会继续补发。
-    ///
-    /// 当会话尚未打开任何终端 Tab 时（pre session 阶段），跳过注入——此时没有真实
-    /// 终端上下文，空快照对 agent 无意义，反而引入一条空的 `terminal_data` 反馈。
-    ///
-    /// 此时 feedback 通道已注入（`set_feedback_tx` 在 `on_session_ready` 之前调用），
-    /// 且注入发生在 Agent Loop 的 select! 启动前，命令入队后会被本轮消费。
+    /// Core 恢复已有会话时，当前用户消息之前已存在历史消息，首次接管需把已有输出
+    /// 设为基线，避免后续轮次重复注入历史内容；新会话首轮同样建基线，保留首条消息
+    /// 前产生的终端增量。此钩子不依赖 feedback 通道，基线由 registry 内部维护。
     fn on_session_ready(&self, session: &mut tiangong_core::session::Session) {
-        let Some(tx) = self.feedback_tx.read().ok().and_then(|g| g.clone()) else {
-            return;
-        };
         // Core 恢复已有会话时，当前用户消息之前已经存在历史消息；首次新建会话只有
         // 本轮刚追加的一条用户消息，仍需把首条消息前的终端输出注入 Agent。
         if !self.core_initialized.swap(true, Ordering::AcqRel) && session.messages.len() > 1 {
             self.registry.baseline_agent_injection(&session.id);
         }
+    }
+
+    /// 每轮 turn 开始：注入终端元状态和未推送的增量输出。
+    ///
+    /// 每轮只携带上次成功入队后产生的新输出；cwd/shell/phase/alive 等元状态始终完整
+    /// 提供。注入失败不提交游标，下一轮会继续补发。会话尚未打开终端 Tab 时跳过注入
+    /// （空快照对 agent 无意义）。此时本轮 feedback 通道已注入（`set_feedback_tx` 在
+    /// 本钩子之前调用），注入发生在 Agent Loop 的 select! 启动前，命令入队后会被本轮消费。
+    fn on_turn_started(
+        &self,
+        session: &mut tiangong_core::session::Session,
+        _turn_start_idx: usize,
+    ) {
+        let Some(tx) = self.feedback_tx.read().ok().and_then(|g| g.clone()) else {
+            return;
+        };
         let (state, commits) = self.registry.snapshot_for_injection(&session.id);
         if state.tabs.is_empty() {
             tracing::debug!(session_id = %session.id, "terminal_data 跳过注入（无终端 Tab）");

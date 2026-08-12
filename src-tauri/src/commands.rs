@@ -1210,9 +1210,10 @@ pub async fn edit_and_resend(
 
     // 编辑后的稳定消息已由 edit_prepared_user_message 落盘。此处复用既有 Core：
     // 编辑重发流程已校验无活跃 turn，Core 不会主动写盘，不存在旧 Core 覆盖编辑结果的
-    // 风险；各插件会话钩子幂等，新一轮 turn 启动时会以截断后的最新 session 重新触发
-    // on_session_ready。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM
-    // 插件重新实例化），与 send_message 的复用路径保持一致。
+    // 风险。编辑重发复用现有 Core，不重复执行会话级初始化（on_session_ready 仅在该
+    // Core 首次 turn 执行一次）；新一轮 turn 通过 on_turn_started 拿到截断后的最新
+    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
+    // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, None, None, None, stream_tx)
