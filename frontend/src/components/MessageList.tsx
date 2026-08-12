@@ -520,7 +520,9 @@ export function MessageList() {
     const content = editingContent.trim();
     const attachments = editingAttachments.map((attachment) => ({ ...attachment }));
     const revision = editingRevisionRef.current;
-    const baseContent = editingBaseContentRef.current.map((block) => structuredClone(block));
+    // editingBaseContentRef 在进入编辑时已深拷贝脱离原消息；invoke 参数序列化是同步的，
+    // 且 ref 在 await 完成后才会被清空，故无需再次深拷贝（避免对含图消息复制 base64）。
+    const baseContent = [...editingBaseContentRef.current];
     const generation = editingGenerationRef.current;
     const succeeded = await editAndResend(
       targetSessionId,

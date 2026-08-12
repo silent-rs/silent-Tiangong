@@ -19,3 +19,14 @@
 - [x] 修复交互式配置向导对 OpenAI Responses 协议的支持
 - [x] 验证 OpenAI Responses 后台流式与服务端取消能力（因上游兼容性问题已回退）
 - [x] 将 OpenAI Responses 改为普通流式模式，并通过关闭连接取消请求
+
+## 编辑历史消息重发性能优化
+
+- [x] 分析编辑重发慢的根因（每次销毁重建 Core）
+- [x] edit_and_resend 改为复用 Core（去掉 retire_core + restore_session）
+- [x] 调整 deliver 失败回滚（不销毁复用 Core，仅回滚磁盘 session）
+- [x] 会话存在性校验改用 session_exists，消除全目录扫描
+- [x] 前端 editAndResend 草稿同步改为后台非阻塞
+- [x] 前端 handleConfirmEdit 去掉二次 structuredClone 深拷贝
+- [x] 后端 cargo check / clippy 通过
+- [x] 前端 build 通过

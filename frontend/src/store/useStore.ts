@@ -1579,7 +1579,9 @@ export const useStore = create<AppState>((set, get) => ({
     });
     try {
       if (sendingCache) {
-        await get().syncInputCache(sessionId, sendingCache, true);
+        // 编辑重发不依赖主输入框草稿同步的结果（不同于 sendMessage 需要拿回
+        // revision/attachments），改为后台落盘，避免阻塞编辑重发请求。
+        syncInputCacheInBackground(get().syncInputCache(sessionId, sendingCache, true));
       }
       await api.editAndResend(
         sessionId,
