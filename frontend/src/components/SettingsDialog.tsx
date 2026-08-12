@@ -1988,23 +1988,29 @@ function DataCleanupSettings() {
                       {session.updated_at && ` · ${session.updated_at.slice(0, 10)}`}
                     </p>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-2 shrink-0"
-                    onClick={async () => {
-                      try {
-                        await api.restoreDeletedSession(session.id);
-                        showSuccess('已恢复', session.title || '会话已恢复到列表');
-                        refresh();
-                      } catch (error) {
-                        showError('恢复失败', String(error));
-                      }
-                    }}
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 mr-1" />
-                    恢复
-                  </Button>
+                  {session.purging ? (
+                    <Badge variant="secondary" className="ml-2 shrink-0 text-xs">
+                      清理中
+                    </Badge>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-2 shrink-0"
+                      onClick={async () => {
+                        try {
+                          await api.restoreDeletedSession(session.id);
+                          showSuccess('已恢复', session.title || '会话已恢复到列表');
+                          refresh();
+                        } catch (error) {
+                          showError('恢复失败', String(error));
+                        }
+                      }}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                      恢复
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>
