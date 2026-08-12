@@ -11378,7 +11378,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -11386,7 +11386,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-sidecar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "tiangong-memory",
@@ -11398,7 +11398,7 @@ dependencies = [
 
 [[package]]
 name = "tiangong-plugin-memory-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "scru128",
  "serde",
