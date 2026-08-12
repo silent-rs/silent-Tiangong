@@ -259,6 +259,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let real = dir.path().join("real.txt");
         std::fs::write(&real, "x").unwrap();
+        #[cfg(unix)]
         let link = dir.path().join("link.txt");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real, &link).unwrap();
