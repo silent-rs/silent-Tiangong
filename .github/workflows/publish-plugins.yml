@@ -120,17 +120,10 @@ jobs:
       # 依赖 libcrypto-3-x64.dll。因此 Windows 下既不需要配置系统 OpenSSL 路径，更不能
       # 设置 OPENSSL_NO_VENDOR=1——那会让 openssl-sys 改用系统动态库，导致用户机器缺 DLL。
       # 注意：vendored 编译需要完整 Perl 驱动 OpenSSL 的 Configure；windows-latest 虽预装
-      # Strawberry Perl，但 PATH 中 Git 自带的精简 MSYS2 Perl 优先，缺
-      # Locale::Maketext::Simple 等模块会导致 Configure 启动即失败，故需显式前置 Strawberry Perl。
-      - name: Put Strawberry Perl first on PATH (Windows)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          echo "C:\Strawberry\perl\bin" >> "$GITHUB_PATH"
-          # 当前 step 立即验证 Strawberry Perl 可加载 OpenSSL Configure 所需模块；
-          # 路径有误时在此秒级失败，避免白白等待数十分钟的 OpenSSL 编译。
-          export PATH="/c/Strawberry/perl/bin:$PATH"
-          perl -e 'use Locale::Maketext::Simple; print "perl OK: $^X\n"'
+      # Strawberry Perl，但 Git Bash 每个 step 会重排 PATH，使自带的精简 MSYS2 Perl 优先（缺
+      # Locale::Maketext::Simple 等模块，OpenSSL Configure 启动即失败）。$GITHUB_PATH 在 Git Bash
+      # 下无法可靠地让 Strawberry 优先，因此必须在执行构建的同一 shell 内前置——见下方
+      # Build and sign plugin 步骤。
       - name: Download shared WASM
         uses: actions/download-artifact@v4
         with:
@@ -161,7 +154,15 @@ jobs:
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PATH: ${{ steps.plugin_signing.outputs.key_path }}
           TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TIANGONG_PLUGIN_SIGNING_PRIVATE_KEY_PASSWORD }}
           TIANGONG_PLUGIN_PREBUILT_WASM: ${{ github.workspace }}/target/shared-wasm/${{ needs.resolve-plugin.outputs.plugin_id }}.wasm
-        run: cargo run -p xtask -- build-plugin "$PLUGIN_ID"
+        run: |
+          if [[ "$(uname -s)" == MINGW* ]]; then
+            # Git Bash 每个 step 会重排 PATH，使 MSYS2 自带 perl 优先于 Strawberry；
+            # 必须在执行 cargo 的同一 shell 内前置，openssl-src 的 build script（作为 cargo
+            # 子进程）才会用到 Strawberry Perl。先自检所需模块，路径有误时秒级失败。
+            export PATH="/c/Strawberry/perl/bin:$PATH"
+            perl -e 'use Locale::Maketext::Simple; print "perl OK: $^X\n"'
+          fi
+          cargo run -p xtask -- build-plugin "$PLUGIN_ID"
 
       - name: Verify platform output
         env:
