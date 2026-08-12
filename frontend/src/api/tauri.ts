@@ -15,6 +15,11 @@ export interface Session {
   cwd: string;
 }
 
+export interface DeleteResult {
+  succeeded: string[];
+  failed: string[];
+}
+
 export interface TrashedSession {
   id: string;
   title: string;
@@ -564,7 +569,7 @@ export const api = {
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
 
-  deleteSessionsByCwd: (cwd: string): Promise<string[]> =>
+  deleteSessionsByCwd: (cwd: string): Promise<DeleteResult> =>
     invoke('delete_sessions_by_cwd', { cwd }),
 
   listTrashedSessions: (): Promise<TrashedSession[]> =>

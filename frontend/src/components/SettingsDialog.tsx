@@ -1897,12 +1897,18 @@ function DataCleanupSettings() {
 
   const handlePurgeAll = async () => {
     if (trashed.length === 0) return;
+    const total = trashed.length;
     setPurging(true);
-    setProgress({ current: 0, total: trashed.length });
+    setProgress({ current: 0, total });
     try {
       const count = await api.purgeAllDeletedSessions();
-      showSuccess('清理完成', `已清理 ${count} 个已删除会话`);
-      setTrashed([]);
+      // 清理后重新扫描回收区（不直接清空——部分可能清理失败仍残留）。
+      await refresh();
+      if (count < total) {
+        showError('部分清理失败', `成功 ${count} 个，${total - count} 个失败，可稍后重试`);
+      } else {
+        showSuccess('清理完成', `已清理 ${count} 个已删除会话`);
+      }
     } catch (error) {
       showError('清理失败', String(error));
       refresh();
