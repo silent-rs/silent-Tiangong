@@ -11,6 +11,7 @@
 - 工具结果通过原 `call_id` 映射为后续请求的 `function_call_output`。
 - Responses 原始结构不得泄漏到 Core、Session 或前端消息模型。
 - Chat Completions、Anthropic 和 DeepSeek 的已有行为不得回退。
+- 前端供应商配置必须提供 OpenAI Responses 选项，并明确区分 Responses 与 Chat Completions，保存值分别为 `openai` 和 `openai_chatcompletions`。
 
 ### 完成标准
 
