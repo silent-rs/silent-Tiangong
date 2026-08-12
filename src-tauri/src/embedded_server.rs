@@ -557,7 +557,7 @@ async fn delete_session(
         .await?;
     let _ = state.release_any_input_send_claim(session_id);
     state.remove_session_send_lock(session_id);
-    let _ = app.emit("sessions_updated", &());
+    // 不 emit sessions_updated：前端已本地移除会话，不需要全量刷新。
     Ok(true)
 }
 

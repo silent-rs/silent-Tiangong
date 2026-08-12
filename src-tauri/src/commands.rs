@@ -2229,12 +2229,17 @@ pub async fn list_trashed_sessions(
 #[tauri::command]
 pub async fn restore_deleted_session(
     session_id: String,
+    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
+    use tauri::Emitter;
     let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || manager.restore_session_file(&session_id))
         .await
-        .map_err(|error| format!("恢复任务失败：{error}"))?
+        .map_err(|error| format!("恢复任务失败：{error}"))??;
+    // 恢复后会话重新出现在列表中，通知前端刷新。
+    let _ = app.emit("sessions_updated", &());
+    Ok(())
 }
 
 /// 物理清理所有回收区会话（配置页"全部清理"触发）。
