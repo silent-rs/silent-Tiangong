@@ -570,6 +570,9 @@ export const api = {
   purgeAllDeletedSessions: (): Promise<number> =>
     invoke('purge_all_deleted_sessions'),
 
+  restoreDeletedSession: (sessionId: string): Promise<void> =>
+    invoke('restore_deleted_session', { sessionId }),
+
   onPurgeProgress: (cb: (progress: PurgeProgress) => void): Promise<() => void> =>
     listen<PurgeProgress>('purge_progress', (event) => cb(event.payload)),
 

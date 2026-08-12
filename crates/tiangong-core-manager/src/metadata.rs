@@ -53,14 +53,57 @@ impl From<&Session> for SessionMetadata {
 }
 
 impl SessionMetadata {
-    /// 从磁盘 session 文件构造元数据（只读浅字段，不构造完整 Session）。
+    /// 从磁盘 session 文件构造元数据（只读浅字段，不反序列化 messages 等重组件）。
     ///
-    /// 实现复用 `Session::load_from_storage` 的路径校验，保证与 worker 写盘路径
-    /// 完全一致。storage_root 形如 `~/.tiangong`，session 文件位于
-    /// `{storage_root}/sessions/{id}.json`。
+    /// 复用 `Session::session_file_path` 的路径校验，但读取后只解析为
+    /// `serde_json::Value` 取浅字段，避免反序列化完整的 `Session`（尤其 `messages`）。
     pub fn load_from_storage(storage_root: &Path, session_id: &str) -> Result<Self, String> {
-        let session = Session::load_from_storage(storage_root, session_id)?;
-        Ok(Self::from(&session))
+        let path = crate::session_file_path(storage_root, session_id)?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("读取会话文件失败（{}）：{error}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|error| format!("解析会话文件失败（{}）：{error}", path.display()))?;
+        Ok(Self::from_value(&value))
+    }
+
+    /// 从已解析的 JSON Value 提取浅字段。
+    fn from_value(value: &serde_json::Value) -> Self {
+        let pick_str = |field: &str| -> String {
+            value
+                .get(field)
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let message_count = value
+            .get("messages")
+            .and_then(|item| item.as_array())
+            .map(|array| array.len())
+            .unwrap_or(0);
+        Self {
+            id: pick_str("id"),
+            title: pick_str("title"),
+            created_at: pick_str("created_at"),
+            updated_at: pick_str("updated_at"),
+            trust_mode: value
+                .get("trust_mode")
+                .and_then(|item| serde_json::from_value(item.clone()).ok())
+                .unwrap_or_default(),
+            reasoning_effort: value
+                .get("reasoning_effort")
+                .and_then(|item| item.as_str())
+                .map(str::to_string),
+            cwd: pick_str("cwd"),
+            cwd_mode: value
+                .get("cwd_mode")
+                .and_then(|item| serde_json::from_value(item.clone()).ok())
+                .unwrap_or_default(),
+            message_count,
+            parent_session_id: value
+                .get("parent_session_id")
+                .and_then(|item| item.as_str())
+                .map(str::to_string),
+        }
     }
 
     /// 索引 ID（用于按 id 查找）。
