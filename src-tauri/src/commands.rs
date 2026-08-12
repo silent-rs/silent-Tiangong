@@ -481,7 +481,7 @@ pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String>
 pub async fn delete_sessions_by_cwd(
     cwd: String,
     state: State<'_, TiangongApp>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let mut deleted_ids = state
         .with_state_read(|core_state| {
             let ids: Vec<String> = core_state
@@ -503,28 +503,52 @@ pub async fn delete_sessions_by_cwd(
     for id in &deleted_ids {
         send_guards.push(state.session_send_lock(id).lock_owned().await);
     }
-    // 并发逻辑删除（原子移动到 trash）。
+    // 并发逻辑删除（等待 worker 退出 + 原子移动到 trash）。收集每项结果。
     let core_manager = state.inner().core_manager.clone();
-    let deletes = deleted_ids.iter().map(|id| core_manager.delete_session(id));
-    futures_util::future::join_all(deletes).await;
-    // 清理内存状态。
+    let deletes = deleted_ids.iter().map(|id| {
+        let id = id.clone();
+        let manager = core_manager.clone();
+        async move {
+            let result = manager.delete_session(&id).await;
+            (id, result)
+        }
+    });
+    let results = futures_util::future::join_all(deletes).await;
+    let (succeeded, failed): (Vec<_>, Vec<_>) =
+        results.into_iter().partition(|(_, result)| result.is_ok());
+    let succeeded_ids: Vec<String> = succeeded.into_iter().map(|(id, _)| id).collect();
+    let failed_ids: Vec<String> = failed
+        .into_iter()
+        .map(|(id, result)| {
+            tracing::warn!(session_id = %id, error = ?result.err(), "批量删除：该会话删除失败");
+            id
+        })
+        .collect();
+    // 只清理成功删除的会话的内存状态。
     state
         .with_state(|core_state| {
-            for id in &deleted_ids {
+            for id in &succeeded_ids {
                 state.fail_remote_session_waiters(id, "目标会话已删除");
                 crate::session_ops::remove_session_state(core_state, &state.core_manager, id);
             }
             Ok(())
         })
         .await?;
-    for id in &deleted_ids {
+    for id in &succeeded_ids {
         let _ = state.release_any_input_send_claim(id);
         state.clear_agent_worker_view(id);
         state.remove_session_send_lock(id);
     }
     drop(send_guards);
     drop(input_cache_guards);
-    Ok(())
+    if !failed_ids.is_empty() {
+        tracing::warn!(
+            succeeded = succeeded_ids.len(),
+            failed = failed_ids.len(),
+            "批量删除部分失败"
+        );
+    }
+    Ok(succeeded_ids)
 }
 
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
@@ -2284,6 +2308,7 @@ pub async fn purge_all_deleted_sessions(
     let media_root = storage_root.join("media");
     let app_handle = app.clone();
 
+    let mut succeeded: Vec<String> = Vec::new();
     for (index, session_id) in trashed_ids.iter().enumerate() {
         // 推送进度：开始清理。
         let _ = app_handle.emit(
@@ -2297,9 +2322,22 @@ pub async fn purge_all_deleted_sessions(
             },
         );
 
-        // 清理该会话的全部资源。
+        // 清理该会话的全部资源（media/teams）。
+        let mut failed = false;
         if let Err(error) = purge_session_resources(&storage_root, &media_root, session_id) {
-            warn!(%error, session_id, "物理清理会话资源失败，跳过");
+            warn!(%error, session_id, "物理清理会话资源失败");
+            failed = true;
+        }
+
+        // 删 trash 文件。失败视为该会话清理失败。
+        if !failed {
+            if let Err(error) = manager.delete_trashed_session(session_id) {
+                warn!(%error, session_id, "删除回收区文件失败");
+                failed = true;
+            }
+        }
+
+        if failed {
             let _ = app_handle.emit(
                 "purge_progress",
                 PurgeProgress {
@@ -2313,10 +2351,7 @@ pub async fn purge_all_deleted_sessions(
             continue;
         }
 
-        // 删 trash 文件。
-        if let Err(error) = manager.delete_trashed_session(session_id) {
-            warn!(%error, session_id, "删除回收区文件失败");
-        }
+        succeeded.push(session_id.clone());
 
         // 推送进度：完成。
         let _ = app_handle.emit(
@@ -2331,8 +2366,8 @@ pub async fn purge_all_deleted_sessions(
         );
     }
 
-    // 清理运行时（PTY/browser）—— 这些需要 AppHandle。
-    for session_id in &trashed_ids {
+    // 只清理成功项的运行时（PTY/browser/layout）。
+    for session_id in &succeeded {
         tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
         if let Some(browser_state) = app.try_state::<tiangong_plugin_browser::BrowserPluginState>()
         {
@@ -2343,7 +2378,7 @@ pub async fn purge_all_deleted_sessions(
         }
     }
 
-    Ok(total)
+    Ok(succeeded.len())
 }
 
 /// 清理单个会话的磁盘资源（media/teams/trash 文件）。不含 PTY/browser 运行时。

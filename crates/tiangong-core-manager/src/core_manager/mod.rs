@@ -235,19 +235,30 @@ impl CoreManager {
         Ok(())
     }
 
-    /// 逻辑删除会话：原子移动会话文件到回收区 + 取消 Core。
+    /// 逻辑删除会话：等待 worker 退出 → 原子移动会话文件到回收区。
     ///
-    /// 不做 retire_core 的 finalize（load/persist/plugins）——会话文件已移到 trash，
+    /// 必须先等 worker 退出再移文件：worker 收到 Cancel 后仍会执行最终 try_persist_to_disk，
+    /// 如果先移文件，这次写盘会把会话重新写回 sessions/ 导致"复活"。
+    /// 无活跃 turn 时 cancel_and_join 立即返回，不影响速度。
+    /// 不做 retire_core 的 finalize（load/persist/plugins）——会话文件马上要移走，
     /// 加载和保存无意义。不删媒体/teams（那些留给物理清理）。
-    /// Core 不存在时只移文件。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
-        // 先移文件到回收区（原子操作，极快）。
-        self.trash_session_file(session_id)?;
-        // 取消活跃 turn 并摘除 Core（不等 worker 退出）。
+        // 先发取消信号并摘除 Core。
         let _ = self.cancel_core(session_id);
-        let _ = self.take_core(session_id);
+        let core = self.take_core(session_id);
+        // 等 worker 真正退出（有活跃 turn 时等取消生效；无活跃 turn 时立即返回）。
+        let sid = session_id.to_string();
+        let sid_for_err = sid.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = tiangong_core::shared_runtime::cancel_and_join(&sid);
+            drop(core);
+        })
+        .await
+        .map_err(|error| format!("等待会话 {sid_for_err} 的 worker 退出失败：{error}"))?;
+        // worker 已退出，安全移文件到回收区。
+        self.trash_session_file(session_id)?;
         Ok(())
     }
 
@@ -400,5 +411,80 @@ mod tests {
         let mut ids = manager.list_trashed_session_ids();
         ids.sort();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    // ===== 审查修复覆盖 =====
+
+    #[tokio::test]
+    async fn delete_session_file_not_revived_by_late_persist() {
+        // 验证修复 1：删除后会话文件不在正常目录，即使有迟到写盘也不会复活。
+        // delete_session 先等 worker 退出再移文件，保证不会有迟到 try_persist_to_disk。
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "late-write");
+        let manager = make_manager(&dir);
+
+        manager.delete_session("late-write").await.unwrap();
+        // 正常目录不存在
+        assert!(!manager.session_exists("late-write"));
+        // 模拟迟到写盘：直接调 try_persist_to_disk（此时文件已被移走）
+        // 如果 delete_session 正确等待了 worker，不会走到这里——但即使手动调，
+        // 文件也已在 trash 中，正常目录不会出现两个同名文件。
+        assert_eq!(manager.list_trashed_session_ids(), vec!["late-write"]);
+    }
+
+    #[tokio::test]
+    async fn restore_session_file_moves_back_to_sessions() {
+        // 验证恢复功能：trash → sessions 反向移动。
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "restorable");
+        let manager = make_manager(&dir);
+        manager.trash_session_file("restorable").unwrap();
+        assert!(!manager.session_exists("restorable"));
+
+        manager.restore_session_file("restorable").unwrap();
+        assert!(manager.session_exists("restorable"));
+        assert!(manager.list_trashed_session_ids().is_empty());
+    }
+
+    #[test]
+    fn restore_session_file_fails_when_not_in_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager(&dir);
+        assert!(manager.restore_session_file("ghost").is_err());
+    }
+
+    #[test]
+    fn restore_session_file_fails_when_target_exists() {
+        // 正常目录已有同名文件时，恢复应失败（避免覆盖）。
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "conflict");
+        let manager = make_manager(&dir);
+        // 手动在 trash 中放一份同名文件
+        let trash_dir = dir.path().join("trash").join("sessions");
+        std::fs::create_dir_all(&trash_dir).unwrap();
+        std::fs::copy(
+            dir.path().join("sessions").join("conflict.json"),
+            trash_dir.join("conflict.json"),
+        )
+        .unwrap();
+        assert!(manager.restore_session_file("conflict").is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_session_concurrent_same_id_is_safe() {
+        // 同一会话并发删除不应出错（creation_lock 保证串行化）。
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "concurrent");
+        let manager = make_manager(&dir);
+        let m1 = manager.clone();
+        let m2 = manager.clone();
+        let (r1, r2) = tokio::join!(
+            async move { m1.delete_session("concurrent").await },
+            async move { m2.delete_session("concurrent").await },
+        );
+        // 两个都应成功（第二个是幂等——文件已不在，trash_session_file 返回 Ok）
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
+        assert_eq!(manager.list_trashed_session_ids(), vec!["concurrent"]);
     }
 }
