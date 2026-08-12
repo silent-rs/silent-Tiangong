@@ -2162,18 +2162,21 @@ pub(crate) async fn cleanup_unreferenced_input_attachments(
         }
     }
 
+    let referenced = referenced
+        .into_iter()
+        .filter_map(|path| tiangong_media_archive::canonical_archived_media_path(&path))
+        .collect::<std::collections::HashSet<_>>();
     let mut checked = std::collections::HashSet::new();
     for candidate in candidates {
-        if !checked.insert(candidate.source.clone()) {
+        let Some(path) = tiangong_media_archive::canonical_archived_media_path(&candidate.source)
+        else {
+            continue;
+        };
+        if !checked.insert(path.clone()) || referenced.contains(&path) {
             continue;
         }
-        if referenced.contains(&candidate.source)
-            || !tiangong_media_archive::is_archived_media_path_any(&candidate.source)
-        {
-            continue;
-        }
-        if let Err(error) = std::fs::remove_file(&candidate.source) {
-            tracing::warn!(path = %candidate.source, error = %error, "清理未引用输入附件失败");
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), error = %error, "清理未引用输入附件失败");
         }
     }
 }

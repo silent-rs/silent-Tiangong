@@ -134,6 +134,11 @@ jobs:
           PLUGIN_ID: ${{ needs.resolve-plugin.outputs.plugin_id }}
         run: cargo run -p xtask -- validate-plugin "$PLUGIN_ID"
 
+      - name: Test cross-platform file handling
+        if: needs.resolve-plugin.outputs.plugin_id == 'fs'
+        timeout-minutes: 10
+        run: cargo test -p tiangong-plugin-fs-sidecar -p tiangong-media-archive
+
       - name: Prepare plugin signing key
         id: plugin_signing
         env:
