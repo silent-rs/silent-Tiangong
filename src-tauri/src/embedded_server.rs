@@ -545,33 +545,18 @@ async fn delete_session(
 
     let _cache_guard = state.input_cache_update_lock(session_id).lock_owned().await;
     let _send_guard = state.session_send_lock(session_id).lock_owned().await;
-    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
-    let deleted_session = state.core_manager.load_session(session_id).ok();
-    // 一步完成:retire core(取消在途 turn + 等待写盘) + 删 session.json。
-    let _ = state.core_manager.delete_session(session_id).await;
+    // 逻辑删除：原子移动到 trash + 取消 Core。
+    state.core_manager.delete_session(session_id).await?;
+    // 清理内存状态。
     state.fail_remote_session_waiters(session_id, "目标会话已删除");
-    let mut attachments = state
+    state
         .with_state(|core_state| {
-            let mut attachments = crate::state_ops::input_cache(core_state, session_id).attachments;
-            if let Some(session) = &deleted_session {
-                attachments.extend(crate::commands::session_attachment_candidates(session));
-            }
             crate::session_ops::remove_session_state(core_state, &state.core_manager, session_id);
-            Ok(attachments)
+            Ok(())
         })
         .await?;
-    attachments.extend(crate::commands::raw_attachments_for_paths(
-        state.release_any_input_send_claim(session_id),
-    ));
+    let _ = state.release_any_input_send_claim(session_id);
     state.remove_session_send_lock(session_id);
-    tiangong_plugin_terminal::destroy_session_pty(app, session_id);
-    if let Some(browser_state) = app.try_state::<tiangong_plugin_browser::BrowserPluginState>() {
-        browser_state.registry.destroy_session(session_id);
-    }
-    if let Err(error) = crate::workspace_tabs::remove_layout(session_id) {
-        tracing::warn!(%error, %session_id, "删除工作区标签页布局失败");
-    }
-    crate::commands::cleanup_unreferenced_input_attachments(state, attachments).await;
     let _ = app.emit("sessions_updated", &());
     Ok(true)
 }

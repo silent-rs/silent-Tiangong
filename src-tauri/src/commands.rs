@@ -421,9 +421,12 @@ pub async fn load_session(
     Ok(view)
 }
 
-/// 删除当前会话
+/// 删除当前会话（逻辑删除）。
+///
+/// 会话文件原子移动到 `trash/sessions/`，从列表立即消失。
+/// 不做媒体/teams/PTY/browser 清理——那些留给配置页的物理删除。
 #[tauri::command]
-pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Result<(), String> {
+pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String> {
     let deleted_id = state
         .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
         .await?;
@@ -432,49 +435,31 @@ pub async fn delete_session(app: AppHandle, state: State<'_, TiangongApp>) -> Re
         .lock_owned()
         .await;
     let _send_guard = state.session_send_lock(&deleted_id).lock_owned().await;
-    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
-    let deleted_session = state.inner().core_manager.load_session(&deleted_id).ok();
-    // 一步完成:retire core(取消在途 turn + 等待写盘) + 删 session.json。
+    // 逻辑删除：原子移动到 trash + 取消 Core。
     state
         .inner()
         .core_manager
         .delete_session(&deleted_id)
         .await
         .map_err(|error| format!("删除会话失败：{error}"))?;
+    // 清理内存状态。
     state.fail_remote_session_waiters(&deleted_id, "目标会话已删除");
-    let mut input_attachments = state
+    state
         .with_state(|core_state| {
-            let mut attachments =
-                crate::state_ops::input_cache(core_state, &deleted_id).attachments;
-            if let Some(session) = &deleted_session {
-                attachments.extend(session_attachment_candidates(session));
-            }
             crate::session_ops::remove_session_state(core_state, &state.core_manager, &deleted_id);
-            Ok(attachments)
+            Ok(())
         })
         .await?;
-    input_attachments.extend(raw_attachments_for_paths(
-        state.release_any_input_send_claim(&deleted_id),
-    ));
+    let _ = state.release_any_input_send_claim(&deleted_id);
     state.clear_agent_worker_view(&deleted_id);
     state.remove_session_send_lock(&deleted_id);
-    // 删除对话后同步销毁终端和浏览器运行时。
-    tiangong_plugin_terminal::destroy_session_pty(&app, &deleted_id);
-    app.state::<tiangong_plugin_browser::BrowserPluginState>()
-        .registry
-        .destroy_session(&deleted_id);
-    if let Err(error) = crate::workspace_tabs::remove_layout(&deleted_id) {
-        warn!(%error, session_id = %deleted_id, "删除工作区标签页布局失败");
-    }
-    cleanup_unreferenced_input_attachments(state.inner(), input_attachments).await;
     Ok(())
 }
 
-/// 删除指定 workspace（cwd）下的所有会话
+/// 删除指定 workspace（cwd）下的所有会话（逻辑删除）。
 #[tauri::command]
 pub async fn delete_sessions_by_cwd(
     cwd: String,
-    app: AppHandle,
     state: State<'_, TiangongApp>,
 ) -> Result<(), String> {
     let mut deleted_ids = state
@@ -498,54 +483,25 @@ pub async fn delete_sessions_by_cwd(
     for id in &deleted_ids {
         send_guards.push(state.session_send_lock(id).lock_owned().await);
     }
-    // 附件候选需遍历会话消息;在删除前从磁盘加载(删后文件就没了)。
-    let deleted_sessions: std::collections::HashMap<String, tiangong_core::session::Session> =
-        deleted_ids
-            .iter()
-            .filter_map(|id| {
-                state
-                    .inner()
-                    .core_manager
-                    .load_session(id)
-                    .ok()
-                    .map(|session| (id.clone(), session))
-            })
-            .collect();
-    // 一步完成:retire core + 删 session.json。
-    for id in &deleted_ids {
-        let _ = state.inner().core_manager.delete_session(id).await;
-        state.fail_remote_session_waiters(id, "目标会话已删除");
-    }
-    let mut input_attachments = state
+    // 并发逻辑删除（原子移动到 trash）。
+    let core_manager = state.inner().core_manager.clone();
+    let deletes = deleted_ids.iter().map(|id| core_manager.delete_session(id));
+    futures_util::future::join_all(deletes).await;
+    // 清理内存状态。
+    state
         .with_state(|core_state| {
-            let mut candidates = Vec::new();
             for id in &deleted_ids {
-                candidates.extend(crate::state_ops::input_cache(core_state, id).attachments);
-                if let Some(session) = deleted_sessions.get(id) {
-                    candidates.extend(session_attachment_candidates(session));
-                }
+                state.fail_remote_session_waiters(id, "目标会话已删除");
                 crate::session_ops::remove_session_state(core_state, &state.core_manager, id);
             }
-            Ok(candidates)
+            Ok(())
         })
         .await?;
     for id in &deleted_ids {
-        input_attachments.extend(raw_attachments_for_paths(
-            state.release_any_input_send_claim(id),
-        ));
-    }
-    // 逐个销毁被删会话的终端和浏览器运行时。
-    let browser_state = app.state::<tiangong_plugin_browser::BrowserPluginState>();
-    for id in &deleted_ids {
-        tiangong_plugin_terminal::destroy_session_pty(&app, id);
-        browser_state.registry.destroy_session(id);
+        let _ = state.release_any_input_send_claim(id);
         state.clear_agent_worker_view(id);
-        if let Err(error) = crate::workspace_tabs::remove_layout(id) {
-            warn!(%error, session_id = %id, "删除工作区标签页布局失败");
-        }
         state.remove_session_send_lock(id);
     }
-    cleanup_unreferenced_input_attachments(state.inner(), input_attachments).await;
     drop(send_guards);
     drop(input_cache_guards);
     Ok(())
@@ -2188,28 +2144,190 @@ pub(crate) fn raw_attachments_for_paths(
         .collect()
 }
 
-pub(crate) fn session_attachment_candidates(
-    session: &tiangong_core::session::Session,
-) -> Vec<tiangong_media_archive::RawAttachment> {
-    let paths = session
-        .messages
-        .iter()
-        .flat_map(|message| {
-            message
-                .extract_media_assets()
-                .into_iter()
-                .map(|asset| asset.url)
-        })
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    raw_attachments_for_paths(paths)
-}
-
 /// 为尚未落盘的新会话生成稳定 SCRU128 ID。这里只分配 ID，不创建 Session。
 #[tauri::command]
 pub fn new_session_id() -> String {
     scru128::new().to_string()
+}
+
+// ============================================================================
+// 物理删除（配置页触发）
+// ============================================================================
+
+/// 回收区中的会话摘要（配置页展示用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrashedSession {
+    pub id: String,
+    pub title: String,
+    pub message_count: usize,
+    pub updated_at: String,
+}
+
+/// 物理清理进度事件 payload。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PurgeProgress {
+    pub current: usize,
+    pub total: usize,
+    pub session_id: String,
+    pub title: String,
+    pub status: String, // "cleaning" | "done" | "error"
+}
+
+/// 扫描回收区，返回待物理清理的会话列表。
+#[tauri::command]
+pub async fn list_trashed_sessions(
+    state: State<'_, TiangongApp>,
+) -> Result<Vec<TrashedSession>, String> {
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let storage_root = manager.storage_root();
+        let ids = manager.list_trashed_session_ids();
+        let mut result = Vec::with_capacity(ids.len());
+        for id in &ids {
+            // 从 trash 文件加载元数据（只读浅字段）。
+            let trash_path = storage_root
+                .join("trash")
+                .join("sessions")
+                .join(format!("{id}.json"));
+            let summary = std::fs::read_to_string(&trash_path)
+                .ok()
+                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                .map(|value| TrashedSession {
+                    id: id.clone(),
+                    title: value
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("（无标题）")
+                        .to_string(),
+                    message_count: value
+                        .get("messages")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    updated_at: value
+                        .get("updated_at")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .unwrap_or_else(|| TrashedSession {
+                    id: id.clone(),
+                    title: "（无法读取）".to_string(),
+                    message_count: 0,
+                    updated_at: String::new(),
+                });
+            result.push(summary);
+        }
+        result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("扫描回收区失败：{error}"))?
+}
+
+/// 物理清理所有回收区会话（配置页"全部清理"触发）。
+///
+/// 逐个清理 media/teams/layout/PTY/browser/trash 文件，通过 `purge_progress`
+/// 事件推送进度。已清理的会话不会重复清理。
+#[tauri::command]
+pub async fn purge_all_deleted_sessions(
+    app: AppHandle,
+    state: State<'_, TiangongApp>,
+) -> Result<usize, String> {
+    use tauri::Emitter;
+
+    let manager = state.core_manager.clone();
+    let trashed_ids = manager.list_trashed_session_ids();
+    let total = trashed_ids.len();
+    if total == 0 {
+        return Ok(0);
+    }
+
+    let storage_root = manager.storage_root().to_path_buf();
+    let media_root = storage_root.join("media");
+    let app_handle = app.clone();
+
+    for (index, session_id) in trashed_ids.iter().enumerate() {
+        // 推送进度：开始清理。
+        let _ = app_handle.emit(
+            "purge_progress",
+            PurgeProgress {
+                current: index,
+                total,
+                session_id: session_id.clone(),
+                title: String::new(),
+                status: "cleaning".to_string(),
+            },
+        );
+
+        // 清理该会话的全部资源。
+        if let Err(error) = purge_session_resources(&storage_root, &media_root, session_id) {
+            warn!(%error, session_id, "物理清理会话资源失败，跳过");
+            let _ = app_handle.emit(
+                "purge_progress",
+                PurgeProgress {
+                    current: index + 1,
+                    total,
+                    session_id: session_id.clone(),
+                    title: String::new(),
+                    status: "error".to_string(),
+                },
+            );
+            continue;
+        }
+
+        // 删 trash 文件。
+        if let Err(error) = manager.delete_trashed_session(session_id) {
+            warn!(%error, session_id, "删除回收区文件失败");
+        }
+
+        // 推送进度：完成。
+        let _ = app_handle.emit(
+            "purge_progress",
+            PurgeProgress {
+                current: index + 1,
+                total,
+                session_id: session_id.clone(),
+                title: String::new(),
+                status: "done".to_string(),
+            },
+        );
+    }
+
+    // 清理运行时（PTY/browser）—— 这些需要 AppHandle。
+    for session_id in &trashed_ids {
+        tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
+        if let Some(browser_state) = app.try_state::<tiangong_plugin_browser::BrowserPluginState>()
+        {
+            browser_state.registry.destroy_session(session_id);
+        }
+        if let Err(error) = crate::workspace_tabs::remove_layout(session_id) {
+            warn!(%error, session_id, "删除工作区标签页布局失败");
+        }
+    }
+
+    Ok(total)
+}
+
+/// 清理单个会话的磁盘资源（media/teams/trash 文件）。不含 PTY/browser 运行时。
+fn purge_session_resources(
+    storage_root: &std::path::Path,
+    media_root: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
+    // 删媒体目录（按会话隔离的新版结构）。
+    let session_media = media_root.join(session_id);
+    if session_media.exists() {
+        std::fs::remove_dir_all(&session_media)
+            .map_err(|error| format!("删除媒体目录失败：{error}"))?;
+    }
+    // 删 teams 目录。
+    let teams_dir = storage_root.join("teams").join(session_id);
+    if teams_dir.exists() {
+        std::fs::remove_dir_all(&teams_dir)
+            .map_err(|error| format!("删除 teams 目录失败：{error}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
