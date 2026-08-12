@@ -12,7 +12,7 @@
 - Responses 原始结构不得泄漏到 Core、Session 或前端消息模型。
 - Chat Completions、Anthropic 和 DeepSeek 的已有行为不得回退。
 - 前端供应商配置必须提供 OpenAI Responses 选项，并明确区分 Responses 与 Chat Completions，保存值分别为 `openai` 和 `openai_chatcompletions`。
-- OpenAI Responses 流式请求必须使用后台流式模式；本地取消或流异常结束时，如已获得 Response ID，必须调用服务端取消接口，并始终保留本地任务终止作为兜底。
+- OpenAI Responses 流式请求必须使用普通流式模式，不得启用 `background`；本地取消时必须终止模型任务并关闭流式连接。
 
 ### 完成标准
 
