@@ -233,6 +233,64 @@ impl CoreManager {
         Ok(())
     }
 
+    /// 将会话从回收区移到"正在清理"目录（`trash/purging/`）。
+    ///
+    /// 一旦进入 purging，不再提供恢复能力（资源可能已被部分删除），
+    /// 但保留记录直到全部资源清理成功，支持失败重试。
+    pub fn move_to_purging(&self, session_id: &str) -> Result<(), String> {
+        let _ = crate::session_file_path(&self.storage_root, session_id)?;
+        let src = self
+            .storage_root
+            .join("trash")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if !src.exists() {
+            return Ok(()); // 可能已在 purging 中（上次清理中断）
+        }
+        let purging_dir = self.storage_root.join("trash").join("purging");
+        std::fs::create_dir_all(&purging_dir)
+            .map_err(|error| format!("创建 purging 目录失败：{error}"))?;
+        let dst = purging_dir.join(format!("{session_id}.json"));
+        std::fs::rename(&src, &dst)
+            .map_err(|error| format!("移动到 purging 失败（{}）：{error}", src.display()))
+    }
+
+    /// 扫描 `trash/purging/`，返回正在清理（含上次失败残留）的会话 ID 列表。
+    pub fn list_purging_session_ids(&self) -> Vec<String> {
+        let purging_dir = self.storage_root.join("trash").join("purging");
+        let Ok(entries) = std::fs::read_dir(&purging_dir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                ids.push(stem.to_string());
+            }
+        }
+        ids
+    }
+
+    /// 删除"正在清理"目录中的会话文件（全部资源清理成功后调用）。
+    pub fn delete_purging_session(&self, session_id: &str) -> Result<(), String> {
+        let path = self
+            .storage_root
+            .join("trash")
+            .join("purging")
+            .join(format!("{session_id}.json"));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("删除 purging 会话文件失败：{error}"))?;
+        }
+        Ok(())
+    }
+
     /// 逻辑删除会话：等待 worker 退出 → 原子移动会话文件到回收区。
     ///
     /// 必须先等 worker 退出再移文件：worker 收到 Cancel 后仍会执行最终 try_persist_to_disk，

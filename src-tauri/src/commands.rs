@@ -2218,6 +2218,8 @@ pub struct TrashedSession {
     pub title: String,
     pub message_count: usize,
     pub updated_at: String,
+    /// 是否正在清理中（资源可能已部分删除，不可恢复）。
+    pub purging: bool,
 }
 
 /// 物理清理进度事件 payload。
@@ -2230,6 +2232,43 @@ pub struct PurgeProgress {
     pub status: String, // "cleaning" | "done" | "error"
 }
 
+/// 从磁盘 JSON 读取回收区会话摘要（只读浅字段）。
+fn read_trashed_summary(id: &str, path: &std::path::Path, purging: bool) -> TrashedSession {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .map(|value| TrashedSession {
+            id: id.to_string(),
+            title: value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("（无标题）")
+                .to_string(),
+            message_count: value
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter(|msg| msg.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .count()
+                })
+                .unwrap_or(0),
+            updated_at: value
+                .get("updated_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            purging,
+        })
+        .unwrap_or_else(|| TrashedSession {
+            id: id.to_string(),
+            title: "（无法读取）".to_string(),
+            message_count: 0,
+            updated_at: String::new(),
+            purging,
+        })
+}
+
 /// 扫描回收区，返回待物理清理的会话列表。
 #[tauri::command]
 pub async fn list_trashed_sessions(
@@ -2238,48 +2277,25 @@ pub async fn list_trashed_sessions(
     let manager = state.core_manager.clone();
     tokio::task::spawn_blocking(move || {
         let storage_root = manager.storage_root();
-        let ids = manager.list_trashed_session_ids();
-        let mut result = Vec::with_capacity(ids.len());
-        for id in &ids {
-            // 从 trash 文件加载元数据（只读浅字段）。
-            let trash_path = storage_root
+        // 扫描回收区（可恢复）和正在清理（不可恢复）两个目录。
+        let trashed_ids = manager.list_trashed_session_ids();
+        let purging_ids = manager.list_purging_session_ids();
+        let mut result = Vec::new();
+        // 回收区会话（可恢复）
+        for id in &trashed_ids {
+            let path = storage_root
                 .join("trash")
                 .join("sessions")
                 .join(format!("{id}.json"));
-            let summary = std::fs::read_to_string(&trash_path)
-                .ok()
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
-                .map(|value| TrashedSession {
-                    id: id.clone(),
-                    title: value
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("（无标题）")
-                        .to_string(),
-                    message_count: value
-                        .get("messages")
-                        .and_then(|v| v.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter(|msg| {
-                                    msg.get("role").and_then(|r| r.as_str()) == Some("user")
-                                })
-                                .count()
-                        })
-                        .unwrap_or(0),
-                    updated_at: value
-                        .get("updated_at")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                })
-                .unwrap_or_else(|| TrashedSession {
-                    id: id.clone(),
-                    title: "（无法读取）".to_string(),
-                    message_count: 0,
-                    updated_at: String::new(),
-                });
-            result.push(summary);
+            result.push(read_trashed_summary(id, &path, false));
+        }
+        // 正在清理会话（不可恢复，资源可能已部分删除）
+        for id in &purging_ids {
+            let path = storage_root
+                .join("trash")
+                .join("purging")
+                .join(format!("{id}.json"));
+            result.push(read_trashed_summary(id, &path, true));
         }
         result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(result)
@@ -2305,6 +2321,21 @@ pub async fn restore_deleted_session(
     Ok(())
 }
 
+/// 发送清理失败进度事件。
+fn emit_error(app: &AppHandle, index: usize, total: usize, session_id: &str) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "purge_progress",
+        PurgeProgress {
+            current: index + 1,
+            total,
+            session_id: session_id.to_string(),
+            title: String::new(),
+            status: "error".to_string(),
+        },
+    );
+}
+
 /// 物理清理所有回收区会话（配置页"全部清理"触发）。
 ///
 /// 逐个清理 media/teams/layout/PTY/browser/trash 文件，通过 `purge_progress`
@@ -2317,8 +2348,15 @@ pub async fn purge_all_deleted_sessions(
     use tauri::Emitter;
 
     let manager = state.core_manager.clone();
+    // 合并待清理列表：回收区中的 + 上次清理失败残留在 purging 中的。
     let trashed_ids = manager.list_trashed_session_ids();
-    let total = trashed_ids.len();
+    let purging_ids = manager.list_purging_session_ids();
+    let all_ids: Vec<String> = trashed_ids
+        .iter()
+        .chain(purging_ids.iter())
+        .cloned()
+        .collect();
+    let total = all_ids.len();
     if total == 0 {
         return Ok(0);
     }
@@ -2328,8 +2366,7 @@ pub async fn purge_all_deleted_sessions(
     let app_handle = app.clone();
 
     let mut succeeded: Vec<String> = Vec::new();
-    for (index, session_id) in trashed_ids.iter().enumerate() {
-        // 推送进度：开始清理。
+    for (index, session_id) in all_ids.iter().enumerate() {
         let _ = app_handle.emit(
             "purge_progress",
             PurgeProgress {
@@ -2341,20 +2378,24 @@ pub async fn purge_all_deleted_sessions(
             },
         );
 
-        // 清理顺序设计原则：
-        // - 不影响会话完整性的资源先删（layout/PTY/browser）
-        // - 然后删 trash 文件（会话 JSON 消失，不再可恢复）
-        // - 最后删 media/teams（失败只留孤儿文件，不影响功能）
-        // 这样：trash 文件删除前任何步骤失败 → 会话仍在回收区、媒体完好 → 可完整恢复
-        let mut error_msg: Option<String> = None;
-
-        // 1. workspace-tab-layouts（不影响会话内容）
-        if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
-            warn!(%e, session_id, "删除工作区标签页布局失败");
-            error_msg = Some(format!("删除布局失败：{e}"));
+        // 阶段 1：移到 purging（原子移动，标记"正在清理"）。
+        // 已在 purging 中的（上次失败残留）跳过移动。
+        if trashed_ids.contains(session_id) {
+            if let Err(e) = manager.move_to_purging(session_id) {
+                warn!(%e, session_id, "移动到 purging 失败");
+                emit_error(&app_handle, index, total, session_id);
+                continue;
+            }
         }
 
-        // 2. PTY/browser 运行时（不返回错误，尽力清理）
+        // 阶段 2：清理全部资源。
+        let mut error_msg: Option<String> = None;
+
+        // layout
+        if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
+            error_msg = Some(format!("删除布局失败：{e}"));
+        }
+        // PTY/browser
         if error_msg.is_none() {
             tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
             if let Some(browser_state) =
@@ -2363,32 +2404,22 @@ pub async fn purge_all_deleted_sessions(
                 browser_state.registry.destroy_session(session_id);
             }
         }
-
-        // 3. 删 trash 文件（会话不再可恢复，此后失败不影响恢复完整性）
+        // media/teams（占用空间最大，必须删成功）
         if error_msg.is_none() {
-            if let Err(e) = manager.delete_trashed_session(session_id) {
-                error_msg = Some(format!("删除回收区文件失败：{e}"));
+            if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
+                error_msg = Some(e);
             }
         }
 
         if let Some(msg) = error_msg {
-            warn!(%msg, session_id, "物理清理会话失败，保留回收区记录供重试");
-            let _ = app_handle.emit(
-                "purge_progress",
-                PurgeProgress {
-                    current: index + 1,
-                    total,
-                    session_id: session_id.clone(),
-                    title: String::new(),
-                    status: "error".to_string(),
-                },
-            );
+            warn!(%msg, session_id, "物理清理失败，保留 purging 记录供重试");
+            emit_error(&app_handle, index, total, session_id);
             continue;
         }
 
-        // 4. 删 media/teams（最后删，失败只留孤儿文件）
-        if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
-            warn!(%e, session_id, "删除媒体/teams 目录失败（留为孤儿文件）");
+        // 阶段 3：全部资源清理成功 → 删 purging 记录。
+        if let Err(e) = manager.delete_purging_session(session_id) {
+            warn!(%e, session_id, "删除 purging 记录失败");
         }
 
         succeeded.push(session_id.clone());
