@@ -863,8 +863,8 @@ export interface AppState {
   updateSessionMeta: (sessionId: string) => Promise<void>;
   startNewConversation: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
-  deleteSession: () => Promise<void>;
-  deleteSessionsByCwd: (cwd: string) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
+  deleteSessionsByCwd: (cwd: string) => Promise<{ failed: number }>;
 
   sendMessage: (
     cacheKey: string,
@@ -1231,22 +1231,19 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 删除当前会话
-  deleteSession: async () => {
+  deleteSession: async (sessionId: string) => {
     try {
-      const deletedSessionId = get().activeSessionId;
-      await api.deleteSession();
-      if (deletedSessionId) {
-        sessionViewCaches.delete(deletedSessionId);
-        discardInputCacheSyncQueue(deletedSessionId);
-      }
+      const deletedSessionId = sessionId;
+      const wasActive = get().activeSessionId === deletedSessionId;
+      await api.deleteSession(deletedSessionId);
+      sessionViewCaches.delete(deletedSessionId);
+      discardInputCacheSyncQueue(deletedSessionId);
       // 本地直接移除被删会话，不重新拉列表（避免全量扫描卡顿）。
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
-        if (deletedSessionId) {
-          delete inputCaches[deletedSessionId];
-          delete sessionRunStatuses[deletedSessionId];
-        }
+        delete inputCaches[deletedSessionId];
+        delete sessionRunStatuses[deletedSessionId];
         return {
           sessions: state.sessions.filter((s) => s.id !== deletedSessionId),
           inputCaches,
@@ -1254,9 +1251,10 @@ export const useStore = create<AppState>((set, get) => ({
         };
       });
 
-      // 删除任意会话后统一进入新对话态，而不是切到剩余列表的第一个——
-      // 用户主动删除通常意味着想开启新的上下文。
-      await get().startNewConversation();
+      // 只有删的是当前活跃会话时才进入新对话态。
+      if (wasActive) {
+        await get().startNewConversation();
+      }
     } catch (error) {
       console.error('删除会话失败:', error);
     }
@@ -1298,17 +1296,19 @@ export const useStore = create<AppState>((set, get) => ({
       }
 
       if (wasNewConversation) {
-        return;
+        return { failed: failedIds.length };
       }
       if (previousActiveSessionId
         && remainingSessions.some((session) => session.id === previousActiveSessionId)) {
-        return;
+        return { failed: failedIds.length };
       }
       const nextSessionId = remainingSessions[0]?.id;
       if (nextSessionId) await get().switchSession(nextSessionId);
       else await get().startNewConversation();
+      return { failed: failedIds.length };
     } catch (error) {
       console.error('删除 workspace 会话失败:', error);
+      return { failed: -1 };
     }
   },
 

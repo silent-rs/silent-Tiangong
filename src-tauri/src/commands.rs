@@ -441,15 +441,16 @@ pub async fn load_session(
     Ok(view)
 }
 
-/// 删除当前会话（逻辑删除）。
+/// 删除指定会话（逻辑删除）。
 ///
 /// 会话文件原子移动到 `trash/sessions/`，从列表立即消失。
 /// 不做媒体/teams/PTY/browser 清理——那些留给配置页的物理删除。
 #[tauri::command]
-pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String> {
-    let deleted_id = state
-        .with_state_read(|core_state| Ok(core_state.active_session_id.as_str().to_string()))
-        .await?;
+pub async fn delete_session(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<(), String> {
+    let deleted_id = session_id;
     let _cache_guard = state
         .input_cache_update_lock(&deleted_id)
         .lock_owned()
