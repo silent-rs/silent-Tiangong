@@ -2418,8 +2418,11 @@ pub async fn purge_all_deleted_sessions(
         }
 
         // 阶段 3：全部资源清理成功 → 删 purging 记录。
+        // 记录删除也是清理完成的一部分；失败时保留记录供下次重试，不能误报成功。
         if let Err(e) = manager.delete_purging_session(session_id) {
-            warn!(%e, session_id, "删除 purging 记录失败");
+            warn!(%e, session_id, "删除 purging 记录失败，保留记录供重试");
+            emit_error(&app_handle, index, total, session_id);
+            continue;
         }
 
         succeeded.push(session_id.clone());
