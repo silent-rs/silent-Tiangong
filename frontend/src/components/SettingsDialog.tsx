@@ -152,16 +152,16 @@ export function SettingsDialog() {
                   <Package className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">插件管理</span>
                 </TabsTrigger>
-                <TabsTrigger value="data-cleanup" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
-                  <HardDriveDownload className="w-4 h-4 sm:mr-2" />
-                  <span className="sr-only sm:not-sr-only">数据清理</span>
-                </TabsTrigger>
                 {pluginContributions.map((entry) => (
                   <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                     {contributionIcon(entry.icon)}
                     <span className="sr-only sm:not-sr-only">{entry.title}</span>
                   </TabsTrigger>
                 ))}
+                <TabsTrigger value="data-cleanup" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <HardDriveDownload className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">数据清理</span>
+                </TabsTrigger>
                 <TabsTrigger value="about" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                   <Info className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">关于与更新</span>
@@ -1993,7 +1993,7 @@ function DataCleanupSettings() {
                   <div className="min-w-0 flex-1">
                     <p className="text-sm truncate">{session.title || '（无标题）'}</p>
                     <p className="text-xs text-muted-foreground">
-                      {session.message_count} 条消息
+                      {session.message_count} 条对话
                       {session.updated_at && ` · ${session.updated_at.slice(0, 10)}`}
                     </p>
                   </div>
