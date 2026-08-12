@@ -22,7 +22,9 @@ pub enum ProviderStreamEvent {
     ToolCallEnd {
         call_id: String,
     },
-    MessageEnd,
+    MessageEnd {
+        stop_reason: Option<crate::response::StopReason>,
+    },
     Usage(TokenUsageData),
     Error(String),
 }

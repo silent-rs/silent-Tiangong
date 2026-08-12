@@ -27,6 +27,7 @@ use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
+use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
 use crate::request::ProviderRequest;
 use crate::response::{ProviderResponse, StopReason};
@@ -155,7 +156,11 @@ fn prepare_openai_tool_repair(
     tool_choice: Option<ToolChoice>,
     mut response: ModelFunctionResponse,
 ) -> Result<OpenAiToolRepairPlan> {
-    if protocol != ProviderProtocol::OpenAiChatCompletions || response.tool_calls.is_empty() {
+    if !matches!(
+        protocol,
+        ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+    ) || response.tool_calls.is_empty()
+    {
         return Ok(OpenAiToolRepairPlan::Return(response));
     }
 
@@ -567,7 +572,14 @@ impl SingleProviderClient {
             ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
                 self.build_anthropic_provider(timeout_ms)?,
             ))),
-            ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAi(Box::new(
+            ProviderProtocol::OpenAi => Ok(ProviderDispatch::OpenAiResponses(Box::new(
+                build_openai_responses_provider_from_config(
+                    &self.cfg,
+                    timeout_ms,
+                    self.on_retry.clone(),
+                )?,
+            ))),
+            ProviderProtocol::OpenAiChatCompletions => Ok(ProviderDispatch::OpenAiChat(Box::new(
                 build_openai_provider_from_config(&self.cfg, timeout_ms, self.on_retry.clone())?,
             ))),
             ProviderProtocol::DeepSeek => {
@@ -910,13 +922,17 @@ impl SingleProviderClient {
             ));
         }
         let request = build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let preserve_tool_call_order = self.protocol() == ProviderProtocol::OpenAiChatCompletions;
+        let preserve_tool_call_order = matches!(
+            self.protocol(),
+            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+        );
         let provider = self.build_provider_dispatch(timeout_ms)?;
 
         let mut text = String::new();
         let mut reasoning_content = String::new();
         let mut reasoning_signature: Option<String> = None;
         let mut usage = TokenUsageData::default();
+        let mut stop_reason = None;
         let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
             std::collections::BTreeMap::new();
         let mut tool_call_order: Vec<String> = Vec::new();
@@ -987,9 +1003,10 @@ impl SingleProviderClient {
                     });
                 }
                 ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
-                ProviderStreamEvent::MessageStart
-                | ProviderStreamEvent::ToolCallEnd { .. }
-                | ProviderStreamEvent::MessageEnd => {}
+                ProviderStreamEvent::MessageEnd {
+                    stop_reason: stream_stop_reason,
+                } => stop_reason = stream_stop_reason,
+                ProviderStreamEvent::MessageStart | ProviderStreamEvent::ToolCallEnd { .. } => {}
             }
         }
 
@@ -1018,7 +1035,7 @@ impl SingleProviderClient {
             text: text.trim().to_string(),
             reasoning_content: reasoning_content.trim().to_string(),
             reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-            stop_reason: None,
+            stop_reason,
             usage: usage.into(),
             tool_calls: tool_calls_vec,
         })
@@ -1267,6 +1284,24 @@ fn build_anthropic_provider_from_config(
     config.max_retries = MAX_RETRIES;
     config.retry_notifier = on_retry;
     AnthropicProvider::from_config(config).map_err(map_llm_error)
+}
+
+fn build_openai_responses_provider_from_config(
+    cfg: &ModelEndpoint,
+    timeout_ms: u64,
+    on_retry: Option<OnRetryCallback>,
+) -> Result<OpenAiResponsesProvider> {
+    let token = cfg.api_key.trim();
+    if token.is_empty() {
+        return Err(anyhow!(
+            "API_AUTH_TOKEN 不能为空，无法发起 OpenAI Responses 请求"
+        ));
+    }
+    let mut config = OpenAiResponsesConfig::new(token.to_string(), cfg.base_url.clone());
+    config.timeout = Duration::from_millis(timeout_ms);
+    config.max_retries = MAX_RETRIES;
+    config.retry_notifier = on_retry;
+    Ok(OpenAiResponsesProvider::new(config))
 }
 
 fn build_openai_provider_from_config(
@@ -1847,6 +1882,7 @@ async fn consume_provider_stream_events_async(
     let mut reasoning_content = String::new();
     let mut reasoning_signature: Option<String> = None;
     let mut usage = TokenUsageData::default();
+    let mut stop_reason = None;
     let mut tool_calls: std::collections::BTreeMap<String, (String, String)> =
         std::collections::BTreeMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
@@ -1907,9 +1943,10 @@ async fn consume_provider_stream_events_async(
                 merge_stream_usage(&mut usage, stream_usage)
             }
             ProviderStreamEvent::Error(message) => return Err(anyhow!(message)),
-            ProviderStreamEvent::MessageStart
-            | ProviderStreamEvent::ToolCallEnd { .. }
-            | ProviderStreamEvent::MessageEnd => {}
+            ProviderStreamEvent::MessageEnd {
+                stop_reason: stream_stop_reason,
+            } => stop_reason = stream_stop_reason,
+            ProviderStreamEvent::MessageStart | ProviderStreamEvent::ToolCallEnd { .. } => {}
         }
     }
 
@@ -1935,7 +1972,7 @@ async fn consume_provider_stream_events_async(
         text: text.trim().to_string(),
         reasoning_content: reasoning_content.trim().to_string(),
         reasoning_signature: reasoning_signature.filter(|value| !value.trim().is_empty()),
-        stop_reason: None,
+        stop_reason,
         usage: usage.into(),
         tool_calls,
     })
@@ -1943,7 +1980,8 @@ async fn consume_provider_stream_events_async(
 
 enum ProviderDispatch {
     Anthropic(Box<AnthropicProvider>),
-    OpenAi(Box<OpenAiChatCompletionsProvider>),
+    OpenAiResponses(Box<OpenAiResponsesProvider>),
+    OpenAiChat(Box<OpenAiChatCompletionsProvider>),
     DeepSeek(Box<DeepSeekProvider>),
 }
 
@@ -1954,7 +1992,8 @@ impl ProviderDispatch {
     ) -> std::result::Result<ProviderResponse, crate::error::LlmError> {
         match self {
             ProviderDispatch::Anthropic(provider) => provider.complete(request).await,
-            ProviderDispatch::OpenAi(provider) => provider.complete(request).await,
+            ProviderDispatch::OpenAiResponses(provider) => provider.complete(request).await,
+            ProviderDispatch::OpenAiChat(provider) => provider.complete(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.complete(request).await,
         }
     }
@@ -1965,7 +2004,8 @@ impl ProviderDispatch {
     ) -> std::result::Result<ProviderStream, crate::error::LlmError> {
         match self {
             ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
-            ProviderDispatch::OpenAi(provider) => provider.stream(request).await,
+            ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
+            ProviderDispatch::OpenAiChat(provider) => provider.stream(request).await,
             ProviderDispatch::DeepSeek(provider) => provider.stream(request).await,
         }
     }
@@ -2005,7 +2045,10 @@ fn block_on_provider_stream(
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
-        let preserve_tool_call_order = matches!(&provider, ProviderDispatch::OpenAi(_));
+        let preserve_tool_call_order = matches!(
+            &provider,
+            ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_)
+        );
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await
     }

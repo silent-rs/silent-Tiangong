@@ -11,6 +11,7 @@ use crate::model::ProviderProtocol;
 use crate::provider::LlmProvider;
 use crate::providers::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::providers::deepseek::{DeepSeekConfig, DeepSeekProvider};
+use crate::providers::openai::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::providers::openai_chatcompletions::{OpenAiChatCompletionsProvider, OpenAiChatConfig};
 use crate::request::ProviderRequest;
 
@@ -90,6 +91,13 @@ pub async fn complete_text_with_usage(
 
 fn build_provider(config: &LlmEndpointConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
     match config.protocol {
+        ProviderProtocol::OpenAi => {
+            let mut provider_config =
+                OpenAiResponsesConfig::new(config.api_key.clone(), config.base_url.clone());
+            provider_config.timeout = config.timeout;
+            provider_config.max_retries = config.max_retries;
+            Ok(Box::new(OpenAiResponsesProvider::new(provider_config)))
+        }
         ProviderProtocol::OpenAiChatCompletions => {
             let mut provider_config =
                 OpenAiChatConfig::new(config.api_key.clone(), config.base_url.clone());

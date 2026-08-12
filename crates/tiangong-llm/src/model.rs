@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 
 /// Provider 协议类型。
 ///
-/// OpenAI 兼容协议统一走 Chat Completions API（`/chat/completions`），适用于官方
-/// OpenAI 端点以及 vLLM/Ollama/智谱等第三方 OpenAI 兼容端点。
+/// OpenAI 官方协议可使用 Responses API（`/responses`）；第三方 OpenAI 兼容端点
+/// 默认使用 Chat Completions API（`/chat/completions`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProviderProtocol {
+    /// OpenAI Responses API（`/responses`）。
+    OpenAi,
     /// OpenAI Chat Completions API（`/chat/completions`）。
     #[default]
     OpenAiChatCompletions,
@@ -32,6 +34,7 @@ impl<'de> Deserialize<'de> for ProviderProtocol {
 impl ProviderProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ProviderProtocol::OpenAi => "openai",
             ProviderProtocol::OpenAiChatCompletions => "openai_chatcompletions",
             ProviderProtocol::Anthropic => "anthropic",
             ProviderProtocol::DeepSeek => "deepseek",
@@ -45,8 +48,7 @@ impl FromStr for ProviderProtocol {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
             "" => Ok(ProviderProtocol::OpenAiChatCompletions),
-            "openai"
-            | "openai_compatible"
+            "openai_compatible"
             | "open_ai_compatible"
             | "openai_chatcompletions"
             | "openai_chat_completions"
@@ -54,9 +56,9 @@ impl FromStr for ProviderProtocol {
             | "openai-chat"
             | "chat_completions"
             | "chat-completions" => Ok(ProviderProtocol::OpenAiChatCompletions),
-            "openai_responses" | "openai-responses" | "responses" => Err(anyhow!(
-                "当前主线暂不启用 OpenAI Responses 协议，请使用 openai_chatcompletions"
-            )),
+            "openai" | "openai_responses" | "openai-responses" | "responses" => {
+                Ok(ProviderProtocol::OpenAi)
+            }
             "anthropic" => Ok(ProviderProtocol::Anthropic),
             "deepseek" | "deep_seek" => Ok(ProviderProtocol::DeepSeek),
             other => Err(anyhow!("不支持的 provider 协议：{other}")),
@@ -77,7 +79,7 @@ mod tests {
 
     #[test]
     fn parses_legacy_openai_protocols_as_chat_completions() {
-        for protocol in ["", "openai", "openai_compatible"] {
+        for protocol in ["", "openai_compatible"] {
             assert_eq!(
                 protocol.parse::<ProviderProtocol>().unwrap(),
                 ProviderProtocol::OpenAiChatCompletions,
@@ -87,12 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_responses_protocols_on_mainline() {
-        for protocol in ["openai_responses", "responses"] {
-            let err = protocol.parse::<ProviderProtocol>().unwrap_err();
-            assert!(
-                err.to_string().contains("暂不启用 OpenAI Responses"),
-                "{protocol:?} 应明确拒绝 Responses 协议，实际错误：{err}"
+    fn parses_openai_responses_protocols() {
+        for protocol in ["openai", "openai_responses", "responses"] {
+            assert_eq!(
+                protocol.parse::<ProviderProtocol>().unwrap(),
+                ProviderProtocol::OpenAi,
+                "{protocol:?} 应解析为 Responses 协议"
             );
         }
     }
