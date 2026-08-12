@@ -566,8 +566,8 @@ export const api = {
   getSessionMeta: (sessionId: string): Promise<Session | null> =>
     invoke('get_session_meta', { sessionId }),
 
-  deleteSession: (): Promise<void> =>
-    invoke('delete_session'),
+  deleteSession: (sessionId: string): Promise<void> =>
+    invoke('delete_session', { sessionId }),
 
   deleteSessionsByCwd: (cwd: string): Promise<DeleteResult> =>
     invoke('delete_sessions_by_cwd', { cwd }),

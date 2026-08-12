@@ -1882,11 +1882,17 @@ function DataCleanupSettings() {
     refresh();
   }, [refresh]);
 
+  // 物理清理失败的会话 ID 集合（已部分删除资源，恢复会不完整）。
+  const [purgeFailedIds, setPurgeFailedIds] = useState<Set<string>>(new Set());
+
   useEffect(() => {
     if (!purging) return;
     let unlisten: (() => void) | undefined;
     api.onPurgeProgress((p) => {
       setProgress({ current: p.current, total: p.total });
+      if (p.status === 'error') {
+        setPurgeFailedIds((prev) => new Set(prev).add(p.session_id));
+      }
     }).then((fn) => {
       unlisten = fn;
     });
@@ -1995,23 +2001,29 @@ function DataCleanupSettings() {
                       {session.updated_at && ` · ${session.updated_at.slice(0, 10)}`}
                     </p>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="ml-2 shrink-0"
-                    onClick={async () => {
-                      try {
-                        await api.restoreDeletedSession(session.id);
-                        showSuccess('已恢复', session.title || '会话已恢复到列表');
-                        refresh();
-                      } catch (error) {
-                        showError('恢复失败', String(error));
-                      }
-                    }}
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 mr-1" />
-                    恢复
-                  </Button>
+                  {purgeFailedIds.has(session.id) ? (
+                    <Badge variant="destructive" className="ml-2 shrink-0 text-xs">
+                      清理失败
+                    </Badge>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-2 shrink-0"
+                      onClick={async () => {
+                        try {
+                          await api.restoreDeletedSession(session.id);
+                          showSuccess('已恢复', session.title || '会话已恢复到列表');
+                          refresh();
+                        } catch (error) {
+                          showError('恢复失败', String(error));
+                        }
+                      }}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                      恢复
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>
