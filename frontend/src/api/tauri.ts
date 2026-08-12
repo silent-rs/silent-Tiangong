@@ -564,7 +564,7 @@ export const api = {
   deleteSession: (): Promise<void> =>
     invoke('delete_session'),
 
-  deleteSessionsByCwd: (cwd: string): Promise<void> =>
+  deleteSessionsByCwd: (cwd: string): Promise<string[]> =>
     invoke('delete_sessions_by_cwd', { cwd }),
 
   listTrashedSessions: (): Promise<TrashedSession[]> =>

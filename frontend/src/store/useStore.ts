@@ -1268,23 +1268,21 @@ export const useStore = create<AppState>((set, get) => ({
       const before = get();
       const wasNewConversation = before.isNewConversation;
       const previousActiveSessionId = before.activeSessionId;
-      const deletedIds = before.sessions
-        .filter((session) => session.cwd === cwd)
-        .map((session) => session.id);
-      await api.deleteSessionsByCwd(cwd);
+      // 后端返回实际删除成功的 ID 列表（部分失败时不包含失败的）。
+      const succeededIds = await api.deleteSessionsByCwd(cwd);
 
-      for (const sessionId of deletedIds) {
+      for (const sessionId of succeededIds) {
         sessionViewCaches.delete(sessionId);
         discardInputCacheSyncQueue(sessionId);
       }
-      // 本地直接移除被删会话，不重新拉列表。
+      // 本地只移除实际删除成功的会话。
       const remainingSessions = before.sessions.filter(
-        (session) => !deletedIds.includes(session.id),
+        (session) => !succeededIds.includes(session.id),
       );
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
-        for (const sessionId of deletedIds) {
+        for (const sessionId of succeededIds) {
           delete inputCaches[sessionId];
           delete sessionRunStatuses[sessionId];
         }

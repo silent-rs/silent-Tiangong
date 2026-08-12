@@ -161,7 +161,7 @@ export function AppSidebar() {
             <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
           )}
         </button>
-        {isActive && (
+        {!isRunning && (
           <button
             type="button"
             className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
@@ -187,6 +187,10 @@ export function AppSidebar() {
       ? group.sessions
       : group.sessions.slice(0, COLLAPSED_LIMIT);
     const canCollapse = allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
+    // workspace 下任一会话正在运行时，禁用批量删除。
+    const groupHasRunning = group.sessions.some(
+      (session) => !!sessionRunStatuses[session.id],
+    );
 
     if (group.isDefault) {
       // 默认分组：无分组头，直接平铺
@@ -252,7 +256,7 @@ export function AppSidebar() {
           </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={isSending}
+            disabled={isSending || groupHasRunning}
             className="text-destructive focus:text-destructive"
             onSelect={() =>
               setPendingDeleteWorkspace({
