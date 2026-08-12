@@ -16,7 +16,7 @@ mod attachment;
 
 pub use attachment::{
     AttachmentCapabilitySnapshot, AttachmentStore, AttachmentTransaction, RawAttachment,
-    StoredAttachment,
+    StoredAttachment, canonical_archived_media_path,
 };
 
 /// 把输入附件归档到本地（图片/文件）。

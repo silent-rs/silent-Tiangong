@@ -232,7 +232,17 @@ pub fn handle_replace_in_file(
             }
             let content = fs::read_to_string(&full_path)
                 .with_context(|| format!("读取文件失败：{}", full_path.display()))?;
-            let count = content.matches(&req.old).count();
+            let mut old = req.old.clone();
+            let mut new = req.new.clone();
+            let line_ending = preferred_line_ending(&content);
+            if new.contains('\n') || new.contains('\r') {
+                new = normalize_line_endings(&new, line_ending);
+            }
+            let mut count = content.matches(&old).count();
+            if count == 0 && (old.contains('\n') || old.contains('\r')) {
+                old = normalize_line_endings(&old, line_ending);
+                count = content.matches(&old).count();
+            }
             if count == 0 {
                 return Err(anyhow!("未找到待替换内容"));
             }
@@ -244,7 +254,7 @@ pub fn handle_replace_in_file(
                 ));
             }
             let (replaced, replaced_count) = if req.replace_all {
-                (content.replace(&req.old, &req.new), count)
+                (content.replace(&old, &new), count)
             } else {
                 if count != 1 {
                     return Err(anyhow!(
@@ -252,7 +262,7 @@ pub fn handle_replace_in_file(
                         count
                     ));
                 }
-                (content.replacen(&req.old, &req.new, 1), 1)
+                (content.replacen(&old, &new, 1), 1)
             };
             fs::write(&full_path, replaced.as_bytes())
                 .with_context(|| format!("写入替换结果失败：{}", full_path.display()))?;
@@ -569,8 +579,7 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
             }
             let base_content = fs::read_to_string(&source)
                 .map_err(|err| anyhow!("读取删除目标失败：{}，{err}", source.display()))?;
-            let content = diffy_apply(&base_content, &parsed)
-                .map_err(|err| anyhow!("删除补丁应用失败：{err}"))?;
+            let content = apply_text_patch(&base_content, &parsed, "删除补丁应用失败")?;
             if !content.is_empty() {
                 return Err(anyhow!(
                     "删除补丁校验失败：应用后内容非空：{}",
@@ -596,8 +605,7 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
         }
         let base_content = fs::read_to_string(&source)
             .map_err(|err| anyhow!("读取文件失败：{}，{err}", source.display()))?;
-        let content = diffy_apply(&base_content, &parsed)
-            .map_err(|err| anyhow!("修改补丁应用失败：{err}"))?;
+        let content = apply_text_patch(&base_content, &parsed, "修改补丁应用失败")?;
 
         if !verify {
             if let Some(parent) = target.parent() {
@@ -624,6 +632,60 @@ fn apply_unified_diff_patch(patch: &str, effective_cwd: &Path, verify: bool) -> 
     }
 
     Ok(stats)
+}
+
+fn apply_text_patch(
+    base_content: &str,
+    patch: &diffy::Patch<'_, str>,
+    error_context: &str,
+) -> Result<String> {
+    let crlf = uses_crlf_line_endings(base_content);
+    let normalized;
+    let base = if crlf {
+        normalized = base_content.replace("\r\n", "\n");
+        normalized.as_str()
+    } else {
+        base_content
+    };
+    let content = diffy::apply(base, patch).map_err(|err| anyhow!("{error_context}：{err}"))?;
+    Ok(if crlf {
+        content.replace('\n', "\r\n")
+    } else {
+        content
+    })
+}
+
+fn preferred_line_ending(content: &str) -> &'static str {
+    if uses_crlf_line_endings(content) {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+fn normalize_line_endings(value: &str, line_ending: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', line_ending)
+}
+
+fn uses_crlf_line_endings(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut saw_line_ending = false;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'\n' => {
+                saw_line_ending = true;
+                if index == 0 || bytes[index - 1] != b'\r' {
+                    return false;
+                }
+            }
+            b'\r' if bytes.get(index + 1) != Some(&b'\n') => return false,
+            _ => {}
+        }
+    }
+    saw_line_ending
 }
 
 fn split_unified_diff_sections(patch: &str) -> Result<Vec<String>> {
@@ -719,4 +781,103 @@ fn normalize_diff_filename(raw: &str) -> Result<String> {
         return Err(anyhow!("unified diff 文件路径非法"));
     }
     Ok(path.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::path_policy::TrustModePathPolicy;
+
+    fn access(root: &Path) -> FsAccessContext {
+        FsAccessContext {
+            workspace: Some(root.to_string_lossy().into_owned()),
+            full_trust: false,
+        }
+    }
+
+    #[test]
+    fn replace_in_file_matches_lf_text_and_preserves_crlf() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("windows.txt");
+        fs::write(&path, b"alpha\r\nbeta\r\ngamma\r\n").unwrap();
+
+        let response = handle_replace_in_file(
+            ReplaceInFileRequest {
+                path: "windows.txt".to_string(),
+                old: "alpha\nbeta".to_string(),
+                new: "alpha\nBETA".to_string(),
+                expected_count: Some(1),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(false),
+        );
+
+        assert!(response.ok, "{}", response.stderr);
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\r\nBETA\r\ngamma\r\n");
+    }
+
+    #[test]
+    fn replace_in_file_matches_crlf_text_and_preserves_lf() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unix.txt");
+        fs::write(&path, b"alpha\nbeta\ngamma\n").unwrap();
+
+        let response = handle_replace_in_file(
+            ReplaceInFileRequest {
+                path: "unix.txt".to_string(),
+                old: "alpha\r\nbeta".to_string(),
+                new: "alpha\r\nBETA".to_string(),
+                expected_count: Some(1),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(false),
+        );
+
+        assert!(response.ok, "{}", response.stderr);
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\nBETA\ngamma\n");
+    }
+
+    #[test]
+    fn apply_patch_updates_and_preserves_crlf() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("windows.txt");
+        fs::write(&path, b"alpha\r\nbeta\r\ngamma\r\n").unwrap();
+        let patch =
+            "--- a/windows.txt\n+++ b/windows.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
+
+        let response = handle_apply_patch(
+            ApplyPatchRequest {
+                patch: patch.to_string(),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(false),
+        );
+
+        assert!(response.ok, "{}", response.stderr);
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\r\nBETA\r\ngamma\r\n");
+    }
+
+    #[test]
+    fn apply_patch_updates_and_preserves_lf() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unix.txt");
+        fs::write(&path, b"alpha\nbeta\ngamma\n").unwrap();
+        let patch =
+            "--- a/unix.txt\n+++ b/unix.txt\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma\n";
+
+        let response = handle_apply_patch(
+            ApplyPatchRequest {
+                patch: patch.to_string(),
+                access: access(root.path()),
+                ..Default::default()
+            },
+            &TrustModePathPolicy::new(false),
+        );
+
+        assert!(response.ok, "{}", response.stderr);
+        assert_eq!(fs::read(&path).unwrap(), b"alpha\nBETA\ngamma\n");
+    }
 }

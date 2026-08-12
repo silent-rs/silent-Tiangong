@@ -147,7 +147,7 @@ impl AttachmentStore {
 
         Ok(StoredAttachment {
             asset_id,
-            local_path: path.to_string_lossy().to_string(),
+            local_path: local_path_text(&path),
             original_name,
             mime_type,
             size: loaded.bytes.len() as u64,
@@ -181,7 +181,7 @@ impl AttachmentStore {
         let metadata =
             fs::metadata(&path).map_err(|error| format!("读取已归档附件信息失败：{error}"))?;
         ensure_size(metadata.len(), "附件")?;
-        let path_text = path.to_string_lossy().to_string();
+        let path_text = local_path_text(&path);
         let mime_type = resolve_mime(
             attachment.kind,
             attachment.mime_type.as_deref(),
@@ -210,6 +210,11 @@ impl AttachmentStore {
             reused: true,
         })
     }
+}
+
+/// 返回归档媒体文件的规范路径，用于跨 Windows 路径表示比较文件身份。
+pub fn canonical_archived_media_path(value: &str) -> Option<PathBuf> {
+    AttachmentStore::default().reusable_path(value)
 }
 
 /// 一批已保存附件的事务。未提交即离开作用域时会自动回滚新文件。
@@ -751,6 +756,23 @@ fn local_path_from_source(value: &str) -> PathBuf {
     PathBuf::from(normalized.replace('\\', "/"))
 }
 
+fn local_path_text(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let text = if let Some(path) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{path}")
+        } else if let Some(path) = text.strip_prefix(r"\\?\") {
+            path.to_string()
+        } else {
+            text.into_owned()
+        };
+        text.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    text.into_owned()
+}
+
 fn cleanup_paths(paths: &[PathBuf]) -> Result<(), String> {
     let mut failures = Vec::new();
     for path in paths.iter().rev() {
@@ -1111,6 +1133,16 @@ mod tests {
             }])
             .unwrap();
         assert!(reused.stored()[0].reused);
+        #[cfg(windows)]
+        {
+            assert!(!reused.stored()[0].local_path.starts_with(r"\\?\"));
+            let normal = path.replace('/', "\\");
+            let extended = format!(r"\\?\{normal}");
+            assert_eq!(
+                root.store().reusable_path(&normal),
+                root.store().reusable_path(&extended)
+            );
+        }
         reused.rollback().unwrap();
         assert!(Path::new(&path).exists());
     }

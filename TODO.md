@@ -1,7 +1,7 @@
 # TODO - 天工当前开发任务
 
 > 最后更新：2026-08-12
-> 当前主线：0.14.x OpenAI Responses 适配
+> 当前主线：0.14.x OpenAI Responses 适配、Fs 0.1.1 Windows 文件处理修复
 > 参考：`PLAN.md`、`docs/requirements.md`
 
 ## OpenAI Responses 适配
@@ -27,3 +27,16 @@
 - [x] 移除工具参数自动重发和固定错误回复，全部异常时继续现有对话循环
 - [x] 确保工具调用容错不会把多次请求用量累计为当前上下文大小
 - [x] 完成模型层与核心流程测试、编译和严格检查
+
+## Fs 0.1.1 Windows 文件处理修复
+
+- [x] 创建 CSV 并验证线上 Fs 0.1.0 对多种 Windows 路径形式的读取行为
+- [x] 复现 CRLF 文件多行替换和统一补丁失败
+- [x] 修复已发送附件因 Windows 路径表示不同而被误清理
+- [x] 修复 CRLF 文件的多行替换和统一补丁处理
+- [x] 将 Fs 插件各组件版本统一更新为 0.1.1
+- [x] 使用 CSV、TXT、JSON、空文件、较大文本和图片完成 Windows 回归验证
+- [x] 验证 LF/CRLF 双向适配，并在 Linux、macOS、Windows 发布构建前运行文件回归
+- [x] 完成格式、测试、严格检查、插件校验和完整构建
+- [ ] 提交并推送修复分支，创建 PR 并指派 hubertshelley
+- [ ] 合并 PR，发布并核验 plugin/fs/v0.1.1 三平台制品
