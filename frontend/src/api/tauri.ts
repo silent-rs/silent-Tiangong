@@ -15,6 +15,21 @@ export interface Session {
   cwd: string;
 }
 
+export interface TrashedSession {
+  id: string;
+  title: string;
+  message_count: number;
+  updated_at: string;
+}
+
+export interface PurgeProgress {
+  current: number;
+  total: number;
+  session_id: string;
+  title: string;
+  status: string;
+}
+
 export interface LoadedSession {
   id: string;
   messages: Message[];
@@ -548,6 +563,15 @@ export const api = {
 
   deleteSessionsByCwd: (cwd: string): Promise<void> =>
     invoke('delete_sessions_by_cwd', { cwd }),
+
+  listTrashedSessions: (): Promise<TrashedSession[]> =>
+    invoke('list_trashed_sessions'),
+
+  purgeAllDeletedSessions: (): Promise<number> =>
+    invoke('purge_all_deleted_sessions'),
+
+  onPurgeProgress: (cb: (progress: PurgeProgress) => void): Promise<() => void> =>
+    listen<PurgeProgress>('purge_progress', (event) => cb(event.payload)),
 
   updateSessionTitle: (title: string): Promise<void> =>
     invoke('update_session_title', { title }),

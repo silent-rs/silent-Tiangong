@@ -8,12 +8,12 @@ import { Card, CardContent } from './ui/card';
 import { Switch } from './ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain } from 'lucide-react';
+import { Settings, Eye, EyeOff, Puzzle, Plus, Trash2, Loader2, Github, Globe, Edit2, RefreshCw, Info, FolderOpen, Save, ShieldCheck, X, Bot as BotIcon, Package, Brain, HardDriveDownload } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import type { DownloadEvent, Update } from '@tauri-apps/plugin-updater';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { api } from '@/api/tauri';
-import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo } from '@/api/tauri';
+import type { ServerConfig, ModelsConfigView, ProviderConfigView, ModelEntryView, ModelCapabilityInfo, TrashedSession } from '@/api/tauri';
 import { useStore } from '@/store/useStore';
 import { useToast } from './Toast';
 import { WebhookPanel } from './automation/WebhookPanel';
@@ -152,6 +152,10 @@ export function SettingsDialog() {
                   <Package className="w-4 h-4 sm:mr-2" />
                   <span className="sr-only sm:not-sr-only">插件管理</span>
                 </TabsTrigger>
+                <TabsTrigger value="data-cleanup" className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
+                  <HardDriveDownload className="w-4 h-4 sm:mr-2" />
+                  <span className="sr-only sm:not-sr-only">数据清理</span>
+                </TabsTrigger>
                 {pluginContributions.map((entry) => (
                   <TabsTrigger key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="w-full justify-center px-0 py-2 sm:justify-start sm:px-3">
                     {contributionIcon(entry.icon)}
@@ -196,6 +200,9 @@ export function SettingsDialog() {
                   initialCatalogError={pluginCatalogError}
                   onRefreshStateChange={setPluginRefreshMask}
                 />
+              </TabsContent>
+              <TabsContent value="data-cleanup" className="m-0 flex-1 min-h-0 overflow-y-auto">
+                <DataCleanupSettings />
               </TabsContent>
               {pluginContributions.map((entry) => (
                 <TabsContent key={`plugin:${entry.plugin_id}:${entry.contribution_id}:${entry.generation}`} value={`plugin:${entry.plugin_id}`} className="m-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -1846,6 +1853,152 @@ function AppUpdateSettings() {
               )}
             </Button>
           </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function DataCleanupSettings() {
+  const { showSuccess, showError } = useToast();
+  const [trashed, setTrashed] = useState<TrashedSession[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; total: number } | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const list = await api.listTrashedSessions();
+      setTrashed(list);
+    } catch (error) {
+      showError('扫描失败', String(error));
+    } finally {
+      setLoading(false);
+    }
+  }, [showError]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!purging) return;
+    let unlisten: (() => void) | undefined;
+    api.onPurgeProgress((p) => {
+      setProgress({ current: p.current, total: p.total });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [purging]);
+
+  const handlePurgeAll = async () => {
+    if (trashed.length === 0) return;
+    setPurging(true);
+    setProgress({ current: 0, total: trashed.length });
+    try {
+      const count = await api.purgeAllDeletedSessions();
+      showSuccess('清理完成', `已清理 ${count} 个已删除会话`);
+      setTrashed([]);
+    } catch (error) {
+      showError('清理失败', String(error));
+      refresh();
+    } finally {
+      setPurging(false);
+      setProgress(null);
+    }
+  };
+
+  const percent = progress && progress.total > 0
+    ? Math.round((progress.current / progress.total) * 100)
+    : 0;
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-6 p-6">
+      <div>
+        <h2 className="text-lg font-semibold mb-1">数据清理</h2>
+        <p className="text-sm text-muted-foreground">
+          已删除的会话会暂存在回收区。点击下方按钮彻底清理它们占用的磁盘空间。
+        </p>
+      </div>
+
+      <Card>
+        <CardContent className="pt-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">回收区会话</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {loading ? '扫描中...' : `${trashed.length} 个已删除会话`}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={loading || purging}
+                onClick={refresh}
+              >
+                {loading ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-4 h-4 mr-1" />
+                )}
+                刷新
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={trashed.length === 0 || purging}
+                onClick={handlePurgeAll}
+              >
+                {purging ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4 mr-1" />
+                )}
+                全部清理
+              </Button>
+            </div>
+          </div>
+
+          {purging && progress && (
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full bg-primary transition-[width] duration-150"
+                  style={{ width: `${percent}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground text-center">
+                {progress.current} / {progress.total}（{percent}%）
+              </p>
+            </div>
+          )}
+
+          {!loading && trashed.length > 0 && !purging && (
+            <div className="border rounded-lg divide-y max-h-80 overflow-y-auto">
+              {trashed.map((session) => (
+                <div key={session.id} className="flex items-center justify-between px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm truncate">{session.title || '（无标题）'}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {session.message_count} 条消息
+                      {session.updated_at && ` · ${session.updated_at.slice(0, 10)}`}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!loading && trashed.length === 0 && !purging && (
+            <p className="text-sm text-muted-foreground text-center py-8">
+              回收区为空，没有待清理的会话。
+            </p>
+          )}
         </CardContent>
       </Card>
     </div>

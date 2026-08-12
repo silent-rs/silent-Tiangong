@@ -142,16 +142,84 @@ impl CoreManager {
         Ok(())
     }
 
-    /// 删除会话：先 retire 对应 Core（取消在途 turn + 等待写盘），
-    /// 再删除磁盘 session 文件（issue #245）。
+    /// 将会话文件原子移动到回收区 `trash/sessions/{id}.json`。
     ///
-    /// 这是安全的操作——retire_core 保证 worker 停止并写盘结束后才返回，
-    /// 随后删除文件不会影响在途 turn。Core 不存在时只删文件。
+    /// 同文件系统 `fs::rename` 保证原子性：要么成功，要么文件原封不动。
+    /// 移走后 `list_session_metadata()` 扫描 `sessions/` 天然看不到。
+    /// 文件不存在时幂等返回 Ok。
+    pub fn trash_session_file(&self, session_id: &str) -> Result<(), String> {
+        let src = self
+            .storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if !src.exists() {
+            return Ok(());
+        }
+        let trash_dir = self.storage_root.join("trash").join("sessions");
+        std::fs::create_dir_all(&trash_dir)
+            .map_err(|error| format!("创建回收区目录失败：{error}"))?;
+        let dst = trash_dir.join(format!("{session_id}.json"));
+        std::fs::rename(&src, &dst).map_err(|error| {
+            format!(
+                "会话文件移动到回收区失败（{} → {}）：{error}",
+                src.display(),
+                dst.display()
+            )
+        })
+    }
+
+    /// 扫描回收区 `trash/sessions/`，返回残留会话 ID 列表。
+    ///
+    /// 这些是逻辑删除后等待物理清理的会话。
+    pub fn list_trashed_session_ids(&self) -> Vec<String> {
+        let trash_dir = self.storage_root.join("trash").join("sessions");
+        let Ok(entries) = std::fs::read_dir(&trash_dir) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                ids.push(stem.to_string());
+            }
+        }
+        ids
+    }
+
+    /// 删除回收区中的会话文件（物理清理阶段调用）。
+    pub fn delete_trashed_session(&self, session_id: &str) -> Result<(), String> {
+        let path = self
+            .storage_root
+            .join("trash")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("删除回收区会话文件失败：{error}"))?;
+        }
+        Ok(())
+    }
+
+    /// 逻辑删除会话：原子移动会话文件到回收区 + 取消 Core。
+    ///
+    /// 不做 retire_core 的 finalize（load/persist/plugins）——会话文件已移到 trash，
+    /// 加载和保存无意义。不删媒体/teams（那些留给物理清理）。
+    /// Core 不存在时只移文件。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
-        self.retire_core_locked(session_id, true).await?;
-        self.delete_session_file(session_id)
+        // 先移文件到回收区（原子操作，极快）。
+        self.trash_session_file(session_id)?;
+        // 取消活跃 turn 并摘除 Core（不等 worker 退出）。
+        let _ = self.cancel_core(session_id);
+        let _ = self.take_core(session_id);
+        Ok(())
     }
 
     /// 同步配置快照到所有存活 Core。
@@ -205,5 +273,103 @@ impl std::fmt::Debug for CoreManager {
             .field("live_cores", &live)
             .field("storage_root", &self.storage_root)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiangong_core::core_config::{CoreConfig, CoreConfigProvider};
+    use tiangong_core::session::Session;
+
+    fn make_manager(dir: &tempfile::TempDir) -> CoreManager {
+        CoreManager::new(
+            CoreConfigProvider::new(CoreConfig::default()),
+            dir.path().to_path_buf(),
+        )
+    }
+
+    fn persist_session(dir: &tempfile::TempDir, id: &str) {
+        let mut session = Session::new("test");
+        session.id = id.to_string();
+        session.bind_storage_root(dir.path().to_path_buf());
+        session.try_persist_to_disk().unwrap();
+    }
+
+    #[test]
+    fn trash_session_file_moves_to_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "s1");
+        let manager = make_manager(&dir);
+        assert!(manager.session_exists("s1"));
+
+        manager.trash_session_file("s1").unwrap();
+        // 原位置不存在
+        assert!(!manager.session_exists("s1"));
+        // trash 中存在
+        let trashed = manager.list_trashed_session_ids();
+        assert_eq!(trashed, vec!["s1"]);
+    }
+
+    #[test]
+    fn trash_session_file_idempotent_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager(&dir);
+        // 文件不存在时应幂等返回 Ok
+        manager.trash_session_file("never-existed").unwrap();
+    }
+
+    #[test]
+    fn delete_trashed_session_removes_from_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "s2");
+        let manager = make_manager(&dir);
+        manager.trash_session_file("s2").unwrap();
+        assert_eq!(manager.list_trashed_session_ids().len(), 1);
+
+        manager.delete_trashed_session("s2").unwrap();
+        assert!(manager.list_trashed_session_ids().is_empty());
+    }
+
+    #[test]
+    fn list_trashed_empty_when_no_trash_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager(&dir);
+        assert!(manager.list_trashed_session_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_session_trashes_file_and_removes_core() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "s3");
+        let manager = make_manager(&dir);
+        assert!(manager.session_exists("s3"));
+
+        manager.delete_session("s3").await.unwrap();
+        // 文件应移到 trash（不再在 sessions/ 中）
+        assert!(!manager.session_exists("s3"));
+        assert_eq!(manager.list_trashed_session_ids(), vec!["s3"]);
+    }
+
+    #[tokio::test]
+    async fn delete_session_idempotent_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = make_manager(&dir);
+        // 文件不存在时 delete_session 不报错
+        let result = manager.delete_session("never-existed").await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_trashed_session_ids_lists_all_json() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_session(&dir, "a");
+        persist_session(&dir, "b");
+        let manager = make_manager(&dir);
+        manager.trash_session_file("a").unwrap();
+        manager.trash_session_file("b").unwrap();
+        let mut ids = manager.list_trashed_session_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 }

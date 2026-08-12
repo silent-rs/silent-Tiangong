@@ -374,6 +374,8 @@ fn run_gui() {
             tiangong_app::commands::load_session,
             tiangong_app::commands::delete_session,
             tiangong_app::commands::delete_sessions_by_cwd,
+            tiangong_app::commands::list_trashed_sessions,
+            tiangong_app::commands::purge_all_deleted_sessions,
             tiangong_app::commands::update_session_title,
             tiangong_app::commands::request_desktop_notification_permission,
             tiangong_app::commands::send_desktop_notification,
