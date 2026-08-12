@@ -11,13 +11,15 @@
 - 恢复并完善 OpenAI Responses API 支持。
 - 保留 OpenAI Chat Completions 作为第三方兼容端点的默认协议。
 - 统一文本、思考摘要、工具调用、用量和结束原因的上层行为。
+- 完善 OpenAI 工具调用容错，单个异常调用不得阻断同批合法调用或结束对话。
 
 ## 优先级与架构边界
 
 1. Responses 文本、流式响应和工具调用稳定可用。
-2. 协议细节只存在于 `tiangong-llm` Provider 适配层。
-3. `openai` 对应 Responses；`openai_chatcompletions` 和旧别名 `openai_compatible` 对应 Chat Completions。
-4. 不影响 Chat Completions、Anthropic 和 DeepSeek。
+2. 工具调用逐项校验和隔离，流式参数按完整 JSON 判断，用量保持单次请求语义。
+3. 协议细节只存在于 `tiangong-llm` Provider 适配层。
+4. `openai` 对应 Responses；`openai_chatcompletions` 和旧别名 `openai_compatible` 对应 Chat Completions。
+5. 不影响 Chat Completions、Anthropic 和 DeepSeek。
 
 ## 关键时间节点
 

@@ -388,6 +388,17 @@ pub(super) fn commit_summary_message(
     response: &crate::model::ModelFunctionResponse,
     usage_source: &str,
 ) -> Result<(), String> {
+    if response.text.trim().is_empty() && !response.invalid_tool_calls.is_empty() {
+        let errors = response
+            .invalid_tool_calls
+            .iter()
+            .take(3)
+            .map(|call| format!("tool={} id={}：{}", call.name, call.id, call.reason))
+            .collect::<Vec<_>>()
+            .join("；");
+        return Err(format!("最终回复为空，工具调用参数未通过校验：{errors}"));
+    }
+
     ctx.session.append_message_with_id(
         pending_msg_id.to_string(),
         MessageRole::Assistant,

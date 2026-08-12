@@ -22,8 +22,8 @@ pub use models_config::{
     RoutingSlot,
 };
 pub use provider_client::{
-    ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse, ModelStreamChunk,
-    OnRetryCallback, SingleProviderClient,
+    InvalidToolCall, ModelClient, ModelFunctionResponse, ModelRequest, ModelResponse,
+    ModelStreamChunk, OnRetryCallback, SingleProviderClient,
 };
 
 pub use client::rerank_provider_from_config;
