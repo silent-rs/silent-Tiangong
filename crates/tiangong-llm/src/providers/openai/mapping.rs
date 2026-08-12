@@ -40,6 +40,8 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
 
     if stream {
         payload.insert("stream".to_string(), json!(true));
+        // 后台流式 Response 可在连接中断或用户取消时通过 response ID 请求服务端停止。
+        payload.insert("background".to_string(), json!(true));
     }
 
     if req.max_tokens > 0 {
@@ -492,6 +494,28 @@ fn strip_think(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn streaming_request_enables_background_mode() {
+        let req = ProviderRequest {
+            model: "gpt-5.6-sol".to_string(),
+            system: None,
+            messages: vec![ChatMessage::text(MessageRole::User, "你好")],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+        let payload = build_request_json(&req, true).unwrap();
+        assert_eq!(payload["stream"], true);
+        assert_eq!(payload["background"], true);
+    }
 
     #[test]
     fn parses_text_response() {

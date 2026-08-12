@@ -52,6 +52,18 @@ impl ResponsesClient {
         .await
     }
 
+    pub async fn cancel(&self, response_id: &str) -> Result<(), LlmError> {
+        let client = self.build_client();
+        timeout(
+            self.config.timeout,
+            client.responses().cancel_byot::<_, Value>(response_id),
+        )
+        .await
+        .map_err(|_| LlmError::Timeout(self.config.timeout.as_millis() as u64))?
+        .map(|_| ())
+        .map_err(|err| map_responses_error(&err))
+    }
+
     pub async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
         // Responses 与 Chat 共用 /models 端点，复用 Chat Completions 的实现。
         crate::providers::openai_chatcompletions::client::list_models_via_config(

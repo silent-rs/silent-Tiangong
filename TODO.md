@@ -17,3 +17,4 @@
 - [x] 完成前端构建验证
 
 - [x] 修复交互式配置向导对 OpenAI Responses 协议的支持
+- [x] 为 OpenAI Responses 增加后台流式与服务端取消能力

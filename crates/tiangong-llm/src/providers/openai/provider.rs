@@ -1,5 +1,12 @@
+use std::pin::Pin;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::task::{Context, Poll};
+
 use async_trait::async_trait;
-use futures_util::{StreamExt, stream};
+use futures_util::{Stream, StreamExt, stream};
 use serde_json::Value;
 
 use crate::error::LlmError;
@@ -14,6 +21,49 @@ use super::config::OpenAiResponsesConfig;
 use super::error::map_responses_error;
 use super::mapping::{build_request_json, parse_complete_response};
 use super::stream::{ResponsesStreamParser, extract_completed_reasoning};
+
+struct BackgroundResponsesStream {
+    inner: ProviderStream,
+    client: ResponsesClient,
+    response_id: Arc<Mutex<Option<String>>>,
+    terminal: Arc<AtomicBool>,
+}
+
+impl Stream for BackgroundResponsesStream {
+    type Item = Result<ProviderStreamEvent, LlmError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for BackgroundResponsesStream {
+    fn drop(&mut self) {
+        if self.terminal.load(Ordering::Acquire) {
+            return;
+        }
+        let response_id = self
+            .response_id
+            .lock()
+            .ok()
+            .and_then(|response_id| response_id.clone());
+        let Some(response_id) = response_id else {
+            return;
+        };
+        let client = self.client.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(%response_id, "无法取得异步运行时，跳过 Responses 服务端取消");
+            return;
+        };
+        handle.spawn(async move {
+            if let Err(error) = client.cancel(&response_id).await {
+                tracing::warn!(%response_id, %error, "Responses 服务端取消失败");
+            } else {
+                tracing::info!(%response_id, "Responses 服务端取消成功");
+            }
+        });
+    }
+}
 
 #[derive(Clone)]
 pub struct OpenAiResponsesProvider {
@@ -74,6 +124,10 @@ impl LlmProvider for OpenAiResponsesProvider {
         let payload = build_request_json(&req, true)
             .map_err(|err| LlmError::InvalidRequest(err.to_string()))?;
         let stream = self.client.stream(&model, payload).await?;
+        let response_id = Arc::new(Mutex::new(None));
+        let terminal = Arc::new(AtomicBool::new(false));
+        let stream_response_id = Arc::clone(&response_id);
+        let stream_terminal = Arc::clone(&terminal);
 
         // 维护流式状态：记录是否收到过 reasoning delta 增量。
         // 流式增量一律保留；仅在全程无 delta 时，从 completed 兜底补发 reasoning。
@@ -86,6 +140,26 @@ impl LlmProvider for OpenAiResponsesProvider {
                     return stream::iter(vec![Err(map_responses_error(&err))]);
                 }
             };
+
+            let event_type = raw_payload
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if event_type == "response.created"
+                && let Some(id) = raw_payload
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                && let Ok(mut stored_id) = stream_response_id.lock()
+            {
+                *stored_id = Some(id.to_string());
+            }
+            if matches!(
+                event_type,
+                "response.completed" | "response.failed" | "response.incomplete"
+            ) {
+                stream_terminal.store(true, Ordering::Release);
+            }
 
             // 记录本条事件是否产生 reasoning delta（用于 completed 兜底判断）。
             let is_completed = raw_payload
@@ -112,7 +186,13 @@ impl LlmProvider for OpenAiResponsesProvider {
 
             stream::iter(events)
         });
-        Ok(Box::pin(mapped))
+        let inner: ProviderStream = Box::pin(mapped);
+        Ok(Box::pin(BackgroundResponsesStream {
+            inner,
+            client: self.client.clone(),
+            response_id,
+            terminal,
+        }))
     }
 
     async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
@@ -123,6 +203,72 @@ impl LlmProvider for OpenAiResponsesProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_background_stream_cancels_response_on_server() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(body_json(serde_json::json!({
+                "model": "gpt-5.6-sol",
+                "input": [{"type": "message", "role": "user", "content": "你好"}],
+                "stream": true,
+                "background": true,
+                "max_output_tokens": 1024
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+                "text/event-stream",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/responses/resp_test/cancel"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_test",
+                "status": "cancelled"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut config = OpenAiResponsesConfig::new("test-key", server.uri());
+        config.timeout = std::time::Duration::from_secs(2);
+        config.max_retries = 0;
+        let provider = OpenAiResponsesProvider::new(config);
+        let request = ProviderRequest {
+            model: "gpt-5.6-sol".to_string(),
+            system: None,
+            messages: vec![crate::message::ChatMessage::text(
+                crate::message::MessageRole::User,
+                "你好",
+            )],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        };
+
+        let mut response_stream = provider.stream(request).await.unwrap();
+        assert!(matches!(
+            response_stream.next().await,
+            Some(Ok(ProviderStreamEvent::MessageStart))
+        ));
+        drop(response_stream);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        server.verify().await;
+    }
 
     #[test]
     fn fallback_emitted_when_no_delta_received() {
