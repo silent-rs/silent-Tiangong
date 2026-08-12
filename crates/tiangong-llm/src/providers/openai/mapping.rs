@@ -40,8 +40,6 @@ pub fn build_request_json(req: &ProviderRequest, stream: bool) -> Result<Value> 
 
     if stream {
         payload.insert("stream".to_string(), json!(true));
-        // 后台流式 Response 可在连接中断或用户取消时通过 response ID 请求服务端停止。
-        payload.insert("background".to_string(), json!(true));
     }
 
     if req.max_tokens > 0 {
@@ -496,7 +494,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn streaming_request_enables_background_mode() {
+    fn streaming_request_uses_regular_mode() {
         let req = ProviderRequest {
             model: "gpt-5.6-sol".to_string(),
             system: None,
@@ -514,7 +512,7 @@ mod tests {
         };
         let payload = build_request_json(&req, true).unwrap();
         assert_eq!(payload["stream"], true);
-        assert_eq!(payload["background"], true);
+        assert!(!payload.as_object().unwrap().contains_key("background"));
     }
 
     #[test]
