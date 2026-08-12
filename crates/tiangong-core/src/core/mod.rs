@@ -4,6 +4,7 @@
 //! CLI / GUI / Server / Connector 统一通过 TiangongCore 运行。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use typed_builder::TypedBuilder;
 
@@ -57,6 +58,10 @@ pub struct TiangongCore {
     stream_tx: Sender<StreamEvent>,
     /// 进程内插件(会话级,跨 turn)。
     plugins: Vec<Arc<dyn Plugin>>,
+    /// on_session_ready 是否已对本 Core 实例执行过（会话级一次性状态，不落盘）。
+    /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
+    #[builder(default)]
+    session_ready: AtomicBool,
 }
 
 impl TiangongCore {
@@ -360,11 +365,18 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     })
                     .map_err(|_| CoreError::WorkerStopped)?;
 
+                let first_turn = self
+                    .session_ready
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok();
                 crate::shared_runtime::spawn_turn(ctx, move |mut ctx, cmd_rx| {
-                    // 每轮都触发 on_session_ready:插件自行保证幂等性(如 index 扫描的 last_scanned
-                    // 标志、memory 的 session_id 已设置检查、agent-team 的 manifest 已存在检查)。
-                    for plugin in &ctx.plugins {
-                        plugin.on_session_ready(&mut ctx.session);
+                    // on_session_ready 仅在本 Core 实例的首次 turn 执行（会话级一次性初始化）。
+                    // 后续轮次（含编辑重发）复用同一 Core，只靠 on_turn_started 处理每轮增量，
+                    // 不再重复执行会话级初始化。Core 销毁重建后该状态随实例重置。
+                    if first_turn {
+                        for plugin in &ctx.plugins {
+                            plugin.on_session_ready(&mut ctx.session);
+                        }
                     }
                     let prompt_sections = ctx
                         .plugins

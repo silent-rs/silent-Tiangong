@@ -1142,14 +1142,9 @@ pub async fn edit_and_resend(
     // 第一遍只读校验发生在任何附件 IO 之前。
     state
         .with_state_read(|core_state| {
-            // 校验需读 messages（完整 Session 字段）。会话存在性用 metadata 判定，
+            // 会话存在性用单文件存在性判定（O(1)），避免遍历解析全部会话文件；
             // 校验本身用从磁盘 load 的最新 session（issue #245：真相源归磁盘）。
-            if !core_state
-                .core_manager
-                .list_session_metadata()
-                .iter()
-                .any(|m| m.id == session_id)
-            {
+            if !core_state.core_manager.session_exists(&session_id) {
                 return Err(anyhow::anyhow!("会话不存在：{session_id}"));
             }
             if crate::state_ops::has_pending_turn(core_state, &session_id) {
@@ -1183,7 +1178,7 @@ pub async fn edit_and_resend(
     // 附件准备可能很慢；在同一把 App 状态锁内做完整二次校验、修改和持久化。
     // 只有本步骤成功后才允许终止旧任务。
     let prepared_for_state = tiangong_types::stable_content_blocks(&prepared);
-    let (original_session, session_snapshot) = state
+    let (original_session, _session_snapshot) = state
         .with_state(|core_state| {
             let (original, runtime) = crate::session_ops::edit_prepared_user_message(
                 core_state,
@@ -1217,24 +1212,20 @@ pub async fn edit_and_resend(
         .collect::<Vec<_>>();
     transaction.commit();
 
-    // 最终校验及稳定消息落盘均成功后，才终止旧 Core（cancel + take + join）。
-    // 旧 Core 的最终收尾可能最后一次写回编辑前快照；join 后重新落盘当前编辑状态，
-    // 此后已无旧写入者可覆盖。
-    state
-        .inner()
-        .core_manager
-        .retire_core(&session_id, true)
-        .await?;
-    crate::session_ops::restore_session(session_snapshot.clone())
-        .map_err(|error| error.to_string())?;
-
+    // 编辑后的稳定消息已由 edit_prepared_user_message 落盘。此处复用既有 Core：
+    // 编辑重发流程已校验无活跃 turn，Core 不会主动写盘，不存在旧 Core 覆盖编辑结果的
+    // 风险。编辑重发复用现有 Core，不重复执行会话级初始化（on_session_ready 仅在该
+    // Core 首次 turn 执行一次）；新一轮 turn 通过 on_turn_started 拿到截断后的最新
+    // session。因此无需销毁重建 Core（省去 shutdown_join 同步阻塞与 WASM 插件重新
+    // 实例化），与 send_message 的复用路径保持一致。
     let (stream_tx, stream_rx) = mpsc::channel::<tiangong_types::StreamEvent>();
     let ensured = state
         .ensure_core(&session_id, None, None, None, stream_tx)
         .await;
     let sid = ensured.session_id.clone();
     if let Err(error) = state.deliver_prepared_if_live(&sid, message_id.clone(), prepared.clone()) {
-        shutdown_join_core_if_current(state.inner(), &sid).await;
+        // 复用 Core 时不销毁 Core（它仍可能被其它流程持有）。deliver 失败时尚未启动
+        // 新 turn，只需把磁盘 session 恢复到编辑前状态，Core 下次读取即为正确内容。
         restore_edited_session(state.inner(), &session_id, original_session).await;
         cleanup_unreferenced_input_attachments(
             state.inner(),
