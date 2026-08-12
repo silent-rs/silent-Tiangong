@@ -285,7 +285,7 @@ describe('MainApp sessions_updated scheduling contract', () => {
     await advance(120);
 
     expect(getSessionsMock).not.toHaveBeenCalled();
-    expect(registeredUnlisteners.length).toBe(8);
+    expect(registeredUnlisteners.length).toBe(9);
     for (const unlisten of registeredUnlisteners) {
       expect(unlisten).toHaveBeenCalledTimes(1);
     }
