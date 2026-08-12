@@ -14,8 +14,8 @@ use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{
-    ModelFunctionResponse, ModelRequest, ModelStreamChunk, TokenUsage, ToolCall, ToolChoice,
-    ToolSpec,
+    InvalidToolCall, ModelFunctionResponse, ModelRequest, ModelStreamChunk, TokenUsage, ToolCall,
+    ToolChoice, ToolSpec,
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
@@ -184,6 +184,33 @@ fn record_tool_calls(
     );
     emit_session_message_upsert(ctx, pending_msg_id);
     calls
+}
+
+fn append_invalid_tool_calls_context(ctx: &mut TurnContext, invalid_calls: &[InvalidToolCall]) {
+    if invalid_calls.is_empty() {
+        return;
+    }
+
+    let calls = invalid_calls
+        .iter()
+        .map(|call| {
+            serde_json::json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+                "validation_error": call.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    inject_tool_to_messages(
+        &mut ctx.session,
+        "invalid_tool_calls",
+        &serde_json::json!({
+            "calls": calls,
+            "instruction": "以上工具调用已从执行列表剔除，其他合法调用不受影响。请根据校验错误修正参数，并在下一轮按需生成新的工具调用；不要复述校验错误。",
+        }),
+    );
+    ctx.session.persist_to_disk();
 }
 
 enum ToolPreflightOutcome {
@@ -457,6 +484,7 @@ enum CompressionContinuation {
         request_injection_generation: u64,
     },
     ToolBatch,
+    InvalidToolCalls,
     Summary {
         decision: SummaryDecision,
         request_injection_generation: u64,
@@ -517,6 +545,7 @@ struct ToolBatchState {
     calls: VecDeque<(usize, ToolCall)>,
     ready_tools: Vec<PreparedToolCall>,
     prepared_keys: HashSet<String>,
+    invalid_tool_calls: Vec<InvalidToolCall>,
     response_usage: TokenUsage,
     request_injection_generation: u64,
     needs_failure_recovery: bool,
@@ -1024,6 +1053,9 @@ pub(super) async fn execute_turn(
                     CompressionContinuation::ToolBatch => {
                         state.next_step = NextStep::DriveTools;
                     }
+                    CompressionContinuation::InvalidToolCalls => {
+                        state.next_step = NextStep::StartReact;
+                    }
                     CompressionContinuation::Summary {
                         decision,
                         request_injection_generation,
@@ -1147,7 +1179,23 @@ pub(super) async fn execute_turn(
                         state.round += 1;
                         state.react_rounds_in_phase += 1;
 
-                        if response.tool_calls.is_empty() {
+                        if response.tool_calls.is_empty()
+                            && !response.invalid_tool_calls.is_empty()
+                        {
+                            append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
+                            let observed_tokens = observed_total_tokens(&response.usage);
+                            if context_organizer.needs_compression(observed_tokens) {
+                                active_compression = Some(ActiveCompression::start(
+                                    ctx,
+                                    &context_organizer,
+                                    observed_tokens,
+                                    CompressionContinuation::InvalidToolCalls,
+                                ));
+                                state.next_step = NextStep::Waiting;
+                            } else {
+                                state.next_step = NextStep::StartReact;
+                            }
+                        } else if response.tool_calls.is_empty() {
                             let disposition = handle_react_text_response(
                                 ctx,
                                 &pending_msg_id,
@@ -1189,6 +1237,7 @@ pub(super) async fn execute_turn(
                                 calls: calls.into_iter().enumerate().collect(),
                                 ready_tools: Vec::new(),
                                 prepared_keys: HashSet::new(),
+                                invalid_tool_calls: response.invalid_tool_calls,
                                 response_usage: response.usage,
                                 request_injection_generation,
                                 needs_failure_recovery: false,
@@ -1235,6 +1284,38 @@ pub(super) async fn execute_turn(
                         }
                         state.accumulated_usage.accumulate(&usage);
 
+                        if response.tool_calls.is_empty()
+                            && !response.invalid_tool_calls.is_empty()
+                        {
+                            append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
+                            let decision = SummaryDecision::NeedMoreWork(
+                                "总结阶段返回的工具调用未通过 schema 校验，请根据校验原因继续完成任务。"
+                                    .to_string(),
+                            );
+                            let observed_tokens = observed_total_tokens(&usage);
+                            if context_organizer.needs_compression(observed_tokens) {
+                                active_compression = Some(ActiveCompression::start(
+                                    ctx,
+                                    &context_organizer,
+                                    observed_tokens,
+                                    CompressionContinuation::Summary {
+                                        decision,
+                                        request_injection_generation,
+                                    },
+                                ));
+                                state.next_step = NextStep::Waiting;
+                            } else {
+                                finish_summary(
+                                    ctx,
+                                    &mut state,
+                                    &mut injections,
+                                    decision,
+                                    request_injection_generation,
+                                );
+                            }
+                            continue 'agent_loop;
+                        }
+
                         if !response.tool_calls.is_empty() {
                             tracing::warn!(
                                 count = response.tool_calls.len(),
@@ -1255,6 +1336,7 @@ pub(super) async fn execute_turn(
                                 calls: calls.into_iter().enumerate().collect(),
                                 ready_tools: Vec::new(),
                                 prepared_keys: HashSet::new(),
+                                invalid_tool_calls: response.invalid_tool_calls,
                                 response_usage: response.usage,
                                 request_injection_generation,
                                 needs_failure_recovery: false,
@@ -1321,18 +1403,15 @@ pub(super) async fn execute_turn(
                         summary_error,
                     } => {
                         let force_result = match response_result {
-                            Ok(response) => match commit_summary_message(
-                                ctx,
-                                &pending_msg_id,
-                                &response,
-                                "force_final_response",
-                            ) {
-                                Ok(()) => {
-                                    state.accumulated_usage.accumulate(&response.usage);
-                                    Ok(())
-                                }
-                                Err(message) => Err(message),
-                            },
+                            Ok(response) => {
+                                state.accumulated_usage.accumulate(&response.usage);
+                                commit_summary_message(
+                                    ctx,
+                                    &pending_msg_id,
+                                    &response,
+                                    "force_final_response",
+                                )
+                            }
                             Err(error) => {
                                 let message = error.to_string();
                                 persist_error(ctx, format!("force_final_response 失败：{message}"));
@@ -1502,6 +1581,7 @@ pub(super) async fn execute_turn(
                             }
 
                             let batch = state.tool_batch.take().expect("工具批次必须存在");
+                            append_invalid_tool_calls_context(ctx, &batch.invalid_tool_calls);
                             if batch.needs_failure_recovery {
                                 append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
                             } else {
@@ -3152,6 +3232,117 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn all_invalid_tool_calls_are_filtered_then_regenerated() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_invalid", "echo", "{}"),
+                usage_chunk(9, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_valid", "echo", r#"{"message":"schema 已修正"}"#),
+                usage_chunk(11, 3),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(13, 4)],
+        )
+        .await;
+
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        let tool = ToolSpec {
+            name: "echo".to_string(),
+            description: "回显消息".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+        };
+        let mut harness = TestHarness::new(&server, vec![tool], overrides);
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(result.usage.total_tokens, 42);
+        {
+            let calls = invocations.lock().unwrap();
+            assert_eq!(calls.len(), 1, "被剔除的调用不应执行");
+            assert_eq!(calls[0].id, "call_valid");
+        }
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        let second_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let second_body_text = second_body.to_string();
+        assert!(second_body_text.contains("invalid_tool_calls"));
+        assert!(second_body_text.contains("required"));
+        assert!(harness.ctx.session.messages.iter().all(|message| {
+            !message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == "call_invalid")
+        }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_summary_tool_calls_trigger_another_bounded_iteration() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_invalid_summary", "echo", "{}"),
+                usage_chunk(9, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[DONE]\n已完成。"), usage_chunk(11, 3)],
+        )
+        .await;
+
+        let tool = ToolSpec {
+            name: "echo".to_string(),
+            description: "回显消息".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+        };
+        let mut harness = TestHarness::new(&server, vec![tool], HashMap::new());
+        harness.ctx.max_tool_rounds = 0;
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(result.usage.total_tokens, 25);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let second_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let second_body_text = second_body.to_string();
+        assert!(second_body_text.contains("invalid_tool_calls"));
+        assert!(second_body_text.contains("schema 位置=#/required"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn returns_cancelled_when_summary_is_cancelled() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -3428,6 +3619,61 @@ mod tests {
                 .iter()
                 .any(|message| message.text_content().contains("强制收尾完成"))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn force_final_does_not_commit_empty_reply_from_invalid_tool_call() {
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("[NEED_MORE_WORK]\n仍有一步"),
+                usage_chunk(7, 2),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_invalid_final", "echo", "{}"),
+                usage_chunk(8, 3),
+            ],
+        )
+        .await;
+
+        let tool = ToolSpec {
+            name: "echo".to_string(),
+            description: "回显消息".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+        };
+        let mut harness = TestHarness::new(&server, vec![tool], HashMap::new());
+        harness.ctx.max_outer_iterations = 1;
+
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert_eq!(result.usage.total_tokens, 26);
+        match result.outcome {
+            TurnExecutionOutcome::Failed(message) => {
+                assert!(message.contains("call_invalid_final"));
+                assert!(message.contains("schema 位置=#/required"));
+            }
+            outcome => panic!("异常最终工具调用不应被当作成功：{outcome:?}"),
+        }
+        assert!(harness.ctx.session.messages.iter().all(|message| {
+            message.id != "call_invalid_final"
+                && !(message.phase == crate::session::MessagePhase::Summary
+                    && message.text_content().trim().is_empty())
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
