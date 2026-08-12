@@ -263,6 +263,26 @@ pub async fn get_sessions(state: State<'_, TiangongApp>) -> Result<Vec<SessionLi
     .map_err(|error| format!("等待会话列表加载失败：{error}"))
 }
 
+/// 获取单个会话的元数据（精确更新列表时使用，避免全量刷新）。
+#[tauri::command]
+pub async fn get_session_meta(
+    session_id: String,
+    state: State<'_, TiangongApp>,
+) -> Result<Option<SessionListItem>, String> {
+    let manager = state.core_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        let meta = tiangong_core_manager::SessionMetadata::load_from_storage(
+            manager.storage_root(),
+            &session_id,
+        )
+        .ok()
+        .filter(|m| m.parent_session_id.is_none());
+        Ok(meta.as_ref().map(SessionListItem::from_metadata))
+    })
+    .await
+    .map_err(|error| format!("读取会话元数据失败：{error}"))?
+}
+
 /// 获取指定会话的统一工作区 Tab 元数据
 #[tauri::command]
 pub async fn get_session_tabs(
@@ -1019,7 +1039,8 @@ pub(crate) fn start_stream_consumer(
                 }
 
                 emit_session_stream_event(&app, &final_sid, &event);
-                let _ = app.emit("sessions_updated", &());
+                // 精确通知：该会话的元数据已更新（消息数/时间），前端只更新这一条。
+                let _ = app.emit("session_meta_updated", &final_sid);
                 // 标题生成已在 send_message_inner 投递后并行启动（与 chat turn 同时跑），
                 // 完成后经 Command::SetTitle 投递给 turn task 安全写入，此处不再串行处理。
                 // 不 break — 消费线程继续运行，等待下一轮消息的 StreamEvent
@@ -1034,7 +1055,6 @@ pub(crate) fn start_stream_consumer(
         if !app_state.core_manager.has_live_core(&session_id) {
             let _ = rt.block_on(app_state.with_state(|core_state| {
                 crate::state_ops::clear_pending_turn(core_state, &session_id);
-                let _ = app.emit("sessions_updated", &());
                 Ok(())
             }));
             app_state.fail_remote_session_waiters(&session_id, "执行已中断：Core 事件流已关闭");

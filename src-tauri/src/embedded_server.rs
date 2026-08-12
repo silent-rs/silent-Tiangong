@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tiangong_core::permission::TrustMode;
 use tiangong_core::session::MessageRole;
 use tiangong_server::remote::backend::{CoreBackendKind, ServerCoreBackend};
@@ -526,7 +526,7 @@ pub(crate) async fn complete_remote_turn_from_stream(
 }
 
 async fn delete_session(
-    app: &AppHandle,
+    _app: &AppHandle,
     state: &TiangongApp,
     session_id: &str,
 ) -> HostResult<bool> {
