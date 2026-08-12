@@ -1889,14 +1889,14 @@ function DataCleanupSettings() {
     const total = trashed.length;
     setPurging(true);
     setProgress({ current: 0, total });
-    // 先注册进度监听器，再调后端命令，防止漏掉早期事件。
-    const unlisten = await api.onPurgeProgress((p) => {
-      setProgress({ current: p.current, total: p.total });
-    });
+    let unlisten: (() => void) | undefined;
     try {
+      // 先注册进度监听器，再调后端命令，防止漏掉早期事件。
+      unlisten = await api.onPurgeProgress((p) => {
+        setProgress({ current: p.current, total: p.total });
+      });
       const count = await api.purgeAllDeletedSessions();
       // 清理后重新扫描回收区（不直接清空——部分可能清理失败仍残留）。
-      // 重新扫描会读取 trash JSON 中的 purge_failed 标记。
       await refresh();
       if (count < total) {
         showError('部分清理失败', `成功 ${count} 个，${total - count} 个失败，可稍后重试`);
@@ -1907,7 +1907,7 @@ function DataCleanupSettings() {
       showError('清理失败', String(error));
       refresh();
     } finally {
-      unlisten();
+      unlisten?.();
       setPurging(false);
       setProgress(null);
     }

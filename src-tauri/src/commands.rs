@@ -2341,25 +2341,20 @@ pub async fn purge_all_deleted_sessions(
             },
         );
 
-        // 按依赖顺序清理所有可能失败的资源：
-        // 1. media/teams 目录
-        // 2. workspace-tab-layouts 布局文件
-        // 3. PTY/browser 运行时（destroy 操作本身不返回错误，但布局删除会）
-        // 全部成功后才删 trash 文件——trash 文件是重试的凭证，保留到最后一刻。
+        // 清理顺序设计原则：
+        // - 不影响会话完整性的资源先删（layout/PTY/browser）
+        // - 然后删 trash 文件（会话 JSON 消失，不再可恢复）
+        // - 最后删 media/teams（失败只留孤儿文件，不影响功能）
+        // 这样：trash 文件删除前任何步骤失败 → 会话仍在回收区、媒体完好 → 可完整恢复
         let mut error_msg: Option<String> = None;
 
-        if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
-            error_msg = Some(e);
+        // 1. workspace-tab-layouts（不影响会话内容）
+        if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
+            warn!(%e, session_id, "删除工作区标签页布局失败");
+            error_msg = Some(format!("删除布局失败：{e}"));
         }
 
-        if error_msg.is_none() {
-            if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
-                warn!(%e, session_id, "删除工作区标签页布局失败");
-                error_msg = Some(format!("删除布局失败：{e}"));
-            }
-        }
-
-        // PTY/browser 运行时销毁（这些不返回错误，尽力清理）。
+        // 2. PTY/browser 运行时（不返回错误，尽力清理）
         if error_msg.is_none() {
             tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
             if let Some(browser_state) =
@@ -2369,7 +2364,7 @@ pub async fn purge_all_deleted_sessions(
             }
         }
 
-        // 所有资源清理成功 → 删 trash 文件（回收区记录不再需要）。
+        // 3. 删 trash 文件（会话不再可恢复，此后失败不影响恢复完整性）
         if error_msg.is_none() {
             if let Err(e) = manager.delete_trashed_session(session_id) {
                 error_msg = Some(format!("删除回收区文件失败：{e}"));
@@ -2389,6 +2384,11 @@ pub async fn purge_all_deleted_sessions(
                 },
             );
             continue;
+        }
+
+        // 4. 删 media/teams（最后删，失败只留孤儿文件）
+        if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
+            warn!(%e, session_id, "删除媒体/teams 目录失败（留为孤儿文件）");
         }
 
         succeeded.push(session_id.clone());
