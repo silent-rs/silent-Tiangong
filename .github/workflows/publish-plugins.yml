@@ -119,7 +119,18 @@ jobs:
       # 静态编译 SQLCipher 与 OpenSSL 并链接进 sidecar.exe，产物自包含，运行时不再
       # 依赖 libcrypto-3-x64.dll。因此 Windows 下既不需要配置系统 OpenSSL 路径，更不能
       # 设置 OPENSSL_NO_VENDOR=1——那会让 openssl-sys 改用系统动态库，导致用户机器缺 DLL。
-      # GitHub windows-latest runner 预装 Perl/NASM/MSVC，足以完成 vendored 静态编译。
+      # 注意：vendored 编译需要完整 Perl 驱动 OpenSSL 的 Configure；windows-latest 虽预装
+      # Strawberry Perl，但 PATH 中 Git 自带的精简 MSYS2 Perl 优先，缺
+      # Locale::Maketext::Simple 等模块会导致 Configure 启动即失败，故需显式前置 Strawberry Perl。
+      - name: Put Strawberry Perl first on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "C:\Strawberry\perl\bin" >> "$GITHUB_PATH"
+          # 当前 step 立即验证 Strawberry Perl 可加载 OpenSSL Configure 所需模块；
+          # 路径有误时在此秒级失败，避免白白等待数十分钟的 OpenSSL 编译。
+          export PATH="/c/Strawberry/perl/bin:$PATH"
+          perl -e 'use Locale::Maketext::Simple; print "perl OK: $^X\n"'
       - name: Download shared WASM
         uses: actions/download-artifact@v4
         with:
