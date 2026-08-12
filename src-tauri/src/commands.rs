@@ -2218,8 +2218,6 @@ pub struct TrashedSession {
     pub title: String,
     pub message_count: usize,
     pub updated_at: String,
-    /// 物理清理是否失败过（媒体/teams 可能已部分删除，恢复会不完整）。
-    pub purge_failed: bool,
 }
 
 /// 物理清理进度事件 payload。
@@ -2274,17 +2272,12 @@ pub async fn list_trashed_sessions(
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string(),
-                    purge_failed: value
-                        .get("purge_failed")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
                 })
                 .unwrap_or_else(|| TrashedSession {
                     id: id.clone(),
                     title: "（无法读取）".to_string(),
                     message_count: 0,
                     updated_at: String::new(),
-                    purge_failed: false,
                 });
             result.push(summary);
         }
@@ -2384,9 +2377,7 @@ pub async fn purge_all_deleted_sessions(
         }
 
         if let Some(msg) = error_msg {
-            warn!(%msg, session_id, "物理清理会话失败，保留回收区记录");
-            // 在 trash JSON 中写入 purge_failed 标记，持久化失败状态。
-            mark_trash_purge_failed(&storage_root, session_id);
+            warn!(%msg, session_id, "物理清理会话失败，保留回收区记录供重试");
             let _ = app_handle.emit(
                 "purge_progress",
                 PurgeProgress {
@@ -2436,27 +2427,6 @@ fn purge_session_resources(
             .map_err(|error| format!("删除 teams 目录失败：{error}"))?;
     }
     Ok(())
-}
-
-/// 在回收区会话 JSON 中写入 purge_failed 标记（持久化清理失败状态）。
-fn mark_trash_purge_failed(storage_root: &std::path::Path, session_id: &str) {
-    let trash_path = storage_root
-        .join("trash")
-        .join("sessions")
-        .join(format!("{session_id}.json"));
-    let Ok(content) = std::fs::read_to_string(&trash_path) else {
-        return;
-    };
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("purge_failed".to_string(), serde_json::Value::Bool(true));
-        let _ = std::fs::write(
-            &trash_path,
-            serde_json::to_string(&value).unwrap_or_default(),
-        );
-    }
 }
 
 #[tauri::command]
