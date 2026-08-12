@@ -1218,7 +1218,7 @@ export const useStore = create<AppState>((set, get) => ({
         sessionViewCaches.delete(deletedSessionId);
         discardInputCacheSyncQueue(deletedSessionId);
       }
-      const sessions = await api.getSessions();
+      // 本地直接移除被删会话，不重新拉列表（避免全量扫描卡顿）。
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
@@ -1226,7 +1226,11 @@ export const useStore = create<AppState>((set, get) => ({
           delete inputCaches[deletedSessionId];
           delete sessionRunStatuses[deletedSessionId];
         }
-        return { sessions, inputCaches, sessionRunStatuses };
+        return {
+          sessions: state.sessions.filter((s) => s.id !== deletedSessionId),
+          inputCaches,
+          sessionRunStatuses,
+        };
       });
 
       // 删除任意会话后统一进入新对话态，而不是切到剩余列表的第一个——
@@ -1240,7 +1244,6 @@ export const useStore = create<AppState>((set, get) => ({
   // 删除指定 workspace（cwd）下的所有会话
   deleteSessionsByCwd: async (cwd: string) => {
     try {
-      // 删除前记录是否正在编辑新对话；删除分组不应打断当前输入。
       const before = get();
       const wasNewConversation = before.isNewConversation;
       const previousActiveSessionId = before.activeSessionId;
@@ -1248,12 +1251,15 @@ export const useStore = create<AppState>((set, get) => ({
         .filter((session) => session.cwd === cwd)
         .map((session) => session.id);
       await api.deleteSessionsByCwd(cwd);
-      const sessions = await api.getSessions();
 
       for (const sessionId of deletedIds) {
         sessionViewCaches.delete(sessionId);
         discardInputCacheSyncQueue(sessionId);
       }
+      // 本地直接移除被删会话，不重新拉列表。
+      const remainingSessions = before.sessions.filter(
+        (session) => !deletedIds.includes(session.id),
+      );
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
@@ -1261,19 +1267,21 @@ export const useStore = create<AppState>((set, get) => ({
           delete inputCaches[sessionId];
           delete sessionRunStatuses[sessionId];
         }
-        return { sessions, inputCaches, sessionRunStatuses };
+        return {
+          sessions: remainingSessions,
+          inputCaches,
+          sessionRunStatuses,
+        };
       });
 
       if (wasNewConversation) {
-        // 新对话：仅刷新会话列表，保持当前输入不变。
         return;
       }
-
       if (previousActiveSessionId
-        && sessions.some((session) => session.id === previousActiveSessionId)) {
+        && remainingSessions.some((session) => session.id === previousActiveSessionId)) {
         return;
       }
-      const nextSessionId = sessions[0]?.id;
+      const nextSessionId = remainingSessions[0]?.id;
       if (nextSessionId) await get().switchSession(nextSessionId);
       else await get().startNewConversation();
     } catch (error) {

@@ -20,3 +20,19 @@ mod workspace;
 pub use core_manager::{CoreManager, CoreRegistry, CoreRegistryGuard, EnsuredCore};
 pub use metadata::SessionMetadata;
 pub use workspace::resolve_effective_cwd;
+
+use std::path::{Path, PathBuf};
+
+/// 校验 session_id 为单个安全路径片段（拒绝 `..`、绝对路径、路径分隔符），
+/// 返回 `{storage_root}/sessions/{id}.json`。
+fn session_file_path(storage_root: &Path, session_id: &str) -> Result<PathBuf, String> {
+    let mut components = Path::new(session_id).components();
+    let valid_id = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !valid_id {
+        return Err("会话 ID 必须是单个安全路径片段".to_string());
+    }
+    Ok(storage_root
+        .join("sessions")
+        .join(format!("{session_id}.json")))
+}

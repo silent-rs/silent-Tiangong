@@ -168,6 +168,35 @@ impl CoreManager {
         })
     }
 
+    /// 将会话从回收区恢复到 `sessions/`（原子 rename）。
+    ///
+    /// 文件不存在于回收区时返回错误。目标已存在同名文件时返回错误（避免覆盖）。
+    pub fn restore_session_file(&self, session_id: &str) -> Result<(), String> {
+        let _ = crate::session_file_path(&self.storage_root, session_id)?;
+        let src = self
+            .storage_root
+            .join("trash")
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if !src.exists() {
+            return Err(format!("回收区中不存在会话 {session_id}"));
+        }
+        let dst = self
+            .storage_root
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        if dst.exists() {
+            return Err(format!("会话 {session_id} 已存在于正常目录，无法恢复"));
+        }
+        std::fs::rename(&src, &dst).map_err(|error| {
+            format!(
+                "恢复会话文件失败（{} → {}）：{error}",
+                src.display(),
+                dst.display()
+            )
+        })
+    }
+
     /// 扫描回收区 `trash/sessions/`，返回残留会话 ID 列表。
     ///
     /// 这些是逻辑删除后等待物理清理的会话。
