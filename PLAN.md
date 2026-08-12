@@ -29,7 +29,7 @@
 5. 不影响 Chat Completions、Anthropic 和 DeepSeek。
 6. 附件清理只删除媒体归档目录中确定未被输入、租约或消息引用的文件。
 7. Fs 在文本匹配和补丁应用边界适配 LF/CRLF，输出保持目标文件原有换行风格。
-8. Windows 路径展示转换只在 Windows 生效，Linux 和 macOS 保持原生路径语义。
+8. Windows 路径分隔符和展示转换只在 Windows 生效，Linux 和 macOS 保持原生路径语义及文件名中的反斜杠。
 
 ## 关键时间节点
 

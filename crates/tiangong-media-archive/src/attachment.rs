@@ -753,7 +753,9 @@ fn local_path_from_source(value: &str) -> PathBuf {
             normalized.remove(0);
         }
     }
-    PathBuf::from(normalized.replace('\\', "/"))
+    #[cfg(windows)]
+    let normalized = normalized.replace('\\', "/");
+    PathBuf::from(normalized)
 }
 
 fn local_path_text(path: &Path) -> String {
@@ -1107,6 +1109,7 @@ mod tests {
         assert!(result.unwrap_err().contains("50MB"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn reuse_path_accepts_both_separator_styles() {
         let root = TestRoot::new();
@@ -1133,17 +1136,27 @@ mod tests {
             }])
             .unwrap();
         assert!(reused.stored()[0].reused);
-        #[cfg(windows)]
-        {
-            assert!(!reused.stored()[0].local_path.starts_with(r"\\?\"));
-            let normal = path.replace('/', "\\");
-            let extended = format!(r"\\?\{normal}");
-            assert_eq!(
-                root.store().reusable_path(&normal),
-                root.store().reusable_path(&extended)
-            );
-        }
+        assert!(!reused.stored()[0].local_path.starts_with(r"\\?\"));
+        let normal = path.replace('/', "\\");
+        let extended = format!(r"\\?\{normal}");
+        assert_eq!(
+            root.store().reusable_path(&normal),
+            root.store().reusable_path(&extended)
+        );
         reused.rollback().unwrap();
         assert!(Path::new(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_path_preserves_literal_backslash_in_filename() {
+        let root = TestRoot::new();
+        let path = root.0.join(r"literal\backslash.txt");
+        fs::write(&path, b"portable").unwrap();
+
+        assert_eq!(
+            root.store().reusable_path(path.to_string_lossy().as_ref()),
+            fs::canonicalize(&path).ok()
+        );
     }
 }

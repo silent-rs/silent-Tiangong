@@ -36,7 +36,7 @@
 - `replace_in_file` 使用 CRLF 多行参数处理 LF 文件时也必须正确匹配，并保持目标文件原有 LF 换行。
 - `apply_patch` 必须能够校验和修改 CRLF 文本文件，并保持目标文件原有 CRLF 换行。
 - `apply_patch` 修改 LF 文本文件时必须保持 LF 换行，不得因 Windows 修复引入 CRLF。
-- Windows 路径展示转换仅在 Windows 生效；Linux 和 macOS 必须保持原生路径与文件处理行为。
+- Windows 路径分隔符和展示转换仅在 Windows 生效；Linux 和 macOS 必须保持原生路径，并将反斜杠保留为合法文件名字符。
 - CSV、TXT、JSON、空文件、较大文本和图片等附件在 Windows 媒体目录中保持可访问；文本类文件可由 fs 读取，二进制文件应给出明确的文本读取失败信息而不是路径错误。
 - Fs 插件清单、protocol、sidecar、WASM 和锁文件版本统一为 `0.1.1`。
 
