@@ -135,6 +135,7 @@ export function SettingsButton() {
                   <SelectValue placeholder="选择协议" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="openai">OpenAI Responses</SelectItem>
                   <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
                   <SelectItem value="anthropic">Anthropic</SelectItem>
                 </SelectContent>

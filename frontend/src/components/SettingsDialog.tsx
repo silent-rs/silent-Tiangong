@@ -943,7 +943,8 @@ function ProviderModelsView({
                     >
                       <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
+                        <SelectItem value="openai">OpenAI Responses</SelectItem>
+                  <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
                         <SelectItem value="anthropic">Anthropic</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1204,7 +1205,8 @@ function ProviderForm({
             <SelectValue placeholder="选择协议" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
+            <SelectItem value="openai">OpenAI Responses</SelectItem>
+                  <SelectItem value="openai_chatcompletions">OpenAI Chat Completions</SelectItem>
             <SelectItem value="anthropic">Anthropic</SelectItem>
           </SelectContent>
         </Select>

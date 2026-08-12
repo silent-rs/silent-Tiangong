@@ -41,7 +41,12 @@ pub fn run_model_configure(config: &mut ModelsConfig) -> Result<()> {
 
 /// 收集 Provider 信息：协议、名称、base_url、api_key。
 fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, String, String)> {
-    let protocols = ["DeepSeek", "OpenAI 兼容", "Anthropic"];
+    let protocols = [
+        "DeepSeek",
+        "OpenAI Responses",
+        "OpenAI Chat Completions（兼容）",
+        "Anthropic",
+    ];
     let idx = ui::select("选择模型协议", &protocols)?;
     let (protocol, default_name, default_url) = match idx {
         0 => (
@@ -50,11 +55,16 @@ fn prompt_provider(_config: &ModelsConfig) -> Result<(ProviderProtocol, String, 
             "https://api.deepseek.com",
         ),
         1 => (
-            ProviderProtocol::OpenAiChatCompletions,
+            ProviderProtocol::OpenAi,
             "openai",
             "https://api.openai.com/v1",
         ),
         2 => (
+            ProviderProtocol::OpenAiChatCompletions,
+            "openai-compatible",
+            "https://api.openai.com/v1",
+        ),
+        3 => (
             "anthropic".parse::<ProviderProtocol>().unwrap(),
             "anthropic",
             "https://api.anthropic.com",
@@ -101,9 +111,10 @@ fn prompt_model(
     provider_name: &str,
     protocol: ProviderProtocol,
 ) -> Result<(String, String, Vec<ModelCapability>)> {
-    let default_id = match protocol {
-        ProviderProtocol::DeepSeek => "deepseek-chat",
-        ProviderProtocol::OpenAiChatCompletions => "gpt-4o-mini",
+    let suggested_model_id = match protocol {
+        ProviderProtocol::DeepSeek => "deepseek-v4-flash",
+        ProviderProtocol::OpenAi => "gpt-5.6-sol",
+        ProviderProtocol::OpenAiChatCompletions => "gpt-4.1-mini",
         ProviderProtocol::Anthropic => "claude-sonnet-4-20250514",
     };
 
@@ -115,9 +126,9 @@ fn prompt_model(
         model_name.trim().to_string()
     };
 
-    let model_id = ui::input("模型 ID（供应商侧标识）", default_id)?;
+    let model_id = ui::input("模型 ID（供应商侧标识）", suggested_model_id)?;
     let model_id = if model_id.trim().is_empty() {
-        default_id.to_string()
+        suggested_model_id.to_string()
     } else {
         model_id.trim().to_string()
     };

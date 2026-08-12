@@ -260,7 +260,7 @@ async fn test_provider_complete_and_stream_behavior() {
     assert!(seen.contains(&ProviderStreamEvent::MessageStart));
     assert!(seen.contains(&ProviderStreamEvent::ReasoningDelta("先想一下".to_string())));
     assert!(seen.contains(&ProviderStreamEvent::TextDelta("你好".to_string())));
-    assert!(seen.contains(&ProviderStreamEvent::MessageEnd));
+    assert!(seen.contains(&ProviderStreamEvent::MessageEnd { stop_reason: None }));
 }
 
 #[tokio::test]
