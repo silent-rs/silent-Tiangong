@@ -481,7 +481,7 @@ pub async fn delete_session(state: State<'_, TiangongApp>) -> Result<(), String>
 pub async fn delete_sessions_by_cwd(
     cwd: String,
     state: State<'_, TiangongApp>,
-) -> Result<Vec<String>, String> {
+) -> Result<DeleteResult, String> {
     let mut deleted_ids = state
         .with_state_read(|core_state| {
             let ids: Vec<String> = core_state
@@ -548,7 +548,10 @@ pub async fn delete_sessions_by_cwd(
             "批量删除部分失败"
         );
     }
-    Ok(succeeded_ids)
+    Ok(DeleteResult {
+        succeeded: succeeded_ids,
+        failed: failed_ids,
+    })
 }
 
 /// 失败回滚只能关闭本次 ensure 绑定的实例，并且必须等待 worker 最终写盘结束，
@@ -2198,6 +2201,15 @@ pub fn new_session_id() -> String {
 // 物理删除（配置页触发）
 // ============================================================================
 
+/// 批量删除结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeleteResult {
+    /// 实际删除成功的会话 ID 列表。
+    pub succeeded: Vec<String>,
+    /// 删除失败的会话 ID 列表。
+    pub failed: Vec<String>,
+}
+
 /// 回收区中的会话摘要（配置页展示用）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TrashedSession {
@@ -2322,22 +2334,43 @@ pub async fn purge_all_deleted_sessions(
             },
         );
 
-        // 清理该会话的全部资源（media/teams）。
-        let mut failed = false;
-        if let Err(error) = purge_session_resources(&storage_root, &media_root, session_id) {
-            warn!(%error, session_id, "物理清理会话资源失败");
-            failed = true;
+        // 按依赖顺序清理所有可能失败的资源：
+        // 1. media/teams 目录
+        // 2. workspace-tab-layouts 布局文件
+        // 3. PTY/browser 运行时（destroy 操作本身不返回错误，但布局删除会）
+        // 全部成功后才删 trash 文件——trash 文件是重试的凭证，保留到最后一刻。
+        let mut error_msg: Option<String> = None;
+
+        if let Err(e) = purge_session_resources(&storage_root, &media_root, session_id) {
+            error_msg = Some(e);
         }
 
-        // 删 trash 文件。失败视为该会话清理失败。
-        if !failed {
-            if let Err(error) = manager.delete_trashed_session(session_id) {
-                warn!(%error, session_id, "删除回收区文件失败");
-                failed = true;
+        if error_msg.is_none() {
+            if let Err(e) = crate::workspace_tabs::remove_layout(session_id) {
+                warn!(%e, session_id, "删除工作区标签页布局失败");
+                error_msg = Some(format!("删除布局失败：{e}"));
             }
         }
 
-        if failed {
+        // PTY/browser 运行时销毁（这些不返回错误，尽力清理）。
+        if error_msg.is_none() {
+            tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
+            if let Some(browser_state) =
+                app.try_state::<tiangong_plugin_browser::BrowserPluginState>()
+            {
+                browser_state.registry.destroy_session(session_id);
+            }
+        }
+
+        // 所有资源清理成功 → 删 trash 文件（回收区记录不再需要）。
+        if error_msg.is_none() {
+            if let Err(e) = manager.delete_trashed_session(session_id) {
+                error_msg = Some(format!("删除回收区文件失败：{e}"));
+            }
+        }
+
+        if let Some(msg) = error_msg {
+            warn!(%msg, session_id, "物理清理会话失败，保留回收区记录");
             let _ = app_handle.emit(
                 "purge_progress",
                 PurgeProgress {
@@ -2353,7 +2386,6 @@ pub async fn purge_all_deleted_sessions(
 
         succeeded.push(session_id.clone());
 
-        // 推送进度：完成。
         let _ = app_handle.emit(
             "purge_progress",
             PurgeProgress {
@@ -2364,18 +2396,6 @@ pub async fn purge_all_deleted_sessions(
                 status: "done".to_string(),
             },
         );
-    }
-
-    // 只清理成功项的运行时（PTY/browser/layout）。
-    for session_id in &succeeded {
-        tiangong_plugin_terminal::destroy_session_pty(&app, session_id);
-        if let Some(browser_state) = app.try_state::<tiangong_plugin_browser::BrowserPluginState>()
-        {
-            browser_state.registry.destroy_session(session_id);
-        }
-        if let Err(error) = crate::workspace_tabs::remove_layout(session_id) {
-            warn!(%error, session_id, "删除工作区标签页布局失败");
-        }
     }
 
     Ok(succeeded.len())

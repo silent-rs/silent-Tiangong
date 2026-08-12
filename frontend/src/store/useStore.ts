@@ -1268,8 +1268,8 @@ export const useStore = create<AppState>((set, get) => ({
       const before = get();
       const wasNewConversation = before.isNewConversation;
       const previousActiveSessionId = before.activeSessionId;
-      // 后端返回实际删除成功的 ID 列表（部分失败时不包含失败的）。
-      const succeededIds = await api.deleteSessionsByCwd(cwd);
+      // 后端返回成功和失败的 ID 列表。
+      const { succeeded: succeededIds, failed: failedIds } = await api.deleteSessionsByCwd(cwd);
 
       for (const sessionId of succeededIds) {
         sessionViewCaches.delete(sessionId);
@@ -1292,6 +1292,10 @@ export const useStore = create<AppState>((set, get) => ({
           sessionRunStatuses,
         };
       });
+
+      if (failedIds.length > 0) {
+        console.warn('部分会话删除失败：', failedIds);
+      }
 
       if (wasNewConversation) {
         return;
