@@ -25,6 +25,7 @@ export interface TrashedSession {
   title: string;
   message_count: number;
   updated_at: string;
+  purge_failed: boolean;
 }
 
 export interface PurgeProgress {

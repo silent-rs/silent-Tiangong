@@ -1884,33 +1884,19 @@ function DataCleanupSettings() {
     refresh();
   }, [refresh]);
 
-  // 物理清理失败的会话 ID 集合（已部分删除资源，恢复会不完整）。
-  const [purgeFailedIds, setPurgeFailedIds] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!purging) return;
-    let unlisten: (() => void) | undefined;
-    api.onPurgeProgress((p) => {
-      setProgress({ current: p.current, total: p.total });
-      if (p.status === 'error') {
-        setPurgeFailedIds((prev) => new Set(prev).add(p.session_id));
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, [purging]);
-
   const handlePurgeAll = async () => {
     if (trashed.length === 0) return;
     const total = trashed.length;
     setPurging(true);
     setProgress({ current: 0, total });
+    // 先注册进度监听器，再调后端命令，防止漏掉早期事件。
+    const unlisten = await api.onPurgeProgress((p) => {
+      setProgress({ current: p.current, total: p.total });
+    });
     try {
       const count = await api.purgeAllDeletedSessions();
       // 清理后重新扫描回收区（不直接清空——部分可能清理失败仍残留）。
+      // 重新扫描会读取 trash JSON 中的 purge_failed 标记。
       await refresh();
       if (count < total) {
         showError('部分清理失败', `成功 ${count} 个，${total - count} 个失败，可稍后重试`);
@@ -1921,6 +1907,7 @@ function DataCleanupSettings() {
       showError('清理失败', String(error));
       refresh();
     } finally {
+      unlisten();
       setPurging(false);
       setProgress(null);
     }
@@ -2003,7 +1990,7 @@ function DataCleanupSettings() {
                       {session.updated_at && ` · ${session.updated_at.slice(0, 10)}`}
                     </p>
                   </div>
-                  {purgeFailedIds.has(session.id) ? (
+                  {session.purge_failed ? (
                     <Badge variant="destructive" className="ml-2 shrink-0 text-xs">
                       清理失败
                     </Badge>

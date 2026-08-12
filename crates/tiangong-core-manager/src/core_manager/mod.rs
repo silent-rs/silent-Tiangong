@@ -148,10 +148,8 @@ impl CoreManager {
     /// 移走后 `list_session_metadata()` 扫描 `sessions/` 天然看不到。
     /// 文件不存在时幂等返回 Ok。
     pub fn trash_session_file(&self, session_id: &str) -> Result<(), String> {
-        let src = self
-            .storage_root
-            .join("sessions")
-            .join(format!("{session_id}.json"));
+        // 安全校验：拒绝 ..、绝对路径、路径分隔符。
+        let src = crate::session_file_path(&self.storage_root, session_id)?;
         if !src.exists() {
             return Ok(());
         }
@@ -243,6 +241,8 @@ impl CoreManager {
     /// 不做 retire_core 的 finalize（load/persist/plugins）——会话文件马上要移走，
     /// 加载和保存无意义。不删媒体/teams（那些留给物理清理）。
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        // 入口立即校验 session_id（前端传入，拒绝 ..、绝对路径、分隔符）。
+        let _ = crate::session_file_path(&self.storage_root, session_id)?;
         let creation_lock = self.creation_lock(session_id);
         let _creation_guard = creation_lock.lock_owned().await;
         // 先发取消信号并摘除 Core。
