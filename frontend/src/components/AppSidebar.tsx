@@ -12,6 +12,7 @@ import {
 import { Plus, Trash2, Folder, FilePlus2, FolderX } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { SettingsDialog } from './SettingsDialog';
+import { useToast } from './Toast';
 import type { Session } from '@/api/tauri';
 
 /** 默认分组 key：与全局 workspace 一致（或 cwd 为空）的会话归入此分组，平铺不显示分组头 */
@@ -100,7 +101,10 @@ export function AppSidebar() {
   const isSending = useStore(selectCurrentIsSending);
 
   const { open } = useSidebar();
+  const { showWarning, showError } = useToast();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // 待删除的会话 ID（点击删除按钮时记录，确认后按此 ID 删除）。
+  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null);
   // 待删除的 workspace 分组（cwd + 显示名），null 表示无待删除
   const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<{ cwd: string; label: string; count: number } | null>(null);
   // 每个分组的展开状态：默认收缩（只显示最近 COLLAPSED_LIMIT 个）；true=展开显示全部
@@ -124,15 +128,22 @@ export function AppSidebar() {
   };
 
   const handleDeleteSession = async () => {
-    await deleteSession();
+    if (!pendingDeleteSessionId) return;
+    await deleteSession(pendingDeleteSessionId);
+    setPendingDeleteSessionId(null);
     setShowDeleteConfirm(false);
   };
 
   const handleDeleteWorkspace = async () => {
     if (!pendingDeleteWorkspace) return;
-    const { cwd } = pendingDeleteWorkspace;
+    const { cwd, count } = pendingDeleteWorkspace;
     setPendingDeleteWorkspace(null);
-    await deleteSessionsByCwd(cwd);
+    const { failed } = await deleteSessionsByCwd(cwd);
+    if (failed < 0) {
+      showError('删除失败', '工作空间会话删除遇到错误');
+    } else if (failed > 0) {
+      showWarning('部分删除失败', `成功 ${count - failed} 个，${failed} 个失败`);
+    }
   };
 
   const renderSessionItem = (session: Session) => {
@@ -161,11 +172,12 @@ export function AppSidebar() {
             <span className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse shrink-0" />
           )}
         </button>
-        {isActive && (
+        {!isRunning && (
           <button
             type="button"
             className="opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
             onClick={() => {
+              setPendingDeleteSessionId(session.id);
               setShowDeleteConfirm(true);
             }}
             aria-label="删除对话"
@@ -187,6 +199,10 @@ export function AppSidebar() {
       ? group.sessions
       : group.sessions.slice(0, COLLAPSED_LIMIT);
     const canCollapse = allowCollapse && group.sessions.length > COLLAPSED_LIMIT;
+    // workspace 下任一会话正在运行时，禁用批量删除。
+    const groupHasRunning = group.sessions.some(
+      (session) => !!sessionRunStatuses[session.id],
+    );
 
     if (group.isDefault) {
       // 默认分组：无分组头，直接平铺
@@ -252,7 +268,7 @@ export function AppSidebar() {
           </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={isSending}
+            disabled={isSending || groupHasRunning}
             className="text-destructive focus:text-destructive"
             onSelect={() =>
               setPendingDeleteWorkspace({
@@ -305,11 +321,17 @@ export function AppSidebar() {
     </div>
   );
 
-  const deleteConfirm = showDeleteConfirm && (
+  const deleteConfirm = showDeleteConfirm && pendingDeleteSessionId && (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50">
       <div className="bg-popover border rounded-lg p-4 max-w-sm w-full mx-4">
         <h3 className="font-medium mb-2">删除对话</h3>
-        <p className="text-muted-foreground text-sm mb-4">确定要删除当前对话吗？此操作无法撤销。</p>
+        <p className="text-muted-foreground text-sm mb-4">
+          {(() => {
+            const session = sessions.find((s) => s.id === pendingDeleteSessionId);
+            const title = session?.title || '新对话';
+            return `确定要删除「${title}」吗？可从设置-数据清理中恢复。`;
+          })()}
+        </p>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setShowDeleteConfirm(false)}>
             取消

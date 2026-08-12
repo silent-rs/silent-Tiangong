@@ -15,6 +15,27 @@ export interface Session {
   cwd: string;
 }
 
+export interface DeleteResult {
+  succeeded: string[];
+  failed: string[];
+}
+
+export interface TrashedSession {
+  id: string;
+  title: string;
+  message_count: number;
+  updated_at: string;
+  purging: boolean;
+}
+
+export interface PurgeProgress {
+  current: number;
+  total: number;
+  session_id: string;
+  title: string;
+  status: string;
+}
+
 export interface LoadedSession {
   id: string;
   messages: Message[];
@@ -543,11 +564,26 @@ export const api = {
   loadSession: (sessionId: string): Promise<LoadedSession> =>
     invoke('load_session', { sessionId }),
 
-  deleteSession: (): Promise<void> =>
-    invoke('delete_session'),
+  getSessionMeta: (sessionId: string): Promise<Session | null> =>
+    invoke('get_session_meta', { sessionId }),
 
-  deleteSessionsByCwd: (cwd: string): Promise<void> =>
+  deleteSession: (sessionId: string): Promise<void> =>
+    invoke('delete_session', { sessionId }),
+
+  deleteSessionsByCwd: (cwd: string): Promise<DeleteResult> =>
     invoke('delete_sessions_by_cwd', { cwd }),
+
+  listTrashedSessions: (): Promise<TrashedSession[]> =>
+    invoke('list_trashed_sessions'),
+
+  purgeAllDeletedSessions: (): Promise<number> =>
+    invoke('purge_all_deleted_sessions'),
+
+  restoreDeletedSession: (sessionId: string): Promise<void> =>
+    invoke('restore_deleted_session', { sessionId }),
+
+  onPurgeProgress: (cb: (progress: PurgeProgress) => void): Promise<() => void> =>
+    listen<PurgeProgress>('purge_progress', (event) => cb(event.payload)),
 
   updateSessionTitle: (title: string): Promise<void> =>
     invoke('update_session_title', { title }),

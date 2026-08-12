@@ -222,6 +222,11 @@ impl ServerCoreManager {
         let _session_guard = session_lock.lock().await;
 
         let existed = self.core_manager.session_exists(&session_id);
+        if !existed {
+            return Ok(false);
+        }
+
+        // 逻辑删除：原子移动到 trash + 取消 Core。
         self.core_manager
             .delete_session(&session_id)
             .await
@@ -240,9 +245,6 @@ impl ServerCoreManager {
             .map_err(|error| anyhow!("远程会话映射锁已损坏：{error}"))?
             .retain(|_, mapped_session_id| mapped_session_id != &session_id);
 
-        if !existed {
-            return Ok(false);
-        }
         let mut state = self.state.lock().await;
         if state.active_session_id == session_id {
             state.active_session_id.clear();

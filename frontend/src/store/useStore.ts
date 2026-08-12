@@ -860,10 +860,11 @@ export interface AppState {
   // - 旧请求晚到时放弃写入；active 不在权威列表时执行完整的会话切换或新对话初始化。
   // 前端在 getSessions 失败时保留旧列表，避免瞬时请求错误清空侧栏。
   loadSessions: (options?: { protective?: boolean }) => Promise<void>;
+  updateSessionMeta: (sessionId: string) => Promise<void>;
   startNewConversation: (targetCwd?: string) => Promise<void>;
   switchSession: (id: string) => Promise<void>;
-  deleteSession: () => Promise<void>;
-  deleteSessionsByCwd: (cwd: string) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
+  deleteSessionsByCwd: (cwd: string) => Promise<{ failed: number }>;
 
   sendMessage: (
     cacheKey: string,
@@ -1079,6 +1080,26 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  // 精确更新单条会话的元数据（消息数/更新时间），替代全量 loadSessions。
+  updateSessionMeta: async (sessionId: string) => {
+    try {
+      const meta = await api.getSessionMeta(sessionId);
+      if (!meta) return;
+      set((state) => {
+        const idx = state.sessions.findIndex((s) => s.id === sessionId);
+        if (idx < 0) {
+          // 会话不在列表中（如恢复后首次更新），加入列表
+          return { sessions: [...state.sessions, meta] };
+        }
+        const sessions = state.sessions.slice();
+        sessions[idx] = { ...sessions[idx], ...meta };
+        return { sessions };
+      });
+    } catch (error) {
+      console.error('更新会话元数据失败:', error);
+    }
+  },
+
   // 开始新对话：只预留 ID 并初始化输入缓存，首次发送时才由 Core 创建 Session。
   // targetCwd 用于在指定 workspace 分组下创建对话；不传则用全局 workspace。
   startNewConversation: async (targetCwd?: string) => {
@@ -1210,28 +1231,30 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // 删除当前会话
-  deleteSession: async () => {
+  deleteSession: async (sessionId: string) => {
     try {
-      const deletedSessionId = get().activeSessionId;
-      await api.deleteSession();
-      if (deletedSessionId) {
-        sessionViewCaches.delete(deletedSessionId);
-        discardInputCacheSyncQueue(deletedSessionId);
-      }
-      const sessions = await api.getSessions();
+      const deletedSessionId = sessionId;
+      const wasActive = get().activeSessionId === deletedSessionId;
+      await api.deleteSession(deletedSessionId);
+      sessionViewCaches.delete(deletedSessionId);
+      discardInputCacheSyncQueue(deletedSessionId);
+      // 本地直接移除被删会话，不重新拉列表（避免全量扫描卡顿）。
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
-        if (deletedSessionId) {
-          delete inputCaches[deletedSessionId];
-          delete sessionRunStatuses[deletedSessionId];
-        }
-        return { sessions, inputCaches, sessionRunStatuses };
+        delete inputCaches[deletedSessionId];
+        delete sessionRunStatuses[deletedSessionId];
+        return {
+          sessions: state.sessions.filter((s) => s.id !== deletedSessionId),
+          inputCaches,
+          sessionRunStatuses,
+        };
       });
 
-      // 删除任意会话后统一进入新对话态，而不是切到剩余列表的第一个——
-      // 用户主动删除通常意味着想开启新的上下文。
-      await get().startNewConversation();
+      // 只有删的是当前活跃会话时才进入新对话态。
+      if (wasActive) {
+        await get().startNewConversation();
+      }
     } catch (error) {
       console.error('删除会话失败:', error);
     }
@@ -1240,44 +1263,52 @@ export const useStore = create<AppState>((set, get) => ({
   // 删除指定 workspace（cwd）下的所有会话
   deleteSessionsByCwd: async (cwd: string) => {
     try {
-      // 删除前记录是否正在编辑新对话；删除分组不应打断当前输入。
       const before = get();
       const wasNewConversation = before.isNewConversation;
       const previousActiveSessionId = before.activeSessionId;
-      const deletedIds = before.sessions
-        .filter((session) => session.cwd === cwd)
-        .map((session) => session.id);
-      await api.deleteSessionsByCwd(cwd);
-      const sessions = await api.getSessions();
+      // 后端返回成功和失败的 ID 列表。
+      const { succeeded: succeededIds, failed: failedIds } = await api.deleteSessionsByCwd(cwd);
 
-      for (const sessionId of deletedIds) {
+      for (const sessionId of succeededIds) {
         sessionViewCaches.delete(sessionId);
         discardInputCacheSyncQueue(sessionId);
       }
+      // 本地只移除实际删除成功的会话。
+      const remainingSessions = before.sessions.filter(
+        (session) => !succeededIds.includes(session.id),
+      );
       set((state) => {
         const inputCaches = { ...state.inputCaches };
         const sessionRunStatuses = { ...state.sessionRunStatuses };
-        for (const sessionId of deletedIds) {
+        for (const sessionId of succeededIds) {
           delete inputCaches[sessionId];
           delete sessionRunStatuses[sessionId];
         }
-        return { sessions, inputCaches, sessionRunStatuses };
+        return {
+          sessions: remainingSessions,
+          inputCaches,
+          sessionRunStatuses,
+        };
       });
 
-      if (wasNewConversation) {
-        // 新对话：仅刷新会话列表，保持当前输入不变。
-        return;
+      if (failedIds.length > 0) {
+        console.warn('部分会话删除失败：', failedIds);
       }
 
-      if (previousActiveSessionId
-        && sessions.some((session) => session.id === previousActiveSessionId)) {
-        return;
+      if (wasNewConversation) {
+        return { failed: failedIds.length };
       }
-      const nextSessionId = sessions[0]?.id;
+      if (previousActiveSessionId
+        && remainingSessions.some((session) => session.id === previousActiveSessionId)) {
+        return { failed: failedIds.length };
+      }
+      const nextSessionId = remainingSessions[0]?.id;
       if (nextSessionId) await get().switchSession(nextSessionId);
       else await get().startNewConversation();
+      return { failed: failedIds.length };
     } catch (error) {
       console.error('删除 workspace 会话失败:', error);
+      return { failed: -1 };
     }
   },
 
