@@ -2258,7 +2258,13 @@ pub async fn list_trashed_sessions(
                     message_count: value
                         .get("messages")
                         .and_then(|v| v.as_array())
-                        .map(|a| a.len())
+                        .map(|a| {
+                            a.iter()
+                                .filter(|msg| {
+                                    msg.get("role").and_then(|r| r.as_str()) == Some("user")
+                                })
+                                .count()
+                        })
                         .unwrap_or(0),
                     updated_at: value
                         .get("updated_at")
