@@ -304,7 +304,11 @@ impl ProcessSidecarConnection {
         self.health_check().is_ok()
     }
 
-    /// 停止当前插件对应的 sidecar。插件身份握手失败时不终止进程，避免误伤其他服务。
+    /// 停止当前插件对应的 sidecar。
+    ///
+    /// 握手确认身份后终止进程；握手不可用（连不上）但进程仍存活时同样终止——
+    /// Windows 上进程卡住、IPC 挂掉时常见这种状态，若不杀掉会持续占用二进制文件，
+    /// 导致后续删除/升级失败。仅当身份明确不匹配（防 PID 复用误伤）时才放过。
     pub fn stop(&self) -> Result<()> {
         let endpoint = match load_endpoint(&self.config.endpoint) {
             Ok(endpoint) => endpoint,
@@ -319,29 +323,24 @@ impl ProcessSidecarConnection {
             Err(error) => return Err(error),
         };
 
-        match self.verify_plugin_identity() {
-            Ok(()) => {}
+        let should_terminate = match self.verify_plugin_identity() {
+            Ok(()) => true,
             Err(error)
                 if error
                     .downcast_ref::<SidecarInvokeError>()
                     .is_some_and(|error| matches!(error, SidecarInvokeError::Unavailable(_))) =>
             {
-                let _ = std::fs::remove_file(&self.config.endpoint);
-                return Ok(());
+                // 握手连不上：进程可能已退出，也可能卡住。仅在进程仍存活时终止；
+                // 已退出则视为完成，避免对不存在的进程发起 kill/taskkill。
+                process_alive(endpoint.pid)
             }
+            // 身份不匹配等其它错误：不终止进程，避免误伤其他服务。
             Err(error) => return Err(error),
-        }
+        };
 
-        terminate_process(endpoint.pid)?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            let same_process = load_endpoint(&self.config.endpoint)
-                .map(|current| current.pid == endpoint.pid)
-                .unwrap_or(false);
-            if !same_process {
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if should_terminate {
+            terminate_process(endpoint.pid)?;
+            wait_for_process_exit(endpoint.pid, Duration::from_secs(5))?;
         }
         let _ = std::fs::remove_file(&self.config.endpoint);
         Ok(())
@@ -641,6 +640,46 @@ fn write_frame(stream: &mut TcpStream, frame: &IpcFrame) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: kill(pid, 0) 仅检测进程是否存在，信号 0 不实际发送信号。
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return true;
+    }
+    // ESRCH 表示进程不存在；其它错误（如 EPERM，进程存在但无权限）视为存活。
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    let mut command = Command::new("tasklist");
+    suppress_console(&mut command);
+    command
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// 为 taskkill/tasklist 等辅助命令抑制 Windows 控制台窗口。
+///
+/// 与拉起 sidecar 用的 [`configure_detached`] 不同：这里只需 CREATE_NO_WINDOW，
+/// 无需 DETACHED_PROCESS（辅助命令短暂运行即退出）。
+#[cfg(windows)]
+fn suppress_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(unix)]
 fn terminate_process(pid: u32) -> Result<()> {
     let pid = i32::try_from(pid).with_context(|| "sidecar PID 超出系统范围")?;
     // SAFETY: kill 只向已通过握手确认的 sidecar PID 发送 SIGTERM。
@@ -658,7 +697,9 @@ fn terminate_process(pid: u32) -> Result<()> {
 
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<()> {
-    let status = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    suppress_console(&mut command);
+    let status = command
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status()
         .with_context(|| format!("停止 sidecar 进程失败: pid={pid}"))?;
@@ -672,6 +713,25 @@ fn terminate_process(pid: u32) -> Result<()> {
 #[cfg(not(any(unix, windows)))]
 fn terminate_process(_pid: u32) -> Result<()> {
     bail!("当前平台不支持停止 sidecar 进程")
+}
+
+/// 终止 sidecar 后轮询进程是否真正退出。
+///
+/// 不能依赖 endpoint 文件：Windows `taskkill /F` 强杀不触发 sidecar 析构，
+/// endpoint 永不被清理。这里直接轮询进程本身，进程退出后再给文件句柄一点
+/// 释放缓冲，确保后续删除/覆盖二进制不会因句柄占用失败。
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_alive(pid) {
+            // Windows 上进程对象销毁与文件句柄释放可能略滞后于进程退出。
+            #[cfg(windows)]
+            std::thread::sleep(Duration::from_millis(100));
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!("等待 sidecar 进程退出超时: pid={pid}")
 }
 
 #[cfg(unix)]

@@ -947,6 +947,9 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
         );
     }
     stop_loaded_sidecar(plugin_id)?;
+    // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
+    // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
+    stop_connection_for_directory(&installed.directory)?;
 
     let removed = transaction_directory(storage_root, "uninstall")?;
     std::fs::rename(&installed.directory, &removed)
@@ -1090,6 +1093,9 @@ fn replace_installed_plugin(
     manifest: PluginManifest,
 ) -> Result<PluginStatus> {
     stop_loaded_sidecar(&current.manifest.id)?;
+    // 升级同样补齐连接表兜底，确保旧 sidecar 进程被停止后再替换二进制文件，
+    // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
+    stop_connection_for_directory(&current.directory)?;
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
         std::fs::create_dir_all(parent)?;
