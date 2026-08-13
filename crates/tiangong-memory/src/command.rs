@@ -123,5 +123,7 @@ pub enum MemoryCommand {
         options: Box<MemoryOptions>,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
-    Shutdown,
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }

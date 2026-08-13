@@ -900,7 +900,14 @@ impl MemoryHandle {
     pub async fn shutdown(&self) {
         match self.inner.as_ref() {
             HandleInner::Local { tx } => {
-                let _ = tx.send(MemoryCommand::Shutdown).await;
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::Shutdown { reply: reply_tx })
+                    .await
+                    .is_ok()
+                {
+                    let _ = reply_rx.await;
+                }
             }
             HandleInner::Remote { .. } => {
                 let _ = self

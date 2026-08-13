@@ -53,18 +53,22 @@ impl MemoryActor {
             )
             .await;
         tracing::info!("Memory Actor 已启动");
-        loop {
+        let shutdown_reply = loop {
             match self.rx.recv().await {
-                Some(MemoryCommand::Shutdown) => {
+                Some(MemoryCommand::Shutdown { reply }) => {
                     tracing::info!("Memory Actor 收到 Shutdown 命令，正在关闭");
-                    break;
+                    break Some(reply);
                 }
                 Some(cmd) => self.handle(cmd).await,
                 None => {
                     tracing::info!("Memory Actor 通道已关闭，退出");
-                    break;
+                    break None;
                 }
             }
+        };
+        drop(self);
+        if let Some(reply) = shutdown_reply {
+            let _ = reply.send(());
         }
         tracing::info!("Memory Actor 已关闭");
     }
@@ -373,7 +377,7 @@ impl MemoryActor {
             }
 
             // Shutdown 在外层 loop 处理
-            MemoryCommand::Shutdown => {}
+            MemoryCommand::Shutdown { .. } => {}
         }
     }
 
