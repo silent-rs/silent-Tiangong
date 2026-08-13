@@ -951,6 +951,7 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
     kill_sidecar_orphans(&installed);
+    unload_plugin_wasm(plugin_id);
 
     let removed = transaction_directory(storage_root, "uninstall")?;
     rename_with_retry(&installed.directory, &removed)?;
@@ -1097,6 +1098,7 @@ fn replace_installed_plugin(
     // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
     stop_connection_for_directory(&current.directory)?;
     kill_sidecar_orphans(current);
+    unload_plugin_wasm(&current.manifest.id);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1473,6 +1475,37 @@ fn kill_sidecar_orphans(installed: &InstalledPlugin) {
     let binary = sidecar_binary_path(&installed.directory, &sidecar.binary)
         .unwrap_or_else(|_| installed.directory.join(&sidecar.binary));
     crate::sidecar::kill_sidecar_processes_by_image(&binary);
+}
+
+/// 卸载插件的 WASM 实例（drop Store），释放其对安装目录的 WASI preopen 句柄。
+///
+/// Windows 上 cap-std 打开目录不带 FILE_SHARE_DELETE，已加载实例的 Store 会长期持有
+/// 安装目录句柄，阻止其被 rename/delete，导致升级切换、卸载删除失败（code=32）。
+/// 在改写目录前调用本函数清空实例，让目录可被改写；后续 reload 会重建实例。
+fn unload_plugin_wasm(plugin_id: &str) {
+    let adapters = {
+        let mut plugins = match loaded_plugins().lock() {
+            Ok(plugins) => plugins,
+            Err(error) => {
+                tracing::error!(plugin_id, %error, "插件注册表已损坏，无法卸载 WASM 实例");
+                return;
+            }
+        };
+        let Some(loaded) = plugins.get_mut(plugin_id) else {
+            return;
+        };
+        loaded.ui_plugin = None;
+        loaded.component = None;
+        loaded.wasm_bytes = None;
+        loaded
+            .instances
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>()
+    };
+    for adapter in adapters {
+        adapter.release_inner();
+    }
 }
 
 fn remove_sidecar_connection(directory: &Path) {
