@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use semver::Version;
@@ -952,18 +952,17 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
     stop_connection_for_directory(&installed.directory)?;
 
     let removed = transaction_directory(storage_root, "uninstall")?;
-    std::fs::rename(&installed.directory, &removed)
-        .with_context(|| format!("移动待卸载插件目录失败: {}", installed.directory.display()))?;
+    rename_with_retry(&installed.directory, &removed)?;
     let uninstall_result = if keep_data {
         preserve_only_data(&removed, &installed.directory)
     } else {
         remove_directory_if_exists(&removed)
     };
     if let Err(error) = uninstall_result {
+        tracing::error!(plugin_id, %error, "卸载插件删除目录失败，尝试恢复插件");
         let restore_result = (|| {
             remove_directory_if_exists(&installed.directory)?;
-            std::fs::rename(&removed, &installed.directory)
-                .with_context(|| format!("恢复插件目录失败: {}", installed.directory.display()))?;
+            rename_with_retry(&removed, &installed.directory)?;
             reload_plugin_inner(storage_root, &installed)
         })();
         if let Err(restore_error) = restore_result {
@@ -1109,13 +1108,14 @@ fn replace_installed_plugin(
     };
 
     let switch_result = (|| {
-        std::fs::rename(&current.directory, &rollback)?;
+        rename_with_retry(&current.directory, &rollback)?;
         move_preserved_entries(&rollback, staged_path)?;
         set_disabled_marker(staged_path, !current.enabled)?;
-        std::fs::rename(staged_path, &current.directory)?;
+        rename_with_retry(staged_path, &current.directory)?;
         Ok::<_, anyhow::Error>(())
     })();
     if let Err(error) = switch_result {
+        tracing::error!(plugin_id = %current.manifest.id, %error, "切换插件目录失败，尝试恢复旧版本");
         let _ = restore_upgrade_directories(staged_path, &current.directory, &rollback);
         let _ = restore_saved_rollback(&rollback, saved_rollback.as_deref());
         let _ = reload_plugin_inner(storage_root, current);
@@ -1129,6 +1129,7 @@ fn replace_installed_plugin(
         signed_release: verify_signed_release(&current.directory, &manifest)?,
     };
     if let Err(error) = reload_plugin_inner(storage_root, &upgraded) {
+        tracing::error!(plugin_id = %current.manifest.id, %error, "升级后重新加载插件失败，尝试恢复旧版本");
         let _ = stop_connection_for_directory(&current.directory);
         let restore_result =
             restore_upgrade_directories(staged_path, &current.directory, &rollback)
@@ -1154,7 +1155,7 @@ fn replace_installed_plugin(
 
 fn restore_upgrade_directories(staged: &Path, destination: &Path, rollback: &Path) -> Result<()> {
     if destination.exists() {
-        std::fs::rename(destination, staged)?;
+        rename_with_retry(destination, staged)?;
     }
     if PRESERVED_ENTRIES
         .iter()
@@ -1163,7 +1164,7 @@ fn restore_upgrade_directories(staged: &Path, destination: &Path, rollback: &Pat
         move_preserved_entries(staged, rollback)?;
     }
     if rollback.exists() {
-        std::fs::rename(rollback, destination)?;
+        rename_with_retry(rollback, destination)?;
     }
     Ok(())
 }
@@ -1273,17 +1274,11 @@ fn move_preserved_entries(source: &Path, destination: &Path) -> Result<()> {
             continue;
         }
         let destination_entry = destination.join(entry);
-        if let Err(error) = std::fs::rename(&source_entry, &destination_entry) {
+        if let Err(error) = rename_with_retry(&source_entry, &destination_entry) {
             for moved_entry in moved.into_iter().rev() {
                 let _ = std::fs::rename(destination.join(moved_entry), source.join(moved_entry));
             }
-            return Err(error).with_context(|| {
-                format!(
-                    "迁移插件目录失败: {} -> {}",
-                    source_entry.display(),
-                    destination_entry.display()
-                )
-            });
+            return Err(error);
         }
         moved.push(entry);
     }
@@ -1346,12 +1341,50 @@ fn ensure_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 判断 IO 错误是否源于文件被占用。
+///
+/// Windows 上停止 sidecar 进程后，其二进制 image 的文件锁释放可能滞后于进程退出，
+/// 紧随其后的目录改名/删除会撞上占用。ACCESS_DENIED(5) 与 SHARING_VIOLATION(32)
+/// 即此类暂时性占用；其它平台极少出现，保留判断以备用。
+fn is_file_locked(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5) | Some(32))
+}
+
+/// 对暂时性文件占用做有限重试的 IO 包装。
+///
+/// 这类占用通常在进程退出后数百毫秒内自行释放，故按固定间隔重试至超时；
+/// 非占用错误立即向上抛出，避免无谓等待。
+fn retry_io<F>(mut operation: F) -> Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    const MAX_WAIT: Duration = Duration::from_secs(3);
+    const INTERVAL: Duration = Duration::from_millis(100);
+    let deadline = Instant::now() + MAX_WAIT;
+    loop {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_file_locked(&error) && Instant::now() < deadline => {
+                tracing::debug!(error = %error, "文件操作因占用暂时失败，稍后重试");
+                std::thread::sleep(INTERVAL);
+            }
+            Err(error) => return Err(anyhow::Error::from(error)),
+        }
+    }
+}
+
+/// 重命名文件/目录，遇到暂时性占用时重试。
+fn rename_with_retry(from: &Path, to: &Path) -> Result<()> {
+    retry_io(|| std::fs::rename(from, to))
+        .with_context(|| format!("重命名失败: {} -> {}", from.display(), to.display()))
+}
+
 fn remove_directory_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             bail!("拒绝删除符号链接目录: {}", path.display())
         }
-        Ok(_) => std::fs::remove_dir_all(path)
+        Ok(_) => retry_io(|| std::fs::remove_dir_all(path))
             .with_context(|| format!("删除目录失败: {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("读取目录失败: {}", path.display())),
