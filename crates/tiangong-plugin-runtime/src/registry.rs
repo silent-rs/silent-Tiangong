@@ -950,6 +950,7 @@ pub fn uninstall_plugin(storage_root: &Path, plugin_id: &str, keep_data: bool) -
     // 补齐连接表兜底：插件不在 loaded_plugins 时，仍可能保留在 sidecar 连接表中，
     // 不一并停止会导致 Windows 上二进制文件被占用、卸载删除失败。
     stop_connection_for_directory(&installed.directory)?;
+    kill_sidecar_orphans(&installed);
 
     let removed = transaction_directory(storage_root, "uninstall")?;
     rename_with_retry(&installed.directory, &removed)?;
@@ -1095,6 +1096,7 @@ fn replace_installed_plugin(
     // 升级同样补齐连接表兜底，确保旧 sidecar 进程被停止后再替换二进制文件，
     // 避免 Windows 上旧进程占用导致目录切换或旧文件清理失败。
     stop_connection_for_directory(&current.directory)?;
+    kill_sidecar_orphans(current);
     let rollback = rollback_directory(&current.directory, &current.manifest.id);
     if let Some(parent) = rollback.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1358,14 +1360,21 @@ fn retry_io<F>(mut operation: F) -> Result<()>
 where
     F: FnMut() -> std::io::Result<()>,
 {
-    const MAX_WAIT: Duration = Duration::from_secs(3);
+    const MAX_WAIT: Duration = Duration::from_secs(8);
     const INTERVAL: Duration = Duration::from_millis(100);
     let deadline = Instant::now() + MAX_WAIT;
+    let mut warned = false;
     loop {
         match operation() {
             Ok(()) => return Ok(()),
             Err(error) if is_file_locked(&error) && Instant::now() < deadline => {
-                tracing::debug!(error = %error, "文件操作因占用暂时失败，稍后重试");
+                if !warned {
+                    warned = true;
+                    tracing::warn!(
+                        code = error.raw_os_error(),
+                        "文件被占用，开始等待重试（进程退出后句柄或杀毒扫描释放可能有延迟）"
+                    );
+                }
                 std::thread::sleep(INTERVAL);
             }
             Err(error) => return Err(anyhow::Error::from(error)),
@@ -1450,6 +1459,20 @@ fn stop_connection_for_directory(directory: &Path) -> Result<()> {
     }
     remove_sidecar_connection(directory);
     Ok(())
+}
+
+/// 兜底按二进制 image 名清理该插件的所有残留 sidecar 进程。
+///
+/// 注册表里的连接未必覆盖全部进程——热加载覆盖连接时旧 sidecar 进程可能成为
+/// 孤儿，持续占用二进制文件。升级/卸载改写二进制前按 image 名再清一遍，避免
+/// 目录改名/删除因文件被占用而失败。
+fn kill_sidecar_orphans(installed: &InstalledPlugin) {
+    let Some(sidecar) = installed.manifest.sidecar.as_ref() else {
+        return;
+    };
+    let binary = sidecar_binary_path(&installed.directory, &sidecar.binary)
+        .unwrap_or_else(|_| installed.directory.join(&sidecar.binary));
+    crate::sidecar::kill_sidecar_processes_by_image(&binary);
 }
 
 fn remove_sidecar_connection(directory: &Path) {

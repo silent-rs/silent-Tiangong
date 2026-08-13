@@ -668,6 +668,30 @@ fn process_alive(_pid: u32) -> bool {
     false
 }
 
+/// 按 image 名清理指定 sidecar 二进制的所有残留进程。
+///
+/// 升级/卸载时停掉注册表里的连接未必覆盖全部进程——热加载覆盖连接时，旧 sidecar
+/// 进程可能未被停止而成为孤儿，持续占用二进制文件，导致目录改名/删除失败。此处
+/// 按二进制文件名兜底清理该 image 的全部进程（taskkill /IM 在无匹配进程时直接
+/// 失败，属正常情况，忽略即可）。
+#[cfg(windows)]
+pub fn kill_sidecar_processes_by_image(binary: &Path) {
+    let Some(name) = binary.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let mut command = Command::new("taskkill");
+    suppress_console(&mut command);
+    let status = command.args(["/IM", name, "/F"]).status();
+    if let Ok(status) = status
+        && status.success()
+    {
+        tracing::info!(image = %name, "已清理残留 sidecar 进程");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn kill_sidecar_processes_by_image(_binary: &Path) {}
+
 /// 为 taskkill/tasklist 等辅助命令抑制 Windows 控制台窗口。
 ///
 /// 与拉起 sidecar 用的 [`configure_detached`] 不同：这里只需 CREATE_NO_WINDOW，
