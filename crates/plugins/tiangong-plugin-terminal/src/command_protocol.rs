@@ -347,7 +347,21 @@ fn prepare_non_interactive_command(
     cwd_marker: &str,
     rc_marker: &str,
     end_marker: &str,
-) -> anyhow::Result<(tempfile::NamedTempFile, String)> {
+) -> anyhow::Result<(Option<tempfile::NamedTempFile>, String)> {
+    // Windows/PowerShell 直接将包装脚本粘贴到 PTY。不使用临时文件——#355 引入的
+    // 临时文件方式在 Windows 上因文件无扩展名，PowerShell dot-source 会回退到
+    // ShellExecute 触发"你要如何打开此文件"弹窗，导致命令卡死超时。PowerShell
+    // 不存在 zsh 的多行拆分问题，直接粘贴是安全的。
+    if cfg!(target_os = "windows") {
+        return Ok(prepare_powershell_command(
+            start_marker,
+            command,
+            cwd_marker,
+            rc_marker,
+            end_marker,
+        ));
+    }
+
     let command = if command_requires_isolation(command) {
         format!("(\n{command}\n)")
     } else {
@@ -364,7 +378,47 @@ fn prepare_non_interactive_command(
     script.flush()?;
     let path = script.path().to_string_lossy();
     let invocation = format!(". {}\r", crate::util::shell_quote(path.as_ref()));
-    Ok((script, invocation))
+    Ok((Some(script), invocation))
+}
+
+/// Windows PowerShell 包装脚本：直接粘贴到 PTY 执行，不经过临时文件。
+///
+/// 输出的 marker 格式与 POSIX 版本完全一致（`line_matches_marker` 精确匹配），
+/// 退出码捕获同时处理外部程序（`$LASTEXITCODE`）和 cmdlet（`$?`）两种情况。
+fn prepare_powershell_command(
+    start_marker: &str,
+    command: &str,
+    cwd_marker: &str,
+    rc_marker: &str,
+    end_marker: &str,
+) -> (Option<tempfile::NamedTempFile>, String) {
+    let mut ps = String::new();
+    // 保存并临时设置 PAGER 等环境变量，避免 git diff/log 等命令落入交互式分页器
+    ps.push_str("$__t_old_PAGER=$env:PAGER; $env:PAGER='cat'; ");
+    ps.push_str("$__t_old_GIT_PAGER=$env:GIT_PAGER; $env:GIT_PAGER='cat'; ");
+    ps.push_str("$__t_old_GH_PAGER=$env:GH_PAGER; $env:GH_PAGER='cat'; ");
+    ps.push_str("$__t_old_LESS=$env:LESS; $env:LESS='FRX'\r\n");
+    // 输出 start marker
+    ps.push_str(&format!("Write-Output '{start_marker}'\r\n"));
+    // 用户命令
+    ps.push_str(command);
+    ps.push_str("\r\n");
+    // 捕获退出码：外部程序用 $LASTEXITCODE，cmdlet 用 $?
+    ps.push_str("$__t_rc=if($?){if($null -ne $LASTEXITCODE){$LASTEXITCODE}else{0}}else{1}\r\n");
+    // 恢复环境变量
+    ps.push_str(
+        "$env:PAGER=$__t_old_PAGER; $env:GIT_PAGER=$__t_old_GIT_PAGER; \
+         $env:GH_PAGER=$__t_old_GH_PAGER; $env:LESS=$__t_old_LESS\r\n",
+    );
+    // 输出 cwd/rc/end marker（格式与 POSIX 版本一致：marker 前缀直接拼接值）
+    ps.push_str("Write-Output ''\r\n");
+    ps.push_str(&format!(
+        "Write-Output \"{}$((Get-Location).Path)\"\r\n",
+        cwd_marker
+    ));
+    ps.push_str(&format!("Write-Output \"{}$__t_rc\"\r\n", rc_marker));
+    ps.push_str(&format!("Write-Output '{end_marker}'\r\n"));
+    (None, ps)
 }
 
 /// 会退出或改变长期 shell 错误处理行为的控制语句放入子 shell 执行。
@@ -1545,6 +1599,7 @@ mod tests {
         assert_eq!(out, "old\nnew");
     }
 
+    #[cfg(unix)]
     #[test]
     fn non_interactive_command_wrapper_disables_pagers() {
         let (script, invocation) = prepare_non_interactive_command(
@@ -1555,6 +1610,7 @@ mod tests {
             "__TIANGONG_END_x__",
         )
         .unwrap();
+        let script = script.unwrap();
         let combined = std::fs::read_to_string(script.path()).unwrap();
         assert!(combined.contains("PAGER="));
         assert!(combined.contains("GIT_PAGER="));
