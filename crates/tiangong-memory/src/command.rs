@@ -102,9 +102,15 @@ pub enum MemoryCommand {
     RunMicroRumination {
         turn_result: Box<TurnResult>,
     },
-    RunEnhancedMicroRumination {
+    /// 将增强版 Micro 反刍快速投递到独立 worker。
+    EnqueueEnhancedMicroRumination {
         turn_result: Box<EnhancedTurnResult>,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// 提交后台 worker 已完成模型提取的增强版 Micro 结果。
+    ApplyEnhancedMicroRumination {
+        turn_result: Box<EnhancedTurnResult>,
+        extraction: Box<crate::types::ExtractionOutput>,
     },
     RunMesoRumination {
         session_id: String,
@@ -117,5 +123,7 @@ pub enum MemoryCommand {
         options: Box<MemoryOptions>,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
-    Shutdown,
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }

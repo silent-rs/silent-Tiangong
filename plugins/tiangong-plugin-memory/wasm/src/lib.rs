@@ -382,7 +382,7 @@ impl Guest for Component {
 
     fn on_turn_finished(session_json: String, turn_start_idx: u32) -> Result<(), PluginError> {
         // 轮次结束：从 session 只读快照提取本轮信息，转发给 sidecar 做 micro 反刍。
-        let _ = forward_turn_rumination(&session_json, turn_start_idx);
+        forward_turn_rumination(&session_json, turn_start_idx)?;
 
         // 每 10 轮触发 Meta 反刍（与原生版本一致）。
         if state::increment_turn_and_check_meta() {
@@ -548,8 +548,9 @@ fn forward_turn_rumination(session_json: &str, turn_start_idx: u32) -> Result<()
     let turn_result =
         turn_extract::build_turn_memory_result(&session, &messages, &user_input, turn_status);
     let request = RunEnhancedMicroRuminationRequest { turn_result };
-    let _ = sidecar_client::invoke::<RunEnhancedMicroRumination>(&request);
-    Ok(())
+    sidecar_client::invoke::<RunEnhancedMicroRumination>(&request)
+        .map(|_| ())
+        .map_err(|error| PluginError::Message(format!("提交 Memory 增强反刍任务失败: {error}")))
 }
 
 /// 从 session 快照提取 id/cwd，转发给 sidecar 做 meso 反刍。

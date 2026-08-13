@@ -284,75 +284,38 @@ impl MemoryHandle {
         }
     }
 
-    /// 增强版 Micro 反刍（等待完成）。
+    /// 将增强版 Micro 反刍快速投递到独立 worker。
     ///
-    /// 合并累积候选与增强轮次结果，执行多类型提取、去重写入和跨类型关联。
-    pub async fn run_enhanced_micro_rumination(&self, turn_result: EnhancedTurnResult) {
+    /// 返回时只保证任务已进入有界队列，不等待模型提取和最终写入。
+    pub async fn run_enhanced_micro_rumination(
+        &self,
+        turn_result: EnhancedTurnResult,
+    ) -> Result<()> {
         match self.inner.as_ref() {
             HandleInner::Local { tx } => {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                if tx
-                    .send(MemoryCommand::RunEnhancedMicroRumination {
-                        turn_result: Box::new(turn_result),
-                        reply: reply_tx,
-                    })
+                tx.send(MemoryCommand::EnqueueEnhancedMicroRumination {
+                    turn_result: Box::new(turn_result),
+                    reply: reply_tx,
+                })
+                .await
+                .with_context(|| "发送 Memory 增强反刍入队命令失败")?;
+                reply_rx
                     .await
-                    .is_err()
-                {
-                    tracing::warn!("Memory run_enhanced_micro_rumination 发送失败");
-                    return;
-                }
-                let _ = reply_rx.await;
+                    .with_context(|| "等待 Memory 增强反刍入队确认失败")?
+                    .map_err(|error| anyhow!(error))
             }
-            HandleInner::Remote { .. } => {
-                match self
-                    .send_remote_request(MemoryIpcRequestPayload::RunEnhancedMicroRumination {
-                        turn_result,
-                    })
-                    .await
-                {
-                    Ok(MemoryIpcResponsePayload::Ack) | Err(_) => {}
-                    Ok(other) => {
-                        tracing::warn!(
-                            "Memory IPC run_enhanced_micro_rumination 返回了非预期响应: {:?}",
-                            other
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// 增强版 Micro 反刍（同步版）。
-    pub fn run_enhanced_micro_rumination_blocking(&self, turn_result: EnhancedTurnResult) {
-        match self.inner.as_ref() {
-            HandleInner::Local { tx } => {
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                if tx
-                    .blocking_send(MemoryCommand::RunEnhancedMicroRumination {
-                        turn_result: Box::new(turn_result),
-                        reply: reply_tx,
-                    })
-                    .is_err()
-                {
-                    tracing::warn!("Memory run_enhanced_micro_rumination_blocking 发送失败");
-                    return;
-                }
-                let _ = reply_rx.blocking_recv();
-            }
-            HandleInner::Remote { .. } => {
-                match self.block_on_remote_request(
-                    MemoryIpcRequestPayload::RunEnhancedMicroRumination { turn_result },
-                ) {
-                    Ok(MemoryIpcResponsePayload::Ack) | Err(_) => {}
-                    Ok(other) => {
-                        tracing::warn!(
-                            "Memory IPC run_enhanced_micro_rumination_blocking 返回了非预期响应: {:?}",
-                            other
-                        );
-                    }
-                }
-            }
+            HandleInner::Remote { .. } => match self
+                .send_remote_request(MemoryIpcRequestPayload::RunEnhancedMicroRumination {
+                    turn_result,
+                })
+                .await?
+            {
+                MemoryIpcResponsePayload::Ack => Ok(()),
+                other => Err(anyhow!(
+                    "Memory IPC run_enhanced_micro_rumination 返回了非预期响应: {other:?}"
+                )),
+            },
         }
     }
 
@@ -937,7 +900,14 @@ impl MemoryHandle {
     pub async fn shutdown(&self) {
         match self.inner.as_ref() {
             HandleInner::Local { tx } => {
-                let _ = tx.send(MemoryCommand::Shutdown).await;
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                if tx
+                    .send(MemoryCommand::Shutdown { reply: reply_tx })
+                    .await
+                    .is_ok()
+                {
+                    let _ = reply_rx.await;
+                }
             }
             HandleInner::Remote { .. } => {
                 let _ = self

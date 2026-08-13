@@ -11,7 +11,12 @@ use crate::options::MemoryOptions;
 use crate::recall_context;
 use crate::rumination;
 use crate::store::MemoryStore;
-use crate::types::MemoryCandidate;
+use crate::types::{EnhancedTurnResult, MemoryCandidate};
+
+struct RuminationJob {
+    turn_result: EnhancedTurnResult,
+    model: Option<tiangong_llm::LlmEndpointConfig>,
+}
 
 /// Memory Actor（独立运行时）
 pub(crate) struct MemoryActor {
@@ -19,19 +24,22 @@ pub(crate) struct MemoryActor {
     store: MemoryStore,
     options: MemoryOptions,
     pending_candidates: Vec<MemoryCandidate>,
+    rumination_tx: mpsc::Sender<RuminationJob>,
 }
 
 impl MemoryActor {
-    pub(crate) fn new(
+    fn new(
         rx: mpsc::Receiver<MemoryCommand>,
         store: MemoryStore,
         options: MemoryOptions,
+        rumination_tx: mpsc::Sender<RuminationJob>,
     ) -> Self {
         Self {
             rx,
             store,
             options,
             pending_candidates: Vec::new(),
+            rumination_tx,
         }
     }
 
@@ -45,18 +53,22 @@ impl MemoryActor {
             )
             .await;
         tracing::info!("Memory Actor 已启动");
-        loop {
+        let shutdown_reply = loop {
             match self.rx.recv().await {
-                Some(MemoryCommand::Shutdown) => {
+                Some(MemoryCommand::Shutdown { reply }) => {
                     tracing::info!("Memory Actor 收到 Shutdown 命令，正在关闭");
-                    break;
+                    break Some(reply);
                 }
                 Some(cmd) => self.handle(cmd).await,
                 None => {
                     tracing::info!("Memory Actor 通道已关闭，退出");
-                    break;
+                    break None;
                 }
             }
+        };
+        drop(self);
+        if let Some(reply) = shutdown_reply {
+            let _ = reply.send(());
         }
         tracing::info!("Memory Actor 已关闭");
     }
@@ -273,25 +285,63 @@ impl MemoryActor {
                 }
             }
 
-            MemoryCommand::RunEnhancedMicroRumination { turn_result, reply } => {
+            MemoryCommand::EnqueueEnhancedMicroRumination { turn_result, reply } => {
+                let started = std::time::Instant::now();
                 let mut enhanced = *turn_result;
-                if !self.pending_candidates.is_empty() {
-                    enhanced
-                        .memory_candidates
-                        .append(&mut self.pending_candidates);
+                let pending = std::mem::take(&mut self.pending_candidates);
+                enhanced.memory_candidates.extend(pending.iter().cloned());
+                let session_id = enhanced.session_id.clone();
+                let turn_id = enhanced.turn_id.clone();
+                let job = RuminationJob {
+                    turn_result: enhanced,
+                    model: self.options.model.clone(),
+                };
+                let result = self.rumination_tx.try_send(job).map_err(|error| {
+                    self.pending_candidates = pending;
+                    format!("Memory 反刍队列不可用: {error}")
+                });
+                match &result {
+                    Ok(()) => tracing::debug!(
+                        %session_id,
+                        %turn_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Memory 增强反刍已入队"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %session_id,
+                        %turn_id,
+                        %error,
+                        "Memory 增强反刍入队失败"
+                    ),
                 }
+                let _ = reply.send(result);
+            }
+            MemoryCommand::ApplyEnhancedMicroRumination {
+                turn_result,
+                extraction,
+            } => {
+                let started = std::time::Instant::now();
+                let enhanced = *turn_result;
+                let session_id = enhanced.session_id.clone();
+                let turn_id = enhanced.turn_id.clone();
                 let wid = enhanced.workspace_id.as_deref();
-                if let Err(e) = rumination::process_enhanced_micro(
-                    &mut self.store,
-                    &enhanced,
-                    wid,
-                    self.options.model.as_ref(),
-                )
-                .await
+                match rumination::apply_enhanced_micro(&mut self.store, &enhanced, &extraction, wid)
+                    .await
                 {
-                    tracing::warn!("增强版 Micro 反刍失败: {}", e);
+                    Ok(()) => tracing::info!(
+                        %session_id,
+                        %turn_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "Memory 增强反刍写入完成"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %session_id,
+                        %turn_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        %error,
+                        "Memory 增强反刍写入失败"
+                    ),
                 }
-                let _ = reply.send(());
             }
 
             // Phase C 实现
@@ -327,7 +377,7 @@ impl MemoryActor {
             }
 
             // Shutdown 在外层 loop 处理
-            MemoryCommand::Shutdown => {}
+            MemoryCommand::Shutdown { .. } => {}
         }
     }
 
@@ -367,17 +417,69 @@ pub fn start_memory_with_options(options: MemoryOptions) -> anyhow::Result<Memor
 /// 与进程级全局静态析构产生竞态（Linux 偶发 SIGSEGV）。不需要显式 join
 /// 的调用方（如生产路径）可直接丢弃返回的 JoinHandle，actor 线程会在
 /// handle 全部释放后随通道关闭自行退出。
+fn spawn_rumination_worker(
+    mut rx: mpsc::Receiver<RuminationJob>,
+    actor_tx: mpsc::WeakSender<MemoryCommand>,
+) -> anyhow::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("tiangong-memory-rumination".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Memory 反刍 runtime 构建失败");
+            runtime.block_on(async move {
+                while let Some(job) = rx.recv().await {
+                    let started = std::time::Instant::now();
+                    let session_id = job.turn_result.session_id.clone();
+                    let turn_id = job.turn_result.turn_id.clone();
+                    let extraction =
+                        rumination::extract_enhanced_micro(&job.turn_result, job.model.as_ref())
+                            .await;
+                    tracing::info!(
+                        %session_id,
+                        %turn_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        episode_count = extraction.episodes.len(),
+                        entity_count = extraction.entities.len(),
+                        decision_count = extraction.decisions.len(),
+                        evidence_count = extraction.evidences.len(),
+                        "Memory 增强反刍提取完成"
+                    );
+                    let Some(actor_tx) = actor_tx.upgrade() else {
+                        tracing::debug!("Memory Actor 已关闭，停止反刍 worker");
+                        break;
+                    };
+                    if actor_tx
+                        .send(MemoryCommand::ApplyEnhancedMicroRumination {
+                            turn_result: Box::new(job.turn_result),
+                            extraction: Box::new(extraction),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!("Memory Actor 已关闭，停止反刍 worker");
+                        break;
+                    }
+                }
+            });
+        })
+        .map_err(Into::into)
+}
+
 pub(crate) fn spawn_memory_actor(
     options: MemoryOptions,
 ) -> anyhow::Result<(MemoryHandle, std::thread::JoinHandle<()>)> {
     let (tx, rx) = mpsc::channel(256);
+    let (rumination_tx, rumination_rx) = mpsc::channel(64);
 
     let store = MemoryStore::open().map_err(|e| {
         tracing::error!("Memory Store 初始化失败: {}", e);
         e
     })?;
 
-    let actor = MemoryActor::new(rx, store, options);
+    let actor = MemoryActor::new(rx, store, options.clone(), rumination_tx);
+    let _rumination_join = spawn_rumination_worker(rumination_rx, tx.downgrade())?;
 
     let join_handle = std::thread::Builder::new()
         .name("tiangong-memory-actor".into())
