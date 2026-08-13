@@ -33,7 +33,7 @@ use crate::loader::WasmPlugin;
 /// 注意：Wasmtime 的 Store 要求 `Send`（Engine 编译产物可跨线程），故
 /// `Arc<Mutex<WasmPlugin>>` 可用于 `spawn_blocking`。
 pub struct WasmPluginAdapter {
-    inner: RwLock<Arc<Mutex<WasmPlugin>>>,
+    inner: RwLock<Option<Arc<Mutex<WasmPlugin>>>>,
     config: PluginRuntimeConfig,
     /// 插件 id，构造期确定后不变。
     id: String,
@@ -69,7 +69,7 @@ impl WasmPluginAdapter {
             .map(|d| d.id)
             .unwrap_or_else(|_| "wasm-unknown".to_string());
         Self {
-            inner: RwLock::new(inner),
+            inner: RwLock::new(Some(inner)),
             id: id_string,
             config,
             feedback_tx: RwLock::new(None),
@@ -88,7 +88,7 @@ impl WasmPluginAdapter {
         sidecar: Option<Arc<dyn SidecarConnection>>,
     ) -> Self {
         Self {
-            inner: RwLock::new(Arc::new(Mutex::new(plugin))),
+            inner: RwLock::new(Some(Arc::new(Mutex::new(plugin)))),
             id,
             config,
             feedback_tx: RwLock::new(None),
@@ -104,11 +104,6 @@ impl WasmPluginAdapter {
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.enabled.load(Ordering::Acquire)
-    }
-
-    /// 返回内部 WasmPlugin 句柄的引用（供全局注册表查询 contributions/config）。
-    pub fn inner_handle(&self) -> Arc<Mutex<WasmPlugin>> {
-        self.current_inner()
     }
 
     pub(crate) fn runtime_config(&self) -> PluginRuntimeConfig {
@@ -148,10 +143,23 @@ impl WasmPluginAdapter {
             .inner
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *current = replacement;
+        *current = Some(replacement);
     }
 
-    fn current_inner(&self) -> Arc<Mutex<WasmPlugin>> {
+    /// 卸载内部 WASM 实例（drop Store），释放其对插件目录的 WASI preopen 句柄。
+    ///
+    /// Windows 上 cap-std 打开目录不带 FILE_SHARE_DELETE，只要 Store 还持有该目录，
+    /// 安装目录就无法 rename/delete，升级与卸载会失败。在改写目录前调用本方法释放句柄，
+    /// 后续 reload 会重建实例。
+    pub(crate) fn release_inner(&self) {
+        let mut current = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = None;
+    }
+
+    fn current_inner(&self) -> Option<Arc<Mutex<WasmPlugin>>> {
         self.inner
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -302,7 +310,10 @@ impl WasmPluginAdapter {
     where
         R: Send,
     {
-        call_wasm_off_runtime(self.current_inner(), call)
+        let inner = self
+            .current_inner()
+            .ok_or_else(|| anyhow::anyhow!("wasm 插件实例已卸载"))?;
+        call_wasm_off_runtime(inner, call)
     }
 
     /// 序列化 PluginSession 只读快照，在独立线程调 WASM 钩子。失败仅 warn。
@@ -388,7 +399,9 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        let inner = self.current_inner();
+        let Some(inner) = self.current_inner() else {
+            return;
+        };
         let plugin_id = self.id.clone();
         let hook_thread_id = plugin_id.clone();
         if let Err(error) = std::thread::Builder::new()
@@ -427,7 +440,9 @@ impl WasmPluginAdapter {
         if !self.is_enabled() {
             return;
         }
-        let inner = self.current_inner();
+        let Some(inner) = self.current_inner() else {
+            return;
+        };
         let plugin_id = self.id.clone();
         let hook_thread_id = plugin_id.clone();
         let idx = turn_start_idx as u32;
@@ -486,7 +501,9 @@ impl ToolOverrideHandler for WasmPluginAdapter {
             name: call.name.clone(),
             arguments,
         };
-        let inner = self.current_inner();
+        let Some(inner) = self.current_inner() else {
+            return Box::pin(async { None });
+        };
         let config = self.config.clone();
         Box::pin(async move {
             let result = task::spawn_blocking(move || {
