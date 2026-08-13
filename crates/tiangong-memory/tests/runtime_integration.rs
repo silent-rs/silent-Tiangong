@@ -9,9 +9,10 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tiangong_llm::{LlmEndpointConfig, ProviderProtocol};
 use tiangong_memory::{
-    Episode, EpisodeOutcome, MemoryKind, MemoryOptions, MemoryRecallRequest, MemoryRelationDraft,
-    MemoryRelationKind, MemoryVectorMode, RecallAnchors, RecallDepth, TurnArtifact,
-    TurnArtifactKind, TurnResult, load_injection_sync, start_with_options, workspace_id_from_path,
+    EnhancedTurnResult, Episode, EpisodeOutcome, MemoryCandidate, MemoryKind, MemoryOptions,
+    MemoryRecallRequest, MemoryRelationDraft, MemoryRelationKind, MemoryVectorMode, RecallAnchors,
+    RecallDepth, TurnArtifact, TurnArtifactKind, TurnResult, load_injection_sync,
+    start_with_options, workspace_id_from_path,
 };
 
 struct EnvGuard {
@@ -122,8 +123,23 @@ impl MockMemoryLlmServer {
 }
 
 /// 处理单个 Mock LLM 请求（在独立线程中运行）。
+fn start_slow_memory_llm(delay: Duration) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("绑定慢速 mock Memory LLM 失败");
+    let addr = listener.local_addr().expect("读取慢速 mock 地址失败");
+    let join = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("等待慢速 mock 请求失败");
+        handle_mock_request_with_delay(&mut stream, delay);
+    });
+    (format!("http://{addr}/v1"), join)
+}
 fn handle_mock_request(mut stream: std::net::TcpStream) {
-    let request = read_http_request(&mut stream);
+    handle_mock_request_with_delay(&mut stream, Duration::ZERO);
+}
+fn handle_mock_request_with_delay(stream: &mut std::net::TcpStream, delay: Duration) {
+    let request = read_http_request(stream);
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
     let body = request
         .as_deref()
         .map(memory_llm_mock_response)
@@ -451,6 +467,62 @@ async fn wait_for_unique_kind_hits(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Vec::new()
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn enhanced_rumination_enqueue_does_not_block_injection_reads() {
+    let (home, _workspace, workspace_path, workspace_id) = setup_workspace();
+    let _guard = EnvGuard::enter(home.path(), &workspace_path);
+    let (base_url, mock_join) = start_slow_memory_llm(Duration::from_secs(2));
+    let mut model = LlmEndpointConfig::new("test-key", &base_url, "memory-test");
+    model.protocol = ProviderProtocol::OpenAiChatCompletions;
+    model.timeout = Duration::from_secs(5);
+    model.max_retries = 0;
+    let handle =
+        start_with_options(MemoryOptions::new().with_model(model)).expect("启动 Memory 失败");
+    let turn_result = EnhancedTurnResult {
+        session_id: "rumination-queue-session".to_string(),
+        turn_id: "rumination-queue-turn".to_string(),
+        had_tool_calls: true,
+        user_input: "记录后台反刍队列优化".to_string(),
+        summary: "已将耗时提取移出 Memory Actor".to_string(),
+        workspace_id: Some(workspace_id.clone()),
+        memory_candidates: vec![MemoryCandidate {
+            tool_name: "coding".to_string(),
+            step_index: 0,
+            hint: "反刍队列优化".to_string(),
+            suggested_kinds: Vec::new(),
+            file_path: None,
+            url: None,
+            result_summary: Some("完成反刍队列优化".to_string()),
+            success: true,
+            tool_source: Some("file_operation".to_string()),
+            is_recalled_context: false,
+        }],
+        ..Default::default()
+    };
+
+    let enqueue_started = std::time::Instant::now();
+    handle
+        .run_enhanced_micro_rumination(turn_result)
+        .await
+        .expect("增强反刍应成功入队");
+    assert!(
+        enqueue_started.elapsed() < Duration::from_secs(1),
+        "增强反刍接口只能等待入队，不能等待模型提取"
+    );
+
+    let injection_started = std::time::Instant::now();
+    let _ = handle
+        .load_injection("rumination-queue-session", Some(&workspace_id))
+        .await;
+    assert!(
+        injection_started.elapsed() < Duration::from_secs(1),
+        "后台反刍执行期间 LoadInjection 不应被模型调用阻塞"
+    );
+    handle.shutdown().await;
+    mock_join.join().expect("慢速 mock Memory LLM 不应异常退出");
 }
 
 #[tokio::test(flavor = "current_thread")]

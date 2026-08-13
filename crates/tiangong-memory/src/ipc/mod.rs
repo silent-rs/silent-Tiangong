@@ -878,7 +878,7 @@ pub async fn handle_memory_request(
             Ok(MemoryIpcResponsePayload::Ack)
         }
         MemoryIpcRequestPayload::RunEnhancedMicroRumination { turn_result } => {
-            handle.run_enhanced_micro_rumination(turn_result).await;
+            handle.run_enhanced_micro_rumination(turn_result).await?;
             Ok(MemoryIpcResponsePayload::Ack)
         }
         MemoryIpcRequestPayload::RunMesoRumination {

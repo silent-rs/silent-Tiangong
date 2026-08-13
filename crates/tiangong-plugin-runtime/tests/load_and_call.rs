@@ -483,8 +483,7 @@ fn on_turn_finished_with_connection_forwards_rumination() {
     let adapter = WasmPluginAdapter::new(plugin, config);
 
     let mut session = test_session_with_user_message();
-    // 有用户消息时，on_turn_finished 应触发反刍（best-effort）。
-    // 反刍通知以 fire-and-forget 投递，等待模拟 sidecar 实际收到请求后再断言。
+    // 有用户消息时，on_turn_finished 应有序投递反刍任务并等待 sidecar 入队确认。
     <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
     assert!(sidecar.wait_for_call_count("run_enhanced_micro_rumination", 1));
     assert!(sidecar.called("run_enhanced_micro_rumination"));
@@ -498,8 +497,7 @@ fn on_turn_finished_with_connection_forwards_rumination() {
 }
 
 #[test]
-#[ignore = "耗时故障诊断，仅在手动复测运行中追加消息阻塞时执行"]
-fn detached_turn_finish_releases_caller_but_holds_wasm_instance_lock() {
+fn turn_finish_waits_only_for_sidecar_enqueue_and_releases_wasm_lock() {
     let sidecar = Arc::new(BlockingMemorySidecar::default());
     let Some(wasm) = wasm_or_skip() else {
         return;
@@ -509,71 +507,32 @@ fn detached_turn_finish_releases_caller_but_holds_wasm_instance_lock() {
         WasmPluginLoader::with_sidecar(&config, Some(sidecar.clone())).expect("创建加载器失败");
     let plugin = loader.load(&wasm, &config).expect("加载 wasm 组件失败");
     let adapter = Arc::new(WasmPluginAdapter::new(plugin, config));
-    let mut session = test_session_with_user_message();
-
-    let turn_finish_started = Instant::now();
-    <WasmPluginAdapter as Plugin>::on_turn_finished(&adapter, &mut session, 0);
-    let turn_finish_elapsed = turn_finish_started.elapsed();
-    let rumination_entered =
-        sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1));
-
-    let (config_started_tx, config_started_rx) = std::sync::mpsc::sync_channel(1);
-    let (config_finished_tx, config_finished_rx) = std::sync::mpsc::sync_channel(1);
-    let config_adapter = Arc::clone(&adapter);
-    let config_thread = std::thread::spawn(move || {
-        let started = Instant::now();
-        let _ = config_started_tx.send(());
-        <WasmPluginAdapter as Plugin>::on_config_updated(&config_adapter, &CoreConfig::default());
-        let _ = config_finished_tx.send(started.elapsed());
+    let session = test_session_with_user_message();
+    let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
+    let finish_adapter = Arc::clone(&adapter);
+    let finish_thread = std::thread::spawn(move || {
+        let mut session = session;
+        <WasmPluginAdapter as Plugin>::on_turn_finished(&finish_adapter, &mut session, 0);
+        let _ = finish_tx.send(());
     });
-    let config_started = config_started_rx
-        .recv_timeout(Duration::from_secs(1))
-        .is_ok();
-    let blocked_result = config_finished_rx.recv_timeout(Duration::from_millis(250));
-    let config_was_blocked = matches!(
-        &blocked_result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    assert!(sidecar.wait_for_call("run_enhanced_micro_rumination", Duration::from_secs(1)));
+    assert!(
+        finish_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+        "sidecar 尚未确认入队时，收尾调用不应虚报完成"
     );
-
     sidecar.release_rumination();
-    let config_elapsed = match blocked_result {
-        Ok(elapsed) => elapsed,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => config_finished_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("释放慢 sidecar 后配置通知应在 2 秒内完成"),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            panic!("配置通知线程在返回结果前断开")
-        }
-    };
-    config_thread.join().expect("配置通知线程不应异常退出");
-
+    finish_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("sidecar 确认入队后收尾调用应尽快返回");
+    finish_thread.join().expect("收尾线程不应异常退出");
+    let started = Instant::now();
+    <WasmPluginAdapter as Plugin>::on_config_updated(&adapter, &CoreConfig::default());
     assert!(
-        turn_finish_elapsed < Duration::from_secs(1),
-        "异步轮次收尾应在 1 秒内返回，实际耗时 {turn_finish_elapsed:?}"
+        started.elapsed() < Duration::from_secs(1),
+        "收尾入队完成后不应继续占用 WASM 实例锁"
     );
-    assert!(
-        rumination_entered,
-        "后台轮次收尾应在 1 秒内进入真实 sidecar"
-    );
-    assert!(config_started, "同步配置通知线程应在 1 秒内开始调用");
-    assert!(
-        config_was_blocked,
-        "后台收尾持有 WASM 实例锁时，同步配置通知不应提前完成"
-    );
-    assert!(
-        config_elapsed >= Duration::from_millis(250),
-        "同步配置通知应等待后台收尾释放实例锁，实际耗时 {config_elapsed:?}"
-    );
-    assert!(
-        sidecar.wait_for_call("reconfigure", Duration::from_millis(100)),
-        "释放后台收尾后应完成真实 reconfigure 调用"
-    );
-    assert!(
-        !sidecar.auto_released(),
-        "测试必须由显式释放完成，不能依赖 10 秒自动释放上限"
-    );
+    assert!(!sidecar.auto_released(), "测试不应依赖自动释放上限");
 }
-
 #[test]
 fn every_tenth_turn_forwards_meta_rumination() {
     let sidecar = Arc::new(MockMemorySidecar::default());

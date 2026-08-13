@@ -147,41 +147,29 @@ fn build_session_injection(episodes: &[Episode], session_id: &str) -> String {
     format!("# Session Memory ({session_id})\n更新时间: {now}\n\n## 本会话近期活动\n{items}\n")
 }
 
-/// 增强版 Micro 反刍。
-///
-/// 合并累积候选与增强轮次结果，执行多类型提取、去重写入和跨类型关联。
-/// 当候选列表为空时退化为普通 Micro 反刍。
-pub(crate) async fn process_enhanced_micro(
-    store: &mut MemoryStore,
+/// 在独立反刍 worker 中执行增强版 Micro 的耗时模型提取。
+pub(crate) async fn extract_enhanced_micro(
     enhanced: &EnhancedTurnResult,
-    workspace_id: Option<&str>,
     model: Option<&LlmEndpointConfig>,
-) -> Result<()> {
-    // 恢复原有分流：候选为空时走普通 Micro（与原生版本一致）。
-    let turn_result = TurnResult {
-        session_id: enhanced.session_id.clone(),
-        turn_id: enhanced.turn_id.clone(),
-        had_tool_calls: enhanced.had_tool_calls,
-        user_input: enhanced.user_input.clone(),
-        summary: enhanced.summary.clone(),
-        tool_calls: enhanced.tool_calls.clone(),
-        artifacts: enhanced.artifacts.clone(),
-        workspace_id: enhanced.workspace_id.clone(),
-    };
-
-    if enhanced.memory_candidates.is_empty() {
-        return process_micro(store, &turn_result, workspace_id, model).await;
-    }
-
+) -> crate::types::ExtractionOutput {
     tracing::debug!(
         candidate_count = enhanced.memory_candidates.len(),
-        "增强版 Micro 反刍：执行多类型提取"
+        "增强版 Micro 反刍：后台执行多类型提取"
     );
+    writer::extract_multi_type_memories_with_model(enhanced, model).await
+}
 
-    // 1. 多类型提取（由 Memory LLM 判断或规则 fallback）
-    let extraction = writer::extract_multi_type_memories_with_model(enhanced, model).await;
-
-    // 2. 去重写入 Episode
+/// 提交已完成模型提取的增强版 Micro 结果。
+///
+/// Actor 只在这里串行执行去重、写入、关联和 Injection 更新，避免耗时模型调用
+/// 阻塞下一轮 LoadInjection / Recall。
+pub(crate) async fn apply_enhanced_micro(
+    store: &mut MemoryStore,
+    enhanced: &EnhancedTurnResult,
+    extraction: &crate::types::ExtractionOutput,
+    workspace_id: Option<&str>,
+) -> Result<()> {
+    // 1. 去重写入 Episode
     let mut written_episode_ids = Vec::new();
     for episode in &extraction.episodes {
         if let Some(existing_id) = check_episode_dedup(store, &episode.title, &episode.keywords) {
@@ -204,7 +192,7 @@ pub(crate) async fn process_enhanced_micro(
         }
     }
 
-    // 3. 写入 Entity
+    // 2. 写入 Entity
     let mut written_entity_ids = Vec::new();
     for entity in &extraction.entities {
         match store.upsert_entity(entity.clone(), workspace_id) {
@@ -213,7 +201,7 @@ pub(crate) async fn process_enhanced_micro(
         }
     }
 
-    // 4. 写入 Decision
+    // 3. 写入 Decision
     let mut written_decision_ids = Vec::new();
     for decision in &extraction.decisions {
         match store.upsert_decision(decision.clone(), workspace_id) {
@@ -239,7 +227,7 @@ pub(crate) async fn process_enhanced_micro(
         &written_decision_ids,
     );
 
-    // 7. 更新 Session Injection
+    // 6. 更新 Session Injection
     let recent = store.recent_episodes_for_session(workspace_id, &enhanced.session_id, 3);
     if !recent.is_empty() {
         let content = build_session_injection(&recent, &enhanced.session_id);
