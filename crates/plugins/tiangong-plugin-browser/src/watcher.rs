@@ -129,7 +129,9 @@ impl BrowserWatcher {
                 POLL_TICK
             };
             sleep(tick).await;
-            // feedback channel 关闭时退出，避免 session 结束后 task 泄漏
+            // feedback channel 关闭表示旧轮已结束：**不退出观察循环**（观察器是
+            // 插件级单例，跨 session 复用；新轮会经 set_feedback_tx 注入新通道，
+            // 此处空转等待即可）。退出会导致新旧轮交接窗口内观察永久停止。
             let closed = self
                 .feedback_tx
                 .read()
@@ -137,9 +139,8 @@ impl BrowserWatcher {
                 .and_then(|g| g.as_ref().map(|tx| tx.is_closed()))
                 .unwrap_or(true);
             if closed {
-                tracing::debug!("browser watcher: feedback channel closed, stopping");
-                self.started.store(false, Ordering::SeqCst);
-                break;
+                // 通道已关闭：跳过本轮 observe/inject，等下一 tick 检查新通道。
+                continue;
             }
             self.maybe_observe_and_inject().await;
         }

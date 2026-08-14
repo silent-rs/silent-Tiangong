@@ -150,29 +150,52 @@ pub fn push_next_turn(session_id: &str, cmd: Command) -> bool {
     }
 }
 
+/// 查询指定会话的下一轮队列是否非空（后台自动启动前判断是否需要消费）。
+pub fn has_next_turn(session_id: &str) -> bool {
+    match next_turn_queue().lock() {
+        Ok(queue) => queue.get(session_id).is_some_and(|deque| !deque.is_empty()),
+        Err(_) => false,
+    }
+}
+
+/// 清空指定会话的下一轮队列（关闭路径：丢弃待启动消息，符合关闭语义）。
+pub fn clear_next_turn(session_id: &str) {
+    if let Ok(mut queue) = next_turn_queue().lock() {
+        queue.remove(session_id);
+    }
+}
+
 /// 将未处理完的命令按原顺序放回指定会话下一轮队列的**前端**
 /// （保存失败时恢复队列，保证消息不丢失、顺序不变，ALR-202）。
-pub fn requeue_next_turn_front(session_id: &str, commands: Vec<Command>) {
+/// 返回 `false` 表示队列锁异常，放回失败——调用方必须中止交接并报告，
+/// 不能当作已恢复。
+pub fn requeue_next_turn_front(session_id: &str, commands: Vec<Command>) -> bool {
     if commands.is_empty() {
-        return;
+        return true;
     }
-    if let Ok(mut queue) = next_turn_queue().lock() {
-        let deque = queue.entry(session_id.to_string()).or_default();
-        // 按原顺序插入到前端：从后往前 push_front 保持原始顺序。
-        for cmd in commands.into_iter().rev() {
-            deque.push_front(cmd);
+    match next_turn_queue().lock() {
+        Ok(mut queue) => {
+            let deque = queue.entry(session_id.to_string()).or_default();
+            // 按原顺序插入到前端：从后往前 push_front 保持原始顺序。
+            for cmd in commands.into_iter().rev() {
+                deque.push_front(cmd);
+            }
+            true
         }
+        Err(_) => false,
     }
 }
 
 /// 取出并清空指定会话的下一轮队列（下一轮 spawn 时调用）。
-pub fn drain_next_turn(session_id: &str) -> Vec<Command> {
-    if let Ok(mut queue) = next_turn_queue().lock()
-        && let Some(pending) = queue.remove(session_id)
-    {
-        pending.into_iter().collect()
-    } else {
-        Vec::new()
+/// 返回 `Err` 表示队列锁异常，调用方无法区分"没有消息"与"读取失败"，
+/// 必须中止交接并报告，不能按空队列继续启动（ALR-202）。
+pub fn drain_next_turn(session_id: &str) -> Result<Vec<Command>, crate::core::CoreError> {
+    match next_turn_queue().lock() {
+        Ok(mut queue) => Ok(queue
+            .remove(session_id)
+            .map(|pending| pending.into_iter().collect())
+            .unwrap_or_default()),
+        Err(_) => Err(crate::core::CoreError::WorkerStopped),
     }
 }
 
@@ -333,6 +356,40 @@ pub fn is_running(session_id: &str) -> bool {
     }
 }
 
+/// 构造仅用于注册表测试的最小 TurnContext（不发真实请求）。
+/// 定义在测试模块外（`pub(crate)`），供 core 模块的封口交接测试复用。
+#[cfg(test)]
+pub(crate) fn dummy_context() -> (TurnContext, String) {
+    use crate::agent_config::AgentConfig;
+    use crate::model::SingleProviderClient;
+    use tiangong_llm::ModelEndpoint;
+
+    let mut session = crate::session::Session::new("ingress-test");
+    let sid = session.id.clone();
+    let root = tempfile::tempdir().expect("临时目录创建失败");
+    session.bind_storage_root(root.path());
+    std::mem::forget(root);
+    let endpoint = ModelEndpoint {
+        base_url: "http://127.0.0.1:1".to_string(),
+        api_key: "test-key".to_string(),
+        model: "test-model".to_string(),
+        ..Default::default()
+    };
+    let ctx = TurnContext::builder()
+        .client(SingleProviderClient::new(endpoint))
+        .session(session)
+        .stream_tx(std::sync::mpsc::channel::<tiangong_types::StreamEvent>().0)
+        .plugins(Vec::new())
+        .context_limit(1_000)
+        .agent_config(AgentConfig::default())
+        .trust_mode(crate::permission::TrustMode::FullTrust)
+        .observer(crate::observe::Observer::new(std::env::temp_dir()))
+        .tools(Vec::new())
+        .tool_overrides(std::collections::HashMap::new())
+        .build();
+    (ctx, sid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,14 +426,17 @@ mod tests {
     #[test]
     fn next_turn_queue_round_trip() {
         let sid = format!("next-turn-{}", scru128::new_string());
-        assert!(drain_next_turn(&sid).is_empty(), "空队列应返回空");
+        assert!(drain_next_turn(&sid).unwrap().is_empty(), "空队列应返回空");
         assert!(push_next_turn(&sid, Command::Cancel), "入队应返回 true");
         assert!(push_next_turn(&sid, Command::Shutdown), "入队应返回 true");
-        let drained = drain_next_turn(&sid);
+        let drained = drain_next_turn(&sid).unwrap();
         assert_eq!(drained.len(), 2, "应按序取出全部排队命令");
         assert!(matches!(drained[0], Command::Cancel));
         assert!(matches!(drained[1], Command::Shutdown));
-        assert!(drain_next_turn(&sid).is_empty(), "取出后队列应清空");
+        assert!(
+            drain_next_turn(&sid).unwrap().is_empty(),
+            "取出后队列应清空"
+        );
     }
 
     #[test]
@@ -385,24 +445,27 @@ mod tests {
         // 先入队两条已处理（保留），再放回 [A, B, C] 到前端。
         push_next_turn(&sid, Command::Cancel);
         push_next_turn(&sid, Command::Shutdown);
-        requeue_next_turn_front(
-            &sid,
-            vec![
-                Command::SetTitle {
-                    title: "A".to_string(),
-                    only_if_default: false,
-                },
-                Command::SetTitle {
-                    title: "B".to_string(),
-                    only_if_default: false,
-                },
-                Command::SetTitle {
-                    title: "C".to_string(),
-                    only_if_default: false,
-                },
-            ],
+        assert!(
+            requeue_next_turn_front(
+                &sid,
+                vec![
+                    Command::SetTitle {
+                        title: "A".to_string(),
+                        only_if_default: false,
+                    },
+                    Command::SetTitle {
+                        title: "B".to_string(),
+                        only_if_default: false,
+                    },
+                    Command::SetTitle {
+                        title: "C".to_string(),
+                        only_if_default: false,
+                    },
+                ],
+            ),
+            "放回队列应返回 true"
         );
-        let drained = drain_next_turn(&sid);
+        let drained = drain_next_turn(&sid).unwrap();
         assert_eq!(drained.len(), 5, "放回的命令应插入到已有队列之前");
         assert!(matches!(
             &drained[0],
@@ -421,38 +484,10 @@ mod tests {
             matches!(drained[4], Command::Shutdown),
             "原有队列保持在其后"
         );
-    }
-
-    /// 构造仅用于注册表测试的最小 TurnContext（不发真实请求）。
-    fn dummy_context() -> (TurnContext, String) {
-        use crate::agent_config::AgentConfig;
-        use crate::model::SingleProviderClient;
-        use tiangong_llm::ModelEndpoint;
-
-        let mut session = crate::session::Session::new("ingress-test");
-        let sid = session.id.clone();
-        let root = tempfile::tempdir().expect("临时目录创建失败");
-        session.bind_storage_root(root.path());
-        std::mem::forget(root);
-        let endpoint = ModelEndpoint {
-            base_url: "http://127.0.0.1:1".to_string(),
-            api_key: "test-key".to_string(),
-            model: "test-model".to_string(),
-            ..Default::default()
-        };
-        let ctx = TurnContext::builder()
-            .client(SingleProviderClient::new(endpoint))
-            .session(session)
-            .stream_tx(std::sync::mpsc::channel::<tiangong_types::StreamEvent>().0)
-            .plugins(Vec::new())
-            .context_limit(1_000)
-            .agent_config(AgentConfig::default())
-            .trust_mode(crate::permission::TrustMode::FullTrust)
-            .observer(crate::observe::Observer::new(std::env::temp_dir()))
-            .tools(Vec::new())
-            .tool_overrides(std::collections::HashMap::new())
-            .build();
-        (ctx, sid)
+        assert!(
+            !has_next_turn(&sid) || drain_next_turn(&sid).unwrap().is_empty(),
+            "队列状态查询与取出一致"
+        );
     }
 
     /// ALR-201：注册表级封口门控——spawn_turn 注册的任务，封口前命令可投递，
@@ -508,7 +543,7 @@ mod tests {
         );
 
         // 下一轮交接：队列中的消息可被取出。
-        let queued = drain_next_turn(&sid);
+        let queued = drain_next_turn(&sid).expect("队列读取不应失败");
         assert_eq!(queued.len(), 1, "封口期间的消息应在队列中");
 
         // 释放任务，注册表自清理。
