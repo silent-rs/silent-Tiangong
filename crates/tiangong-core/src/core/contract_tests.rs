@@ -1,13 +1,8 @@
 //! 新契约行为测试：Inbox、单 driver、最新 Session 与关闭可靠性（requirements.md §5.2）。
 //!
 //! 本文件针对 `TiangongCore::deliver` 公开边界断言目标行为（ALR-101~106、201~206），
-//! 不固化当前的临时下一轮队列和每消息后台任务等内部实现。大部分用例在当前过渡
-//! 实现上**预期失败**，以 `#[ignore]` 标注启用任务：它们证明旧交接方案的
-//! “合并轮次 / 旧 Session 快照 / 关闭静默丢消息 / 空闲注入被拒”缺陷，并守护
-//! 任务 14 的 Agent Inbox 与唯一 driver 不被回退。启用任务完成后移除 ignore，
-//! 测试必须转绿。
-//!
-//! 通过 `cargo test -p tiangong-core -- --ignored` 可单独运行并核对失败形态。
+//! 不依赖内部调度实现细节。任务 14（Agent Inbox 与唯一 driver）实现后这些用例
+//! 必须保持绿色，防止回退到临时队列、每消息后台任务或旧 Session 快照。
 
 use std::time::{Duration, Instant};
 
@@ -45,7 +40,55 @@ fn core_for(root: &std::path::Path, sid: &str, endpoint_base: &str) -> TiangongC
         .build()
 }
 
-/// 挂载一个永久匹配的 400 请求错误（4xx 不重试），让每个 turn 快速失败结束。
+/// OpenAI SSE chunk（`data: {json}\n\n`）+ 末尾 `[DONE]`。
+fn sse_body(chunks: &[serde_json::Value]) -> Vec<u8> {
+    let mut body = String::new();
+    for chunk in chunks {
+        body.push_str(&format!("data: {}\n\n", chunk));
+    }
+    body.push_str("data: [DONE]\n\n");
+    body.into_bytes()
+}
+
+/// 纯文本 delta chunk。
+fn text_delta_chunk(content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl-contract",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": content},
+            "finish_reason": null,
+        }],
+    })
+}
+
+/// 按挂载顺序（FIFO）挂载一条只响应一次的 SSE mock，可带延迟（挂起当前请求）。
+async fn mount_sse_with_delay(
+    server: &wiremock::MockServer,
+    chunks: Vec<serde_json::Value>,
+    delay: Option<Duration>,
+) {
+    let mut response =
+        wiremock::ResponseTemplate::new(200).set_body_raw(sse_body(&chunks), "text/event-stream");
+    if let Some(delay) = delay {
+        response = response.set_delay(delay);
+    }
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/chat/completions"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer test-key",
+        ))
+        .respond_with(response)
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
+/// 挂载一个永久匹配的 400 请求错误（4xx 不重试），让 turn 快速失败结束。
 async fn mount_permanent_error(server: &wiremock::MockServer) {
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/chat/completions"))
@@ -67,22 +110,31 @@ async fn mount_permanent_error(server: &wiremock::MockServer) {
         .await;
 }
 
-/// 等待 `sid` 的活跃 turn 与下一轮队列全部排空。
-async fn wait_idle(sid: &str) {
+/// 等待磁盘 session 中全部 `ids` 消息都获得 turn 终态（driver 排空的最终信号；
+/// 瞬时 is_running=false 不能证明 Inbox 已排空——driver 启动前也存在该窗口）。
+async fn wait_all_turns_settled(root: &std::path::Path, sid: &str, ids: &[String]) {
     let deadline = Instant::now() + WAIT;
-    while (crate::shared_runtime::is_running(sid) || crate::shared_runtime::has_next_turn(sid))
-        && Instant::now() < deadline
-    {
+    loop {
+        let settled = Session::load_from_storage(root, sid)
+            .map(|session| {
+                ids.iter().all(|id| {
+                    session
+                        .messages
+                        .iter()
+                        .any(|m| &m.id == id && m.turn_status.is_some())
+                })
+            })
+            .unwrap_or(false);
+        if settled {
+            return;
+        }
+        assert!(Instant::now() < deadline, "等待全部 turn 完成超时");
         tokio::time::sleep(POLL).await;
     }
 }
 
 /// 空闲期快速连发的多条用户消息应按 FIFO 各成一个 turn（ALR-101/104）：
 /// 每条消息在磁盘 session 上各自获得独立的 turn 终态，由同一 driver 顺序执行。
-///
-/// 当前实现：后续消息经命令通道并入当前轮重启，最终只有一条消息携带 turn
-/// 状态（其余被合并），正是要消除的合并轮次行为。
-#[ignore = "任务 14：Agent Inbox next_turn FIFO 实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rapid_followups_execute_as_separate_turns() {
     let root = tempfile::tempdir().expect("创建临时目录失败");
@@ -102,11 +154,11 @@ async fn rapid_followups_execute_as_separate_turns() {
         .expect("空闲期投递应被接受");
     }
 
-    wait_idle(&sid).await;
-    // 排空后额外等待，确认没有延迟启动的后续 turn。
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_all_turns_settled(root.path(), &sid, &ids).await;
+    // 全部完成后稍候，确认没有延迟启动的后续 turn。
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
-        !crate::shared_runtime::is_running(&sid),
+        !crate::react::inbox::is_running(&sid),
         "全部 followup 处理完毕后应回到空闲"
     );
 
@@ -126,68 +178,62 @@ async fn rapid_followups_execute_as_separate_turns() {
 /// 封口交接的下一 turn 必须在真正开始时读取最新 Session（ALR-201/204）：
 /// 前一 turn 提交完成后的最终数据必须出现在下一 turn 的模型请求中。
 ///
-/// 当前实现：封口时提前 build_turn_context 捕获旧 Session 快照，旧轮之后
-/// 落盘的最终消息对下一轮模型请求不可见。
-#[ignore = "任务 14：下一 turn 从最新 Session 构建实现后启用"]
+/// 旧实现：封口时提前 build_turn_context 捕获旧 Session 快照，旧轮之后落盘的
+/// 最终消息对下一轮模型请求不可见。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealed_next_turn_reads_latest_session() {
     let root = tempfile::tempdir().expect("创建临时目录失败");
     let sid = format!("latest-session-{}", scru128::new_string());
     let server = wiremock::MockServer::start().await;
-    mount_permanent_error(&server).await;
     let core = core_for(root.path(), &sid, &server.uri());
 
-    // 挂起一个占用注册表的旧轮（release 控制结束），并进入封口态。
-    let (mut ctx, _) = crate::shared_runtime::dummy_context();
-    ctx.session.id = sid.clone();
-    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    crate::shared_runtime::spawn_turn(ctx, move |_ctx, cmd_rx| {
-        Ok(async move {
-            let _cmd_rx = cmd_rx;
-            let _ = release_rx.await;
-        })
-    })
-    .expect("spawn 旧轮失败");
-    crate::shared_runtime::begin_seal(&sid);
+    // turn A 的响应带唯一标记（当前实现经 Summary 阶段保存为最终回复并落盘）。
+    let marker = format!("SEALED-TURN-A-FINAL-{sid}");
+    mount_sse_with_delay(
+        &server,
+        vec![text_delta_chunk(&marker)],
+        Some(Duration::from_millis(300)),
+    )
+    .await;
+    mount_sse_with_delay(&server, vec![text_delta_chunk(&marker)], None).await;
+    // turn B 的请求快速失败（请求体仍可捕获）。
+    mount_permanent_error(&server).await;
 
-    // 封口窗口投递下一条用户消息：入队即接受。
+    // A 执行中投递 B（followup 排队，由同一 driver 在 A 提交后继续执行）。
     core.deliver(AgentInputKind::prepared_with_id(
-        format!("{sid}-next"),
+        format!("{sid}-a"),
+        vec![tiangong_types::ContentBlock::text("第一条消息")],
+    ))
+    .expect("A 应被接受");
+    core.deliver(AgentInputKind::prepared_with_id(
+        format!("{sid}-b"),
         vec![tiangong_types::ContentBlock::text("请基于上一轮结果继续")],
     ))
-    .expect("封口窗口消息应被接受");
+    .expect("B 应被接受");
 
-    // 模拟旧轮（turn A）最终提交落盘：写入带唯一标记的最终 assistant 消息。
-    let marker = format!("SEALED-TURN-A-FINAL-{sid}");
-    {
-        let mut session = Session::load_from_storage(root.path(), &sid).expect("加载失败");
-        session.append_message(crate::session::MessageRole::Assistant, &marker);
-        session.try_persist_to_disk().expect("旧轮最终落盘失败");
+    // 等待 B 的模型请求出现（B 只会在 A 提交落盘后由同一 driver 启动）。
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let requests = server.received_requests().await.expect("读取请求失败");
+        let saw_marker = requests.iter().any(|request| {
+            request.url.path() == "/chat/completions"
+                && String::from_utf8_lossy(&request.body).contains(&marker)
+        });
+        if saw_marker {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "等待下一 turn 模型请求超时：请求中始终未见前一 turn 的最终消息"
+        );
+        tokio::time::sleep(POLL).await;
     }
-
-    // 释放旧轮：交接启动下一 turn，其模型请求打到 mock。
-    release_tx.send(()).expect("释放旧轮失败");
-    wait_idle(&sid).await;
-
-    let requests = server.received_requests().await.expect("读取请求失败");
-    let saw_marker = requests.iter().any(|request| {
-        request.url.path() == "/chat/completions"
-            && String::from_utf8_lossy(&request.body).contains(&marker)
-    });
-    assert!(
-        saw_marker,
-        "下一 turn 的模型请求必须包含前一 turn 最终提交的消息（最新 Session），不能使用旧快照"
-    );
     core.shutdown_join().expect("关闭失败");
 }
 
 /// 关闭不得静默丢弃已确认接受的消息（ALR-202/206）：
 /// deliver 已返回 Ok 的消息，在关闭后必须能在磁盘 session 找到（可恢复），
-/// 或关闭本身返回明确失败；且关闭后不得再启动新 turn、发出新的模型请求。
-///
-/// 当前实现：关闭路径 clear_next_turn 直接清空已接受队列，磁盘无消息且
-/// shutdown 返回 Ok——静默丢弃。
-#[ignore = "任务 14：关闭可靠性（Inbox 持久化或明确失败）实现后启用"]
+/// 或关闭本身返回明确失败；且关闭后不得为被丢弃的消息发出模型请求。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_does_not_silently_drop_accepted_message() {
     let root = tempfile::tempdir().expect("创建临时目录失败");
@@ -195,56 +241,57 @@ async fn shutdown_does_not_silently_drop_accepted_message() {
     let server = wiremock::MockServer::start().await;
     let core = core_for(root.path(), &sid, &server.uri());
 
-    // 挂起一个读取命令的旧轮：收到 Cancel（关闭路径强制投递）即退出。
-    let (mut ctx, _) = crate::shared_runtime::dummy_context();
-    ctx.session.id = sid.clone();
-    crate::shared_runtime::spawn_turn(ctx, move |_ctx, mut cmd_rx| {
-        Ok(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                if matches!(cmd, crate::core::command::Command::Cancel) {
-                    break;
-                }
-            }
-        })
-    })
-    .expect("spawn 旧轮失败");
-    crate::shared_runtime::begin_seal(&sid);
+    // turn A 的模型响应长时间挂起（模拟长任务），关闭时被强制取消。
+    mount_sse_with_delay(
+        &server,
+        vec![text_delta_chunk("长时间任务执行中")],
+        Some(Duration::from_secs(30)),
+    )
+    .await;
 
     let msg_id = format!("{sid}-accepted");
     core.deliver(AgentInputKind::prepared_with_id(
         msg_id.clone(),
-        vec![tiangong_types::ContentBlock::text("关闭前最后一条消息")],
+        vec![tiangong_types::ContentBlock::text("关闭前正在处理的消息")],
     ))
-    .expect("封口窗口消息应被接受（已确认）");
+    .expect("消息 A 应被接受（已确认）");
+    core.deliver(AgentInputKind::prepared_with_id(
+        format!("{sid}-pending"),
+        vec![tiangong_types::ContentBlock::text("排队未处理的消息 B")],
+    ))
+    .expect("排队消息 B 应被接受（已确认）");
 
     let shutdown_result = core.shutdown_join();
-    // 关闭后等待任何竞态启动的交接任务安定。
+    // 关闭后等待任何竞态任务安定。
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let persisted = Session::load_from_storage(root.path(), &sid)
-        .map(|session| session.messages.iter().any(|m| m.id == msg_id))
+        .map(|session| {
+            session
+                .messages
+                .iter()
+                .any(|m| m.id == format!("{sid}-pending"))
+        })
         .unwrap_or(false);
     assert!(
         persisted || shutdown_result.is_err(),
         "已确认接受的消息必须被持久化（可恢复）或让关闭返回明确失败，不得静默丢弃"
     );
     assert!(
-        !crate::shared_runtime::is_running(&sid),
+        !crate::react::inbox::is_running(&sid),
         "关闭后不得残留或新启动 turn task"
     );
     let requests = server.received_requests().await.expect("读取请求失败");
     assert!(
-        requests.is_empty(),
+        requests.iter().all(|request| {
+            !String::from_utf8_lossy(&request.body).contains("排队未处理的消息 B")
+        }),
         "关闭后不得为被丢弃的消息发出任何模型请求"
     );
 }
 
 /// 空闲期的工具注入（inject）应被接受并保留（ALR-102/106）：
 /// inject 不唤醒 driver、不启动 turn，等待下一次自然 step 边界生效。
-///
-/// 当前实现：空闲期 send_command 无活跃任务直接失败，deliver 返回
-/// WorkerStopped——注入内容丢失。
-#[ignore = "任务 14：Agent Inbox next_step（inject 不唤醒）实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_tool_injection_accepted_without_wake() {
     let root = tempfile::tempdir().expect("创建临时目录失败");
@@ -261,7 +308,7 @@ async fn idle_tool_injection_accepted_without_wake() {
         "空闲期 inject 应被 Inbox 接受（等待下一自然 step），当前实现直接拒绝: {result:?}"
     );
     assert!(
-        !crate::shared_runtime::is_running(&sid),
+        !crate::react::inbox::is_running(&sid),
         "inject 不得唤醒 driver 或启动 turn"
     );
     core.shutdown_join().expect("关闭失败");

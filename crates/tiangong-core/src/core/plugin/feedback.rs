@@ -4,7 +4,7 @@
 //! 按命令顺序处理。插件不持有 Session、用量收集器或前端事件发送端。
 
 use crate::core::command::Command;
-use crate::shared_runtime::CommandIngress;
+use crate::react::inbox::CommandIngress;
 
 /// 插件向 Core 投递的会话注入反馈。
 #[derive(Debug, Clone)]

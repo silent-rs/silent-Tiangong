@@ -58,23 +58,25 @@ impl AgentInputKind {
         }))
     }
 
-    /// 便捷构造：用户消息（触发 turn）。
+    /// 便捷构造：用户消息（触发 turn，followup 语义）。
     pub fn message(content: impl Into<String>) -> Self {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared: vec![tiangong_types::ContentBlock::text(content)],
             message_id: None,
+            delivery: MessageDelivery::default(),
         })
     }
 
-    /// 便捷构造：已由宿主入口准备完成的用户消息。
+    /// 便捷构造：已由宿主入口准备完成的用户消息（followup 语义）。
     pub fn prepared(prepared: Vec<tiangong_types::ContentBlock>) -> Self {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: None,
+            delivery: MessageDelivery::default(),
         })
     }
 
-    /// 便捷构造：带稳定消息 ID 的 Prepared 用户消息。
+    /// 便捷构造：带稳定消息 ID 的 Prepared 用户消息（followup 语义）。
     pub fn prepared_with_id(
         message_id: impl Into<String>,
         prepared: Vec<tiangong_types::ContentBlock>,
@@ -82,6 +84,20 @@ impl AgentInputKind {
         AgentInputKind::Message(MessageInput::UserMessage {
             prepared,
             message_id: Some(message_id.into()),
+            delivery: MessageDelivery::default(),
+        })
+    }
+
+    /// 便捷构造：带投递语义与稳定消息 ID 的用户消息。
+    pub fn prepared_with_delivery(
+        message_id: impl Into<String>,
+        prepared: Vec<tiangong_types::ContentBlock>,
+        delivery: MessageDelivery,
+    ) -> Self {
+        AgentInputKind::Message(MessageInput::UserMessage {
+            prepared,
+            message_id: Some(message_id.into()),
+            delivery,
         })
     }
 
@@ -111,6 +127,16 @@ impl AgentInputKind {
 
 // ===== Message 层 =====
 
+/// 用户消息的投递语义（ALR-106：调用方必须明确选择，不能由封口时序隐式改变）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MessageDelivery {
+    /// followup：完整后续请求，进入 `next_turn` FIFO；当前 turn 完成后开始新 turn。
+    #[default]
+    Followup,
+    /// steer：修正当前意图，唤醒当前活动；无活动轮时等同开始新 turn。
+    Steer,
+}
+
 /// 对话消息层输入。
 pub enum MessageInput {
     /// 用户消息（触发 Agent 执行一轮 turn）。
@@ -118,6 +144,8 @@ pub enum MessageInput {
         prepared: Vec<tiangong_types::ContentBlock>,
         /// 前端预生成的消息 ID（用于流式复用），None 则由后端生成。
         message_id: Option<String>,
+        /// 投递语义，默认 followup（ALR-101/106）。
+        delivery: MessageDelivery,
     },
 }
 

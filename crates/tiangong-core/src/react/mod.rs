@@ -7,6 +7,7 @@ pub mod context;
 mod contract_tests;
 mod execute;
 mod helpers;
+pub mod inbox;
 mod interrupt;
 pub mod message;
 mod outcome;

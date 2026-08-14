@@ -155,7 +155,7 @@ fn spawn_title_generation(ctx: &TurnContext) {
         if clean.is_empty() {
             return;
         }
-        let _ = crate::shared_runtime::send_command(
+        let _ = crate::react::inbox::send_command(
             &session_id,
             Command::SetTitle {
                 title: clean,

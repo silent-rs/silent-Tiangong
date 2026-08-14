@@ -894,7 +894,7 @@ pub(super) async fn execute_turn(
             // 直接形成终态；继续命令（引导/工具注入）恢复 Accepting 并重启；
             // 无决定性命令 → Committing，刷新为最新累计用量后提交（ALR-111）。
             ExecutionPhase::PendingFinish(result) => {
-                crate::shared_runtime::begin_seal(&ctx.session.id);
+                crate::react::inbox::begin_seal(&ctx.session.id);
                 let mut pending_result = result;
                 loop {
                     let next = match cmd_rx.try_recv() {
@@ -921,17 +921,17 @@ pub(super) async fn execute_turn(
                         CommandEffect::KeepCurrent => {}
                         CommandEffect::ToPhase(phase) => {
                             // 继续命令：恢复接收，回到主循环驱动新阶段。
-                            crate::shared_runtime::reopen(&ctx.session.id);
+                            crate::react::inbox::reopen(&ctx.session.id);
                             state.install_phase(phase);
                             continue 'agent_loop;
                         }
                         CommandEffect::Terminate(terminal) => {
-                            crate::shared_runtime::commit_ingress(&ctx.session.id);
+                            crate::react::inbox::commit_ingress(&ctx.session.id);
                             break 'agent_loop terminal;
                         }
                     }
                 }
-                crate::shared_runtime::commit_ingress(&ctx.session.id);
+                crate::react::inbox::commit_ingress(&ctx.session.id);
                 pending_result.usage = state.accumulated_usage.clone();
                 tracing::debug!(
                     session_id = %ctx.session.id,
