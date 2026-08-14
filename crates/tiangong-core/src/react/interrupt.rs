@@ -9,12 +9,8 @@ use super::execute::{
     AgentLoopState, ToolInjectionBuffer, persist_streamed_react_message, record_rejected_tool_call,
 };
 use super::message::append_tool_result_message;
-use super::summary::persist_partial_summary;
 
-/// 持久化被中断的 LLM 请求已流式收到的部分输出。
-///
-/// Summary 的部分输出降级为 React 过程消息（ALR-104）——半截总结不得保持最终
-/// Summary 身份；ForceFinal 无可靠完整内容，丢弃不提交。
+/// 持久化被中断的 LLM 请求已流式收到的部分输出（降级为 React 过程消息）。
 pub(super) fn persist_interrupted_llm_output(
     ctx: &mut TurnContext,
     purpose: &LlmPurpose,
@@ -23,10 +19,9 @@ pub(super) fn persist_interrupted_llm_output(
     streamed_reasoning: &str,
 ) {
     match purpose {
-        LlmPurpose::React { .. } | LlmPurpose::Summary { .. } => {
+        LlmPurpose::React { .. } => {
             persist_streamed_react_message(ctx, pending_msg_id, streamed_text, streamed_reasoning);
         }
-        LlmPurpose::ForceFinal { .. } => {}
     }
 }
 
@@ -55,9 +50,7 @@ pub(super) async fn interrupt_active_work(
         "中断主循环直接拥有的活动"
     );
     match phase {
-        ExecutionPhase::WaitingModel(active)
-        | ExecutionPhase::CheckingCompletion(active)
-        | ExecutionPhase::ForceFinalPhase(active) => {
+        ExecutionPhase::WaitingModel(active) => {
             let ActiveLlm {
                 purpose,
                 pending_msg_id,
@@ -70,31 +63,14 @@ pub(super) async fn interrupt_active_work(
             } = active;
             sink.finish();
             abort_and_join(task).await;
-            if downgrade_summary {
-                persist_interrupted_llm_output(
-                    ctx,
-                    &purpose,
-                    &pending_msg_id,
-                    &streamed_text,
-                    &streamed_reasoning,
-                );
-            } else {
-                match purpose {
-                    LlmPurpose::React { .. } => persist_streamed_react_message(
-                        ctx,
-                        &pending_msg_id,
-                        &streamed_text,
-                        &streamed_reasoning,
-                    ),
-                    LlmPurpose::Summary { .. } => persist_partial_summary(
-                        ctx,
-                        &pending_msg_id,
-                        &streamed_text,
-                        &streamed_reasoning,
-                    ),
-                    LlmPurpose::ForceFinal { .. } => {}
-                }
-            }
+            let _ = downgrade_summary;
+            persist_interrupted_llm_output(
+                ctx,
+                &purpose,
+                &pending_msg_id,
+                &streamed_text,
+                &streamed_reasoning,
+            );
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);
         }
@@ -158,8 +134,7 @@ pub(super) async fn interrupt_active_work(
         ExecutionPhase::PreparingTools(_) | ExecutionPhase::PendingFinish(_) => {
             // 无在途活动；PreparingTools 的悬空调用由下方统一闭合。
         }
-        ExecutionPhase::NeedModel | ExecutionPhase::StartCheckingCompletion => {}
-        ExecutionPhase::StartForceFinal { .. } => {}
+        ExecutionPhase::NeedModel => {}
     }
 
     injections.commit(ctx);

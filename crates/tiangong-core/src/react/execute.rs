@@ -19,8 +19,7 @@ use crate::model::{
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
-    build_thinking_config, emit_token_usage, persist_error, rebuild_system_prompt,
-    select_client_for_request,
+    build_thinking_config, emit_token_usage, persist_error, select_client_for_request,
 };
 use crate::react::message::*;
 use crate::runtime::LlmOutputRecord;
@@ -31,23 +30,13 @@ use crate::turn_context::TurnContext;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::command::{CommandEffect, Deferred, handle_command};
-use super::completion_policy::{
-    CompletionAction, CompletionPolicy, DefaultCompletionPolicy, TextCompletionInput,
-};
-use super::compression::{
-    ActiveCompression, CompressionContinuation, ReactTextDisposition, observed_total_tokens,
-};
-use super::helpers::looks_like_final_answer;
+use super::compression::{ActiveCompression, CompressionContinuation, observed_total_tokens};
+use super::contract::{ReactTextDisposition, TaskContract};
 use super::outcome::TurnExecutionResult;
 use super::phase::{
     ActiveLlm, ApprovalPhase, CompressionPhase, ExecutionBudget, ExecutionPhase, LlmPurpose,
     PendingApproval, PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase,
     ToolTaskOutput,
-};
-use super::summary::{
-    ForceFinalReason, SummaryDecision, build_force_final_request, commit_summary_message,
-    parse_summary_phase_output, persist_partial_summary, promote_last_react_message_to_summary,
-    request_for_summary_phase,
 };
 use super::tool_call::start_tool_call;
 
@@ -391,6 +380,7 @@ fn record_completed_tool_call(
     ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
     history: &mut ToolCallHistory,
+    contract: &mut TaskContract,
 ) -> bool {
     let CompletedToolCall {
         call,
@@ -399,6 +389,8 @@ fn record_completed_tool_call(
         result,
         duration_ms,
     } = completion;
+    // 工具结果落库前更新义务状态：只有成功结果可满足义务（ALR-307）。
+    contract.record_tool_result(result.ok);
     ctx.observer.audit_tool_execution(
         &ctx.session.id,
         &call.name,
@@ -491,22 +483,25 @@ fn append_failure_recovery_prompt(
 }
 
 /// Agent Loop 状态：单一 `ExecutionPhase`（take/install 所有权模式，见 design.md
-/// 3.1）+ 预算 + 累计用量 + 工具去重记录。阶段持有的活动资源（模型请求/工具
-/// 任务/审批/压缩）都在 phase 变体内，不再有并列活动 `Option`（ALR-001）。
+/// 3.1）+ 预算 + 累计用量 + 工具去重记录 + 工具义务契约。阶段持有的活动资源
+/// （模型请求/工具任务/审批/压缩）都在 phase 变体内，不再有并列活动 `Option`
+/// （ALR-001）。
 pub(super) struct AgentLoopState {
     pub(super) phase: Option<ExecutionPhase>,
     pub(super) budget: ExecutionBudget,
     pub(super) accumulated_usage: TokenUsage,
     pub(super) tool_history: ToolCallHistory,
+    pub(super) contract: TaskContract,
 }
 
 impl AgentLoopState {
-    fn new() -> Self {
+    fn new(ctx: &TurnContext) -> Self {
         Self {
             phase: Some(ExecutionPhase::NeedModel),
             budget: ExecutionBudget::default(),
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
+            contract: TaskContract::from_session_anchor(ctx),
         }
     }
 
@@ -524,8 +519,9 @@ impl AgentLoopState {
         self.phase = Some(phase);
     }
 
-    pub(super) fn reset_react_phase(&mut self) {
-        self.budget.reset_react_phase();
+    /// 新用户意图（steer 注入）：重建工具义务契约并清工具去重记录。
+    pub(super) fn rebuild_for_new_intent(&mut self, ctx: &TurnContext) {
+        self.contract = TaskContract::from_session_anchor(ctx);
         self.tool_history.clear();
     }
 }
@@ -605,8 +601,9 @@ fn handle_react_text_response(
     response: &ModelFunctionResponse,
     state: &AgentLoopState,
 ) -> ReactTextDisposition {
+    // 合成占位符不是有效输出：不保存为消息，直接进入修复路径。
     if is_synthetic_tool_call_placeholder(&response.text) {
-        return ReactTextDisposition::EnterSummary;
+        return state.contract.gate_placeholder();
     }
 
     upsert_assistant_text_message(
@@ -639,19 +636,9 @@ fn handle_react_text_response(
     );
     ctx.session.persist_to_disk();
 
-    // 完成度判定经 CompletionPolicy（ALR-303）：默认策略保持既有行为；占位符已
-    // 在上方提前进入检查，此处 synthetic=false。
-    let input = TextCompletionInput {
-        continuation_count: state.budget.continuation_count,
-        executed_tool_in_phase: state.budget.executed_tool_in_phase,
-        text_empty: response.text.trim().is_empty(),
-        looks_like_final: looks_like_final_answer(&response.text),
-        synthetic_placeholder: false,
-    };
-    match DefaultCompletionPolicy.decide_after_text(&input) {
-        CompletionAction::Finish => ReactTextDisposition::Complete,
-        CompletionAction::CheckCompletion => ReactTextDisposition::EnterSummary,
-    }
+    // 候选完成门控（ALR-003/006）：纯文本只是候选完成信号，是否存在未满足的
+    // 工具义务由 TaskContract 确定性判定，不调用第二个模型判断"是否完成"。
+    state.contract.gate_text(&response.text)
 }
 
 pub(super) fn start_tool_execution(
@@ -708,49 +695,34 @@ fn finish_react_text(
                 state.accumulated_usage.clone(),
             ))
         }
-        ReactTextDisposition::EnterSummary => ExecutionPhase::StartCheckingCompletion,
-    }
-}
-
-fn finish_summary(
-    ctx: &mut TurnContext,
-    state: &mut AgentLoopState,
-    injections: &mut ToolInjectionBuffer,
-    decision: SummaryDecision,
-    request_injection_generation: u64,
-) -> ExecutionPhase {
-    ctx.session.persist_to_disk();
-    let received_new_injection = injections.generation() > request_injection_generation;
-    injections.commit(ctx);
-    if received_new_injection {
-        state.reset_react_phase();
-        return ExecutionPhase::NeedModel;
-    }
-
-    match decision {
-        SummaryDecision::Done(_) | SummaryDecision::AskUser(_) => ExecutionPhase::PendingFinish(
-            TurnExecutionResult::success(state.accumulated_usage.clone()),
-        ),
-        SummaryDecision::NeedMoreWork(reason) => {
-            state.budget.continuation_count += 1;
-            if state.budget.continuation_count >= ctx.max_outer_iterations {
-                return ExecutionPhase::StartForceFinal {
-                    reason: ForceFinalReason::OuterLimit,
-                    request_injection_generation,
-                    summary_error: None,
-                };
-            }
+        ReactTextDisposition::RepairRequired { reason } => {
+            // 有界工具协议修复（ALR-008）：记录缺失义务、注入明确指令，下一次
+            // 请求附带 Provider 原生工具约束（NeedModel 分支按契约设置）。
+            let instruction = state.contract.begin_repair();
+            tracing::warn!(
+                session_id = %ctx.session.id,
+                reason = %reason,
+                repairs = state.contract.protocol_repairs(),
+                "missing_required_tool_call：拒绝候选完成并发起协议修复"
+            );
             inject_tool_to_messages(
                 &mut ctx.session,
-                "summary_need_more_work",
+                "tool_protocol_repair",
                 &serde_json::json!({
-                    "reason": reason.trim(),
-                    "instruction": "上轮总结判定任务未完成，请根据原因继续执行剩余工作。",
+                    "reason": reason,
+                    "instruction": instruction,
                 }),
             );
             ctx.session.persist_to_disk();
-            state.reset_react_phase();
             ExecutionPhase::NeedModel
+        }
+        ReactTextDisposition::Exhausted { reason } => {
+            // 修复预算耗尽：明确失败，不把未经工具验证的文本发布为成功（ALR-009）。
+            persist_error(ctx, &reason);
+            ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
+                state.accumulated_usage.clone(),
+                reason,
+            ))
         }
     }
 }
@@ -770,7 +742,7 @@ pub(super) async fn execute_turn(
     let request_tools = ctx.tools.clone();
     let mut trust_mode = ctx.trust_mode;
     let mut injections = ToolInjectionBuffer::new(ctx);
-    let mut state = AgentLoopState::new();
+    let mut state = AgentLoopState::new(ctx);
     let mut deferred: Option<Deferred> = None;
 
     let result = 'agent_loop: loop {
@@ -813,7 +785,16 @@ pub(super) async fn execute_turn(
             // ── Ready：需要下一次 ReAct 模型请求 ──
             ExecutionPhase::NeedModel => {
                 if state.budget.react_rounds_in_phase >= ctx.max_tool_rounds {
-                    state.install_phase(ExecutionPhase::StartCheckingCompletion);
+                    // 安全限制（ALR-305）：连续工具调用轮次达到上限时明确失败，
+                    // 不强迫模型生成一个看起来完成的回答。
+                    let message = format!(
+                        "连续工具执行轮次达到安全上限（{}），本轮已终止",
+                        ctx.max_tool_rounds
+                    );
+                    persist_error(ctx, &message);
+                    state.install_phase(ExecutionPhase::PendingFinish(
+                        TurnExecutionResult::failed(state.accumulated_usage.clone(), message),
+                    ));
                     continue 'agent_loop;
                 }
                 injections.commit(ctx);
@@ -829,6 +810,9 @@ pub(super) async fn execute_turn(
                         iteration: (state.budget.request_round + 1) as u32,
                     });
                 }
+                // 存在未满足工具义务时使用 Provider 原生约束（ALR-007），
+                // 不只依赖提示词提醒模型。
+                let tool_choice = state.contract.tool_constraint();
                 let active = start_llm_request(
                     ctx,
                     build_react_request(ctx),
@@ -836,54 +820,9 @@ pub(super) async fn execute_turn(
                         request_injection_generation,
                     },
                     StreamTextKind::React,
-                    None,
+                    tool_choice,
                 );
                 state.install_phase(ExecutionPhase::WaitingModel(active));
-            }
-
-            // ── Ready（同步过渡）：发起完成度检查请求 ──
-            ExecutionPhase::StartCheckingCompletion => {
-                injections.commit(ctx);
-                let request_injection_generation = injections.generation();
-                let iteration = state.budget.continuation_count + 1;
-                let _ = stream_tx.send(StreamEvent::PhaseChanged {
-                    phase: "summary".to_string(),
-                    iteration,
-                });
-                if ctx.session.system_prompt_message.is_none() {
-                    rebuild_system_prompt(ctx);
-                }
-                let active = start_llm_request(
-                    ctx,
-                    request_for_summary_phase(&ctx.session),
-                    LlmPurpose::Summary {
-                        iteration,
-                        request_injection_generation,
-                    },
-                    StreamTextKind::Summary,
-                    Some(ToolChoice::None),
-                );
-                state.install_phase(ExecutionPhase::CheckingCompletion(active));
-            }
-
-            // ── Ready（同步过渡）：发起强制最终回复请求 ──
-            ExecutionPhase::StartForceFinal {
-                reason,
-                request_injection_generation,
-                summary_error,
-            } => {
-                let request = build_force_final_request(ctx, reason);
-                let active = start_llm_request(
-                    ctx,
-                    request,
-                    LlmPurpose::ForceFinal {
-                        request_injection_generation,
-                        summary_error,
-                    },
-                    StreamTextKind::Summary,
-                    Some(ToolChoice::None),
-                );
-                state.install_phase(ExecutionPhase::ForceFinalPhase(active));
             }
 
             // ── Ready：暂定完成，终态封口后提交 ──
@@ -1038,66 +977,61 @@ pub(super) async fn execute_turn(
                 }
             }
 
-            // ── Waiting：模型请求（ReAct/完成度检查/ForceFinal 共用流式驱动）──
-            ExecutionPhase::WaitingModel(mut active)
-            | ExecutionPhase::CheckingCompletion(mut active)
-            | ExecutionPhase::ForceFinalPhase(mut active) => {
+            // ── Waiting：模型请求（流式驱动，命令与 chunk 双路 select）──
+            ExecutionPhase::WaitingModel(mut active) => {
                 tokio::select! {
-                                    biased;
-                                    command = cmd_rx.recv() => {
-                                        // 命令优先：归还阶段，交由统一命令处理接管。
-                                        deferred = Some(match command {
-                                            Some(command) => Deferred::Command(command),
-                                            None => Deferred::Closed,
-                                        });
-                                        state.install_phase(reinstate_llm_phase(active));
-                                        continue 'agent_loop;
-                                    }
-                                    chunk = active.chunk_rx.recv() => {
-                                        if let Some(chunk) = chunk {
-                                            if let Some(chunk_usage) = &chunk.usage {
-                                                let usage: TokenUsage = chunk_usage.clone().into();
-                                                active.streaming_usage.accumulate(&usage);
-                                            }
-                                            active.streamed_text.push_str(&chunk.content);
-                                            active.streamed_reasoning.push_str(&chunk.reasoning_content);
-                                            active.sink.push_chunk(&chunk);
-                                            state.install_phase(reinstate_llm_phase(active));
-                                            continue 'agent_loop;
-                                        }
-                                        // 通道关闭：完整响应可收取。
-                                        let ActiveLlm {
-                                            purpose,
-                                            pending_msg_id,
-                                            sink,
-                                            task,
-                                            streamed_text,
-                                            streamed_reasoning,
-                                            streaming_usage,
-                                            ..
-                                        } = active;
-                                        sink.finish();
-                                        let response_result = match task.await {
-                                            Ok(result) => result,
-                                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
-                                        };
-                                        let next = complete_llm_request(
-                                            ctx,
-                                            &mut state,
-                                            &mut injections,
-                                            &context_organizer,
-                                            &stream_tx,
-                                            purpose,
-                                            pending_msg_id,
-                                            streamed_text,
-                                            streamed_reasoning,
-                                            streaming_usage,
-                                            response_result,
-                                        )
-                ;
-                                        state.install_phase(next);
-                                    }
-                                }
+                    biased;
+                    command = cmd_rx.recv() => {
+                        // 命令优先：归还阶段，交由统一命令处理接管。
+                        deferred = Some(match command {
+                            Some(command) => Deferred::Command(command),
+                            None => Deferred::Closed,
+                        });
+                        state.install_phase(reinstate_llm_phase(active));
+                        continue 'agent_loop;
+                    }
+                    chunk = active.chunk_rx.recv() => {
+                        if let Some(chunk) = chunk {
+                            if let Some(chunk_usage) = &chunk.usage {
+                                let usage: TokenUsage = chunk_usage.clone().into();
+                                active.streaming_usage.accumulate(&usage);
+                            }
+                            active.streamed_text.push_str(&chunk.content);
+                            active.streamed_reasoning.push_str(&chunk.reasoning_content);
+                            active.sink.push_chunk(&chunk);
+                            state.install_phase(reinstate_llm_phase(active));
+                            continue 'agent_loop;
+                        }
+                        // 通道关闭：完整响应可收取。
+                        let ActiveLlm {
+                            purpose,
+                            pending_msg_id,
+                            sink,
+                            task,
+                            streamed_text,
+                            streamed_reasoning,
+                            ..
+                        } = active;
+                        sink.finish();
+                        let response_result = match task.await {
+                            Ok(result) => result,
+                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+                        };
+                        let next = complete_llm_request(
+                            ctx,
+                            &mut state,
+                            &mut injections,
+                            &context_organizer,
+                            &stream_tx,
+                            purpose,
+                            pending_msg_id,
+                            streamed_text,
+                            streamed_reasoning,
+                            response_result,
+                        );
+                        state.install_phase(next);
+                    }
+                }
             }
 
             // ── Waiting（兼容层，任务 05 迁移）：工具任务运行中 ──
@@ -1153,6 +1087,7 @@ pub(super) async fn execute_turn(
                                 duration_ms: task_output.duration_ms,
                             },
                             &mut state.tool_history,
+                            &mut state.contract,
                         );
                         // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
                         tools.batch.needs_failure_recovery |= needs_recovery;
@@ -1241,16 +1176,6 @@ pub(super) async fn execute_turn(
                             CompressionContinuation::InvalidToolCalls => {
                                 ExecutionPhase::NeedModel
                             }
-                            CompressionContinuation::Summary {
-                                decision,
-                                request_injection_generation,
-                            } => finish_summary(
-                                ctx,
-                                &mut state,
-                                &mut injections,
-                                decision,
-                                request_injection_generation,
-                            ),
                             CompressionContinuation::ContextRetry {
                                 previous_summary_up_to,
                                 error_message,
@@ -1289,16 +1214,13 @@ pub(super) async fn execute_turn(
 fn reinstate_llm_phase(active: ActiveLlm) -> ExecutionPhase {
     match &active.purpose {
         LlmPurpose::React { .. } => ExecutionPhase::WaitingModel(active),
-        LlmPurpose::Summary { .. } => ExecutionPhase::CheckingCompletion(active),
-        LlmPurpose::ForceFinal { .. } => ExecutionPhase::ForceFinalPhase(active),
     }
 }
 
-/// 模型请求完成后的统一处理：按 purpose 归一化响应并产出下一阶段。
+/// 模型请求完成后的统一处理：归一化响应并产出下一阶段。
 ///
 /// 这是旧 select「chunk 通道关闭」分支的主体：错误分流（上下文超限 → 压缩重试）、
-/// 工具调用 → PreparingTools、文本回复 → 完成度检查/直接完成、Summary 判定 →
-/// 续作/完成/ForceFinal、ForceFinal → 提交结果。
+/// 工具调用 → PreparingTools、文本回复 → 候选完成门控（无义务完成 / 有义务修复）。
 #[allow(clippy::too_many_arguments)]
 fn complete_llm_request(
     ctx: &mut TurnContext,
@@ -1310,7 +1232,6 @@ fn complete_llm_request(
     pending_msg_id: String,
     streamed_text: String,
     streamed_reasoning: String,
-    streaming_usage: TokenUsage,
     response_result: anyhow::Result<ModelFunctionResponse>,
 ) -> ExecutionPhase {
     let context_limit = ctx.context_limit;
@@ -1416,7 +1337,6 @@ fn complete_llm_request(
                     )
                 }
             } else {
-                state.budget.executed_tool_in_phase = true;
                 let calls = record_tool_calls(
                     ctx,
                     &pending_msg_id,
@@ -1432,194 +1352,6 @@ fn complete_llm_request(
                     request_injection_generation,
                     needs_failure_recovery: false,
                 })
-            }
-        }
-        LlmPurpose::Summary {
-            iteration,
-            request_injection_generation,
-        } => {
-            let response = match response_result {
-                Ok(response) => response,
-                Err(error) => {
-                    let message = error.to_string();
-                    persist_partial_summary(
-                        ctx,
-                        &pending_msg_id,
-                        &streamed_text,
-                        &streamed_reasoning,
-                    );
-                    state.accumulated_usage.accumulate(&streaming_usage);
-                    persist_error(ctx, format!("总结阶段失败：{message}"));
-                    return ExecutionPhase::StartForceFinal {
-                        reason: ForceFinalReason::SummaryError,
-                        request_injection_generation,
-                        summary_error: Some(message),
-                    };
-                }
-            };
-
-            emit_token_usage(
-                stream_tx,
-                &response.usage,
-                Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
-                context_limit,
-                format!("summary-iteration-{iteration}"),
-                None,
-            );
-            let mut usage = response.usage.clone();
-            if usage.total_tokens == 0 {
-                usage.accumulate(&streaming_usage);
-            }
-            state.accumulated_usage.accumulate(&usage);
-
-            if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
-                append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
-                let decision = SummaryDecision::NeedMoreWork(
-                    "总结阶段返回的工具调用未通过 schema 校验，请根据校验原因继续完成任务。"
-                        .to_string(),
-                );
-                let observed_tokens = observed_total_tokens(&usage);
-                if context_organizer.needs_compression(observed_tokens) {
-                    let active = ActiveCompression::start(
-                        ctx,
-                        context_organizer,
-                        observed_tokens,
-                        CompressionContinuation::Summary {
-                            decision,
-                            request_injection_generation,
-                        },
-                    );
-                    return ExecutionPhase::Compressing(CompressionPhase {
-                        active,
-                        suspended_batch: None,
-                    });
-                }
-                return finish_summary(
-                    ctx,
-                    state,
-                    injections,
-                    decision,
-                    request_injection_generation,
-                );
-            }
-
-            if !response.tool_calls.is_empty() {
-                tracing::warn!(
-                    count = response.tool_calls.len(),
-                    protocol = ?ctx.client().protocol(),
-                    "summary phase returned tool calls; continuing tool execution"
-                );
-                // 工具调用说明任务仍可继续。把总结响应转回 ReAct 工具批次，
-                // 不经过 finish_summary，因此不增加 continuation_count。
-                state.reset_react_phase();
-                state.budget.executed_tool_in_phase = true;
-                let calls = record_tool_calls(
-                    ctx,
-                    &pending_msg_id,
-                    &response,
-                    format!("summary-iteration-{iteration}-continuation"),
-                );
-                return ExecutionPhase::PreparingTools(ToolBatchState {
-                    calls: calls.into_iter().enumerate().collect(),
-                    ready_tools: Vec::new(),
-                    prepared_keys: HashSet::new(),
-                    invalid_tool_calls: response.invalid_tool_calls,
-                    response_usage: response.usage,
-                    request_injection_generation,
-                    needs_failure_recovery: false,
-                });
-            }
-
-            let decision = parse_summary_phase_output(&response.text);
-            let summary_content = decision.payload().to_string();
-            let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
-            if !needs_more_work && summary_content.trim().is_empty() {
-                if let Some(message_id) = promote_last_react_message_to_summary(&mut ctx.session) {
-                    emit_session_message_upsert(ctx, &message_id);
-                }
-            } else {
-                upsert_assistant_text_message(
-                    &mut ctx.session,
-                    &pending_msg_id,
-                    &summary_content,
-                    &response.reasoning_content,
-                    MessagePhase::Normal,
-                );
-                if let Some(message) = ctx
-                    .session
-                    .messages
-                    .iter_mut()
-                    .find(|message| message.id == pending_msg_id)
-                {
-                    message.reasoning_signature = response.reasoning_signature;
-                    message.phase = if needs_more_work {
-                        MessagePhase::React
-                    } else {
-                        MessagePhase::Summary
-                    };
-                }
-                emit_session_message_upsert(ctx, &pending_msg_id);
-            }
-
-            let observed_tokens = observed_total_tokens(&usage);
-            if context_organizer.needs_compression(observed_tokens) {
-                let active = ActiveCompression::start(
-                    ctx,
-                    context_organizer,
-                    observed_tokens,
-                    CompressionContinuation::Summary {
-                        decision,
-                        request_injection_generation,
-                    },
-                );
-                ExecutionPhase::Compressing(CompressionPhase {
-                    active,
-                    suspended_batch: None,
-                })
-            } else {
-                finish_summary(
-                    ctx,
-                    state,
-                    injections,
-                    decision,
-                    request_injection_generation,
-                )
-            }
-        }
-        LlmPurpose::ForceFinal {
-            request_injection_generation,
-            summary_error,
-        } => {
-            let force_result = match response_result {
-                Ok(response) => {
-                    state.accumulated_usage.accumulate(&response.usage);
-                    commit_summary_message(ctx, &pending_msg_id, &response, "force_final_response")
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    persist_error(ctx, format!("force_final_response 失败：{message}"));
-                    Err(message)
-                }
-            };
-            let received_new_injection = injections.generation() > request_injection_generation;
-            injections.commit(ctx);
-            if received_new_injection {
-                state.reset_react_phase();
-                return ExecutionPhase::NeedModel;
-            }
-            match force_result {
-                Ok(()) => ExecutionPhase::PendingFinish(TurnExecutionResult::success(
-                    state.accumulated_usage.clone(),
-                )),
-                Err(message) => {
-                    let message = summary_error.map_or(message.clone(), |summary_error| {
-                        format!("总结阶段失败：{summary_error}；强制最终回复失败：{message}")
-                    });
-                    ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
-                        state.accumulated_usage.clone(),
-                        message,
-                    ))
-                }
             }
         }
     }
@@ -2553,12 +2285,12 @@ mod tests {
         assert!(injection_snapshots[1].is_empty());
     }
 
-    /// 工具调用路径:模型先调用工具 → 工具执行 → 模型给出非最终回答(问号结尾)→
-    /// 进入总结阶段 → 总结完成 → `Success`。
+    /// 工具调用路径:模型先调用工具 → 工具执行 → 模型给出文本回复 → 候选完成
+    /// 门控（无工具义务）通过 → `Success`。
     ///
-    /// 覆盖 ReAct loop 多轮 + summary 阶段的完整链路。
+    /// 覆盖最小模型—工具循环的完整链路（任务 15：不再进入总结阶段）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn runs_tool_then_completes_via_summary() {
+    async fn runs_tool_then_completes() {
         let server = MockServer::start().await;
         let invocations = Arc::new(Mutex::new(Vec::new()));
 
@@ -2583,7 +2315,7 @@ mod tests {
             vec![tool_call_chunk("call_1", "echo", "{}"), usage_chunk(15, 3)],
         )
         .await;
-        // 2) 工具执行后第二轮:文本以问号结尾 → looks_like_final_answer=false → EnterSummary。
+        // 2) 工具执行后:文本回复(无工具义务 → 直接完成,问号结尾不影响)。
         mount_sse(
             &server,
             vec![
@@ -2592,19 +2324,13 @@ mod tests {
             ],
         )
         .await;
-        // 3) 总结阶段:纯文本 → SummaryDecision::Done → Completed。
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("已完成。"), usage_chunk(30, 4)],
-        )
-        .await;
 
         let mut harness = TestHarness::new(&server, tools, overrides);
         let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
         assert!(
             matches!(result.outcome, TurnExecutionOutcome::Success),
-            "工具+总结完整链路应返回 Success,实际: {:?}",
+            "工具+文本回复链路应返回 Success,实际: {:?}",
             result.outcome
         );
         // 工具应被调用一次。
@@ -2629,7 +2355,7 @@ mod tests {
                 invocations: invocations.clone(),
             }),
         );
-        // 1) 工具调用；2) 文本以问号结尾 → 进入 Summary；3) Summary 完成。
+        // 1) 工具调用；2) 文本回复（无工具义务 → 直接完成，不再有总结请求）。
         mount_sse(
             &server,
             vec![tool_call_chunk("call_1", "echo", "{}"), usage_chunk(15, 3)],
@@ -2640,23 +2366,18 @@ mod tests {
             vec![text_delta_chunk("结果还需要补充吗?"), usage_chunk(25, 5)],
         )
         .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("已完成。"), usage_chunk(30, 4)],
-        )
-        .await;
 
         let mut harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
         let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
         assert!(
             matches!(result.outcome, TurnExecutionOutcome::Success),
-            "工具+总结链路应返回 Success，实际: {:?}",
+            "工具+文本链路应返回 Success，实际: {:?}",
             result.outcome
         );
-        // 三轮请求用量累计：(15+3) + (25+5) + (30+4) = 82
+        // 两轮请求用量累计：(15+3) + (25+5) = 48
         assert_eq!(
-            result.usage.total_tokens, 82,
+            result.usage.total_tokens, 48,
             "终态用量应为各轮模型请求用量之和（ALR-111）"
         );
         harness.drain_stream();
@@ -2896,69 +2617,6 @@ mod tests {
             .iter()
             .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.tool_result_is_error);
         assert!(call_closed, "被中断的工具调用应有失败结果（ALR-110）");
-    }
-
-    /// ALR-104：Summary 进行中被引导消息打断——部分输出降级为 React 过程消息，
-    /// 不得保持最终 Summary 身份。
-    ///
-    /// 说明：集成层面"Summary 流式中途被打断"无法用 wiremock 确定性构造（SSE body
-    /// 完整发送即结束，无中途停顿点；整体延迟则注入先于任何 chunk、部分输出为空）。
-    /// 因此直接单测降级语义的核心：被中断的 Summary 部分输出以 React 过程消息落盘，
-    /// 不保持最终 Summary 身份。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn interrupted_llm_summary_output_persists_as_react_phase() {
-        use super::super::interrupt::persist_interrupted_llm_output;
-        use super::super::phase::LlmPurpose;
-
-        let server = MockServer::start().await;
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let summary_purpose = LlmPurpose::Summary {
-            iteration: 1,
-            request_injection_generation: 0,
-        };
-        persist_interrupted_llm_output(
-            &mut harness.ctx,
-            &summary_purpose,
-            "summary-partial-1",
-            "这是被打断的半截总结",
-            "",
-        );
-        let message = harness
-            .ctx
-            .session
-            .messages
-            .iter()
-            .find(|m| m.id == "summary-partial-1")
-            .expect("部分总结应以过程消息落盘");
-        assert_eq!(
-            message.phase,
-            crate::session::MessagePhase::React,
-            "被中断的 Summary 部分输出必须降级为 React（ALR-104），实际: {:?}",
-            message.phase
-        );
-        assert!(message.text_content().contains("半截总结"));
-
-        // ForceFinal 被中断：无可靠完整内容，不落盘。
-        let force_purpose = LlmPurpose::ForceFinal {
-            request_injection_generation: 0,
-            summary_error: None,
-        };
-        persist_interrupted_llm_output(
-            &mut harness.ctx,
-            &force_purpose,
-            "force-partial-1",
-            "半截强制回复",
-            "",
-        );
-        assert!(
-            !harness
-                .ctx
-                .session
-                .messages
-                .iter()
-                .any(|m| m.id == "force-partial-1"),
-            "被中断的 ForceFinal 输出不应提交"
-        );
     }
 
     /// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
@@ -4066,450 +3724,5 @@ mod tests {
                 .iter()
                 .any(|call| call.id == "call_invalid")
         }));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn invalid_summary_tool_calls_trigger_another_bounded_iteration() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![
-                tool_call_chunk("call_invalid_summary", "echo", "{}"),
-                usage_chunk(9, 2),
-            ],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[DONE]\n已完成。"), usage_chunk(11, 3)],
-        )
-        .await;
-
-        let tool = ToolSpec {
-            name: "echo".to_string(),
-            description: "回显消息".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
-                "additionalProperties": false
-            }),
-        };
-        let mut harness = TestHarness::new(&server, vec![tool], HashMap::new());
-        harness.ctx.max_tool_rounds = 0;
-
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
-        assert_eq!(result.usage.total_tokens, 25);
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let second_body: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-        let second_body_text = second_body.to_string();
-        assert!(second_body_text.contains("invalid_tool_calls"));
-        assert!(second_body_text.contains("schema 位置=#/required"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn returns_cancelled_when_summary_is_cancelled() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(header("authorization", "Bearer test-key"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(
-                        sse_body(&[text_delta_chunk("[DONE]\n不应完成")]),
-                        "text/event-stream",
-                    )
-                    .set_delay(Duration::from_secs(2)),
-            )
-            .mount(&server)
-            .await;
-
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        harness.ctx.max_tool_rounds = 0;
-        let cmd_tx = harness.cmd_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            cmd_tx.send(Command::Cancel).unwrap();
-        });
-
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-        assert!(matches!(result.outcome, TurnExecutionOutcome::Cancelled));
-        assert!(harness.stream_rx.try_iter().any(|event| matches!(
-            event,
-            StreamEvent::PhaseChanged { phase, .. } if phase == "summary"
-        )));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reenters_agent_loop_when_summary_needs_more_work() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![
-                text_delta_chunk("[NEED_MORE_WORK]\n继续处理剩余步骤"),
-                usage_chunk(12, 2),
-            ],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("继续执行后的结果"), usage_chunk(20, 3)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[DONE]\n任务完成"), usage_chunk(24, 4)],
-        )
-        .await;
-
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert!(
-            matches!(result.outcome, TurnExecutionOutcome::Success),
-            "总结重入结果: {:?}",
-            result.outcome
-        );
-        assert_eq!(result.usage.total_tokens, 76);
-        let summary_phases = harness
-            .stream_rx
-            .try_iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    StreamEvent::PhaseChanged { phase, .. } if phase == "summary"
-                )
-            })
-            .count();
-        assert_eq!(summary_phases, 2);
-        assert!(harness.ctx.session.messages.iter().any(|message| {
-            message.text_content().contains("summary_need_more_work")
-                || message.text_content().contains("继续处理剩余步骤")
-        }));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn summary_tool_calls_continue_without_consuming_summary_iteration() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![
-                text_delta_chunk(
-                    "先跑验证：\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"verify\">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>",
-                ),
-                usage_chunk(12, 2),
-            ],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:仍需总结]"), usage_chunk(20, 3)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[DONE]\n任务完成"), usage_chunk(24, 4)],
-        )
-        .await;
-
-        let invocations = Arc::new(Mutex::new(Vec::new()));
-        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
-        overrides.insert(
-            "verify".to_string(),
-            Arc::new(EchoTool {
-                invocations: invocations.clone(),
-            }),
-        );
-        let mut harness = TestHarness::new_with_protocol(
-            &server,
-            ProviderProtocol::DeepSeek,
-            vec![tool_spec("verify")],
-            overrides,
-            Vec::new(),
-        );
-        // 第一轮 ReAct 已到上限；总结工具调用必须重置阶段，才能继续处理工具结果。
-        harness.ctx.max_tool_rounds = 1;
-        harness.ctx.max_outer_iterations = 1;
-
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert!(
-            matches!(result.outcome, TurnExecutionOutcome::Success),
-            "DeepSeek 总结工具续作结果: {:?}",
-            result.outcome
-        );
-        assert_eq!(invocations.lock().unwrap().len(), 1);
-        let summary_iterations = harness
-            .stream_rx
-            .try_iter()
-            .filter_map(|event| match event {
-                StreamEvent::PhaseChanged { phase, iteration } if phase == "summary" => {
-                    Some(iteration)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(summary_iterations, vec![1, 1]);
-        assert!(harness.ctx.session.messages.iter().any(|message| {
-            message.role == MessageRole::Tool
-                && message.tool_name.as_deref() == Some("verify")
-                && message.text_content().contains("done")
-        }));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reenters_agent_loop_when_plugin_result_arrives_during_summary() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(10, 1)],
-        )
-        .await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(header("authorization", "Bearer test-key"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(
-                        sse_body(&[text_delta_chunk("[DONE]\n旧总结"), usage_chunk(12, 2)]),
-                        "text/event-stream",
-                    )
-                    .set_delay(Duration::from_millis(500)),
-            )
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("新插件结果已处理。"), usage_chunk(20, 3)],
-        )
-        .await;
-
-        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let TestHarness {
-            mut ctx,
-            stream_rx,
-            cmd_tx,
-            mut cmd_rx,
-            ..
-        } = harness;
-        let injection_tx = cmd_tx.clone();
-        let injection_task = tokio::task::spawn_blocking(move || {
-            loop {
-                let event = stream_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("等待总结阶段事件超时");
-                if matches!(
-                    event,
-                    StreamEvent::PhaseChanged { ref phase, .. } if phase == "summary"
-                ) {
-                    injection_tx
-                        .send(Command::InjectTool {
-                            tool_name: "summary_probe".to_string(),
-                            payload: serde_json::json!({"value": 1}),
-                        })
-                        .unwrap();
-                    break;
-                }
-            }
-            stream_rx
-        });
-
-        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
-        let stream_rx = injection_task.await.unwrap();
-        drop(cmd_tx);
-
-        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
-        assert_eq!(result.usage.total_tokens, 48);
-        assert!(ctx.session.messages.iter().any(|message| {
-            message.role == MessageRole::Tool && message.text_content().contains("summary_probe")
-        }));
-        let injection_snapshots = stream_rx
-            .try_iter()
-            .filter_map(|event| match event {
-                StreamEvent::DeferredToolInjectionsChanged { injections } => Some(injections),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(injection_snapshots.len(), 2);
-        assert_eq!(injection_snapshots[0].len(), 1);
-        assert!(injection_snapshots[1].is_empty());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn forces_final_response_when_continuation_limit_is_reached() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![
-                text_delta_chunk("[NEED_MORE_WORK]\n仍有一步"),
-                usage_chunk(7, 2),
-            ],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("强制收尾完成"), usage_chunk(8, 3)],
-        )
-        .await;
-
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        harness.ctx.max_outer_iterations = 1;
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert!(
-            matches!(result.outcome, TurnExecutionOutcome::Success),
-            "外层上限强制收尾结果: {:?}",
-            result.outcome
-        );
-        assert_eq!(result.usage.total_tokens, 26);
-        assert!(
-            harness
-                .ctx
-                .session
-                .messages
-                .iter()
-                .any(|message| message.text_content().contains("强制收尾完成"))
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn force_final_does_not_commit_empty_reply_from_invalid_tool_call() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![
-                text_delta_chunk("[NEED_MORE_WORK]\n仍有一步"),
-                usage_chunk(7, 2),
-            ],
-        )
-        .await;
-        mount_sse(
-            &server,
-            vec![
-                tool_call_chunk("call_invalid_final", "echo", "{}"),
-                usage_chunk(8, 3),
-            ],
-        )
-        .await;
-
-        let tool = ToolSpec {
-            name: "echo".to_string(),
-            description: "回显消息".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
-                "additionalProperties": false
-            }),
-        };
-        let mut harness = TestHarness::new(&server, vec![tool], HashMap::new());
-        harness.ctx.max_outer_iterations = 1;
-
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert_eq!(result.usage.total_tokens, 26);
-        match result.outcome {
-            TurnExecutionOutcome::Failed(message) => {
-                assert!(message.contains("call_invalid_final"));
-                assert!(message.contains("schema 位置=#/required"));
-            }
-            outcome => panic!("异常最终工具调用不应被当作成功：{outcome:?}"),
-        }
-        assert!(harness.ctx.session.messages.iter().all(|message| {
-            message.id != "call_invalid_final"
-                && !(message.phase == crate::session::MessagePhase::Summary
-                    && message.text_content().trim().is_empty())
-        }));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn forces_final_response_after_summary_request_fails() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
-        )
-        .await;
-        mount_request_error(&server, "summary request rejected").await;
-        mount_request_error(&server, "summary request rejected").await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("总结失败后完成收尾"), usage_chunk(8, 3)],
-        )
-        .await;
-
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        assert!(
-            matches!(result.outcome, TurnExecutionOutcome::Success),
-            "总结失败兜底结果: {:?}",
-            result.outcome
-        );
-        assert_eq!(result.usage.total_tokens, 17);
-        assert!(
-            harness
-                .ctx
-                .session
-                .messages
-                .iter()
-                .any(|message| message.text_content().contains("总结阶段失败"))
-        );
-        assert!(
-            harness
-                .ctx
-                .session
-                .messages
-                .iter()
-                .any(|message| message.text_content().contains("总结失败后完成收尾"))
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn returns_failed_when_summary_and_force_final_both_fail() {
-        let server = MockServer::start().await;
-        mount_sse(
-            &server,
-            vec![text_delta_chunk("[调用工具:测试]"), usage_chunk(5, 1)],
-        )
-        .await;
-        mount_request_error(&server, "summary stream rejected").await;
-        mount_request_error(&server, "summary fallback rejected").await;
-        mount_request_error(&server, "force final stream rejected").await;
-        mount_request_error(&server, "force final fallback rejected").await;
-
-        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
-        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
-
-        let TurnExecutionOutcome::Failed(message) = result.outcome else {
-            panic!("总结与强制收尾都失败时必须返回 Failed");
-        };
-        assert!(message.contains("总结阶段失败"));
-        assert!(message.contains("强制最终回复失败"));
-        assert_eq!(result.usage.total_tokens, 6);
     }
 }

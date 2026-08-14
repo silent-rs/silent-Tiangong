@@ -4,13 +4,13 @@
 
 ## 当前状态
 
-- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12~14 已完成；15~18 待实施**。
-- 当前建议任务：任务 15，建立 `TaskContract`/`CompletionGate` 与 Provider 工具约束、有界协议修复，删除 Summary/ForceFinal/continuation 控制与阶段，并启用 `react/contract_tests.rs` 的 4 项失败用例。
+- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12~15 已完成；16~18 待实施**。
+- 当前建议任务：任务 16，模型请求策略外置（压缩迁到请求前/请求错误策略、Provider 重试返回 Retry/Fail、安全预算取消活动），随后任务 17 审批下沉。
 - 当前阻塞：无。
 - 当前分支：`feature/agent-execution-core`，基线为 `main` v0.14.3（`7c425bac`）。
-- 当前实现不是交付候选：旧 Summary/ForceFinal/continuation 完成控制仍在 Loop 内（任务 15 删除）；Inbox/单 driver/最新 Session/关闭可靠性已按新契约落地并有测试守护。
+- 当前实现不是交付候选：审批/压缩仍是 Agent 顶层阶段、请求错误恢复仍散在 Loop 内（任务 16/17 外置）；工具义务暂只覆盖附件场景。
 - 当前文档决策：Loop 收敛为模型—工具最小循环；无工具响应只形成候选完成；通过确定性 `TaskContract`、Provider 工具约束和有界协议修复防止模型漏发必需 tool call；Agent 自有 Inbox 与单 driver；审批、压缩、重试和预算外置。
-- 任务 14 已落地：`react/inbox.rs`（调度归位，`shared_runtime` 回归纯 runtime）、唯一 driver 主循环、followup/steer/inject 显式语义、关闭排空持久化；`NEXT_TURN_QUEUE` 与每消息后台任务已删除。
+- 任务 15 已落地：Summary/ForceFinal/continuation 全部删除（`summary.rs`、`completion_policy.rs` 移除），`react/contract.rs` 候选完成门控 + 有界协议修复（上限 2）+ Provider `tool_choice` 约束；`execute.rs` 4515 → 3728 行；8 项契约用例全部启用转绿。
 
 ## 已确认的 Review 结论
 
@@ -52,7 +52,8 @@
 | 11 | 模块拆分与交付 | 暂停交付 | 60facb3f 等 | 代码与自动化检查通过，但真实验证和架构 Review 未通过 |
 | 12 | 简化需求与设计 | 已完成 | 69c884c5 | Harness 对照、需求重定界、删除清单、量化验收 |
 | 13 | 测试契约重组 | 已完成 | 3969e406 | 三分类清单 + 9 项契约测试（1 绿 + 8 ignore 失败用例，均核对失败形态） |
-| 14 | Agent Inbox 与唯一 driver | 已完成 | 本次提交 | react/inbox.rs 调度归位、driver 主循环、followup/steer/inject、关闭排空；4 项调度用例转绿 |
+| 14 | Agent Inbox 与唯一 driver | 已完成 | c9d9dfed | react/inbox.rs 调度归位、driver 主循环、followup/steer/inject、关闭排空；4 项调度用例转绿 |
+| 15 | 最小 Loop | 已完成 | 本次提交 | contract.rs 门控+有界修复+tool_choice；删 Summary/ForceFinal/continuation；4 项工具义务用例转绿 |
 | 14 | Agent Inbox 与唯一 driver | 未开始 | — | next_turn/next_step、Idle/Running、wake_requested、最新 Session |
 | 15 | 最小 Loop | 未开始 | — | 模型—工具循环、TaskContract/CompletionGate、删除旧完成控制 |
 | 16 | 模型请求策略外置 | 未开始 | — | tool_choice、有界协议修复、压缩、重试和安全预算 |
@@ -218,6 +219,16 @@ cargo test -p tiangong-plugin-browser
 - `cargo test -p tiangong-plugin-browser`：32 通过；
 - `cargo test -p tiangong-core contract_tests -- --ignored`：4 项工具义务用例保持失败，失败形态与任务 13 记录一致（安全网未受影响）。
 
+任务 15 验证（最小 Loop 与工具义务）：
+
+- `cargo fmt -- --check`：通过；
+- `cargo clippy --workspace --all-targets --tests --benches -- -D warnings`：通过；
+- `cargo check --workspace`：通过；
+- `cargo test -p tiangong-core`：93 通过、0 失败、**0 ignored**（8 项契约用例全部启用转绿；`-- --ignored` 无遗留）；
+- `cargo test -p tiangong-plugin-agent-team`：10 通过、1 ignored；
+- `cargo test -p tiangong-plugin-browser`：32 通过；
+- 量化：`execute.rs` 4515 → 3728 行（-787）；整体 +161/-1737。
+
 ## 分支与提交策略
 
 1. 保持当前 `feature/agent-execution-core` 作为 Review 整改分支；不自动提交、推送或合并。
@@ -237,6 +248,7 @@ cargo test -p tiangong-plugin-browser
 - 2026-08-14：完成任务 12 简化需求、设计、TODO、PLAN 和进度同步，尚未修改生产代码。
 - 2026-08-14：完成任务 13 测试契约重组：现有测试三分类完成，新增 9 项契约测试（`react/contract_tests.rs`、`core/contract_tests.rs`），8 项失败用例以 `#[ignore]` 挂起并核对失败形态。
 - 2026-08-14：完成任务 14：`react/inbox.rs` 建立 Agent 自有 Inbox 与唯一 driver（Review 整改：调度从 `shared_runtime` 迁出回归纯 runtime，`busy`/`parked` 合并为 `Phase`，修复 turn 间隙 inject 自旋与 Inbox 载体覆盖两个实施缺陷）；`NEXT_TURN_QUEUE`、每消息后台任务与封口交接补偿全部删除；4 项调度契约用例转绿。
+- 2026-08-14：完成任务 15：`react/contract.rs` 候选完成门控 + 有界协议修复（上限 2）+ Provider `tool_choice` 约束；删除 `summary.rs`、`completion_policy.rs`、`continuation_count`、`max_outer_iterations` 与问号启发式；工具轮次上限改为明确失败；4 项工具义务用例转绿，10 项旧策略测试删除。
 
 ## 更新规则
 

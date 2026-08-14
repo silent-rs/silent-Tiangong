@@ -1,6 +1,4 @@
 //! ReAct 循环上下文管理：system prompt 重建与 token usage 上报。
-//!
-//! 最终化相关逻辑（总结阶段、强制最终回复）已迁移到 `summary.rs`。
 
 use std::sync::mpsc::Sender as StdSender;
 
@@ -15,10 +13,6 @@ use tiangong_types::StreamEvent;
 ///
 /// 产品身份 / 通用规则 / 自定义指令外围等文案由各插件经 `PromptSectionProvider`
 /// 注入（产品基础文案见 `tiangong-plugin-prompt`），core 不再持有产品文案。
-pub(crate) fn rebuild_system_prompt(ctx: &mut TurnContext) {
-    rebuild_system_prompt_for_session(&mut ctx.session, &ctx.plugins);
-}
-
 pub(crate) fn rebuild_system_prompt_for_session(
     session: &mut Session,
     plugins: &[std::sync::Arc<dyn crate::core::plugin::Plugin>],

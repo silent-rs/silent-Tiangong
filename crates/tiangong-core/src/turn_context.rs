@@ -57,9 +57,6 @@ pub struct TurnContext {
     /// 单次工具执行阶段（ReAct Loop 内层）的最大轮次
     #[builder(default = crate::MAX_TOOL_ROUNDS)]
     pub max_tool_rounds: usize,
-    /// 总结阶段后重新进入工具执行阶段的最大次数
-    #[builder(default = crate::MAX_OUTER_ITERATIONS)]
-    pub max_outer_iterations: u32,
 }
 
 impl TurnContext {

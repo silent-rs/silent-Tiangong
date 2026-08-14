@@ -233,7 +233,6 @@ fn contract_harness(
 /// 不应发布成功终态（ALR-003/006/307）。
 ///
 /// 当前实现：ReAct 纯文本 → Summary 完成 → Success（正是要消除的虚假完成）。
-#[ignore = "任务 15：TaskContract 候选完成门控实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_request_rejects_text_only_completion() {
     let server = MockServer::start().await;
@@ -284,7 +283,6 @@ async fn plain_question_without_obligation_completes_without_tool() {
 }
 
 /// 附件义务场景：首次漏发工具、第二次修复成功——应执行工具并正常完成（ALR-008）。
-#[ignore = "任务 15：工具协议修复实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_obligation_repair_recovers_with_tool_call() {
     let server = MockServer::start().await;
@@ -318,7 +316,6 @@ async fn attachment_obligation_repair_recovers_with_tool_call() {
 }
 
 /// 附件义务场景：模型持续漏发工具——修复预算耗尽后必须明确失败（ALR-008/009）。
-#[ignore = "任务 15：工具协议修复实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attachment_obligation_repair_exhaustion_fails_explicitly() {
     let server = MockServer::start().await;
@@ -344,7 +341,6 @@ async fn attachment_obligation_repair_exhaustion_fails_explicitly() {
 
 /// 工具真实失败不能满足义务：read_file 失败后模型纯文本声称"已完成"，
 /// 不应发布成功（ALR-307：只有成功结果可满足要求成功证据的义务）。
-#[ignore = "任务 15：TaskContract 义务状态更新实现后启用"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_tool_result_does_not_satisfy_obligation() {
     let server = MockServer::start().await;
