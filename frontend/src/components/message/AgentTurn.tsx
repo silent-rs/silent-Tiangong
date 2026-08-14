@@ -377,7 +377,6 @@ function AgentTurnView({
       )}
       {(!collapseProcess || showProcess) && processFrags.length > 0 && (
         <div className="space-y-1.5">
-          {processFrags.map((frag, i) => renderFragment(frag, i))}
           {collapseProcess && showProcess && (
             <button
               type="button"
@@ -388,6 +387,7 @@ function AgentTurnView({
               <span>收起过程</span>
             </button>
           )}
+          {processFrags.map((frag, i) => renderFragment(frag, i))}
         </div>
       )}
       {summaryFrags.map((frag, i) => renderFragment(frag, mergedFragments.length + i))}

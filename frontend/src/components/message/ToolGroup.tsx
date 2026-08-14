@@ -79,50 +79,41 @@ function ToolCardBody({ model, args }: { model: ToolDisplayModel; args?: unknown
   );
 }
 
-function isExpandable(model: ToolDisplayModel): boolean {
+/** 该调用是否有详情卡片可显示（组展开后直接渲染，不再逐条折叠）。 */
+function hasBody(model: ToolDisplayModel): boolean {
   if (model.state === "running") return false;
   if (model.variant === "terminal") return !!model.terminal?.command || !!model.terminal?.stdout || !!model.terminal?.stderr;
   if (model.variant === "file-read") return !!model.outputText;
   return model.argsText !== null || model.outputText !== null;
 }
 
-/** 单条工具行：图标 + 类别 + 摘要；失败行摘要为错误首行（错误色）；运行行带扫光动画。 */
+/**
+ * 单条工具行：图标 + 类别 + 摘要 + 详情卡片直接显示。
+ * 折叠只在组一级（组头），行本身无二级交互；失败行摘要为错误首行（错误色），运行行带扫光动画。
+ */
 function ToolRunRow({
   model,
   args,
-  expanded = false,
-  onToggle,
   time,
 }: {
   model: ToolDisplayModel;
   args?: unknown;
-  expanded?: boolean;
-  onToggle?: () => void;
   time?: string;
 }) {
   const Icon = VARIANT_ICONS[model.variant];
   const isError = model.state === "error";
   const isRunning = model.state === "running";
   const summaryText = model.errorSummary ?? model.summary;
-  const expandable = isExpandable(model);
-  const open = expandable && expanded;
 
   return (
     <div title={time}>
-      <button
-        className={`w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs transition-colors text-left ${
+      <div
+        className={`flex items-center gap-2 px-2 py-0.5 rounded text-xs ${
           isRunning
             ? "tool-run-row text-foreground/90"
-            : "text-muted-foreground hover:bg-muted/50"
+            : "text-muted-foreground"
         }`}
-        onClick={expandable ? onToggle : undefined}
-        type="button"
       >
-        {open ? (
-          <ChevronDown className="w-3 h-3 shrink-0" />
-        ) : (
-          <ChevronRight className={`w-3 h-3 shrink-0 ${expandable ? "" : "invisible"}`} />
-        )}
         <Icon className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`} />
         <span className="font-medium shrink-0">{model.title}</span>
         {summaryText && (
@@ -134,8 +125,8 @@ function ToolRunRow({
             {summaryText}
           </span>
         )}
-      </button>
-      {open && (
+      </div>
+      {hasBody(model) && (
         <div className="ml-5 mt-0.5 mb-1">
           <ToolCardBody model={model} args={args} />
         </div>
@@ -153,14 +144,11 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
 
   const renderToolItem = (tool: MessageItem) => {
     const args = argsOf?.(tool);
-    const model = buildToolDisplayModel(tool, args);
     return (
       <ToolRunRow
         key={tool.id}
-        model={model}
+        model={buildToolDisplayModel(tool, args)}
         args={args}
-        expanded={expansion.isExpanded(tool.id)}
-        onToggle={() => expansion.toggle(tool.id)}
         time={formatMessageTime(tool.created_at)}
       />
     );
