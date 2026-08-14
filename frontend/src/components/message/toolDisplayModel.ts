@@ -80,6 +80,8 @@ export function classifyToolName(toolName: string): ToolVariant {
 
 /** run_command 的 shell 模式哨兵值（后端 formatting.rs 约定）。 */
 const SHELL_SENTINEL = "__tiangong_shell__";
+/** 后端混入参数数组的工作目录参数前缀。 */
+const CWD_ARG_PREFIX = "__tiangong_cwd=";
 
 function firstNonEmptyLine(text: string | null | undefined): string {
   if (!text) return "";
@@ -94,17 +96,23 @@ function clamp(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+/** 后端混入参数数组的内部执行参数（__tiangong_cwd=），展示摘要时过滤，与 formatting.rs 对齐。 */
+function filterCwdArgs(args: unknown[]): unknown[] {
+  return args.filter((item) => !(typeof item === "string" && item.startsWith(CWD_ARG_PREFIX)));
+}
+
 /** 从调用参数提取单行摘要；参数兼容位置数组（核心工具）与对象（插件/MCP 工具）。 */
 function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
   if (args === undefined || args === null) return null;
 
   if (Array.isArray(args)) {
-    if (variant === "terminal" && args[0] === SHELL_SENTINEL) {
-      const script = typeof args[1] === "string" ? args[1] : "";
+    const visible = filterCwdArgs(args);
+    if (variant === "terminal" && visible[0] === SHELL_SENTINEL) {
+      const script = typeof visible[1] === "string" ? visible[1] : "";
       if (script) return clamp(firstNonEmptyLine(script), 120);
       return null;
     }
-    const first = args.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
+    const first = visible.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
     if (typeof first === "string" && first) return clamp(first, 120);
     return null;
   }
@@ -152,7 +160,7 @@ function argsToText(args: unknown): string | null {
   return null;
 }
 
-/** 从 write_file 参数中取写入内容（位置参数 [path, content, append?]）。 */
+/** 从 write_file 参数中取写入内容（位置参数 [path, content, append?]，过滤 cwd 干扰项）。 */
 export function writeContentFromArgs(args: unknown): string | null {
   if (!Array.isArray(args)) {
     if (args && typeof args === "object") {
@@ -161,7 +169,7 @@ export function writeContentFromArgs(args: unknown): string | null {
     }
     return null;
   }
-  const content = args[1];
+  const content = filterCwdArgs(args)[1];
   return typeof content === "string" ? content : null;
 }
 
@@ -300,9 +308,12 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   } else {
     summary = clamp(firstNonEmptyLine(outputText) || "执行完成", 80);
   }
-  if (Array.isArray(args) && typeof args[0] === "string") {
-    filePath = args[0];
-  } else if (args && typeof args === "object") {
+  const firstPathArg = Array.isArray(args)
+    ? filterCwdArgs(args).find((item) => typeof item === "string")
+    : undefined;
+  if (typeof firstPathArg === "string") {
+    filePath = firstPathArg;
+  } else if (args && typeof args === "object" && !Array.isArray(args)) {
     const record = args as Record<string, unknown>;
     const path = record.path ?? record.file_path;
     if (typeof path === "string") filePath = path;
@@ -313,9 +324,10 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
 
   let terminal: TerminalMaterial | null = null;
   if (variant === "terminal") {
+    const visibleArgs = Array.isArray(args) ? filterCwdArgs(args) : [];
     const command =
-      Array.isArray(args) && args[0] === SHELL_SENTINEL && typeof args[1] === "string"
-        ? args[1]
+      visibleArgs[0] === SHELL_SENTINEL && typeof visibleArgs[1] === "string"
+        ? visibleArgs[1]
         : argSummary;
     terminal = { command: command ?? null, stdout: outputText, stderr: null };
   }
