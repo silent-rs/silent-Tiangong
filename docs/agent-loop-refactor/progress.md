@@ -4,14 +4,15 @@
 
 ## 当前状态
 
-- 当前阶段：任务 08 完成，进入任务 09 迟到结果与稳态。
-- 当前建议任务：**09 - 迟到结果与稳态**（并发决策、迁移日志补全、压力验证）。
+- 当前阶段：任务 09 完成，进入任务 10 完成度策略评估。
+- 当前建议任务：**10 - 完成度策略评估**（CompletionPolicy 解耦；按需 Summary 需指标数据支撑，
+  本任务先解耦与记录决策）。
 - 当前阻塞：无。
-- 生产代码状态：任务 08 终态封口——CommandIngress（Accepting/Sealing/Committing）门控所有
-  命令来源（send_command/PluginFeedbackTx/关闭 force_send）；PendingFinish 提交前 begin_seal 原子
-  封口、排空封口前命令（决定性→终态；继续→reopen 重启）、无决定性→Committing 并刷新最新用量；
-  封口期间用户消息经 deliver 排入会话级下一轮队列，由下一轮 spawn 取出保存并确认（无 Core
-  快照/respawn，符合 6.2.1 红线）。103 测试 + agent-team 10 + workspace clippy/check 通过。
+- 生产代码状态：任务 09 迟到结果与稳态——逐通道盘点后决策**不引入 intent_generation**
+  （全部通道由结构化所有权 abort+join/shutdown+drop 或 ingress 门控覆盖，决策表写入 design.md 7.1）；
+  补迁移日志（中断 from_phase、LLM 完成 to_phase+budget、封口提交）与 ExecutionBudget 摘要；
+  压力测试：连续双引导（都保存、按序重启、锚点最新）、命令风暴（混合命令按序、取消终态、
+  副作用生效、用量累计）。105 测试 ×2 + agent-team 10 + workspace clippy/check 通过。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -29,7 +30,7 @@
 | 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 已完成 | feature/agent-execution-core | （本次） | CompressionPhase 命名对齐 + 引导中断压缩测试 |
 | 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 已完成 | feature/agent-execution-core | （本次） | CommandEffect 统一处理器 + PendingFinish 语义 + 顺序测试 |
 | 08 | [终态封口](./tasks/08-终态封口.md) | 已完成 | feature/agent-execution-core | （本次） | CommandIngress 门控 + 下一轮队列可靠交接 |
-| 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 未开始 | - | - | 并发决策、日志、压力验证 |
+| 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 已完成 | feature/agent-execution-core | （本次） | 不引入代际决策（design 7.1）+ 日志补全 + 压力测试 |
 | 10 | [完成度策略](./tasks/10-完成度策略.md) | 未开始 | - | - | CompletionPolicy、Summary 评估 |
 | 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 未开始 | - | - | 模块化核心与最终交付 |
 
@@ -157,3 +158,4 @@ cargo test -p tiangong-plugin-agent-team
 | 06 压缩阶段 | ✅ | ✅ | 99 通过（×2）| CompressionPhase 对齐设计；引导中断压缩、迟到结果不应用 |
 | 07 统一命令与暂定完成 | ✅ | ✅ | 100 通过（×2）| CommandEffect、InjectTool 撤销暂定、用量刷新、顺序测试 |
 | 08 终态封口 | ✅ | ✅ | 103 通过（×2）+ agent-team 10 | ingress 门控/封口排空/下一轮队列测试 |
+| 09 迟到结果与稳态 | ✅ | ✅ | 105 通过（×2）+ agent-team 10 | 代际不引入决策、日志、连续引导/命令风暴 |

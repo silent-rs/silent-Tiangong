@@ -117,6 +117,17 @@ impl ExecutionBudget {
         self.reset_react_phase();
         self.continuation_count = 0;
     }
+
+    /// 诊断摘要（迁移日志用，ALR-301）。
+    pub(super) fn debug_summary(&self) -> String {
+        format!(
+            "budget: request_round={} react_rounds={} continuation={} tool_executed={}",
+            self.request_round,
+            self.react_rounds_in_phase,
+            self.continuation_count,
+            self.executed_tool_in_phase,
+        )
+    }
 }
 
 /// 执行限制。任务 07 前暂由 `TurnContext.max_tool_rounds` / `max_outer_iterations`

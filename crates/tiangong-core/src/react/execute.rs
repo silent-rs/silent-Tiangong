@@ -782,6 +782,12 @@ async fn interrupt_active_work(
     downgrade_summary: bool,
 ) {
     let phase = state.take_phase();
+    tracing::debug!(
+        session_id = %ctx.session.id,
+        from_phase = phase.name(),
+        downgrade_summary,
+        "中断主循环直接拥有的活动"
+    );
     match phase {
         ExecutionPhase::WaitingModel(active)
         | ExecutionPhase::CheckingCompletion(active)
@@ -1310,6 +1316,12 @@ pub(super) async fn execute_turn(
                 }
                 crate::shared_runtime::commit_ingress(&ctx.session.id);
                 pending_result.usage = state.accumulated_usage.clone();
+                tracing::debug!(
+                    session_id = %ctx.session.id,
+                    event = "ingress_committed",
+                    detail = state.budget.debug_summary(),
+                    "终态封口完成，提交暂定结果（ALR-201/301）"
+                );
                 break 'agent_loop pending_result;
             }
 
@@ -3747,6 +3759,198 @@ mod tests {
                 .iter()
                 .any(|m| m.id == "injected-then-cancel" && m.role == MessageRole::User),
             "注入的消息应已保存（先于取消处理）"
+        );
+    }
+
+    /// 压力场景（任务 09）：连续两条引导消息——都保存成功、按序重启、
+    /// 最终一次成功终态；锚点为最后一条注入消息。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consecutive_injects_are_all_saved_and_restart_in_order() {
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        // 两次工具调用（两次打断窗口）+ 新意图文本 + Summary。
+        for i in 1..=2 {
+            let _ = i;
+            mount_sse(
+                &server,
+                vec![
+                    tool_call_chunk("call_x", "paused_probe", "{}"),
+                    usage_chunk(15, 3),
+                ],
+            )
+            .await;
+        }
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("按最新要求完成。"), usage_chunk(20, 4)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(25, 3)],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx: _,
+            cmd_tx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        let tx = cmd_tx.clone();
+        let started_wait = started.clone();
+        let cmd_task = tokio::spawn(async move {
+            for n in 1..=2u32 {
+                tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                    .await
+                    .expect("工具应已启动");
+                tx.send(Command::InjectUserMessage {
+                    message_id: format!("injected-chain-{n}"),
+                    content: vec![tiangong_types::ContentBlock::text(format!("第 {n} 次调整"))],
+                })
+                .unwrap();
+            }
+        });
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        let _ = cmd_task.await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "连续引导后应成功完成，实际: {:?}",
+            result.outcome
+        );
+        for n in 1..=2u32 {
+            let id = format!("injected-chain-{n}");
+            assert!(
+                ctx.session
+                    .messages
+                    .iter()
+                    .any(|m| m.id == id && m.role == MessageRole::User),
+                "{id} 应已保存"
+            );
+        }
+        // 锚点：最后一条用户消息是第二次注入。
+        let latest = ctx
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("应有用户消息");
+        assert_eq!(latest.id, "injected-chain-2", "最新锚点应为最后一条注入");
+    }
+
+    /// 压力场景（任务 09）：命令风暴——工具等待中背靠背投递混合命令（标题/用量/
+    /// 工具注入/思考强度/流事件/引导/取消），按序处理不 panic，取消形成终态，
+    /// 副作用（标题、用量）生效。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_storm_is_processed_in_order_without_panicking() {
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx: _,
+            cmd_tx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        let tx = cmd_tx.clone();
+        let started_wait = started.clone();
+        let cmd_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("工具应已启动");
+            // 命令风暴：混合非决定性命令 + 引导 + 取消（最后）。
+            tx.send(Command::SetTitle {
+                title: "风暴标题".to_string(),
+                only_if_default: false,
+            })
+            .unwrap();
+            tx.send(Command::ReportUsage {
+                usage: TokenUsage {
+                    prompt_tokens: 7,
+                    completion_tokens: 3,
+                    total_tokens: 10,
+                    prompt_cache_hit_tokens: None,
+                    prompt_cache_miss_tokens: None,
+                },
+                source: "storm-probe".to_string(),
+                emit_event: false,
+            })
+            .unwrap();
+            tx.send(Command::InjectTool {
+                tool_name: "storm_data".to_string(),
+                payload: serde_json::json!({"k": 1}),
+            })
+            .unwrap();
+            tx.send(Command::SetReasoningEffort("high".to_string()))
+                .unwrap();
+            tx.send(Command::EmitStreamEvent(Box::new(
+                StreamEvent::TitleChanged {
+                    title: "不应直接出现的标题".to_string(),
+                },
+            )))
+            .unwrap();
+            tx.send(Command::InjectUserMessage {
+                message_id: "storm-injected".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("风暴中的引导")],
+            })
+            .unwrap();
+            tx.send(Command::Cancel).unwrap();
+        });
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        let _ = cmd_task.await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Cancelled),
+            "风暴以取消收尾应形成取消终态，实际: {:?}",
+            result.outcome
+        );
+        assert_eq!(ctx.session.title, "风暴标题", "标题命令应已生效");
+        assert_eq!(
+            ctx.session.reasoning_effort.as_deref(),
+            Some("high"),
+            "思考强度命令应已生效"
+        );
+        assert!(
+            result.usage.total_tokens >= 10,
+            "插件用量应累计进终态（ALR-111），实际: {}",
+            result.usage.total_tokens
+        );
+        assert!(
+            ctx.session
+                .messages
+                .iter()
+                .any(|m| m.id == "storm-injected" && m.role == MessageRole::User),
+            "风暴中的引导消息应已保存"
         );
     }
 

@@ -332,6 +332,23 @@ enum MessageDeliveryResult {
    - 压缩旧结果：不得应用旧摘要；已消耗用量和取消事件按契约处理。
 4. 必须先有可复现迟到路径或明确通道，再增加代际字段。
 
+### 7.1 任务 09 决策：不引入 `intent_generation`
+
+逐通道盘点（2026-08-14，实现于任务 02~08）：
+
+| 通道 | 归属 | 迟到可能性 | 处置 |
+| --- | --- | --- | --- |
+| LLM chunk/完成 | `ActiveLlm` 阶段持有 | 无：中断 `abort_and_join` 等待真正结束 | 结构化所有权 |
+| 工具任务 | `ToolExecutionPhase` 阶段持有 | 无：`shutdown().await` 后 drop 整个阶段 | 中断时补失败结果+协议闭合（ALR-110） |
+| 压缩任务 | `CompressionPhase` 阶段持有 | 无：`cancel()` abort+join | 迟到摘要不应用（测试钉死） |
+| 插件 feedback | ingress 门控 | 无：封口后拒绝，通道内命令被 PendingFinish 排空 | ALR-201/203 |
+| 标题生成回传 | `send_command` 门控 | 可能丢弃（封口后 send=false） | 自愈：标题默认值下次再生成 |
+
+结论：全部通道由结构化所有权（abort+join / shutdown+drop）或 ingress 门控覆盖，
+无任何通道存在"结果脱离阶段所有权后仍能到达驱动"的路径，**不引入
+`intent_generation`**。后续若新增异步回传通道（不经过阶段所有权或 ingress），
+须先补本表并重新评估。
+
 ## 8. 完成度策略
 
 第一阶段保持现有 Summary/ForceFinal 用户行为，但从驱动循环中解耦：
