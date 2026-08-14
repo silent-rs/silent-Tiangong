@@ -17,8 +17,8 @@
 | 编号 | 任务 | 状态 | 分支 | 提交 | 关键产物 |
 | --- | --- | --- | --- | --- | --- |
 | 00 | [基线冻结](./tasks/00-基线冻结.md) | 已完成 | feature/agent-execution-core | 7c425bac（基线） | main v0.14.3 干净基线、引导消息重构中实现、89 测试绿色 |
-| 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | （本次） | ALR-107/108/109/302/111 安全网；引导/PendingFinish 留 04/07 |
-| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | （本次） | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
+| 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | 0470d743 / aeedcba6 | ALR-107(单消息)/108/109/302/111 安全网；引导/PendingFinish 留 04/07 |
+| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | 187bfa0d / aeedcba6 | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
 | 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 未开始 | - | - | 预算、类型归属、阶段数据模型 |
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 未开始 | - | - | 模型侧生产状态机 |
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 未开始 | - | - | 工具批次与审批状态机 |
@@ -111,7 +111,7 @@ cargo test -p tiangong-plugin-agent-team
 - 2026-08-14：完成第一版状态机收敛方案。
 - 2026-08-14：根据工程评估升级为整体 Agent 执行核心重构方案，扩展为 00~11 任务。
 - 2026-08-14：任务 00 基线冻结——确认 `main` v0.14.3 干净基线，引导消息（ALR-101）在重构中实现，89 测试绿色基线。
-- 2026-08-14：任务 02 驱动原型——`react/phase.rs` 验证 take/install 所有权模式 + AbortHandle 取消，3 测试通过，结论写回 design.md。
+- 2026-08-14：任务 02 驱动原型——`react/phase.rs` 验证 take/install 所有权模式 + AbortHandle 取消（后补真实取消与守卫验证，共 4 测试），结论写回 design.md。
 
 ## 更新规则
 
@@ -131,7 +131,7 @@ cargo test -p tiangong-plugin-agent-team
 | 104 Summary 中断降级 | 04 | 待实现 |
 | 105 暂定完成可撤销 | 07 | 待实现 |
 | 106 控制命令完整处理 | 07 | 待实现 |
-| 107 最新消息锚点 | 01（run_turn + 磁盘重载）| 已覆盖（run_turn_emits_single_done_and_anchors_status_to_latest_user_message）|
+| 107 最新消息锚点 | 01（单消息）+ 04（多消息）| 部分覆盖：单消息锚点 + 磁盘重载已测；多消息（引导注入后写最新、不覆盖旧消息、重载一致）留任务 04 验收 |
 | 108 生命周期唯一 | 01（mock 插件计数）| 已覆盖（run_turn_invokes_lifecycle_hooks_exactly_once）|
 | 109 唯一终态 | 01（Done 计数）| 已覆盖（run_turn_emits_single_done_and_anchors_status_to_latest_user_message）|
 | 110 工具协议闭合 | 01 基线 + 05/06 | 基线覆盖（取消时闭合测试）|

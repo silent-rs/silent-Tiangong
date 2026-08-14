@@ -158,6 +158,8 @@ loop {
 - **Ready**：`NeedModel`、`PreparingTools`、`PendingFinish`；
 - **Waiting**：`WaitingModel`、`WaitingTools`、`WaitingApproval`、`Compressing`、`CheckingCompletion`、`ForceFinal`。
 
+**任务 04 的实现顺序约束（ExecutionEvent 归一化先行）**：原型只验证了"阶段持有 JoinHandle/JoinSet 可迁移"，未覆盖生产 select 的真正借用难题——LLM chunk / 压缩续接处理需要同时借阶段内资源（如 `ActiveLlm.chunk_rx`）与 `&mut ctx`（持久化）。解法是 2.4 节的 `ExecutionEvent`：**任务 04 必须先建"select 输出 → ExecutionEvent"的转换层（在 select 分支内只做转换、不触碰 ctx），事件枚举值脱离借用后再进入阶段迁移与副作用处理**，然后才迁阶段。不允许在 select 分支内直接处理业务来绕过这一步。
+
 ### 3.1 任务 02 原型验证结论
 
 `react/phase.rs` 的最小原型（`ProtoState` / `ProtoPhase` / `drive_phase` / `proto_drive_loop` / `InstallGuard`）已验证（4 个测试通过，含真实取消与迁移守卫）：
@@ -165,7 +167,7 @@ loop {
 - **take/install 模式可行**：`take_phase` 取出阶段（`Option::take`），`install_phase` 安装新阶段，循环中无需并列活动 `Option`。
 - **活动资源可整体转移**：阶段持有 `JoinHandle`/`JoinSet` 时，迁移通过消费旧阶段、构造新阶段完成，无需在 state 上维护并列 `Option`。
 - **取消用 `AbortHandle` 并等待结束**：`WaitingModel` 用 `tokio::select!` 监听命令与 `&mut handle`；命令分支用独立的 `AbortHandle` 取消（避免与 select 借用冲突），随后 `handle.await` **等待任务真正结束**，避免残留迟到结果（ALR-204）。测试用 `Notify` 确认任务已进入运行后再取消，并断言快速结束（不等满任务时长）。
-- **迁移中断有守卫**：`InstallGuard` 在 take 后持有 state，未 install 就 drop（panic/future 取消）时恢复为 `PendingFinish`，保证不留下"无阶段"半状态（ALR-205）。
+- **迁移守卫（诊断定位，非恢复机制）**：`InstallGuard` 在 take 后持有 state，未 install 就 drop（panic 展开时）恢复为 `PendingFinish` 并记录 error 日志。**定位澄清**：它保证的是同任务内 panic 后的内存一致性与可诊断性（调用方 catch_unwind 后能观察到明确阶段，已有测试验证）；turn task 被整体 abort 时 state 随栈销毁、无可观察者，恢复无实际意义——那种场景的"不留半状态"由 turn 级唯一终态（ALR-109/205 的 TurnCommitter 路径）保证，不依赖守卫。任务 04 集成时不得把守卫当作生产恢复手段。
 - **Ready/Waiting 分流**：Ready 阶段同步推进（构造新阶段返回），Waiting 阶段进入 `select!`，不引入含义模糊的 `is_idle`。
 
 后续任务（03 起）按此骨架扩展为正式 `ExecutionPhase` / `ExecutionState`，无需另选所有权模型。
@@ -279,6 +281,21 @@ enum IngressState {
 - 标题生成回传；
 - 插件用量和流事件；
 - 工具/浏览器/终端注入。
+
+### 6.2.1 历史权衡记录（为什么之前两次回退、这次仍要做）
+
+`perf/inject-user-message` 分支上，CommandIngress 门控（两态）与封口期间下一 turn 队列**实现过两次并回退**，原因：
+
+1. 简化版两态（Running/Committing）只挡住了仲裁排空后的纳秒级窗口，收益与引入的运行时状态复杂度不成比例；
+2. 封口后消息的"下一 turn 交接"最初做成了 Core 字段快照 + respawn 重建上下文，引入 `CoreFields`/Clone 泛滥，被判定过度设计回退。
+
+本次仍将其列为任务 08 正式范围的依据：
+
+- ALR-202（可靠投递）要求"确认成功的消息不能丢失"，简单方案无法承诺这一点；
+- 新架构中封口从 Agent Loop 独立为 `CommandIngress` 模块（本节），与旧实现"塞进 execute.rs 命令分支"不同，复杂度有明确边界；
+- 下一 turn 交接改为 deliver 层排入会话级队列、由 turn 结束路径自然承接（不再需要 Core 字段快照/respawn）。
+
+任务 08 执行时的红线：不得为封口重新引入 Core 字段快照或 respawn 重建；若实现中发现复杂度再次失控，回退到"仲裁排空 + Busy 拒绝"的简单方案并重新评审 ALR-202 的验收口径。
 
 ### 6.3 封口流程
 

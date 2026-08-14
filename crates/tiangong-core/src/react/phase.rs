@@ -225,8 +225,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_guard_restores_pending_finish_on_interrupt() {
-        // 模拟迁移中断：take 后守卫未 install 就 drop（如 panic/future 取消）。
+    async fn install_guard_restores_pending_finish_on_drop() {
+        // 基础验证：take 后守卫未 install 就 drop，恢复为 PendingFinish。
         let mut state = ProtoState::new();
         let _phase = state.take_phase();
         assert!(state.phase.is_none(), "take 后应处于无阶段");
@@ -239,7 +239,37 @@ mod tests {
         }
         assert!(
             matches!(state.phase, Some(ProtoPhase::PendingFinish)),
-            "迁移中断后守卫应恢复为 PendingFinish"
+            "守卫 drop 后应恢复为 PendingFinish"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_guard_restores_state_when_drive_panics() {
+        // 真实异常场景：drive_phase 等待期间 panic（unwind 展开），守卫在展开中
+        // drop，同任务内恢复状态——panic 后调用方仍能观察到明确阶段而非"无阶段"。
+        // 这是守卫的真实能力边界：task 级 abort 时 state 随栈销毁、无可观察者，
+        // 恢复无意义（见 design.md 3.1 守卫定位）。
+        let mut state = ProtoState::new();
+        let (_tx, mut rx) = mpsc::unbounded_channel::<Command>();
+        // 推进到 WaitingModel（持有真实任务），模拟在等待中 panic。
+        let phase = state.take_phase();
+        let (waiting, _) = drive_phase(phase, &mut rx).await;
+        assert!(matches!(waiting, ProtoPhase::WaitingModel(_)));
+        state.install_phase(waiting);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // take 后在"处理事件"中 panic，模拟迁移中断；panic 展开时守卫 drop 恢复。
+            let _phase = state.take_phase();
+            let _guard = InstallGuard {
+                state: &mut state,
+                installed: false,
+            };
+            panic!("模拟 drive 迁移中断");
+        }));
+        assert!(result.is_err(), "模拟 panic 应被捕获");
+        assert!(
+            matches!(state.phase, Some(ProtoPhase::PendingFinish)),
+            "panic 展开后守卫应恢复为 PendingFinish，而非停留无阶段"
         );
     }
 }
