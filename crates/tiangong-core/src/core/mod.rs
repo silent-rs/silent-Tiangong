@@ -347,40 +347,67 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         // 保存消息后再发送——命令成功写入通道不等于已处理。
                         return Ok(());
                     }
-                    // 发送失败：turn 正在终态封口（Sealing/Committing）或刚结束。
-                    // 把消息排入下一轮队列——由下一轮 spawn 取出、保存并确认
-                    // （ALR-202：确认基于落盘或可靠排队，不虚报成功）。
-                    crate::shared_runtime::push_next_turn(
+                    // 发送失败：turn 正在终态封口（Sealing/Committing）。把消息排入
+                    // 下一轮队列（入队失败返回错误，不虚报成功，ALR-202），然后等待
+                    // 旧轮结束、落入下方 spawn 路径自动启动下一轮并取出队列——交接
+                    // 不依赖用户再发一条消息。等待限时，超时返回错误（同样不虚报）。
+                    let queued = crate::shared_runtime::push_next_turn(
                         &self.session_id,
                         Command::InjectUserMessage {
                             message_id: msg_id,
                             content: prepared.clone(),
                         },
                     );
+                    if !queued {
+                        tracing::warn!(
+                            session_id = %self.session_id,
+                            "注入用户消息入队下一轮失败（内部锁异常）"
+                        );
+                        return Err(CoreError::WorkerStopped);
+                    }
                     tracing::debug!(
                         session_id = %self.session_id,
-                        "注入用户消息时 turn 正在封口或已结束，已排入下一轮队列"
+                        "注入用户消息时 turn 正在封口，已排入下一轮队列并等待交接"
                     );
-                    return Ok(());
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while crate::shared_runtime::is_running(&self.session_id) {
+                        if std::time::Instant::now() > deadline {
+                            tracing::warn!(
+                                session_id = %self.session_id,
+                                "等待封口轮次结束超时"
+                            );
+                            return Err(CoreError::WorkerPanicked);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    // 消息仍在队列中，由下方 spawn 路径取出保存并确认。
                 }
 
                 let mut ctx = self.build_turn_context()?;
-                // 合并上一轮封口后遗留的待执行消息：与本轮消息一起进入 session
-                // 并确认接收（可靠交接的取出端）。
-                for command in crate::shared_runtime::drain_next_turn(&self.session_id) {
-                    if let Command::InjectUserMessage {
+                // 合并封口期间排入下一轮队列的消息：与本轮消息一起进入 session
+                // 并确认接收（可靠交接的取出端）。**保存成功才移除**：任一条保存
+                // 失败，把该条与剩余未处理消息按原顺序放回队列并返回错误——
+                // 不启动轮次、不虚报成功、不丢消息（ALR-202）。
+                let mut pending = crate::shared_runtime::drain_next_turn(&self.session_id);
+                let mut failure: Option<String> = None;
+                let mut idx = 0;
+                while idx < pending.len() {
+                    let Command::InjectUserMessage {
                         message_id,
                         content,
-                    } = command
-                    {
-                        let content_text = tiangong_types::content_blocks_text(&content);
-                        let content_blocks = tiangong_types::stable_content_blocks(&content);
-                        let event_id = message_id.clone();
-                        if ctx
-                            .session
-                            .try_append_prepared_user_message_with_id(message_id, content)
-                            .is_ok()
-                        {
+                    } = &pending[idx]
+                    else {
+                        idx += 1;
+                        continue;
+                    };
+                    let content_text = tiangong_types::content_blocks_text(content);
+                    let content_blocks = tiangong_types::stable_content_blocks(content);
+                    let event_id = message_id.clone();
+                    match ctx.session.try_append_prepared_user_message_with_id(
+                        message_id.clone(),
+                        content.clone(),
+                    ) {
+                        Ok(()) => {
                             let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
                                 message_id: event_id,
                                 content: content_text,
@@ -388,8 +415,24 @@ impl crate::agent_input::AgentInput for TiangongCore {
                                 media: Vec::new(),
                                 model_excluded: false,
                             });
+                            idx += 1;
+                        }
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
                         }
                     }
+                }
+                if let Some(error) = failure {
+                    // idx 起（含失败条）都未成功保存，按原顺序放回队列前端。
+                    let remaining = pending.split_off(idx);
+                    crate::shared_runtime::requeue_next_turn_front(&self.session_id, remaining);
+                    tracing::warn!(
+                        %error,
+                        session_id = %self.session_id,
+                        "下一轮队列消息保存失败，已按原顺序放回队列"
+                    );
+                    return Err(CoreError::WorkerStopped);
                 }
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
                 let content = tiangong_types::content_blocks_text(&prepared);

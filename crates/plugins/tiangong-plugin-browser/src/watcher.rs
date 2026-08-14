@@ -160,6 +160,11 @@ impl BrowserWatcher {
         if tx.is_closed() {
             return;
         }
+        // 封口（Sealing/Committing）期间拒绝注入：保留本次变化，等下一轮恢复。
+        // 兜底由 inject_tool 的返回值负责（判断与投递之间的竞态窗口）。
+        if !tx.is_accepting() {
+            return;
+        }
 
         // 节流：首次无限制；后续至少间隔 MIN_OBSERVE_INTERVAL
         let now = Instant::now();
@@ -242,7 +247,7 @@ impl BrowserWatcher {
             .iter()
             .map(|t| (t.id.clone(), t.url.clone(), t.title.clone()))
             .collect();
-        tx.inject_tool(
+        let delivered = tx.inject_tool(
             "browser_data",
             json!({
                 "title": snapshot.title,
@@ -253,6 +258,19 @@ impl BrowserWatcher {
                 "feedback": feedback,
             }),
         );
+        if !delivered {
+            // 注入被拒绝（判断后进入封口/通道关闭的竞态窗口）：不更新已推送快照，
+            // 保留本次变化，下一 tick 会重新观察并尝试注入——封口窗口不丢插件反馈。
+            tracing::debug!(
+                url = %snapshot.url,
+                title = %snapshot.title,
+                text_len = snapshot.text.len(),
+                events_len = snapshot.events.len(),
+                has_feedback,
+                "browser watcher: inject rejected (sealing/closed), keeping snapshot for retry"
+            );
+            return;
+        }
         tracing::info!(
             url = %snapshot.url,
             title = %snapshot.title,

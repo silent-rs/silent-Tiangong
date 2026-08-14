@@ -338,7 +338,7 @@ impl Coordinator {
                 content: content.clone(),
             });
             if let Some(parent_feedback) = self.feedback() {
-                parent_feedback.inject_tool(
+                let delivered = parent_feedback.inject_tool(
                     "agent_team_message",
                     json!({
                         "from_agent_id": actor_id,
@@ -346,6 +346,14 @@ impl Coordinator {
                         "content": content,
                     }),
                 );
+                if !delivered {
+                    // 父 Core 正在封口或已关闭：不虚报"已送达"，返回错误让上层重试。
+                    // 消息内容已随 AgentMessage 事件发出，但注入会话被拒，不能确认投递。
+                    return error_result(
+                        TOOL_SEND_MESSAGE,
+                        "父 Core 正在封口或已关闭，消息未送达，请稍后重试",
+                    );
+                }
             }
             return ok_result(
                 TOOL_SEND_MESSAGE,
@@ -397,10 +405,17 @@ impl Coordinator {
         cancel_target.disarm();
         match result {
             Ok(result) => {
-                feedback.accumulate_token_usage(
+                let delivered = feedback.accumulate_token_usage(
                     result.usage,
                     format!("sub_agent:{}", target.descriptor.agent_id),
                 );
+                if !delivered {
+                    // 父 Core 封口/关闭导致用量未并入：记录丢失，不静默忽略（ALR-203）。
+                    tracing::warn!(
+                        agent_id = %target.descriptor.agent_id,
+                        "子 Agent 用量累计投递被拒（父 Core 封口/关闭），本次用量未并入"
+                    );
+                }
                 let output = result.assistant_text.unwrap_or_else(|| {
                     format!("{} 已完成本轮，但没有生成文本输出", target.descriptor.label)
                 });

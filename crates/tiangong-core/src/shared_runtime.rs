@@ -92,6 +92,14 @@ impl CommandIngress {
     pub(crate) fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
+
+    /// 当前是否处于 `Accepting`（可接收命令）。`false` 表示正在封口
+    /// （`Sealing`/`Committing`）或通道已关闭——插件反馈此时不应投递，
+    /// 需要保留待重试数据（ALR-201/203）。
+    pub(crate) fn is_accepting(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        matches!(*state, IngressState::Accepting)
+    }
 }
 
 /// turn task 注册表: session_id → 当前代任务。
@@ -124,12 +132,36 @@ fn next_turn_queue() -> &'static Mutex<NextTurnQueue> {
 }
 
 /// 将命令排入指定会话的下一轮队列（封口期间 deliver 调用）。
-pub fn push_next_turn(session_id: &str, cmd: Command) {
+/// 返回 `true` 表示成功入队；`false` 表示队列锁异常（Mutex poisoned），
+/// 调用方应据此返回错误，不虚报成功（ALR-202）。
+pub fn push_next_turn(session_id: &str, cmd: Command) -> bool {
+    match next_turn_queue().lock() {
+        Ok(mut queue) => {
+            queue
+                .entry(session_id.to_string())
+                .or_default()
+                .push_back(cmd);
+            true
+        }
+        Err(_) => {
+            // Mutex poisoned——不应发生，但必须如实报告，不能静默丢弃消息。
+            false
+        }
+    }
+}
+
+/// 将未处理完的命令按原顺序放回指定会话下一轮队列的**前端**
+/// （保存失败时恢复队列，保证消息不丢失、顺序不变，ALR-202）。
+pub fn requeue_next_turn_front(session_id: &str, commands: Vec<Command>) {
+    if commands.is_empty() {
+        return;
+    }
     if let Ok(mut queue) = next_turn_queue().lock() {
-        queue
-            .entry(session_id.to_string())
-            .or_default()
-            .push_back(cmd);
+        let deque = queue.entry(session_id.to_string()).or_default();
+        // 按原顺序插入到前端：从后往前 push_front 保持原始顺序。
+        for cmd in commands.into_iter().rev() {
+            deque.push_front(cmd);
+        }
     }
 }
 
@@ -309,15 +341,19 @@ mod tests {
     fn ingress_gates_send_by_state() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         let ingress = CommandIngress::new(tx);
+        assert!(ingress.is_accepting(), "新建 ingress 应为 Accepting");
         assert!(ingress.send(Command::Cancel), "Accepting 时应接受");
         assert!(matches!(rx.try_recv(), Ok(Command::Cancel)));
 
         ingress.begin_seal();
+        assert!(!ingress.is_accepting(), "Sealing 后不应可接收");
         assert!(!ingress.send(Command::Cancel), "Sealing 后应拒绝");
         ingress.reopen();
+        assert!(ingress.is_accepting(), "reopen 后恢复接受");
         assert!(ingress.send(Command::Cancel), "reopen 后恢复接受");
         ingress.begin_seal();
         ingress.commit();
+        assert!(!ingress.is_accepting(), "Committing 后不应可接收");
         assert!(!ingress.send(Command::Cancel), "Committing 后应拒绝");
         // 已封口不可再 reopen（Committing 是终态方向）。
         ingress.reopen();
@@ -325,6 +361,7 @@ mod tests {
             !ingress.send(Command::Cancel),
             "Committing 不因 reopen 恢复"
         );
+        assert!(!ingress.is_accepting(), "Committing 不因 reopen 恢复");
         // force_send 仍可送达（关闭路径专用）。
         assert!(ingress.force_send(Command::Cancel));
     }
@@ -333,13 +370,57 @@ mod tests {
     fn next_turn_queue_round_trip() {
         let sid = format!("next-turn-{}", scru128::new_string());
         assert!(drain_next_turn(&sid).is_empty(), "空队列应返回空");
-        push_next_turn(&sid, Command::Cancel);
-        push_next_turn(&sid, Command::Shutdown);
+        assert!(push_next_turn(&sid, Command::Cancel), "入队应返回 true");
+        assert!(push_next_turn(&sid, Command::Shutdown), "入队应返回 true");
         let drained = drain_next_turn(&sid);
         assert_eq!(drained.len(), 2, "应按序取出全部排队命令");
         assert!(matches!(drained[0], Command::Cancel));
         assert!(matches!(drained[1], Command::Shutdown));
         assert!(drain_next_turn(&sid).is_empty(), "取出后队列应清空");
+    }
+
+    #[test]
+    fn requeue_next_turn_front_preserves_order() {
+        let sid = format!("next-turn-{}", scru128::new_string());
+        // 先入队两条已处理（保留），再放回 [A, B, C] 到前端。
+        push_next_turn(&sid, Command::Cancel);
+        push_next_turn(&sid, Command::Shutdown);
+        requeue_next_turn_front(
+            &sid,
+            vec![
+                Command::SetTitle {
+                    title: "A".to_string(),
+                    only_if_default: false,
+                },
+                Command::SetTitle {
+                    title: "B".to_string(),
+                    only_if_default: false,
+                },
+                Command::SetTitle {
+                    title: "C".to_string(),
+                    only_if_default: false,
+                },
+            ],
+        );
+        let drained = drain_next_turn(&sid);
+        assert_eq!(drained.len(), 5, "放回的命令应插入到已有队列之前");
+        assert!(matches!(
+            &drained[0],
+            Command::SetTitle { title, .. } if title == "A"
+        ));
+        assert!(matches!(
+            &drained[1],
+            Command::SetTitle { title, .. } if title == "B"
+        ));
+        assert!(matches!(
+            &drained[2],
+            Command::SetTitle { title, .. } if title == "C"
+        ));
+        assert!(matches!(drained[3], Command::Cancel), "原有队列保持在其后");
+        assert!(
+            matches!(drained[4], Command::Shutdown),
+            "原有队列保持在其后"
+        );
     }
 
     /// 构造仅用于注册表测试的最小 TurnContext（不发真实请求）。

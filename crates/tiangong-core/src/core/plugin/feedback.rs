@@ -52,25 +52,33 @@ impl PluginFeedbackTx {
     }
 
     /// 上报插件内部模型调用产生的用量，并向前端发送用量事件。
-    pub fn report_token_usage(&self, usage: tiangong_types::TokenUsage, source: impl Into<String>) {
-        let _ = self.ingress.send(Command::ReportUsage {
+    /// 返回 `true` 表示已成功投递到当前 turn 的命令队列；`false` 表示封口或
+    /// 通道关闭导致投递被拒。调用方应据此记录丢失，不能静默忽略。
+    pub fn report_token_usage(
+        &self,
+        usage: tiangong_types::TokenUsage,
+        source: impl Into<String>,
+    ) -> bool {
+        self.ingress.send(Command::ReportUsage {
             usage,
             source: source.into(),
             emit_event: true,
-        });
+        })
     }
 
     /// 将已经逐笔通知过前端的嵌套执行用量并入当前 turn，不重复发送用量事件。
+    /// 返回 `true` 表示已成功投递到当前 turn 的命令队列；`false` 表示封口或
+    /// 通道关闭导致投递被拒。调用方应据此记录丢失，不能静默忽略。
     pub fn accumulate_token_usage(
         &self,
         usage: tiangong_types::TokenUsage,
         source: impl Into<String>,
-    ) {
-        let _ = self.ingress.send(Command::ReportUsage {
+    ) -> bool {
+        self.ingress.send(Command::ReportUsage {
             usage,
             source: source.into(),
             emit_event: false,
-        });
+        })
     }
 
     /// 向当前 turn 投递一个前端流事件。
@@ -80,6 +88,12 @@ impl PluginFeedbackTx {
 
     pub fn is_closed(&self) -> bool {
         self.ingress.is_closed()
+    }
+
+    /// 当前是否可接收命令（`Accepting` 状态）。封口（`Sealing`/`Committing`）
+    /// 或通道关闭期间返回 `false`，插件不应投递并需要保留数据待重试（ALR-201）。
+    pub fn is_accepting(&self) -> bool {
+        self.ingress.is_accepting()
     }
 }
 
