@@ -4,13 +4,15 @@
 
 ## 当前状态
 
-- 当前阶段：任务 06 完成，进入任务 07 统一命令与暂定完成。
-- 当前建议任务：**07 - 统一命令与暂定完成**（PendingFinish 命令仲裁、InjectTool 撤销暂定结果、
-  晚到用量刷新、删除 NextStep 兼容残留与 TurnContext max_* 接入 ExecutionLimits）。
+- 当前阶段：任务 07 完成，进入任务 08 终态封口。
+- 当前建议任务：**08 - 终态封口**（CommandIngress：Accepting/Sealing/Committing + 可靠下一 turn
+  交接；红线：不用 Core 快照/respawn，见 design.md 6.2.1）。
 - 当前阻塞：无。
-- 生产代码状态：任务 06 压缩阶段转正式——CompressionPhase 命名对齐设计（design.md 2.3），
-  续接去向由 CompressionContinuation 完整表达（压缩完成后单一 match 迁移）；
-  新增引导中断压缩测试（迟到结果不应用）。99 测试连跑两次稳定，workspace check 通过。
+- 生产代码状态：任务 07 统一命令与暂定完成——CommandEffect（KeepCurrent/ToPhase/Terminate）
+  处理器统一承接全部命令；PendingFinish 收到 InjectTool 撤销暂定结果重新分析（不重置意图预算）；
+  PendingFinish 提交前刷新为最新累计用量（ALR-111 不冻结快照）；新增连续命令顺序测试
+  （注入+背靠背取消 → 取消终态、消息已保存）。NextStep/can_advance/并列 Option 已在 04b 清除。
+  100 测试连跑两次稳定。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -26,7 +28,7 @@
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 已完成 | feature/agent-execution-core | b1667d57(04a) / (本次 04b) | 引导消息链路 + ExecutionPhase 单一状态机主循环 |
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 已完成 | feature/agent-execution-core | （本次） | 不变量断言 + 迁移日志 + ALR-103/并行批次测试 |
 | 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 已完成 | feature/agent-execution-core | （本次） | CompressionPhase 命名对齐 + 引导中断压缩测试 |
-| 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 未开始 | - | - | 单一命令语义、删除旧状态 |
+| 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 已完成 | feature/agent-execution-core | （本次） | CommandEffect 统一处理器 + PendingFinish 语义 + 顺序测试 |
 | 08 | [终态封口](./tasks/08-终态封口.md) | 未开始 | - | - | ingress、可靠下一 turn 交接 |
 | 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 未开始 | - | - | 并发决策、日志、压力验证 |
 | 10 | [完成度策略](./tasks/10-完成度策略.md) | 未开始 | - | - | CompletionPolicy、Summary 评估 |
@@ -154,3 +156,4 @@ cargo test -p tiangong-plugin-agent-team
 | 04b ExecutionPhase 主循环 | ✅ | ✅ | 96 通过（×2 稳定）| next_step/can_advance/并列 Option 清除；workspace check 通过 |
 | 05 工具与审批阶段 | ✅ | ✅ | 98 通过（×2）+ agent-team 10 | 不变量断言、迁移日志、ALR-103、并行批次 |
 | 06 压缩阶段 | ✅ | ✅ | 99 通过（×2）| CompressionPhase 对齐设计；引导中断压缩、迟到结果不应用 |
+| 07 统一命令与暂定完成 | ✅ | ✅ | 100 通过（×2）| CommandEffect、InjectTool 撤销暂定、用量刷新、顺序测试 |

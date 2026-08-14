@@ -939,6 +939,199 @@ fn save_user_message_and_restart(
     Ok(())
 }
 
+/// Waiting 阶段 select 出或 drain 到的命令载体（`Closed` 表示通道关闭，等同取消）。
+enum Deferred {
+    Command(Command),
+    Closed,
+}
+
+/// 命令处理效果：处理器不直接驱动循环控制流，统一由驱动解释（任务 07）。
+#[allow(clippy::large_enum_variant)]
+enum CommandEffect {
+    /// 副作用已应用，阶段保持（处理器未触碰阶段）。
+    KeepCurrent,
+    /// 产出新阶段（重启/审批迁移/暂定结果撤销等），由驱动统一安装。
+    ToPhase(ExecutionPhase),
+    /// 终止本轮（取消/关闭/保存失败）。
+    Terminate(TurnExecutionResult),
+}
+
+/// 统一命令处理器：所有命令（含 PendingFinish 阶段收到的）都经此入口。
+///
+/// 命令按到达顺序处理（ALR-203）：决定性取消/关闭立即终止；引导消息中断后从
+/// 新意图重启；PendingFinish 收到 InjectTool 撤销暂定结果重新分析（不重置用户
+/// 意图预算）；迟到审批明确忽略。
+#[allow(clippy::too_many_arguments)]
+async fn handle_command(
+    cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+    deferred_command: Deferred,
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    trust_mode: &mut TrustMode,
+    plugins: &[Arc<dyn Plugin>],
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+) -> CommandEffect {
+    let is_cancel = matches!(
+        &deferred_command,
+        Deferred::Closed
+            | Deferred::Command(Command::Cancel)
+            | Deferred::Command(Command::Shutdown)
+    );
+    if is_cancel {
+        cmd_rx.close();
+        // 取消路径：Summary 部分输出保持取消语义（不降级）；插件 on_cancel
+        // 由 run_turn 在终态判定后调用。
+        interrupt_active_work(ctx, state, injections, stream_tx, context_limit, false).await;
+        return CommandEffect::Terminate(TurnExecutionResult::cancelled(
+            state.accumulated_usage.clone(),
+        ));
+    }
+    match deferred_command {
+        Deferred::Command(Command::InjectUserMessage {
+            message_id,
+            content,
+        }) => {
+            // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
+            // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
+            interrupt_active_work(ctx, state, injections, stream_tx, context_limit, true).await;
+            match save_user_message_and_restart(ctx, state, stream_tx, message_id, content) {
+                Ok(()) => CommandEffect::ToPhase(ExecutionPhase::NeedModel),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        session_id = %ctx.session.id,
+                        "运行中注入用户消息保存失败"
+                    );
+                    CommandEffect::Terminate(TurnExecutionResult::failed(
+                        state.accumulated_usage.clone(),
+                        format!("用户消息保存失败：{error}"),
+                    ))
+                }
+            }
+        }
+        Deferred::Command(Command::Approval {
+            request_id,
+            approved,
+        }) => {
+            let phase = state.take_phase();
+            match phase {
+                ExecutionPhase::WaitingApproval(approval)
+                    if approval.pending.request_id == request_id =>
+                {
+                    tracing::debug!(
+                        session_id = %ctx.session.id,
+                        approved,
+                        detail = approval.debug_summary(),
+                        "审批响应：WaitingApproval 迁移"
+                    );
+                    if approved {
+                        let mut tools = ToolExecutionPhase {
+                            tasks: JoinSet::new(),
+                            running: HashMap::new(),
+                            batch: approval.batch,
+                        };
+                        start_tool_execution(ctx, approval.pending.tool, &mut tools);
+                        CommandEffect::ToPhase(ExecutionPhase::WaitingTools(tools))
+                    } else {
+                        record_rejected_tool_call(
+                            ctx,
+                            &approval.pending.tool.call,
+                            &approval.pending.tool.args_summary,
+                        );
+                        let request_generation = approval.batch.request_injection_generation;
+                        let received_new_injection = injections.generation() > request_generation;
+                        injections.commit(ctx);
+                        if received_new_injection {
+                            CommandEffect::ToPhase(ExecutionPhase::NeedModel)
+                        } else {
+                            CommandEffect::ToPhase(ExecutionPhase::PendingFinish(
+                                TurnExecutionResult::success(state.accumulated_usage.clone()),
+                            ))
+                        }
+                    }
+                }
+                other => {
+                    // 迟到或不匹配的审批：明确忽略，不影响当前阶段。
+                    CommandEffect::ToPhase(other)
+                }
+            }
+        }
+        Deferred::Command(Command::SetTrustMode(mode)) => {
+            set_runtime_trust_mode(trust_mode, plugins, mode);
+            let phase = state.take_phase();
+            match phase {
+                ExecutionPhase::WaitingApproval(mut approval) if mode == TrustMode::FullTrust => {
+                    let tool = approval.pending.tool;
+                    approval.batch.ready_tools.push(tool);
+                    CommandEffect::ToPhase(ExecutionPhase::PreparingTools(approval.batch))
+                }
+                other => CommandEffect::ToPhase(other),
+            }
+        }
+        Deferred::Command(Command::SetReasoningEffort(effort)) => {
+            ctx.agent_config.reasoning_effort = effort.clone();
+            ctx.session.reasoning_effort = Some(effort);
+            CommandEffect::KeepCurrent
+        }
+        Deferred::Command(Command::InjectTool { tool_name, payload }) => {
+            injections.receive(stream_tx, tool_name, payload);
+            // PendingFinish 收到工具注入：撤销暂定结果、重新分析（不重置用户
+            // 意图预算——这是当前任务的新信息，不是新意图）。
+            let phase = state.take_phase();
+            match phase {
+                ExecutionPhase::PendingFinish(_) => {
+                    tracing::debug!(
+                        session_id = %ctx.session.id,
+                        "PendingFinish 收到工具注入：撤销暂定结果并重新分析"
+                    );
+                    CommandEffect::ToPhase(ExecutionPhase::NeedModel)
+                }
+                other => CommandEffect::ToPhase(other),
+            }
+        }
+        Deferred::Command(Command::SetTitle {
+            title,
+            only_if_default,
+        }) => {
+            if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
+                ctx.session.title = title.clone();
+                ctx.session.updated_at = tiangong_types::now_text();
+                // 通知消费线程转发 sessions_updated（core 层不碰 tauri，走自有 StreamEvent 通道）。
+                let _ = stream_tx.send(tiangong_types::StreamEvent::TitleChanged { title });
+            }
+            // 不立即 persist：turn 结束 run_turn 统一落盘。
+            CommandEffect::KeepCurrent
+        }
+        Deferred::Command(Command::EmitStreamEvent(event)) => {
+            let _ = stream_tx.send(*event);
+            CommandEffect::KeepCurrent
+        }
+        Deferred::Command(Command::ReportUsage {
+            usage,
+            source,
+            emit_event,
+        }) => {
+            record_plugin_usage(
+                stream_tx,
+                context_limit,
+                &mut state.accumulated_usage,
+                usage,
+                source,
+                emit_event,
+            );
+            // 晚到用量不丢失：累计进 accumulated_usage；若当前处于
+            // PendingFinish，提交时统一刷新为最新用量（ALR-111）。
+            CommandEffect::KeepCurrent
+        }
+        Deferred::Command(Command::Cancel | Command::Shutdown) => {
+            unreachable!("Cancel/Shutdown 已在上方取消分支处理")
+        }
+        Deferred::Closed => unreachable!("Closed 已在上方取消分支处理"),
+    }
+}
+
 /// 执行一个完整的对话轮次。
 ///
 /// `cmd_rx` 只在这一处消费。模型、工具和压缩任务与命令进入同一个
@@ -955,11 +1148,6 @@ pub(super) async fn execute_turn(
     let mut trust_mode = ctx.trust_mode;
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new();
-    // Waiting 阶段 select 出的命令：先归还阶段再由统一命令处理接管（命令优先）。
-    enum Deferred {
-        Command(Command),
-        Closed,
-    }
     let mut deferred: Option<Deferred> = None;
 
     let result = 'agent_loop: loop {
@@ -976,163 +1164,22 @@ pub(super) async fn execute_turn(
             },
         };
         if let Some(deferred_command) = pending_command {
-            let is_cancel = matches!(
-                &deferred_command,
-                Deferred::Closed
-                    | Deferred::Command(Command::Cancel)
-                    | Deferred::Command(Command::Shutdown)
-            );
-            if is_cancel {
-                cmd_rx.close();
-                // 取消路径：Summary 部分输出保持取消语义（不降级）；插件 on_cancel
-                // 由 run_turn 在终态判定后调用。
-                interrupt_active_work(
-                    ctx,
-                    &mut state,
-                    &mut injections,
-                    &stream_tx,
-                    context_limit,
-                    false,
-                )
-                .await;
-                break 'agent_loop TurnExecutionResult::cancelled(state.accumulated_usage);
-            }
-            match deferred_command {
-                Deferred::Command(Command::InjectUserMessage {
-                    message_id,
-                    content,
-                }) => {
-                    // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
-                    // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
-                    interrupt_active_work(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        &stream_tx,
-                        context_limit,
-                        true,
-                    )
-                    .await;
-                    match save_user_message_and_restart(
-                        ctx, &mut state, &stream_tx, message_id, content,
-                    ) {
-                        Ok(()) => state.install_phase(ExecutionPhase::NeedModel),
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                session_id = %ctx.session.id,
-                                "运行中注入用户消息保存失败"
-                            );
-                            break 'agent_loop TurnExecutionResult::failed(
-                                state.accumulated_usage.clone(),
-                                format!("用户消息保存失败：{error}"),
-                            );
-                        }
-                    }
-                }
-                Deferred::Command(Command::Approval {
-                    request_id,
-                    approved,
-                }) => {
-                    let phase = state.take_phase();
-                    match phase {
-                        ExecutionPhase::WaitingApproval(approval)
-                            if approval.pending.request_id == request_id =>
-                        {
-                            tracing::debug!(
-                                session_id = %ctx.session.id,
-                                approved,
-                                detail = approval.debug_summary(),
-                                "审批响应：WaitingApproval 迁移"
-                            );
-                            if approved {
-                                let mut tools = ToolExecutionPhase {
-                                    tasks: JoinSet::new(),
-                                    running: HashMap::new(),
-                                    batch: approval.batch,
-                                };
-                                start_tool_execution(ctx, approval.pending.tool, &mut tools);
-                                state.install_phase(ExecutionPhase::WaitingTools(tools));
-                            } else {
-                                record_rejected_tool_call(
-                                    ctx,
-                                    &approval.pending.tool.call,
-                                    &approval.pending.tool.args_summary,
-                                );
-                                let request_generation =
-                                    approval.batch.request_injection_generation;
-                                let received_new_injection =
-                                    injections.generation() > request_generation;
-                                injections.commit(ctx);
-                                if received_new_injection {
-                                    state.install_phase(ExecutionPhase::NeedModel);
-                                } else {
-                                    state.install_phase(ExecutionPhase::PendingFinish(
-                                        TurnExecutionResult::success(
-                                            state.accumulated_usage.clone(),
-                                        ),
-                                    ));
-                                }
-                            }
-                        }
-                        other => {
-                            // 迟到或不匹配的审批：明确忽略，不影响当前阶段。
-                            state.install_phase(other);
-                        }
-                    }
-                }
-                Deferred::Command(Command::SetTrustMode(mode)) => {
-                    set_runtime_trust_mode(&mut trust_mode, &plugins, mode);
-                    let phase = state.take_phase();
-                    match phase {
-                        ExecutionPhase::WaitingApproval(mut approval)
-                            if mode == TrustMode::FullTrust =>
-                        {
-                            let tool = approval.pending.tool;
-                            approval.batch.ready_tools.push(tool);
-                            state.install_phase(ExecutionPhase::PreparingTools(approval.batch));
-                        }
-                        other => state.install_phase(other),
-                    }
-                }
-                Deferred::Command(Command::SetReasoningEffort(effort)) => {
-                    ctx.agent_config.reasoning_effort = effort.clone();
-                    ctx.session.reasoning_effort = Some(effort);
-                }
-                Deferred::Command(Command::InjectTool { tool_name, payload }) => {
-                    injections.receive(&stream_tx, tool_name, payload);
-                }
-                Deferred::Command(Command::SetTitle {
-                    title,
-                    only_if_default,
-                }) => {
-                    if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
-                        ctx.session.title = title.clone();
-                        ctx.session.updated_at = tiangong_types::now_text();
-                        // 通知消费线程转发 sessions_updated（core 层不碰 tauri，走自有 StreamEvent 通道）。
-                        let _ = stream_tx.send(tiangong_types::StreamEvent::TitleChanged { title });
-                    }
-                    // 不立即 persist：turn 结束 run_turn 统一落盘。
-                }
-                Deferred::Command(Command::EmitStreamEvent(event)) => {
-                    let _ = stream_tx.send(*event);
-                }
-                Deferred::Command(Command::ReportUsage {
-                    usage,
-                    source,
-                    emit_event,
-                }) => record_plugin_usage(
-                    &stream_tx,
-                    context_limit,
-                    &mut state.accumulated_usage,
-                    usage,
-                    source,
-                    emit_event,
-                ),
-                Deferred::Command(Command::Cancel | Command::Shutdown) => {
-                    unreachable!("Cancel/Shutdown 已在上方取消分支处理")
-                }
-                Deferred::Closed => unreachable!("Closed 已在上方取消分支处理"),
+            match handle_command(
+                cmd_rx,
+                deferred_command,
+                ctx,
+                &mut state,
+                &mut injections,
+                &mut trust_mode,
+                &plugins,
+                &stream_tx,
+                context_limit,
+            )
+            .await
+            {
+                CommandEffect::KeepCurrent => {}
+                CommandEffect::ToPhase(phase) => state.install_phase(phase),
+                CommandEffect::Terminate(result) => break 'agent_loop result,
             }
             continue 'agent_loop;
         }
@@ -1216,8 +1263,15 @@ pub(super) async fn execute_turn(
                 state.install_phase(ExecutionPhase::ForceFinalPhase(active));
             }
 
-            // ── Ready：暂定完成，提交结果（任务 07 接入命令仲裁后此处先排空命令）──
-            ExecutionPhase::PendingFinish(result) => break 'agent_loop result,
+            // ── Ready：暂定完成，提交结果 ──
+            // 阶段变体只含结果（结构上保证不持有主循环活动资源，不变量 4）。
+            // 提交前刷新为最新累计用量（ALR-111：不冻结旧用量快照——晚到的
+            // ReportUsage 在上方命令排空阶段已累计进 accumulated_usage）。
+            // 排空后到提交之间的命令窗口由任务 08 的 ingress 封口承接。
+            ExecutionPhase::PendingFinish(mut result) => {
+                result.usage = state.accumulated_usage.clone();
+                break 'agent_loop result;
+            }
 
             // ── Ready（兼容层，任务 05 迁移）：推进工具批次准备/执行 ──
             ExecutionPhase::PreparingTools(mut batch) => {
@@ -3591,6 +3645,68 @@ mod tests {
         assert!(
             ctx.session.context_summary.is_none(),
             "被中断压缩的迟到结果不得应用（context_summary 应为空）"
+        );
+    }
+
+    /// ALR-203 连续命令顺序：引导消息与取消接连到达时按序处理——注入先保存
+    /// 消息并重启，随后的取消形成最终取消终态（不被重启意图覆盖）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consecutive_inject_then_cancel_terminates_in_order() {
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx: _,
+            cmd_tx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        let tx = cmd_tx.clone();
+        let started_wait = started.clone();
+        let cmd_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("工具应已启动");
+            // 两条命令背靠背投递：注入在前、取消在后。
+            tx.send(Command::InjectUserMessage {
+                message_id: "injected-then-cancel".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("先换个方向")],
+            })
+            .unwrap();
+            tx.send(Command::Cancel).unwrap();
+        });
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        let _ = cmd_task.await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Cancelled),
+            "连续注入后取消应形成取消终态，实际: {:?}",
+            result.outcome
+        );
+        assert!(
+            ctx.session
+                .messages
+                .iter()
+                .any(|m| m.id == "injected-then-cancel" && m.role == MessageRole::User),
+            "注入的消息应已保存（先于取消处理）"
         );
     }
 
