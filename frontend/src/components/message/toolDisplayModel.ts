@@ -61,8 +61,14 @@ const VARIANT_TITLES: Record<ToolVariant, string> = {
 /** 已知工具名 → 变体；未收录的落 other。 */
 const TOOL_VARIANTS: Record<string, ToolVariant> = {
   run_command: "terminal",
+  run_shell: "terminal",
+  terminal_send: "terminal",
   read_file: "file-read",
+  list_dir: "file-read",
+  tree_dir: "file-read",
   write_file: "file-write",
+  replace_in_file: "file-write",
+  apply_patch: "file-write",
   grep: "search",
   glob: "search",
   search: "search",
@@ -82,6 +88,21 @@ export function classifyToolName(toolName: string): ToolVariant {
 const SHELL_SENTINEL = "__tiangong_shell__";
 /** 后端混入参数数组的工作目录参数前缀。 */
 const CWD_ARG_PREFIX = "__tiangong_cwd=";
+/** 对象参数中的环境/配置键，摘要兜底遍历时跳过（不构成"这次调用做了什么"）。 */
+const CONFIG_ARG_KEYS: ReadonlySet<string> = new Set([
+  "cwd",
+  "workdir",
+  "working_dir",
+  "timeout",
+  "timeout_secs",
+  "interactive",
+  "encoding",
+  "offset",
+  "limit",
+  "append",
+  "dry_run",
+  "force",
+]);
 
 function firstNonEmptyLine(text: string | null | undefined): string {
   if (!text) return "";
@@ -120,7 +141,7 @@ function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
   if (typeof args === "object") {
     const record = args as Record<string, unknown>;
     const keyPreference: Record<ToolVariant, readonly string[]> = {
-      terminal: ["command", "description", "script"],
+      terminal: ["script", "cmd", "command", "description"],
       "file-read": ["path", "file_path", "url"],
       "file-write": ["path", "file_path"],
       search: ["query", "pattern", "keyword"],
@@ -133,7 +154,9 @@ function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
       const value = record[key];
       if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
     }
-    for (const value of Object.values(record)) {
+    // 兜底取第一个内容字符串，跳过环境/配置键（cwd、timeout 等），避免摘要显示工作目录。
+    for (const [key, value] of Object.entries(record)) {
+      if (CONFIG_ARG_KEYS.has(key)) continue;
       if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
     }
     return null;
@@ -325,10 +348,18 @@ export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDis
   let terminal: TerminalMaterial | null = null;
   if (variant === "terminal") {
     const visibleArgs = Array.isArray(args) ? filterCwdArgs(args) : [];
-    const command =
-      visibleArgs[0] === SHELL_SENTINEL && typeof visibleArgs[1] === "string"
-        ? visibleArgs[1]
-        : argSummary;
+    const command = (() => {
+      if (visibleArgs[0] === SHELL_SENTINEL && typeof visibleArgs[1] === "string") {
+        return visibleArgs[1];
+      }
+      // 对象参数（run_shell {script} / run_command {cmd}）：取完整命令文本。
+      if (args && typeof args === "object" && !Array.isArray(args)) {
+        const record = args as Record<string, unknown>;
+        const script = record.script ?? record.cmd ?? record.command;
+        if (typeof script === "string" && script) return script;
+      }
+      return argSummary;
+    })();
     terminal = { command: command ?? null, stdout: outputText, stderr: null };
   }
 
