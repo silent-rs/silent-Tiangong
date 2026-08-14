@@ -9,11 +9,62 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::{Id as TaskId, JoinSet};
 
+use super::compression::ActiveCompression;
+use super::outcome::TurnExecutionResult;
+use super::summary::ForceFinalReason;
 use crate::model::{
     InvalidToolCall, ModelFunctionResponse, ModelStreamChunk, TokenUsage, ToolCall,
 };
 use crate::stream_throttle::ThrottledStreamSink;
 use crate::tool::ToolResult;
+
+/// 执行阶段：任意时刻当前阶段唯一（ALR-001）。
+///
+/// Ready 阶段（NeedModel / Start* 过渡 / PreparingTools / PendingFinish）由驱动
+/// 同步推进；Waiting 阶段持有活动资源并进入事件等待。`Start*` 是同步过渡变体，
+/// 由驱动在收到后的同一轮迭代内立即消费（构造对应请求并进入 Waiting），不进入
+/// 事件等待——它们是单一阶段枚举的一部分，不是并列状态。
+///
+/// 工具/审批/压缩变体当前为**兼容层**：内部逻辑仍沿用旧分支，任务 05/06 迁移
+/// 后由 ToolExecutionPhase/ApprovalPhase/压缩续接驱动正式接管（删除点见各任务）。
+pub(super) enum ExecutionPhase {
+    /// Ready：需要发起下一次 ReAct 模型请求。
+    NeedModel,
+    /// 同步过渡：立即发起完成度检查（Summary）请求。
+    StartCheckingCompletion,
+    /// 同步过渡：立即发起强制最终回复请求。
+    StartForceFinal {
+        reason: ForceFinalReason,
+        request_injection_generation: u64,
+        summary_error: Option<String>,
+    },
+    /// Waiting：ReAct 模型请求进行中。
+    WaitingModel(ActiveLlm),
+    /// Waiting：完成度检查（Summary）请求进行中。
+    CheckingCompletion(ActiveLlm),
+    /// Waiting：强制最终回复请求进行中。
+    ForceFinalPhase(ActiveLlm),
+    /// Ready：大循环已产出暂定结果，待提交（任务 07 接入命令仲裁）。
+    PendingFinish(TurnExecutionResult),
+    // ── 兼容层（任务 05 迁移后由工具驱动接管）──
+    /// Ready：准备/执行工具批次（原 DriveTools）。
+    PreparingTools(ToolBatchState),
+    /// Waiting：工具任务运行中（任务集合与运行记录一一对应，不变量 3）。
+    WaitingTools(ToolExecutionPhase),
+    /// Waiting：等待审批（必须同时持有待审批工具与完整批次，不变量 2）。
+    WaitingApproval(ApprovalPhase),
+    // ── 兼容层（任务 06 迁移后由压缩驱动接管）──
+    /// Waiting：上下文压缩进行中（续接信息由 CompressionContinuation 承载；
+    /// ToolBatch 续接时挂起的工具批次随阶段持有）。
+    Compressing(CompressingPhase),
+}
+
+/// 压缩阶段数据：活动压缩任务 +（仅 ToolBatch 续接时）挂起的工具批次。
+pub(super) struct CompressingPhase {
+    pub(super) active: ActiveCompression<super::compression::CompressionContinuation>,
+    /// ToolBatch 续接时保留批次，压缩完成后回到 PreparingTools。
+    pub(super) suspended_batch: Option<ToolBatchState>,
+}
 
 /// 执行预算：物理 turn 内的各阶段计数。
 ///

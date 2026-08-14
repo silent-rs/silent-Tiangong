@@ -19,6 +19,32 @@ use super::context::{emit_token_usage, rebuild_system_prompt_for_session};
 pub(super) type CompressionResult = std::result::Result<CompressionUpdate, CompressionError>;
 type CompressionTask = tokio::task::JoinHandle<CompressionResult>;
 
+/// ReAct 文本回复的后续去向。
+#[derive(Clone, Copy)]
+pub(super) enum ReactTextDisposition {
+    Complete,
+    EnterSummary,
+}
+
+/// 压缩完成后待执行的后续动作。
+pub(super) enum CompressionContinuation {
+    ReactText {
+        pending_msg_id: String,
+        disposition: ReactTextDisposition,
+        request_injection_generation: u64,
+    },
+    ToolBatch,
+    InvalidToolCalls,
+    Summary {
+        decision: super::summary::SummaryDecision,
+        request_injection_generation: u64,
+    },
+    ContextRetry {
+        previous_summary_up_to: usize,
+        error_message: String,
+    },
+}
+
 pub(super) struct ActiveCompression<C> {
     task: CompressionTask,
     observed_tokens: usize,

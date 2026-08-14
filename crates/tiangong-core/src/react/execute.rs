@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tokio::task::{Id as TaskId, JoinSet};
+use tokio::task::JoinSet;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
@@ -31,12 +31,15 @@ use crate::turn_context::TurnContext;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
-use super::compression::{ActiveCompression, observed_total_tokens};
+use super::compression::{
+    ActiveCompression, CompressionContinuation, ReactTextDisposition, observed_total_tokens,
+};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
 use super::phase::{
-    ActiveLlm, ExecutionBudget, LlmPurpose, PendingApproval, PreparedToolCall, RunningToolCall,
-    ToolBatchState, ToolTaskOutput,
+    ActiveLlm, ApprovalPhase, CompressingPhase, ExecutionBudget, ExecutionPhase, LlmPurpose,
+    PendingApproval, PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase,
+    ToolTaskOutput,
 };
 use super::summary::{
     ForceFinalReason, SummaryDecision, build_force_final_request, commit_summary_message,
@@ -480,73 +483,49 @@ fn append_failure_recovery_prompt(
     ctx.session.persist_to_disk();
 }
 
-/// 压缩完成后待执行的后续动作。
-enum CompressionContinuation {
-    ReactText {
-        pending_msg_id: String,
-        disposition: ReactTextDisposition,
-        request_injection_generation: u64,
-    },
-    ToolBatch,
-    InvalidToolCalls,
-    Summary {
-        decision: SummaryDecision,
-        request_injection_generation: u64,
-    },
-    ContextRetry {
-        previous_summary_up_to: usize,
-        error_message: String,
-    },
-}
-
-enum NextStep {
-    StartReact,
-    DriveTools,
-    StartSummary,
-    StartForceFinal {
-        reason: ForceFinalReason,
-        request_injection_generation: u64,
-        summary_error: Option<String>,
-    },
-    Waiting,
-    Finish(TurnExecutionResult),
-}
-
+/// Agent Loop 状态：单一 `ExecutionPhase`（take/install 所有权模式，见 design.md
+/// 3.1）+ 预算 + 累计用量 + 工具去重记录。阶段持有的活动资源（模型请求/工具
+/// 任务/审批/压缩）都在 phase 变体内，不再有并列活动 `Option`（ALR-001）。
 struct AgentLoopState {
+    phase: Option<ExecutionPhase>,
     budget: ExecutionBudget,
     accumulated_usage: TokenUsage,
     tool_history: ToolCallHistory,
-    tool_batch: Option<ToolBatchState>,
-    next_step: NextStep,
 }
 
 impl AgentLoopState {
     fn new() -> Self {
         Self {
+            phase: Some(ExecutionPhase::NeedModel),
             budget: ExecutionBudget::default(),
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
-            tool_batch: None,
-            next_step: NextStep::StartReact,
         }
+    }
+
+    /// 取出当前阶段（ALR-205：取出后所有退出路径必须 install 新阶段或形成终态）。
+    fn take_phase(&mut self) -> ExecutionPhase {
+        self.phase.take().expect("take_phase 时阶段必须存在")
+    }
+
+    /// 安装新阶段。install 前 phase 必须为 None（已 take），避免双阶段并存。
+    fn install_phase(&mut self, phase: ExecutionPhase) {
+        debug_assert!(
+            self.phase.is_none(),
+            "install_phase 前必须先 take，避免双阶段并存"
+        );
+        self.phase = Some(phase);
     }
 
     fn reset_react_phase(&mut self) {
         self.budget.reset_react_phase();
         self.tool_history.clear();
-        self.tool_batch = None;
     }
 }
 
 // 阶段数据类型（ToolBatchState / PreparedToolCall / PendingApproval /
 // RunningToolCall / ToolTaskOutput / LlmPurpose / ActiveLlm 及
 // ToolExecutionPhase / ApprovalPhase）统一定义在 super::phase。
-
-#[derive(Clone, Copy)]
-enum ReactTextDisposition {
-    Complete,
-    EnterSummary,
-}
 
 fn build_react_request(ctx: &TurnContext) -> ModelRequest {
     let (thinking, reasoning_effort, thinking_disabled) = build_thinking_config(ctx);
@@ -668,8 +647,7 @@ fn handle_react_text_response(
 fn start_tool_execution(
     ctx: &mut TurnContext,
     tool: PreparedToolCall,
-    tasks: &mut JoinSet<ToolTaskOutput>,
-    running_tools: &mut HashMap<TaskId, RunningToolCall>,
+    tools: &mut ToolExecutionPhase,
 ) {
     let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
         name: tool.call.name.clone(),
@@ -678,14 +656,16 @@ fn start_tool_execution(
     let actor_id = ctx.session.id.clone();
     let future = start_tool_call(ctx, &tool.call, &actor_id);
     let started_at = std::time::Instant::now();
-    let task = tasks.spawn(async move {
+    let task = tools.tasks.spawn(async move {
         let result = future.await;
         ToolTaskOutput {
             result,
             duration_ms: started_at.elapsed().as_millis() as u64,
         }
     });
-    running_tools.insert(task.id(), RunningToolCall { tool, started_at });
+    tools
+        .running
+        .insert(task.id(), RunningToolCall { tool, started_at });
 }
 
 fn finish_react_text(
@@ -695,12 +675,11 @@ fn finish_react_text(
     pending_msg_id: String,
     disposition: ReactTextDisposition,
     request_injection_generation: u64,
-) {
+) -> ExecutionPhase {
     let received_new_injection = injections.generation() > request_injection_generation;
     injections.commit(ctx);
     if received_new_injection {
-        state.next_step = NextStep::StartReact;
-        return;
+        return ExecutionPhase::NeedModel;
     }
 
     match disposition {
@@ -715,11 +694,11 @@ fn finish_react_text(
             }
             emit_session_message_upsert(ctx, &pending_msg_id);
             ctx.session.persist_to_disk();
-            state.next_step = NextStep::Finish(TurnExecutionResult::success(
+            ExecutionPhase::PendingFinish(TurnExecutionResult::success(
                 state.accumulated_usage.clone(),
-            ));
+            ))
         }
-        ReactTextDisposition::EnterSummary => state.next_step = NextStep::StartSummary,
+        ReactTextDisposition::EnterSummary => ExecutionPhase::StartCheckingCompletion,
     }
 }
 
@@ -729,31 +708,27 @@ fn finish_summary(
     injections: &mut ToolInjectionBuffer,
     decision: SummaryDecision,
     request_injection_generation: u64,
-) {
+) -> ExecutionPhase {
     ctx.session.persist_to_disk();
     let received_new_injection = injections.generation() > request_injection_generation;
     injections.commit(ctx);
     if received_new_injection {
         state.reset_react_phase();
-        state.next_step = NextStep::StartReact;
-        return;
+        return ExecutionPhase::NeedModel;
     }
 
     match decision {
-        SummaryDecision::Done(_) | SummaryDecision::AskUser(_) => {
-            state.next_step = NextStep::Finish(TurnExecutionResult::success(
-                state.accumulated_usage.clone(),
-            ));
-        }
+        SummaryDecision::Done(_) | SummaryDecision::AskUser(_) => ExecutionPhase::PendingFinish(
+            TurnExecutionResult::success(state.accumulated_usage.clone()),
+        ),
         SummaryDecision::NeedMoreWork(reason) => {
             state.budget.continuation_count += 1;
             if state.budget.continuation_count >= ctx.max_outer_iterations {
-                state.next_step = NextStep::StartForceFinal {
+                return ExecutionPhase::StartForceFinal {
                     reason: ForceFinalReason::OuterLimit,
                     request_injection_generation,
                     summary_error: None,
                 };
-                return;
             }
             inject_tool_to_messages(
                 &mut ctx.session,
@@ -765,7 +740,7 @@ fn finish_summary(
             );
             ctx.session.persist_to_disk();
             state.reset_react_phase();
-            state.next_step = NextStep::StartReact;
+            ExecutionPhase::NeedModel
         }
     }
 }
@@ -789,88 +764,130 @@ fn persist_interrupted_llm_output(
     }
 }
 
-/// 运行中注入新用户消息时，中断主循环直接拥有的活动（ALR-101）。
+/// 中断主循环直接拥有的活动（阶段感知）：消费当前阶段持有的资源并完成收尾。
 ///
-/// 处理：流式 LLM 请求（Summary 部分输出降级为 React 过程消息，ALR-104）、工具
-/// 执行（补失败结果并闭合协议，ALR-110）、上下文压缩、待审批，并提交已接收的
-/// 注入。**不取消插件独立持有的后台任务**（ALR-103）——只有显式取消整个 turn
-/// 才走 `on_cancel`。
-#[allow(clippy::too_many_arguments)]
+/// `reason` 区分两种中断语义：
+/// - 引导消息（ALR-101）：Summary 部分输出**降级**为 React 过程消息（ALR-104）；
+/// - 取消/关闭：Summary 部分输出按取消路径持久化（保持 Summary 身份，与旧行为
+///   一致），工具/压缩/审批处理相同。
+///
+/// 两者都**不取消插件独立持有的后台任务**（ALR-103）。中断后安装 `NeedModel`
+/// 之外的目标阶段由调用方决定；本函数保证阶段资源全部转移、取消或完成（ALR-205）。
 async fn interrupt_active_work(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
-    active_llm: &mut Option<ActiveLlm>,
-    active_compression: &mut Option<ActiveCompression<CompressionContinuation>>,
-    tool_tasks: &mut JoinSet<ToolTaskOutput>,
-    running_tools: &mut HashMap<TaskId, RunningToolCall>,
-    pending_approval: &mut Option<PendingApproval>,
     injections: &mut ToolInjectionBuffer,
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     context_limit: usize,
+    downgrade_summary: bool,
 ) {
-    if let Some(active) = active_llm.take() {
-        let ActiveLlm {
-            purpose,
-            pending_msg_id,
-            sink,
-            task,
-            streamed_text,
-            streamed_reasoning,
-            streaming_usage,
-            ..
-        } = active;
-        sink.finish();
-        abort_and_join(task).await;
-        persist_interrupted_llm_output(
-            ctx,
-            &purpose,
-            &pending_msg_id,
-            &streamed_text,
-            &streamed_reasoning,
-        );
-        emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
-        state.accumulated_usage.accumulate(&streaming_usage);
-    }
-
-    if !running_tools.is_empty() {
-        tool_tasks.shutdown().await;
-        let mut interrupted = running_tools
-            .drain()
-            .map(|(_, tool)| tool)
-            .collect::<Vec<_>>();
-        interrupted.sort_by_key(|running| running.tool.index);
-        let mut interrupted_events = Vec::with_capacity(interrupted.len());
-        for running in interrupted {
-            let duration_ms = running.started_at.elapsed().as_millis() as u64;
-            let output = "工具调用因用户发送新消息而中断。".to_string();
-            append_tool_result_message(
-                &mut ctx.session,
-                &running.tool.call.id,
-                &running.tool.call.name,
-                output.clone(),
-                true,
+    let phase = state.take_phase();
+    match phase {
+        ExecutionPhase::WaitingModel(active)
+        | ExecutionPhase::CheckingCompletion(active)
+        | ExecutionPhase::ForceFinalPhase(active) => {
+            let ActiveLlm {
+                purpose,
+                pending_msg_id,
+                sink,
+                task,
+                streamed_text,
+                streamed_reasoning,
+                streaming_usage,
+                ..
+            } = active;
+            sink.finish();
+            abort_and_join(task).await;
+            if downgrade_summary {
+                persist_interrupted_llm_output(
+                    ctx,
+                    &purpose,
+                    &pending_msg_id,
+                    &streamed_text,
+                    &streamed_reasoning,
+                );
+            } else {
+                match purpose {
+                    LlmPurpose::React { .. } => persist_streamed_react_message(
+                        ctx,
+                        &pending_msg_id,
+                        &streamed_text,
+                        &streamed_reasoning,
+                    ),
+                    LlmPurpose::Summary { .. } => persist_partial_summary(
+                        ctx,
+                        &pending_msg_id,
+                        &streamed_text,
+                        &streamed_reasoning,
+                    ),
+                    LlmPurpose::ForceFinal { .. } => {}
+                }
+            }
+            emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
+            state.accumulated_usage.accumulate(&streaming_usage);
+        }
+        ExecutionPhase::WaitingTools(mut tools) => {
+            tools.tasks.shutdown().await;
+            let mut interrupted = tools
+                .running
+                .drain()
+                .map(|(_, tool)| tool)
+                .collect::<Vec<_>>();
+            interrupted.sort_by_key(|running| running.tool.index);
+            let mut interrupted_events = Vec::with_capacity(interrupted.len());
+            for running in interrupted {
+                let duration_ms = running.started_at.elapsed().as_millis() as u64;
+                let output = "工具调用因用户发送新消息而中断。".to_string();
+                append_tool_result_message(
+                    &mut ctx.session,
+                    &running.tool.call.id,
+                    &running.tool.call.name,
+                    output.clone(),
+                    true,
+                );
+                interrupted_events.push(StreamEvent::ToolResult {
+                    name: running.tool.call.name,
+                    tool_call_id: Some(running.tool.call.id),
+                    ok: false,
+                    output,
+                    full_output: None,
+                    duration_ms: Some(duration_ms),
+                });
+            }
+            ctx.session.persist_to_disk();
+            for event in interrupted_events {
+                let _ = stream_tx.send(event);
+            }
+            // 批次中尚未执行的调用一并闭合。
+            let closed = ctx
+                .session
+                .close_unfinished_tool_calls_with_reason("工具调用因用户发送新消息而中断。");
+            for (tool_call_id, tool_name, output) in closed {
+                let _ = stream_tx.send(StreamEvent::ToolResult {
+                    name: tool_name,
+                    tool_call_id: Some(tool_call_id),
+                    ok: false,
+                    output,
+                    full_output: None,
+                    duration_ms: None,
+                });
+            }
+        }
+        ExecutionPhase::Compressing(compressing) => {
+            compressing.active.cancel(ctx).await;
+        }
+        ExecutionPhase::WaitingApproval(approval) => {
+            record_rejected_tool_call(
+                ctx,
+                &approval.pending.tool.call,
+                &approval.pending.tool.args_summary,
             );
-            interrupted_events.push(StreamEvent::ToolResult {
-                name: running.tool.call.name,
-                tool_call_id: Some(running.tool.call.id),
-                ok: false,
-                output,
-                full_output: None,
-                duration_ms: Some(duration_ms),
-            });
         }
-        ctx.session.persist_to_disk();
-        for event in interrupted_events {
-            let _ = stream_tx.send(event);
+        ExecutionPhase::PreparingTools(_) | ExecutionPhase::PendingFinish(_) => {
+            // 无在途活动；PreparingTools 的悬空调用由下方统一闭合。
         }
-    }
-
-    if let Some(active) = active_compression.take() {
-        active.cancel(ctx).await;
-    }
-
-    if let Some(pending) = pending_approval.take() {
-        record_rejected_tool_call(ctx, &pending.tool.call, &pending.tool.args_summary);
+        ExecutionPhase::NeedModel | ExecutionPhase::StartCheckingCompletion => {}
+        ExecutionPhase::StartForceFinal { .. } => {}
     }
 
     injections.commit(ctx);
@@ -893,6 +910,7 @@ async fn interrupt_active_work(
 
 /// 校验并事务性保存运行中注入的用户消息；成功才向界面确认接收，并重置为新用户
 /// 意图（ALR-102：重置阶段预算与工具去重记录，保留物理 turn 累计用量）。
+/// 调用前须先 interrupt_active_work；成功后由调用方安装 `NeedModel`。
 fn save_user_message_and_restart(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
@@ -918,8 +936,6 @@ fn save_user_message_and_restart(
     );
     state.budget.reset_for_new_intent();
     state.tool_history.clear();
-    state.tool_batch = None;
-    state.next_step = NextStep::StartReact;
     Ok(())
 }
 
@@ -939,201 +955,152 @@ pub(super) async fn execute_turn(
     let mut trust_mode = ctx.trust_mode;
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new();
-    let mut active_llm: Option<ActiveLlm> = None;
-    let mut active_compression: Option<ActiveCompression<CompressionContinuation>> = None;
-    let mut tool_tasks = JoinSet::<ToolTaskOutput>::new();
-    let mut running_tools = HashMap::<TaskId, RunningToolCall>::new();
-    let mut pending_approval: Option<PendingApproval> = None;
+    // Waiting 阶段 select 出的命令：先归还阶段再由统一命令处理接管（命令优先）。
+    enum Deferred {
+        Command(Command),
+        Closed,
+    }
+    let mut deferred: Option<Deferred> = None;
 
     let result = 'agent_loop: loop {
-        let can_advance = active_llm.is_none()
-            && active_compression.is_none()
-            && tool_tasks.is_empty()
-            && pending_approval.is_none()
-            && !matches!(state.next_step, NextStep::Waiting);
-
-        tokio::select! {
-            biased;
-
-            // 命令永远具有最高优先级；Cancel/Shutdown 会关闭接收端并直接终止活跃任务。
-            command = cmd_rx.recv() => match command {
-                Some(Command::Cancel | Command::Shutdown) | None => {
-                    cmd_rx.close();
-
-                    if let Some(active) = active_llm.take() {
-                        let ActiveLlm {
-                            purpose,
-                            pending_msg_id,
-                            sink,
-                            task,
-                            streamed_text,
-                            streamed_reasoning,
-                            streaming_usage,
-                            ..
-                        } = active;
-                        sink.finish();
-                        abort_and_join(task).await;
-                        match purpose {
-                            LlmPurpose::React { .. } => persist_streamed_react_message(
-                                ctx,
-                                &pending_msg_id,
-                                &streamed_text,
-                                &streamed_reasoning,
-                            ),
-                            LlmPurpose::Summary { .. } => persist_partial_summary(
-                                ctx,
-                                &pending_msg_id,
-                                &streamed_text,
-                                &streamed_reasoning,
-                            ),
-                            LlmPurpose::ForceFinal { .. } => {}
-                        }
-                        emit_cancel_usage(&stream_tx, &streaming_usage, context_limit);
-                        state.accumulated_usage.accumulate(&streaming_usage);
-                    }
-
-                    if !running_tools.is_empty() {
-                        tool_tasks.shutdown().await;
-                        let mut interrupted = running_tools.drain().map(|(_, tool)| tool).collect::<Vec<_>>();
-                        interrupted.sort_by_key(|running| running.tool.index);
-                        let mut interrupted_events = Vec::with_capacity(interrupted.len());
-                        for running in interrupted {
-                            let duration_ms = running.started_at.elapsed().as_millis() as u64;
-                            let output = "工具调用因执行取消或会话关闭而中断。".to_string();
-                            append_tool_result_message(
-                                &mut ctx.session,
-                                &running.tool.call.id,
-                                &running.tool.call.name,
-                                output,
-                                true,
-                            );
-                            interrupted_events.push(StreamEvent::ToolResult {
-                                name: running.tool.call.name,
-                                tool_call_id: Some(running.tool.call.id),
-                                ok: false,
-                                output: "工具调用因执行取消或会话关闭而中断。".to_string(),
-                                full_output: None,
-                                duration_ms: Some(duration_ms),
-                            });
-                        }
-                        ctx.session.persist_to_disk();
-                        for event in interrupted_events {
-                            let _ = stream_tx.send(event);
-                        }
-                    }
-
-                    if let Some(active) = active_compression.take() {
-                        active.cancel(ctx).await;
-                    }
-
-                    // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
-                    injections.commit(ctx);
-                    break 'agent_loop TurnExecutionResult::cancelled(state.accumulated_usage);
-                }
-                Some(Command::InjectUserMessage {
+        // ── 命令优先（统一处理）──
+        // 已到达的命令先于阶段推进处理；Waiting 阶段 select 出的命令经 deferred
+        // 在此处接管。Cancel/Shutdown/通道关闭中断当前阶段并终止本轮；其余命令
+        // 按阶段语义处理副作用或触发阶段迁移。
+        let pending_command = match deferred.take() {
+            Some(d) => Some(d),
+            None => match cmd_rx.try_recv() {
+                Ok(command) => Some(Deferred::Command(command)),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => None,
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => Some(Deferred::Closed),
+            },
+        };
+        if let Some(deferred_command) = pending_command {
+            let is_cancel = matches!(
+                &deferred_command,
+                Deferred::Closed
+                    | Deferred::Command(Command::Cancel)
+                    | Deferred::Command(Command::Shutdown)
+            );
+            if is_cancel {
+                cmd_rx.close();
+                // 取消路径：Summary 部分输出保持取消语义（不降级）；插件 on_cancel
+                // 由 run_turn 在终态判定后调用。
+                interrupt_active_work(
+                    ctx,
+                    &mut state,
+                    &mut injections,
+                    &stream_tx,
+                    context_limit,
+                    false,
+                )
+                .await;
+                break 'agent_loop TurnExecutionResult::cancelled(state.accumulated_usage);
+            }
+            match deferred_command {
+                Deferred::Command(Command::InjectUserMessage {
                     message_id,
                     content,
                 }) => {
-                    // 引导消息：中断主循环直接拥有的活动（模型/工具/压缩/审批），
-                    // 校验并保存新消息，成功才向界面确认，然后从新意图重启大循环。
-                    // 保存失败不在此处发送终态错误，交由 run_turn 发布唯一终态。
+                    // 引导消息：中断主循环直接拥有的活动（Summary 降级 ALR-104），
+                    // 校验并保存，成功才确认，然后从新意图重启（ALR-101/102）。
                     interrupt_active_work(
                         ctx,
                         &mut state,
-                        &mut active_llm,
-                        &mut active_compression,
-                        &mut tool_tasks,
-                        &mut running_tools,
-                        &mut pending_approval,
                         &mut injections,
                         &stream_tx,
                         context_limit,
+                        true,
                     )
                     .await;
-                    if let Err(error) = save_user_message_and_restart(
-                        ctx,
-                        &mut state,
-                        &stream_tx,
-                        message_id,
-                        content,
+                    match save_user_message_and_restart(
+                        ctx, &mut state, &stream_tx, message_id, content,
                     ) {
-                        tracing::warn!(
-                            %error,
-                            session_id = %ctx.session.id,
-                            "运行中注入用户消息保存失败"
-                        );
-                        state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                            state.accumulated_usage.clone(),
-                            format!("用户消息保存失败：{error}"),
-                        ));
-                    }
-                }
-                Some(Command::Approval { request_id, approved }) => {
-                    let matches_pending = pending_approval
-                        .as_ref()
-                        .is_some_and(|pending| pending.request_id == request_id);
-                    if matches_pending {
-                        let pending = pending_approval.take().expect("审批状态必须存在");
-                        if approved {
-                            start_tool_execution(
-                                ctx,
-                                pending.tool,
-                                &mut tool_tasks,
-                                &mut running_tools,
+                        Ok(()) => state.install_phase(ExecutionPhase::NeedModel),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                session_id = %ctx.session.id,
+                                "运行中注入用户消息保存失败"
                             );
-                            state.next_step = NextStep::Waiting;
-                        } else {
-                            record_rejected_tool_call(
-                                ctx,
-                                &pending.tool.call,
-                                &pending.tool.args_summary,
+                            break 'agent_loop TurnExecutionResult::failed(
+                                state.accumulated_usage.clone(),
+                                format!("用户消息保存失败：{error}"),
                             );
-                            let request_generation = state
-                                .tool_batch
-                                .take()
-                                .map(|batch| batch.request_injection_generation)
-                                .unwrap_or_else(|| injections.generation());
-                            let received_new_injection =
-                                injections.generation() > request_generation;
-                            injections.commit(ctx);
-                            state.next_step = if received_new_injection {
-                                NextStep::StartReact
-                            } else {
-                                NextStep::Finish(TurnExecutionResult::success(
-                                    state.accumulated_usage.clone(),
-                                ))
-                            };
                         }
                     }
                 }
-                Some(Command::SetTrustMode(mode)) => {
-                    set_runtime_trust_mode(&mut trust_mode, &plugins, mode);
-                    if mode == TrustMode::FullTrust
-                        && let Some(pending) = pending_approval.take()
-                    {
-                        state
-                            .tool_batch
-                            .as_mut()
-                            .expect("审批必须属于活跃工具批次")
-                            .ready_tools
-                            .push(pending.tool);
-                        state.next_step = NextStep::DriveTools;
+                Deferred::Command(Command::Approval {
+                    request_id,
+                    approved,
+                }) => {
+                    let phase = state.take_phase();
+                    match phase {
+                        ExecutionPhase::WaitingApproval(approval)
+                            if approval.pending.request_id == request_id =>
+                        {
+                            if approved {
+                                let mut tools = ToolExecutionPhase {
+                                    tasks: JoinSet::new(),
+                                    running: HashMap::new(),
+                                    batch: approval.batch,
+                                };
+                                start_tool_execution(ctx, approval.pending.tool, &mut tools);
+                                state.install_phase(ExecutionPhase::WaitingTools(tools));
+                            } else {
+                                record_rejected_tool_call(
+                                    ctx,
+                                    &approval.pending.tool.call,
+                                    &approval.pending.tool.args_summary,
+                                );
+                                let request_generation =
+                                    approval.batch.request_injection_generation;
+                                let received_new_injection =
+                                    injections.generation() > request_generation;
+                                injections.commit(ctx);
+                                if received_new_injection {
+                                    state.install_phase(ExecutionPhase::NeedModel);
+                                } else {
+                                    state.install_phase(ExecutionPhase::PendingFinish(
+                                        TurnExecutionResult::success(
+                                            state.accumulated_usage.clone(),
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        other => {
+                            // 迟到或不匹配的审批：明确忽略，不影响当前阶段。
+                            state.install_phase(other);
+                        }
                     }
                 }
-                Some(Command::SetReasoningEffort(effort)) => {
+                Deferred::Command(Command::SetTrustMode(mode)) => {
+                    set_runtime_trust_mode(&mut trust_mode, &plugins, mode);
+                    let phase = state.take_phase();
+                    match phase {
+                        ExecutionPhase::WaitingApproval(mut approval)
+                            if mode == TrustMode::FullTrust =>
+                        {
+                            let tool = approval.pending.tool;
+                            approval.batch.ready_tools.push(tool);
+                            state.install_phase(ExecutionPhase::PreparingTools(approval.batch));
+                        }
+                        other => state.install_phase(other),
+                    }
+                }
+                Deferred::Command(Command::SetReasoningEffort(effort)) => {
                     ctx.agent_config.reasoning_effort = effort.clone();
                     ctx.session.reasoning_effort = Some(effort);
                 }
-                Some(Command::InjectTool { tool_name, payload }) => {
+                Deferred::Command(Command::InjectTool { tool_name, payload }) => {
                     injections.receive(&stream_tx, tool_name, payload);
                 }
-                Some(Command::SetTitle {
+                Deferred::Command(Command::SetTitle {
                     title,
                     only_if_default,
                 }) => {
-                    if !only_if_default
-                        || crate::core::is_default_title(&ctx.session.title)
-                    {
+                    if !only_if_default || crate::core::is_default_title(&ctx.session.title) {
                         ctx.session.title = title.clone();
                         ctx.session.updated_at = tiangong_types::now_text();
                         // 通知消费线程转发 sessions_updated（core 层不碰 tauri，走自有 StreamEvent 通道）。
@@ -1141,10 +1108,10 @@ pub(super) async fn execute_turn(
                     }
                     // 不立即 persist：turn 结束 run_turn 统一落盘。
                 }
-                Some(Command::EmitStreamEvent(event)) => {
+                Deferred::Command(Command::EmitStreamEvent(event)) => {
                     let _ = stream_tx.send(*event);
                 }
-                Some(Command::ReportUsage {
+                Deferred::Command(Command::ReportUsage {
                     usage,
                     source,
                     emit_event,
@@ -1156,685 +1123,416 @@ pub(super) async fn execute_turn(
                     source,
                     emit_event,
                 ),
-            },
+                Deferred::Command(Command::Cancel | Command::Shutdown) => {
+                    unreachable!("Cancel/Shutdown 已在上方取消分支处理")
+                }
+                Deferred::Closed => unreachable!("Closed 已在上方取消分支处理"),
+            }
+            continue 'agent_loop;
+        }
 
-            compression_result = async {
-                let active = active_compression
-                    .as_mut()
-                    .expect("压缩分支只在任务活跃时启用");
-                active.wait().await
-            }, if active_compression.is_some() => {
-                let active = active_compression
-                    .take()
-                    .expect("完成的压缩任务必须存在运行记录");
-                let continuation = active.complete(
+        // ── 阶段驱动（take → drive → install）──
+        let phase = state.take_phase();
+        match phase {
+            // ── Ready：需要下一次 ReAct 模型请求 ──
+            ExecutionPhase::NeedModel => {
+                if state.budget.react_rounds_in_phase >= ctx.max_tool_rounds {
+                    state.install_phase(ExecutionPhase::StartCheckingCompletion);
+                    continue 'agent_loop;
+                }
+                injections.commit(ctx);
+                let request_injection_generation = injections.generation();
+                if state.budget.request_round == 0 {
+                    debug_assert!(
+                        ctx.session.system_prompt_message.is_some(),
+                        "TurnContext 构建前应已注入 system prompt"
+                    );
+                } else {
+                    let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                        phase: "analyzing".to_string(),
+                        iteration: (state.budget.request_round + 1) as u32,
+                    });
+                }
+                let active = start_llm_request(
                     ctx,
-                    &mut state.accumulated_usage,
-                    compression_result,
+                    build_react_request(ctx),
+                    LlmPurpose::React {
+                        request_injection_generation,
+                    },
+                    StreamTextKind::React,
+                    None,
                 );
+                state.install_phase(ExecutionPhase::WaitingModel(active));
+            }
 
-                match continuation {
-                    CompressionContinuation::ReactText {
-                        pending_msg_id,
-                        disposition,
+            // ── Ready（同步过渡）：发起完成度检查请求 ──
+            ExecutionPhase::StartCheckingCompletion => {
+                injections.commit(ctx);
+                let request_injection_generation = injections.generation();
+                let iteration = state.budget.continuation_count + 1;
+                let _ = stream_tx.send(StreamEvent::PhaseChanged {
+                    phase: "summary".to_string(),
+                    iteration,
+                });
+                if ctx.session.system_prompt_message.is_none() {
+                    rebuild_system_prompt(ctx);
+                }
+                let active = start_llm_request(
+                    ctx,
+                    request_for_summary_phase(&ctx.session),
+                    LlmPurpose::Summary {
+                        iteration,
                         request_injection_generation,
-                    } => finish_react_text(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        pending_msg_id,
-                        disposition,
+                    },
+                    StreamTextKind::Summary,
+                    Some(ToolChoice::None),
+                );
+                state.install_phase(ExecutionPhase::CheckingCompletion(active));
+            }
+
+            // ── Ready（同步过渡）：发起强制最终回复请求 ──
+            ExecutionPhase::StartForceFinal {
+                reason,
+                request_injection_generation,
+                summary_error,
+            } => {
+                let request = build_force_final_request(ctx, reason);
+                let active = start_llm_request(
+                    ctx,
+                    request,
+                    LlmPurpose::ForceFinal {
                         request_injection_generation,
-                    ),
-                    CompressionContinuation::ToolBatch => {
-                        state.next_step = NextStep::DriveTools;
+                        summary_error,
+                    },
+                    StreamTextKind::Summary,
+                    Some(ToolChoice::None),
+                );
+                state.install_phase(ExecutionPhase::ForceFinalPhase(active));
+            }
+
+            // ── Ready：暂定完成，提交结果（任务 07 接入命令仲裁后此处先排空命令）──
+            ExecutionPhase::PendingFinish(result) => break 'agent_loop result,
+
+            // ── Ready（兼容层，任务 05 迁移）：推进工具批次准备/执行 ──
+            ExecutionPhase::PreparingTools(mut batch) => {
+                let call = batch.calls.pop_front();
+                let Some((index, call)) = call else {
+                    if !batch.ready_tools.is_empty() {
+                        let ready_tools = std::mem::take(&mut batch.ready_tools);
+                        let mut tools = ToolExecutionPhase {
+                            tasks: JoinSet::new(),
+                            running: HashMap::new(),
+                            batch,
+                        };
+                        for tool in ready_tools {
+                            start_tool_execution(ctx, tool, &mut tools);
+                        }
+                        state.install_phase(ExecutionPhase::WaitingTools(tools));
+                        continue 'agent_loop;
                     }
-                    CompressionContinuation::InvalidToolCalls => {
-                        state.next_step = NextStep::StartReact;
+
+                    append_invalid_tool_calls_context(ctx, &batch.invalid_tool_calls);
+                    if batch.needs_failure_recovery {
+                        append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
+                    } else {
+                        ctx.session.persist_to_disk();
                     }
-                    CompressionContinuation::Summary {
-                        decision,
-                        request_injection_generation,
-                    } => finish_summary(
-                        ctx,
-                        &mut state,
-                        &mut injections,
-                        decision,
-                        request_injection_generation,
-                    ),
-                    CompressionContinuation::ContextRetry {
-                        previous_summary_up_to,
-                        error_message,
+                    injections.commit(ctx);
+                    state.install_phase(ExecutionPhase::NeedModel);
+                    continue 'agent_loop;
+                };
+
+                match prepare_tool_call(ctx, &call, &mut state.tool_history) {
+                    ToolPreflightOutcome::Skip { needs_recovery } => {
+                        batch.needs_failure_recovery |= needs_recovery;
+                        ctx.session.persist_to_disk();
+                        state.install_phase(ExecutionPhase::PreparingTools(batch));
+                    }
+                    ToolPreflightOutcome::Execute {
+                        args_summary,
+                        dedupe_key,
                     } => {
-                        injections.commit(ctx);
-                        if ctx.session.summary_up_to > previous_summary_up_to {
-                            state.next_step = NextStep::StartReact;
-                        } else {
-                            persist_error(
-                                ctx,
-                                format!("ReAct 循环请求失败：{error_message}"),
+                        let first_in_batch = batch.prepared_keys.insert(dedupe_key.clone());
+                        if !first_in_batch {
+                            record_parallel_duplicate_tool_call(ctx, &call);
+                            state.install_phase(ExecutionPhase::PreparingTools(batch));
+                            continue 'agent_loop;
+                        }
+                        let tool = PreparedToolCall {
+                            index,
+                            call,
+                            args_summary,
+                            dedupe_key,
+                        };
+                        let trust_mode_label = format!("{trust_mode:?}");
+                        if trust_mode == TrustMode::FullTrust {
+                            ctx.observer.audit_permission(
+                                &ctx.session.id,
+                                &tool.call.name,
+                                "approved",
+                                &trust_mode_label,
+                                (!tool.args_summary.is_empty())
+                                    .then_some(tool.args_summary.as_str()),
                             );
-                            state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                state.accumulated_usage.clone(),
-                                error_message,
-                            ));
+                            batch.ready_tools.push(tool);
+                            state.install_phase(ExecutionPhase::PreparingTools(batch));
+                        } else {
+                            let request_id = scru128::new().to_string();
+                            ctx.observer.audit_permission(
+                                &ctx.session.id,
+                                &tool.call.name,
+                                "needs_approval",
+                                &trust_mode_label,
+                                (!tool.args_summary.is_empty())
+                                    .then_some(tool.args_summary.as_str()),
+                            );
+                            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
+                                request_id: request_id.clone(),
+                                tool_name: tool.call.name.clone(),
+                                args_summary: tool.args_summary.clone(),
+                            });
+                            state.install_phase(ExecutionPhase::WaitingApproval(ApprovalPhase {
+                                pending: PendingApproval { request_id, tool },
+                                batch,
+                            }));
                         }
                     }
                 }
             }
 
-            // 模型任务把流式内容写入此通道；通道关闭表示完整响应已经可以收取。
-            chunk = async {
-                active_llm
-                    .as_mut()
-                    .expect("LLM 分支只在请求活跃时启用")
-                    .chunk_rx
-                    .recv()
-                    .await
-            }, if active_llm.is_some() => {
-                if let Some(chunk) = chunk {
-                    let active = active_llm.as_mut().expect("LLM 状态必须存在");
-                    if let Some(chunk_usage) = &chunk.usage {
-                        let usage: TokenUsage = chunk_usage.clone().into();
-                        active.streaming_usage.accumulate(&usage);
-                    }
-                    active.streamed_text.push_str(&chunk.content);
-                    active.streamed_reasoning.push_str(&chunk.reasoning_content);
-                    active.sink.push_chunk(&chunk);
-                    continue 'agent_loop;
-                }
-
-                let active = active_llm.take().expect("LLM 状态必须存在");
-                let ActiveLlm {
-                    purpose,
-                    pending_msg_id,
-                    sink,
-                    task,
-                    streamed_text,
-                    streamed_reasoning,
-                    streaming_usage,
-                    ..
-                } = active;
-                sink.finish();
-                let response_result = match task.await {
-                    Ok(result) => result,
-                    Err(error) => Err(anyhow::anyhow!(error.to_string())),
-                };
-
-                match purpose {
-                    LlmPurpose::React {
-                        request_injection_generation,
-                    } => {
-                        persist_streamed_react_message(
-                            ctx,
-                            &pending_msg_id,
-                            &streamed_text,
-                            &streamed_reasoning,
-                        );
-                        let response = match response_result {
-                            Ok(response) => response,
-                            Err(error) => {
-                                let error_message = format!("{error:#}");
-                                let should_compress = error_message.contains("context_window_exceeded")
-                                    || error_message.contains("context_length_exceeded")
-                                    || (error_message.contains("content_blocks=0")
-                                        && error_message.contains("stop_reason=end_turn"));
-                                if should_compress {
-                                    tracing::warn!("检测到上下文超限，尝试强制压缩");
-                                    let previous_summary_up_to = ctx.session.summary_up_to;
-                                    active_compression = Some(ActiveCompression::start_forced(
-                                        ctx,
-                                        &context_organizer,
-                                        CompressionContinuation::ContextRetry {
-                                            previous_summary_up_to,
-                                            error_message,
-                                        },
-                                    ));
-                                    state.next_step = NextStep::Waiting;
-                                } else {
-                                    injections.commit(ctx);
-                                    persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
-                                    state.next_step = NextStep::Finish(TurnExecutionResult::failed(
-                                        state.accumulated_usage.clone(),
-                                        error_message,
-                                    ));
+            // ── Waiting：模型请求（ReAct/完成度检查/ForceFinal 共用流式驱动）──
+            ExecutionPhase::WaitingModel(mut active)
+            | ExecutionPhase::CheckingCompletion(mut active)
+            | ExecutionPhase::ForceFinalPhase(mut active) => {
+                tokio::select! {
+                                    biased;
+                                    command = cmd_rx.recv() => {
+                                        // 命令优先：归还阶段，交由统一命令处理接管。
+                                        deferred = Some(match command {
+                                            Some(command) => Deferred::Command(command),
+                                            None => Deferred::Closed,
+                                        });
+                                        state.install_phase(reinstate_llm_phase(active));
+                                        continue 'agent_loop;
+                                    }
+                                    chunk = active.chunk_rx.recv() => {
+                                        if let Some(chunk) = chunk {
+                                            if let Some(chunk_usage) = &chunk.usage {
+                                                let usage: TokenUsage = chunk_usage.clone().into();
+                                                active.streaming_usage.accumulate(&usage);
+                                            }
+                                            active.streamed_text.push_str(&chunk.content);
+                                            active.streamed_reasoning.push_str(&chunk.reasoning_content);
+                                            active.sink.push_chunk(&chunk);
+                                            state.install_phase(reinstate_llm_phase(active));
+                                            continue 'agent_loop;
+                                        }
+                                        // 通道关闭：完整响应可收取。
+                                        let ActiveLlm {
+                                            purpose,
+                                            pending_msg_id,
+                                            sink,
+                                            task,
+                                            streamed_text,
+                                            streamed_reasoning,
+                                            streaming_usage,
+                                            ..
+                                        } = active;
+                                        sink.finish();
+                                        let response_result = match task.await {
+                                            Ok(result) => result,
+                                            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+                                        };
+                                        let next = complete_llm_request(
+                                            ctx,
+                                            &mut state,
+                                            &mut injections,
+                                            &context_organizer,
+                                            &stream_tx,
+                                            purpose,
+                                            pending_msg_id,
+                                            streamed_text,
+                                            streamed_reasoning,
+                                            streaming_usage,
+                                            response_result,
+                                        )
+                ;
+                                        state.install_phase(next);
+                                    }
                                 }
-                                continue 'agent_loop;
-                            }
-                        };
+            }
 
-                        state.accumulated_usage.accumulate(&response.usage);
-                        emit_token_usage(
-                            &stream_tx,
-                            &response.usage,
-                            Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
-                            context_limit,
-                            format!("react-round-{}", state.budget.request_round + 1),
-                            None,
-                        );
-                        state.budget.request_round += 1;
-                        state.budget.react_rounds_in_phase += 1;
-
-                        if response.tool_calls.is_empty()
-                            && !response.invalid_tool_calls.is_empty()
-                        {
-                            append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
-                            let observed_tokens = observed_total_tokens(&response.usage);
-                            if context_organizer.needs_compression(observed_tokens) {
-                                active_compression = Some(ActiveCompression::start(
-                                    ctx,
-                                    &context_organizer,
-                                    observed_tokens,
-                                    CompressionContinuation::InvalidToolCalls,
-                                ));
-                                state.next_step = NextStep::Waiting;
-                            } else {
-                                state.next_step = NextStep::StartReact;
-                            }
-                        } else if response.tool_calls.is_empty() {
-                            let disposition = handle_react_text_response(
-                                ctx,
-                                &pending_msg_id,
-                                &response,
-                                &state,
-                            );
-                            let observed_tokens = observed_total_tokens(&response.usage);
-                            if context_organizer.needs_compression(observed_tokens) {
-                                active_compression = Some(ActiveCompression::start(
-                                    ctx,
-                                    &context_organizer,
-                                    observed_tokens,
-                                    CompressionContinuation::ReactText {
-                                        pending_msg_id,
-                                        disposition,
-                                        request_injection_generation,
-                                    },
-                                ));
-                                state.next_step = NextStep::Waiting;
-                            } else {
-                                finish_react_text(
-                                    ctx,
-                                    &mut state,
-                                    &mut injections,
-                                    pending_msg_id,
-                                    disposition,
-                                    request_injection_generation,
-                                );
-                            }
-                        } else {
-                            state.budget.executed_tool_in_phase = true;
-                            let calls = record_tool_calls(
-                                ctx,
-                                &pending_msg_id,
-                                &response,
-                                format!("react-round-{}", state.budget.request_round),
-                            );
-                            state.tool_batch = Some(ToolBatchState {
-                                calls: calls.into_iter().enumerate().collect(),
-                                ready_tools: Vec::new(),
-                                prepared_keys: HashSet::new(),
-                                invalid_tool_calls: response.invalid_tool_calls,
-                                response_usage: response.usage,
-                                request_injection_generation,
-                                needs_failure_recovery: false,
-                            });
-                            state.next_step = NextStep::DriveTools;
-                        }
+            // ── Waiting（兼容层，任务 05 迁移）：工具任务运行中 ──
+            ExecutionPhase::WaitingTools(mut tools) => {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv() => {
+                        deferred = Some(match command {
+                            Some(command) => Deferred::Command(command),
+                            None => Deferred::Closed,
+                        });
+                        state.install_phase(ExecutionPhase::WaitingTools(tools));
+                        continue 'agent_loop;
                     }
-                    LlmPurpose::Summary {
-                        iteration,
-                        request_injection_generation,
-                    } => {
-                        let response = match response_result {
-                            Ok(response) => response,
+                    tool_result = tools.tasks.join_next_with_id() => {
+                        let joined = tool_result.expect("工具任务集合非空时必须返回结果");
+                        let (task_id, task_output) = match joined {
+                            Ok((task_id, output)) => (task_id, output),
                             Err(error) => {
-                                let message = error.to_string();
-                                persist_partial_summary(
-                                    ctx,
-                                    &pending_msg_id,
-                                    &streamed_text,
-                                    &streamed_reasoning,
-                                );
-                                state.accumulated_usage.accumulate(&streaming_usage);
-                                persist_error(ctx, format!("总结阶段失败：{message}"));
-                                state.next_step = NextStep::StartForceFinal {
-                                    reason: ForceFinalReason::SummaryError,
-                                    request_injection_generation,
-                                    summary_error: Some(message),
-                                };
-                                continue 'agent_loop;
+                                let task_id = error.id();
+                                let running = tools
+                                    .running
+                                    .get(&task_id)
+                                    .expect("异常工具任务必须存在运行记录");
+                                let message = format!("工具任务异常结束：{error}");
+                                (
+                                    task_id,
+                                    ToolTaskOutput {
+                                        result: ToolResult {
+                                            ok: false,
+                                            summary: message.clone(),
+                                            stdout: String::new(),
+                                            stderr: message,
+                                            exit_code: 1,
+                                            execution: None,
+                                        },
+                                        duration_ms: running.started_at.elapsed().as_millis() as u64,
+                                    },
+                                )
                             }
                         };
-
-                        emit_token_usage(
-                            &stream_tx,
-                            &response.usage,
-                            Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
-                            context_limit,
-                            format!("summary-iteration-{iteration}"),
-                            None,
+                        let running = tools
+                            .running
+                            .remove(&task_id)
+                            .expect("完成的工具任务必须存在运行记录");
+                        let needs_recovery = record_completed_tool_call(
+                            ctx,
+                            CompletedToolCall {
+                                call: &running.tool.call,
+                                args_summary: &running.tool.args_summary,
+                                dedupe_key: running.tool.dedupe_key,
+                                result: &task_output.result,
+                                duration_ms: task_output.duration_ms,
+                            },
+                            &mut state.tool_history,
                         );
-                        let mut usage = response.usage.clone();
-                        if usage.total_tokens == 0 {
-                            usage.accumulate(&streaming_usage);
-                        }
-                        state.accumulated_usage.accumulate(&usage);
+                        // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
+                        tools.batch.needs_failure_recovery |= needs_recovery;
 
-                        if response.tool_calls.is_empty()
-                            && !response.invalid_tool_calls.is_empty()
-                        {
-                            append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
-                            let decision = SummaryDecision::NeedMoreWork(
-                                "总结阶段返回的工具调用未通过 schema 校验，请根据校验原因继续完成任务。"
-                                    .to_string(),
-                            );
-                            let observed_tokens = observed_total_tokens(&usage);
-                            if context_organizer.needs_compression(observed_tokens) {
-                                active_compression = Some(ActiveCompression::start(
-                                    ctx,
-                                    &context_organizer,
-                                    observed_tokens,
-                                    CompressionContinuation::Summary {
-                                        decision,
-                                        request_injection_generation,
-                                    },
-                                ));
-                                state.next_step = NextStep::Waiting;
-                            } else {
-                                finish_summary(
-                                    ctx,
-                                    &mut state,
-                                    &mut injections,
-                                    decision,
-                                    request_injection_generation,
-                                );
-                            }
+                        if !tools.tasks.is_empty() {
+                            state.install_phase(ExecutionPhase::WaitingTools(tools));
                             continue 'agent_loop;
                         }
 
-                        if !response.tool_calls.is_empty() {
-                            tracing::warn!(
-                                count = response.tool_calls.len(),
-                                protocol = ?ctx.client().protocol(),
-                                "summary phase returned tool calls; continuing tool execution"
-                            );
-                            // 工具调用说明任务仍可继续。把总结响应转回 ReAct 工具批次，
-                            // 不经过 finish_summary，因此不增加 continuation_count。
-                            state.reset_react_phase();
-                            state.budget.executed_tool_in_phase = true;
-                            let calls = record_tool_calls(
-                                ctx,
-                                &pending_msg_id,
-                                &response,
-                                format!("summary-iteration-{iteration}-continuation"),
-                            );
-                            state.tool_batch = Some(ToolBatchState {
-                                calls: calls.into_iter().enumerate().collect(),
-                                ready_tools: Vec::new(),
-                                prepared_keys: HashSet::new(),
-                                invalid_tool_calls: response.invalid_tool_calls,
-                                response_usage: response.usage,
-                                request_injection_generation,
-                                needs_failure_recovery: false,
-                            });
-                            state.next_step = NextStep::DriveTools;
+                        if !tools.batch.calls.is_empty() || !tools.batch.ready_tools.is_empty() {
+                            state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
                             continue 'agent_loop;
                         }
 
-                        let decision = parse_summary_phase_output(&response.text);
-                        let summary_content = decision.payload().to_string();
-                        let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
-                        if !needs_more_work && summary_content.trim().is_empty() {
-                            if let Some(message_id) = promote_last_react_message_to_summary(&mut ctx.session) {
-                                emit_session_message_upsert(ctx, &message_id);
-                            }
-                        } else {
-                            upsert_assistant_text_message(
-                                &mut ctx.session,
-                                &pending_msg_id,
-                                &summary_content,
-                                &response.reasoning_content,
-                                MessagePhase::Normal,
-                            );
-                            if let Some(message) = ctx
-                                .session
-                                .messages
-                                .iter_mut()
-                                .find(|message| message.id == pending_msg_id)
-                            {
-                                message.reasoning_signature = response.reasoning_signature;
-                                message.phase = if needs_more_work {
-                                    MessagePhase::React
-                                } else {
-                                    MessagePhase::Summary
-                                };
-                            }
-                            emit_session_message_upsert(ctx, &pending_msg_id);
-                        }
-
-                        let observed_tokens = observed_total_tokens(&usage);
+                        let observed_tokens = observed_total_tokens(&tools.batch.response_usage);
                         if context_organizer.needs_compression(observed_tokens) {
-                            active_compression = Some(ActiveCompression::start(
+                            let active = ActiveCompression::start(
                                 ctx,
                                 &context_organizer,
                                 observed_tokens,
-                                CompressionContinuation::Summary {
-                                    decision,
-                                    request_injection_generation,
-                                },
-                            ));
-                            state.next_step = NextStep::Waiting;
+                                CompressionContinuation::ToolBatch,
+                            );
+                            state.install_phase(ExecutionPhase::Compressing(CompressingPhase {
+                                active,
+                                suspended_batch: Some(tools.batch),
+                            }));
                         } else {
-                            finish_summary(
+                            state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
+                        }
+                    }
+                }
+            }
+
+            // ── Waiting（兼容层，任务 05 迁移）：等待审批（仅命令可推进）──
+            ExecutionPhase::WaitingApproval(approval) => {
+                let command = cmd_rx.recv().await;
+                deferred = Some(match command {
+                    Some(command) => Deferred::Command(command),
+                    None => Deferred::Closed,
+                });
+                state.install_phase(ExecutionPhase::WaitingApproval(approval));
+            }
+
+            // ── Waiting（兼容层，任务 06 迁移）：上下文压缩进行中 ──
+            ExecutionPhase::Compressing(mut compressing) => {
+                tokio::select! {
+                    biased;
+                    command = cmd_rx.recv() => {
+                        deferred = Some(match command {
+                            Some(command) => Deferred::Command(command),
+                            None => Deferred::Closed,
+                        });
+                        state.install_phase(ExecutionPhase::Compressing(compressing));
+                        continue 'agent_loop;
+                    }
+                    compression_result = compressing.active.wait() => {
+                        let CompressingPhase {
+                            active,
+                            suspended_batch,
+                        } = compressing;
+                        let continuation = active.complete(
+                            ctx,
+                            &mut state.accumulated_usage,
+                            compression_result,
+                        );
+
+                        let next = match continuation {
+                            CompressionContinuation::ReactText {
+                                pending_msg_id,
+                                disposition,
+                                request_injection_generation,
+                            } => finish_react_text(
+                                ctx,
+                                &mut state,
+                                &mut injections,
+                                pending_msg_id,
+                                disposition,
+                                request_injection_generation,
+                            ),
+                            CompressionContinuation::ToolBatch => {
+                                ExecutionPhase::PreparingTools(
+                                    suspended_batch.expect("ToolBatch 续接必须挂起批次"),
+                                )
+                            }
+                            CompressionContinuation::InvalidToolCalls => {
+                                ExecutionPhase::NeedModel
+                            }
+                            CompressionContinuation::Summary {
+                                decision,
+                                request_injection_generation,
+                            } => finish_summary(
                                 ctx,
                                 &mut state,
                                 &mut injections,
                                 decision,
                                 request_injection_generation,
-                            );
-                        }
-                    }
-                    LlmPurpose::ForceFinal {
-                        request_injection_generation,
-                        summary_error,
-                    } => {
-                        let force_result = match response_result {
-                            Ok(response) => {
-                                state.accumulated_usage.accumulate(&response.usage);
-                                commit_summary_message(
-                                    ctx,
-                                    &pending_msg_id,
-                                    &response,
-                                    "force_final_response",
-                                )
-                            }
-                            Err(error) => {
-                                let message = error.to_string();
-                                persist_error(ctx, format!("force_final_response 失败：{message}"));
-                                Err(message)
-                            }
-                        };
-                        let received_new_injection =
-                            injections.generation() > request_injection_generation;
-                        injections.commit(ctx);
-                        if received_new_injection {
-                            state.reset_react_phase();
-                            state.next_step = NextStep::StartReact;
-                            continue 'agent_loop;
-                        }
-                        state.next_step = match force_result {
-                            Ok(()) => NextStep::Finish(TurnExecutionResult::success(
-                                state.accumulated_usage.clone(),
-                            )),
-                            Err(message) => {
-                                let message = summary_error.map_or(message.clone(), |summary_error| {
-                                    format!(
-                                        "总结阶段失败：{summary_error}；强制最终回复失败：{message}"
-                                    )
-                                });
-                                NextStep::Finish(TurnExecutionResult::failed(
-                                    state.accumulated_usage.clone(),
-                                    message,
-                                ))
-                            }
-                        };
-                    }
-                }
-            }
-
-            // 每个工具都是独立 Tokio task；单项完成后立即反馈并持久化，但必须等整批结束才继续。
-            tool_result = tool_tasks.join_next_with_id(), if !tool_tasks.is_empty() => {
-                let joined = tool_result.expect("工具任务集合非空时必须返回结果");
-                let (task_id, task_output) = match joined {
-                    Ok((task_id, output)) => (task_id, output),
-                    Err(error) => {
-                        let task_id = error.id();
-                        let running = running_tools
-                            .get(&task_id)
-                            .expect("异常工具任务必须存在运行记录");
-                        let message = format!("工具任务异常结束：{error}");
-                        (
-                            task_id,
-                            ToolTaskOutput {
-                                result: ToolResult {
-                                    ok: false,
-                                    summary: message.clone(),
-                                    stdout: String::new(),
-                                    stderr: message,
-                                    exit_code: 1,
-                                    execution: None,
-                                },
-                                duration_ms: running.started_at.elapsed().as_millis() as u64,
-                            },
-                        )
-                    }
-                };
-                let running = running_tools
-                    .remove(&task_id)
-                    .expect("完成的工具任务必须存在运行记录");
-                let needs_recovery = record_completed_tool_call(
-                    ctx,
-                    CompletedToolCall {
-                        call: &running.tool.call,
-                        args_summary: &running.tool.args_summary,
-                        dedupe_key: running.tool.dedupe_key,
-                        result: &task_output.result,
-                        duration_ms: task_output.duration_ms,
-                    },
-                    &mut state.tool_history,
-                );
-                // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
-                state
-                    .tool_batch
-                    .as_mut()
-                    .expect("工具结果必须属于活跃批次")
-                    .needs_failure_recovery |= needs_recovery;
-
-                if !tool_tasks.is_empty() {
-                    state.next_step = NextStep::Waiting;
-                    continue 'agent_loop;
-                }
-
-                let batch = state
-                    .tool_batch
-                    .as_ref()
-                    .expect("工具结果必须属于活跃批次");
-                if !batch.calls.is_empty() || !batch.ready_tools.is_empty() {
-                    state.next_step = NextStep::DriveTools;
-                    continue 'agent_loop;
-                }
-
-                let observed_tokens = observed_total_tokens(&batch.response_usage);
-                if context_organizer.needs_compression(observed_tokens) {
-                    active_compression = Some(ActiveCompression::start(
-                        ctx,
-                        &context_organizer,
-                        observed_tokens,
-                        CompressionContinuation::ToolBatch,
-                    ));
-                    state.next_step = NextStep::Waiting;
-                } else {
-                    state.next_step = NextStep::DriveTools;
-                }
-            }
-
-            // 状态推进分支：命令分支 biased 在前，会先排空已到达命令，再推进 next_step。
-            _ = std::future::ready(()), if can_advance => {
-                let next_step = std::mem::replace(&mut state.next_step, NextStep::Waiting);
-                match next_step {
-                    NextStep::StartReact => {
-                        if state.budget.react_rounds_in_phase >= ctx.max_tool_rounds {
-                            state.next_step = NextStep::StartSummary;
-                            continue 'agent_loop;
-                        }
-                        injections.commit(ctx);
-                        let request_injection_generation = injections.generation();
-                        if state.budget.request_round == 0 {
-                            debug_assert!(
-                                ctx.session.system_prompt_message.is_some(),
-                                "TurnContext 构建前应已注入 system prompt"
-                            );
-                        } else {
-                            let _ = stream_tx.send(StreamEvent::PhaseChanged {
-                                phase: "analyzing".to_string(),
-                                iteration: (state.budget.request_round + 1) as u32,
-                            });
-                        }
-                        active_llm = Some(start_llm_request(
-                            ctx,
-                            build_react_request(ctx),
-                            LlmPurpose::React {
-                                request_injection_generation,
-                            },
-                            StreamTextKind::React,
-                            None,
-                        ));
-                    }
-                    NextStep::DriveTools => {
-                        let call = state
-                            .tool_batch
-                            .as_mut()
-                            .and_then(|batch| batch.calls.pop_front());
-                        let Some((index, call)) = call else {
-                            let ready_tools = std::mem::take(
-                                &mut state
-                                    .tool_batch
-                                    .as_mut()
-                                    .expect("工具批次必须存在")
-                                    .ready_tools,
-                            );
-                            if !ready_tools.is_empty() {
-                                for tool in ready_tools {
-                                    start_tool_execution(
-                                        ctx,
-                                        tool,
-                                        &mut tool_tasks,
-                                        &mut running_tools,
-                                    );
-                                }
-                                state.next_step = NextStep::Waiting;
-                                continue 'agent_loop;
-                            }
-
-                            let batch = state.tool_batch.take().expect("工具批次必须存在");
-                            append_invalid_tool_calls_context(ctx, &batch.invalid_tool_calls);
-                            if batch.needs_failure_recovery {
-                                append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
-                            } else {
-                                ctx.session.persist_to_disk();
-                            }
-                            injections.commit(ctx);
-                            state.next_step = NextStep::StartReact;
-                            continue 'agent_loop;
-                        };
-
-                        match prepare_tool_call(ctx, &call, &mut state.tool_history) {
-                            ToolPreflightOutcome::Skip { needs_recovery } => {
-                                state
-                                    .tool_batch
-                                    .as_mut()
-                                    .expect("工具批次必须存在")
-                                    .needs_failure_recovery |= needs_recovery;
-                                ctx.session.persist_to_disk();
-                                state.next_step = NextStep::DriveTools;
-                            }
-                            ToolPreflightOutcome::Execute {
-                                args_summary,
-                                dedupe_key,
+                            ),
+                            CompressionContinuation::ContextRetry {
+                                previous_summary_up_to,
+                                error_message,
                             } => {
-                                let first_in_batch = state
-                                    .tool_batch
-                                    .as_mut()
-                                    .expect("工具批次必须存在")
-                                    .prepared_keys
-                                    .insert(dedupe_key.clone());
-                                if !first_in_batch {
-                                    record_parallel_duplicate_tool_call(ctx, &call);
-                                    state.next_step = NextStep::DriveTools;
-                                    continue 'agent_loop;
-                                }
-                                let tool = PreparedToolCall {
-                                    index,
-                                    call,
-                                    args_summary,
-                                    dedupe_key,
-                                };
-                                let trust_mode_label = format!("{trust_mode:?}");
-                                if trust_mode == TrustMode::FullTrust {
-                                    ctx.observer.audit_permission(
-                                        &ctx.session.id,
-                                        &tool.call.name,
-                                        "approved",
-                                        &trust_mode_label,
-                                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
-                                    );
-                                    state
-                                        .tool_batch
-                                        .as_mut()
-                                        .expect("工具批次必须存在")
-                                        .ready_tools
-                                        .push(tool);
-                                    state.next_step = NextStep::DriveTools;
+                                injections.commit(ctx);
+                                if ctx.session.summary_up_to > previous_summary_up_to {
+                                    ExecutionPhase::NeedModel
                                 } else {
-                                    let request_id = scru128::new().to_string();
-                                    ctx.observer.audit_permission(
-                                        &ctx.session.id,
-                                        &tool.call.name,
-                                        "needs_approval",
-                                        &trust_mode_label,
-                                        (!tool.args_summary.is_empty()).then_some(tool.args_summary.as_str()),
+                                    persist_error(
+                                        ctx,
+                                        format!("ReAct 循环请求失败：{error_message}"),
                                     );
-                                    let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                                        request_id: request_id.clone(),
-                                        tool_name: tool.call.name.clone(),
-                                        args_summary: tool.args_summary.clone(),
-                                    });
-                                    pending_approval = Some(PendingApproval { request_id, tool });
+                                    ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
+                                        state.accumulated_usage.clone(),
+                                        error_message,
+                                    ))
                                 }
                             }
-                        }
+                        };
+                        state.install_phase(next);
                     }
-                    NextStep::StartSummary => {
-                        injections.commit(ctx);
-                        let request_injection_generation = injections.generation();
-                        let iteration = state.budget.continuation_count + 1;
-                        let _ = stream_tx.send(StreamEvent::PhaseChanged {
-                            phase: "summary".to_string(),
-                            iteration,
-                        });
-                        if ctx.session.system_prompt_message.is_none() {
-                            rebuild_system_prompt(ctx);
-                        }
-                        active_llm = Some(start_llm_request(
-                            ctx,
-                            request_for_summary_phase(&ctx.session),
-                            LlmPurpose::Summary {
-                                iteration,
-                                request_injection_generation,
-                            },
-                            StreamTextKind::Summary,
-                            Some(ToolChoice::None),
-                        ));
-                    }
-                    NextStep::StartForceFinal {
-                        reason,
-                        request_injection_generation,
-                        summary_error,
-                    } => {
-                        let request = build_force_final_request(ctx, reason);
-                        active_llm = Some(start_llm_request(
-                            ctx,
-                            request,
-                            LlmPurpose::ForceFinal {
-                                request_injection_generation,
-                                summary_error,
-                            },
-                            StreamTextKind::Summary,
-                            Some(ToolChoice::None),
-                        ));
-                    }
-                    NextStep::Finish(result) => break 'agent_loop result,
-                    NextStep::Waiting => unreachable!("等待状态不能主动推进"),
                 }
             }
         }
@@ -1846,6 +1544,346 @@ pub(super) async fn execute_turn(
     ctx.session.reasoning_effort = Some(ctx.agent_config.reasoning_effort.clone());
     injections.commit(ctx);
     result
+}
+
+/// 按 purpose 重建对应的模型 Waiting 阶段（构造时变体与 purpose 一一对应）。
+fn reinstate_llm_phase(active: ActiveLlm) -> ExecutionPhase {
+    match &active.purpose {
+        LlmPurpose::React { .. } => ExecutionPhase::WaitingModel(active),
+        LlmPurpose::Summary { .. } => ExecutionPhase::CheckingCompletion(active),
+        LlmPurpose::ForceFinal { .. } => ExecutionPhase::ForceFinalPhase(active),
+    }
+}
+
+/// 模型请求完成后的统一处理：按 purpose 归一化响应并产出下一阶段。
+///
+/// 这是旧 select「chunk 通道关闭」分支的主体：错误分流（上下文超限 → 压缩重试）、
+/// 工具调用 → PreparingTools、文本回复 → 完成度检查/直接完成、Summary 判定 →
+/// 续作/完成/ForceFinal、ForceFinal → 提交结果。
+#[allow(clippy::too_many_arguments)]
+fn complete_llm_request(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    injections: &mut ToolInjectionBuffer,
+    context_organizer: &ContextOrganizer,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    purpose: LlmPurpose,
+    pending_msg_id: String,
+    streamed_text: String,
+    streamed_reasoning: String,
+    streaming_usage: TokenUsage,
+    response_result: anyhow::Result<ModelFunctionResponse>,
+) -> ExecutionPhase {
+    let context_limit = ctx.context_limit;
+    match purpose {
+        LlmPurpose::React {
+            request_injection_generation,
+        } => {
+            persist_streamed_react_message(
+                ctx,
+                &pending_msg_id,
+                &streamed_text,
+                &streamed_reasoning,
+            );
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    let error_message = format!("{error:#}");
+                    let should_compress = error_message.contains("context_window_exceeded")
+                        || error_message.contains("context_length_exceeded")
+                        || (error_message.contains("content_blocks=0")
+                            && error_message.contains("stop_reason=end_turn"));
+                    if should_compress {
+                        tracing::warn!("检测到上下文超限，尝试强制压缩");
+                        let previous_summary_up_to = ctx.session.summary_up_to;
+                        let active = ActiveCompression::start_forced(
+                            ctx,
+                            context_organizer,
+                            CompressionContinuation::ContextRetry {
+                                previous_summary_up_to,
+                                error_message,
+                            },
+                        );
+                        return ExecutionPhase::Compressing(CompressingPhase {
+                            active,
+                            suspended_batch: None,
+                        });
+                    }
+                    injections.commit(ctx);
+                    persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
+                    return ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
+                        state.accumulated_usage.clone(),
+                        error_message,
+                    ));
+                }
+            };
+
+            state.accumulated_usage.accumulate(&response.usage);
+            emit_token_usage(
+                stream_tx,
+                &response.usage,
+                Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
+                context_limit,
+                format!("react-round-{}", state.budget.request_round + 1),
+                None,
+            );
+            state.budget.request_round += 1;
+            state.budget.react_rounds_in_phase += 1;
+
+            if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
+                append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
+                let observed_tokens = observed_total_tokens(&response.usage);
+                if context_organizer.needs_compression(observed_tokens) {
+                    let active = ActiveCompression::start(
+                        ctx,
+                        context_organizer,
+                        observed_tokens,
+                        CompressionContinuation::InvalidToolCalls,
+                    );
+                    ExecutionPhase::Compressing(CompressingPhase {
+                        active,
+                        suspended_batch: None,
+                    })
+                } else {
+                    ExecutionPhase::NeedModel
+                }
+            } else if response.tool_calls.is_empty() {
+                let disposition =
+                    handle_react_text_response(ctx, &pending_msg_id, &response, state);
+                let observed_tokens = observed_total_tokens(&response.usage);
+                if context_organizer.needs_compression(observed_tokens) {
+                    let active = ActiveCompression::start(
+                        ctx,
+                        context_organizer,
+                        observed_tokens,
+                        CompressionContinuation::ReactText {
+                            pending_msg_id,
+                            disposition,
+                            request_injection_generation,
+                        },
+                    );
+                    ExecutionPhase::Compressing(CompressingPhase {
+                        active,
+                        suspended_batch: None,
+                    })
+                } else {
+                    finish_react_text(
+                        ctx,
+                        state,
+                        injections,
+                        pending_msg_id,
+                        disposition,
+                        request_injection_generation,
+                    )
+                }
+            } else {
+                state.budget.executed_tool_in_phase = true;
+                let calls = record_tool_calls(
+                    ctx,
+                    &pending_msg_id,
+                    &response,
+                    format!("react-round-{}", state.budget.request_round),
+                );
+                ExecutionPhase::PreparingTools(ToolBatchState {
+                    calls: calls.into_iter().enumerate().collect(),
+                    ready_tools: Vec::new(),
+                    prepared_keys: HashSet::new(),
+                    invalid_tool_calls: response.invalid_tool_calls,
+                    response_usage: response.usage,
+                    request_injection_generation,
+                    needs_failure_recovery: false,
+                })
+            }
+        }
+        LlmPurpose::Summary {
+            iteration,
+            request_injection_generation,
+        } => {
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) => {
+                    let message = error.to_string();
+                    persist_partial_summary(
+                        ctx,
+                        &pending_msg_id,
+                        &streamed_text,
+                        &streamed_reasoning,
+                    );
+                    state.accumulated_usage.accumulate(&streaming_usage);
+                    persist_error(ctx, format!("总结阶段失败：{message}"));
+                    return ExecutionPhase::StartForceFinal {
+                        reason: ForceFinalReason::SummaryError,
+                        request_injection_generation,
+                        summary_error: Some(message),
+                    };
+                }
+            };
+
+            emit_token_usage(
+                stream_tx,
+                &response.usage,
+                Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
+                context_limit,
+                format!("summary-iteration-{iteration}"),
+                None,
+            );
+            let mut usage = response.usage.clone();
+            if usage.total_tokens == 0 {
+                usage.accumulate(&streaming_usage);
+            }
+            state.accumulated_usage.accumulate(&usage);
+
+            if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
+                append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
+                let decision = SummaryDecision::NeedMoreWork(
+                    "总结阶段返回的工具调用未通过 schema 校验，请根据校验原因继续完成任务。"
+                        .to_string(),
+                );
+                let observed_tokens = observed_total_tokens(&usage);
+                if context_organizer.needs_compression(observed_tokens) {
+                    let active = ActiveCompression::start(
+                        ctx,
+                        context_organizer,
+                        observed_tokens,
+                        CompressionContinuation::Summary {
+                            decision,
+                            request_injection_generation,
+                        },
+                    );
+                    return ExecutionPhase::Compressing(CompressingPhase {
+                        active,
+                        suspended_batch: None,
+                    });
+                }
+                return finish_summary(
+                    ctx,
+                    state,
+                    injections,
+                    decision,
+                    request_injection_generation,
+                );
+            }
+
+            if !response.tool_calls.is_empty() {
+                tracing::warn!(
+                    count = response.tool_calls.len(),
+                    protocol = ?ctx.client().protocol(),
+                    "summary phase returned tool calls; continuing tool execution"
+                );
+                // 工具调用说明任务仍可继续。把总结响应转回 ReAct 工具批次，
+                // 不经过 finish_summary，因此不增加 continuation_count。
+                state.reset_react_phase();
+                state.budget.executed_tool_in_phase = true;
+                let calls = record_tool_calls(
+                    ctx,
+                    &pending_msg_id,
+                    &response,
+                    format!("summary-iteration-{iteration}-continuation"),
+                );
+                return ExecutionPhase::PreparingTools(ToolBatchState {
+                    calls: calls.into_iter().enumerate().collect(),
+                    ready_tools: Vec::new(),
+                    prepared_keys: HashSet::new(),
+                    invalid_tool_calls: response.invalid_tool_calls,
+                    response_usage: response.usage,
+                    request_injection_generation,
+                    needs_failure_recovery: false,
+                });
+            }
+
+            let decision = parse_summary_phase_output(&response.text);
+            let summary_content = decision.payload().to_string();
+            let needs_more_work = matches!(decision, SummaryDecision::NeedMoreWork(_));
+            if !needs_more_work && summary_content.trim().is_empty() {
+                if let Some(message_id) = promote_last_react_message_to_summary(&mut ctx.session) {
+                    emit_session_message_upsert(ctx, &message_id);
+                }
+            } else {
+                upsert_assistant_text_message(
+                    &mut ctx.session,
+                    &pending_msg_id,
+                    &summary_content,
+                    &response.reasoning_content,
+                    MessagePhase::Normal,
+                );
+                if let Some(message) = ctx
+                    .session
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.id == pending_msg_id)
+                {
+                    message.reasoning_signature = response.reasoning_signature;
+                    message.phase = if needs_more_work {
+                        MessagePhase::React
+                    } else {
+                        MessagePhase::Summary
+                    };
+                }
+                emit_session_message_upsert(ctx, &pending_msg_id);
+            }
+
+            let observed_tokens = observed_total_tokens(&usage);
+            if context_organizer.needs_compression(observed_tokens) {
+                let active = ActiveCompression::start(
+                    ctx,
+                    context_organizer,
+                    observed_tokens,
+                    CompressionContinuation::Summary {
+                        decision,
+                        request_injection_generation,
+                    },
+                );
+                ExecutionPhase::Compressing(CompressingPhase {
+                    active,
+                    suspended_batch: None,
+                })
+            } else {
+                finish_summary(
+                    ctx,
+                    state,
+                    injections,
+                    decision,
+                    request_injection_generation,
+                )
+            }
+        }
+        LlmPurpose::ForceFinal {
+            request_injection_generation,
+            summary_error,
+        } => {
+            let force_result = match response_result {
+                Ok(response) => {
+                    state.accumulated_usage.accumulate(&response.usage);
+                    commit_summary_message(ctx, &pending_msg_id, &response, "force_final_response")
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    persist_error(ctx, format!("force_final_response 失败：{message}"));
+                    Err(message)
+                }
+            };
+            let received_new_injection = injections.generation() > request_injection_generation;
+            injections.commit(ctx);
+            if received_new_injection {
+                state.reset_react_phase();
+                return ExecutionPhase::NeedModel;
+            }
+            match force_result {
+                Ok(()) => ExecutionPhase::PendingFinish(TurnExecutionResult::success(
+                    state.accumulated_usage.clone(),
+                )),
+                Err(message) => {
+                    let message = summary_error.map_or(message.clone(), |summary_error| {
+                        format!("总结阶段失败：{summary_error}；强制最终回复失败：{message}")
+                    });
+                    ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
+                        state.accumulated_usage.clone(),
+                        message,
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// 通用工具参数摘要:把 JSON arguments 的 key=value 拼成简短字符串。
