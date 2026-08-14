@@ -1,9 +1,11 @@
 pub(crate) mod cancel;
+mod command;
 mod completion_policy;
 pub(crate) mod compression;
 pub mod context;
 mod execute;
 mod helpers;
+mod interrupt;
 pub mod message;
 mod outcome;
 mod phase;

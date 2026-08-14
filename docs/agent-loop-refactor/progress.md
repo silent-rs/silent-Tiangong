@@ -4,8 +4,9 @@
 
 ## 当前状态
 
-- 当前阶段：任务 10 完成，进入任务 11 模块拆分与交付。
-- 当前建议任务：**11 - 模块拆分与交付**（execute.rs 机械拆分 + 全链路验证 + 文档同步 + PR）。
+- 当前阶段：**全部 12 个任务（00~11）完成**。等待真实场景验证（GUI/CLI/Server 代表入口）与 PR 审查交付。
+- 当前建议任务：真实场景验证 + 按项目流程创建 PR。
+- 当前阻塞：无。
 - 当前阻塞：无。
 - 生产代码状态：任务 09 迟到结果与稳态——逐通道盘点后决策**不引入 intent_generation**
   （全部通道由结构化所有权 abort+join/shutdown+drop 或 ingress 门控覆盖，决策表写入 design.md 7.1）；
@@ -31,7 +32,7 @@
 | 08 | [终态封口](./tasks/08-终态封口.md) | 已完成 | feature/agent-execution-core | （本次） | CommandIngress 门控 + 下一轮队列可靠交接 |
 | 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 已完成 | feature/agent-execution-core | （本次） | 不引入代际决策（design 7.1）+ 日志补全 + 压力测试 |
 | 10 | [完成度策略](./tasks/10-完成度策略.md) | 已完成 | feature/agent-execution-core | （本次） | CompletionPolicy 解耦；默认策略保持（无数据不切换） |
-| 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 未开始 | - | - | 模块化核心与最终交付 |
+| 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 已完成（代码部分） | feature/agent-execution-core | （本次） | command/interrupt 拆分；全链路验证通过；真实场景验证待用户执行 |
 
 状态取值：未开始 / 进行中 / 已完成 / 阻塞。
 
@@ -159,3 +160,4 @@ cargo test -p tiangong-plugin-agent-team
 | 08 终态封口 | ✅ | ✅ | 103 通过（×2）+ agent-team 10 | ingress 门控/封口排空/下一轮队列测试 |
 | 09 迟到结果与稳态 | ✅ | ✅ | 105 通过（×2）+ agent-team 10 | 代际不引入决策、日志、连续引导/命令风暴 |
 | 10 完成度策略 | ✅ | ✅ | 107 通过（×2）| 策略解耦 + 判定表测试；默认行为不变 |
+| 11 模块拆分 | ✅ | ✅ | 107 通过（×2）+ agent-team 10 + workspace | 纯机械移动；行为零变更 |
