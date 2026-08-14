@@ -25,8 +25,8 @@ use crate::tool::ToolResult;
 /// 由驱动在收到后的同一轮迭代内立即消费（构造对应请求并进入 Waiting），不进入
 /// 事件等待——它们是单一阶段枚举的一部分，不是并列状态。
 ///
-/// 工具/审批变体自任务 05 起为正式阶段（批次、任务集合、审批与批次同体持有）；
-/// 压缩变体仍为兼容层，任务 06 迁移后由压缩续接驱动正式接管。
+/// 工具/审批/压缩变体均为正式阶段：批次、任务集合、审批与批次同体持有；
+/// 压缩的续接去向由 `CompressionContinuation` 完整表达（任务 06）。
 pub(super) enum ExecutionPhase {
     /// Ready：需要发起下一次 ReAct 模型请求。
     NeedModel,
@@ -52,14 +52,17 @@ pub(super) enum ExecutionPhase {
     WaitingTools(ToolExecutionPhase),
     /// Waiting：等待审批（必须同时持有待审批工具与完整批次，不变量 2）。
     WaitingApproval(ApprovalPhase),
-    // ── 兼容层（任务 06 迁移后由压缩驱动接管）──
-    /// Waiting：上下文压缩进行中（续接信息由 CompressionContinuation 承载；
-    /// ToolBatch 续接时挂起的工具批次随阶段持有）。
-    Compressing(CompressingPhase),
+    /// Waiting：上下文压缩进行中。续接去向（return_to）由
+    /// `CompressionContinuation` 完整表达：React 文本 / 工具批次（挂起批次随
+    /// 阶段持有）/ 无效工具调用重生成 / Summary 判定 / 上下文超限重试。
+    /// 压缩完成后只能迁移到续接允许的阶段（单一 match，不散落修改字段）。
+    Compressing(CompressionPhase),
 }
 
-/// 压缩阶段数据：活动压缩任务 +（仅 ToolBatch 续接时）挂起的工具批次。
-pub(super) struct CompressingPhase {
+/// 压缩阶段数据（design.md 2.3 `CompressionPhase`）：活动压缩任务 +
+/// （仅 ToolBatch 续接时）挂起的工具批次；续接去向见
+/// `compression::CompressionContinuation`（即 CompressionReturn）。
+pub(super) struct CompressionPhase {
     pub(super) active: ActiveCompression<super::compression::CompressionContinuation>,
     /// ToolBatch 续接时保留批次，压缩完成后回到 PreparingTools。
     pub(super) suspended_batch: Option<ToolBatchState>,

@@ -37,7 +37,7 @@ use super::compression::{
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
 use super::phase::{
-    ActiveLlm, ApprovalPhase, CompressingPhase, ExecutionBudget, ExecutionPhase, LlmPurpose,
+    ActiveLlm, ApprovalPhase, CompressionPhase, ExecutionBudget, ExecutionPhase, LlmPurpose,
     PendingApproval, PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase,
     ToolTaskOutput,
 };
@@ -1453,7 +1453,7 @@ pub(super) async fn execute_turn(
                                 observed_tokens,
                                 CompressionContinuation::ToolBatch,
                             );
-                            state.install_phase(ExecutionPhase::Compressing(CompressingPhase {
+                            state.install_phase(ExecutionPhase::Compressing(CompressionPhase {
                                 active,
                                 suspended_batch: Some(tools.batch),
                             }));
@@ -1487,7 +1487,7 @@ pub(super) async fn execute_turn(
                         continue 'agent_loop;
                     }
                     compression_result = compressing.active.wait() => {
-                        let CompressingPhase {
+                        let CompressionPhase {
                             active,
                             suspended_batch,
                         } = compressing;
@@ -1620,7 +1620,7 @@ fn complete_llm_request(
                                 error_message,
                             },
                         );
-                        return ExecutionPhase::Compressing(CompressingPhase {
+                        return ExecutionPhase::Compressing(CompressionPhase {
                             active,
                             suspended_batch: None,
                         });
@@ -1656,7 +1656,7 @@ fn complete_llm_request(
                         observed_tokens,
                         CompressionContinuation::InvalidToolCalls,
                     );
-                    ExecutionPhase::Compressing(CompressingPhase {
+                    ExecutionPhase::Compressing(CompressionPhase {
                         active,
                         suspended_batch: None,
                     })
@@ -1678,7 +1678,7 @@ fn complete_llm_request(
                             request_injection_generation,
                         },
                     );
-                    ExecutionPhase::Compressing(CompressingPhase {
+                    ExecutionPhase::Compressing(CompressionPhase {
                         active,
                         suspended_batch: None,
                     })
@@ -1766,7 +1766,7 @@ fn complete_llm_request(
                             request_injection_generation,
                         },
                     );
-                    return ExecutionPhase::Compressing(CompressingPhase {
+                    return ExecutionPhase::Compressing(CompressionPhase {
                         active,
                         suspended_batch: None,
                     });
@@ -1849,7 +1849,7 @@ fn complete_llm_request(
                         request_injection_generation,
                     },
                 );
-                ExecutionPhase::Compressing(CompressingPhase {
+                ExecutionPhase::Compressing(CompressionPhase {
                     active,
                     suspended_batch: None,
                 })
@@ -3514,6 +3514,84 @@ mod tests {
             assert!(has_result, "{call_id} 应有对应工具结果（协议闭合）");
         }
         harness.drain_stream();
+    }
+
+    /// ALR-101（压缩分支）：压缩进行中收到引导消息——取消压缩、保存新消息、
+    /// 从新意图重启；被取消压缩的迟到结果不得应用（context_summary 保持为空）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inject_during_compression_cancels_and_restarts_without_applying_summary() {
+        let server = MockServer::start().await;
+        // 1) 首轮回答触发自动压缩（用量超限），压缩响应整体延迟制造打断窗口。
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("部分回答。"), usage_chunk(185_900, 5)],
+        )
+        .await;
+        mount_completion(
+            &server,
+            "[[CURRENT_TASK]]\n旧任务\n[[SUMMARY]]\n旧摘要（不应被应用）",
+            "stop",
+            100,
+            20,
+            Some(Duration::from_millis(400)),
+        )
+        .await;
+        // 2) 新意图请求：文本 → 进入完成度检查；3) Summary 完成。
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("按新要求完成。"), usage_chunk(20, 4)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(25, 3)],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let TestHarness {
+            mut ctx,
+            stream_rx: _,
+            cmd_tx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        // execute_turn 独立任务运行并归还 ctx；主任务轮询到压缩请求（第 2 个）后注入。
+        let turn = tokio::spawn(async move {
+            let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+            (result, ctx)
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while server.received_requests().await.map_or(0, |r| r.len()) < 2 {
+            if tokio::time::Instant::now() >= deadline {
+                panic!("压缩请求未在期限内发出");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        cmd_tx
+            .send(Command::InjectUserMessage {
+                message_id: "injected-during-compression".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("换个方向，不用压缩了")],
+            })
+            .unwrap();
+
+        let (result, ctx) = turn.await.expect("turn task 不应 panic");
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "新意图执行应成功，实际: {:?}",
+            result.outcome
+        );
+        assert!(
+            ctx.session
+                .messages
+                .iter()
+                .any(|m| m.id == "injected-during-compression" && m.role == MessageRole::User),
+            "引导消息应保存进 session"
+        );
+        assert!(
+            ctx.session.context_summary.is_none(),
+            "被中断压缩的迟到结果不得应用（context_summary 应为空）"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
