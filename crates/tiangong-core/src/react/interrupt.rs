@@ -5,10 +5,7 @@ use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
-use super::execute::{
-    AgentLoopState, ToolInjectionBuffer, persist_streamed_react_message, record_rejected_tool_call,
-};
-use super::message::append_tool_result_message;
+use super::execute::{AgentLoopState, ToolInjectionBuffer, persist_streamed_react_message};
 
 /// 持久化被中断的 LLM 请求已流式收到的部分输出（降级为 React 过程消息）。
 pub(super) fn persist_interrupted_llm_output(
@@ -74,62 +71,8 @@ pub(super) async fn interrupt_active_work(
             emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
             state.accumulated_usage.accumulate(&streaming_usage);
         }
-        ExecutionPhase::WaitingTools(mut tools) => {
-            tools.tasks.shutdown().await;
-            let mut interrupted = tools
-                .running
-                .drain()
-                .map(|(_, tool)| tool)
-                .collect::<Vec<_>>();
-            interrupted.sort_by_key(|running| running.tool.index);
-            let mut interrupted_events = Vec::with_capacity(interrupted.len());
-            for running in interrupted {
-                let duration_ms = running.started_at.elapsed().as_millis() as u64;
-                let output = "工具调用因用户发送新消息而中断。".to_string();
-                append_tool_result_message(
-                    &mut ctx.session,
-                    &running.tool.call.id,
-                    &running.tool.call.name,
-                    output.clone(),
-                    true,
-                );
-                interrupted_events.push(StreamEvent::ToolResult {
-                    name: running.tool.call.name,
-                    tool_call_id: Some(running.tool.call.id),
-                    ok: false,
-                    output,
-                    full_output: None,
-                    duration_ms: Some(duration_ms),
-                });
-            }
-            ctx.session.persist_to_disk();
-            for event in interrupted_events {
-                let _ = stream_tx.send(event);
-            }
-            // 批次中尚未执行的调用一并闭合。
-            let closed = ctx
-                .session
-                .close_unfinished_tool_calls_with_reason("工具调用因用户发送新消息而中断。");
-            for (tool_call_id, tool_name, output) in closed {
-                let _ = stream_tx.send(StreamEvent::ToolResult {
-                    name: tool_name,
-                    tool_call_id: Some(tool_call_id),
-                    ok: false,
-                    output,
-                    full_output: None,
-                    duration_ms: None,
-                });
-            }
-        }
-        ExecutionPhase::WaitingApproval(approval) => {
-            record_rejected_tool_call(
-                ctx,
-                &approval.pending.tool.call,
-                &approval.pending.tool.args_summary,
-            );
-        }
-        ExecutionPhase::PreparingTools(_) | ExecutionPhase::PendingFinish(_) => {
-            // 无在途活动；PreparingTools 的悬空调用由下方统一闭合。
+        ExecutionPhase::PendingFinish(_) => {
+            // 无在途活动；悬空调用由下方统一闭合。
         }
         ExecutionPhase::NeedModel => {}
     }

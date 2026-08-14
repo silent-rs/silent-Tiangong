@@ -3,25 +3,18 @@
 //! 所有命令（含 PendingFinish 阶段收到的）经 [`handle_command`]：处理器不直接
 //! 驱动循环控制流，返回 [`CommandEffect`] 由执行驱动统一解释。
 
-use std::collections::HashMap;
-
 use std::sync::Arc;
-use tokio::task::JoinSet;
-
 use tokio::sync::mpsc as tokio_mpsc;
 
 use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::permission::TrustMode;
 use crate::react::outcome::TurnExecutionResult;
-use crate::react::phase::{ExecutionPhase, ToolExecutionPhase};
+use crate::react::phase::ExecutionPhase;
 use crate::turn_context::TurnContext;
 use tiangong_types::StreamEvent;
 
-use super::execute::{
-    AgentLoopState, ToolInjectionBuffer, record_rejected_tool_call, set_runtime_trust_mode,
-    start_tool_execution,
-};
+use super::execute::{AgentLoopState, ToolInjectionBuffer, set_runtime_trust_mode};
 use super::helpers::record_plugin_usage;
 use super::interrupt::interrupt_active_work;
 
@@ -129,64 +122,20 @@ pub(super) async fn handle_command(
                 }
             }
         }
-        Deferred::Command(Command::Approval {
-            request_id,
-            approved,
-        }) => {
-            let phase = state.take_phase();
-            match phase {
-                ExecutionPhase::WaitingApproval(approval)
-                    if approval.pending.request_id == request_id =>
-                {
-                    tracing::debug!(
-                        session_id = %ctx.session.id,
-                        approved,
-                        detail = approval.debug_summary(),
-                        "审批响应：WaitingApproval 迁移"
-                    );
-                    if approved {
-                        let mut tools = ToolExecutionPhase {
-                            tasks: JoinSet::new(),
-                            running: HashMap::new(),
-                            batch: approval.batch,
-                        };
-                        start_tool_execution(ctx, approval.pending.tool, &mut tools);
-                        CommandEffect::ToPhase(ExecutionPhase::WaitingTools(tools))
-                    } else {
-                        record_rejected_tool_call(
-                            ctx,
-                            &approval.pending.tool.call,
-                            &approval.pending.tool.args_summary,
-                        );
-                        let request_generation = approval.batch.request_injection_generation;
-                        let received_new_injection = injections.generation() > request_generation;
-                        injections.commit(ctx);
-                        if received_new_injection {
-                            CommandEffect::ToPhase(ExecutionPhase::NeedModel)
-                        } else {
-                            CommandEffect::ToPhase(ExecutionPhase::PendingFinish(
-                                TurnExecutionResult::success(state.accumulated_usage.clone()),
-                            ))
-                        }
-                    }
-                }
-                other => {
-                    // 迟到或不匹配的审批：明确忽略，不影响当前阶段。
-                    CommandEffect::ToPhase(other)
-                }
-            }
+        Deferred::Command(Command::Approval { .. }) => {
+            // 审批等待在工具流水线内部（ALR-302）；流水线之外到达的审批
+            // 一律是迟到或不匹配的响应，明确忽略。
+            tracing::debug!(
+                session_id = %ctx.session.id,
+                "迟到或不匹配的审批响应：忽略"
+            );
+            CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::SetTrustMode(mode)) => {
+            // 流水线内（审批等待/工具执行中）的信任模式变化由流水线就地处理；
+            // 其余阶段只更新运行时值，下一次权限判断生效。
             set_runtime_trust_mode(trust_mode, plugins, mode);
-            let phase = state.take_phase();
-            match phase {
-                ExecutionPhase::WaitingApproval(mut approval) if mode == TrustMode::FullTrust => {
-                    let tool = approval.pending.tool;
-                    approval.batch.ready_tools.push(tool);
-                    CommandEffect::ToPhase(ExecutionPhase::PreparingTools(approval.batch))
-                }
-                other => CommandEffect::ToPhase(other),
-            }
+            CommandEffect::KeepCurrent
         }
         Deferred::Command(Command::SetReasoningEffort(effort)) => {
             ctx.agent_config.reasoning_effort = effort.clone();

@@ -4,17 +4,15 @@
 //! 压缩驱动）统一使用。所有权模式（take/install）与取消方式已由任务 02 原型验证，
 //! 结论见 design.md 3.1；任务 04 起在此数据模型上接入正式 `ExecutionPhase` 驱动。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::task::{Id as TaskId, JoinSet};
 
 use super::outcome::TurnExecutionResult;
 use crate::model::{
     InvalidToolCall, ModelFunctionResponse, ModelStreamChunk, TokenUsage, ToolCall,
 };
 use crate::stream_throttle::ThrottledStreamSink;
-use crate::tool::ToolResult;
 
 /// 执行阶段：任意时刻当前阶段唯一（ALR-001）。
 ///
@@ -32,12 +30,6 @@ pub(super) enum ExecutionPhase {
     WaitingModel(ActiveLlm),
     /// Ready：大循环已产出暂定结果，待提交（任务 07 接入命令仲裁）。
     PendingFinish(TurnExecutionResult),
-    /// Ready：准备/执行工具批次（逐个弹出调用，去重/审批/直接就绪分流）。
-    PreparingTools(ToolBatchState),
-    /// Waiting：工具任务运行中（任务集合与运行记录一一对应，不变量 3）。
-    WaitingTools(ToolExecutionPhase),
-    /// Waiting：等待审批（必须同时持有待审批工具与完整批次，不变量 2）。
-    WaitingApproval(ApprovalPhase),
 }
 
 impl ExecutionPhase {
@@ -47,9 +39,6 @@ impl ExecutionPhase {
             ExecutionPhase::NeedModel => "NeedModel",
             ExecutionPhase::WaitingModel(_) => "WaitingModel",
             ExecutionPhase::PendingFinish(_) => "PendingFinish",
-            ExecutionPhase::PreparingTools(_) => "PreparingTools",
-            ExecutionPhase::WaitingTools(_) => "WaitingTools",
-            ExecutionPhase::WaitingApproval(_) => "WaitingApproval",
         }
     }
 }
@@ -102,76 +91,6 @@ pub(super) struct ToolBatchState {
     pub(super) response_usage: TokenUsage,
     pub(super) request_injection_generation: u64,
     pub(super) needs_failure_recovery: bool,
-}
-
-/// 待审批的工具调用。
-pub(super) struct PendingApproval {
-    pub(super) request_id: String,
-    pub(super) tool: PreparedToolCall,
-}
-
-/// 运行中的工具调用记录。
-pub(super) struct RunningToolCall {
-    pub(super) tool: PreparedToolCall,
-    pub(super) started_at: std::time::Instant,
-}
-
-/// 工具任务输出（任务完成回传）。
-pub(super) struct ToolTaskOutput {
-    pub(super) result: ToolResult,
-    pub(super) duration_ms: u64,
-}
-
-/// `WaitingTools` 阶段数据：任务集合与运行记录必须一一对应（不变量 3）。
-pub(super) struct ToolExecutionPhase {
-    pub(super) tasks: JoinSet<ToolTaskOutput>,
-    pub(super) running: HashMap<TaskId, RunningToolCall>,
-    pub(super) batch: ToolBatchState,
-}
-
-impl ToolExecutionPhase {
-    /// 不变量校验：JoinSet 任务与运行记录一一对应（debug 断言用）。
-    #[allow(dead_code)]
-    pub(super) fn assert_running_matches(&self) {
-        debug_assert_eq!(
-            self.tasks.len(),
-            self.running.len(),
-            "JoinSet 任务数与运行记录数必须一致"
-        );
-    }
-
-    /// 诊断摘要（不含工具参数等敏感正文）。
-    #[allow(dead_code)]
-    pub(super) fn debug_summary(&self) -> String {
-        format!(
-            "tools: pending={} ready={} running={} invalid={} recovery={}",
-            self.batch.calls.len(),
-            self.batch.ready_tools.len(),
-            self.running.len(),
-            self.batch.invalid_tool_calls.len(),
-            self.batch.needs_failure_recovery,
-        )
-    }
-}
-
-/// `WaitingApproval` 阶段数据：必须同时持有待审批工具与所属完整批次（不变量 2），
-/// 避免审批完成后丢失尚未处理的工具和批次元数据。
-pub(super) struct ApprovalPhase {
-    pub(super) pending: PendingApproval,
-    pub(super) batch: ToolBatchState,
-}
-
-impl ApprovalPhase {
-    /// 诊断摘要（不含请求 ID 以外的敏感内容）。
-    #[allow(dead_code)]
-    pub(super) fn debug_summary(&self) -> String {
-        format!(
-            "approval: request={} tool={} pending_batch={}",
-            self.pending.request_id,
-            self.pending.tool.call.name,
-            self.batch.calls.len(),
-        )
-    }
 }
 
 /// 模型请求的用途。

@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::mpsc as tokio_mpsc;
-use tokio::task::JoinSet;
 
 use crate::context::organizer::ContextOrganizer;
 use crate::core::command::Command;
@@ -33,12 +32,9 @@ use super::command::{CommandEffect, Deferred, handle_command};
 use super::compression::observed_total_tokens;
 use super::contract::{ReactTextDisposition, TaskContract};
 use super::outcome::TurnExecutionResult;
-use super::phase::{
-    ActiveLlm, ApprovalPhase, ExecutionBudget, ExecutionPhase, LlmPurpose, PendingApproval,
-    PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase, ToolTaskOutput,
-};
+use super::phase::{ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, ToolBatchState};
 use super::request;
-use super::tool_call::start_tool_call;
+use super::tools;
 
 #[derive(Default)]
 pub(super) struct ToolCallHistory {
@@ -185,7 +181,10 @@ fn record_tool_calls(
     calls
 }
 
-fn append_invalid_tool_calls_context(ctx: &mut TurnContext, invalid_calls: &[InvalidToolCall]) {
+pub(super) fn append_invalid_tool_calls_context(
+    ctx: &mut TurnContext,
+    invalid_calls: &[InvalidToolCall],
+) {
     if invalid_calls.is_empty() {
         return;
     }
@@ -212,7 +211,7 @@ fn append_invalid_tool_calls_context(ctx: &mut TurnContext, invalid_calls: &[Inv
     ctx.session.persist_to_disk();
 }
 
-enum ToolPreflightOutcome {
+pub(super) enum ToolPreflightOutcome {
     Execute {
         args_summary: String,
         dedupe_key: String,
@@ -222,7 +221,7 @@ enum ToolPreflightOutcome {
     },
 }
 
-fn prepare_tool_call(
+pub(super) fn prepare_tool_call(
     ctx: &mut TurnContext,
     call: &ToolCall,
     history: &mut ToolCallHistory,
@@ -298,7 +297,7 @@ fn prepare_tool_call(
     }
 }
 
-fn record_parallel_duplicate_tool_call(ctx: &mut TurnContext, call: &ToolCall) {
+pub(super) fn record_parallel_duplicate_tool_call(ctx: &mut TurnContext, call: &ToolCall) {
     let message = format!(
         "同一批次已经安排了完全相同的 {} 工具调用，本次重复调用已跳过；请直接使用同批调用返回的结果。",
         call.name
@@ -368,15 +367,15 @@ pub(super) fn record_rejected_tool_call(
     });
 }
 
-struct CompletedToolCall<'a> {
-    call: &'a ToolCall,
-    args_summary: &'a str,
-    dedupe_key: String,
-    result: &'a ToolResult,
-    duration_ms: u64,
+pub(super) struct CompletedToolCall<'a> {
+    pub(super) call: &'a ToolCall,
+    pub(super) args_summary: &'a str,
+    pub(super) dedupe_key: String,
+    pub(super) result: &'a ToolResult,
+    pub(super) duration_ms: u64,
 }
 
-fn record_completed_tool_call(
+pub(super) fn record_completed_tool_call(
     ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
     history: &mut ToolCallHistory,
@@ -452,7 +451,7 @@ fn record_completed_tool_call(
     needs_recovery
 }
 
-fn append_failure_recovery_prompt(
+pub(super) fn append_failure_recovery_prompt(
     ctx: &mut TurnContext,
     history: &ToolCallHistory,
     request_tools: &[ToolSpec],
@@ -647,30 +646,6 @@ fn handle_react_text_response(
     state.contract.gate_text(&response.text)
 }
 
-pub(super) fn start_tool_execution(
-    ctx: &mut TurnContext,
-    tool: PreparedToolCall,
-    tools: &mut ToolExecutionPhase,
-) {
-    let _ = ctx.stream_tx.send(StreamEvent::ToolStart {
-        name: tool.call.name.clone(),
-        args_summary: tool.args_summary.clone(),
-    });
-    let actor_id = ctx.session.id.clone();
-    let future = start_tool_call(ctx, &tool.call, &actor_id);
-    let started_at = std::time::Instant::now();
-    let task = tools.tasks.spawn(async move {
-        let result = future.await;
-        ToolTaskOutput {
-            result,
-            duration_ms: started_at.elapsed().as_millis() as u64,
-        }
-    });
-    tools
-        .running
-        .insert(task.id(), RunningToolCall { tool, started_at });
-}
-
 fn finish_react_text(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
@@ -745,7 +720,6 @@ pub(super) async fn execute_turn(
     let context_limit = ctx.context_limit;
     let context_organizer = ContextOrganizer::new(context_limit);
     let plugins = ctx.plugins.clone();
-    let request_tools = ctx.tools.clone();
     let mut trust_mode = ctx.trust_mode;
     let mut injections = ToolInjectionBuffer::new(ctx);
     let mut state = AgentLoopState::new(ctx);
@@ -942,102 +916,6 @@ pub(super) async fn execute_turn(
                 break 'agent_loop pending_result;
             }
 
-            // ── Ready（兼容层，任务 05 迁移）：推进工具批次准备/执行 ──
-            ExecutionPhase::PreparingTools(mut batch) => {
-                let call = batch.calls.pop_front();
-                let Some((index, call)) = call else {
-                    if !batch.ready_tools.is_empty() {
-                        let ready_tools = std::mem::take(&mut batch.ready_tools);
-                        let mut tools = ToolExecutionPhase {
-                            tasks: JoinSet::new(),
-                            running: HashMap::new(),
-                            batch,
-                        };
-                        for tool in ready_tools {
-                            start_tool_execution(ctx, tool, &mut tools);
-                        }
-                        let detail = tools.debug_summary();
-                        let next = ExecutionPhase::WaitingTools(tools);
-                        tracing::debug!(
-                            session_id = %ctx.session.id,
-                            from_phase = "PreparingTools",
-                            to_phase = next.name(),
-                            detail,
-                            "阶段迁移（ALR-301）"
-                        );
-                        state.install_phase(next);
-                        continue 'agent_loop;
-                    }
-
-                    append_invalid_tool_calls_context(ctx, &batch.invalid_tool_calls);
-                    if batch.needs_failure_recovery {
-                        append_failure_recovery_prompt(ctx, &state.tool_history, &request_tools);
-                    } else {
-                        ctx.session.persist_to_disk();
-                    }
-                    injections.commit(ctx);
-                    state.install_phase(ExecutionPhase::NeedModel);
-                    continue 'agent_loop;
-                };
-
-                match prepare_tool_call(ctx, &call, &mut state.tool_history) {
-                    ToolPreflightOutcome::Skip { needs_recovery } => {
-                        batch.needs_failure_recovery |= needs_recovery;
-                        ctx.session.persist_to_disk();
-                        state.install_phase(ExecutionPhase::PreparingTools(batch));
-                    }
-                    ToolPreflightOutcome::Execute {
-                        args_summary,
-                        dedupe_key,
-                    } => {
-                        let first_in_batch = batch.prepared_keys.insert(dedupe_key.clone());
-                        if !first_in_batch {
-                            record_parallel_duplicate_tool_call(ctx, &call);
-                            state.install_phase(ExecutionPhase::PreparingTools(batch));
-                            continue 'agent_loop;
-                        }
-                        let tool = PreparedToolCall {
-                            index,
-                            call,
-                            args_summary,
-                            dedupe_key,
-                        };
-                        let trust_mode_label = format!("{trust_mode:?}");
-                        if trust_mode == TrustMode::FullTrust {
-                            ctx.observer.audit_permission(
-                                &ctx.session.id,
-                                &tool.call.name,
-                                "approved",
-                                &trust_mode_label,
-                                (!tool.args_summary.is_empty())
-                                    .then_some(tool.args_summary.as_str()),
-                            );
-                            batch.ready_tools.push(tool);
-                            state.install_phase(ExecutionPhase::PreparingTools(batch));
-                        } else {
-                            let request_id = scru128::new().to_string();
-                            ctx.observer.audit_permission(
-                                &ctx.session.id,
-                                &tool.call.name,
-                                "needs_approval",
-                                &trust_mode_label,
-                                (!tool.args_summary.is_empty())
-                                    .then_some(tool.args_summary.as_str()),
-                            );
-                            let _ = stream_tx.send(StreamEvent::ApprovalNeeded {
-                                request_id: request_id.clone(),
-                                tool_name: tool.call.name.clone(),
-                                args_summary: tool.args_summary.clone(),
-                            });
-                            state.install_phase(ExecutionPhase::WaitingApproval(ApprovalPhase {
-                                pending: PendingApproval { request_id, tool },
-                                batch,
-                            }));
-                        }
-                    }
-                }
-            }
-
             // ── Waiting：模型请求（流式驱动，命令与 chunk 双路 select）──
             ExecutionPhase::WaitingModel(mut active) => {
                 tokio::select! {
@@ -1089,98 +967,43 @@ pub(super) async fn execute_turn(
                             streamed_reasoning,
                             response_result,
                         );
-                        state.install_phase(next);
-                    }
-                }
-            }
-
-            // ── Waiting（兼容层，任务 05 迁移）：工具任务运行中 ──
-            ExecutionPhase::WaitingTools(mut tools) => {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => {
-                        deferred = Some(match command {
-                            Some(command) => Deferred::Command(command),
-                            None => Deferred::Closed,
-                        });
-                        state.install_phase(ExecutionPhase::WaitingTools(tools));
-                        continue 'agent_loop;
-                    }
-                    tool_result = tools.tasks.join_next_with_id() => {
-                        let joined = tool_result.expect("工具任务集合非空时必须返回结果");
-                        let (task_id, task_output) = match joined {
-                            Ok((task_id, output)) => (task_id, output),
-                            Err(error) => {
-                                let task_id = error.id();
-                                let running = tools
-                                    .running
-                                    .get(&task_id)
-                                    .expect("异常工具任务必须存在运行记录");
-                                let message = format!("工具任务异常结束：{error}");
-                                (
-                                    task_id,
-                                    ToolTaskOutput {
-                                        result: ToolResult {
-                                            ok: false,
-                                            summary: message.clone(),
-                                            stdout: String::new(),
-                                            stderr: message,
-                                            exit_code: 1,
-                                            execution: None,
-                                        },
-                                        duration_ms: running.started_at.elapsed().as_millis() as u64,
-                                    },
+                        let next_phase = match next {
+                            NextStep::Phase(phase) => phase,
+                            NextStep::ExecuteTools(batch) => {
+                                match tools::execute_tool_batch(
+                                    ctx,
+                                    &mut state,
+                                    &mut injections,
+                                    &mut trust_mode,
+                                    &plugins,
+                                    &stream_tx,
+                                    context_limit,
+                                    cmd_rx,
+                                    batch,
                                 )
+                                .await
+                                {
+                                    tools::ToolBatchOutcome::Completed => {
+                                        ExecutionPhase::NeedModel
+                                    }
+                                    tools::ToolBatchOutcome::RejectedToFinish => {
+                                        ExecutionPhase::PendingFinish(TurnExecutionResult::success(
+                                            state.accumulated_usage.clone(),
+                                        ))
+                                    }
+                                    tools::ToolBatchOutcome::Interrupted(deferred_command) => {
+                                        // 归还阶段后交还统一命令处理（命令处理器会
+                                        // take 当前阶段）。
+                                        state.install_phase(ExecutionPhase::NeedModel);
+                                        deferred = Some(deferred_command);
+                                        continue 'agent_loop;
+                                    }
+                                }
                             }
                         };
-                        let running = tools
-                            .running
-                            .remove(&task_id)
-                            .expect("完成的工具任务必须存在运行记录");
-                        let needs_recovery = record_completed_tool_call(
-                            ctx,
-                            CompletedToolCall {
-                                call: &running.tool.call,
-                                args_summary: &running.tool.args_summary,
-                                dedupe_key: running.tool.dedupe_key,
-                                result: &task_output.result,
-                                duration_ms: task_output.duration_ms,
-                            },
-                            &mut state.tool_history,
-                            &mut state.contract,
-                        );
-                        // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
-                        tools.batch.needs_failure_recovery |= needs_recovery;
-                        tools.assert_running_matches();
-
-                        if !tools.tasks.is_empty() {
-                            state.install_phase(ExecutionPhase::WaitingTools(tools));
-                            continue 'agent_loop;
-                        }
-
-                        if !tools.batch.calls.is_empty() || !tools.batch.ready_tools.is_empty() {
-                            state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
-                            continue 'agent_loop;
-                        }
-
-                        // 记录批次响应的观测压力，交给下一次请求前策略统一判断
-                        // （压缩不再是顶层阶段，ALR-303）。
-                        let observed_tokens = observed_total_tokens(&tools.batch.response_usage);
-                        state.last_observed_tokens = observed_tokens;
-                        ctx.session.current_tokens = observed_tokens;
-                        state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
+                        state.install_phase(next_phase);
                     }
                 }
-            }
-
-            // ── Waiting（兼容层，任务 05 迁移）：等待审批（仅命令可推进）──
-            ExecutionPhase::WaitingApproval(approval) => {
-                let command = cmd_rx.recv().await;
-                deferred = Some(match command {
-                    Some(command) => Deferred::Command(command),
-                    None => Deferred::Closed,
-                });
-                state.install_phase(ExecutionPhase::WaitingApproval(approval));
             }
         }
     };
@@ -1200,10 +1023,17 @@ fn reinstate_llm_phase(active: ActiveLlm) -> ExecutionPhase {
     }
 }
 
-/// 模型请求完成后的统一处理：归一化响应并产出下一阶段。
+/// 模型请求完成后的去向：下一阶段，或整批工具调用（由调用方 await
+/// 工具流水线，ALR-301）。
+enum NextStep {
+    Phase(ExecutionPhase),
+    ExecuteTools(ToolBatchState),
+}
+
+/// 模型请求完成后的统一处理：归一化响应并产出下一去向。
 ///
 /// 这是旧 select「chunk 通道关闭」分支的主体：错误分流（上下文超限 → 压缩重试）、
-/// 工具调用 → PreparingTools、文本回复 → 候选完成门控（无义务完成 / 有义务修复）。
+/// 工具调用 → 工具流水线、文本回复 → 候选完成门控（无义务完成 / 有义务修复）。
 #[allow(clippy::too_many_arguments)]
 fn complete_llm_request(
     ctx: &mut TurnContext,
@@ -1215,7 +1045,7 @@ fn complete_llm_request(
     streamed_text: String,
     streamed_reasoning: String,
     response_result: anyhow::Result<ModelFunctionResponse>,
-) -> ExecutionPhase {
+) -> NextStep {
     let context_limit = ctx.context_limit;
     match purpose {
         LlmPurpose::React {
@@ -1238,13 +1068,12 @@ fn complete_llm_request(
                     if should_compress {
                         // 上下文溢出：交由下一次请求前的恢复策略强制压缩（ALR-304）。
                         state.pending_context_recovery = Some(error_message);
-                        return ExecutionPhase::NeedModel;
+                        return NextStep::Phase(ExecutionPhase::NeedModel);
                     }
                     injections.commit(ctx);
                     persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
-                    return ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
-                        state.accumulated_usage.clone(),
-                        error_message,
+                    return NextStep::Phase(ExecutionPhase::PendingFinish(
+                        TurnExecutionResult::failed(state.accumulated_usage.clone(), error_message),
                     ));
                 }
             };
@@ -1268,18 +1097,18 @@ fn complete_llm_request(
 
             if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
                 append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
-                ExecutionPhase::NeedModel
+                NextStep::Phase(ExecutionPhase::NeedModel)
             } else if response.tool_calls.is_empty() {
                 let disposition =
                     handle_react_text_response(ctx, &pending_msg_id, &response, state);
-                finish_react_text(
+                NextStep::Phase(finish_react_text(
                     ctx,
                     state,
                     injections,
                     pending_msg_id,
                     disposition,
                     request_injection_generation,
-                )
+                ))
             } else {
                 let calls = record_tool_calls(
                     ctx,
@@ -1287,7 +1116,7 @@ fn complete_llm_request(
                     &response,
                     format!("react-round-{}", state.budget.request_round),
                 );
-                ExecutionPhase::PreparingTools(ToolBatchState {
+                NextStep::ExecuteTools(ToolBatchState {
                     calls: calls.into_iter().enumerate().collect(),
                     ready_tools: Vec::new(),
                     prepared_keys: HashSet::new(),
