@@ -4,13 +4,13 @@
 
 ## 当前状态
 
-- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12 简化需求与设计已完成；13~18 待实施**。
-- 当前建议任务：任务 13，先按新契约分类现有测试，并补 Inbox、单 driver、wake latch、最新 Session 与关闭可靠性的失败用例。
+- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12 简化需求与设计已完成；13 测试契约重组已完成；14~18 待实施**。
+- 当前建议任务：任务 14，建立 Agent 自有 Inbox（next_turn/next_step）、唯一 driver、`wake_requested` 与最新 Session 启动，删除临时 `NEXT_TURN_QUEUE` 与每消息后台任务，并启用 `core/contract_tests.rs` 的 4 项失败用例。
 - 当前阻塞：无。
 - 当前分支：`feature/agent-execution-core`，基线为 `main` v0.14.3（`7c425bac`）。
 - 当前实现不是交付候选：Review 已确认旧 Summary/ForceFinal/continuation 控制仍在，下一 turn 的临时队列与每消息后台自动启动也存在结构性风险。
 - 当前文档决策：Loop 收敛为模型—工具最小循环；无工具响应只形成候选完成；通过确定性 `TaskContract`、Provider 工具约束和有界协议修复防止模型漏发必需 tool call；Agent 自有 Inbox 与单 driver；审批、压缩、重试和预算外置。
-- 当前工作区仅有规划文档改动，尚未修改生产代码。
+- 任务 13 已建立新契约测试安全网：`react/contract_tests.rs`（工具义务 5 项，1 绿 4 ignore）与 `core/contract_tests.rs`（调度可靠性 4 项 ignore）；ignored 用例已核对在当前实现上全部失败，任务 14/15 实现后必须转绿。
 
 ## 已确认的 Review 结论
 
@@ -50,8 +50,8 @@
 | 09 | 迟到结果与稳态 | 历史已完成 | 9ae68269 | 结构化取消盘点与压力测试 |
 | 10 | 完成度策略 | 历史已完成，待删除旧策略 | 45958adc | CompletionPolicy 解耦但默认行为仍保留 |
 | 11 | 模块拆分与交付 | 暂停交付 | 60facb3f 等 | 代码与自动化检查通过，但真实验证和架构 Review 未通过 |
-| 12 | 简化需求与设计 | 文档完成，待提交 | 当前工作区 | Harness 对照、需求重定界、删除清单、量化验收 |
-| 13 | 测试契约重组 | 未开始 | — | 保留行为测试，增加工具漏调用/协议修复测试，改写 Inbox/边界测试 |
+| 12 | 简化需求与设计 | 已完成 | 69c884c5 | Harness 对照、需求重定界、删除清单、量化验收 |
+| 13 | 测试契约重组 | 已完成 | 本次提交 | 三分类清单 + 9 项契约测试（1 绿 + 8 ignore 失败用例，均核对失败形态） |
 | 14 | Agent Inbox 与唯一 driver | 未开始 | — | next_turn/next_step、Idle/Running、wake_requested、最新 Session |
 | 15 | 最小 Loop | 未开始 | — | 模型—工具循环、TaskContract/CompletionGate、删除旧完成控制 |
 | 16 | 模型请求策略外置 | 未开始 | — | tool_choice、有界协议修复、压缩、重试和安全预算 |
@@ -200,6 +200,13 @@ cargo test -p tiangong-plugin-browser
 - Markdown 本地链接检查：通过；
 - 未运行 Rust 构建和测试，因为任务 12 未修改生产代码。
 
+任务 13 验证（新增测试契约，未改生产行为）：
+
+- `cargo fmt -- --check`：通过；
+- `cargo clippy -p tiangong-core --all-targets --tests --benches -- -D warnings`：通过；
+- `cargo test -p tiangong-core`：110 通过、8 ignored、0 失败（109 项既有 + 1 项新增绿色锚点）；
+- `cargo test -p tiangong-core contract_tests -- --ignored`：8 项失败用例全部失败，失败断言逐条对应旧方案缺陷（`当前实现: Success`、`Err(WorkerStopped)`、请求不含前一 turn 标记消息、消息无独立 turn 状态、关闭后发出模型请求）。
+
 ## 分支与提交策略
 
 1. 保持当前 `feature/agent-execution-core` 作为 Review 整改分支；不自动提交、推送或合并。
@@ -217,6 +224,7 @@ cargo test -p tiangong-plugin-browser
 - 2026-08-14：完成 DeepSeek Harness 本地代码与文档对照分析。
 - 2026-08-14：完成天工早期单循环历史实现对照，确认直接完成、短文本启发式和 lite 模型三代方案的边界。
 - 2026-08-14：完成任务 12 简化需求、设计、TODO、PLAN 和进度同步，尚未修改生产代码。
+- 2026-08-14：完成任务 13 测试契约重组：现有测试三分类完成，新增 9 项契约测试（`react/contract_tests.rs`、`core/contract_tests.rs`），8 项失败用例以 `#[ignore]` 挂起并核对失败形态。
 
 ## 更新规则
 

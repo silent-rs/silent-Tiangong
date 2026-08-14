@@ -17,6 +17,8 @@ use tiangong_types::StreamEvent;
 
 pub mod command;
 pub(crate) use command::Command;
+#[cfg(test)]
+mod contract_tests;
 pub mod plugin;
 pub use plugin::Plugin;
 pub mod error;

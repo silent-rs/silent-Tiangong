@@ -3,6 +3,8 @@ mod command;
 mod completion_policy;
 pub(crate) mod compression;
 pub mod context;
+#[cfg(test)]
+mod contract_tests;
 mod execute;
 mod helpers;
 mod interrupt;
