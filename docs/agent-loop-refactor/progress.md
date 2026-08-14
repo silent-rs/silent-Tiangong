@@ -4,18 +4,22 @@
 
 ## 当前状态
 
-- 当前阶段：**全部 12 个任务（00~11）完成，review 整改完成**。等待真实场景验证（GUI/CLI/Server 代表入口）与 PR 审查交付。
-- 当前建议任务：真实场景验证 + 按项目流程创建 PR。
+- 当前阶段：**00~10 完成；11 代码与文档完成，真实场景验证与 PR 交付进行中**。
+- 当前建议任务：真实场景验证（GUI/CLI/Server 代表入口）→ 按项目流程创建 PR，完成后勾选任务 11。
 - 当前阻塞：无。
 - 生产代码状态：任务 09 迟到结果与稳态——逐通道盘点后决策**不引入 intent_generation**
   （全部通道由结构化所有权 abort+join/shutdown+drop 或 ingress 门控覆盖，决策表写入 design.md 7.1）；
   补迁移日志（中断 from_phase、LLM 完成 to_phase+budget、封口提交）与 ExecutionBudget 摘要；
   压力测试：连续双引导（都保存、按序重启、锚点最新）、命令风暴（混合命令按序、取消终态、
   副作用生效、用量累计）。105 测试 ×2 + agent-team 10 + workspace clippy/check 通过。
-- review 整改（2026-08-14，8d0ac58f）：下一轮交接可靠性三条丢消息路径全部修复——
-  `push_next_turn` 返回结果、`requeue_next_turn_front` 保存失败按序放回、消费循环保存成功才移除；
-  封口状态纳入可接收判断（`CommandIngress::is_accepting`），浏览器 watcher 注入被拒保留快照重试、
-  agent-team 注入失败不虚报送达、用量累计被拒记录警告。108 测试 + agent-team 10 + browser 32 通过。
+- review 整改 1（2026-08-14，8d0ac58f）：下一轮交接可靠性——`push_next_turn` 返回结果、
+  `requeue_next_turn_front` 保存失败按序放回、消费循环保存成功才移除；封口状态纳入可接收
+  判断（`CommandIngress::is_accepting`），浏览器 watcher 注入被拒保留快照重试、agent-team
+  注入失败不虚报送达、用量累计被拒记录警告。108 测试 + agent-team 10 + browser 32 通过。
+- review 整改 2（2026-08-14，be0c7c96）：封口交接改为**入队即接受 + 后台自动启动**——不再
+  同步轮询等待/复用同一次投递（消除重复确认、全局阻塞与"失败但保留"）；requeue/drain 返回
+  明确结果；浏览器 watcher 通道关闭不退出观察循环；关闭时清空待启动队列。109 测试
+  + agent-team 10 + browser 32 + workspace clippy 通过。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -32,10 +36,10 @@
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 已完成 | feature/agent-execution-core | a603a22b | 不变量断言 + 迁移日志 + ALR-103/并行批次测试 |
 | 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 已完成 | feature/agent-execution-core | de3badc1 | CompressionPhase 命名对齐 + 引导中断压缩测试 |
 | 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 已完成 | feature/agent-execution-core | 9c1acc2c | CommandEffect 统一处理器 + PendingFinish 语义 + 顺序测试 |
-| 08 | [终态封口](./tasks/08-终态封口.md) | 已完成 | feature/agent-execution-core | 970112c3 / 8d0ac58f(review 整改) | CommandIngress 门控 + 下一轮队列可靠交接 |
+| 08 | [终态封口](./tasks/08-终态封口.md) | 已完成 | feature/agent-execution-core | 970112c3 / 8d0ac58f / be0c7c96(review 整改) | CommandIngress 门控 + 下一轮队列可靠交接（入队即接受 + 后台自动启动） |
 | 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 已完成 | feature/agent-execution-core | 9ae68269 | 不引入代际决策（design 7.1）+ 日志补全 + 压力测试 |
 | 10 | [完成度策略](./tasks/10-完成度策略.md) | 已完成 | feature/agent-execution-core | 45958adc | CompletionPolicy 解耦；默认策略保持（无数据不切换） |
-| 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 已完成 | feature/agent-execution-core | 60facb3f / 8d0ac58f(review 整改) | command/interrupt 拆分；全链路验证通过；真实场景验证待用户执行 |
+| 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 代码完成，交付验证进行中 | feature/agent-execution-core | 60facb3f / 8d0ac58f / be0c7c96(review 整改) | command/interrupt 拆分；全链路验证通过；真实场景验证与 PR 交付待完成 |
 
 状态取值：未开始 / 进行中 / 已完成 / 阻塞。
 
@@ -120,7 +124,8 @@ cargo test -p tiangong-plugin-agent-team
 - 2026-08-14：根据工程评估升级为整体 Agent 执行核心重构方案，扩展为 00~11 任务。
 - 2026-08-14：任务 00 基线冻结——确认 `main` v0.14.3 干净基线，引导消息（ALR-101）在重构中实现，89 测试绿色基线。
 - 2026-08-14：任务 02 驱动原型——`react/phase.rs` 验证 take/install 所有权模式 + AbortHandle 取消（后补真实取消与守卫验证，共 4 测试），结论写回 design.md。
-- 2026-08-14：review 整改（8d0ac58f）——修复终态封口与下一轮交接三条丢消息路径，封口状态纳入插件反馈可接收判断；108 测试 + agent-team 10 + browser 32 + workspace clippy 全绿。
+- 2026-08-14：review 整改 1（8d0ac58f）——修复终态封口与下一轮交接三条丢消息路径，封口状态纳入插件反馈可接收判断；108 测试 + agent-team 10 + browser 32 + workspace clippy 全绿。
+- 2026-08-14：review 整改 2（be0c7c96）——封口交接改为入队即接受 + 后台自动启动（消除重复确认、全局阻塞与"失败但保留"）；requeue/drain 返回明确结果；浏览器 watcher 不因通道关闭退出；关闭时清空待启动队列；新增端到端交接测试。109 测试 ×3 稳定 + agent-team 10 + browser 32 + workspace clippy 全绿。
 
 ## 更新规则
 
@@ -165,4 +170,5 @@ cargo test -p tiangong-plugin-agent-team
 | 09 迟到结果与稳态 | ✅ | ✅ | 105 通过（×2）+ agent-team 10 | 代际不引入决策、日志、连续引导/命令风暴 |
 | 10 完成度策略 | ✅ | ✅ | 107 通过（×2）| 策略解耦 + 判定表测试；默认行为不变 |
 | 11 模块拆分 | ✅ | ✅ | 107 通过（×2）+ agent-team 10 + workspace | 纯机械移动；行为零变更 |
-| review 整改（08/11） | ✅ | ✅ | 108 通过 + agent-team 10 + browser 32 + workspace clippy | 下一轮交接可靠性（push/requeue/消费循环）+ 插件反馈封口保护 |
+| review 整改 1（08/11） | ✅ | ✅ | 108 通过 + agent-team 10 + browser 32 + workspace clippy | 下一轮交接可靠性（push/requeue/消费循环）+ 插件反馈封口保护 |
+| review 整改 2（08/11） | ✅ | ✅ | 109 通过（×3 稳定）+ agent-team 10 + browser 32 + workspace clippy | 入队即接受 + 后台自动启动（消除重复确认/阻塞/失败保留）；端到端交接测试 |
