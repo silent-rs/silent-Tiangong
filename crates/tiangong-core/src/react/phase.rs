@@ -1,275 +1,195 @@
-//! ExecutionPhase 驱动原型（任务 02）。
+//! 执行阶段数据与执行预算（任务 03）。
 //!
-//! 验证"取出阶段 → 等待事件 → 安装新阶段"的所有权模式，重点覆盖：
-//! - 阶段持有 JoinHandle/JoinSet 时可安全迁移，无需并列活动 `Option`；
-//! - 运行中的任务被命令取消时，abort 后**等待其真正结束**，不残留迟到结果；
-//! - 迁移中断（panic/future 取消）时由守卫恢复明确阶段，不留下"无阶段"半状态。
-//!
-//! 任务 03 在此骨架上扩展为正式 `ExecutionPhase` / `ExecutionState`。
+//! 阶段数据类型集中于此，供 execute.rs 及后续拆分的兄弟模块（模型/工具/审批/
+//! 压缩驱动）统一使用。所有权模式（take/install）与取消方式已由任务 02 原型验证，
+//! 结论见 design.md 3.1；任务 04 起在此数据模型上接入正式 `ExecutionPhase` 驱动。
 
-// 原型仅用于验证所有权与取消模式，尚未接入生产 execute_turn；任务 03 转为正式
-// 类型后移除该 allow。
-#![allow(dead_code)]
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{Id as TaskId, JoinSet};
 
-use crate::core::command::Command;
+use crate::model::{
+    InvalidToolCall, ModelFunctionResponse, ModelStreamChunk, TokenUsage, ToolCall,
+};
+use crate::stream_throttle::ThrottledStreamSink;
+use crate::tool::ToolResult;
 
-/// 最小阶段原型：覆盖 Ready（NeedModel/PendingFinish）与 Waiting（持有 JoinHandle/
-/// JoinSet）两类。
-pub(super) enum ProtoPhase {
-    NeedModel,
-    WaitingModel(JoinHandle<&'static str>),
-    WaitingTools(JoinSet<&'static str>),
-    PendingFinish,
-}
-
-enum ProtoEffect {
-    Continue,
-    Done,
-}
-
-/// `WaitingModel` 等待的结果：收到命令、任务完成、或命令通道关闭。
-enum WaitOutcome {
-    Command,
-    Completed,
-    Closed,
-}
-
-pub(super) struct ProtoState {
-    phase: Option<ProtoPhase>,
-}
-
-impl ProtoState {
-    pub(super) fn new() -> Self {
-        Self {
-            phase: Some(ProtoPhase::NeedModel),
-        }
-    }
-
-    /// 取出当前阶段。取出后到 install 之间为"无阶段"，由 [`InstallGuard`] 保证所有
-    /// 退出路径都 install 新阶段或恢复安全阶段（ALR-205）。
-    pub(super) fn take_phase(&mut self) -> ProtoPhase {
-        self.phase.take().expect("take_phase 时阶段必须存在")
-    }
-
-    pub(super) fn install_phase(&mut self, phase: ProtoPhase) {
-        debug_assert!(
-            self.phase.is_none(),
-            "install_phase 前必须先 take，避免双阶段并存"
-        );
-        self.phase = Some(phase);
-    }
-}
-
-impl Default for ProtoState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 迁移守卫：take 之后无论正常 install、panic 还是 future 被取消，都保证 state
-/// 不会停留在"无阶段"。未 install 时 Drop 恢复为 `PendingFinish`，形成明确终态。
-struct InstallGuard<'a> {
-    state: &'a mut ProtoState,
-    installed: bool,
-}
-
-impl InstallGuard<'_> {
-    fn install(&mut self, phase: ProtoPhase) {
-        self.state.install_phase(phase);
-        self.installed = true;
-    }
-}
-
-impl Drop for InstallGuard<'_> {
-    fn drop(&mut self) {
-        if !self.installed {
-            tracing::error!(
-                "阶段迁移中断（panic 或 future 取消）：未安装新阶段，恢复为 PendingFinish"
-            );
-            // 中断时 phase 已 take（确为 None），直接恢复，绕过 install_phase 的断言。
-            self.state.phase = Some(ProtoPhase::PendingFinish);
-        }
-    }
-}
-
-/// 驱动一个阶段：消费 phase，返回新阶段与效果。
-async fn drive_phase(
-    phase: ProtoPhase,
-    cmd_rx: &mut UnboundedReceiver<Command>,
-) -> (ProtoPhase, ProtoEffect) {
-    match phase {
-        ProtoPhase::NeedModel => {
-            // Ready 阶段：同步推进，启动一个"模型任务"后进入 Waiting。
-            let handle = tokio::spawn(async { "model-output" });
-            (ProtoPhase::WaitingModel(handle), ProtoEffect::Continue)
-        }
-        ProtoPhase::WaitingModel(handle) => {
-            // 命令取消用独立的 AbortHandle，避免与 select 监听 handle 冲突。
-            let abort = handle.abort_handle();
-            let mut handle = handle;
-            let outcome = tokio::select! {
-                biased;
-                cmd = cmd_rx.recv() => match cmd {
-                    Some(_) => WaitOutcome::Command,
-                    None => WaitOutcome::Closed,
-                },
-                _ = &mut handle => WaitOutcome::Completed,
-            };
-            match outcome {
-                WaitOutcome::Command => {
-                    abort.abort();
-                    // 等待旧任务真正结束，避免残留迟到结果（ALR-204）。
-                    let _ = handle.await;
-                    (ProtoPhase::NeedModel, ProtoEffect::Continue)
-                }
-                WaitOutcome::Completed => (ProtoPhase::PendingFinish, ProtoEffect::Continue),
-                WaitOutcome::Closed => (ProtoPhase::PendingFinish, ProtoEffect::Done),
-            }
-        }
-        ProtoPhase::WaitingTools(mut tasks) => {
-            // Waiting 阶段：持有 JoinSet，等待任务完成（验证 JoinSet 可迁移）。
-            if tasks.join_next().await.is_some() {
-                (ProtoPhase::PendingFinish, ProtoEffect::Continue)
-            } else {
-                (ProtoPhase::NeedModel, ProtoEffect::Continue)
-            }
-        }
-        ProtoPhase::PendingFinish => (ProtoPhase::PendingFinish, ProtoEffect::Done),
-    }
-}
-
-/// 单事件循环骨架：take →（守卫）→ drive → install，直到 Done。
+/// 执行预算：物理 turn 内的各阶段计数。
 ///
-/// `InstallGuard` 保证：即便 `drive_phase` panic 或整个 future 被取消，state 也会
-/// 恢复为 `PendingFinish`，不会停留在"无阶段"半状态。
-pub(super) async fn proto_drive_loop(
-    state: &mut ProtoState,
-    cmd_rx: &mut UnboundedReceiver<Command>,
-) {
-    loop {
-        let phase = state.take_phase();
-        let mut guard = InstallGuard {
-            state,
-            installed: false,
-        };
-        let (next, effect) = drive_phase(phase, cmd_rx).await;
-        guard.install(next);
-        if matches!(effect, ProtoEffect::Done) {
-            break;
-        }
+/// `reset_react_phase` 在阶段重启（总结续作、注入重启）时清阶段级计数；
+/// `reset_for_new_intent`（任务 04 接入引导消息时使用）代表新的用户意图，
+/// 额外清空续作次数。`request_round` 是物理 turn 内的日志/事件序号，任何重置
+/// 都保留它；`accumulated_usage` 不在此结构中（永远不重置）。
+#[derive(Default)]
+pub(super) struct ExecutionBudget {
+    /// 物理 turn 内的全局请求编号（仅日志/流事件，不参与重置决策）。
+    pub(super) request_round: usize,
+    /// 当前 ReAct 阶段内的轮数。
+    pub(super) react_rounds_in_phase: usize,
+    /// 完成度检查要求继续的次数（原 `outer_iteration`）。
+    pub(super) continuation_count: u32,
+    /// 当前阶段是否已执行过工具。
+    pub(super) executed_tool_in_phase: bool,
+}
+
+impl ExecutionBudget {
+    /// 阶段重启：清阶段级计数，保留续作次数与全局请求编号。
+    pub(super) fn reset_react_phase(&mut self) {
+        self.react_rounds_in_phase = 0;
+        self.executed_tool_in_phase = false;
+    }
+
+    /// 新用户意图（任务 04 引导消息接入后使用）：额外清空续作次数。
+    #[allow(dead_code)]
+    pub(super) fn reset_for_new_intent(&mut self) {
+        self.reset_react_phase();
+        self.continuation_count = 0;
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-    use tokio::sync::{Notify, mpsc};
+/// 执行限制。任务 07 前暂由 `TurnContext.max_tool_rounds` / `max_outer_iterations`
+/// 承担，本类型先落位、接入时替换（避免控制流提前变化）。
+#[allow(dead_code)]
+pub(super) struct ExecutionLimits {
+    pub(super) max_react_rounds: usize,
+    pub(super) max_continuation_checks: u32,
+}
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn take_drive_install_cycle_completes_without_command() {
-        // NeedModel → WaitingModel →（通道关闭）PendingFinish(Done)。
-        let mut state = ProtoState::new();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
-        drop(tx);
-        proto_drive_loop(&mut state, &mut rx).await;
-        assert!(matches!(state.phase, Some(ProtoPhase::PendingFinish)));
-    }
+/// 已就绪待执行的单个工具调用。
+pub(super) struct PreparedToolCall {
+    pub(super) index: usize,
+    pub(super) call: ToolCall,
+    pub(super) args_summary: String,
+    pub(super) dedupe_key: String,
+}
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn command_aborts_running_model_and_waits_for_completion() {
-        // 模型任务先确认进入运行（Notify），再发命令；drive 必须 abort 并等待任务
-        // 真正结束，且不应等满任务的长期 sleep——以此证明取消真的生效。
-        let started = Arc::new(Notify::new());
-        let entered = Arc::new(AtomicBool::new(false));
-        let task_started = started.clone();
-        let task_entered = entered.clone();
-        let handle = tokio::spawn(async move {
-            task_entered.store(true, Ordering::SeqCst);
-            task_started.notify_one();
-            // 长期运行，仅 abort 能终止。
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            "done"
-        });
-        started.notified().await;
-        assert!(entered.load(Ordering::SeqCst), "模型任务应已进入运行");
+/// 一批工具调用的执行状态。
+pub(super) struct ToolBatchState {
+    pub(super) calls: VecDeque<(usize, ToolCall)>,
+    pub(super) ready_tools: Vec<PreparedToolCall>,
+    pub(super) prepared_keys: HashSet<String>,
+    pub(super) invalid_tool_calls: Vec<InvalidToolCall>,
+    pub(super) response_usage: TokenUsage,
+    pub(super) request_injection_generation: u64,
+    pub(super) needs_failure_recovery: bool,
+}
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
-        tx.send(Command::Cancel).unwrap();
-        let began = std::time::Instant::now();
-        let (next, _) = drive_phase(ProtoPhase::WaitingModel(handle), &mut rx).await;
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "abort 后应快速结束（等待任务取消），实际耗时 {:?}",
-            began.elapsed()
-        );
-        assert!(
-            matches!(next, ProtoPhase::NeedModel),
-            "命令应使阶段回到 NeedModel"
-        );
-    }
+/// 待审批的工具调用。
+pub(super) struct PendingApproval {
+    pub(super) request_id: String,
+    pub(super) tool: PreparedToolCall,
+}
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn joinset_holding_phase_can_migrate() {
-        // WaitingTools 持有 JoinSet，任务完成后迁移到 PendingFinish。
-        let mut tasks = JoinSet::new();
-        tasks.spawn(async { "tool-output" });
-        let (_tx, mut rx) = mpsc::unbounded_channel::<Command>();
-        let (next, _) = drive_phase(ProtoPhase::WaitingTools(tasks), &mut rx).await;
-        assert!(matches!(next, ProtoPhase::PendingFinish));
-    }
+/// 运行中的工具调用记录。
+pub(super) struct RunningToolCall {
+    pub(super) tool: PreparedToolCall,
+    pub(super) started_at: std::time::Instant,
+}
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_guard_restores_pending_finish_on_drop() {
-        // 基础验证：take 后守卫未 install 就 drop，恢复为 PendingFinish。
-        let mut state = ProtoState::new();
-        let _phase = state.take_phase();
-        assert!(state.phase.is_none(), "take 后应处于无阶段");
-        {
-            let _guard = InstallGuard {
-                state: &mut state,
-                installed: false,
-            };
-            // 不 install，块结束时 guard drop。
-        }
-        assert!(
-            matches!(state.phase, Some(ProtoPhase::PendingFinish)),
-            "守卫 drop 后应恢复为 PendingFinish"
+/// 工具任务输出（任务完成回传）。
+pub(super) struct ToolTaskOutput {
+    pub(super) result: ToolResult,
+    pub(super) duration_ms: u64,
+}
+
+/// `WaitingTools` 阶段数据：任务集合与运行记录必须一一对应（不变量 3）。
+/// 任务 05 接入工具阶段驱动时使用。
+#[allow(dead_code)]
+pub(super) struct ToolExecutionPhase {
+    pub(super) tasks: JoinSet<ToolTaskOutput>,
+    pub(super) running: HashMap<TaskId, RunningToolCall>,
+    pub(super) batch: ToolBatchState,
+}
+
+impl ToolExecutionPhase {
+    /// 不变量校验：JoinSet 任务与运行记录一一对应（debug 断言用）。
+    #[allow(dead_code)]
+    pub(super) fn assert_running_matches(&self) {
+        debug_assert_eq!(
+            self.tasks.len(),
+            self.running.len(),
+            "JoinSet 任务数与运行记录数必须一致"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_guard_restores_state_when_drive_panics() {
-        // 真实异常场景：drive_phase 等待期间 panic（unwind 展开），守卫在展开中
-        // drop，同任务内恢复状态——panic 后调用方仍能观察到明确阶段而非"无阶段"。
-        // 这是守卫的真实能力边界：task 级 abort 时 state 随栈销毁、无可观察者，
-        // 恢复无意义（见 design.md 3.1 守卫定位）。
-        let mut state = ProtoState::new();
-        let (_tx, mut rx) = mpsc::unbounded_channel::<Command>();
-        // 推进到 WaitingModel（持有真实任务），模拟在等待中 panic。
-        let phase = state.take_phase();
-        let (waiting, _) = drive_phase(phase, &mut rx).await;
-        assert!(matches!(waiting, ProtoPhase::WaitingModel(_)));
-        state.install_phase(waiting);
+    /// 诊断摘要（不含工具参数等敏感正文）。
+    #[allow(dead_code)]
+    pub(super) fn debug_summary(&self) -> String {
+        format!(
+            "tools: pending={} ready={} running={} invalid={} recovery={}",
+            self.batch.calls.len(),
+            self.batch.ready_tools.len(),
+            self.running.len(),
+            self.batch.invalid_tool_calls.len(),
+            self.batch.needs_failure_recovery,
+        )
+    }
+}
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // take 后在"处理事件"中 panic，模拟迁移中断；panic 展开时守卫 drop 恢复。
-            let _phase = state.take_phase();
-            let _guard = InstallGuard {
-                state: &mut state,
-                installed: false,
-            };
-            panic!("模拟 drive 迁移中断");
-        }));
-        assert!(result.is_err(), "模拟 panic 应被捕获");
-        assert!(
-            matches!(state.phase, Some(ProtoPhase::PendingFinish)),
-            "panic 展开后守卫应恢复为 PendingFinish，而非停留无阶段"
-        );
+/// `WaitingApproval` 阶段数据：必须同时持有待审批工具与所属完整批次（不变量 2），
+/// 避免审批完成后丢失尚未处理的工具和批次元数据。任务 05 接入审批阶段时使用。
+#[allow(dead_code)]
+pub(super) struct ApprovalPhase {
+    pub(super) pending: PendingApproval,
+    pub(super) batch: ToolBatchState,
+}
+
+impl ApprovalPhase {
+    /// 诊断摘要（不含请求 ID 以外的敏感内容）。
+    #[allow(dead_code)]
+    pub(super) fn debug_summary(&self) -> String {
+        format!(
+            "approval: request={} tool={} pending_batch={}",
+            self.pending.request_id,
+            self.pending.tool.call.name,
+            self.batch.calls.len(),
+        )
+    }
+}
+
+/// 模型请求的用途。
+pub(super) enum LlmPurpose {
+    React {
+        request_injection_generation: u64,
+    },
+    Summary {
+        iteration: u32,
+        request_injection_generation: u64,
+    },
+    ForceFinal {
+        request_injection_generation: u64,
+        summary_error: Option<String>,
+    },
+}
+
+/// 活跃模型请求（阶段持有）。
+pub(super) struct ActiveLlm {
+    pub(super) purpose: LlmPurpose,
+    pub(super) pending_msg_id: String,
+    pub(super) sink: ThrottledStreamSink,
+    pub(super) chunk_rx: UnboundedReceiver<ModelStreamChunk>,
+    pub(super) task: tokio::task::JoinHandle<anyhow::Result<ModelFunctionResponse>>,
+    pub(super) streamed_text: String,
+    pub(super) streamed_reasoning: String,
+    pub(super) streaming_usage: TokenUsage,
+}
+
+impl ActiveLlm {
+    /// 诊断摘要（不含流式正文）。
+    #[allow(dead_code)]
+    pub(super) fn debug_summary(&self) -> String {
+        let purpose = match &self.purpose {
+            LlmPurpose::React { .. } => "react".to_string(),
+            LlmPurpose::Summary { iteration, .. } => {
+                format!("summary(iteration={iteration})")
+            }
+            LlmPurpose::ForceFinal { .. } => "force_final".to_string(),
+        };
+        format!(
+            "llm: purpose={purpose} streamed_chars={} usage_total={}",
+            self.streamed_text.chars().count(),
+            self.streaming_usage.total_tokens,
+        )
     }
 }

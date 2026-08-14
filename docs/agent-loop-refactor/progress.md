@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 当前阶段：任务 01/02 按审查意见补齐完成，进入任务 03 执行预算与阶段数据。
-- 当前建议任务：**03 - 执行预算与阶段数据**。
+- 当前阶段：任务 03 执行预算与阶段数据完成，进入任务 04 模型与完成度阶段。
+- 当前建议任务：**04 - 模型与完成度阶段（注意：ExecutionEvent 归一化先行，见 design.md 3 节）**。
 - 当前阻塞：无。
-- 生产代码状态：任务 01 补 ALR-107/108/109/302/111 安全网；任务 02 补真实取消（abort+await）+ 迁移守卫（InstallGuard）。core lib 97 测试通过。
+- 生产代码状态：任务 03 落地 ExecutionBudget/ExecutionLimits + 阶段数据类型移至 phase.rs（move 非复制），outer_iteration 全部改名 continuation_count，控制流未变。原型代码按 spec 删除（结论留存 design.md 3.1）。core lib 93 测试通过（98 - 5 个已删原型测试）。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -19,7 +19,7 @@
 | 00 | [基线冻结](./tasks/00-基线冻结.md) | 已完成 | feature/agent-execution-core | 7c425bac（基线） | main v0.14.3 干净基线、引导消息重构中实现、89 测试绿色 |
 | 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | 0470d743 / aeedcba6 | ALR-107(单消息)/108/109/302/111 安全网；引导/PendingFinish 留 04/07 |
 | 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | 187bfa0d / aeedcba6 | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
-| 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 未开始 | - | - | 预算、类型归属、阶段数据模型 |
+| 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 已完成 | feature/agent-execution-core | （本次） | ExecutionBudget/Limits、阶段类型移入 phase.rs、continuation_count 改名 |
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 未开始 | - | - | 模型侧生产状态机 |
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 未开始 | - | - | 工具批次与审批状态机 |
 | 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 未开始 | - | - | 压缩续接状态机 |
@@ -146,3 +146,4 @@ cargo test -p tiangong-plugin-agent-team
 | 00 基线 | ✅ | ✅ | 89 通过 | main v0.14.3 干净基线 |
 | 01 测试安全网 | ✅ | ✅ | 97 通过 | ALR-107/108/109/302/111 安全网（含 run_turn 级 + mock 插件）|
 | 02 驱动原型 | ✅ | ✅ | 97 通过 | take/install + abort 等待结束 + InstallGuard 守卫 |
+| 03 预算与阶段数据 | ✅ | ✅ | 93 通过 | 控制流未变；98-5 原型测试（原型按 spec 删除） |

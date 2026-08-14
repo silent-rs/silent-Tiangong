@@ -14,8 +14,8 @@ use crate::core::command::Command;
 use crate::core::plugin::Plugin;
 use crate::formatting::{format_llm_output_message, format_tool_trace_message};
 use crate::model::{
-    InvalidToolCall, ModelFunctionResponse, ModelRequest, ModelStreamChunk, TokenUsage, ToolCall,
-    ToolChoice, ToolSpec,
+    InvalidToolCall, ModelFunctionResponse, ModelRequest, TokenUsage, ToolCall, ToolChoice,
+    ToolSpec,
 };
 use crate::permission::TrustMode;
 use crate::react::context::{
@@ -34,6 +34,10 @@ use super::cancel::{abort_and_join, emit_cancel_usage};
 use super::compression::{ActiveCompression, observed_total_tokens};
 use super::helpers::{looks_like_final_answer, record_plugin_usage};
 use super::outcome::TurnExecutionResult;
+use super::phase::{
+    ActiveLlm, ExecutionBudget, LlmPurpose, PendingApproval, PreparedToolCall, RunningToolCall,
+    ToolBatchState, ToolTaskOutput,
+};
 use super::summary::{
     ForceFinalReason, SummaryDecision, build_force_final_request, commit_summary_message,
     parse_summary_phase_output, persist_partial_summary, promote_last_react_message_to_summary,
@@ -509,10 +513,7 @@ enum NextStep {
 }
 
 struct AgentLoopState {
-    round: usize,
-    react_rounds_in_phase: usize,
-    outer_iteration: u32,
-    executed_tool_in_phase: bool,
+    budget: ExecutionBudget,
     accumulated_usage: TokenUsage,
     tool_history: ToolCallHistory,
     tool_batch: Option<ToolBatchState>,
@@ -522,10 +523,7 @@ struct AgentLoopState {
 impl AgentLoopState {
     fn new() -> Self {
         Self {
-            round: 0,
-            react_rounds_in_phase: 0,
-            outer_iteration: 0,
-            executed_tool_in_phase: false,
+            budget: ExecutionBudget::default(),
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
             tool_batch: None,
@@ -534,69 +532,15 @@ impl AgentLoopState {
     }
 
     fn reset_react_phase(&mut self) {
-        self.react_rounds_in_phase = 0;
-        self.executed_tool_in_phase = false;
+        self.budget.reset_react_phase();
         self.tool_history.clear();
         self.tool_batch = None;
     }
 }
 
-struct ToolBatchState {
-    calls: VecDeque<(usize, ToolCall)>,
-    ready_tools: Vec<PreparedToolCall>,
-    prepared_keys: HashSet<String>,
-    invalid_tool_calls: Vec<InvalidToolCall>,
-    response_usage: TokenUsage,
-    request_injection_generation: u64,
-    needs_failure_recovery: bool,
-}
-
-struct PreparedToolCall {
-    index: usize,
-    call: ToolCall,
-    args_summary: String,
-    dedupe_key: String,
-}
-
-struct PendingApproval {
-    request_id: String,
-    tool: PreparedToolCall,
-}
-
-struct RunningToolCall {
-    tool: PreparedToolCall,
-    started_at: std::time::Instant,
-}
-
-struct ToolTaskOutput {
-    result: ToolResult,
-    duration_ms: u64,
-}
-
-enum LlmPurpose {
-    React {
-        request_injection_generation: u64,
-    },
-    Summary {
-        iteration: u32,
-        request_injection_generation: u64,
-    },
-    ForceFinal {
-        request_injection_generation: u64,
-        summary_error: Option<String>,
-    },
-}
-
-struct ActiveLlm {
-    purpose: LlmPurpose,
-    pending_msg_id: String,
-    sink: ThrottledStreamSink,
-    chunk_rx: tokio_mpsc::UnboundedReceiver<ModelStreamChunk>,
-    task: tokio::task::JoinHandle<anyhow::Result<ModelFunctionResponse>>,
-    streamed_text: String,
-    streamed_reasoning: String,
-    streaming_usage: TokenUsage,
-}
+// 阶段数据类型（ToolBatchState / PreparedToolCall / PendingApproval /
+// RunningToolCall / ToolTaskOutput / LlmPurpose / ActiveLlm 及
+// ToolExecutionPhase / ApprovalPhase）统一定义在 super::phase。
 
 #[derive(Clone, Copy)]
 enum ReactTextDisposition {
@@ -699,7 +643,7 @@ fn handle_react_text_response(
         &mut ctx.session,
         "llm_output",
         format_llm_output_message(&LlmOutputRecord {
-            stage: format!("react-round-{}", state.round),
+            stage: format!("react-round-{}", state.budget.request_round),
             content: response.text.clone(),
             reasoning_content: response.reasoning_content.clone(),
             tool_calls: Vec::new(),
@@ -709,10 +653,11 @@ fn handle_react_text_response(
     );
     ctx.session.persist_to_disk();
 
-    let direct_answer = state.outer_iteration == 0
-        && !state.executed_tool_in_phase
+    let direct_answer = state.budget.continuation_count == 0
+        && !state.budget.executed_tool_in_phase
         && !response.text.trim().is_empty();
-    let tool_answer = state.executed_tool_in_phase && looks_like_final_answer(&response.text);
+    let tool_answer =
+        state.budget.executed_tool_in_phase && looks_like_final_answer(&response.text);
     if direct_answer || tool_answer {
         ReactTextDisposition::Complete
     } else {
@@ -801,8 +746,8 @@ fn finish_summary(
             ));
         }
         SummaryDecision::NeedMoreWork(reason) => {
-            state.outer_iteration += 1;
-            if state.outer_iteration >= ctx.max_outer_iterations {
+            state.budget.continuation_count += 1;
+            if state.budget.continuation_count >= ctx.max_outer_iterations {
                 state.next_step = NextStep::StartForceFinal {
                     reason: ForceFinalReason::OuterLimit,
                     request_injection_generation,
@@ -1173,11 +1118,11 @@ pub(super) async fn execute_turn(
                             &response.usage,
                             Some(response.usage.prompt_tokens.max(ctx.session.current_tokens)),
                             context_limit,
-                            format!("react-round-{}", state.round + 1),
+                            format!("react-round-{}", state.budget.request_round + 1),
                             None,
                         );
-                        state.round += 1;
-                        state.react_rounds_in_phase += 1;
+                        state.budget.request_round += 1;
+                        state.budget.react_rounds_in_phase += 1;
 
                         if response.tool_calls.is_empty()
                             && !response.invalid_tool_calls.is_empty()
@@ -1226,12 +1171,12 @@ pub(super) async fn execute_turn(
                                 );
                             }
                         } else {
-                            state.executed_tool_in_phase = true;
+                            state.budget.executed_tool_in_phase = true;
                             let calls = record_tool_calls(
                                 ctx,
                                 &pending_msg_id,
                                 &response,
-                                format!("react-round-{}", state.round),
+                                format!("react-round-{}", state.budget.request_round),
                             );
                             state.tool_batch = Some(ToolBatchState {
                                 calls: calls.into_iter().enumerate().collect(),
@@ -1323,9 +1268,9 @@ pub(super) async fn execute_turn(
                                 "summary phase returned tool calls; continuing tool execution"
                             );
                             // 工具调用说明任务仍可继续。把总结响应转回 ReAct 工具批次，
-                            // 不经过 finish_summary，因此不增加 outer_iteration。
+                            // 不经过 finish_summary，因此不增加 continuation_count。
                             state.reset_react_phase();
-                            state.executed_tool_in_phase = true;
+                            state.budget.executed_tool_in_phase = true;
                             let calls = record_tool_calls(
                                 ctx,
                                 &pending_msg_id,
@@ -1527,13 +1472,13 @@ pub(super) async fn execute_turn(
                 let next_step = std::mem::replace(&mut state.next_step, NextStep::Waiting);
                 match next_step {
                     NextStep::StartReact => {
-                        if state.react_rounds_in_phase >= ctx.max_tool_rounds {
+                        if state.budget.react_rounds_in_phase >= ctx.max_tool_rounds {
                             state.next_step = NextStep::StartSummary;
                             continue 'agent_loop;
                         }
                         injections.commit(ctx);
                         let request_injection_generation = injections.generation();
-                        if state.round == 0 {
+                        if state.budget.request_round == 0 {
                             debug_assert!(
                                 ctx.session.system_prompt_message.is_some(),
                                 "TurnContext 构建前应已注入 system prompt"
@@ -1541,7 +1486,7 @@ pub(super) async fn execute_turn(
                         } else {
                             let _ = stream_tx.send(StreamEvent::PhaseChanged {
                                 phase: "analyzing".to_string(),
-                                iteration: (state.round + 1) as u32,
+                                iteration: (state.budget.request_round + 1) as u32,
                             });
                         }
                         active_llm = Some(start_llm_request(
@@ -1661,7 +1606,7 @@ pub(super) async fn execute_turn(
                     NextStep::StartSummary => {
                         injections.commit(ctx);
                         let request_injection_generation = injections.generation();
-                        let iteration = state.outer_iteration + 1;
+                        let iteration = state.budget.continuation_count + 1;
                         let _ = stream_tx.send(StreamEvent::PhaseChanged {
                             phase: "summary".to_string(),
                             iteration,
@@ -3679,7 +3624,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn forces_final_response_when_outer_iteration_limit_is_reached() {
+    async fn forces_final_response_when_continuation_limit_is_reached() {
         let server = MockServer::start().await;
         mount_sse(
             &server,
