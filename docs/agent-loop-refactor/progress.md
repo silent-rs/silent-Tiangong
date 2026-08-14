@@ -4,92 +4,149 @@
 
 ## 当前状态
 
-- 当前阶段：**00~10 完成；11 代码与文档完成，真实场景验证与 PR 交付进行中**。
-- 当前建议任务：真实场景验证（GUI/CLI/Server 代表入口）→ 按项目流程创建 PR，完成后勾选任务 11。
+- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12 简化需求与设计已完成；13~18 待实施**。
+- 当前建议任务：任务 13，先按新契约分类现有测试，并补 Inbox、单 driver、wake latch、最新 Session 与关闭可靠性的失败用例。
 - 当前阻塞：无。
-- 生产代码状态：任务 09 迟到结果与稳态——逐通道盘点后决策**不引入 intent_generation**
-  （全部通道由结构化所有权 abort+join/shutdown+drop 或 ingress 门控覆盖，决策表写入 design.md 7.1）；
-  补迁移日志（中断 from_phase、LLM 完成 to_phase+budget、封口提交）与 ExecutionBudget 摘要；
-  压力测试：连续双引导（都保存、按序重启、锚点最新）、命令风暴（混合命令按序、取消终态、
-  副作用生效、用量累计）。105 测试 ×2 + agent-team 10 + workspace clippy/check 通过。
-- review 整改 1（2026-08-14，8d0ac58f）：下一轮交接可靠性——`push_next_turn` 返回结果、
-  `requeue_next_turn_front` 保存失败按序放回、消费循环保存成功才移除；封口状态纳入可接收
-  判断（`CommandIngress::is_accepting`），浏览器 watcher 注入被拒保留快照重试、agent-team
-  注入失败不虚报送达、用量累计被拒记录警告。108 测试 + agent-team 10 + browser 32 通过。
-- review 整改 2（2026-08-14，be0c7c96）：封口交接改为**入队即接受 + 后台自动启动**——不再
-  同步轮询等待/复用同一次投递（消除重复确认、全局阻塞与"失败但保留"）；requeue/drain 返回
-  明确结果；浏览器 watcher 通道关闭不退出观察循环；关闭时清空待启动队列。109 测试
-  + agent-team 10 + browser 32 + workspace clippy 通过。
-- 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
-- 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
-- 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
+- 当前分支：`feature/agent-execution-core`，基线为 `main` v0.14.3（`7c425bac`）。
+- 当前实现不是交付候选：Review 已确认旧 Summary/ForceFinal/continuation 控制仍在，下一 turn 的临时队列与每消息后台自动启动也存在结构性风险。
+- 当前文档决策：Loop 收敛为模型—工具最小循环；无工具响应只形成候选完成；通过确定性 `TaskContract`、Provider 工具约束和有界协议修复防止模型漏发必需 tool call；Agent 自有 Inbox 与单 driver；审批、压缩、重试和预算外置。
+- 当前工作区仅有规划文档改动，尚未修改生产代码。
+
+## 已确认的 Review 结论
+
+1. 相对 `origin/main`，Rust 新增约 3647 行、删除约 1068 行，净增约 2579 行；增长主要来自兼容旧行为、下一 turn 交接补偿和测试。
+2. `execute.rs` 从 3616 行增至 4515 行；生产部分约从 1744 行降至 1657 行，测试增长较多，但主干职责仍未充分简化。
+3. `execute.rs` 旧测试保留率约 96%：重构前 27 项，当前 40 项，保留 26 项，仅明显替换 1 项。大部分旧 Summary/ForceFinal 控制测试仍在，说明旧 Loop 控制模型没有真正淘汰。
+4. 当前下一 turn 实现经历两轮补偿后仍有风险：
+   - 可能提前构建并持有旧 Session 快照；
+   - 后台失败后消息重新入队但没有持续调度者；
+   - 抢先启动竞争可能重复确认或重复启动；
+   - Core 关闭会静默清除已经返回成功的排队消息；
+   - 每条消息 spawn 一次性后台任务，调度权威入口不唯一。
+5. 原设计红线规定交接复杂度失控时回退并重新评审 ALR-202；当前情况已经满足该条件。
+6. DeepSeek Harness 对照结果：Loop 只负责调用模型、执行工具并重复；Inbox、压缩、审批、重试和失控控制分别归属其他边界，没有 Summary、ForceFinal 或内置轮次预算。
+7. 天工真实场景补充约束：模型可能在任务明确需要命令、附件、文件或验证工具时返回纯文本，因此不能直接采用“无工具即完成”；必须把它降为候选完成，并检查可程序判定的工具义务。
+8. 天工早期单循环历史核对：
+   - `db18a318`（2026-05-09）是清晰的单 `'react_loop`，`engine.rs` 约 614 行；无工具响应直接保存并 `Done`；
+   - `ca9e465b` 增加“有 reasoning 且短回复”启发式重试，覆盖面不足；
+   - `06c0ac18` 改为 lite 模型完成判断，最多两次重入，仍缺少真实工具证据；
+   - 双阶段引入前 `474389d0^` 的单循环已增长到约 2428 行，说明单循环本身不自动带来模块简洁；
+   - `474389d0` 引入 ReAct + Summary 后 `engine.rs` 约 2853 行，单次新增 1399 行、删除 974 行，并形成后来延续的 outer/ForceFinal 控制。
+9. 决策：新方案恢复早期单循环的控制形态，但不恢复“无工具即成功”、文本启发式、lite 完成模型、所有子系统内联或 max rounds 后强制回复；改用 TaskContract、原生工具约束、有界协议修复和明确失败。
 
 ## 任务总览
 
-| 编号 | 任务 | 状态 | 分支 | 提交 | 关键产物 |
-| --- | --- | --- | --- | --- | --- |
-| 00 | [基线冻结](./tasks/00-基线冻结.md) | 已完成 | feature/agent-execution-core | 7c425bac（基线） | main v0.14.3 干净基线、引导消息重构中实现、89 测试绿色 |
-| 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | 0470d743 / aeedcba6 | ALR-107(单消息)/108/109/302/111 安全网；引导/PendingFinish 留 04/07 |
-| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | 187bfa0d / aeedcba6 | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
-| 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 已完成 | feature/agent-execution-core | cb180a48 | ExecutionBudget/Limits、阶段类型移入 phase.rs、continuation_count 改名 |
-| 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 已完成 | feature/agent-execution-core | b1667d57(04a) / 2c3e0fbf(04b) | 引导消息链路 + ExecutionPhase 单一状态机主循环 |
-| 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 已完成 | feature/agent-execution-core | a603a22b | 不变量断言 + 迁移日志 + ALR-103/并行批次测试 |
-| 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 已完成 | feature/agent-execution-core | de3badc1 | CompressionPhase 命名对齐 + 引导中断压缩测试 |
-| 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 已完成 | feature/agent-execution-core | 9c1acc2c | CommandEffect 统一处理器 + PendingFinish 语义 + 顺序测试 |
-| 08 | [终态封口](./tasks/08-终态封口.md) | 已完成 | feature/agent-execution-core | 970112c3 / 8d0ac58f / be0c7c96(review 整改) | CommandIngress 门控 + 下一轮队列可靠交接（入队即接受 + 后台自动启动） |
-| 09 | [迟到结果与稳态](./tasks/09-迟到结果与稳态.md) | 已完成 | feature/agent-execution-core | 9ae68269 | 不引入代际决策（design 7.1）+ 日志补全 + 压力测试 |
-| 10 | [完成度策略](./tasks/10-完成度策略.md) | 已完成 | feature/agent-execution-core | 45958adc | CompletionPolicy 解耦；默认策略保持（无数据不切换） |
-| 11 | [模块拆分与交付](./tasks/11-模块拆分与交付.md) | 代码完成，交付验证进行中 | feature/agent-execution-core | 60facb3f / 8d0ac58f / be0c7c96(review 整改) | command/interrupt 拆分；全链路验证通过；真实场景验证与 PR 交付待完成 |
+| 编号 | 任务 | 状态 | 提交/基线 | 关键结果 |
+| --- | --- | --- | --- | --- |
+| 00 | 基线冻结 | 历史已完成 | 7c425bac | main v0.14.3 干净基线、89 项核心测试 |
+| 01 | 关键路径与不变量测试 | 历史已完成 | 0470d743 / aeedcba6 | 生命周期、唯一终态、用量、锚点安全网 |
+| 02 | 驱动原型 | 历史已完成 | 187bfa0d / aeedcba6 | take/install 与结构化取消原型 |
+| 03 | 执行预算与阶段数据 | 历史已完成 | cb180a48 | 统一阶段数据，但保留 continuation 控制 |
+| 04 | 模型与完成度阶段 | 历史已完成 | b1667d57 / 2c3e0fbf | 引导链路与 ExecutionPhase 主循环 |
+| 05 | 工具与审批阶段 | 历史已完成 | a603a22b | 工具批次、并行与审批阶段 |
+| 06 | 压缩阶段 | 历史已完成 | de3badc1 | CompressionPhase 与续接路径 |
+| 07 | 统一命令与暂定完成 | 历史已完成 | 9c1acc2c | CommandEffect 与 PendingFinish |
+| 08 | 终态封口与下一 turn | 历史已完成，待替换 | 970112c3 / 8d0ac58f / be0c7c96 | 当前临时队列与后台自动启动方案 |
+| 09 | 迟到结果与稳态 | 历史已完成 | 9ae68269 | 结构化取消盘点与压力测试 |
+| 10 | 完成度策略 | 历史已完成，待删除旧策略 | 45958adc | CompletionPolicy 解耦但默认行为仍保留 |
+| 11 | 模块拆分与交付 | 暂停交付 | 60facb3f 等 | 代码与自动化检查通过，但真实验证和架构 Review 未通过 |
+| 12 | 简化需求与设计 | 文档完成，待提交 | 当前工作区 | Harness 对照、需求重定界、删除清单、量化验收 |
+| 13 | 测试契约重组 | 未开始 | — | 保留行为测试，增加工具漏调用/协议修复测试，改写 Inbox/边界测试 |
+| 14 | Agent Inbox 与唯一 driver | 未开始 | — | next_turn/next_step、Idle/Running、wake_requested、最新 Session |
+| 15 | 最小 Loop | 未开始 | — | 模型—工具循环、TaskContract/CompletionGate、删除旧完成控制 |
+| 16 | 模型请求策略外置 | 未开始 | — | tool_choice、有界协议修复、压缩、重试和安全预算 |
+| 17 | 工具流水线收敛 | 未开始 | — | 审批下沉、并行/屏障/顺序提交/协议闭合 |
+| 18 | 清理、验收与交付 | 未开始 | — | 删除双轨、量化、真实场景、完整检查和 PR |
 
-状态取值：未开始 / 进行中 / 已完成 / 阻塞。
+状态取值：未开始 / 进行中 / 文档完成，待提交 / 历史已完成 / 暂停交付 / 已完成 / 阻塞。
 
-## 依赖关系
-
-```text
-00 基线冻结
- └→ 01 测试安全网
-     └→ 02 驱动原型
-         └→ 03 预算与阶段数据
-             └→ 04 模型与完成度
-                 └→ 05 工具与审批
-                     └→ 06 压缩
-                         └→ 07 命令与 PendingFinish
-                             └→ 08 终态封口
-                                 └→ 09 稳态验证
-                                     ├→ 10 完成度策略评估
-                                     └→ 11 模块拆分与交付
-```
-
-任务 10 只有在任务 09 稳定后才允许改变默认完成度策略。任务 11 如需吸收任务 10 的模块结果，应在任务 10 决策完成后进行；若任务 10 决定保持现状，也要记录结论再进入最终拆分。
-
-## 分支与提交策略
-
-1. 先完成并合并当前引导消息功能，更新本地主线。
-2. 从最新 `main`/`develop` 创建 `feature/agent-execution-core`。
-3. 每个任务至少一个独立提交；任务 04~08 可进一步按内部阶段拆成多个小提交。
-4. 每个提交必须保持编译和对应测试绿色。
-5. 不自动提交、推送或合并；PR 按项目流程创建和审查。
-6. 出现回归时回滚到上一个绿色提交，不在红色基线上继续叠加阶段迁移。
-
-## 每任务记录模板
-
-任务开始或完成时记录：
+## 新依赖关系
 
 ```text
-状态：
-分支：
-基线提交：
-完成提交：
-改动范围：
-完成需求：
-验证命令与结果：
-遗留问题：
-下一个任务：
+00~10 历史迁移
+      │
+      ├─ 11 暂停交付
+      │
+      ▼
+12 简化需求与设计
+      │
+      ▼
+13 测试契约重组
+      │
+      ▼
+14 Inbox 与唯一 driver
+      │
+      ▼
+15 最小 Loop
+      │
+      ├────────────┐
+      ▼            ▼
+16 请求策略外置   17 工具流水线收敛
+      └──────┬─────┘
+             ▼
+18 清理、验收与交付
+      │
+      └─ 完成后同步勾选 11
 ```
 
-## 验证层级
+任务 14 必须先替换当前临时下一 turn 调度，任务 15 才删除旧完成控制；任务 16 和 17 可在任务 15 稳定后按独立提交推进。任务 18 未通过前不得恢复任务 11 的 PR 交付。
 
-### 每个任务最低验证
+## 测试迁移清单
+
+### 永久保留
+
+- 直接回答、工具后回答，以及明确工具义务下不会虚假完成；
+- 工具协议闭合、并行、独占与取消；
+- 审批批准、拒绝、FullTrust 和显式取消；
+- 生命周期唯一、最终终态唯一；
+- Session 持久化、最新消息锚点和累计用量；
+- 插件反馈、标题、配置、流事件和请求失败；
+- 子 Agent、浏览器和终端后台任务的既有语义。
+
+### 按新架构改写
+
+- 连续用户输入 → followup FIFO、同一 driver 连续 turn；
+- 运行中引导 → steer 在下一 step 生效；
+- 工具/插件注入 → inject 不唤醒、下一自然 step 生效；
+- PendingFinish/封口竞态 → stopping Inbox 检查；
+- 取消与新消息竞态 → `wake_requested` 重放；
+- 自动下一轮测试 → 最新 Session 构建、至多一个 driver、失败后仍有权威所有者；
+- Core 关闭 → 不接受新输入、不静默清除已确认输入；
+- 工具漏调用 → 无义务时直接完成，有义务时纯文本被拒绝；
+- 工具约束与修复 → `required`/指定工具生效，修复成功继续执行，耗尽后明确失败；
+- 义务证据 → 工具成功并持久化才满足义务，模型文字声明和工具失败都不能冒充证据。
+
+### 删除或迁移到独立策略测试
+
+- `runs_tool_then_completes_via_summary`；
+- `reenters_agent_loop_when_summary_needs_more_work`；
+- `summary_tool_calls_continue_without_consuming_summary_iteration`；
+- `invalid_summary_tool_calls_trigger_another_bounded_iteration`；
+- `forces_final_response_after_summary_request_fails`；
+- `returns_failed_when_summary_and_force_final_both_fail`；
+- `force_final_does_not_commit_empty_reply_from_invalid_tool_call`；
+- `returns_cancelled_when_summary_is_cancelled`；
+- outer iteration / continuation limit 强制最终响应相关测试。
+
+删除前先抽离其中仍有效的取消、用量、持久化和错误断言。
+
+## 量化验收基线
+
+| 项目 | 当前 | 任务 18 目标 |
+| --- | --- | --- |
+| `execute.rs` 总行数 | 约 4515 | 不以总行数单独验收，测试可迁移到独立模块 |
+| `execute.rs` 生产代码 | 约 1657 | 目标不超过 1200，且只保留 driver 编排 |
+| Agent 顶层状态 | 多个 ExecutionPhase 子系统阶段 | 对外 `Idle | Running` |
+| 完成控制 | Summary / ForceFinal / continuation | 无工具为候选完成；工具义务门控通过才提交 |
+| 下一 turn | 临时队列 + 每消息 spawn | Agent Inbox + 单 driver |
+| 取消收敛 | 额外补偿调度 | `wake_requested` |
+| Session | 存在未来 turn 旧快照风险 | turn 启动时读取最新 Session |
+| 工具漏调用 | 纯文本可能被当成完成 | tool_choice + TaskContract + 有界修复或明确失败 |
+| 权威入口 | 多处分散 | driver 启动、Session 写入、next_turn 领取各一个 |
+
+## 验证要求
+
+### 每个代码任务最低验证
 
 ```bash
 cargo fmt -- --check
@@ -102,73 +159,69 @@ cargo test -p tiangong-core
 ```bash
 cargo check --workspace
 cargo clippy --workspace --all-targets --tests --benches -- -D warnings
+cargo test -p tiangong-core
 cargo test -p tiangong-plugin-agent-team
+cargo test -p tiangong-plugin-browser
 ```
 
 ### 真实场景
 
 - 普通直接回答；
 - 多轮工具执行；
+- 明确要求执行命令但模型首次只返回说明文字；
+- 指定附件未读取、代码改动未验证时阻止成功提交；
+- Provider 工具修复成功以及连续漏调用后明确失败；
+- 多条 followup FIFO；
+- 模型等待、工具执行、审批和压缩期间 steer；
+- inject 在自然 step 边界生效；
 - 审批批准、拒绝和 FullTrust；
-- 压缩与上下文超限；
-- Summary NeedMoreWork 和 ForceFinal；
-- 连续引导和连续命令；
-- 引导期间子 Agent/浏览器/终端后台保持；
-- Cancel/Shutdown；
-- 终态封口前后消息交接；
-- GUI、CLI、Server 的代表入口。
+- 上下文压力压缩与溢出恢复；
+- 取消收敛窗口同时到达新输入；
+- driver 内部失败后 Inbox 仍可继续或明确失败；
+- Core 关闭时已确认消息不静默丢失；
+- GUI、CLI、Server 代表入口。
+
+## 最近实际验证
+
+当前生产代码最近一次 Review 前验证均通过：
+
+- `cargo fmt -- --check`；
+- `cargo clippy --workspace --all-targets --tests --benches -- -D warnings`；
+- `cargo test -p tiangong-core`：109 项通过；
+- `cargo test -p tiangong-plugin-agent-team`：10 项通过，1 项手动诊断测试 ignored；
+- `cargo test -p tiangong-plugin-browser`：32 项通过；
+- `git diff --check origin/main...HEAD`。
+
+这些结果只证明当前代码可编译且旧行为测试通过，**不代表简化架构已经完成，也不解除任务 11 的暂停交付状态**。
+
+任务 12 文档验证：
+
+- `git diff --check`：通过；
+- Markdown 本地链接检查：通过；
+- 未运行 Rust 构建和测试，因为任务 12 未修改生产代码。
+
+## 分支与提交策略
+
+1. 保持当前 `feature/agent-execution-core` 作为 Review 整改分支；不自动提交、推送或合并。
+2. 任务 12 文档先独立审查；任务 13~18 每项至少一个独立提交。
+3. 每个代码提交必须保持对应检查绿色。
+4. 不为兼容迁移长期保留双轨；每个临时适配都必须在同一任务或明确的下一任务删除。
+5. 出现回归时回到上一个绿色提交，不在红色基线上叠加修复。
+6. 每完成一项记录真实提交、代码量、验证命令和遗留问题。
 
 ## 已有里程碑
 
-- 2026-08-14：完成第一版状态机收敛方案。
-- 2026-08-14：根据工程评估升级为整体 Agent 执行核心重构方案，扩展为 00~11 任务。
-- 2026-08-14：任务 00 基线冻结——确认 `main` v0.14.3 干净基线，引导消息（ALR-101）在重构中实现，89 测试绿色基线。
-- 2026-08-14：任务 02 驱动原型——`react/phase.rs` 验证 take/install 所有权模式 + AbortHandle 取消（后补真实取消与守卫验证，共 4 测试），结论写回 design.md。
-- 2026-08-14：review 整改 1（8d0ac58f）——修复终态封口与下一轮交接三条丢消息路径，封口状态纳入插件反馈可接收判断；108 测试 + agent-team 10 + browser 32 + workspace clippy 全绿。
-- 2026-08-14：review 整改 2（be0c7c96）——封口交接改为入队即接受 + 后台自动启动（消除重复确认、全局阻塞与"失败但保留"）；requeue/drain 返回明确结果；浏览器 watcher 不因通道关闭退出；关闭时清空待启动队列；新增端到端交接测试。109 测试 ×3 稳定 + agent-team 10 + browser 32 + workspace clippy 全绿。
+- 2026-08-14：完成第一版状态机收敛方案及任务 00~10。
+- 2026-08-14：完成两轮下一 turn 可靠性 Review 整改，自动化检查保持绿色。
+- 2026-08-14：进一步 Review 确认旧 Loop 控制几乎完整保留，下一 turn 补偿调度复杂度继续增长，暂停任务 11 交付。
+- 2026-08-14：完成 DeepSeek Harness 本地代码与文档对照分析。
+- 2026-08-14：完成天工早期单循环历史实现对照，确认直接完成、短文本启发式和 lite 模型三代方案的边界。
+- 2026-08-14：完成任务 12 简化需求、设计、TODO、PLAN 和进度同步，尚未修改生产代码。
 
 ## 更新规则
 
 - 每开始一个任务：标记进行中，记录真实基线和分支。
 - 每完成一个任务：记录提交、需求编号和实际验证，不只写“通过”。
-- 设计发生变化：先更新需求/设计/任务，再继续生产代码。
-- 遇到实现障碍但可自行解决：保持进行中，不标记外部阻塞。
-- 只有缺少用户决定、授权、凭据或外部资源时标记阻塞。
-
-## ALR 测试落点
-
-| ALR | 落点任务 | 状态 |
-| --- | --- | --- |
-| 101 引导消息同 turn 重启 | 04（ExecutionPhase + InjectUserMessage） | 已覆盖（inject_user_message_interrupts_tools_and_restarts、consecutive_injects_are_all_saved_and_restart_in_order、final_status_anchors_to_injected_latest_user_message） |
-| 102 预算重置 | 04（reset_for_new_intent） | 已覆盖（引导重启重置 request_round/continuation_count，见 ALR-101 测试） |
-| 103 插件后台保持 | 04/07 | 已覆盖（inject_does_not_cancel_plugins_but_explicit_cancel_does） |
-| 104 Summary 中断降级 | 04 | 已覆盖（interrupted_llm_summary_output_persists_as_react_phase、inject_during_compression_cancels_and_restarts_without_applying_summary） |
-| 105 暂定完成可撤销 | 07 | 已覆盖（handles_runtime_feedback_while_request_is_running、reenters_agent_loop_when_plugin_result_arrives_during_summary：PendingFinish 收到工具注入撤销暂定重新分析） |
-| 106 控制命令完整处理 | 07 | 已覆盖（consecutive_inject_then_cancel_terminates_in_order、command_storm_is_processed_in_order_without_panicking、reasoning_effort_update_applies_to_next_model_request） |
-| 107 最新消息锚点 | 01（单消息）+ 04（多消息）| 已覆盖（单消息锚点 + 磁盘重载；final_status_anchors_to_injected_latest_user_message、consecutive_injects_are_all_saved_and_restart_in_order） |
-| 108 生命周期唯一 | 01（mock 插件计数）| 已覆盖（run_turn_invokes_lifecycle_hooks_exactly_once）|
-| 109 唯一终态 | 01（Done 计数）| 已覆盖（run_turn_emits_single_done_and_anchors_status_to_latest_user_message）|
-| 110 工具协议闭合 | 01 基线 + 05/06 | 已覆盖（取消时闭合测试、parallel_tool_batch_executes_both_and_closes_protocol）|
-| 111 用量权威 | 01（执行循环累计）+ 07（暂定完成晚到）+ turn 级 | 已覆盖（accumulated_usage_is_aggregated_across_requests；PendingFinish 提交时读取最新累计用量，execute.rs:896 提交路径） |
-
-基线 execute_turn 回归网覆盖核心路径：直接回答、工具循环、Summary（Done/NeedMoreWork/AskUser）、ForceFinal、压缩续接、审批（批准/拒绝/FullTrust）、取消、请求失败、用量累计。引导消息与 PendingFinish 相关测试在 04/07 加入后已全部落地。
-
-## 验证记录
-
-| 任务 | fmt | clippy | test | 备注 |
-| --- | --- | --- | --- | --- |
-| 00 基线 | ✅ | ✅ | 89 通过 | main v0.14.3 干净基线 |
-| 01 测试安全网 | ✅ | ✅ | 97 通过 | ALR-107/108/109/302/111 安全网（含 run_turn 级 + mock 插件）|
-| 02 驱动原型 | ✅ | ✅ | 97 通过 | take/install + abort 等待结束 + InstallGuard 守卫 |
-| 03 预算与阶段数据 | ✅ | ✅ | 93 通过 | 控制流未变；98-5 原型测试（原型按 spec 删除） |
-| 04a 引导消息链路 | ✅ | ✅ | 96 通过（×2 稳定）| ALR-101/102/104/107 多消息；连跑两次无 flaky |
-| 04b ExecutionPhase 主循环 | ✅ | ✅ | 96 通过（×2 稳定）| next_step/can_advance/并列 Option 清除；workspace check 通过 |
-| 05 工具与审批阶段 | ✅ | ✅ | 98 通过（×2）+ agent-team 10 | 不变量断言、迁移日志、ALR-103、并行批次 |
-| 06 压缩阶段 | ✅ | ✅ | 99 通过（×2）| CompressionPhase 对齐设计；引导中断压缩、迟到结果不应用 |
-| 07 统一命令与暂定完成 | ✅ | ✅ | 100 通过（×2）| CommandEffect、InjectTool 撤销暂定、用量刷新、顺序测试 |
-| 08 终态封口 | ✅ | ✅ | 103 通过（×2）+ agent-team 10 | ingress 门控/封口排空/下一轮队列测试 |
-| 09 迟到结果与稳态 | ✅ | ✅ | 105 通过（×2）+ agent-team 10 | 代际不引入决策、日志、连续引导/命令风暴 |
-| 10 完成度策略 | ✅ | ✅ | 107 通过（×2）| 策略解耦 + 判定表测试；默认行为不变 |
-| 11 模块拆分 | ✅ | ✅ | 107 通过（×2）+ agent-team 10 + workspace | 纯机械移动；行为零变更 |
-| review 整改 1（08/11） | ✅ | ✅ | 108 通过 + agent-team 10 + browser 32 + workspace clippy | 下一轮交接可靠性（push/requeue/消费循环）+ 插件反馈封口保护 |
-| review 整改 2（08/11） | ✅ | ✅ | 109 通过（×3 稳定）+ agent-team 10 + browser 32 + workspace clippy | 入队即接受 + 后台自动启动（消除重复确认/阻塞/失败保留）；端到端交接测试 |
+- 设计发生变化：先更新需求、设计、PLAN、TODO 和本进度，再继续生产代码。
+- 遇到可自行解决的实现问题：保持进行中，不标记外部阻塞。
+- 只有缺少用户决定、授权、凭据或不可替代的外部资源时标记阻塞。
