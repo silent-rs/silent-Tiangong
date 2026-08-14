@@ -1964,9 +1964,13 @@ mod tests {
             }
         });
 
+        let defer_never =
+            |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
+                Err(command)
+            };
         tokio::time::timeout(
             Duration::from_secs(2),
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx),
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_never),
         )
         .await
         .expect("取消手动压缩后任务应及时结束");
@@ -2026,9 +2030,13 @@ mod tests {
             }
         });
 
+        let defer_never =
+            |command: crate::core::command::Command| -> Result<(), crate::core::command::Command> {
+                Err(command)
+            };
         tokio::time::timeout(
             Duration::from_secs(2),
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx),
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_never),
         )
         .await
         .expect("手动压缩应及时完成");

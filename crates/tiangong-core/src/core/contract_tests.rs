@@ -88,6 +88,39 @@ async fn mount_sse_with_delay(
         .await;
 }
 
+/// 挂载一条只响应一次的非流式完成响应（手动压缩用），可带延迟。
+async fn mount_completion_with_delay(
+    server: &wiremock::MockServer,
+    content: &str,
+    delay: Option<Duration>,
+) {
+    let body = serde_json::json!({
+        "id": "chatcmpl-manual-compress",
+        "object": "chat.completion",
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+    });
+    let mut response = wiremock::ResponseTemplate::new(200).set_body_json(body);
+    if let Some(delay) = delay {
+        response = response.set_delay(delay);
+    }
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/chat/completions"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            "Bearer test-key",
+        ))
+        .respond_with(response)
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+}
+
 /// 挂载一个永久匹配的 400 请求错误（4xx 不重试），让 turn 快速失败结束。
 async fn mount_permanent_error(server: &wiremock::MockServer) {
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -314,9 +347,9 @@ async fn idle_tool_injection_accepted_without_wake() {
     core.shutdown_join().expect("关闭失败");
 }
 
-/// 手动压缩期间的引导消息（steer）不得丢失（ALR-102/202）：
-/// 压缩被取消让路，消息转入 Inbox 作为下一个 turn 自动执行——不需要用户
-/// 再发消息触发（自动顺延）。
+/// 手动压缩期间的引导消息（steer）不丢失且压缩独立完成（ALR-102/202/104）：
+/// 压缩是独立维护活动，不因新输入让路——引导消息转入 Inbox 排队，压缩继续
+/// 执行并应用结果，随后同一 driver 自动处理排队的消息（自动顺延）。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_during_manual_compression_defers_to_next_turn() {
     use crate::agent_input::MessageDelivery;
@@ -326,32 +359,32 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
     let server = wiremock::MockServer::start().await;
     let core = core_for(root.path(), &sid, &server.uri());
 
-    // 预置可压缩历史并让手动压缩请求长时间挂起（制造引导窗口）。
+    // 预置可压缩历史；压缩响应延迟制造引导窗口（压缩不会被取消）。
     {
         let mut session = Session::load_from_storage(root.path(), &sid).expect("加载失败");
         session.append_message(crate::session::MessageRole::User, "第一条问题");
         session.append_message(crate::session::MessageRole::User, "第二条问题");
         session.try_persist_to_disk().expect("预置历史失败");
     }
-    mount_sse_with_delay(
+    mount_completion_with_delay(
         &server,
-        vec![text_delta_chunk("压缩结果")],
-        Some(Duration::from_secs(30)),
+        "[[SUMMARY]]\n压缩完成的历史摘要",
+        Some(Duration::from_millis(500)),
     )
     .await;
-    // 压缩取消后，引导消息作为下一 turn 的模型请求快速失败（400）。
+    // 压缩完成后，排队的引导消息作为下一 turn 的模型请求快速失败（400）。
     mount_permanent_error(&server).await;
 
     core.deliver(AgentInputKind::compress_context())
         .expect("空闲期手动压缩应被接受");
-    // 等待压缩请求发出（进入挂起窗口）。
+    // 等待压缩请求发出（进入延迟窗口）。
     let deadline = Instant::now() + WAIT;
     while server.received_requests().await.map_or(0, |r| r.len()) < 1 {
         assert!(Instant::now() < deadline, "等待手动压缩请求超时");
         tokio::time::sleep(POLL).await;
     }
 
-    // 压缩挂起期间投递 steer：必须被接受且不丢。
+    // 压缩进行期间投递 steer：必须被接受且不丢（排队等压缩完成）。
     let msg_id = format!("{sid}-steer");
     core.deliver(AgentInputKind::prepared_with_delivery(
         msg_id.clone(),
@@ -360,7 +393,7 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
     ))
     .expect("压缩期间的 steer 应被接受");
 
-    // driver 应取消压缩、自动执行该消息（无需再投递任何输入）。
+    // 压缩完成后 driver 自动处理排队的消息（无需再投递任何输入）。
     let deadline = Instant::now() + WAIT;
     loop {
         let settled = Session::load_from_storage(root.path(), &sid)
@@ -376,9 +409,15 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
         }
         assert!(
             Instant::now() < deadline,
-            "压缩期间的引导消息应自动顺延执行（转 next_turn 由 driver 领取）"
+            "压缩期间的引导消息应在压缩完成后自动顺延执行"
         );
         tokio::time::sleep(POLL).await;
     }
+    // 压缩没有被引导取消：摘要已应用。
+    let session = Session::load_from_storage(root.path(), &sid).expect("加载失败");
+    assert!(
+        session.context_summary.is_some(),
+        "压缩是独立维护活动，不应因引导消息取消"
+    );
     core.shutdown_join().expect("关闭失败");
 }

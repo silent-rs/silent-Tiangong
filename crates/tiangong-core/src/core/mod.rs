@@ -520,38 +520,31 @@ impl TurnSpawner {
             plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(ingress.clone()));
         }
         scheduling.begin_turn(ingress);
-        let interrupted =
-            crate::react::compression::run_manual_context_compression(ctx, cmd_rx).await;
-        scheduling.end_turn();
-        // 维护活动（手动压缩）被新输入打断：压缩已取消，把消息转入 Inbox——
-        // 引导消息作为下一个 turn，工具注入积压等下次活动（不丢失，ALR-102/202）。
-        match interrupted {
-            Some(crate::react::compression::CompressionInterrupt::Command(
+        // 压缩独立于用户意图：期间到达的新输入（引导消息/工具注入）在压缩
+        // 等待循环内即时转入 Inbox 排队，压缩继续完成；只有终止类命令或
+        // 转排队失败（会话关闭）才会取消压缩，此处无需再处理上抛。
+        let defer_input = |command: Command| -> Result<(), Command> {
+            let queued = match &command {
                 Command::InjectUserMessage {
                     message_id,
                     content,
-                },
-            )) => {
-                if let Err(error) =
-                    scheduling.push_turn_input(crate::react::inbox::TurnInput::UserMessage {
-                        message_id,
-                        content,
+                } => scheduling
+                    .push_turn_input(crate::react::inbox::TurnInput::UserMessage {
+                        message_id: message_id.clone(),
+                        content: content.clone(),
                     })
-                {
-                    tracing::warn!(
-                        %error,
-                        session_id = %self.session_id,
-                        "手动压缩中断后的引导消息转排队失败"
-                    );
-                }
-            }
-            Some(crate::react::compression::CompressionInterrupt::Command(
-                Command::InjectTool { tool_name, payload },
-            )) => {
-                let _ = scheduling.push_inject(tool_name, payload);
-            }
-            _ => {}
-        }
+                    .is_ok(),
+                Command::InjectTool { tool_name, payload } => scheduling
+                    .push_inject(tool_name.clone(), payload.clone())
+                    .is_ok(),
+                _ => false,
+            };
+            if queued { Ok(()) } else { Err(command) }
+        };
+        let _ =
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_input)
+                .await;
+        scheduling.end_turn();
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
