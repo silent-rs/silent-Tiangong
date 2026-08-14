@@ -1039,6 +1039,12 @@ pub(super) async fn execute_turn(
                         ExecutionPhase::WaitingApproval(approval)
                             if approval.pending.request_id == request_id =>
                         {
+                            tracing::debug!(
+                                session_id = %ctx.session.id,
+                                approved,
+                                detail = approval.debug_summary(),
+                                "审批响应：WaitingApproval 迁移"
+                            );
                             if approved {
                                 let mut tools = ToolExecutionPhase {
                                     tasks: JoinSet::new(),
@@ -1227,7 +1233,16 @@ pub(super) async fn execute_turn(
                         for tool in ready_tools {
                             start_tool_execution(ctx, tool, &mut tools);
                         }
-                        state.install_phase(ExecutionPhase::WaitingTools(tools));
+                        let detail = tools.debug_summary();
+                        let next = ExecutionPhase::WaitingTools(tools);
+                        tracing::debug!(
+                            session_id = %ctx.session.id,
+                            from_phase = "PreparingTools",
+                            to_phase = next.name(),
+                            detail,
+                            "阶段迁移（ALR-301）"
+                        );
+                        state.install_phase(next);
                         continue 'agent_loop;
                     }
 
@@ -1418,6 +1433,7 @@ pub(super) async fn execute_turn(
                         );
                         // record_completed_tool_call 已先持久化该结果，再向 App 发布完成事件。
                         tools.batch.needs_failure_recovery |= needs_recovery;
+                        tools.assert_running_matches();
 
                         if !tools.tasks.is_empty() {
                             state.install_phase(ExecutionPhase::WaitingTools(tools));
@@ -3326,6 +3342,178 @@ mod tests {
             vec!["done".to_string()],
             "一个物理 turn 只发一次 Done（ALR-109），实际终态: {terminal:?}"
         );
+    }
+
+    /// 计数 on_cancel 调用次数的插件（ALR-103 语义验证）。
+    struct CancelCountingPlugin {
+        cancelled: Arc<AtomicU32>,
+    }
+
+    impl ToolOverrideHandler for CancelCountingPlugin {}
+    impl ToolSpecProvider for CancelCountingPlugin {}
+    impl PromptSectionProvider for CancelCountingPlugin {}
+    impl MentionCandidateProvider for CancelCountingPlugin {}
+
+    impl Plugin for CancelCountingPlugin {
+        fn id(&self) -> &str {
+            "cancel-counter"
+        }
+        fn on_cancel<'a>(
+            &'a self,
+            _session: &mut Session,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            let cancelled = self.cancelled.clone();
+            Box::pin(async move {
+                cancelled.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    /// ALR-103：普通引导消息不取消插件后台任务（on_cancel 不被调用）；显式取消
+    /// 整个 turn 时 on_cancel 恰好调用一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inject_does_not_cancel_plugins_but_explicit_cancel_does() {
+        use super::super::turn::run_turn;
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        // 两轮工具调用：第一轮被注入打断（新意图再次进入工具等待），随后显式取消。
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_2", "paused_probe", "{}"),
+                usage_chunk(20, 4),
+            ],
+        )
+        .await;
+
+        let cancelled = Arc::new(AtomicU32::new(0));
+        let plugin = Arc::new(CancelCountingPlugin {
+            cancelled: cancelled.clone(),
+        });
+        let harness = TestHarness::new_with_plugins(
+            &server,
+            vec![tool_spec("paused_probe")],
+            overrides,
+            vec![plugin],
+        );
+        let TestHarness { ctx, stream_rx, .. } = harness;
+        // on_cancel 由 run_turn 在终态判定后调用，须走 run_turn 层验证。
+        // 顺序驱动：等工具启动 → 注入 → 等第二次工具启动 → 显式取消。
+        let started_wait = started.clone();
+        let cancelled_probe = cancelled.clone();
+        let (tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let _keep_open = tx.clone();
+        let cmd_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("第一个工具应已启动");
+            tx.send(Command::InjectUserMessage {
+                message_id: "injected-cancel-probe".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("换个方向")],
+            })
+            .unwrap();
+            // 注入后引导阶段不触发 on_cancel（此刻计数必须为 0）。
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("新意图的工具应已启动");
+            assert_eq!(
+                cancelled_probe.load(Ordering::SeqCst),
+                0,
+                "引导消息不应触发 on_cancel（ALR-103）"
+            );
+            tx.send(Command::Cancel).unwrap();
+        });
+        run_turn(ctx, cmd_rx).await;
+        let _ = cmd_task.await;
+        assert_eq!(
+            cancelled.load(Ordering::SeqCst),
+            1,
+            "显式取消应恰好触发一次 on_cancel（ALR-103）"
+        );
+        // 取消终态 + 注入的消息已保存（引导路径生效）。
+        let terminal: Vec<String> = stream_rx
+            .try_iter()
+            .filter_map(|e| match e {
+                StreamEvent::Error { message } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            terminal.iter().any(|m| m.contains("已取消")),
+            "应发布取消终态，实际: {terminal:?}"
+        );
+    }
+
+    /// 并行工具批次：单个响应返回两个工具调用（不同参数，避免同批去重），
+    /// 两者都执行并产出结果，协议完整后进入完成度检查（不变量 3：任务↔记录对应）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_tool_batch_executes_both_and_closes_protocol() {
+        let server = MockServer::start().await;
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        // 1) 单响应两个工具调用（参数不同，避免同批去重跳过）。
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_a", "echo", r#"{"a":1}"#),
+                tool_call_chunk("call_b", "echo", r#"{"b":2}"#),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        // 2) 工具后文本以问号结尾 → 进入 Summary；3) Summary 完成。
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("两个都完成了吗?"), usage_chunk(25, 5)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(30, 4)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "并行批次完整链路应 Success，实际: {:?}",
+            result.outcome
+        );
+        assert_eq!(invocations.lock().unwrap().len(), 2, "两个并行工具都应执行");
+        for call_id in ["call_a", "call_b"] {
+            let has_result = harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|m| m.tool_call_id.as_deref() == Some(call_id));
+            assert!(has_result, "{call_id} 应有对应工具结果（协议闭合）");
+        }
+        harness.drain_stream();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

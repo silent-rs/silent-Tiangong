@@ -4,12 +4,12 @@
 
 ## 当前状态
 
-- 当前阶段：任务 04 完成（04a 引导消息链路 + 04b ExecutionPhase 主循环改造），进入任务 05 工具与审批阶段。
-- 当前建议任务：**05 - 工具与审批阶段**（PreparationTools/WaitingTools/WaitingApproval 从兼容层转正式驱动）。
+- 当前阶段：任务 05 完成，进入任务 06 压缩阶段。
+- 当前建议任务：**06 - 压缩阶段**（Compressing 从兼容层转正式驱动、全部续接路径迁移）。
 - 当前阻塞：无。
-- 生产代码状态：04b 落地 ExecutionPhase 单一状态机——next_step/can_advance/并列活动 Option 全部移除，
-  主循环改为 take→drive→install + 命令优先统一处理；complete_llm_request 归一化模型完成处理
-  （select 分支内只等待/转发，处理在事件脱离借用后进行）。96 测试连跑两次稳定。
+- 生产代码状态：任务 05 工具/审批阶段转正式——不变量断言接入（assert_running_matches）、
+  迁移日志（ALR-301，name()/debug_summary 不含敏感正文）、ALR-103 插件后台保持测试（注入不触发
+  on_cancel、显式取消触发一次）、并行批次协议测试。98 测试 + agent-team 10 通过。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -23,7 +23,7 @@
 | 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | 187bfa0d / aeedcba6 | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
 | 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 已完成 | feature/agent-execution-core | （本次） | ExecutionBudget/Limits、阶段类型移入 phase.rs、continuation_count 改名 |
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 已完成 | feature/agent-execution-core | b1667d57(04a) / (本次 04b) | 引导消息链路 + ExecutionPhase 单一状态机主循环 |
-| 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 未开始 | - | - | 工具批次与审批状态机 |
+| 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 已完成 | feature/agent-execution-core | （本次） | 不变量断言 + 迁移日志 + ALR-103/并行批次测试 |
 | 06 | [压缩阶段](./tasks/06-压缩阶段.md) | 未开始 | - | - | 压缩续接状态机 |
 | 07 | [统一命令与暂定完成](./tasks/07-统一命令与暂定完成.md) | 未开始 | - | - | 单一命令语义、删除旧状态 |
 | 08 | [终态封口](./tasks/08-终态封口.md) | 未开始 | - | - | ingress、可靠下一 turn 交接 |
@@ -151,3 +151,4 @@ cargo test -p tiangong-plugin-agent-team
 | 03 预算与阶段数据 | ✅ | ✅ | 93 通过 | 控制流未变；98-5 原型测试（原型按 spec 删除） |
 | 04a 引导消息链路 | ✅ | ✅ | 96 通过（×2 稳定）| ALR-101/102/104/107 多消息；连跑两次无 flaky |
 | 04b ExecutionPhase 主循环 | ✅ | ✅ | 96 通过（×2 稳定）| next_step/can_advance/并列 Option 清除；workspace check 通过 |
+| 05 工具与审批阶段 | ✅ | ✅ | 98 通过（×2）+ agent-team 10 | 不变量断言、迁移日志、ALR-103、并行批次 |

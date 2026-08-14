@@ -25,8 +25,8 @@ use crate::tool::ToolResult;
 /// 由驱动在收到后的同一轮迭代内立即消费（构造对应请求并进入 Waiting），不进入
 /// 事件等待——它们是单一阶段枚举的一部分，不是并列状态。
 ///
-/// 工具/审批/压缩变体当前为**兼容层**：内部逻辑仍沿用旧分支，任务 05/06 迁移
-/// 后由 ToolExecutionPhase/ApprovalPhase/压缩续接驱动正式接管（删除点见各任务）。
+/// 工具/审批变体自任务 05 起为正式阶段（批次、任务集合、审批与批次同体持有）；
+/// 压缩变体仍为兼容层，任务 06 迁移后由压缩续接驱动正式接管。
 pub(super) enum ExecutionPhase {
     /// Ready：需要发起下一次 ReAct 模型请求。
     NeedModel,
@@ -46,8 +46,7 @@ pub(super) enum ExecutionPhase {
     ForceFinalPhase(ActiveLlm),
     /// Ready：大循环已产出暂定结果，待提交（任务 07 接入命令仲裁）。
     PendingFinish(TurnExecutionResult),
-    // ── 兼容层（任务 05 迁移后由工具驱动接管）──
-    /// Ready：准备/执行工具批次（原 DriveTools）。
+    /// Ready：准备/执行工具批次（逐个弹出调用，去重/审批/直接就绪分流）。
     PreparingTools(ToolBatchState),
     /// Waiting：工具任务运行中（任务集合与运行记录一一对应，不变量 3）。
     WaitingTools(ToolExecutionPhase),
@@ -64,6 +63,25 @@ pub(super) struct CompressingPhase {
     pub(super) active: ActiveCompression<super::compression::CompressionContinuation>,
     /// ToolBatch 续接时保留批次，压缩完成后回到 PreparingTools。
     pub(super) suspended_batch: Option<ToolBatchState>,
+}
+
+impl ExecutionPhase {
+    /// 阶段名（迁移日志用，不含敏感内容）。
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            ExecutionPhase::NeedModel => "NeedModel",
+            ExecutionPhase::StartCheckingCompletion => "StartCheckingCompletion",
+            ExecutionPhase::StartForceFinal { .. } => "StartForceFinal",
+            ExecutionPhase::WaitingModel(_) => "WaitingModel",
+            ExecutionPhase::CheckingCompletion(_) => "CheckingCompletion",
+            ExecutionPhase::ForceFinalPhase(_) => "ForceFinal",
+            ExecutionPhase::PendingFinish(_) => "PendingFinish",
+            ExecutionPhase::PreparingTools(_) => "PreparingTools",
+            ExecutionPhase::WaitingTools(_) => "WaitingTools",
+            ExecutionPhase::WaitingApproval(_) => "WaitingApproval",
+            ExecutionPhase::Compressing(_) => "Compressing",
+        }
+    }
 }
 
 /// 执行预算：物理 turn 内的各阶段计数。
@@ -91,8 +109,7 @@ impl ExecutionBudget {
         self.executed_tool_in_phase = false;
     }
 
-    /// 新用户意图（任务 04 引导消息接入后使用）：额外清空续作次数。
-    #[allow(dead_code)]
+    /// 新用户意图：额外清空续作次数。
     pub(super) fn reset_for_new_intent(&mut self) {
         self.reset_react_phase();
         self.continuation_count = 0;
@@ -145,8 +162,6 @@ pub(super) struct ToolTaskOutput {
 }
 
 /// `WaitingTools` 阶段数据：任务集合与运行记录必须一一对应（不变量 3）。
-/// 任务 05 接入工具阶段驱动时使用。
-#[allow(dead_code)]
 pub(super) struct ToolExecutionPhase {
     pub(super) tasks: JoinSet<ToolTaskOutput>,
     pub(super) running: HashMap<TaskId, RunningToolCall>,
@@ -179,8 +194,7 @@ impl ToolExecutionPhase {
 }
 
 /// `WaitingApproval` 阶段数据：必须同时持有待审批工具与所属完整批次（不变量 2），
-/// 避免审批完成后丢失尚未处理的工具和批次元数据。任务 05 接入审批阶段时使用。
-#[allow(dead_code)]
+/// 避免审批完成后丢失尚未处理的工具和批次元数据。
 pub(super) struct ApprovalPhase {
     pub(super) pending: PendingApproval,
     pub(super) batch: ToolBatchState,
