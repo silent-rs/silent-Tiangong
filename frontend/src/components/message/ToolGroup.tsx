@@ -79,8 +79,8 @@ function ToolCardBody({ model, args }: { model: ToolDisplayModel; args?: unknown
   );
 }
 
-/** 该调用是否有详情卡片可显示（组展开后直接渲染，不再逐条折叠）。 */
-function hasBody(model: ToolDisplayModel): boolean {
+/** 该调用是否有详情卡片可展开。 */
+function isExpandable(model: ToolDisplayModel): boolean {
   if (model.state === "running") return false;
   if (model.variant === "terminal") return !!model.terminal?.command || !!model.terminal?.stdout || !!model.terminal?.stderr;
   if (model.variant === "file-read") return !!model.outputText;
@@ -88,32 +88,45 @@ function hasBody(model: ToolDisplayModel): boolean {
 }
 
 /**
- * 单条工具行：图标 + 类别 + 摘要 + 详情卡片直接显示。
- * 折叠只在组一级（组头），行本身无二级交互；失败行摘要为错误首行（错误色），运行行带扫光动画。
+ * 单条工具行：图标 + 类别 + 摘要，点击行展开/收起详情卡片。
+ * 失败行摘要为错误首行（错误色）；运行行带扫光动画、不可展开。
  */
 function ToolRunRow({
   model,
   args,
+  expanded = false,
+  onToggle,
   time,
 }: {
   model: ToolDisplayModel;
   args?: unknown;
+  expanded?: boolean;
+  onToggle?: () => void;
   time?: string;
 }) {
   const Icon = VARIANT_ICONS[model.variant];
   const isError = model.state === "error";
   const isRunning = model.state === "running";
   const summaryText = model.errorSummary ?? model.summary;
+  const expandable = isExpandable(model);
+  const open = expandable && expanded;
 
   return (
     <div title={time}>
-      <div
-        className={`flex items-center gap-2 px-2 py-0.5 rounded text-xs ${
+      <button
+        type="button"
+        className={`w-full flex items-center gap-2 px-2 py-0.5 rounded text-xs transition-colors text-left ${
           isRunning
             ? "tool-run-row text-foreground/90"
-            : "text-muted-foreground"
+            : "text-muted-foreground hover:bg-muted/50"
         }`}
+        onClick={expandable ? onToggle : undefined}
       >
+        {open ? (
+          <ChevronDown className="w-3 h-3 shrink-0" />
+        ) : (
+          <ChevronRight className={`w-3 h-3 shrink-0 ${expandable ? "" : "invisible"}`} />
+        )}
         <Icon className={`w-3 h-3 shrink-0 ${isError ? "text-destructive" : ""}`} />
         <span className="font-medium shrink-0">{model.title}</span>
         {summaryText && (
@@ -125,8 +138,8 @@ function ToolRunRow({
             {summaryText}
           </span>
         )}
-      </div>
-      {hasBody(model) && (
+      </button>
+      {open && (
         <div className="ml-5 mt-0.5 mb-1">
           <ToolCardBody model={model} args={args} />
         </div>
@@ -137,9 +150,7 @@ function ToolRunRow({
 
 export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupProps) {
   if (tools.length === 0 && !runningCalls?.length) return null;
-  const key = tools.length > 0 ? tools[0].id : (runningCalls?.[0].id ?? "");
   const brief = summarizeToolGroup(tools);
-  const collapsed = !expansion.isExpanded(key);
   const groupTime = tools.length > 0 ? formatMessageTime(tools[0].created_at) : undefined;
 
   const renderToolItem = (tool: MessageItem) => {
@@ -149,6 +160,8 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
         key={tool.id}
         model={buildToolDisplayModel(tool, args)}
         args={args}
+        expanded={expansion.isExpanded(tool.id)}
+        onToggle={() => expansion.toggle(tool.id)}
         time={formatMessageTime(tool.created_at)}
       />
     );
@@ -156,19 +169,12 @@ export function ToolGroup({ tools, expansion, argsOf, runningCalls }: ToolGroupP
 
   return (
     <div title={groupTime}>
-      <button
-        className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted/50 rounded transition-colors"
-        onClick={() => expansion.toggle(key)}
-        type="button"
-      >
-        {collapsed ? <ChevronRight className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+      {/* 组统计为静态摘要行：不再折叠包裹工具行，工具行始终直接列出。 */}
+      <div className="flex items-center gap-2 px-2 py-0.5 text-xs text-muted-foreground">
         <Cpu className="w-3 h-3 shrink-0" />
         <span>{brief}</span>
-      </button>
-      {!collapsed && (
-        <div className="ml-4 space-y-0">{tools.map(renderToolItem)}</div>
-      )}
-      {/* 运行行不受组折叠影响：执行中的调用即使组被收起也要可见。 */}
+      </div>
+      <div className="ml-4 space-y-0">{tools.map(renderToolItem)}</div>
       {runningCalls?.map((call) => (
         <div key={`running-${call.id}`} className="ml-4">
           <ToolRunRow model={buildRunningToolModel(call.name, call.arguments)} />
