@@ -122,7 +122,19 @@ function filterCwdArgs(args: unknown[]): unknown[] {
   return args.filter((item) => !(typeof item === "string" && item.startsWith(CWD_ARG_PREFIX)));
 }
 
-/** 从调用参数提取单行摘要；参数兼容位置数组（核心工具）与对象（插件/MCP 工具）。 */
+/** 摘要字符上限：多行命令压缩为单行后截断防撑爆。 */
+const SUMMARY_MAX_CHARS = 500;
+
+/** 多行文本压缩为单行：换行折叠为单个空格，供单行摘要展示。 */
+function squeezeToSingleLine(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** 从调用参数提取单行摘要（多行命令压缩去换行）；参数兼容位置数组与对象。 */
 function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
   if (args === undefined || args === null) return null;
 
@@ -130,11 +142,11 @@ function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
     const visible = filterCwdArgs(args);
     if (variant === "terminal" && visible[0] === SHELL_SENTINEL) {
       const script = typeof visible[1] === "string" ? visible[1] : "";
-      if (script) return clamp(firstNonEmptyLine(script), 120);
+      if (script) return clamp(squeezeToSingleLine(script), SUMMARY_MAX_CHARS);
       return null;
     }
     const first = visible.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
-    if (typeof first === "string" && first) return clamp(first, 120);
+    if (typeof first === "string" && first) return clamp(squeezeToSingleLine(first), SUMMARY_MAX_CHARS);
     return null;
   }
 
@@ -152,17 +164,17 @@ function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
     };
     for (const key of keyPreference[variant]) {
       const value = record[key];
-      if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
+      if (typeof value === "string" && value) return clamp(squeezeToSingleLine(value), SUMMARY_MAX_CHARS);
     }
     // 兜底取第一个内容字符串，跳过环境/配置键（cwd、timeout 等），避免摘要显示工作目录。
     for (const [key, value] of Object.entries(record)) {
       if (CONFIG_ARG_KEYS.has(key)) continue;
-      if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
+      if (typeof value === "string" && value) return clamp(squeezeToSingleLine(value), SUMMARY_MAX_CHARS);
     }
     return null;
   }
 
-  if (typeof args === "string" && args) return clamp(firstNonEmptyLine(args), 120);
+  if (typeof args === "string" && args) return clamp(squeezeToSingleLine(args), SUMMARY_MAX_CHARS);
   return null;
 }
 
