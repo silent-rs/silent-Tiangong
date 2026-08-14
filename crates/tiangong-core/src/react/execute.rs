@@ -770,6 +770,159 @@ fn finish_summary(
     }
 }
 
+/// 持久化被中断的 LLM 请求已流式收到的部分输出。
+///
+/// Summary 的部分输出降级为 React 过程消息（ALR-104）——半截总结不得保持最终
+/// Summary 身份；ForceFinal 无可靠完整内容，丢弃不提交。
+fn persist_interrupted_llm_output(
+    ctx: &mut TurnContext,
+    purpose: &LlmPurpose,
+    pending_msg_id: &str,
+    streamed_text: &str,
+    streamed_reasoning: &str,
+) {
+    match purpose {
+        LlmPurpose::React { .. } | LlmPurpose::Summary { .. } => {
+            persist_streamed_react_message(ctx, pending_msg_id, streamed_text, streamed_reasoning);
+        }
+        LlmPurpose::ForceFinal { .. } => {}
+    }
+}
+
+/// 运行中注入新用户消息时，中断主循环直接拥有的活动（ALR-101）。
+///
+/// 处理：流式 LLM 请求（Summary 部分输出降级为 React 过程消息，ALR-104）、工具
+/// 执行（补失败结果并闭合协议，ALR-110）、上下文压缩、待审批，并提交已接收的
+/// 注入。**不取消插件独立持有的后台任务**（ALR-103）——只有显式取消整个 turn
+/// 才走 `on_cancel`。
+#[allow(clippy::too_many_arguments)]
+async fn interrupt_active_work(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    active_llm: &mut Option<ActiveLlm>,
+    active_compression: &mut Option<ActiveCompression<CompressionContinuation>>,
+    tool_tasks: &mut JoinSet<ToolTaskOutput>,
+    running_tools: &mut HashMap<TaskId, RunningToolCall>,
+    pending_approval: &mut Option<PendingApproval>,
+    injections: &mut ToolInjectionBuffer,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    context_limit: usize,
+) {
+    if let Some(active) = active_llm.take() {
+        let ActiveLlm {
+            purpose,
+            pending_msg_id,
+            sink,
+            task,
+            streamed_text,
+            streamed_reasoning,
+            streaming_usage,
+            ..
+        } = active;
+        sink.finish();
+        abort_and_join(task).await;
+        persist_interrupted_llm_output(
+            ctx,
+            &purpose,
+            &pending_msg_id,
+            &streamed_text,
+            &streamed_reasoning,
+        );
+        emit_cancel_usage(stream_tx, &streaming_usage, context_limit);
+        state.accumulated_usage.accumulate(&streaming_usage);
+    }
+
+    if !running_tools.is_empty() {
+        tool_tasks.shutdown().await;
+        let mut interrupted = running_tools
+            .drain()
+            .map(|(_, tool)| tool)
+            .collect::<Vec<_>>();
+        interrupted.sort_by_key(|running| running.tool.index);
+        let mut interrupted_events = Vec::with_capacity(interrupted.len());
+        for running in interrupted {
+            let duration_ms = running.started_at.elapsed().as_millis() as u64;
+            let output = "工具调用因用户发送新消息而中断。".to_string();
+            append_tool_result_message(
+                &mut ctx.session,
+                &running.tool.call.id,
+                &running.tool.call.name,
+                output.clone(),
+                true,
+            );
+            interrupted_events.push(StreamEvent::ToolResult {
+                name: running.tool.call.name,
+                tool_call_id: Some(running.tool.call.id),
+                ok: false,
+                output,
+                full_output: None,
+                duration_ms: Some(duration_ms),
+            });
+        }
+        ctx.session.persist_to_disk();
+        for event in interrupted_events {
+            let _ = stream_tx.send(event);
+        }
+    }
+
+    if let Some(active) = active_compression.take() {
+        active.cancel(ctx).await;
+    }
+
+    if let Some(pending) = pending_approval.take() {
+        record_rejected_tool_call(ctx, &pending.tool.call, &pending.tool.args_summary);
+    }
+
+    injections.commit(ctx);
+
+    // 闭合残留的未完成 tool calls（模型已返回但工具未开始执行的）。
+    let closed = ctx
+        .session
+        .close_unfinished_tool_calls_with_reason("工具调用因用户发送新消息而中断。");
+    for (tool_call_id, tool_name, output) in closed {
+        let _ = stream_tx.send(StreamEvent::ToolResult {
+            name: tool_name,
+            tool_call_id: Some(tool_call_id),
+            ok: false,
+            output,
+            full_output: None,
+            duration_ms: None,
+        });
+    }
+}
+
+/// 校验并事务性保存运行中注入的用户消息；成功才向界面确认接收，并重置为新用户
+/// 意图（ALR-102：重置阶段预算与工具去重记录，保留物理 turn 累计用量）。
+fn save_user_message_and_restart(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+    message_id: String,
+    content: Vec<tiangong_types::ContentBlock>,
+) -> Result<(), String> {
+    let content_text = tiangong_types::content_blocks_text(&content);
+    let content_blocks = tiangong_types::stable_content_blocks(&content);
+    let event_message_id = message_id.clone();
+    ctx.session
+        .try_append_prepared_user_message_with_id(message_id, content)?;
+    let _ = stream_tx.send(StreamEvent::UserMessage {
+        message_id: event_message_id,
+        content: content_text,
+        content_blocks,
+        media: Vec::new(),
+        model_excluded: false,
+    });
+    tracing::info!(
+        session_id = %ctx.session.id,
+        "运行中注入用户消息：中断当前执行并追加新消息"
+    );
+    state.budget.reset_for_new_intent();
+    state.tool_history.clear();
+    state.tool_batch = None;
+    state.next_step = NextStep::StartReact;
+    Ok(())
+}
+
 /// 执行一个完整的对话轮次。
 ///
 /// `cmd_rx` 只在这一处消费。模型、工具和压缩任务与命令进入同一个
@@ -876,6 +1029,44 @@ pub(super) async fn execute_turn(
                     // 取消前已接收的插件结果仍属于本轮，必须进入 Session 或延迟队列。
                     injections.commit(ctx);
                     break 'agent_loop TurnExecutionResult::cancelled(state.accumulated_usage);
+                }
+                Some(Command::InjectUserMessage {
+                    message_id,
+                    content,
+                }) => {
+                    // 引导消息：中断主循环直接拥有的活动（模型/工具/压缩/审批），
+                    // 校验并保存新消息，成功才向界面确认，然后从新意图重启大循环。
+                    // 保存失败不在此处发送终态错误，交由 run_turn 发布唯一终态。
+                    interrupt_active_work(
+                        ctx,
+                        &mut state,
+                        &mut active_llm,
+                        &mut active_compression,
+                        &mut tool_tasks,
+                        &mut running_tools,
+                        &mut pending_approval,
+                        &mut injections,
+                        &stream_tx,
+                        context_limit,
+                    )
+                    .await;
+                    if let Err(error) = save_user_message_and_restart(
+                        ctx,
+                        &mut state,
+                        &stream_tx,
+                        message_id,
+                        content,
+                    ) {
+                        tracing::warn!(
+                            %error,
+                            session_id = %ctx.session.id,
+                            "运行中注入用户消息保存失败"
+                        );
+                        state.next_step = NextStep::Finish(TurnExecutionResult::failed(
+                            state.accumulated_usage.clone(),
+                            format!("用户消息保存失败：{error}"),
+                        ));
+                    }
                 }
                 Some(Command::Approval { request_id, approved }) => {
                     let matches_pending = pending_approval
@@ -2842,6 +3033,260 @@ mod tests {
             finished.load(Ordering::SeqCst),
             1,
             "on_turn_finished 应只调用一次（ALR-108）"
+        );
+    }
+
+    /// ALR-101/110：运行中注入用户消息——中断工具等待（协议闭合）、保存消息、
+    /// 确认接收，并从新意图重启直至成功。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inject_user_message_interrupts_tools_and_restarts() {
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        // 1) 首轮：工具调用（PausedTool 阻塞，制造"工具等待中"）。
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        // 2) 注入后新意图的请求：直接文本回答 → Success。
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("好的，按新要求完成了。"),
+                usage_chunk(20, 4),
+            ],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            cmd_tx,
+            mut cmd_rx,
+            ..
+        } = harness;
+        // 注入由独立任务发送：等工具进入运行后投递引导消息。
+        let inject_tx = cmd_tx.clone();
+        let started_wait = started.clone();
+        tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("工具应已启动");
+            inject_tx
+                .send(Command::InjectUserMessage {
+                    message_id: "injected-1".to_string(),
+                    content: vec![tiangong_types::ContentBlock::text("改成先做另一件事")],
+                })
+                .unwrap();
+        });
+        let result = execute_turn(&mut ctx, &mut cmd_rx).await;
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "新意图执行应成功，实际: {:?}",
+            result.outcome
+        );
+        // 消息已进入 session（校验+事务保存）。
+        assert!(
+            ctx.session
+                .messages
+                .iter()
+                .any(|m| m.id == "injected-1" && m.role == MessageRole::User),
+            "注入的消息应保存进 session"
+        );
+        // 保存成功后才发 UserMessage 确认（ALR-202 的同轮部分）。
+        assert!(
+            stream_rx.try_iter().any(|e| matches!(e,
+                StreamEvent::UserMessage { message_id, .. } if message_id == "injected-1")),
+            "保存成功后应发送 UserMessage 确认"
+        );
+        // 被中断的工具调用协议已闭合：call_1 有对应的失败结果消息。
+        let call_closed = ctx
+            .session
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("call_1") && m.tool_result_is_error);
+        assert!(call_closed, "被中断的工具调用应有失败结果（ALR-110）");
+    }
+
+    /// ALR-104：Summary 进行中被引导消息打断——部分输出降级为 React 过程消息，
+    /// 不得保持最终 Summary 身份。
+    ///
+    /// 说明：集成层面"Summary 流式中途被打断"无法用 wiremock 确定性构造（SSE body
+    /// 完整发送即结束，无中途停顿点；整体延迟则注入先于任何 chunk、部分输出为空）。
+    /// 因此直接单测降级语义的核心：被中断的 Summary 部分输出以 React 过程消息落盘，
+    /// 不保持最终 Summary 身份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn interrupted_llm_summary_output_persists_as_react_phase() {
+        use super::super::phase::LlmPurpose;
+        use super::persist_interrupted_llm_output;
+
+        let server = MockServer::start().await;
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let summary_purpose = LlmPurpose::Summary {
+            iteration: 1,
+            request_injection_generation: 0,
+        };
+        persist_interrupted_llm_output(
+            &mut harness.ctx,
+            &summary_purpose,
+            "summary-partial-1",
+            "这是被打断的半截总结",
+            "",
+        );
+        let message = harness
+            .ctx
+            .session
+            .messages
+            .iter()
+            .find(|m| m.id == "summary-partial-1")
+            .expect("部分总结应以过程消息落盘");
+        assert_eq!(
+            message.phase,
+            crate::session::MessagePhase::React,
+            "被中断的 Summary 部分输出必须降级为 React（ALR-104），实际: {:?}",
+            message.phase
+        );
+        assert!(message.text_content().contains("半截总结"));
+
+        // ForceFinal 被中断：无可靠完整内容，不落盘。
+        let force_purpose = LlmPurpose::ForceFinal {
+            request_injection_generation: 0,
+            summary_error: None,
+        };
+        persist_interrupted_llm_output(
+            &mut harness.ctx,
+            &force_purpose,
+            "force-partial-1",
+            "半截强制回复",
+            "",
+        );
+        assert!(
+            !harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .any(|m| m.id == "force-partial-1"),
+            "被中断的 ForceFinal 输出不应提交"
+        );
+    }
+
+    /// ALR-107（多消息）：注入引导消息后，最终 turn_status 写入最新（注入的）
+    /// 用户消息，原始消息不被覆盖；磁盘重载后一致。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_status_anchors_to_injected_latest_user_message() {
+        use super::super::turn::run_turn;
+
+        let server = MockServer::start().await;
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "paused_probe".to_string(),
+            Arc::new(PausedTool {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+        );
+        mount_sse(
+            &server,
+            vec![
+                tool_call_chunk("call_1", "paused_probe", "{}"),
+                usage_chunk(15, 3),
+            ],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("按新要求完成。"), usage_chunk(20, 4)],
+        )
+        .await;
+        // 新意图首轮后 request_round>0，文本回答进入完成度检查 → Summary 完成。
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(25, 3)],
+        )
+        .await;
+
+        let harness = TestHarness::new(&server, vec![tool_spec("paused_probe")], overrides);
+        let TestHarness {
+            ctx,
+            stream_rx,
+            cmd_tx: _,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        // 注入走独立通道任务：等工具启动后把命令投给 run_turn 持有的接收端。
+        // 生产中发送端由 TurnTask 注册表持有；测试克隆一份保持通道开启，否则任务
+        // 结束后通道关闭会被 execute_turn 当作取消。
+        let started_wait = started.clone();
+        let (inject_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let _keep_channel_open = inject_tx.clone();
+        let inject_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(2), started_wait.notified())
+                .await
+                .expect("工具应已启动");
+            inject_tx
+                .send(Command::InjectUserMessage {
+                    message_id: "injected-anchor".to_string(),
+                    content: vec![tiangong_types::ContentBlock::text("请改用另一方案")],
+                })
+                .unwrap();
+        });
+        run_turn(ctx, cmd_rx).await;
+        let _ = inject_task.await;
+
+        // 磁盘重载验证：最新用户消息（注入的）有 turn_status，原始消息无。
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("重载 session");
+        let latest = reloaded
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .expect("应有用户消息");
+        assert_eq!(latest.id, "injected-anchor", "最新用户消息应为注入的消息");
+        assert!(
+            latest.turn_status.is_some(),
+            "最终状态应写入最新（注入的）用户消息（ALR-107）"
+        );
+        let first = reloaded
+            .messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .expect("应有原始用户消息");
+        assert_eq!(first.text_content(), "你好", "原始用户消息应保持");
+        assert!(
+            first.turn_status.is_none(),
+            "原始用户消息不应被写入最终状态（ALR-107）"
+        );
+        // 唯一终态保持（ALR-109）。
+        let terminal: Vec<String> = stream_rx
+            .try_iter()
+            .filter_map(|e| match e {
+                StreamEvent::Done { .. } => Some("done".to_string()),
+                StreamEvent::Error { message } => Some(format!("error: {message}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            terminal,
+            vec!["done".to_string()],
+            "一个物理 turn 只发一次 Done（ALR-109），实际终态: {terminal:?}"
         );
     }
 

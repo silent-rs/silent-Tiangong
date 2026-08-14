@@ -23,8 +23,10 @@ pub(crate) async fn run_turn(
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
 ) {
     // ── 固定轮次锚点 ──
-    // 当前用户消息已在 deliver 阶段写入 Session。后续插件回调、耗时与状态都使用
-    // 同一消息索引和 ID，避免执行过程中追加的消息改变本轮归属。
+    // 生命周期锚点 turn_start_idx 在 turn 开始时固定，供 on_turn_started/
+    // on_turn_finished 使用同一消息范围（ALR-108：一个物理 turn 只触发一次）。
+    // 最终 turn_status 锚点不同：写入**提交时最新**的用户消息（ALR-107）——运行中
+    // 注入的引导消息成为当前任务锚点，原始用户消息保留无最终状态。
     let stream_tx = ctx.stream_tx.clone();
     let turn_started = std::time::Instant::now();
     let Some(turn_start_idx) = ctx.session.latest_user_message_index() else {
@@ -33,7 +35,6 @@ pub(crate) async fn run_turn(
         });
         return;
     };
-    let user_msg_id = ctx.session.messages[turn_start_idx].id.clone();
     let elapsed_timer = TurnElapsedTimer::start(turn_started, stream_tx.clone());
 
     // ── 启动插件生命周期 ──
@@ -81,17 +82,13 @@ pub(crate) async fn run_turn(
     }
 
     // ── 提交轮次状态与插件收尾 ──
-    // 先把明确结果写入本轮用户消息，让取消钩子和结束钩子看到一致状态。
+    // 结果写入**提交时最新**的用户消息（ALR-107）：运行中注入的引导消息成为当前
+    // 任务锚点；生命周期锚点 turn_start_idx 保持 turn 开始时的值不变。
     elapsed_timer.stop().await;
     let elapsed_ms = turn_started.elapsed().as_millis() as u64;
     let status = outcome.status();
-    if let Some(msg) = ctx
-        .session
-        .messages
-        .iter_mut()
-        .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
-    {
-        msg.set_turn_result(elapsed_ms, status);
+    if let Some(idx) = ctx.session.latest_user_message_index() {
+        ctx.session.messages[idx].set_turn_result(elapsed_ms, status);
     }
     if status == tiangong_types::TurnStatus::Cancelled {
         for plugin in &ctx.plugins {
@@ -111,13 +108,9 @@ pub(crate) async fn run_turn(
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
-        if let Some(msg) = ctx
-            .session
-            .messages
-            .iter_mut()
-            .find(|m| m.id == user_msg_id && m.role == MessageRole::User)
-        {
-            msg.set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
+        if let Some(idx) = ctx.session.latest_user_message_index() {
+            ctx.session.messages[idx]
+                .set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
         }
         let _ = ctx.session.try_persist_to_disk();
     }

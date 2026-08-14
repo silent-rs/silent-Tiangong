@@ -23,6 +23,16 @@ pub enum Command {
         tool_name: String,
         payload: serde_json::Value,
     },
+    /// 运行中注入用户消息：中断主循环直接拥有的活动（模型/工具等待/压缩/审批），
+    /// 在同一物理 turn 内保存新消息并从新意图重启（ALR-101）。
+    ///
+    /// 执行线程校验并事务性保存消息，成功后才向界面发 `UserMessage` 确认——
+    /// 调用方仅凭投递成功不能认定消息已进入会话。插件独立持有的后台任务不受
+    /// 影响（ALR-103），只有显式取消才走 `on_cancel`。
+    InjectUserMessage {
+        message_id: String,
+        content: Vec<tiangong_types::ContentBlock>,
+    },
     /// 插件投递的流事件。
     EmitStreamEvent(Box<tiangong_types::StreamEvent>),
     /// 插件内部模型调用产生的 token 用量。

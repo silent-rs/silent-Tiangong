@@ -330,18 +330,25 @@ impl crate::agent_input::AgentInput for TiangongCore {
                 prepared,
                 message_id,
             }) => {
-                // 如果有活跃 turn task,先取消并等待结束
+                // 有活跃 turn task 时注入用户消息：中断主循环直接拥有的活动，在同一
+                // 物理 turn 内保存新消息并从新意图重启（ALR-101），避免取消 + 重新
+                // spawn 带来的生命周期重复触发和插件副作用。
                 if crate::shared_runtime::is_running(&self.session_id) {
-                    crate::shared_runtime::send_command(&self.session_id, Command::Cancel);
-                    // 等待 task 结束(轮询,最多 5 秒)
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                    while crate::shared_runtime::is_running(&self.session_id) {
-                        if std::time::Instant::now() > deadline {
-                            tracing::warn!(session_id = %self.session_id, "等待上一轮 turn 结束超时");
-                            return Err(CoreError::WorkerPanicked);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    let msg_id = message_id.clone().unwrap_or_else(scru128::new_string);
+                    let sent = crate::shared_runtime::send_command(
+                        &self.session_id,
+                        Command::InjectUserMessage {
+                            message_id: msg_id,
+                            content: prepared.clone(),
+                        },
+                    );
+                    if sent {
+                        // 不在此处发送 UserMessage 确认事件：由执行线程在校验并成功
+                        // 保存消息后再发送——命令成功写入通道不等于已处理。
+                        return Ok(());
                     }
+                    // 发送失败说明 turn 刚结束，回退到正常 spawn 流程
+                    tracing::debug!(session_id = %self.session_id, "注入用户消息失败，回退到正常 spawn 流程");
                 }
 
                 let mut ctx = self.build_turn_context()?;
