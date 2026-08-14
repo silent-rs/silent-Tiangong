@@ -1597,7 +1597,7 @@ mod tests {
     /// 请求前压缩保留模型可见的续接消息：上一 turn 观测压力超阈值，下一 turn
     /// 在发起模型请求前压缩（ALR-303），摘要与 resume 持久化到磁盘。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn compression_persists_model_visible_resume_after_system_prompt() {
+    async fn compression_persists_summary_and_keeps_recent_interaction() {
         let server = MockServer::start().await;
         // 第一段：大用量文本完成，建立跨 turn 的压力信号。
         mount_sse(

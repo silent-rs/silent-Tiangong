@@ -717,7 +717,7 @@ mod shared_runtime_tests {
         assert_eq!(values, vec!["@one", "@two"]);
     }
 
-    /// 多个空闲 Core 不创建 turn task，且可正常关闭。
+    /// 多个未启动活动的 Core 不创建 driver 任务，且可正常关闭。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multiple_cores_share_runtime_and_shutdown_cleanly() {
         let root = tempfile::tempdir().unwrap();
@@ -741,9 +741,10 @@ mod shared_runtime_tests {
             })
             .collect();
 
-        // 空闲 Core 没有活跃 turn task。
+        // 从未投递输入的 Core 不创建 driver（is_stopped 语义：未关闭即可接收；
+        // 尚无任何活动时注册表中无条目）。
         for core in &cores {
-            assert!(core.is_stopped(), "空闲 Core 不应存在 turn task");
+            assert!(core.is_stopped(), "未启动活动的 Core 不应存在 driver");
         }
 
         // 逐个关闭，验证 shutdown 路径在共享 runtime 上正常工作

@@ -260,7 +260,7 @@ async fn attachment_request_rejects_text_only_completion() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plain_question_without_obligation_completes_without_tool() {
     let server = MockServer::start().await;
-    mount_sse(&server, vec![text_delta_chunk("贪心算法是一种……")]).await;
+    // 无工具义务：单次请求即完成，不再有总结阶段的第二次请求。
     mount_sse(&server, vec![text_delta_chunk("贪心算法是一种……")]).await;
 
     let (mut ctx, invocations) = contract_harness(
