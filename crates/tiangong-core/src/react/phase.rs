@@ -16,7 +16,7 @@ use crate::stream_throttle::ThrottledStreamSink;
 
 /// 执行阶段：任意时刻当前阶段唯一（ALR-001）。
 ///
-/// Ready 阶段（NeedModel / PreparingTools / PendingFinish）由驱动同步推进；
+/// Ready 阶段（NeedModel / PendingFinish）由驱动同步推进；
 /// Waiting 阶段持有活动资源并进入事件等待。
 ///
 /// 工具/审批/压缩变体均为正式阶段：批次、任务集合、审批与批次同体持有；

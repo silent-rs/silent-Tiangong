@@ -4,15 +4,16 @@
 
 ## 当前状态
 
-- 当前阶段：**00~10 历史迁移已完成；11 暂停交付；12~17 已完成；18 待实施**。
-- 当前建议任务：任务 18，清理迁移双轨与量化验收（`execute.rs` 生产代码 ≤1200 行、权威入口唯一）、真实场景验证、完整检查与 PR 交付审查。
+- 当前阶段：**00~10、12~18 全部完成；11 暂停交付（待真实宿主验证后恢复 PR）**。
+- 当前建议任务：用户在 GUI/CLI/Server 真实环境执行连续交互验证（普通问答、附件分析、多轮工具、运行中追问、取消、关闭），通过后恢复任务 11 的 PR 交付。
 - 当前阻塞：无。
 - 当前分支：`feature/agent-execution-core`，基线为 `main` v0.14.3（`7c425bac`）。
-- 当前实现不是交付候选：工具义务暂只覆盖附件场景；真实连续交互场景与交付审查未完成（任务 18）。
+- 当前实现是自动化可验证范围内的交付候选：全套检查通过、量化达标、审查清单无异常；唯一待办是真实宿主连续交互验证（需用户模型凭据，见任务 18 文档）。
 - 当前文档决策：Loop 收敛为模型—工具最小循环；无工具响应只形成候选完成；通过确定性 `TaskContract`、Provider 工具约束和有界协议修复防止模型漏发必需 tool call；Agent 自有 Inbox 与单 driver；审批、压缩、重试和预算外置。
 - 任务 15 已落地：Summary/ForceFinal/continuation 全部删除（`summary.rs`、`completion_policy.rs` 移除），`react/contract.rs` 候选完成门控 + 有界协议修复（上限 2）+ Provider `tool_choice` 约束；`execute.rs` 4515 → 3728 行；8 项契约用例全部启用转绿。
 - 任务 16 已落地：`react/request.rs` 请求前压力检查与溢出恢复；压缩统一为 `ContextCompression` 会话（auto/forced/manual 单份等待/提交）；`Compressing` 顶层阶段与四处分散压缩点删除；压缩收敛为一次摘要调用（删 `[[CURRENT_TASK]]` LLM 提取）；锚点消息机制（LLM 可见/用户不可见，用户原文程序复制）满足 Provider 首条 User 约束。
 - 任务 17 已落地：`react/tools.rs` 工具执行流水线（准备/审批/并行执行一体化，命令分流中断类与就地消化类）；`PreparingTools`/`WaitingTools`/`WaitingApproval` 顶层阶段及对应命令/中断分支删除；审批等待与工具共享同一命令通道；既有 92 项测试零改写通过（行为契约不变）。
+- 任务 18 已完成（自动化部分）：双轨残留为零、`execute.rs` 生产代码 1162 行达标、全套检查通过、15 项真实场景对照中 13 项有测试守护（命令/验证义务与宿主运行两项为记录遗留）；真实宿主验证待用户执行。
 
 ## 已确认的 Review 结论
 
@@ -57,7 +58,8 @@
 | 14 | Agent Inbox 与唯一 driver | 已完成 | c9d9dfed | react/inbox.rs 调度归位、driver 主循环、followup/steer/inject、关闭排空；4 项调度用例转绿 |
 | 15 | 最小 Loop | 已完成 | 89d5fe3a | contract.rs 门控+有界修复+tool_choice；删 Summary/ForceFinal/continuation；4 项工具义务用例转绿 |
 | 16 | 模型请求策略外置 | 已完成 | 0a0ed561 | request.rs 压缩外置、ContextCompression 统一、锚点消息机制、删 Compressing 阶段 |
-| 17 | 工具流水线收敛 | 已完成 | 本次提交 | tools.rs 流水线一体化、审批下沉、删 PreparingTools/WaitingTools/WaitingApproval |
+| 17 | 工具流水线收敛 | 已完成 | c241074a | tools.rs 流水线一体化、审批下沉、删 PreparingTools/WaitingTools/WaitingApproval |
+| 18 | 清理、验收与交付 | 自动化部分已完成 | 本次提交 | 双轨零残留、execute.rs 1162 行达标、审查清单无异常；宿主验证待用户 |
 | 14 | Agent Inbox 与唯一 driver | 未开始 | — | next_turn/next_step、Idle/Running、wake_requested、最新 Session |
 | 15 | 最小 Loop | 未开始 | — | 模型—工具循环、TaskContract/CompletionGate、删除旧完成控制 |
 | 16 | 模型请求策略外置 | 未开始 | — | tool_choice、有界协议修复、压缩、重试和安全预算 |
@@ -223,6 +225,16 @@ cargo test -p tiangong-plugin-browser
 - `cargo test -p tiangong-plugin-browser`：32 通过；
 - `cargo test -p tiangong-core contract_tests -- --ignored`：4 项工具义务用例保持失败，失败形态与任务 13 记录一致（安全网未受影响）。
 
+任务 18 验证（清理与量化验收）：
+
+- 双轨残留 grep 核对：`NEXT_TURN_QUEUE`/`continuation_count`/`max_outer_iterations`/ForceFinal/CheckingCompletion/`spawn_turn`/`cancel_and_join` 均为 0；
+- `ExecutionPhase` 仅剩 `NeedModel`/`WaitingModel`/`PendingFinish`；driver 启动与 `next_turn` 领取入口各 1；
+- `execute.rs` 生产代码 1162 行（≤1200 目标）；
+- `cargo fmt -- --check` / `cargo clippy --workspace --all-targets --tests --benches -- -D warnings` / `cargo check --workspace`：通过；
+- `cargo test -p tiangong-core`：92 通过；agent-team 10 通过；browser 32 通过；
+- 交付审查清单（静默丢消息/重复 driver/过期 Session/虚假工具完成/重复生命周期）：自动化核对全部通过；
+- 真实宿主场景：待用户执行（场景对照与覆盖明细见 tasks/18-清理验收与交付.md）。
+
 任务 17 验证（工具流水线收敛）：
 
 - `cargo fmt -- --check`：通过；
@@ -272,6 +284,7 @@ cargo test -p tiangong-plugin-browser
 - 2026-08-14：完成任务 15：`react/contract.rs` 候选完成门控 + 有界协议修复（上限 2）+ Provider `tool_choice` 约束；删除 `summary.rs`、`completion_policy.rs`、`continuation_count`、`max_outer_iterations` 与问号启发式；工具轮次上限改为明确失败；4 项工具义务用例转绿，10 项旧策略测试删除。
 - 2026-08-14：完成任务 16：压缩外置到请求策略（`react/request.rs`），三种压缩统一为 `ContextCompression`；压缩收敛为一次摘要调用，锚点消息（LLM 可见/用户不可见、原文程序复制）替代 LLM 任务提取并满足 Provider 首条 User 约束；修复请求前压缩中断的阶段归还缺陷。
 - 2026-08-14：完成任务 17：工具执行流水线（`react/tools.rs`）一体化准备/审批/并行执行，命令分流（中断类收敛闭合上抛、其余就地消化）；三个工具顶层阶段与对应命令/中断分支删除，既有测试零改写通过。
+- 2026-08-14：完成任务 18 自动化部分：双轨零残留、量化达标（execute.rs 1162 行）、全套检查与交付审查通过；真实宿主验证待用户执行后方可恢复任务 11 PR。
 
 ## 更新规则
 
