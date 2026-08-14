@@ -1,0 +1,356 @@
+import { textContent } from "@/api/tauri";
+import type { MessageItem } from "./types";
+
+/**
+ * 工具调用展示模型（参考 DeepSeek Harness 的 tool-call-model 设计）。
+ *
+ * 职责：把一条工具相关消息（role:'tool' 结果，或系统 trace / 记忆检索 / 插件注入消息）
+ * 加上可选的配对调用参数（assistant.tool_calls.arguments），转换成纯展示用的模型：
+ * 变体、标题、单行摘要、状态、错误首行与展开物料。模型是纯函数，不碰 React。
+ */
+
+export type ToolVariant =
+  | "terminal"
+  | "file-read"
+  | "file-write"
+  | "search"
+  | "web"
+  | "memory"
+  | "plugin"
+  | "other";
+
+export type ToolDisplayState = "running" | "ok" | "error";
+
+/** 终端卡物料：命令执行类工具的展开内容。 */
+export interface TerminalMaterial {
+  command: string | null;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+export interface ToolDisplayModel {
+  variant: ToolVariant;
+  /** 类别标题（命令执行 / 读取文件 / ……）。 */
+  title: string;
+  /** 单行摘要：优先从参数派生，失败时被 errorSummary 顶替显示。 */
+  summary: string;
+  state: ToolDisplayState;
+  /** 失败结果的第一行，折叠行直接以错误色显示。 */
+  errorSummary: string | null;
+  /** 展开用的参数文本；无参数为 null。 */
+  argsText: string | null;
+  /** 结果文本（工具输出原文）。 */
+  outputText: string | null;
+  /** terminal 变体的展开卡物料；其余变体为 null。 */
+  terminal: TerminalMaterial | null;
+  /** 文件类工具的目标路径（来自参数）。 */
+  filePath: string | null;
+}
+
+const VARIANT_TITLES: Record<ToolVariant, string> = {
+  terminal: "命令执行",
+  "file-read": "读取文件",
+  "file-write": "写入文件",
+  search: "搜索",
+  web: "网页",
+  memory: "记忆检索",
+  plugin: "插件注入",
+  other: "工具调用",
+};
+
+/** 已知工具名 → 变体；未收录的落 other。 */
+const TOOL_VARIANTS: Record<string, ToolVariant> = {
+  run_command: "terminal",
+  read_file: "file-read",
+  write_file: "file-write",
+  grep: "search",
+  glob: "search",
+  search: "search",
+  web_fetch: "web",
+  web_search: "web",
+  recall_memory: "memory",
+};
+
+/** 以 web_ 开头的浏览器插件工具统一归 web 变体。 */
+export function classifyToolName(toolName: string): ToolVariant {
+  if (TOOL_VARIANTS[toolName]) return TOOL_VARIANTS[toolName];
+  if (toolName.startsWith("web_")) return "web";
+  return "other";
+}
+
+/** run_command 的 shell 模式哨兵值（后端 formatting.rs 约定）。 */
+const SHELL_SENTINEL = "__tiangong_shell__";
+
+function firstNonEmptyLine(text: string | null | undefined): string {
+  if (!text) return "";
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
+}
+
+function clamp(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** 从调用参数提取单行摘要；参数兼容位置数组（核心工具）与对象（插件/MCP 工具）。 */
+function summaryFromArgs(variant: ToolVariant, args: unknown): string | null {
+  if (args === undefined || args === null) return null;
+
+  if (Array.isArray(args)) {
+    if (variant === "terminal" && args[0] === SHELL_SENTINEL) {
+      const script = typeof args[1] === "string" ? args[1] : "";
+      if (script) return clamp(firstNonEmptyLine(script), 120);
+      return null;
+    }
+    const first = args.find((item) => typeof item === "string" && item !== SHELL_SENTINEL);
+    if (typeof first === "string" && first) return clamp(first, 120);
+    return null;
+  }
+
+  if (typeof args === "object") {
+    const record = args as Record<string, unknown>;
+    const keyPreference: Record<ToolVariant, readonly string[]> = {
+      terminal: ["command", "description", "script"],
+      "file-read": ["path", "file_path", "url"],
+      "file-write": ["path", "file_path"],
+      search: ["query", "pattern", "keyword"],
+      web: ["url", "query", "title"],
+      memory: ["query"],
+      plugin: ["command", "url", "title"],
+      other: [],
+    };
+    for (const key of keyPreference[variant]) {
+      const value = record[key];
+      if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
+    }
+    for (const value of Object.values(record)) {
+      if (typeof value === "string" && value) return clamp(firstNonEmptyLine(value), 120);
+    }
+    return null;
+  }
+
+  if (typeof args === "string" && args) return clamp(firstNonEmptyLine(args), 120);
+  return null;
+}
+
+/** 展开用的参数文本：对象 pretty JSON，数组逐项标注位置参数。 */
+function argsToText(args: unknown): string | null {
+  if (args === undefined || args === null) return null;
+  if (Array.isArray(args)) {
+    if (args.length === 0) return null;
+    return args
+      .map((item, index) => {
+        const value = typeof item === "string" ? item : JSON.stringify(item);
+        return `[${index}] ${value ?? ""}`;
+      })
+      .join("\n");
+  }
+  if (typeof args === "object") return JSON.stringify(args, null, 2);
+  if (typeof args === "string" && args) return args;
+  return null;
+}
+
+/** 从 write_file 参数中取写入内容（位置参数 [path, content, append?]）。 */
+export function writeContentFromArgs(args: unknown): string | null {
+  if (!Array.isArray(args)) {
+    if (args && typeof args === "object") {
+      const content = (args as Record<string, unknown>).content;
+      if (typeof content === "string") return content;
+    }
+    return null;
+  }
+  const content = args[1];
+  return typeof content === "string" ? content : null;
+}
+
+/** 解析后端系统 trace 消息（formatting.rs 产出的「工具执行 [...]」格式）。 */
+export interface ToolTraceInfo {
+  toolName: string;
+  command: string | null;
+  ok: boolean;
+  exitCode: number | null;
+  durationMs: number | null;
+  summary: string | null;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+export function parseToolTrace(content: string): ToolTraceInfo | null {
+  const header = content.match(/^工具执行 \[(.+?)\]/);
+  if (!header) return null;
+  const info: ToolTraceInfo = {
+    toolName: header[1],
+    command: null,
+    ok: true,
+    exitCode: null,
+    durationMs: null,
+    summary: null,
+    stdout: null,
+    stderr: null,
+  };
+  const commandMatch = content.match(/^命令: (.+)$/m);
+  if (commandMatch) info.command = commandMatch[1];
+  const statusMatch = content.match(/^ok=(\S+) exit_code=(\S+) duration_ms=(\d+)$/m);
+  if (statusMatch) {
+    info.ok = statusMatch[1] !== "false";
+    info.exitCode = statusMatch[2] === "null" ? null : Number(statusMatch[2]);
+    info.durationMs = Number(statusMatch[3]);
+  }
+  const summaryMatch = content.match(/^summary: (.+)$/m);
+  if (summaryMatch) info.summary = summaryMatch[1];
+
+  const extractBlock = (label: string): string | null => {
+    const pattern = new RegExp(`^${label}:$\\n^\\\`\\\`\\\`text$\\n([\\s\\S]*?)^\\\`\\\`\\\`$`, "m");
+    const match = content.match(pattern);
+    return match ? match[1].replace(/\n$/, "") : null;
+  };
+  info.stdout = extractBlock("stdout");
+  info.stderr = extractBlock("stderr");
+  return info;
+}
+
+/**
+ * 构建单条工具消息的展示模型。
+ *
+ * @param msg 工具相关消息（role:'tool'，或工具 trace / 记忆检索 / 插件注入系统消息）。
+ * @param args 配对到的调用参数（来自 assistant.tool_calls，按 tool_call_id 配对）。
+ */
+export function buildToolDisplayModel(msg: MessageItem, args?: unknown): ToolDisplayModel {
+  const content = textContent(msg);
+  const toolName = msg.tool_name || "";
+
+  // 插件注入消息（数据来源：xxx）
+  if (content.startsWith("数据来源：")) {
+    const source = content.match(/^数据来源：(\S+)/)?.[1] ?? "plugin";
+    const detail =
+      content.match(/command:\s*(.+)/)?.[1] ||
+      content.match(/url:\s*(.+)/)?.[1] ||
+      content.match(/title:\s*(.+)/)?.[1] ||
+      "";
+    return {
+      variant: "plugin",
+      title: VARIANT_TITLES.plugin,
+      summary: detail ? `${source} · ${clamp(detail.trim(), 60)}` : source,
+      state: "ok",
+      errorSummary: null,
+      argsText: null,
+      outputText: content,
+      terminal: null,
+      filePath: null,
+    };
+  }
+
+  // 记忆检索消息
+  if (toolName === "recall_memory" || content.startsWith("[记忆检索]")) {
+    const count = content.match(/命中 (\d+) 条/)?.[1] ?? "";
+    const noHit = content.includes("无相关记忆");
+    return {
+      variant: "memory",
+      title: VARIANT_TITLES.memory,
+      summary: noHit ? "无命中" : count ? `${count} 条命中` : "记忆检索",
+      state: "ok",
+      errorSummary: null,
+      argsText: argsToText(args),
+      outputText: content,
+      terminal: null,
+      filePath: null,
+    };
+  }
+
+  // 系统 trace 消息（工具执行 [...]）：按 trace 内的工具名分类，展开为终端卡物料。
+  const trace = parseToolTrace(content);
+  if (trace && msg.role === "system") {
+    const variant = classifyToolName(trace.toolName);
+    const fallbackSummary =
+      trace.command ?? trace.summary ?? firstNonEmptyLine(content) ?? trace.toolName;
+    return {
+      variant,
+      title: VARIANT_TITLES[variant],
+      summary: summaryFromArgs(variant, args) ?? clamp(fallbackSummary || trace.toolName, 120),
+      state: trace.ok ? "ok" : "error",
+      errorSummary: trace.ok ? null : clamp(trace.stderr || trace.summary || "执行失败", 160),
+      argsText: argsToText(args),
+      outputText: content,
+      terminal: {
+        command: trace.command,
+        stdout: trace.stdout,
+        stderr: trace.stderr,
+      },
+      filePath:
+        variant === "file-read" || variant === "file-write"
+          ? (trace.command?.match(/^(?:path=)?(\S+)/)?.[1] ?? null)
+          : null,
+    };
+  }
+
+  // 工具结果消息（role:'tool'）或兜底。
+  const variant = classifyToolName(toolName);
+  const isError = msg.tool_result_is_error === true;
+  const outputText = content || null;
+  const argSummary = summaryFromArgs(variant, args);
+
+  let summary: string;
+  let filePath: string | null = null;
+  if (argSummary) {
+    summary = argSummary;
+  } else if (toolName && toolName !== variant) {
+    summary = variant === "other" ? `${toolName} · ${firstLineOr(outputText, "执行完成")}` : toolName;
+  } else {
+    summary = clamp(firstNonEmptyLine(outputText) || "执行完成", 80);
+  }
+  if (Array.isArray(args) && typeof args[0] === "string") {
+    filePath = args[0];
+  } else if (args && typeof args === "object") {
+    const record = args as Record<string, unknown>;
+    const path = record.path ?? record.file_path;
+    if (typeof path === "string") filePath = path;
+  }
+
+  const errorSummary =
+    isError && outputText ? clamp(firstNonEmptyLine(outputText) || "执行失败", 160) : null;
+
+  let terminal: TerminalMaterial | null = null;
+  if (variant === "terminal") {
+    const command =
+      Array.isArray(args) && args[0] === SHELL_SENTINEL && typeof args[1] === "string"
+        ? args[1]
+        : argSummary;
+    terminal = { command: command ?? null, stdout: outputText, stderr: null };
+  }
+
+  return {
+    variant,
+    title: VARIANT_TITLES[variant],
+    summary,
+    state: isError ? "error" : "ok",
+    errorSummary,
+    argsText: argsToText(args),
+    outputText,
+    terminal,
+    filePath,
+  };
+}
+
+/** 运行中工具调用的展示模型（结果未到达，只有名称与参数）。 */
+export function buildRunningToolModel(name: string, args?: unknown): ToolDisplayModel {
+  const variant = classifyToolName(name);
+  return {
+    variant,
+    title: VARIANT_TITLES[variant],
+    summary: summaryFromArgs(variant, args) ?? name,
+    state: "running",
+    errorSummary: null,
+    argsText: null,
+    outputText: null,
+    terminal: null,
+    filePath: null,
+  };
+}
+
+function firstLineOr(text: string | null, fallback: string): string {
+  if (!text) return fallback;
+  const line = firstNonEmptyLine(text);
+  return clamp(line || fallback, 80);
+}

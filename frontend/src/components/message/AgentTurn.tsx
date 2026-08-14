@@ -78,6 +78,21 @@ function AgentTurnView({
     setShowProcess(isActive);
   }, [isActive]);
 
+  // 工具调用参数配对：assistant 消息携带 tool_calls（含参数），
+  // role:'tool' 结果消息按 tool_call_id 反查参数，用于派生单行摘要与展开内容。
+  const toolCallArgs = new Map<string, { id: string; name: string; arguments?: unknown }>();
+  const settledToolCallIds = new Set<string>();
+  for (const msg of messages) {
+    for (const call of msg.tool_calls ?? []) toolCallArgs.set(call.id, call);
+    if (msg.role === "tool" && msg.tool_call_id) settledToolCallIds.add(msg.tool_call_id);
+  }
+  const argsOfToolMessage = (msg: MessageItem): unknown =>
+    msg.tool_call_id ? toolCallArgs.get(msg.tool_call_id)?.arguments : undefined;
+  // 执行中的调用：tool_calls 已发出但结果未到达，仅活跃轮次渲染为运行行。
+  const runningToolCalls = isActive
+    ? [...toolCallArgs.values()].filter((call) => !settledToolCallIds.has(call.id))
+    : [];
+
   const renderWithHighlight = (msgId: string, text: string) => {
     if (!searchQuery) return text;
     const occurrences = findTextOccurrences(text, searchQuery, caseSensitive);
@@ -201,6 +216,14 @@ function AgentTurnView({
     }
   }
 
+  // 运行行挂在最后一个工具组：执行中的调用总是出现在过程尾部。
+  const lastToolGroupIndex = (() => {
+    for (let i = mergedFragments.length - 1; i >= 0; i--) {
+      if (mergedFragments[i].type === "tool_group") return i;
+    }
+    return -1;
+  })();
+
   const renderFragment = (frag: Fragment, i: number) => {
     if (selectedAgentTab && frag.type !== "agent_event") return null;
     if (selectedAgentTab && frag.type === "agent_event" && frag.agentRoles.length > 0 && !frag.agentRoles.includes(selectedAgentTab)) return null;
@@ -212,7 +235,15 @@ function AgentTurnView({
           return <p key={`expl-${i}`} className="text-sm text-muted-foreground leading-relaxed whitespace-pre-wrap break-words" title={formatMessageTime(frag.time)}>{frag.text}</p>;
         }
         if (frag.type === "tool_group") {
-          return <ToolGroup key={`tools-${frag.key}`} tools={frag.tools} expansion={toolGroupExpansion} />;
+          return (
+            <ToolGroup
+              key={`tools-${frag.key}`}
+              tools={frag.tools}
+              expansion={toolGroupExpansion}
+              argsOf={argsOfToolMessage}
+              runningCalls={i === lastToolGroupIndex && runningToolCalls.length > 0 ? runningToolCalls : undefined}
+            />
+          );
         }
         if (frag.type === "user") {
           const statusMeta = frag.msg.turn_status ? TURN_STATUS_META[frag.msg.turn_status] : null;
