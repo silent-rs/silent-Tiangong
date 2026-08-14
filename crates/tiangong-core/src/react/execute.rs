@@ -2677,6 +2677,52 @@ mod tests {
         harness.drain_stream();
     }
 
+    /// ALR-111 用量权威：多轮模型请求的用量必须累计到终态结果，重构后仍须保证
+    /// 最终终态和 Session 使用封口前最新累计用量。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accumulated_usage_is_aggregated_across_requests() {
+        let server = MockServer::start().await;
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        // 1) 工具调用；2) 文本以问号结尾 → 进入 Summary；3) Summary 完成。
+        mount_sse(
+            &server,
+            vec![tool_call_chunk("call_1", "echo", "{}"), usage_chunk(15, 3)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("结果还需要补充吗?"), usage_chunk(25, 5)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(30, 4)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+
+        assert!(
+            matches!(result.outcome, TurnExecutionOutcome::Success),
+            "工具+总结链路应返回 Success，实际: {:?}",
+            result.outcome
+        );
+        // 三轮请求用量累计：(15+3) + (25+5) + (30+4) = 82
+        assert_eq!(
+            result.usage.total_tokens, 82,
+            "终态用量应为各轮模型请求用量之和（ALR-111）"
+        );
+        harness.drain_stream();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reasoning_effort_update_applies_to_next_model_request() {
         let server = MockServer::start().await;
