@@ -158,6 +158,17 @@ loop {
 - **Ready**：`NeedModel`、`PreparingTools`、`PendingFinish`；
 - **Waiting**：`WaitingModel`、`WaitingTools`、`WaitingApproval`、`Compressing`、`CheckingCompletion`、`ForceFinal`。
 
+### 3.1 任务 02 原型验证结论
+
+`react/phase.rs` 的最小原型（`ProtoState` / `ProtoPhase` / `drive_phase` / `proto_drive_loop`）已验证（3 个测试通过）：
+
+- **take/install 模式可行**：`take_phase` 取出阶段（`Option::take`），`install_phase` 安装新阶段，中间"无阶段"窗口由断言约束（ALR-205），循环中无需并列活动 `Option`。
+- **活动资源可整体转移**：阶段持有 `JoinHandle`/`JoinSet` 时，迁移通过消费旧阶段、构造新阶段完成，无需在 state 上维护并列 `Option`。
+- **取消用 `AbortHandle`**：`WaitingModel` 的 `tokio::select!` 消费 `JoinHandle`，取消改用 `handle.abort_handle()` 产生的独立 `AbortHandle`，避免与 select 消费 handle 冲突。
+- **Ready/Waiting 分流**：Ready 阶段同步推进（构造新阶段返回），Waiting 阶段进入 `select!`，不引入含义模糊的 `is_idle`。
+
+后续任务（03 起）按此骨架扩展为正式 `ExecutionPhase` / `ExecutionState`，无需另选所有权模型。
+
 ## 4. 阶段迁移
 
 ```text

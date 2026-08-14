@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 当前阶段：任务 01 测试安全网完成，进入任务 02 驱动原型。
-- 当前建议任务：**02 - 驱动原型（所有权与事件驱动决策）**。
+- 当前阶段：任务 02 驱动原型完成，进入任务 03 执行预算与阶段数据。
+- 当前建议任务：**03 - 执行预算与阶段数据**。
 - 当前阻塞：无。
-- 生产代码状态：新增 ALR-111 用量累计测试（core lib 90 测试通过）。
+- 生产代码状态：新增 react/phase.rs 驱动原型（3 测试），core lib 93 测试通过。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -18,7 +18,7 @@
 | --- | --- | --- | --- | --- | --- |
 | 00 | [基线冻结](./tasks/00-基线冻结.md) | 已完成 | feature/agent-execution-core | 7c425bac（基线） | main v0.14.3 干净基线、引导消息重构中实现、89 测试绿色 |
 | 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | （本次） | ALR-111 用量测试 + 基线回归网 |
-| 02 | [驱动原型](./tasks/02-驱动原型.md) | 未开始 | - | - | Rust 所有权与事件驱动决策 |
+| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | （本次） | take/install 模式 + AbortHandle 取消，结论写回 design.md |
 | 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 未开始 | - | - | 预算、类型归属、阶段数据模型 |
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 未开始 | - | - | 模型侧生产状态机 |
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 未开始 | - | - | 工具批次与审批状态机 |
@@ -111,6 +111,7 @@ cargo test -p tiangong-plugin-agent-team
 - 2026-08-14：完成第一版状态机收敛方案。
 - 2026-08-14：根据工程评估升级为整体 Agent 执行核心重构方案，扩展为 00~11 任务。
 - 2026-08-14：任务 00 基线冻结——确认 `main` v0.14.3 干净基线，引导消息（ALR-101）在重构中实现，89 测试绿色基线。
+- 2026-08-14：任务 02 驱动原型——`react/phase.rs` 验证 take/install 所有权模式 + AbortHandle 取消，3 测试通过，结论写回 design.md。
 
 ## 更新规则
 
@@ -144,3 +145,4 @@ cargo test -p tiangong-plugin-agent-team
 | --- | --- | --- | --- | --- |
 | 00 基线 | ✅ | ✅ | 89 通过 | main v0.14.3 干净基线 |
 | 01 测试安全网 | ✅ | ✅ | 90 通过 | 新增 ALR-111 用量累计测试 |
+| 02 驱动原型 | ✅ | ✅ | 93 通过 | 新增 react/phase.rs 原型（take/install + AbortHandle） |
