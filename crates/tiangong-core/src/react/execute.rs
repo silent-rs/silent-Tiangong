@@ -31,6 +31,9 @@ use crate::turn_context::TurnContext;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::cancel::{abort_and_join, emit_cancel_usage};
+use super::completion_policy::{
+    CompletionAction, CompletionPolicy, DefaultCompletionPolicy, TextCompletionInput,
+};
 use super::compression::{
     ActiveCompression, CompressionContinuation, ReactTextDisposition, observed_total_tokens,
 };
@@ -632,15 +635,18 @@ fn handle_react_text_response(
     );
     ctx.session.persist_to_disk();
 
-    let direct_answer = state.budget.continuation_count == 0
-        && !state.budget.executed_tool_in_phase
-        && !response.text.trim().is_empty();
-    let tool_answer =
-        state.budget.executed_tool_in_phase && looks_like_final_answer(&response.text);
-    if direct_answer || tool_answer {
-        ReactTextDisposition::Complete
-    } else {
-        ReactTextDisposition::EnterSummary
+    // 完成度判定经 CompletionPolicy（ALR-303）：默认策略保持既有行为；占位符已
+    // 在上方提前进入检查，此处 synthetic=false。
+    let input = TextCompletionInput {
+        continuation_count: state.budget.continuation_count,
+        executed_tool_in_phase: state.budget.executed_tool_in_phase,
+        text_empty: response.text.trim().is_empty(),
+        looks_like_final: looks_like_final_answer(&response.text),
+        synthetic_placeholder: false,
+    };
+    match DefaultCompletionPolicy.decide_after_text(&input) {
+        CompletionAction::Finish => ReactTextDisposition::Complete,
+        CompletionAction::CheckCompletion => ReactTextDisposition::EnterSummary,
     }
 }
 
