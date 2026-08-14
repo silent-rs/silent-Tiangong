@@ -313,3 +313,72 @@ async fn idle_tool_injection_accepted_without_wake() {
     );
     core.shutdown_join().expect("关闭失败");
 }
+
+/// 手动压缩期间的引导消息（steer）不得丢失（ALR-102/202）：
+/// 压缩被取消让路，消息转入 Inbox 作为下一个 turn 自动执行——不需要用户
+/// 再发消息触发（自动顺延）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_during_manual_compression_defers_to_next_turn() {
+    use crate::agent_input::MessageDelivery;
+
+    let root = tempfile::tempdir().expect("创建临时目录失败");
+    let sid = format!("steer-compress-{}", scru128::new_string());
+    let server = wiremock::MockServer::start().await;
+    let core = core_for(root.path(), &sid, &server.uri());
+
+    // 预置可压缩历史并让手动压缩请求长时间挂起（制造引导窗口）。
+    {
+        let mut session = Session::load_from_storage(root.path(), &sid).expect("加载失败");
+        session.append_message(crate::session::MessageRole::User, "第一条问题");
+        session.append_message(crate::session::MessageRole::User, "第二条问题");
+        session.try_persist_to_disk().expect("预置历史失败");
+    }
+    mount_sse_with_delay(
+        &server,
+        vec![text_delta_chunk("压缩结果")],
+        Some(Duration::from_secs(30)),
+    )
+    .await;
+    // 压缩取消后，引导消息作为下一 turn 的模型请求快速失败（400）。
+    mount_permanent_error(&server).await;
+
+    core.deliver(AgentInputKind::compress_context())
+        .expect("空闲期手动压缩应被接受");
+    // 等待压缩请求发出（进入挂起窗口）。
+    let deadline = Instant::now() + WAIT;
+    while server.received_requests().await.map_or(0, |r| r.len()) < 1 {
+        assert!(Instant::now() < deadline, "等待手动压缩请求超时");
+        tokio::time::sleep(POLL).await;
+    }
+
+    // 压缩挂起期间投递 steer：必须被接受且不丢。
+    let msg_id = format!("{sid}-steer");
+    core.deliver(AgentInputKind::prepared_with_delivery(
+        msg_id.clone(),
+        vec![tiangong_types::ContentBlock::text("换个方向处理")],
+        MessageDelivery::Steer,
+    ))
+    .expect("压缩期间的 steer 应被接受");
+
+    // driver 应取消压缩、自动执行该消息（无需再投递任何输入）。
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let settled = Session::load_from_storage(root.path(), &sid)
+            .map(|session| {
+                session
+                    .messages
+                    .iter()
+                    .any(|m| m.id == msg_id && m.turn_status.is_some())
+            })
+            .unwrap_or(false);
+        if settled {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "压缩期间的引导消息应自动顺延执行（转 next_turn 由 driver 领取）"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+    core.shutdown_join().expect("关闭失败");
+}

@@ -151,6 +151,12 @@ impl ContextCompression {
                                 self.cancel(ctx).await;
                                 return Err(CompressionInterrupt::Command(command));
                             }
+                            // 维护活动期间的新输入（引导消息/工具注入）不得忽略
+                            // 丢弃：取消压缩并上抛，由调用方转入 Inbox 排队。
+                            Command::InjectUserMessage { .. } | Command::InjectTool { .. } => {
+                                self.cancel(ctx).await;
+                                return Err(CompressionInterrupt::Command(command));
+                            }
                             // 配置类命令就地消化（保持原手动压缩行为）。
                             Command::SetReasoningEffort(effort) => {
                                 ctx.agent_config.reasoning_effort = effort.clone();
@@ -241,23 +247,28 @@ fn complete_with_turn_usage(
 pub(crate) async fn run_manual_context_compression(
     mut ctx: TurnContext,
     mut cmd_rx: tokio_mpsc::UnboundedReceiver<Command>,
-) {
+) -> Option<CompressionInterrupt> {
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
 
     let compressor = ContextCompressor::new(ctx.session.clone(), ctx.client.clone());
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
-        return;
+        return None;
     }
     let mut compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
-    if let Ok(result) = compression
+    match compression
         .run(&mut ctx, &mut cmd_rx, CommandPolicy::ConsumeLocally)
         .await
     {
-        compression.complete(&mut ctx, result, None);
+        Ok(result) => {
+            compression.complete(&mut ctx, result, None);
+            None
+        }
+        // 中断类命令已取消压缩，未应用任何结果；引导消息/工具注入原样上抛，
+        // 由调用方转入 Inbox 排队（不丢失，ALR-102/202）。
+        Err(interrupt) => Some(interrupt),
     }
-    // Err：终止类命令已取消压缩，未应用任何结果。
 }
 
 pub(crate) fn notify_cleared(stream_tx: &std::sync::mpsc::Sender<StreamEvent>, session: &Session) {

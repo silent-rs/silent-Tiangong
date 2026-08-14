@@ -503,14 +503,55 @@ impl TurnSpawner {
                 return;
             }
         };
+        let mut ctx = ctx;
+        // 防御性重建 system prompt：压缩请求需要它承载旧摘要（裸 session 直接
+        // 手动压缩时可能缺失）。
+        let prompt_sections = ctx
+            .plugins
+            .iter()
+            .flat_map(|plugin| plugin.prompt_sections())
+            .collect();
+        ctx.session.rebuild_system_prompt(
+            &crate::prompt::SystemPromptConfig::from_plugin_sections(prompt_sections),
+        );
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         let ingress = CommandIngress::new(cmd_tx);
         for plugin in &ctx.plugins {
             plugin.set_feedback_tx(crate::core::plugin::PluginFeedbackTx::new(ingress.clone()));
         }
         scheduling.begin_turn(ingress);
-        crate::react::compression::run_manual_context_compression(ctx, cmd_rx).await;
+        let interrupted =
+            crate::react::compression::run_manual_context_compression(ctx, cmd_rx).await;
         scheduling.end_turn();
+        // 维护活动（手动压缩）被新输入打断：压缩已取消，把消息转入 Inbox——
+        // 引导消息作为下一个 turn，工具注入积压等下次活动（不丢失，ALR-102/202）。
+        match interrupted {
+            Some(crate::react::compression::CompressionInterrupt::Command(
+                Command::InjectUserMessage {
+                    message_id,
+                    content,
+                },
+            )) => {
+                if let Err(error) =
+                    scheduling.push_turn_input(crate::react::inbox::TurnInput::UserMessage {
+                        message_id,
+                        content,
+                    })
+                {
+                    tracing::warn!(
+                        %error,
+                        session_id = %self.session_id,
+                        "手动压缩中断后的引导消息转排队失败"
+                    );
+                }
+            }
+            Some(crate::react::compression::CompressionInterrupt::Command(
+                Command::InjectTool { tool_name, payload },
+            )) => {
+                let _ = scheduling.push_inject(tool_name, payload);
+            }
+            _ => {}
+        }
     }
 
     /// 空闲期清理上下文（同步执行，不涉及模型请求）。
