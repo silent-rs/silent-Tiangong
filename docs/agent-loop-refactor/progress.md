@@ -4,10 +4,10 @@
 
 ## 当前状态
 
-- 当前阶段：任务 02 驱动原型完成，进入任务 03 执行预算与阶段数据。
+- 当前阶段：任务 01/02 按审查意见补齐完成，进入任务 03 执行预算与阶段数据。
 - 当前建议任务：**03 - 执行预算与阶段数据**。
 - 当前阻塞：无。
-- 生产代码状态：新增 react/phase.rs 驱动原型（3 测试），core lib 93 测试通过。
+- 生产代码状态：任务 01 补 ALR-107/108/109/302/111 安全网；任务 02 补真实取消（abort+await）+ 迁移守卫（InstallGuard）。core lib 97 测试通过。
 - 重构基线：`feature/agent-execution-core` @ `7c425bac`（`main` v0.14.3 干净基线，不含引导消息改动）。
 - 引导消息（ALR-101）在重构任务 04/07 中由 `ExecutionPhase` 实现，不合并 `perf/inject-user-message`。
 - 绿色基线：`cargo test -p tiangong-core --lib` → 89 passed；`execute.rs` 3616 行。
@@ -17,8 +17,8 @@
 | 编号 | 任务 | 状态 | 分支 | 提交 | 关键产物 |
 | --- | --- | --- | --- | --- | --- |
 | 00 | [基线冻结](./tasks/00-基线冻结.md) | 已完成 | feature/agent-execution-core | 7c425bac（基线） | main v0.14.3 干净基线、引导消息重构中实现、89 测试绿色 |
-| 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | （本次） | ALR-111 用量测试 + 基线回归网 |
-| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | （本次） | take/install 模式 + AbortHandle 取消，结论写回 design.md |
+| 01 | [关键路径与不变量测试](./tasks/01-关键路径测试.md) | 已完成 | feature/agent-execution-core | （本次） | ALR-107/108/109/302/111 安全网；引导/PendingFinish 留 04/07 |
+| 02 | [驱动原型](./tasks/02-驱动原型.md) | 已完成 | feature/agent-execution-core | （本次） | take/install + abort 等待结束 + InstallGuard 守卫，结论写回 design.md |
 | 03 | [执行预算与阶段数据](./tasks/03-执行预算与阶段数据.md) | 未开始 | - | - | 预算、类型归属、阶段数据模型 |
 | 04 | [模型与完成度阶段](./tasks/04-模型与完成度阶段.md) | 未开始 | - | - | 模型侧生产状态机 |
 | 05 | [工具与审批阶段](./tasks/05-工具与审批阶段.md) | 未开始 | - | - | 工具批次与审批状态机 |
@@ -131,11 +131,11 @@ cargo test -p tiangong-plugin-agent-team
 | 104 Summary 中断降级 | 04 | 待实现 |
 | 105 暂定完成可撤销 | 07 | 待实现 |
 | 106 控制命令完整处理 | 07 | 待实现 |
-| 107 最新消息锚点 | 09（run_turn 级稳态测试） | 待实现 |
-| 108 生命周期唯一 | 09 | 待实现 |
-| 109 唯一终态 | 01 基线 + 09 | 基线覆盖（execute_turn 返回单一 result） |
-| 110 工具协议闭合 | 01 基线 + 05/06 | 基线覆盖（取消时闭合测试） |
-| 111 用量权威 | 01 | 已覆盖（accumulated_usage_is_aggregated_across_requests） |
+| 107 最新消息锚点 | 01（run_turn + 磁盘重载）| 已覆盖（run_turn_emits_single_done_and_anchors_status_to_latest_user_message）|
+| 108 生命周期唯一 | 01（mock 插件计数）| 已覆盖（run_turn_invokes_lifecycle_hooks_exactly_once）|
+| 109 唯一终态 | 01（Done 计数）| 已覆盖（run_turn_emits_single_done_and_anchors_status_to_latest_user_message）|
+| 110 工具协议闭合 | 01 基线 + 05/06 | 基线覆盖（取消时闭合测试）|
+| 111 用量权威 | 01（执行循环累计）+ 07（暂定完成晚到）+ turn 级 | 执行循环累计已覆盖；Session/Done 事件/暂定完成晚到用量待补 |
 
 基线 execute_turn 回归网覆盖核心路径：直接回答、工具循环、Summary（Done/NeedMoreWork/AskUser）、ForceFinal、压缩续接、审批（批准/拒绝/FullTrust）、取消、请求失败、用量累计。引导消息与 PendingFinish 相关测试因基线无对应命令/阶段，在 04/07 加入后补。
 
@@ -144,5 +144,5 @@ cargo test -p tiangong-plugin-agent-team
 | 任务 | fmt | clippy | test | 备注 |
 | --- | --- | --- | --- | --- |
 | 00 基线 | ✅ | ✅ | 89 通过 | main v0.14.3 干净基线 |
-| 01 测试安全网 | ✅ | ✅ | 90 通过 | 新增 ALR-111 用量累计测试 |
-| 02 驱动原型 | ✅ | ✅ | 93 通过 | 新增 react/phase.rs 原型（take/install + AbortHandle） |
+| 01 测试安全网 | ✅ | ✅ | 97 通过 | ALR-107/108/109/302/111 安全网（含 run_turn 级 + mock 插件）|
+| 02 驱动原型 | ✅ | ✅ | 97 通过 | take/install + abort 等待结束 + InstallGuard 守卫 |

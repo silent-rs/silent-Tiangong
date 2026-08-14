@@ -1770,6 +1770,7 @@ mod tests {
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
@@ -2058,6 +2059,7 @@ mod tests {
         stream_rx: std::sync::mpsc::Receiver<StreamEvent>,
         cmd_tx: tokio::sync::mpsc::UnboundedSender<Command>,
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+        storage_root: std::path::PathBuf,
     }
 
     impl TestHarness {
@@ -2072,6 +2074,23 @@ mod tests {
                 ProviderProtocol::OpenAiChatCompletions,
                 tools,
                 tool_overrides,
+                Vec::new(),
+            )
+        }
+
+        /// 额外注入插件（用于生命周期计数等需要插件观察的测试）。
+        fn new_with_plugins(
+            server: &MockServer,
+            tools: Vec<ToolSpec>,
+            tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+            plugins: Vec<Arc<dyn Plugin>>,
+        ) -> Self {
+            Self::new_with_protocol(
+                server,
+                ProviderProtocol::OpenAiChatCompletions,
+                tools,
+                tool_overrides,
+                plugins,
             )
         }
 
@@ -2080,12 +2099,15 @@ mod tests {
             protocol: ProviderProtocol,
             tools: Vec<ToolSpec>,
             tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+            plugins: Vec<Arc<dyn Plugin>>,
         ) -> Self {
             let root = tempfile::tempdir().expect("创建临时目录失败");
             let mut session = Session::new("test-session".to_string());
             session.bind_storage_root(root.path());
             session.append_message(MessageRole::User, "你好");
             session.rebuild_system_prompt(&SystemPromptConfig::from_plugin_sections(Vec::new()));
+            // 暴露 storage_root 供 turn 级测试磁盘重载验证。
+            let storage_root = root.path().to_path_buf();
             // 让 tempdir 存活到 turn 结束(用 `leak` 避免 Rust 借用检查器抱怨;
             // 测试进程结束即回收)。
             std::mem::forget(root);
@@ -2102,7 +2124,7 @@ mod tests {
                 .client(client)
                 .session(session)
                 .stream_tx(stream_tx)
-                .plugins(Vec::new())
+                .plugins(plugins)
                 .context_limit(200_000)
                 .agent_config(agent_config)
                 .trust_mode(TrustMode::FullTrust)
@@ -2116,6 +2138,7 @@ mod tests {
                 stream_rx,
                 cmd_tx,
                 cmd_rx,
+                storage_root,
             }
         }
 
@@ -2408,6 +2431,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             mut cmd_rx,
+            ..
         } = harness;
         let cancel_task = tokio::task::spawn_blocking(move || {
             loop {
@@ -2457,6 +2481,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             cmd_rx,
+            ..
         } = harness;
         let cancel_task = tokio::task::spawn_blocking(move || {
             loop {
@@ -2506,6 +2531,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             cmd_rx,
+            ..
         } = harness;
         let storage_root = ctx
             .session
@@ -2723,6 +2749,157 @@ mod tests {
         harness.drain_stream();
     }
 
+    /// ALR-302 事件契约：工具执行必须先发 ToolStart，完成后发 ToolResult，
+    /// 重构后事件顺序需保持。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_execution_emits_start_before_result_event() {
+        let server = MockServer::start().await;
+        let invocations = Arc::new(Mutex::new(Vec::new()));
+        let mut overrides: HashMap<String, Arc<dyn ToolOverrideHandler>> = HashMap::new();
+        overrides.insert(
+            "echo".to_string(),
+            Arc::new(EchoTool {
+                invocations: invocations.clone(),
+            }),
+        );
+        // 工具调用 → 文本以问号结尾 → Summary 完成。
+        mount_sse(
+            &server,
+            vec![tool_call_chunk("call_1", "echo", "{}"), usage_chunk(15, 3)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("结果还需要补充吗?"), usage_chunk(25, 5)],
+        )
+        .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("已完成。"), usage_chunk(30, 4)],
+        )
+        .await;
+
+        let mut harness = TestHarness::new(&server, vec![tool_spec("echo")], overrides);
+        let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
+
+        let events: Vec<StreamEvent> = harness.stream_rx.try_iter().collect();
+        let start_idx = events.iter().position(
+            |e| matches!(e, StreamEvent::ToolStart { name, .. } if name.as_str() == "echo"),
+        );
+        let result_idx = events.iter().position(
+            |e| matches!(e, StreamEvent::ToolResult { name, .. } if name.as_str() == "echo"),
+        );
+        assert!(start_idx.is_some(), "应发送 echo 的 ToolStart 事件");
+        assert!(result_idx.is_some(), "应发送 echo 的 ToolResult 事件");
+        assert!(
+            start_idx < result_idx,
+            "ToolStart 必须在 ToolResult 之前（ALR-302 事件契约）"
+        );
+    }
+
+    /// ALR-107/109：run_turn 只发一次 Done，并把 turn_status 写入最新用户消息；
+    /// 重载磁盘 session 后锚点一致。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_turn_emits_single_done_and_anchors_status_to_latest_user_message() {
+        use super::super::turn::run_turn;
+
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("你好,我是测试助手。"), usage_chunk(10, 5)],
+        )
+        .await;
+        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        // 标题为 "test-session"（非默认），spawn_title_generation 跳过。
+        let storage_root = harness.storage_root.clone();
+        let session_id = harness.ctx.session.id.clone();
+        let (_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let stream_rx = harness.stream_rx;
+        run_turn(harness.ctx, cmd_rx).await;
+
+        // ALR-109 唯一终态：恰好一个 Done。
+        let events: Vec<StreamEvent> = stream_rx.try_iter().collect();
+        let done = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Done { .. }))
+            .count();
+        assert_eq!(
+            done, 1,
+            "一个物理 turn 只发一次 Done（ALR-109），实际: {done}"
+        );
+
+        // ALR-107 最新消息锚点：重载磁盘 session，最新用户消息应有 turn_status。
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("重载 session");
+        let latest_has_status = reloaded
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .is_some_and(|m| m.turn_status.is_some());
+        assert!(
+            latest_has_status,
+            "最新用户消息应写入 turn_status（ALR-107）"
+        );
+    }
+
+    /// 计数 on_turn_started / on_turn_finished 调用次数的插件，用于验证生命周期唯一性。
+    struct LifecycleCountingPlugin {
+        started: Arc<AtomicU32>,
+        finished: Arc<AtomicU32>,
+    }
+
+    impl ToolOverrideHandler for LifecycleCountingPlugin {}
+    impl ToolSpecProvider for LifecycleCountingPlugin {}
+    impl PromptSectionProvider for LifecycleCountingPlugin {}
+    impl MentionCandidateProvider for LifecycleCountingPlugin {}
+
+    impl Plugin for LifecycleCountingPlugin {
+        fn id(&self) -> &str {
+            "lifecycle-counter"
+        }
+        fn on_turn_started(&self, _: &mut Session, _: usize) {
+            self.started.fetch_add(1, Ordering::SeqCst);
+        }
+        fn on_turn_finished(&self, _: &mut Session, _: usize) {
+            self.finished.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// ALR-108：一个物理 turn 只调用一次 on_turn_started 和一次 on_turn_finished。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_turn_invokes_lifecycle_hooks_exactly_once() {
+        use super::super::turn::run_turn;
+
+        let server = MockServer::start().await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("你好,我是测试助手。"), usage_chunk(10, 5)],
+        )
+        .await;
+        let started = Arc::new(AtomicU32::new(0));
+        let finished = Arc::new(AtomicU32::new(0));
+        let plugin = Arc::new(LifecycleCountingPlugin {
+            started: started.clone(),
+            finished: finished.clone(),
+        });
+        let harness =
+            TestHarness::new_with_plugins(&server, Vec::new(), HashMap::new(), vec![plugin]);
+        let (_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        run_turn(harness.ctx, cmd_rx).await;
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "on_turn_started 应只调用一次（ALR-108）"
+        );
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "on_turn_finished 应只调用一次（ALR-108）"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reasoning_effort_update_applies_to_next_model_request() {
         let server = MockServer::start().await;
@@ -2830,6 +3007,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             mut cmd_rx,
+            ..
         } = harness;
         let runtime_cmd_tx = cmd_tx.clone();
         tokio::spawn(async move {
@@ -2942,6 +3120,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             mut cmd_rx,
+            ..
         } = harness;
         cmd_tx
             .send(Command::SetTrustMode(TrustMode::Supervised))
@@ -3013,6 +3192,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             mut cmd_rx,
+            ..
         } = harness;
         cmd_tx
             .send(Command::SetTrustMode(TrustMode::Supervised))
@@ -3387,6 +3567,7 @@ mod tests {
             ProviderProtocol::DeepSeek,
             vec![tool_spec("verify")],
             overrides,
+            Vec::new(),
         );
         // 第一轮 ReAct 已到上限；总结工具调用必须重置阶段，才能继续处理工具结果。
         harness.ctx.max_tool_rounds = 1;
@@ -3452,6 +3633,7 @@ mod tests {
             stream_rx,
             cmd_tx,
             mut cmd_rx,
+            ..
         } = harness;
         let injection_tx = cmd_tx.clone();
         let injection_task = tokio::task::spawn_blocking(move || {
