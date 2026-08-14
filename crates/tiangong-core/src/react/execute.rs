@@ -30,14 +30,14 @@ use crate::turn_context::TurnContext;
 use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::command::{CommandEffect, Deferred, handle_command};
-use super::compression::{ActiveCompression, CompressionContinuation, observed_total_tokens};
+use super::compression::observed_total_tokens;
 use super::contract::{ReactTextDisposition, TaskContract};
 use super::outcome::TurnExecutionResult;
 use super::phase::{
-    ActiveLlm, ApprovalPhase, CompressionPhase, ExecutionBudget, ExecutionPhase, LlmPurpose,
-    PendingApproval, PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase,
-    ToolTaskOutput,
+    ActiveLlm, ApprovalPhase, ExecutionBudget, ExecutionPhase, LlmPurpose, PendingApproval,
+    PreparedToolCall, RunningToolCall, ToolBatchState, ToolExecutionPhase, ToolTaskOutput,
 };
+use super::request;
 use super::tool_call::start_tool_call;
 
 #[derive(Default)]
@@ -492,6 +492,10 @@ pub(super) struct AgentLoopState {
     pub(super) accumulated_usage: TokenUsage,
     pub(super) tool_history: ToolCallHistory,
     pub(super) contract: TaskContract,
+    /// 最近一次模型响应/工具批次的观测 token 总量（请求前压力检查的信号）。
+    pub(super) last_observed_tokens: usize,
+    /// 待处理的上下文溢出恢复（请求错误策略在下次请求前消费，ALR-304）。
+    pub(super) pending_context_recovery: Option<String>,
 }
 
 impl AgentLoopState {
@@ -502,6 +506,8 @@ impl AgentLoopState {
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
             contract: TaskContract::from_session_anchor(ctx),
+            last_observed_tokens: ctx.session.current_tokens,
+            pending_context_recovery: None,
         }
     }
 
@@ -797,6 +803,61 @@ pub(super) async fn execute_turn(
                     ));
                     continue 'agent_loop;
                 }
+                // ── 请求前策略（ALR-303/304）──
+                // 上下文溢出恢复优先于常规压力压缩；两者都在请求前内联完成，
+                // 压缩不再形成 Agent 顶层阶段。压缩期间到达的命令交还驱动处理。
+                let recovery = state.pending_context_recovery.take();
+                let preparation = match recovery {
+                    Some(error_message) => {
+                        tracing::warn!(session_id = %ctx.session.id, "检测到上下文超限，尝试强制压缩");
+                        match request::recover_context_overflow(
+                            ctx,
+                            &mut state.accumulated_usage,
+                            &context_organizer,
+                            cmd_rx,
+                        )
+                        .await
+                        {
+                            request::ContextRecovery::Retriable => None,
+                            request::ContextRecovery::Exhausted => {
+                                persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
+                                state.install_phase(ExecutionPhase::PendingFinish(
+                                    TurnExecutionResult::failed(
+                                        state.accumulated_usage.clone(),
+                                        error_message,
+                                    ),
+                                ));
+                                continue 'agent_loop;
+                            }
+                            request::ContextRecovery::Interrupted(deferred_command) => {
+                                Some(deferred_command)
+                            }
+                        }
+                    }
+                    None => {
+                        match request::prepare_before_request(
+                            ctx,
+                            &mut state.accumulated_usage,
+                            &context_organizer,
+                            state.last_observed_tokens,
+                            cmd_rx,
+                        )
+                        .await
+                        {
+                            request::RequestPreparation::Ready => None,
+                            request::RequestPreparation::Interrupted(deferred_command) => {
+                                Some(deferred_command)
+                            }
+                        }
+                    }
+                };
+                if let Some(deferred_command) = preparation {
+                    // 归还阶段：命令处理器（如 interrupt_active_work）会 take 当前
+                    // 阶段，KeepCurrent 语义假设阶段仍在驱动手中。
+                    state.install_phase(ExecutionPhase::NeedModel);
+                    deferred = Some(deferred_command);
+                    continue 'agent_loop;
+                }
                 injections.commit(ctx);
                 let request_injection_generation = injections.generation();
                 if state.budget.request_round == 0 {
@@ -1021,7 +1082,6 @@ pub(super) async fn execute_turn(
                             ctx,
                             &mut state,
                             &mut injections,
-                            &context_organizer,
                             &stream_tx,
                             purpose,
                             pending_msg_id,
@@ -1103,21 +1163,12 @@ pub(super) async fn execute_turn(
                             continue 'agent_loop;
                         }
 
+                        // 记录批次响应的观测压力，交给下一次请求前策略统一判断
+                        // （压缩不再是顶层阶段，ALR-303）。
                         let observed_tokens = observed_total_tokens(&tools.batch.response_usage);
-                        if context_organizer.needs_compression(observed_tokens) {
-                            let active = ActiveCompression::start(
-                                ctx,
-                                &context_organizer,
-                                observed_tokens,
-                                CompressionContinuation::ToolBatch,
-                            );
-                            state.install_phase(ExecutionPhase::Compressing(CompressionPhase {
-                                active,
-                                suspended_batch: Some(tools.batch),
-                            }));
-                        } else {
-                            state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
-                        }
+                        state.last_observed_tokens = observed_tokens;
+                        ctx.session.current_tokens = observed_tokens;
+                        state.install_phase(ExecutionPhase::PreparingTools(tools.batch));
                     }
                 }
             }
@@ -1130,74 +1181,6 @@ pub(super) async fn execute_turn(
                     None => Deferred::Closed,
                 });
                 state.install_phase(ExecutionPhase::WaitingApproval(approval));
-            }
-
-            // ── Waiting（兼容层，任务 06 迁移）：上下文压缩进行中 ──
-            ExecutionPhase::Compressing(mut compressing) => {
-                tokio::select! {
-                    biased;
-                    command = cmd_rx.recv() => {
-                        deferred = Some(match command {
-                            Some(command) => Deferred::Command(command),
-                            None => Deferred::Closed,
-                        });
-                        state.install_phase(ExecutionPhase::Compressing(compressing));
-                        continue 'agent_loop;
-                    }
-                    compression_result = compressing.active.wait() => {
-                        let CompressionPhase {
-                            active,
-                            suspended_batch,
-                        } = compressing;
-                        let continuation = active.complete(
-                            ctx,
-                            &mut state.accumulated_usage,
-                            compression_result,
-                        );
-
-                        let next = match continuation {
-                            CompressionContinuation::ReactText {
-                                pending_msg_id,
-                                disposition,
-                                request_injection_generation,
-                            } => finish_react_text(
-                                ctx,
-                                &mut state,
-                                &mut injections,
-                                pending_msg_id,
-                                disposition,
-                                request_injection_generation,
-                            ),
-                            CompressionContinuation::ToolBatch => {
-                                ExecutionPhase::PreparingTools(
-                                    suspended_batch.expect("ToolBatch 续接必须挂起批次"),
-                                )
-                            }
-                            CompressionContinuation::InvalidToolCalls => {
-                                ExecutionPhase::NeedModel
-                            }
-                            CompressionContinuation::ContextRetry {
-                                previous_summary_up_to,
-                                error_message,
-                            } => {
-                                injections.commit(ctx);
-                                if ctx.session.summary_up_to > previous_summary_up_to {
-                                    ExecutionPhase::NeedModel
-                                } else {
-                                    persist_error(
-                                        ctx,
-                                        format!("ReAct 循环请求失败：{error_message}"),
-                                    );
-                                    ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
-                                        state.accumulated_usage.clone(),
-                                        error_message,
-                                    ))
-                                }
-                            }
-                        };
-                        state.install_phase(next);
-                    }
-                }
             }
         }
     };
@@ -1226,7 +1209,6 @@ fn complete_llm_request(
     ctx: &mut TurnContext,
     state: &mut AgentLoopState,
     injections: &mut ToolInjectionBuffer,
-    context_organizer: &ContextOrganizer,
     stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
     purpose: LlmPurpose,
     pending_msg_id: String,
@@ -1254,20 +1236,9 @@ fn complete_llm_request(
                         || (error_message.contains("content_blocks=0")
                             && error_message.contains("stop_reason=end_turn"));
                     if should_compress {
-                        tracing::warn!("检测到上下文超限，尝试强制压缩");
-                        let previous_summary_up_to = ctx.session.summary_up_to;
-                        let active = ActiveCompression::start_forced(
-                            ctx,
-                            context_organizer,
-                            CompressionContinuation::ContextRetry {
-                                previous_summary_up_to,
-                                error_message,
-                            },
-                        );
-                        return ExecutionPhase::Compressing(CompressionPhase {
-                            active,
-                            suspended_batch: None,
-                        });
+                        // 上下文溢出：交由下一次请求前的恢复策略强制压缩（ALR-304）。
+                        state.pending_context_recovery = Some(error_message);
+                        return ExecutionPhase::NeedModel;
                     }
                     injections.commit(ctx);
                     persist_error(ctx, format!("ReAct 循环请求失败：{error_message}"));
@@ -1289,53 +1260,26 @@ fn complete_llm_request(
             );
             state.budget.request_round += 1;
             state.budget.react_rounds_in_phase += 1;
+            // 记录观测压力，交给下一次请求前策略统一判断（ALR-303）；
+            // 同步到 session，跨 turn 的请求前策略也能读取该信号。
+            let observed_tokens = observed_total_tokens(&response.usage);
+            state.last_observed_tokens = observed_tokens;
+            ctx.session.current_tokens = observed_tokens;
 
             if response.tool_calls.is_empty() && !response.invalid_tool_calls.is_empty() {
                 append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
-                let observed_tokens = observed_total_tokens(&response.usage);
-                if context_organizer.needs_compression(observed_tokens) {
-                    let active = ActiveCompression::start(
-                        ctx,
-                        context_organizer,
-                        observed_tokens,
-                        CompressionContinuation::InvalidToolCalls,
-                    );
-                    ExecutionPhase::Compressing(CompressionPhase {
-                        active,
-                        suspended_batch: None,
-                    })
-                } else {
-                    ExecutionPhase::NeedModel
-                }
+                ExecutionPhase::NeedModel
             } else if response.tool_calls.is_empty() {
                 let disposition =
                     handle_react_text_response(ctx, &pending_msg_id, &response, state);
-                let observed_tokens = observed_total_tokens(&response.usage);
-                if context_organizer.needs_compression(observed_tokens) {
-                    let active = ActiveCompression::start(
-                        ctx,
-                        context_organizer,
-                        observed_tokens,
-                        CompressionContinuation::ReactText {
-                            pending_msg_id,
-                            disposition,
-                            request_injection_generation,
-                        },
-                    );
-                    ExecutionPhase::Compressing(CompressionPhase {
-                        active,
-                        suspended_batch: None,
-                    })
-                } else {
-                    finish_react_text(
-                        ctx,
-                        state,
-                        injections,
-                        pending_msg_id,
-                        disposition,
-                        request_injection_generation,
-                    )
-                }
+                finish_react_text(
+                    ctx,
+                    state,
+                    injections,
+                    pending_msg_id,
+                    disposition,
+                    request_injection_generation,
+                )
             } else {
                 let calls = record_tool_calls(
                     ctx,
@@ -1821,14 +1765,18 @@ mod tests {
         );
     }
 
+    /// 请求前压缩保留模型可见的续接消息：上一 turn 观测压力超阈值，下一 turn
+    /// 在发起模型请求前压缩（ALR-303），摘要与 resume 持久化到磁盘。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compression_persists_model_visible_resume_after_system_prompt() {
         let server = MockServer::start().await;
+        // 第一段：大用量文本完成，建立跨 turn 的压力信号。
         mount_sse(
             &server,
             vec![text_delta_chunk("最终回答。"), usage_chunk(185_900, 5)],
         )
         .await;
+        // 第二段请求前压缩；压缩后的模型请求。
         mount_completion(
             &server,
             "[[CURRENT_TASK]]\n当前任务已完成\n[[SUMMARY]]\n历史摘要",
@@ -1838,32 +1786,43 @@ mod tests {
             None,
         )
         .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("继续回答。"), usage_chunk(30, 5)],
+        )
+        .await;
 
         let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let first = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(matches!(first.outcome, TurnExecutionOutcome::Success));
+        assert_eq!(first.usage.total_tokens, 185_905);
+
+        // 新 turn：请求前压力检查触发压缩（新增用户消息成为续接的当前任务）。
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提出新问题");
         let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
         assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
-        assert_eq!(result.usage.total_tokens, 186_025);
+        assert_eq!(result.usage.total_tokens, 155);
         assert_eq!(
             harness.ctx.session.context_summary.as_deref(),
             Some("历史摘要")
         );
-        let resume = &harness.ctx.session.messages[harness.ctx.session.summary_up_to];
-        assert_eq!(resume.role, MessageRole::User);
-        assert_eq!(resume.phase, crate::session::MessagePhase::CompressedResume);
-        assert!(!resume.model_excluded);
-        assert!(matches!(
-            &resume.content[0],
-            crate::session::ContentBlock::ModelInstruction { text }
-                if text.contains("当前任务已完成")
-        ));
-
+        // 压缩只是 session 的一次调整：最近交互保留（锚点用户消息承载当前任务），
+        // 不注入合成续接消息。
         let context = harness.ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[1].id, resume.id);
-        assert_eq!(
-            context[1].phase,
-            crate::session::MessagePhase::CompressedResume
+        assert_eq!(context[1].text_content(), "继续提出新问题");
+        assert!(
+            harness
+                .ctx
+                .session
+                .messages
+                .iter()
+                .all(|message| message.phase != crate::session::MessagePhase::CompressedResume),
+            "压缩不注入合成续接消息"
         );
 
         let persisted = Session::load_from_storage(
@@ -1876,20 +1835,10 @@ mod tests {
         )
         .expect("压缩结果应持久化");
         assert_eq!(
-            persisted.messages[persisted.summary_up_to].phase,
-            crate::session::MessagePhase::CompressedResume
+            persisted.context_summary.as_deref(),
+            Some("历史摘要"),
+            "摘要边界应持久化"
         );
-
-        harness
-            .ctx
-            .session
-            .append_message(MessageRole::User, "继续提出新问题");
-        let context = harness.ctx.session.context();
-        assert_eq!(
-            context[1].phase,
-            crate::session::MessagePhase::CompressedResume
-        );
-        assert_eq!(context[2].text_content(), "继续提出新问题");
 
         let requests = server.received_requests().await.unwrap();
         let compression_body: serde_json::Value =
@@ -1927,6 +1876,10 @@ mod tests {
             .ctx
             .session
             .append_message(MessageRole::Assistant, "较早回答");
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "处理 latest.txt");
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![MessageToolCall {
             id: "latest-call".to_string(),
@@ -1949,13 +1902,22 @@ mod tests {
             result.outcome
         );
         assert_eq!(result.usage.total_tokens, 135);
-        assert_eq!(harness.ctx.session.summary_up_to, 2);
+        assert_eq!(harness.ctx.session.summary_up_to, 3);
         let context = harness.ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
+        // 锚点被折叠：注入 LLM 可见、用户不可见的锚点消息（用户请求原文），
+        // 随后是完整保留的最近工具批次。
+        assert_eq!(context[1].role, MessageRole::User);
         assert_eq!(
             context[1].phase,
             crate::session::MessagePhase::CompressedResume
         );
+        assert!(matches!(
+            &context[1].content[0],
+            crate::session::ContentBlock::ModelInstruction { text }
+                if text.contains("处理 latest.txt")
+        ));
+        assert_eq!(context[2].role, MessageRole::Assistant);
         assert!(context.iter().any(|message| {
             message.tool_call_id.as_deref() == Some("latest-call")
                 && message.text_content() == "recent-tool-output"
@@ -1972,6 +1934,8 @@ mod tests {
         assert!(retry_body.contains("recent-tool-output"));
     }
 
+    /// 截断的压缩结果不得推进摘要边界：finish_reason=length 视为失败，
+    /// session 保持原状（请求前压缩路径，ALR-303）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn truncated_compression_does_not_advance_summary_boundary() {
         let server = MockServer::start().await;
@@ -1989,12 +1953,22 @@ mod tests {
             None,
         )
         .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("继续回答。"), usage_chunk(30, 5)],
+        )
+        .await;
 
         let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let first = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        assert!(matches!(first.outcome, TurnExecutionOutcome::Success));
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提问");
         let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
 
         assert!(matches!(result.outcome, TurnExecutionOutcome::Success));
-        assert_eq!(result.usage.total_tokens, 186_025);
         assert_eq!(harness.ctx.session.summary_up_to, 0);
         assert!(harness.ctx.session.context_summary.is_none());
         assert!(harness.stream_rx.try_iter().any(|event| matches!(
@@ -2006,6 +1980,8 @@ mod tests {
         )));
     }
 
+    /// 压缩结果持久化失败时保持原压缩状态：不发 Auto 成功事件，仅 Failed 事件
+    ///（请求前压缩路径，ALR-303）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn persistence_failure_keeps_original_compression_state() {
         let server = MockServer::start().await;
@@ -2023,6 +1999,11 @@ mod tests {
             None,
         )
         .await;
+        mount_sse(
+            &server,
+            vec![text_delta_chunk("继续回答。"), usage_chunk(30, 5)],
+        )
+        .await;
 
         let invalid_root = tempfile::tempdir().unwrap();
         let blocking_file = invalid_root.path().join("not-a-directory");
@@ -2030,6 +2011,11 @@ mod tests {
         let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
         harness.ctx.session.bind_storage_root(blocking_file);
 
+        let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提问");
         let result = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
         let events = harness.stream_rx.try_iter().collect::<Vec<_>>();
 
@@ -2052,6 +2038,8 @@ mod tests {
         )));
     }
 
+    /// 请求前压缩期间取消：压缩被中止（Cancelled 事件），turn 以取消终态结束
+    /// 且不应用任何压缩结果（ALR-303/306）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_interrupts_active_context_compression() {
         let server = MockServer::start().await;
@@ -2070,7 +2058,14 @@ mod tests {
         )
         .await;
 
-        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        harness.drain_stream();
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续提问");
+
         let TestHarness {
             mut ctx,
             stream_rx,
@@ -2899,15 +2894,18 @@ mod tests {
 
     /// ALR-101（压缩分支）：压缩进行中收到引导消息——取消压缩、保存新消息、
     /// 从新意图重启；被取消压缩的迟到结果不得应用（context_summary 保持为空）。
+    /// 请求前压缩期间注入用户消息：压缩被中止、迟到结果不应用，新意图重启后
+    /// 正常完成（ALR-102/303）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inject_during_compression_cancels_and_restarts_without_applying_summary() {
         let server = MockServer::start().await;
-        // 1) 首轮回答触发自动压缩（用量超限），压缩响应整体延迟制造打断窗口。
+        // 1) 第一段：大用量文本完成（建立压力信号）。
         mount_sse(
             &server,
             vec![text_delta_chunk("部分回答。"), usage_chunk(185_900, 5)],
         )
         .await;
+        // 2) 第二段请求前压缩（响应延迟制造注入窗口）。
         mount_completion(
             &server,
             "[[CURRENT_TASK]]\n旧任务\n[[SUMMARY]]\n旧摘要（不应被应用）",
@@ -2917,19 +2915,27 @@ mod tests {
             Some(Duration::from_millis(400)),
         )
         .await;
-        // 2) 新意图请求：文本 → 进入完成度检查；3) Summary 完成。
+        // 3) 注入重启后：再次请求前压缩（无可用压缩响应，失败不应用）。
         mount_sse(
             &server,
             vec![text_delta_chunk("按新要求完成。"), usage_chunk(20, 4)],
         )
         .await;
+        // 4) 最终模型请求。
         mount_sse(
             &server,
             vec![text_delta_chunk("已完成。"), usage_chunk(25, 3)],
         )
         .await;
 
-        let harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let mut harness = TestHarness::new(&server, Vec::new(), HashMap::new());
+        let _ = execute_turn(&mut harness.ctx, &mut harness.cmd_rx).await;
+        harness.drain_stream();
+        harness
+            .ctx
+            .session
+            .append_message(MessageRole::User, "继续任务");
+
         let TestHarness {
             mut ctx,
             stream_rx: _,
@@ -2937,11 +2943,11 @@ mod tests {
             mut cmd_rx,
             ..
         } = harness;
-        // execute_turn 独立任务运行并归还 ctx；主任务轮询到压缩请求（第 2 个）后注入。
         let turn = tokio::spawn(async move {
             let result = execute_turn(&mut ctx, &mut cmd_rx).await;
             (result, ctx)
         });
+        // 第一段已发出 1 个请求；等待第二段的压缩请求（第 2 个）后注入。
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while server.received_requests().await.map_or(0, |r| r.len()) < 2 {
             if tokio::time::Instant::now() >= deadline {

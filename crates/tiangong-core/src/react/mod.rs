@@ -12,6 +12,7 @@ mod interrupt;
 pub mod message;
 mod outcome;
 mod phase;
+mod request;
 mod timer;
 mod tool_call;
 pub mod turn;

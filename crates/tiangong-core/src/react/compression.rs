@@ -19,104 +19,221 @@ use super::context::{emit_token_usage, rebuild_system_prompt_for_session};
 pub(super) type CompressionResult = std::result::Result<CompressionUpdate, CompressionError>;
 type CompressionTask = tokio::task::JoinHandle<CompressionResult>;
 
-/// 压缩完成后待执行的后续动作。
-pub(super) enum CompressionContinuation {
-    ReactText {
-        pending_msg_id: String,
-        disposition: super::contract::ReactTextDisposition,
-        request_injection_generation: u64,
-    },
-    ToolBatch,
-    InvalidToolCalls,
-    ContextRetry {
-        previous_summary_up_to: usize,
-        error_message: String,
-    },
+/// 压缩种类：三种场景的全部差异都在这里参数化（启动参数、用量归属、通知文案）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompressionKind {
+    /// 请求前压力压缩：含当前任务续接，用量计入 turn 累计。
+    Auto { observed_tokens: usize },
+    /// 上下文溢出强制压缩：从强制分割点开始，用量计入 turn 累计。
+    Forced,
+    /// 手动压缩：不含当前任务续接，用量计入 session 并显式落盘。
+    Manual { observed_tokens: usize },
 }
 
-pub(super) struct ActiveCompression<C> {
+/// 压缩会话的中断原因（`run` 返回；取消类命令已在内部分流）。
+pub(crate) enum CompressionInterrupt {
+    Command(Command),
+    Closed,
+}
+
+/// `run` 的命令策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandPolicy {
+    /// 任何命令都取消压缩并上抛，由调用方（主循环）统一处理（Auto/Forced）。
+    Relay,
+    /// 终止类命令取消并上抛；配置类就地消化继续等待；其余忽略（Manual）。
+    ConsumeLocally,
+}
+
+/// 一次统一的上下文压缩会话：启动 → 等待（命令可中断）→ 提交。
+///
+/// 三种压缩场景（请求前压力、溢出强制、手动）共用同一份等待与提交逻辑，
+/// 差异全部由 [`CompressionKind`] 表达；压缩不再是 Agent 顶层阶段（ALR-303）。
+pub(crate) struct ContextCompression {
     task: CompressionTask,
-    observed_tokens: usize,
-    continuation: C,
+    kind: CompressionKind,
 }
 
-impl<C> ActiveCompression<C> {
-    pub(super) fn start(
+impl ContextCompression {
+    /// 发起请求前压力压缩。
+    pub(super) fn auto(
         ctx: &TurnContext,
         organizer: &ContextOrganizer,
         observed_tokens: usize,
-        continuation: C,
     ) -> Self {
+        Self::start(
+            ctx,
+            organizer,
+            observed_tokens,
+            CompressionKind::Auto { observed_tokens },
+        )
+    }
+
+    /// 发起强制压缩（上下文溢出恢复）。
+    pub(super) fn forced(ctx: &TurnContext, organizer: &ContextOrganizer) -> Self {
+        Self::start(ctx, organizer, 0, CompressionKind::Forced)
+    }
+
+    /// 发起手动压缩。
+    fn manual(ctx: &TurnContext, organizer: &ContextOrganizer, observed_tokens: usize) -> Self {
+        Self::start(
+            ctx,
+            organizer,
+            observed_tokens,
+            CompressionKind::Manual { observed_tokens },
+        )
+    }
+
+    /// 统一启动：三种压缩共用同一分割点（保留最近一次完整交互，折叠更早
+    /// 历史），产出只是 session 的一次调整（摘要 + 边界推进），不注入任何
+    /// 合成消息——当前任务由 Loop 保留的锚点用户消息承载。
+    fn start(
+        ctx: &TurnContext,
+        organizer: &ContextOrganizer,
+        observed_tokens: usize,
+        kind: CompressionKind,
+    ) -> Self {
+        eprintln!(
+            "SPLIT debug: {:?} msgs={:?}",
+            compression_split_point(&ctx.session),
+            ctx.session
+                .messages
+                .iter()
+                .map(|m| format!(
+                    "{:?}|{}",
+                    m.role,
+                    m.text_content().chars().take(8).collect::<String>()
+                ))
+                .collect::<Vec<_>>()
+        );
         notify_started(ctx);
         Self {
             task: start_task(
                 ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
                 organizer,
                 observed_tokens,
-                true,
-                Some(ctx.session.messages.len()),
+                compression_split_point(&ctx.session),
             ),
-            observed_tokens,
-            continuation,
+            kind,
         }
     }
 
-    pub(super) fn start_forced(
-        ctx: &TurnContext,
-        organizer: &ContextOrganizer,
-        continuation: C,
-    ) -> Self {
-        notify_started(ctx);
-        Self {
-            task: start_task(
-                ContextCompressor::new(ctx.session.clone(), ctx.client.clone()),
-                organizer,
-                0,
-                true,
-                forced_compression_split_point(&ctx.session),
-            ),
-            observed_tokens: ctx.context_limit,
-            continuation,
-        }
+    /// 取消压缩任务并通知取消（压缩被命令中断时）。
+    pub(crate) async fn cancel(&mut self, ctx: &TurnContext) {
+        cancel_task(std::mem::replace(&mut self.task, noop_task()), ctx).await;
     }
 
-    pub(super) async fn wait(&mut self) -> CompressionResult {
-        resolve_task_result((&mut self.task).await)
-    }
-
-    pub(super) async fn cancel(self, ctx: &TurnContext) {
-        cancel_task(self.task, ctx).await;
-    }
-
-    pub(super) fn complete(
-        self,
+    /// 压缩与命令双路等待：命令优先（biased）；到达时取消压缩并上抛。
+    pub(crate) async fn run(
+        &mut self,
         ctx: &mut TurnContext,
-        accumulated_usage: &mut TokenUsage,
-        result: CompressionResult,
-    ) -> C {
-        let Self {
-            observed_tokens,
-            continuation,
-            ..
-        } = self;
-        match result {
-            Ok(update) => {
-                accumulated_usage.accumulate(&update.usage);
-                match apply_compression(ctx, &update, false) {
-                    Ok(current_tokens) => {
-                        notify_auto_success(ctx, &update, current_tokens, observed_tokens);
-                    }
-                    Err(error) => {
-                        notify_auto_failure(ctx, &update.usage, &error);
+        cmd_rx: &mut tokio_mpsc::UnboundedReceiver<Command>,
+        policy: CommandPolicy,
+    ) -> std::result::Result<CompressionResult, CompressionInterrupt> {
+        loop {
+            tokio::select! {
+                biased;
+                command = cmd_rx.recv() => {
+                    let command = match command {
+                        Some(command) => command,
+                        None => {
+                            self.cancel(ctx).await;
+                            return Err(CompressionInterrupt::Closed);
+                        }
+                    };
+                    match policy {
+                        CommandPolicy::Relay => {
+                            self.cancel(ctx).await;
+                            return Err(CompressionInterrupt::Command(command));
+                        }
+                        CommandPolicy::ConsumeLocally => match command {
+                            Command::Cancel | Command::Shutdown => {
+                                self.cancel(ctx).await;
+                                return Err(CompressionInterrupt::Command(command));
+                            }
+                            // 配置类命令就地消化（保持原手动压缩行为）。
+                            Command::SetReasoningEffort(effort) => {
+                                ctx.agent_config.reasoning_effort = effort.clone();
+                                ctx.session.reasoning_effort = Some(effort);
+                            }
+                            Command::SetTrustMode(mode) => {
+                                ctx.trust_mode = mode;
+                                ctx.session.trust_mode = mode;
+                            }
+                            _ => {}
+                        },
                     }
                 }
-            }
-            Err(error) => {
-                accumulated_usage.accumulate(&error.usage);
-                notify_auto_failure(ctx, &error.usage, &error);
+                task_result = &mut self.task => {
+                    return Ok(resolve_task_result(task_result));
+                }
             }
         }
-        continuation
+    }
+
+    /// 提交压缩结果：应用摘要、按种类累计用量并通知（ALR-307）。
+    ///
+    /// `result` 来自 `run` 的完成返回。Auto/Forced 的用量计入 `turn_usage`
+    /// （turn 累计）；Manual 计入 session 并显式落盘。
+    pub(crate) fn complete(
+        self,
+        ctx: &mut TurnContext,
+        result: CompressionResult,
+        turn_usage: Option<&mut TokenUsage>,
+    ) {
+        let Self { kind, task } = self;
+        drop(task);
+        match kind {
+            CompressionKind::Forced => {
+                let observed_tokens = ctx.context_limit;
+                complete_with_turn_usage(
+                    ctx,
+                    turn_usage.expect("Forced 压缩必须提供 turn 用量"),
+                    observed_tokens,
+                    result,
+                );
+            }
+            CompressionKind::Auto { observed_tokens } => {
+                complete_with_turn_usage(
+                    ctx,
+                    turn_usage.expect("Auto 压缩必须提供 turn 用量"),
+                    observed_tokens,
+                    result,
+                );
+            }
+            CompressionKind::Manual { .. } => complete_manual(ctx, result),
+        }
+    }
+}
+
+/// 取消后的占位任务（run 已返回，占位仅为保持结构可丢弃，永不完成）。
+fn noop_task() -> CompressionTask {
+    tokio::spawn(async { std::future::pending::<CompressionResult>().await })
+}
+
+/// Auto/Forced 的统一提交：应用、累计 turn 用量并通知。
+fn complete_with_turn_usage(
+    ctx: &mut TurnContext,
+    turn_usage: &mut TokenUsage,
+    observed_tokens: usize,
+    result: CompressionResult,
+) {
+    match result {
+        Ok(update) => {
+            turn_usage.accumulate(&update.usage);
+            match apply_compression(ctx, &update, false) {
+                Ok(current_tokens) => {
+                    notify_auto_success(ctx, &update, current_tokens, observed_tokens);
+                }
+                Err(error) => {
+                    notify_auto_failure(ctx, &update.usage, &error);
+                }
+            }
+        }
+        Err(error) => {
+            turn_usage.accumulate(&error.usage);
+            notify_auto_failure(ctx, &error.usage, &error);
+        }
     }
 }
 
@@ -127,43 +244,20 @@ pub(crate) async fn run_manual_context_compression(
 ) {
     let observed_tokens = ctx.session.current_tokens;
     let organizer = ContextOrganizer::new(ctx.context_limit);
-    notify_started(&ctx);
 
     let compressor = ContextCompressor::new(ctx.session.clone(), ctx.client.clone());
     if !compressor.has_pending_messages() {
         notify_result(&ctx, ContextCompressAction::Noop);
         return;
     }
-    let mut task = start_task(
-        compressor,
-        &organizer,
-        observed_tokens,
-        false,
-        Some(ctx.session.messages.len()),
-    );
-
-    let result = loop {
-        tokio::select! {
-            biased;
-            command = cmd_rx.recv() => match command {
-                Some(Command::Cancel | Command::Shutdown) | None => {
-                    cancel_task(task, &ctx).await;
-                    return;
-                }
-                Some(Command::SetReasoningEffort(effort)) => {
-                    ctx.agent_config.reasoning_effort = effort.clone();
-                    ctx.session.reasoning_effort = Some(effort);
-                }
-                Some(Command::SetTrustMode(mode)) => {
-                    ctx.trust_mode = mode;
-                    ctx.session.trust_mode = mode;
-                }
-                Some(_) => {}
-            },
-            task_result = &mut task => break resolve_task_result(task_result),
-        }
-    };
-    complete_manual(&mut ctx, result);
+    let mut compression = ContextCompression::manual(&ctx, &organizer, observed_tokens);
+    if let Ok(result) = compression
+        .run(&mut ctx, &mut cmd_rx, CommandPolicy::ConsumeLocally)
+        .await
+    {
+        compression.complete(&mut ctx, result, None);
+    }
+    // Err：终止类命令已取消压缩，未应用任何结果。
 }
 
 pub(crate) fn notify_cleared(stream_tx: &std::sync::mpsc::Sender<StreamEvent>, session: &Session) {
@@ -178,7 +272,12 @@ pub(super) fn observed_total_tokens(usage: &TokenUsage) -> usize {
     }
 }
 
-fn forced_compression_split_point(session: &Session) -> Option<usize> {
+/// 压缩分割点：保留最近一次完整交互（最新可见消息及其所属工具批次），
+/// 之前的可压缩历史（含锚点用户消息本身）折叠为摘要。
+///
+/// 锚点被折叠时由 `apply_compression` 注入 LLM 可见、用户不可见的锚点消息
+///（用户最近请求原文），满足 Provider「首条非 System 消息必须是 User」约束。
+fn compression_split_point(session: &Session) -> Option<usize> {
     let start = session.summary_up_to.min(session.messages.len());
     let last_visible = (start..session.messages.len()).rev().find(|&index| {
         let message = &session.messages[index];
@@ -210,33 +309,47 @@ fn forced_compression_split_point(session: &Session) -> Option<usize> {
         .then_some(recent_start)
 }
 
-fn build_compression_resume_message(current_task: &str) -> Message {
+/// 构造 LLM 可见、用户不可见的锚点消息：`User` 角色（满足 Provider 首条
+/// 约束）+ `CompressedResume` 阶段（前端不展示/搜索/编辑）+ `ModelInstruction`
+/// 内容块（进入模型请求，不属于用户可见文本）。内容是被折叠锚点的原文，
+/// 由程序直接复制，不经过 LLM 提取。
+fn build_anchor_resume_message(anchor_text: &str) -> Message {
     let mut message = Message::new(MessageRole::User, "");
     message.content = vec![ContentBlock::model_instruction(format!(
-        "以下是上下文压缩后的当前任务状态，请据此继续执行，不要重新询问用户：\n\n{current_task}"
+        "用户当前请求（压缩后原文保留）：\n\n{anchor_text}"
     ))];
     message.phase = MessagePhase::CompressedResume;
     message
+}
+
+/// 被折叠区间内最后一条可见用户消息的文本（锚点原文）。
+fn folded_anchor_text(session: &Session, folded_end: usize) -> Option<String> {
+    let start = session.summary_up_to.min(folded_end);
+    (start..folded_end)
+        .rev()
+        .find(|index| {
+            let message = &session.messages[*index];
+            !message.model_excluded && message.role == MessageRole::User
+        })
+        .map(|index| session.messages[index].text_content())
+        .filter(|text| !text.trim().is_empty())
 }
 
 fn start_task(
     compressor: ContextCompressor,
     organizer: &ContextOrganizer,
     observed_tokens: usize,
-    include_current_task: bool,
     split_point: Option<usize>,
 ) -> CompressionTask {
     let output_budget = organizer.compression_output_budget(observed_tokens);
     tokio::spawn(async move {
         let split_point = split_point.ok_or_else(|| {
-            CompressionError::new("上下文已超限，但没有可与最近交互分离的较早历史，无法强制压缩")
+            CompressionError::new("上下文已超限，但没有可与最近交互分离的较早历史，无法压缩")
         })?;
         let output_budget = output_budget.ok_or_else(|| {
             CompressionError::new("上下文剩余空间不足 2048 tokens，无法生成有效摘要")
         })?;
-        compressor
-            .compress(split_point, output_budget, include_current_task)
-            .await
+        compressor.compress(split_point, output_budget).await
     })
 }
 
@@ -293,15 +406,23 @@ fn apply_compression(
     }
 
     let mut candidate = ctx.session.clone();
-    candidate.context_summary = Some(update.summary.clone());
-    candidate.summary_up_to = update.summary_up_to;
-    mark_compact_boundary(&mut candidate.messages, update.summary_up_to);
-    if let Some(current_task) = update.current_task.as_deref() {
+    // 保留区不以 User 开头（锚点被折叠）时，注入 LLM 可见、用户不可见的
+    // 锚点消息承载用户最近请求原文（程序复制，非 LLM 提取）。
+    let needs_anchor = candidate
+        .messages
+        .get(update.summary_up_to)
+        .is_none_or(|message| message.role != MessageRole::User || message.model_excluded);
+    if needs_anchor
+        && let Some(anchor_text) = folded_anchor_text(&ctx.session, update.summary_up_to)
+    {
         candidate.messages.insert(
             update.summary_up_to,
-            build_compression_resume_message(current_task),
+            build_anchor_resume_message(&anchor_text),
         );
     }
+    candidate.context_summary = Some(update.summary.clone());
+    candidate.summary_up_to = update.summary_up_to;
+    mark_compact_boundary(&mut candidate.messages, candidate.summary_up_to);
     if account_usage_in_session {
         candidate.token_usage.accumulate(&update.usage);
         candidate.active_agent_current_tokens = 0;
@@ -422,6 +543,8 @@ mod tests {
     use crate::model::SingleProviderClient;
     use crate::observe::Observer;
     use crate::permission::TrustMode;
+    use crate::session::Message;
+    use crate::session::MessagePhase;
     use crate::session::MessageToolCall;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
 
@@ -456,20 +579,14 @@ mod tests {
         session: &Session,
         previous_summary_up_to: usize,
         summary: &str,
-        current_task: &str,
+        summary_up_to: usize,
     ) -> CompressionUpdate {
         CompressionUpdate {
             summary: summary.to_string(),
-            current_task: Some(current_task.to_string()),
             usage: TokenUsage::default(),
             previous_summary_up_to,
-            summary_up_to: session.messages.len(),
-            boundary_message_id: session
-                .messages
-                .last()
-                .expect("测试会话应存在消息")
-                .id
-                .clone(),
+            summary_up_to,
+            boundary_message_id: session.messages[summary_up_to - 1].id.clone(),
         }
     }
 
@@ -500,10 +617,11 @@ mod tests {
     }
 
     #[test]
-    fn forced_compression_keeps_the_latest_complete_tool_batch() {
+    fn split_point_keeps_the_latest_complete_tool_batch() {
         let mut session = Session::new("test");
         session.append_message(MessageRole::User, "较早问题");
         session.append_message(MessageRole::Assistant, "较早回答");
+        session.append_message(MessageRole::User, "锚点问题");
 
         let mut assistant = Message::new(MessageRole::Assistant, "");
         assistant.tool_calls = vec![MessageToolCall {
@@ -522,79 +640,49 @@ mod tests {
         hidden.model_excluded = true;
         session.messages.push(hidden);
 
-        assert_eq!(forced_compression_split_point(&session), Some(2));
+        // 锚点用户消息允许被折叠（由锚点消息机制续接）：保留最近工具批次。
+        assert_eq!(compression_split_point(&session), Some(3));
     }
 
     #[test]
-    fn forced_compression_requires_history_before_the_latest_interaction() {
+    fn split_point_requires_history_before_the_latest_interaction() {
         let mut session = Session::new("test");
         session.append_message(MessageRole::User, "当前问题");
-        assert_eq!(forced_compression_split_point(&session), None);
+        assert_eq!(compression_split_point(&session), None);
 
         session
             .messages
             .insert(0, Message::new(MessageRole::User, "较早问题"));
-        assert_eq!(forced_compression_split_point(&session), Some(1));
+        assert_eq!(compression_split_point(&session), Some(1));
     }
 
+    /// 压缩只是 session 的一次调整：摘要推进边界，不注入任何合成消息；
+    /// 最近交互保留在模型上下文中（当前任务由 Loop 的锚点用户消息承载）。
     #[test]
-    fn resume_message_is_model_visible_user_message() {
-        let message = build_compression_resume_message("继续任务");
-
-        assert_eq!(message.role, MessageRole::User);
-        assert_eq!(message.phase, MessagePhase::CompressedResume);
-        assert!(!message.model_excluded);
-        assert!(matches!(
-            &message.content[0],
-            ContentBlock::ModelInstruction { text } if text.contains("继续任务")
-        ));
-    }
-
-    #[test]
-    fn consecutive_compressions_expose_only_latest_resume_to_model() {
+    fn compression_folds_history_and_keeps_recent_interaction_in_context() {
         let mut session = Session::new("test");
-        session.append_message(MessageRole::User, "第一轮问题");
-        session.append_message(MessageRole::Assistant, "第一轮回答");
+        for round in ["第一轮", "第二轮", "第三轮"] {
+            session.append_message(MessageRole::User, format!("{round}问题"));
+            session.append_message(MessageRole::Assistant, format!("{round}回答"));
+        }
         let (mut ctx, _root) = test_context(session);
 
-        let first = update_for(&ctx.session, 0, "第一轮摘要", "第一轮续接");
-        apply_compression(&mut ctx, &first, false).expect("第一次压缩应成功");
-        let first_resume_id = ctx.session.messages[ctx.session.summary_up_to].id.clone();
+        // 模拟压缩分割点：保留第三轮（最近交互），折叠前两轮。
+        let update = update_for(&ctx.session, 0, "前两轮摘要", 4);
+        apply_compression(&mut ctx, &update, false).expect("压缩应成功");
 
-        ctx.session.append_message(MessageRole::User, "第二轮问题");
-        ctx.session
-            .append_message(MessageRole::Assistant, "第二轮回答");
+        assert_eq!(ctx.session.context_summary.as_deref(), Some("前两轮摘要"));
+        assert_eq!(ctx.session.summary_up_to, 4);
         let context = ctx.session.context();
         assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[1].id, first_resume_id);
-        assert_eq!(context[2].text_content(), "第二轮问题");
-
-        let previous_summary_up_to = ctx.session.summary_up_to;
-        let second = update_for(
-            &ctx.session,
-            previous_summary_up_to,
-            "第二轮摘要",
-            "第二轮续接",
-        );
-        apply_compression(&mut ctx, &second, false).expect("第二次压缩应成功");
-
-        let context = ctx.session.context();
-        assert_eq!(context.len(), 2);
-        assert_eq!(context[0].role, MessageRole::System);
-        assert_eq!(context[1].phase, MessagePhase::CompressedResume);
-        assert!(matches!(
-            &context[1].content[0],
-            ContentBlock::ModelInstruction { text } if text.contains("第二轮续接")
-        ));
-        assert_ne!(context[1].id, first_resume_id);
-        assert_eq!(
+        assert_eq!(context[1].text_content(), "第三轮问题");
+        assert_eq!(context[2].text_content(), "第三轮回答");
+        assert!(
             ctx.session
                 .messages
                 .iter()
-                .filter(|message| message.phase == MessagePhase::CompressedResume)
-                .count(),
-            2,
-            "完整会话应保留历次续接消息"
+                .all(|message| message.phase != MessagePhase::CompressedResume),
+            "压缩不注入合成续接消息"
         );
     }
 }

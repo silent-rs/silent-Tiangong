@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::{Id as TaskId, JoinSet};
 
-use super::compression::ActiveCompression;
 use super::outcome::TurnExecutionResult;
 use crate::model::{
     InvalidToolCall, ModelFunctionResponse, ModelStreamChunk, TokenUsage, ToolCall,
@@ -39,20 +38,6 @@ pub(super) enum ExecutionPhase {
     WaitingTools(ToolExecutionPhase),
     /// Waiting：等待审批（必须同时持有待审批工具与完整批次，不变量 2）。
     WaitingApproval(ApprovalPhase),
-    /// Waiting：上下文压缩进行中。续接去向（return_to）由
-    /// `CompressionContinuation` 完整表达：React 文本 / 工具批次（挂起批次随
-    /// 阶段持有）/ 无效工具调用重生成 / 上下文超限重试。
-    /// 压缩完成后只能迁移到续接允许的阶段（单一 match，不散落修改字段）。
-    Compressing(CompressionPhase),
-}
-
-/// 压缩阶段数据（design.md 2.3 `CompressionPhase`）：活动压缩任务 +
-/// （仅 ToolBatch 续接时）挂起的工具批次；续接去向见
-/// `compression::CompressionContinuation`（即 CompressionReturn）。
-pub(super) struct CompressionPhase {
-    pub(super) active: ActiveCompression<super::compression::CompressionContinuation>,
-    /// ToolBatch 续接时保留批次，压缩完成后回到 PreparingTools。
-    pub(super) suspended_batch: Option<ToolBatchState>,
 }
 
 impl ExecutionPhase {
@@ -65,7 +50,6 @@ impl ExecutionPhase {
             ExecutionPhase::PreparingTools(_) => "PreparingTools",
             ExecutionPhase::WaitingTools(_) => "WaitingTools",
             ExecutionPhase::WaitingApproval(_) => "WaitingApproval",
-            ExecutionPhase::Compressing(_) => "Compressing",
         }
     }
 }

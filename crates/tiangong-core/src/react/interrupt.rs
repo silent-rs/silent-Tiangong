@@ -121,9 +121,6 @@ pub(super) async fn interrupt_active_work(
                 });
             }
         }
-        ExecutionPhase::Compressing(compressing) => {
-            compressing.active.cancel(ctx).await;
-        }
         ExecutionPhase::WaitingApproval(approval) => {
             record_rejected_tool_call(
                 ctx,
