@@ -338,7 +338,7 @@ impl crate::agent_input::AgentInput for TiangongCore {
                     let sent = crate::shared_runtime::send_command(
                         &self.session_id,
                         Command::InjectUserMessage {
-                            message_id: msg_id,
+                            message_id: msg_id.clone(),
                             content: prepared.clone(),
                         },
                     );
@@ -347,11 +347,50 @@ impl crate::agent_input::AgentInput for TiangongCore {
                         // 保存消息后再发送——命令成功写入通道不等于已处理。
                         return Ok(());
                     }
-                    // 发送失败说明 turn 刚结束，回退到正常 spawn 流程
-                    tracing::debug!(session_id = %self.session_id, "注入用户消息失败，回退到正常 spawn 流程");
+                    // 发送失败：turn 正在终态封口（Sealing/Committing）或刚结束。
+                    // 把消息排入下一轮队列——由下一轮 spawn 取出、保存并确认
+                    // （ALR-202：确认基于落盘或可靠排队，不虚报成功）。
+                    crate::shared_runtime::push_next_turn(
+                        &self.session_id,
+                        Command::InjectUserMessage {
+                            message_id: msg_id,
+                            content: prepared.clone(),
+                        },
+                    );
+                    tracing::debug!(
+                        session_id = %self.session_id,
+                        "注入用户消息时 turn 正在封口或已结束，已排入下一轮队列"
+                    );
+                    return Ok(());
                 }
 
                 let mut ctx = self.build_turn_context()?;
+                // 合并上一轮封口后遗留的待执行消息：与本轮消息一起进入 session
+                // 并确认接收（可靠交接的取出端）。
+                for command in crate::shared_runtime::drain_next_turn(&self.session_id) {
+                    if let Command::InjectUserMessage {
+                        message_id,
+                        content,
+                    } = command
+                    {
+                        let content_text = tiangong_types::content_blocks_text(&content);
+                        let content_blocks = tiangong_types::stable_content_blocks(&content);
+                        let event_id = message_id.clone();
+                        if ctx
+                            .session
+                            .try_append_prepared_user_message_with_id(message_id, content)
+                            .is_ok()
+                        {
+                            let _ = ctx.stream_tx.send(StreamEvent::UserMessage {
+                                message_id: event_id,
+                                content: content_text,
+                                content_blocks,
+                                media: Vec::new(),
+                                model_excluded: false,
+                            });
+                        }
+                    }
+                }
                 let message_id = message_id.unwrap_or_else(scru128::new_string);
                 let content = tiangong_types::content_blocks_text(&prepared);
                 let content_blocks = tiangong_types::stable_content_blocks(&prepared);

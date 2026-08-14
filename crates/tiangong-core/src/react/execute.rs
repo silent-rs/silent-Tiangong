@@ -1263,14 +1263,54 @@ pub(super) async fn execute_turn(
                 state.install_phase(ExecutionPhase::ForceFinalPhase(active));
             }
 
-            // ── Ready：暂定完成，提交结果 ──
+            // ── Ready：暂定完成，终态封口后提交 ──
             // 阶段变体只含结果（结构上保证不持有主循环活动资源，不变量 4）。
-            // 提交前刷新为最新累计用量（ALR-111：不冻结旧用量快照——晚到的
-            // ReportUsage 在上方命令排空阶段已累计进 accumulated_usage）。
-            // 排空后到提交之间的命令窗口由任务 08 的 ingress 封口承接。
-            ExecutionPhase::PendingFinish(mut result) => {
-                result.usage = state.accumulated_usage.clone();
-                break 'agent_loop result;
+            // 封口（ALR-201）：原子 Accepting → Sealing，此后新命令不再入当前
+            // 队列（send_command 返回 false，deliver 把用户消息排入下一轮）；
+            // 封口前已入队的命令在此排空处理：决定性命令（取消/关闭/保存失败）
+            // 直接形成终态；继续命令（引导/工具注入）恢复 Accepting 并重启；
+            // 无决定性命令 → Committing，刷新为最新累计用量后提交（ALR-111）。
+            ExecutionPhase::PendingFinish(result) => {
+                crate::shared_runtime::begin_seal(&ctx.session.id);
+                let mut pending_result = result;
+                loop {
+                    let next = match cmd_rx.try_recv() {
+                        Ok(command) => Some(Deferred::Command(command)),
+                        Err(tokio_mpsc::error::TryRecvError::Empty) => None,
+                        Err(tokio_mpsc::error::TryRecvError::Disconnected) => {
+                            Some(Deferred::Closed)
+                        }
+                    };
+                    let Some(deferred_command) = next else { break };
+                    match handle_command(
+                        cmd_rx,
+                        deferred_command,
+                        ctx,
+                        &mut state,
+                        &mut injections,
+                        &mut trust_mode,
+                        &plugins,
+                        &stream_tx,
+                        context_limit,
+                    )
+                    .await
+                    {
+                        CommandEffect::KeepCurrent => {}
+                        CommandEffect::ToPhase(phase) => {
+                            // 继续命令：恢复接收，回到主循环驱动新阶段。
+                            crate::shared_runtime::reopen(&ctx.session.id);
+                            state.install_phase(phase);
+                            continue 'agent_loop;
+                        }
+                        CommandEffect::Terminate(terminal) => {
+                            crate::shared_runtime::commit_ingress(&ctx.session.id);
+                            break 'agent_loop terminal;
+                        }
+                    }
+                }
+                crate::shared_runtime::commit_ingress(&ctx.session.id);
+                pending_result.usage = state.accumulated_usage.clone();
+                break 'agent_loop pending_result;
             }
 
             // ── Ready（兼容层，任务 05 迁移）：推进工具批次准备/执行 ──

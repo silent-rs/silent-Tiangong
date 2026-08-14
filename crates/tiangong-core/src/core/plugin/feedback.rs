@@ -3,9 +3,8 @@
 //! 会话注入、用量上报和流事件都通过当前 turn 的命令通道投递，由 Agent Loop
 //! 按命令顺序处理。插件不持有 Session、用量收集器或前端事件发送端。
 
-use tokio::sync::mpsc::UnboundedSender;
-
 use crate::core::command::Command;
+use crate::shared_runtime::CommandIngress;
 
 /// 插件向 Core 投递的会话注入反馈。
 #[derive(Debug, Clone)]
@@ -29,12 +28,12 @@ impl PluginFeedback {
 /// 不会进入后续 turn。
 #[derive(Clone)]
 pub struct PluginFeedbackTx {
-    tx: UnboundedSender<Command>,
+    ingress: CommandIngress,
 }
 
 impl PluginFeedbackTx {
-    pub(crate) fn new(tx: UnboundedSender<Command>) -> Self {
-        Self { tx }
+    pub(crate) fn new(ingress: CommandIngress) -> Self {
+        Self { ingress }
     }
 
     /// 将插件产生的结构化内容注入当前会话。
@@ -46,17 +45,15 @@ impl PluginFeedbackTx {
     /// 入队后、消费前结束，命令仍可能丢失。彻底消除该竞态需配合 turn 侧在
     /// Agent Loop 结束后立即 drop 接收端（见 `run_turn`）。
     pub fn inject_tool(&self, tool_name: impl Into<String>, payload: serde_json::Value) -> bool {
-        self.tx
-            .send(Command::InjectTool {
-                tool_name: tool_name.into(),
-                payload,
-            })
-            .is_ok()
+        self.ingress.send(Command::InjectTool {
+            tool_name: tool_name.into(),
+            payload,
+        })
     }
 
     /// 上报插件内部模型调用产生的用量，并向前端发送用量事件。
     pub fn report_token_usage(&self, usage: tiangong_types::TokenUsage, source: impl Into<String>) {
-        let _ = self.tx.send(Command::ReportUsage {
+        let _ = self.ingress.send(Command::ReportUsage {
             usage,
             source: source.into(),
             emit_event: true,
@@ -69,7 +66,7 @@ impl PluginFeedbackTx {
         usage: tiangong_types::TokenUsage,
         source: impl Into<String>,
     ) {
-        let _ = self.tx.send(Command::ReportUsage {
+        let _ = self.ingress.send(Command::ReportUsage {
             usage,
             source: source.into(),
             emit_event: false,
@@ -78,11 +75,11 @@ impl PluginFeedbackTx {
 
     /// 向当前 turn 投递一个前端流事件。
     pub fn send_stream_event(&self, event: tiangong_types::StreamEvent) {
-        let _ = self.tx.send(Command::EmitStreamEvent(Box::new(event)));
+        let _ = self.ingress.send(Command::EmitStreamEvent(Box::new(event)));
     }
 
     pub fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.ingress.is_closed()
     }
 }
 
@@ -103,7 +100,7 @@ mod tests {
     #[test]
     fn usage_reports_use_the_turn_command_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(tx);
+        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
 
         feedback.report_token_usage(usage(), "attachment");
         feedback.accumulate_token_usage(usage(), "child");
@@ -130,7 +127,7 @@ mod tests {
     #[test]
     fn inject_tool_returns_true_when_consumer_alive() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(tx);
+        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
 
         assert!(feedback.inject_tool("browser_data", serde_json::json!({"url": "x"})));
         match rx.try_recv() {
@@ -143,7 +140,7 @@ mod tests {
     fn inject_tool_returns_false_after_receiver_dropped() {
         // 模拟 turn 收尾窗口：Agent Loop 已退出，接收端被显式 drop。
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let feedback = PluginFeedbackTx::new(tx);
+        let feedback = PluginFeedbackTx::new(CommandIngress::new(tx));
         drop(rx);
 
         // drop 接收端后，is_closed() 应为 true，inject_tool 也必须返回 false。

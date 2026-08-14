@@ -6,10 +6,10 @@
 //! runtime 必须是 multi-thread：LLM crate 的 `provider_client` 内部使用
 //! `tokio::task::block_in_place`（仅在 multi-thread runtime 可用）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -25,13 +25,82 @@ const WORKER_THREADS: usize = 2;
 
 static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
+/// turn 命令入口的接收状态（终态封口，ALR-201；见 design.md 6.2）。
+enum IngressState {
+    /// 正常接收命令。
+    Accepting,
+    /// 封口中：已停止接收新命令，正在排空封口前已入队的命令。
+    Sealing,
+    /// 已确定提交终态：旧队列拒绝新命令，用户消息可靠进入下一 turn 队列。
+    Committing,
+}
+
+/// 命令入口门控：宿主 `send_command`、插件 `PluginFeedbackTx`、关闭路径共享同一份
+/// 接收状态，封口对所有来源一致生效（ALR-201/203）。禁止绕过门控持有裸发送端。
+#[derive(Clone)]
+pub(crate) struct CommandIngress {
+    state: Arc<Mutex<IngressState>>,
+    sender: UnboundedSender<Command>,
+}
+
+impl CommandIngress {
+    pub(crate) fn new(sender: UnboundedSender<Command>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(IngressState::Accepting)),
+            sender,
+        }
+    }
+
+    /// `Accepting` 状态下入队并返回 true；`Sealing`/`Committing` 拒绝（返回 false）。
+    pub(crate) fn send(&self, cmd: Command) -> bool {
+        let state = self.state.lock().unwrap();
+        if !matches!(*state, IngressState::Accepting) {
+            return false;
+        }
+        self.sender.send(cmd).is_ok()
+    }
+
+    /// 绕过门控强制入队，仅用于 Core 关闭路径的强制取消（此时门控语义已无意义）。
+    pub(crate) fn force_send(&self, cmd: Command) -> bool {
+        self.sender.send(cmd).is_ok()
+    }
+
+    /// `Accepting → Sealing`：此后新命令不再入当前队列。
+    pub(crate) fn begin_seal(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, IngressState::Accepting) {
+            *state = IngressState::Sealing;
+        }
+    }
+
+    /// `Sealing → Accepting`：排空发现继续命令（用户消息/工具注入等），恢复接收。
+    pub(crate) fn reopen(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, IngressState::Sealing) {
+            *state = IngressState::Accepting;
+        }
+    }
+
+    /// `Sealing → Committing`：确定提交终态。
+    pub(crate) fn commit(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, IngressState::Sealing) {
+            *state = IngressState::Committing;
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+}
+
 /// turn task 注册表: session_id → 当前代任务。
 ///
-/// cmd_tx 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx,
+/// ingress 的生命周期与 turn task 绑定。turn task 内部持有 cmd_rx,
 /// deliver(Cancel/Approval) 通过 send_command 投递到活跃 turn task。
 struct TurnTask {
     generation: u64,
-    cmd_tx: UnboundedSender<Command>,
+    ingress: CommandIngress,
     handle: JoinHandle<()>,
 }
 
@@ -42,6 +111,37 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn turn_tasks() -> &'static Mutex<TurnTaskMap> {
     TURN_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 会话级待执行命令队列：终态封口（Sealing/Committing）期间到达的用户消息暂存
+/// 于此，由 deliver 的下一轮 spawn 路径取出、保存并确认（可靠交接，不虚报成功）。
+type NextTurnQueue = HashMap<String, VecDeque<Command>>;
+
+static NEXT_TURN_QUEUE: OnceLock<Mutex<NextTurnQueue>> = OnceLock::new();
+
+fn next_turn_queue() -> &'static Mutex<NextTurnQueue> {
+    NEXT_TURN_QUEUE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 将命令排入指定会话的下一轮队列（封口期间 deliver 调用）。
+pub fn push_next_turn(session_id: &str, cmd: Command) {
+    if let Ok(mut queue) = next_turn_queue().lock() {
+        queue
+            .entry(session_id.to_string())
+            .or_default()
+            .push_back(cmd);
+    }
+}
+
+/// 取出并清空指定会话的下一轮队列（下一轮 spawn 时调用）。
+pub fn drain_next_turn(session_id: &str) -> Vec<Command> {
+    if let Ok(mut queue) = next_turn_queue().lock()
+        && let Some(pending) = queue.remove(session_id)
+    {
+        pending.into_iter().collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// 获取进程级共享 tokio runtime。
@@ -76,8 +176,9 @@ where
         return Err(crate::core::CoreError::Busy);
     }
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
+    let ingress = CommandIngress::new(cmd_tx);
     for plugin in &context.plugins {
-        plugin.set_feedback_tx(PluginFeedbackTx::new(cmd_tx.clone()));
+        plugin.set_feedback_tx(PluginFeedbackTx::new(ingress.clone()));
     }
     let future = future_factory(context, cmd_rx)?;
 
@@ -105,7 +206,7 @@ where
         session_id,
         TurnTask {
             generation,
-            cmd_tx,
+            ingress,
             handle,
         },
     );
@@ -117,15 +218,43 @@ where
 
 /// 向当前活跃任务发送命令（取消、审批、工具注入和运行配置更新等）。
 ///
-/// 无活跃任务时返回 false(命令被忽略)。
+/// 无活跃任务、任务已结束、或已进入终态封口（`Sealing`/`Committing`）时返回
+/// false。封口期间投递被拒，调用方（deliver）应把用户消息排入下一轮队列。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
     if let Ok(tasks) = turn_tasks().lock()
         && let Some(task) = tasks.get(session_id)
         && !task.handle.is_finished()
     {
-        return task.cmd_tx.send(cmd).is_ok();
+        return task.ingress.send(cmd);
     }
     false
+}
+
+/// 终态封口：`Accepting → Sealing`（PendingFinish 提交前由执行线程调用）。
+pub fn begin_seal(session_id: &str) {
+    if let Ok(tasks) = turn_tasks().lock()
+        && let Some(task) = tasks.get(session_id)
+    {
+        task.ingress.begin_seal();
+    }
+}
+
+/// 封口排空发现继续命令：`Sealing → Accepting`，恢复接收。
+pub fn reopen(session_id: &str) {
+    if let Ok(tasks) = turn_tasks().lock()
+        && let Some(task) = tasks.get(session_id)
+    {
+        task.ingress.reopen();
+    }
+}
+
+/// 确定提交终态：`Sealing → Committing`。
+pub fn commit_ingress(session_id: &str) {
+    if let Ok(tasks) = turn_tasks().lock()
+        && let Some(task) = tasks.get(session_id)
+    {
+        task.ingress.commit();
+    }
 }
 
 fn remove_turn_if_current(session_id: &str, generation: u64) {
@@ -147,7 +276,8 @@ pub fn cancel_and_join(session_id: &str) -> Result<(), crate::core::CoreError> {
         let Some(task) = tasks.remove(session_id) else {
             return Ok(());
         };
-        let _ = task.cmd_tx.send(Command::Cancel);
+        // 关闭路径：强制取消必须送达（绕过门控——任务即将销毁，封口语义无意义）。
+        let _ = task.ingress.force_send(Command::Cancel);
         task.handle
     };
 
@@ -168,5 +298,144 @@ pub fn is_running(session_id: &str) -> bool {
             .is_some_and(|task| !task.handle.is_finished())
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingress_gates_send_by_state() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
+        let ingress = CommandIngress::new(tx);
+        assert!(ingress.send(Command::Cancel), "Accepting 时应接受");
+        assert!(matches!(rx.try_recv(), Ok(Command::Cancel)));
+
+        ingress.begin_seal();
+        assert!(!ingress.send(Command::Cancel), "Sealing 后应拒绝");
+        ingress.reopen();
+        assert!(ingress.send(Command::Cancel), "reopen 后恢复接受");
+        ingress.begin_seal();
+        ingress.commit();
+        assert!(!ingress.send(Command::Cancel), "Committing 后应拒绝");
+        // 已封口不可再 reopen（Committing 是终态方向）。
+        ingress.reopen();
+        assert!(
+            !ingress.send(Command::Cancel),
+            "Committing 不因 reopen 恢复"
+        );
+        // force_send 仍可送达（关闭路径专用）。
+        assert!(ingress.force_send(Command::Cancel));
+    }
+
+    #[test]
+    fn next_turn_queue_round_trip() {
+        let sid = format!("next-turn-{}", scru128::new_string());
+        assert!(drain_next_turn(&sid).is_empty(), "空队列应返回空");
+        push_next_turn(&sid, Command::Cancel);
+        push_next_turn(&sid, Command::Shutdown);
+        let drained = drain_next_turn(&sid);
+        assert_eq!(drained.len(), 2, "应按序取出全部排队命令");
+        assert!(matches!(drained[0], Command::Cancel));
+        assert!(matches!(drained[1], Command::Shutdown));
+        assert!(drain_next_turn(&sid).is_empty(), "取出后队列应清空");
+    }
+
+    /// 构造仅用于注册表测试的最小 TurnContext（不发真实请求）。
+    fn dummy_context() -> (TurnContext, String) {
+        use crate::agent_config::AgentConfig;
+        use crate::model::SingleProviderClient;
+        use tiangong_llm::ModelEndpoint;
+
+        let mut session = crate::session::Session::new("ingress-test");
+        let sid = session.id.clone();
+        let root = tempfile::tempdir().expect("临时目录创建失败");
+        session.bind_storage_root(root.path());
+        std::mem::forget(root);
+        let endpoint = ModelEndpoint {
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            ..Default::default()
+        };
+        let ctx = TurnContext::builder()
+            .client(SingleProviderClient::new(endpoint))
+            .session(session)
+            .stream_tx(std::sync::mpsc::channel::<tiangong_types::StreamEvent>().0)
+            .plugins(Vec::new())
+            .context_limit(1_000)
+            .agent_config(AgentConfig::default())
+            .trust_mode(crate::permission::TrustMode::FullTrust)
+            .observer(crate::observe::Observer::new(std::env::temp_dir()))
+            .tools(Vec::new())
+            .tool_overrides(std::collections::HashMap::new())
+            .build();
+        (ctx, sid)
+    }
+
+    /// ALR-201：注册表级封口门控——spawn_turn 注册的任务，封口前命令可投递，
+    /// Sealing/Committing 后被拒；被拒的用户消息进入下一轮队列可靠交接。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_level_sealing_gates_send_command() {
+        let (ctx, sid) = dummy_context();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        spawn_turn(ctx, move |_ctx, cmd_rx| {
+            Ok(async move {
+                // 持有接收端保持通道开启；挂起任务直到测试释放，保持注册表中
+                // 的活跃代任务。
+                let _cmd_rx = cmd_rx;
+                let _ = release_rx.await;
+            })
+        })
+        .expect("spawn 失败");
+
+        // Accepting：命令可投递。
+        assert!(
+            send_command(
+                &sid,
+                Command::SetTitle {
+                    title: "t".to_string(),
+                    only_if_default: false,
+                }
+            ),
+            "Accepting 时应可投递"
+        );
+
+        // Sealing：新命令被拒；用户消息进入下一轮队列。
+        begin_seal(&sid);
+        assert!(!send_command(&sid, Command::Cancel), "Sealing 后应拒绝投递");
+        push_next_turn(
+            &sid,
+            Command::InjectUserMessage {
+                message_id: "queued-1".to_string(),
+                content: Vec::new(),
+            },
+        );
+
+        // reopen：恢复接收。
+        reopen(&sid);
+        assert!(send_command(&sid, Command::Cancel), "reopen 后应恢复投递");
+
+        // Committing：终态方向，不再恢复。
+        begin_seal(&sid);
+        commit_ingress(&sid);
+        reopen(&sid);
+        assert!(
+            !send_command(&sid, Command::Cancel),
+            "Committing 后应永久拒绝"
+        );
+
+        // 下一轮交接：队列中的消息可被取出。
+        let queued = drain_next_turn(&sid);
+        assert_eq!(queued.len(), 1, "封口期间的消息应在队列中");
+
+        // 释放任务，注册表自清理。
+        release_tx.send(()).expect("释放任务失败");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while is_running(&sid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(!is_running(&sid), "任务应已结束并清理注册表");
     }
 }
