@@ -393,8 +393,8 @@ fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &Stored
 
 fn inline_image_instruction(index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息的图片内容已直接提供给模型，无需调用 analyze_attachment；图片同时已归档为本地资源。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。\n- {}",
-        asset_notice_item(index, asset)
+        "本条消息中的图片已归档，本地工具需要读取时直接使用：index={index} path={}",
+        asset.local_path
     )
 }
 
@@ -985,14 +985,13 @@ mod tests {
             }
             other => panic!("应生成最终 Image block，实际：{other:?}"),
         }
+        let expected_instruction = format!(
+            "本条消息中的图片已归档，本地工具需要读取时直接使用：index=0 path={}",
+            transaction.assets()[0].local_path
+        );
         assert!(matches!(
             &message[2],
-            ContentBlock::ModelInstruction { text }
-                if text.contains("index=0")
-                    && text.contains("path=")
-                    && text.contains("generate_image")
-                    && text.contains("无需调用 analyze_attachment")
-                    && !text.contains("message_id=")
+            ContentBlock::ModelInstruction { text } if text == &expected_instruction
         ));
         let stable = tiangong_types::stable_content_blocks(&message);
         assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
@@ -1031,7 +1030,10 @@ mod tests {
         assert!(matches!(
             &message[2],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=0") && text.contains("name=person.png")
+                if text == &format!(
+                    "本条消息中的图片已归档，本地工具需要读取时直接使用：index=0 path={}",
+                    transaction.assets()[0].local_path
+                )
         ));
         assert!(matches!(
             &message[3],
@@ -1040,7 +1042,10 @@ mod tests {
         assert!(matches!(
             &message[4],
             ContentBlock::ModelInstruction { text }
-                if text.contains("index=1") && text.contains("name=dress.png")
+                if text == &format!(
+                    "本条消息中的图片已归档，本地工具需要读取时直接使用：index=1 path={}",
+                    transaction.assets()[1].local_path
+                )
         ));
     }
 
