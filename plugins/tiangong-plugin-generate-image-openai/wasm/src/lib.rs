@@ -44,12 +44,11 @@ impl Guest for Component {
             name: TOOL_GENERATE_IMAGE.to_string(),
             description: "根据文字描述生成图片，或基于已有图片进行编辑（通过 OpenAI Responses API 的 image_generation 工具）。\
             传入 images 参数时为编辑模式（修改/合成原图），不传时为生成模式。\
-            用户直接上传的图片会在消息资源说明中提供本地 path；编辑时应把全部相关 path 按 index 顺序直接传入 images，不要要求用户复制到工作区、重命名或重新上传。\
             每次调用等待完成后返回图片路径。\
             注意：同一轮次中不要重复调用相同参数的 generate_image，\
             拿到图片结果后应直接继续后续任务（如编写 HTML、组合排版等）。"
                 .to_string(),
-            input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"图片描述或编辑指令，建议使用英文以获得更好效果。编辑时用 edit/draw 等动词描述要做的修改"},"images":{"type":"array","items":{"type":"string"},"description":"要编辑的原图本地路径列表（可选）。直接上传图片的 path 来自用户消息资源说明；多图任务按 index 顺序传入全部相关路径。传入时进入编辑模式，不传为生成模式"}},"required":["prompt"]}"#
+            input_schema: r#"{"type":"object","properties":{"prompt":{"type":"string","description":"图片描述或编辑指令，建议使用英文以获得更好效果。编辑时用 edit/draw 等动词描述要做的修改"},"images":{"type":"array","items":{"type":"string"},"description":"要编辑的原图本地路径列表（可选）。传入时进入编辑模式，不传为生成模式"}},"required":["prompt"]}"#
                 .to_string(),
         }])
     }
