@@ -22,7 +22,11 @@ pub mod command;
 pub(crate) use command::Command;
 #[cfg(test)]
 mod contract_tests;
+#[cfg(test)]
+mod integration_tests;
 pub mod plugin;
+#[cfg(test)]
+mod test_support;
 pub use plugin::Plugin;
 pub mod error;
 pub mod storage_location;
