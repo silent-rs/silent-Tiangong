@@ -54,8 +54,7 @@ async fn accepted_and_saved_message_survives_shutdown() {
     }
     wait_requests(&server, 1).await;
 
-    core.shutdown_join()
-        .expect("正常存储环境下关闭必须成功");
+    core.shutdown_join().expect("正常存储环境下关闭必须成功");
     assert!(
         env.load_session(&sid)
             .messages
@@ -125,7 +124,12 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
     core.deliver(AgentInputKind::compress_context())
         .expect("空闲期手动压缩应被接受");
     let deadline = Instant::now() + WAIT;
-    while server.received_requests().await.map_or(0, |requests| requests.len()) < 1 {
+    while server
+        .received_requests()
+        .await
+        .map_or(0, |requests| requests.len())
+        < 1
+    {
         assert!(Instant::now() < deadline, "等待手动压缩请求超时");
         tokio::time::sleep(POLL).await;
     }
@@ -156,7 +160,11 @@ async fn steer_during_manual_compression_defers_to_next_turn() {
         );
         tokio::time::sleep(POLL).await;
     };
-    assert_eq!(status, TurnStatus::Failed, "顺延消息的失败响应必须形成 Failed 终态");
+    assert_eq!(
+        status,
+        TurnStatus::Failed,
+        "顺延消息的失败响应必须形成 Failed 终态"
+    );
     wait_idle(&sid).await;
     events.wait_error_containing("deferred steer failed");
     events.assert_single_failure_terminal("deferred steer failed");

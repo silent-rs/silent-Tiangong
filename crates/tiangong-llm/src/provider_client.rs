@@ -720,6 +720,12 @@ impl SingleProviderClient {
         {
             Ok(response) => Ok(response),
             Err(err) => {
+                // 消费端已关闭：流失败源于调用方中止（引导/取消中断当前活动），
+                // 不是可重试错误——禁止非流式回退重发（否则被中断的旧请求会
+                // 越过中断屏障产生一次新的完整请求）。
+                if chunk_tx.is_closed() {
+                    return Err(err.context("流式请求被调用方中止"));
+                }
                 if let Some(on_retry) = &self.on_retry {
                     on_retry(1, MAX_RETRIES, 0, &err.to_string());
                 }
@@ -1381,7 +1387,14 @@ fn sanitize_tool_call_pairing(messages: &mut Vec<ChatMessage>) {
 
         if !has_tool_calls {
             if assistant.role != LlmMessageRole::Tool {
-                push_merged_provider_message(&mut output, assistant);
+                // 用户消息不与相邻同角色消息合并：引导/追问的意图边界必须
+                // 保留（请求按最新用户意图路由与锚定）；合并仅用于 core 内部
+                // 注入的 tool-context 流。
+                if assistant.role == LlmMessageRole::User {
+                    output.push(assistant);
+                } else {
+                    push_merged_provider_message(&mut output, assistant);
+                }
             }
             index += 1;
             continue;

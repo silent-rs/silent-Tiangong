@@ -908,8 +908,15 @@ pub(super) async fn execute_turn(
                 let ExecutionPhase::PendingFinish(pending_result) = state.take_phase() else {
                     unreachable!("排空循环保持 PendingFinish 在位");
                 };
-                // 提交时刻标记候选答复为最终答复（此前撤销路径不会到达这里）。
-                if let Some(msg_id) = state.pending_summary_msg_id.take() {
+                // 提交时刻标记候选答复为最终答复：仅成功终态——失败终态不
+                // 得把未验证的候选定格为最终答复（替代请求失败时旧候选必须
+                // 保留 React 过程相位）。
+                let candidate_id = state.pending_summary_msg_id.take();
+                if matches!(
+                    pending_result.outcome,
+                    super::outcome::TurnExecutionOutcome::Success
+                ) && let Some(msg_id) = candidate_id
+                {
                     if let Some(message) = ctx
                         .session
                         .messages

@@ -146,11 +146,7 @@ async fn approval_granted_executes_tool_and_completes() {
                         .is_some_and(|text| text.contains("审批后执行 echo"))
                         && request.tool_results().is_empty()
                 },
-                MockReply::sse(stream_tool_call_chunks(
-                    "approve-call",
-                    "echo",
-                    &["{", "}"],
-                )),
+                MockReply::sse(stream_tool_call_chunks("approve-call", "echo", &["{", "}"])),
             ),
         ],
     )
@@ -212,11 +208,7 @@ async fn approval_rejected_records_result_and_model_explains() {
                         .is_some_and(|text| text.contains("拒绝执行 echo"))
                         && request.tool_results().is_empty()
                 },
-                MockReply::sse(stream_tool_call_chunks(
-                    "reject-call",
-                    "echo",
-                    &["{", "}"],
-                )),
+                MockReply::sse(stream_tool_call_chunks("reject-call", "echo", &["{", "}"])),
             ),
         ],
     )
@@ -460,7 +452,10 @@ async fn high_pressure_triggers_pre_request_compression() {
     assert!(compression.any_message_contains("AUTO-COMPRESS-FIRST"));
     assert!(!compression.any_message_contains("AUTO-COMPRESS-SECOND"));
     assert!(compression.defined_tools().is_empty());
-    assert!(!compression.is_stream(), "压缩沿生产接口使用非流式 completion");
+    assert!(
+        !compression.is_stream(),
+        "压缩沿生产接口使用非流式 completion"
+    );
     let post = chat_request_at(&server, 2).await;
     assert!(post.any_message_contains("压缩后的历史摘要"));
     assert!(post.role_message_contains("user", "AUTO-COMPRESS-SECOND"));
@@ -504,10 +499,7 @@ async fn manual_compression_applies_summary() {
     assert!(compression.any_message_contains("第一条问题"));
     assert!(!compression.is_stream());
     let session = env.load_session(&sid);
-    assert_eq!(
-        session.context_summary.as_deref(),
-        Some("手动压缩摘要内容")
-    );
+    assert_eq!(session.context_summary.as_deref(), Some("手动压缩摘要内容"));
     assert_eq!(session.summary_up_to, event_boundary);
     assert_eq!(
         session.messages.len() - session.summary_up_to,
@@ -623,7 +615,12 @@ async fn handoff_during_commit_starts_next_turn_from_pending_slot() {
     send_message(&core, "msg-a", "HANDOFF-A 第一个问题");
     finish.wait_frozen();
     send_message(&core, "msg-b", "HANDOFF-B 第二个问题");
-    assert!(!env.load_session(&sid).messages.iter().any(|m| m.id == "msg-b"));
+    assert!(
+        !env.load_session(&sid)
+            .messages
+            .iter()
+            .any(|m| m.id == "msg-b")
+    );
     finish.release();
 
     assert_eq!(
@@ -687,7 +684,12 @@ async fn occupied_pending_slot_returns_busy() {
     wait_idle(&sid).await;
     events.wait_done_count(2);
     events.assert_done_count(2);
-    assert!(!env.load_session(&sid).messages.iter().any(|m| m.id == "msg-c"));
+    assert!(
+        !env.load_session(&sid)
+            .messages
+            .iter()
+            .any(|m| m.id == "msg-c")
+    );
     routes["busy-a"].assert_hits(1);
     routes["busy-b"].assert_hits(1);
     core.shutdown_join().expect("关闭失败");
@@ -712,12 +714,20 @@ async fn accepted_not_yet_saved_message_survives_shutdown() {
     send_message(&core, "msg-a", "SHUTDOWN-A 第一个问题");
     finish.wait_frozen();
     send_message(&core, "msg-b", "SHUTDOWN-B 关闭前未保存的消息");
-    assert!(!env.load_session(&sid).messages.iter().any(|m| m.id == "msg-b"));
+    assert!(
+        !env.load_session(&sid)
+            .messages
+            .iter()
+            .any(|m| m.id == "msg-b")
+    );
 
     let shutdown = std::thread::spawn(move || core.shutdown_join());
     let deadline = std::time::Instant::now() + WAIT;
     while crate::react::inbox::is_alive(&sid) {
-        assert!(std::time::Instant::now() < deadline, "等待 Core 停止接收超时");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "等待 Core 停止接收超时"
+        );
         tokio::time::sleep(POLL).await;
     }
     finish.release();
@@ -817,7 +827,10 @@ async fn candidate_guidance_then_replacement_llm_failure_never_finalizes_stale_c
             PromptRoute::new(
                 "stale-candidate",
                 latest_user_contains("CANDIDATE-FAIL-OLD"),
-                MockReply::sse(stream_text_chunks(&["STALE-CANDIDATE-", "MUST-NOT-FINALIZE"])),
+                MockReply::sse(stream_text_chunks(&[
+                    "STALE-CANDIDATE-",
+                    "MUST-NOT-FINALIZE",
+                ])),
             ),
         ],
     )
@@ -827,11 +840,7 @@ async fn candidate_guidance_then_replacement_llm_failure_never_finalizes_stale_c
     let mut seal = arm_seal(&sid);
     send_message(&core, "msg-a", "CANDIDATE-FAIL-OLD 原始请求");
     seal.wait_frozen();
-    send_message(
-        &core,
-        "msg-b",
-        "CANDIDATE-FAIL-NEW 新要求触发替代请求失败",
-    );
+    send_message(&core, "msg-b", "CANDIDATE-FAIL-NEW 新要求触发替代请求失败");
     seal.release();
 
     assert_eq!(
@@ -851,7 +860,9 @@ async fn candidate_guidance_then_replacement_llm_failure_never_finalizes_stale_c
     assert!(original.turn_status.is_none());
     assert!(!session.messages.iter().any(|message| {
         message.role == MessageRole::Assistant
-            && message.text_content().contains("STALE-CANDIDATE-MUST-NOT-FINALIZE")
+            && message
+                .text_content()
+                .contains("STALE-CANDIDATE-MUST-NOT-FINALIZE")
             && message.phase == crate::session::MessagePhase::Summary
     }));
     assert!(!events.seen().iter().any(|event| {
@@ -865,7 +876,11 @@ async fn candidate_guidance_then_replacement_llm_failure_never_finalizes_stale_c
     routes["stale-candidate"].assert_hits(1);
     routes["replacement-failure"].assert_hits(2);
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 3, "旧候选一次请求，替代失败包含流式与非流式回退");
+    assert_eq!(
+        requests.len(),
+        3,
+        "旧候选一次请求，替代失败包含流式与非流式回退"
+    );
     assert!(chat_request_at(&server, 1).await.is_stream());
     assert!(!chat_request_at(&server, 2).await.is_stream());
     core.shutdown_join().expect("关闭失败");

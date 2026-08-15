@@ -735,8 +735,8 @@ impl MockReply {
     fn response(&self) -> ResponseTemplate {
         match self {
             Self::Sse { chunks, delay } => {
-                let mut response = ResponseTemplate::new(200)
-                    .set_body_raw(sse_body(chunks), "text/event-stream");
+                let mut response =
+                    ResponseTemplate::new(200).set_body_raw(sse_body(chunks), "text/event-stream");
                 if let Some(delay) = delay {
                     response = response.set_delay(*delay);
                 }
@@ -760,11 +760,11 @@ impl MockReply {
                 }
                 response
             }
-            Self::Error { status, message } => ResponseTemplate::new(*status).set_body_json(
-                serde_json::json!({
+            Self::Error { status, message } => {
+                ResponseTemplate::new(*status).set_body_json(serde_json::json!({
                     "error": {"message": message, "type": "integration_test_error"}
-                }),
-            ),
+                }))
+            }
         }
     }
 }
