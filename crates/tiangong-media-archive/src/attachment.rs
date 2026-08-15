@@ -304,6 +304,9 @@ impl AttachmentTransaction {
                         asset: asset.clone(),
                         data: Some(general_purpose::STANDARD.encode(bytes)),
                     });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: inline_image_instruction(index, &asset),
+                    });
                 }
                 MediaKind::Image if capabilities.analyze_attachment => {
                     content.push(ContentBlock::AssetReference {
@@ -385,6 +388,13 @@ fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &Stored
     format!(
         "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={message_id}，并指定 attachment_index={index}。\n- {}",
         asset_notice_item(index, asset)
+    )
+}
+
+fn inline_image_instruction(index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条消息中的图片已归档，本地工具需要读取时直接使用：index={index} path={}",
+        asset.local_path
     )
 }
 
@@ -938,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_is_a_final_image_block_with_stable_asset_data() {
+    fn inline_image_keeps_runtime_data_and_exposes_archived_path_to_tools() {
         let root = TestRoot::new();
         let mut transaction = root
             .store()
@@ -962,7 +972,7 @@ mod tests {
 
         assert_eq!(transaction.assets().len(), 1);
         assert!(!transaction.assets()[0].local_path.starts_with("data:"));
-        assert_eq!(message.len(), 2);
+        assert_eq!(message.len(), 3);
         match &message[1] {
             ContentBlock::Image { asset, data } => {
                 assert_eq!(asset, &transaction.assets()[0]);
@@ -975,9 +985,67 @@ mod tests {
             }
             other => panic!("应生成最终 Image block，实际：{other:?}"),
         }
+        let expected_instruction = format!(
+            "本条消息中的图片已归档，本地工具需要读取时直接使用：index=0 path={}",
+            transaction.assets()[0].local_path
+        );
         assert!(matches!(
-            &tiangong_types::stable_content_blocks(&message)[1],
-            ContentBlock::Image { data: None, .. }
+            &message[2],
+            ContentBlock::ModelInstruction { text } if text == &expected_instruction
+        ));
+        let stable = tiangong_types::stable_content_blocks(&message);
+        assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
+        assert!(matches!(
+            &stable[2],
+            ContentBlock::ModelInstruction { text } if text.contains("path=")
+        ));
+    }
+
+    #[test]
+    fn inline_images_expose_all_archived_paths_in_upload_order() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![
+                data_attachment(MediaKind::Image, "person.png", "image/png", b"person"),
+                data_attachment(MediaKind::Image, "dress.png", "image/png", b"dress"),
+            ])
+            .unwrap();
+        let message = transaction
+            .prepare_message(
+                "message-two-images",
+                "try on",
+                AttachmentCapabilitySnapshot {
+                    chat_multimodal: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.len(), 5);
+        assert!(matches!(
+            &message[1],
+            ContentBlock::Image { asset, .. } if asset.original_name == "person.png"
+        ));
+        assert!(matches!(
+            &message[2],
+            ContentBlock::ModelInstruction { text }
+                if text == &format!(
+                    "本条消息中的图片已归档，本地工具需要读取时直接使用：index=0 path={}",
+                    transaction.assets()[0].local_path
+                )
+        ));
+        assert!(matches!(
+            &message[3],
+            ContentBlock::Image { asset, .. } if asset.original_name == "dress.png"
+        ));
+        assert!(matches!(
+            &message[4],
+            ContentBlock::ModelInstruction { text }
+                if text == &format!(
+                    "本条消息中的图片已归档，本地工具需要读取时直接使用：index=1 path={}",
+                    transaction.assets()[1].local_path
+                )
         ));
     }
 
