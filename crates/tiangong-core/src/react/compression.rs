@@ -97,19 +97,6 @@ impl ContextCompression {
         observed_tokens: usize,
         kind: CompressionKind,
     ) -> Self {
-        eprintln!(
-            "SPLIT debug: {:?} msgs={:?}",
-            compression_split_point(&ctx.session),
-            ctx.session
-                .messages
-                .iter()
-                .map(|m| format!(
-                    "{:?}|{}",
-                    m.role,
-                    m.text_content().chars().take(8).collect::<String>()
-                ))
-                .collect::<Vec<_>>()
-        );
         notify_started(ctx);
         Self {
             task: start_task(

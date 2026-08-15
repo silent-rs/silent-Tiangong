@@ -1,10 +1,12 @@
 //! Core 集成测试共享基础设施：真实 `TiangongCore` 实例 + wiremock 假 LLM。
 //!
-//! 全部用例从 `deliver()` 发起，模型交互经 mock 服务器回放，断言落在
-//! 公开可见结果上：StreamEvent 事件流与磁盘 Session 终态。
+//! 全部用例从 `deliver()` 发起，断言落在公开可见结果上：StreamEvent 事件流
+//! 与磁盘 Session 终态。临时目录由 [`TestEnv`] 自动清理；事件等待保留全部
+//! 已收到事件（不清空），模型请求以结构化方式解析（不做裸字符串包含判断）。
 
 #![allow(dead_code)]
 
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,353 @@ use crate::session::Session;
 
 pub const WAIT: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_millis(10);
+
+/// 自动清理的测试环境：持有临时目录直到测试结束。
+pub struct TestEnv {
+    pub root: std::path::PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl TestEnv {
+    pub fn new(tag: &str) -> (Self, String) {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let env = Self {
+            root: dir.path().to_path_buf(),
+            _dir: dir,
+        };
+        (env, format!("it-{tag}-{}", scru128::new_string()))
+    }
+
+    pub fn load_session(&self, sid: &str) -> Session {
+        Session::load_from_storage(&self.root, sid).expect("加载 session 失败")
+    }
+}
+
+/// 事件日志：等待方法保留全部已收到事件，断言可反复检视完整历史。
+pub struct EventLog {
+    rx: Receiver<StreamEvent>,
+    seen: Vec<StreamEvent>,
+}
+
+impl EventLog {
+    pub fn new(rx: Receiver<StreamEvent>) -> Self {
+        Self {
+            rx,
+            seen: Vec::new(),
+        }
+    }
+
+    /// 非阻塞收取当前积压事件（保留进历史）。
+    pub fn pump(&mut self) {
+        while let Ok(event) = self.rx.try_recv() {
+            self.seen.push(event);
+        }
+    }
+
+    pub fn seen(&self) -> &[StreamEvent] {
+        &self.seen
+    }
+
+    /// 带超时等待谓词命中；超时失败时附带已收到事件摘要。
+    pub fn wait_until(&mut self, pred: impl Fn(&StreamEvent) -> bool, desc: &str) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            self.pump();
+            if self.seen.iter().any(&pred) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等待事件超时：{desc}；已收到：{}",
+                self.summarize()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+
+    pub fn wait_done(&mut self) {
+        self.wait_until(|e| matches!(e, StreamEvent::Done { .. }), "成功终态 Done");
+    }
+
+    /// 等待包含指定文本的错误事件（终态或提示）。
+    pub fn wait_error_containing(&mut self, text: &str) {
+        self.wait_until(
+            |e| matches!(e, StreamEvent::Error { message } if message.contains(text)),
+            &format!("含“{text}”的错误事件"),
+        );
+    }
+
+    /// 等待审批请求并返回 request_id。
+    pub fn wait_approval_needed(&mut self) -> String {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            self.pump();
+            if let Some(StreamEvent::ApprovalNeeded { request_id, .. }) = self
+                .seen
+                .iter()
+                .find(|e| matches!(e, StreamEvent::ApprovalNeeded { .. }))
+            {
+                return request_id.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等待审批事件超时；已收到：{}",
+                self.summarize()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// 等待指定动作的压缩完成事件。
+    pub fn wait_context_compressed(
+        &mut self,
+        action: tiangong_types::stream::ContextCompressAction,
+    ) {
+        let label = format!("{action:?}");
+        self.wait_until(
+            move |e| matches!(e, StreamEvent::ContextCompressed { action: a, .. } if *a == action),
+            &format!("压缩完成事件（action={label}）"),
+        );
+    }
+
+    fn count_done(&mut self) -> usize {
+        self.pump();
+        self.seen
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Done { .. }))
+            .count()
+    }
+
+    fn count_cancelled(&mut self) -> usize {
+        self.pump();
+        self.seen
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Error { message } if message.contains("已取消")))
+            .count()
+    }
+
+    /// 多轮场景：Done 总数恰为 n（每轮一次），且无取消终态。
+    pub fn assert_done_count(&mut self, n: usize) {
+        let done = self.count_done();
+        assert_eq!(
+            done,
+            n,
+            "Done 终态应恰为 {n} 个（每轮一次）；已收到：{}",
+            self.summarize()
+        );
+        assert_eq!(self.count_cancelled(), 0, "不得出现取消终态");
+    }
+
+    /// 终态唯一性（成功）：恰好一个 Done，且不出现取消终态。
+    pub fn assert_single_success_terminal(&mut self) {
+        let done = self.count_done();
+        let cancelled = self.count_cancelled();
+        assert_eq!(
+            done,
+            1,
+            "成功场景必须恰好一个 Done 终态；已收到：{}",
+            self.summarize()
+        );
+        assert_eq!(
+            cancelled,
+            0,
+            "成功场景不得出现取消终态；已收到：{}",
+            self.summarize()
+        );
+    }
+
+    /// 终态唯一性（失败）：无 Done，含目标文案的错误事件恰好一次。
+    pub fn assert_single_failure_terminal(&mut self, text: &str) {
+        let done = self.count_done();
+        assert_eq!(
+            done,
+            0,
+            "失败场景不得出现 Done；已收到：{}",
+            self.summarize()
+        );
+        let matching = self
+            .seen
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Error { message } if message.contains(text)))
+            .count();
+        assert_eq!(
+            matching,
+            1,
+            "失败终态错误应恰好出现一次；已收到：{}",
+            self.summarize()
+        );
+    }
+
+    /// 终态唯一性（取消）：恰好一个取消终态，无 Done。
+    pub fn assert_single_cancelled_terminal(&mut self) {
+        assert_eq!(
+            self.count_cancelled(),
+            1,
+            "取消终态应恰好一次；已收到：{}",
+            self.summarize()
+        );
+        assert_eq!(
+            self.count_done(),
+            0,
+            "取消场景不得出现 Done；已收到：{}",
+            self.summarize()
+        );
+    }
+
+    fn summarize(&self) -> String {
+        self.seen.iter().map(name_of).collect::<Vec<_>>().join(",")
+    }
+}
+
+fn name_of(event: &StreamEvent) -> &'static str {
+    match event {
+        StreamEvent::Done { .. } => "Done",
+        StreamEvent::Error { .. } => "Error",
+        StreamEvent::UserMessage { .. } => "UserMessage",
+        StreamEvent::ApprovalNeeded { .. } => "ApprovalNeeded",
+        StreamEvent::ToolStart { .. } => "ToolStart",
+        StreamEvent::ToolResult { .. } => "ToolResult",
+        StreamEvent::ContextCompressing { .. } => "ContextCompressing",
+        StreamEvent::ContextCompressed { .. } => "ContextCompressed",
+        StreamEvent::TitleChanged { .. } => "TitleChanged",
+        StreamEvent::Delta { .. } => "Delta",
+        StreamEvent::ReactText { .. } => "ReactText",
+        StreamEvent::SummaryText { .. } => "SummaryText",
+        StreamEvent::TokenUsage { .. } => "TokenUsage",
+        _ => "其他",
+    }
+}
+
+/// 结构化的模型请求正文。
+pub struct RequestBody {
+    value: serde_json::Value,
+}
+
+impl RequestBody {
+    pub fn messages(&self) -> Vec<&serde_json::Value> {
+        self.value
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map(|a| a.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// 指定角色的消息 content 文本是否包含 needle
+    ///（content 为字符串或 blocks 数组时均做结构化遍历）。
+    pub fn role_message_contains(&self, role: &str, needle: &str) -> bool {
+        self.messages().iter().any(|message| {
+            message.get("role").and_then(|r| r.as_str()) == Some(role)
+                && content_text(message).is_some_and(|text| text.contains(needle))
+        })
+    }
+
+    pub fn any_message_contains(&self, needle: &str) -> bool {
+        self.messages()
+            .iter()
+            .any(|m| content_text(m).is_some_and(|t| t.contains(needle)))
+    }
+
+    /// assistant 消息声明的工具调用（id, name）。
+    pub fn assistant_tool_calls(&self) -> Vec<(String, String)> {
+        let mut calls = Vec::new();
+        for message in self.messages() {
+            if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                continue;
+            }
+            if let Some(items) = message.get("tool_calls").and_then(|t| t.as_array()) {
+                for item in items {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    calls.push((id, name));
+                }
+            }
+        }
+        calls
+    }
+
+    /// 工具结果消息（tool_call_id, content 文本）。
+    pub fn tool_results(&self) -> Vec<(String, String)> {
+        self.messages()
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+            .map(|m| {
+                (
+                    m.get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    content_text(m).unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// 请求声明的工具定义名列表。
+    pub fn defined_tools(&self) -> Vec<String> {
+        self.value
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|t| {
+                        t.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 请求是否允许模型调用工具（未指定或 auto/required；none 为禁止）。
+    pub fn allows_tool_calls(&self) -> bool {
+        match self.value.get("tool_choice") {
+            None => true,
+            Some(v) => v.as_str().is_some_and(|s| s != "none"),
+        }
+    }
+}
+
+/// 提取消息 content 的文本（字符串直取；数组拼接各块的 text 字段）。
+fn content_text(message: &serde_json::Value) -> Option<String> {
+    match message.get("content")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let mut text = String::new();
+            for block in blocks {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    text.push_str(t);
+                }
+            }
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
+/// 读取 mock 服务器收到的第 idx 个 /chat/completions 请求（结构化）。
+pub async fn chat_request_at(server: &MockServer, idx: usize) -> RequestBody {
+    let requests = server.received_requests().await.expect("读取请求失败");
+    let request = requests
+        .iter()
+        .filter(|r| r.url.path() == "/chat/completions")
+        .nth(idx)
+        .unwrap_or_else(|| panic!("第 {idx} 个模型请求尚未发出"));
+    RequestBody {
+        value: serde_json::from_slice(&request.body).expect("请求正文应为 JSON"),
+    }
+}
 
 /// 记录调用并返回固定结果的测试工具（经插件注册进 Core）。
 pub struct RecordingTool {
@@ -39,6 +388,15 @@ impl RecordingTool {
 
     pub fn count(&self) -> usize {
         self.invocations.lock().unwrap().len()
+    }
+
+    pub fn call_ids(&self) -> Vec<String> {
+        self.invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.id.clone())
+            .collect()
     }
 }
 
@@ -102,7 +460,8 @@ impl crate::core::plugin::Plugin for ToolPlugin {
     }
 }
 
-/// OpenAI SSE chunk 组装（`data: {json}` + 末尾 `[DONE]`）。
+// ── mock 挂载 ──────────────────────────────────────────────────────────
+
 pub fn sse_body(chunks: &[serde_json::Value]) -> Vec<u8> {
     let mut body = String::new();
     for chunk in chunks {
@@ -162,7 +521,6 @@ pub fn tool_call_chunk(call_id: &str, name: &str, arguments: &str) -> serde_json
     })
 }
 
-/// 按挂载顺序只响应一次的 SSE mock（可带延迟制造挂起窗口）。
 pub async fn mount_sse(
     server: &MockServer,
     chunks: Vec<serde_json::Value>,
@@ -182,7 +540,6 @@ pub async fn mount_sse(
         .await;
 }
 
-/// 非流式完成响应（压缩请求用）。
 pub async fn mount_completion(server: &MockServer, content: &str, delay: Option<Duration>) {
     let body = serde_json::json!({
         "id": "chatcmpl-it-compress",
@@ -208,7 +565,6 @@ pub async fn mount_completion(server: &MockServer, content: &str, delay: Option<
         .await;
 }
 
-/// 永久匹配的 400 请求错误（模型请求快速失败）。
 pub async fn mount_permanent_error(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -220,17 +576,19 @@ pub async fn mount_permanent_error(server: &MockServer) {
         .await;
 }
 
+// ── Core 构建与投递 ────────────────────────────────────────────────────
+
 /// 构建真实 TiangongCore（非默认标题跳过 lite 标题生成）并保留事件接收端。
 pub fn core_with(
-    root: &std::path::Path,
+    env: &TestEnv,
     sid: &str,
     endpoint: &str,
     trust_mode: TrustMode,
     plugins: Vec<Arc<dyn crate::core::plugin::Plugin>>,
-) -> (TiangongCore, std::sync::mpsc::Receiver<StreamEvent>) {
+) -> (TiangongCore, EventLog) {
     let mut session = Session::new("集成测试会话".to_string());
     session.id = sid.to_string();
-    session.bind_storage_root(root);
+    session.bind_storage_root(&env.root);
     session.try_persist_to_disk().expect("预落盘 session 失败");
 
     let config = CoreConfig::builder()
@@ -242,24 +600,18 @@ pub fn core_with(
         .session_id(sid.to_string())
         .config(CoreConfigProvider::new(config))
         .trust_mode(trust_mode)
-        .storage_root(root)
-        .workspace_dir(root.to_string_lossy())
+        .storage_root(env.root.clone())
+        .workspace_dir(env.root.to_string_lossy())
         .stream_tx(event_tx)
         .plugins(plugins)
         .build();
-    (core, event_rx)
+    (core, EventLog::new(event_rx))
 }
 
-/// 全信任 + 无插件的默认实例。
-pub fn core_for(
-    root: &std::path::Path,
-    sid: &str,
-    endpoint: &str,
-) -> (TiangongCore, std::sync::mpsc::Receiver<StreamEvent>) {
-    core_with(root, sid, endpoint, TrustMode::FullTrust, Vec::new())
+pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, EventLog) {
+    core_with(env, sid, endpoint, TrustMode::FullTrust, Vec::new())
 }
 
-/// 投递一条用户消息。
 pub fn send_message(core: &TiangongCore, message_id: &str, text: &str) {
     core.deliver(AgentInputKind::prepared_with_id(
         message_id,
@@ -269,10 +621,10 @@ pub fn send_message(core: &TiangongCore, message_id: &str, text: &str) {
 }
 
 /// 等待指定用户消息获得 turn 终态（磁盘 Session 权威）。
-pub async fn wait_turn_status(root: &std::path::Path, sid: &str, message_id: &str) -> TurnStatus {
+pub async fn wait_turn_status(env: &TestEnv, sid: &str, message_id: &str) -> TurnStatus {
     let deadline = Instant::now() + WAIT;
     loop {
-        if let Some(status) = Session::load_from_storage(root, sid)
+        if let Some(status) = Session::load_from_storage(&env.root, sid)
             .ok()
             .and_then(|session| {
                 session
@@ -292,15 +644,7 @@ pub async fn wait_turn_status(root: &std::path::Path, sid: &str, message_id: &st
     }
 }
 
-/// 等待 driver 回到空闲。
-pub async fn wait_idle(sid: &str) {
-    let deadline = Instant::now() + WAIT;
-    while crate::react::inbox::is_running(sid) && Instant::now() < deadline {
-        tokio::time::sleep(POLL).await;
-    }
-}
-
-/// 等待 mock 服务器收到至少 `n` 个请求。
+/// 等待 mock 服务器收到至少 `n` 个请求（超时 panic）。
 pub async fn wait_requests(server: &MockServer, n: usize) {
     let deadline = Instant::now() + WAIT;
     while server.received_requests().await.map_or(0, |r| r.len()) < n {
@@ -309,31 +653,26 @@ pub async fn wait_requests(server: &MockServer, n: usize) {
     }
 }
 
-/// 收集当前积压的全部事件（非阻塞）。
-pub fn drain_events(rx: &std::sync::mpsc::Receiver<StreamEvent>) -> Vec<StreamEvent> {
-    rx.try_iter().collect()
-}
-
-/// 断言事件流中存在成功终态（Done）。
-pub fn assert_done(events: &[StreamEvent]) {
-    assert!(
-        events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
-        "事件流应包含 Done 终态，实际: {:?}",
-        events.iter().map(|e| discriminant(e)).collect::<Vec<_>>()
-    );
-}
-
-fn discriminant(event: &StreamEvent) -> &'static str {
-    match event {
-        StreamEvent::Done { .. } => "Done",
-        StreamEvent::Error { .. } => "Error",
-        StreamEvent::UserMessage { .. } => "UserMessage",
-        StreamEvent::ApprovalNeeded { .. } => "ApprovalNeeded",
-        StreamEvent::ToolStart { .. } => "ToolStart",
-        StreamEvent::ToolResult { .. } => "ToolResult",
-        StreamEvent::ContextCompressing { .. } => "ContextCompressing",
-        StreamEvent::ContextCompressed { .. } => "ContextCompressed",
-        StreamEvent::TitleChanged { .. } => "TitleChanged",
-        _ => "其他",
+/// 非断言版：在预算内等到返回 true，否则 false（调用方按落点分支断言）。
+pub async fn try_wait_requests(server: &MockServer, n: usize, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while server.received_requests().await.map_or(0, |r| r.len()) < n {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(POLL).await;
     }
+    true
+}
+
+/// 等待 driver 回到空闲（超时即失败）。
+pub async fn wait_idle(sid: &str) {
+    let deadline = Instant::now() + WAIT;
+    while crate::react::inbox::is_running(sid) && Instant::now() < deadline {
+        tokio::time::sleep(POLL).await;
+    }
+    assert!(
+        !crate::react::inbox::is_running(sid),
+        "等待 driver 空闲超时"
+    );
 }
