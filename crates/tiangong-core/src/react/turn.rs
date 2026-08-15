@@ -82,6 +82,10 @@ pub(crate) async fn run_turn(
     }
 
     // ── 提交轮次状态与插件收尾 ──
+    // 测试同步点：Agent Loop 已提交结果且 ingress 已进入 Committing，但 turn 尚未
+    // 写入终态。屏障只等待独立释放信号，不消费真实命令通道。
+    #[cfg(test)]
+    crate::core::test_support::turn_finish_barrier(&ctx.session.id).await;
     // 结果写入**提交时最新**的用户消息（ALR-107）：运行中注入的引导消息成为当前
     // 任务锚点；生命周期锚点 turn_start_idx 保持 turn 开始时的值不变。
     elapsed_timer.stop().await;

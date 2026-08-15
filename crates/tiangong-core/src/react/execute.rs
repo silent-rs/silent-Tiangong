@@ -853,7 +853,7 @@ pub(super) async fn execute_turn(
                 // 测试同步点（仅测试构建）：封口前屏障——候选答复已生成、
                 // 提交尚未开始的精确窗口，供集成测试投递引导/交接消息。
                 #[cfg(test)]
-                crate::core::test_support::seal_barrier(&ctx.session.id, "seal", cmd_rx).await;
+                crate::core::test_support::seal_barrier(&ctx.session.id).await;
                 crate::react::inbox::begin_seal(&ctx.session.id);
                 loop {
                     let next = match cmd_rx.try_recv() {
@@ -921,10 +921,6 @@ pub(super) async fn execute_turn(
                     emit_session_message_upsert(ctx, &msg_id);
                 }
                 crate::react::inbox::commit_ingress(&ctx.session.id);
-                // 测试同步点（仅测试构建）：提交已确定（Committing），此后
-                // 到达的用户消息只能占用待执行单槽——供关闭/交接/Busy 测试。
-                #[cfg(test)]
-                crate::core::test_support::seal_barrier(&ctx.session.id, "commit", cmd_rx).await;
                 let mut pending_result = pending_result;
                 pending_result.usage = state.accumulated_usage.clone();
                 tracing::debug!(

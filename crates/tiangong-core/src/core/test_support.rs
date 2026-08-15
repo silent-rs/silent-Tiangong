@@ -6,13 +6,15 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tiangong_types::{StreamEvent, TurnStatus};
 use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use crate::agent_input::{AgentInput, AgentInputKind};
 use crate::core::TiangongCore;
@@ -23,12 +25,12 @@ use crate::session::Session;
 pub const WAIT: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_millis(10);
 
-/// 测试同步屏障：在 Core 的封口前（候选已生成、提交未开始）与提交后
-/// （Committing，消息只能进单槽）两个瞬态窗口提供确定性同步。
+/// 测试同步屏障：在 Core 的封口前（候选已生成、提交未开始）与 turn 收尾前
+/// （ingress 已是 Committing，消息只能进单槽）提供确定性同步。
 ///
-/// 协议：测试端 [`arm_seal`]/[`arm_commit`] 按 session 预置；Core 到达屏障点
+/// 协议：测试端 [`arm_seal`]/[`arm_turn_finish`] 按 session 预置；Core 到达屏障点
 /// 后 ack 并阻塞等待 release；测试端收到 ack（窗口已冻结）后投递消息，
-/// 再 [`release_barriers`] 让 Core 继续。按 session 多槽，并行测试互不干扰；
+/// 再调用 [`SealHandle::release`] 让 Core 继续。按 session 多槽，并行测试互不干扰；
 /// 未预置的 session 直接通过（不影响不用屏障的测试）。
 /// 测试端持有的屏障句柄：`ack` 在 Core 到达冻结点时收到信号，
 /// `release()` 解除冻结。
@@ -89,32 +91,18 @@ static SEAL_GATES: std::sync::OnceLock<SealGates> = std::sync::OnceLock::new();
 
 struct SealGates {
     seal: SealGate,
-    commit: SealGate,
+    turn_finish: SealGate,
 }
 
 fn seal_gates() -> &'static SealGates {
     SEAL_GATES.get_or_init(|| SealGates {
         seal: SealGate::new(),
-        commit: SealGate::new(),
+        turn_finish: SealGate::new(),
     })
 }
 
-/// Core 端屏障（async 等待，不阻塞共享 runtime 的 worker；未预置直接通过）。
-///
-/// - seal（Accepting，候选已生成、提交未开始）：只等测试释放——期间到达的
-///   用户消息应留给封口排空循环按继续命令处理，屏障不得吞命令；
-/// - commit（Committing）：额外监听命令通道——正常投递已被门控拒绝，唯一
-///   能进入的是关闭路径的 force_send(Cancel)，收到即解除（关闭流程兜底）。
-pub async fn seal_barrier(
-    sid: &str,
-    kind: &str,
-    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::core::command::Command>,
-) {
-    let taken = match kind {
-        "seal" => seal_gates().seal.armed.lock().unwrap().remove(sid),
-        "commit" => seal_gates().commit.armed.lock().unwrap().remove(sid),
-        _ => None,
-    };
+async fn wait_gate(gate: &SealGate, sid: &str) {
+    let taken = gate.armed.lock().unwrap().remove(sid);
     let Some(gate) = taken else {
         return;
     };
@@ -122,18 +110,18 @@ pub async fn seal_barrier(
     if gate.ack_tx.send(()).is_err() {
         return;
     }
-    match kind {
-        "commit" => {
-            tokio::select! {
-                _ = gate.release_rx => {}
-                // 关闭的强制取消：解除等待，命令由关闭流程兜底。
-                _ = cmd_rx.recv() => {}
-            }
-        }
-        _ => {
-            let _ = gate.release_rx.await;
-        }
-    }
+    let _ = gate.release_rx.await;
+}
+
+/// 候选已经生成、封口尚未开始。屏障只等待独立释放信号，不读取命令通道。
+pub async fn seal_barrier(sid: &str) {
+    wait_gate(&seal_gates().seal, sid).await;
+}
+
+/// Agent Loop 已提交结果、turn 尚未收尾。此时 ingress 为 Committing，外部用户
+/// 消息只能进入待执行单槽。屏障不消费 Cancel/Shutdown 等真实命令。
+pub async fn turn_finish_barrier(sid: &str) {
+    wait_gate(&seal_gates().turn_finish, sid).await;
 }
 
 /// 测试端：预置封口屏障（候选已生成、提交未开始的窗口）。
@@ -141,9 +129,9 @@ pub fn arm_seal(sid: &str) -> SealHandle {
     seal_gates().seal.arm(sid)
 }
 
-/// 测试端：预置提交屏障（Committing，消息只能进单槽）。
-pub fn arm_commit(sid: &str) -> SealHandle {
-    seal_gates().commit.arm(sid)
+/// 测试端：预置 turn 收尾屏障（Committing，消息只能进单槽）。
+pub fn arm_turn_finish(sid: &str) -> SealHandle {
+    seal_gates().turn_finish.arm(sid)
 }
 
 /// 自动清理的测试环境：持有临时目录直到测试结束。
@@ -209,8 +197,37 @@ impl EventLog {
         }
     }
 
+    pub fn wait_done_count(&mut self, expected: usize) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            self.pump();
+            if self
+                .seen
+                .iter()
+                .filter(|event| matches!(event, StreamEvent::Done { .. }))
+                .count()
+                >= expected
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "等待 {expected} 个成功终态超时；已收到：{}",
+                self.summarize()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+
     pub fn wait_done(&mut self) {
-        self.wait_until(|e| matches!(e, StreamEvent::Done { .. }), "成功终态 Done");
+        self.wait_done_count(1);
+    }
+
+    pub fn wait_cancelled(&mut self) {
+        self.wait_until(
+            |event| matches!(event, StreamEvent::Error { message } if message.contains("已取消")),
+            "取消终态",
+        );
     }
 
     /// 等待包含指定文本的错误事件（终态或提示）。
@@ -297,7 +314,7 @@ impl EventLog {
             .count()
     }
 
-    /// 多轮场景：Done 总数恰为 n（每轮一次），且无取消终态。
+    /// 多轮成功场景：Done 总数恰为 n，且没有任何 Error。
     pub fn assert_done_count(&mut self, n: usize) {
         let done = self.count_done();
         assert_eq!(
@@ -306,13 +323,17 @@ impl EventLog {
             "Done 终态应恰为 {n} 个（每轮一次）；已收到：{}",
             self.summarize()
         );
-        assert_eq!(self.count_cancelled(), 0, "不得出现取消终态");
+        assert_eq!(
+            self.count_errors(),
+            0,
+            "成功场景不得出现任何错误；已收到：{}",
+            self.summarize()
+        );
     }
 
-    /// 终态唯一性（成功）：恰好一个 Done，且不出现取消终态。
+    /// 终态唯一性（成功）：恰好一个 Done，且没有任何 Error。
     pub fn assert_single_success_terminal(&mut self) {
         let done = self.count_done();
-        let cancelled = self.count_cancelled();
         assert_eq!(
             done,
             1,
@@ -320,20 +341,26 @@ impl EventLog {
             self.summarize()
         );
         assert_eq!(
-            cancelled,
+            self.count_errors(),
             0,
-            "成功场景不得出现取消终态；已收到：{}",
+            "成功场景不得出现任何错误；已收到：{}",
             self.summarize()
         );
     }
 
-    /// 终态唯一性（失败）：无 Done，含目标文案的错误事件恰好一次。
+    /// 终态唯一性（失败）：无 Done，全部 Error 恰好一个且包含目标文案。
     pub fn assert_single_failure_terminal(&mut self, text: &str) {
         let done = self.count_done();
         assert_eq!(
             done,
             0,
             "失败场景不得出现 Done；已收到：{}",
+            self.summarize()
+        );
+        assert_eq!(
+            self.count_errors(),
+            1,
+            "失败场景必须恰好一个错误终态；已收到：{}",
             self.summarize()
         );
         let matching = self
@@ -344,7 +371,7 @@ impl EventLog {
         assert_eq!(
             matching,
             1,
-            "失败终态错误应恰好出现一次；已收到：{}",
+            "唯一失败终态必须包含目标文案；已收到：{}",
             self.summarize()
         );
     }
@@ -424,6 +451,38 @@ impl RequestBody {
             .any(|m| content_text(m).is_some_and(|t| t.contains(needle)))
     }
 
+    pub fn latest_user_text(&self) -> Option<String> {
+        self.messages().iter().rev().find_map(|message| {
+            (message.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .then(|| content_text(message))
+                .flatten()
+        })
+    }
+
+    pub fn is_stream(&self) -> bool {
+        self.value
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    pub fn is_compression(&self) -> bool {
+        self.latest_user_text()
+            .is_some_and(|text| text.contains("请压缩以上对话历史") && text.contains("[[SUMMARY]]"))
+    }
+
+    pub fn has_tool_result(&self, call_id: &str, needle: &str) -> bool {
+        self.tool_results()
+            .iter()
+            .any(|(id, text)| id == call_id && text.contains(needle))
+    }
+
+    pub fn has_assistant_tool_call(&self, call_id: &str, name: &str) -> bool {
+        self.assistant_tool_calls()
+            .iter()
+            .any(|(id, tool_name)| id == call_id && tool_name == name)
+    }
+
     /// assistant 消息声明的工具调用（id, name）。
     pub fn assistant_tool_calls(&self) -> Vec<(String, String)> {
         let mut calls = Vec::new();
@@ -487,12 +546,13 @@ impl RequestBody {
             .unwrap_or_default()
     }
 
-    /// 请求是否允许模型调用工具（未指定或 auto/required；none 为禁止）。
+    /// 请求是否允许模型调用工具（仅字符串 none 表示禁止）。
     pub fn allows_tool_calls(&self) -> bool {
-        match self.value.get("tool_choice") {
-            None => true,
-            Some(v) => v.as_str().is_some_and(|s| s != "none"),
-        }
+        !self
+            .value
+            .get("tool_choice")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|choice| choice == "none")
     }
 }
 
@@ -618,6 +678,237 @@ impl crate::core::plugin::Plugin for ToolPlugin {
 
 // ── mock 挂载 ──────────────────────────────────────────────────────────
 
+pub type RequestPredicate = Arc<dyn Fn(&RequestBody) -> bool + Send + Sync>;
+
+#[derive(Clone)]
+pub enum MockReply {
+    Sse {
+        chunks: Vec<serde_json::Value>,
+        delay: Option<Duration>,
+    },
+    Completion {
+        content: String,
+        delay: Option<Duration>,
+    },
+    Error {
+        status: u16,
+        message: String,
+    },
+}
+
+impl MockReply {
+    pub fn sse(chunks: Vec<serde_json::Value>) -> Self {
+        Self::Sse {
+            chunks,
+            delay: None,
+        }
+    }
+
+    pub fn delayed_sse(chunks: Vec<serde_json::Value>, delay: Duration) -> Self {
+        Self::Sse {
+            chunks,
+            delay: Some(delay),
+        }
+    }
+
+    pub fn completion(content: impl Into<String>) -> Self {
+        Self::Completion {
+            content: content.into(),
+            delay: None,
+        }
+    }
+
+    pub fn delayed_completion(content: impl Into<String>, delay: Duration) -> Self {
+        Self::Completion {
+            content: content.into(),
+            delay: Some(delay),
+        }
+    }
+
+    pub fn error(status: u16, message: impl Into<String>) -> Self {
+        Self::Error {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn response(&self) -> ResponseTemplate {
+        match self {
+            Self::Sse { chunks, delay } => {
+                let mut response = ResponseTemplate::new(200)
+                    .set_body_raw(sse_body(chunks), "text/event-stream");
+                if let Some(delay) = delay {
+                    response = response.set_delay(*delay);
+                }
+                response
+            }
+            Self::Completion { content, delay } => {
+                let body = serde_json::json!({
+                    "id": "chatcmpl-it-compress",
+                    "object": "chat.completion",
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+                });
+                let mut response = ResponseTemplate::new(200).set_body_json(body);
+                if let Some(delay) = delay {
+                    response = response.set_delay(*delay);
+                }
+                response
+            }
+            Self::Error { status, message } => ResponseTemplate::new(*status).set_body_json(
+                serde_json::json!({
+                    "error": {"message": message, "type": "integration_test_error"}
+                }),
+            ),
+        }
+    }
+}
+
+pub struct PromptRoute {
+    name: &'static str,
+    predicate: RequestPredicate,
+    reply: MockReply,
+    hits: Arc<AtomicUsize>,
+}
+
+impl PromptRoute {
+    pub fn new(
+        name: &'static str,
+        predicate: impl Fn(&RequestBody) -> bool + Send + Sync + 'static,
+        reply: MockReply,
+    ) -> Self {
+        Self {
+            name,
+            predicate: Arc::new(predicate),
+            reply,
+            hits: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct PromptRouteHandle {
+    name: &'static str,
+    hits: Arc<AtomicUsize>,
+}
+
+impl PromptRouteHandle {
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::SeqCst)
+    }
+
+    pub fn assert_hits(&self, expected: usize) {
+        assert_eq!(
+            self.hits(),
+            expected,
+            "prompt 路由 {} 命中次数不符",
+            self.name
+        );
+    }
+}
+
+struct PromptRouter {
+    routes: Vec<PromptRoute>,
+}
+
+impl Respond for PromptRouter {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let parsed = serde_json::from_slice::<serde_json::Value>(&request.body);
+        let Ok(value) = parsed else {
+            return MockReply::error(400, "mock 收到非 JSON 请求").response();
+        };
+        let body = RequestBody { value };
+        let matched = self
+            .routes
+            .iter()
+            .filter(|route| (route.predicate)(&body))
+            .collect::<Vec<_>>();
+        if let [route] = matched.as_slice() {
+            route.hits.fetch_add(1, Ordering::SeqCst);
+            return route.reply.response();
+        }
+        let latest_user = body.latest_user_text().unwrap_or_default();
+        let route_names = matched
+            .iter()
+            .map(|route| route.name)
+            .collect::<Vec<_>>()
+            .join(",");
+        MockReply::error(
+            400,
+            format!(
+                "prompt 路由必须唯一匹配：matched=[{route_names}] stream={} compression={} latest_user={latest_user:?}",
+                body.is_stream(),
+                body.is_compression(),
+            ),
+        )
+        .response()
+    }
+}
+
+pub async fn mount_prompt_router(
+    server: &MockServer,
+    routes: Vec<PromptRoute>,
+) -> HashMap<&'static str, PromptRouteHandle> {
+    let handles = routes
+        .iter()
+        .map(|route| {
+            (
+                route.name,
+                PromptRouteHandle {
+                    name: route.name,
+                    hits: route.hits.clone(),
+                },
+            )
+        })
+        .collect();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(PromptRouter { routes })
+        .mount(server)
+        .await;
+    handles
+}
+
+pub fn latest_user_contains(text: &'static str) -> impl Fn(&RequestBody) -> bool {
+    move |request| {
+        request
+            .latest_user_text()
+            .is_some_and(|latest| latest.contains(text))
+    }
+}
+
+pub fn stream_text_chunks(parts: &[&str]) -> Vec<serde_json::Value> {
+    let mut chunks = parts
+        .iter()
+        .map(|part| text_delta_chunk(part))
+        .collect::<Vec<_>>();
+    chunks.push(finish_chunk("stop"));
+    chunks.push(usage_delta_chunk(12, parts.len() as u64 + 1));
+    chunks
+}
+
+pub fn stream_tool_call_chunks(
+    call_id: &str,
+    name: &str,
+    argument_parts: &[&str],
+) -> Vec<serde_json::Value> {
+    let mut chunks = vec![tool_call_delta_chunk(call_id, name, "")];
+    chunks.extend(
+        argument_parts
+            .iter()
+            .map(|part| tool_call_delta_chunk("", "", part)),
+    );
+    chunks.push(finish_chunk("tool_calls"));
+    chunks.push(usage_delta_chunk(15, 3));
+    chunks
+}
+
 pub fn sse_body(chunks: &[serde_json::Value]) -> Vec<u8> {
     let mut body = String::new();
     for chunk in chunks {
@@ -653,6 +944,41 @@ pub fn usage_delta_chunk(prompt: u64, completion: u64) -> serde_json::Value {
             "completion_tokens": completion,
             "total_tokens": prompt + completion,
         },
+    })
+}
+
+pub fn finish_chunk(reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl-it",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": reason,
+        }],
+    })
+}
+
+pub fn tool_call_delta_chunk(call_id: &str, name: &str, arguments: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "chatcmpl-it",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }],
+            },
+            "finish_reason": null,
+        }],
     })
 }
 
