@@ -26,7 +26,7 @@ mod contract_tests;
 mod integration_tests;
 pub mod plugin;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub use plugin::Plugin;
 pub mod error;
 pub mod storage_location;

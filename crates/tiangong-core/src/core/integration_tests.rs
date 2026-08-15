@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tiangong_types::StreamEvent;
 use tiangong_types::TurnStatus;
 use wiremock::MockServer;
 
@@ -233,7 +232,7 @@ async fn steering_message_aborts_and_restarts_current_turn() {
     mount_sse(
         &server,
         vec![text_delta_chunk("长时间任务执行中")],
-        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(3)),
     )
     .await;
     mount_sse(&server, vec![text_delta_chunk("按新方向完成。")], None).await;
@@ -284,7 +283,7 @@ async fn cancel_running_turn_ends_cancelled() {
     mount_sse(
         &server,
         vec![text_delta_chunk("长时间任务执行中")],
-        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(3)),
     )
     .await;
     let (core, mut events) = core_for(&env, &sid, &server.uri());
@@ -443,7 +442,8 @@ async fn manual_compression_applies_summary() {
     core.deliver(AgentInputKind::compress_context())
         .expect("手动压缩应被接受");
     // 成功动作事件（不是任意压缩结束事件）。
-    events.wait_context_compressed(tiangong_types::stream::ContextCompressAction::Compress);
+    let (event_boundary, event_remaining) =
+        events.wait_context_compressed(tiangong_types::stream::ContextCompressAction::Compress);
 
     // 压缩请求的历史范围：含被折叠历史。
     let compression = chat_request_at(&server, 0).await;
@@ -451,14 +451,22 @@ async fn manual_compression_applies_summary() {
         compression.any_message_contains("第一条问题"),
         "压缩请求应包含被折叠的历史"
     );
-    // 摘要、边界与事件内容一致。
+    // 摘要、边界与事件内容一致（界面进度与磁盘结果核对）。
     let session = env.load_session(&sid);
     assert_eq!(
         session.context_summary.as_deref(),
         Some("手动压缩摘要内容"),
         "摘要应落盘"
     );
-    assert!(session.summary_up_to > 0, "压缩边界应推进");
+    assert_eq!(
+        session.summary_up_to, event_boundary,
+        "事件中的压缩边界必须与磁盘一致"
+    );
+    assert_eq!(
+        session.messages.len() - session.summary_up_to,
+        event_remaining,
+        "事件中的剩余消息数必须与磁盘一致"
+    );
     // 压缩结束后执行循环回到空闲。
     wait_idle(&sid).await;
     core.shutdown_join().expect("关闭失败");
@@ -490,80 +498,101 @@ async fn llm_failure_propagates_failed_status() {
 
 // ── 边界场景 ──────────────────────────────────────────────────────────
 
-/// 边界 1：turn 结束交接——A 完成后立即投递 B：B 不丢失、不并入 A，
-/// 同一 driver 自动开始下一轮，B 的请求从 A 完成后的最新会话构建。
+/// 下一轮读取最新会话：A 完成落盘后投递 B，B 的请求包含 A 的最终回复。
+/// （这是普通的轮次衔接语义；真正的提交期交接见 handoff_during_commit。）
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sealed_turn_hands_off_next_message() {
-    let (env, sid) = TestEnv::new("handoff");
+async fn next_turn_reads_latest_session() {
+    let (env, sid) = TestEnv::new("next-latest");
     let server = MockServer::start().await;
     let (core, mut events) = core_for(&env, &sid, &server.uri());
 
-    // A：文本完成（含唯一标记）。
     let marker = format!("A-FINAL-{sid}");
     mount_sse(&server, vec![text_delta_chunk(&marker)], None).await;
-    // B：文本完成。
     mount_sse(&server, vec![text_delta_chunk("B 的回答。")], None).await;
 
     send_message(&core, "msg-a", "第一个问题");
-    // A 完成落盘后（交接窗口起点），立即投递 B。
     assert_eq!(
         wait_turn_status(&env, &sid, "msg-a").await,
         TurnStatus::Success
     );
     send_message(&core, "msg-b", "第二个问题");
 
-    // B 不丢失且由下一轮处理（同一 driver 自动开始）。
     let status = wait_turn_status(&env, &sid, "msg-b").await;
-    assert_eq!(status, TurnStatus::Success, "B 必须被执行并获得终态");
-    events.wait_done();
-    events.pump();
-    let done_count = events
-        .seen()
-        .iter()
-        .filter(|e| matches!(e, StreamEvent::Done { .. }))
-        .count();
-    assert_eq!(done_count, 2, "A 与 B 各发布一次成功终态");
+    assert_eq!(status, TurnStatus::Success);
+    events.assert_done_count(2);
 
-    // B 的请求从 A 完成后的最新会话构建（含 A 的最终回复）。
     let second = chat_request_at(&server, 1).await;
     assert!(
-        second.any_message_contains(&marker),
-        "B 的请求必须包含 A 的最终回复（最新会话）"
+        second.role_message_contains("assistant", &marker),
+        "B 的请求必须在 assistant 历史回复中包含 A 的最终答复（最新会话）"
     );
-    // B 未被并入 A：B 的消息独立存在。
     let session = env.load_session(&sid);
     assert!(session.messages.iter().any(|m| m.id == "msg-b"));
     core.shutdown_join().expect("关闭失败");
 }
 
-/// 边界 2：单槽占用忙碌拒绝——无可引导活动轮的间隙投递 B 占用待执行
-/// 槽，C 必须明确 Busy；B 落盘执行，C 不得悄悄出现。
+/// 真正的提交期交接（封口 Committing 窗口，测试屏障冻结）：A 提交确定瞬间
+/// 投递 B——B 进入待执行单槽（不并入 A、不丢失），A 完成后同一 driver 自动
+/// 执行 B，且 B 的请求从 A 提交后的最新会话构建。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_during_commit_starts_next_turn_from_pending_slot() {
+    let (env, sid) = TestEnv::new("commit-handoff");
+    let server = MockServer::start().await;
+    let (core, mut events) = core_for(&env, &sid, &server.uri());
+
+    let marker = format!("A-FINAL-{sid}");
+    mount_sse(&server, vec![text_delta_chunk(&marker)], None).await;
+    mount_sse(&server, vec![text_delta_chunk("B 的回答。")], None).await;
+
+    // 预置提交屏障：Core 到达 Committing 时冻结。
+    let mut commit = arm_commit(&sid);
+    send_message(&core, "msg-a", "第一个问题");
+    commit.wait_frozen();
+
+    // 冻结窗口投递 B：deliver 成功（进入单槽——不会并入正在提交的 A）。
+    send_message(&core, "msg-b", "第二个问题");
+    let session = env.load_session(&sid);
+    assert!(
+        !session.messages.iter().any(|m| m.id == "msg-b"),
+        "提交窗口的 B 只能占单槽，不得立即并入正在提交的 A"
+    );
+
+    // 释放屏障：A 完成提交，同一 driver 自动从单槽领取并执行 B。
+    commit.release();
+    let status = wait_turn_status(&env, &sid, "msg-b").await;
+    assert_eq!(status, TurnStatus::Success, "B 必须被自动执行");
+    assert_eq!(
+        wait_turn_status(&env, &sid, "msg-a").await,
+        TurnStatus::Success,
+        "A 正常完成，B 未并入 A"
+    );
+    events.assert_done_count(2);
+
+    let second = chat_request_at(&server, 1).await;
+    assert!(
+        second.role_message_contains("assistant", &marker),
+        "B 的请求必须包含 A 的最终答复（提交后的最新会话）"
+    );
+    core.shutdown_join().expect("关闭失败");
+}
+
+/// 单槽占用忙碌拒绝（提交屏障冻结，确定性窗口）：A 处于 Committing 时
+/// B 占用待执行单槽，C 必须明确 Busy；释放后 B 落盘执行，C 不出现。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn occupied_pending_slot_returns_busy() {
     let (env, sid) = TestEnv::new("busy");
     let server = MockServer::start().await;
     let (core, mut events) = core_for(&env, &sid, &server.uri());
 
-    mount_sse(
-        &server,
-        vec![text_delta_chunk("挂起中")],
-        Some(Duration::from_secs(30)),
-    )
-    .await;
+    mount_sse(&server, vec![text_delta_chunk("A 完成。")], None).await;
     mount_sse(&server, vec![text_delta_chunk("B 完成。")], None).await;
 
+    let mut commit = arm_commit(&sid);
     send_message(&core, "msg-a", "第一个问题");
-    wait_requests(&server, 1).await;
-    // 取消 A（进入结束路径），等待 driver 回到无可引导活动的间隙。
-    core.deliver(AgentInputKind::cancel()).unwrap();
-    assert_eq!(
-        wait_turn_status(&env, &sid, "msg-a").await,
-        TurnStatus::Cancelled
-    );
+    commit.wait_frozen();
 
-    // B 占用待执行槽。
+    // 冻结窗口：B 占用单槽；C 明确 Busy（App 层队列负责重试）。
     send_message(&core, "msg-b", "第二个问题");
-    // C 必须明确忙碌。
     let c_result = core.deliver(AgentInputKind::prepared_with_id(
         "msg-c",
         vec![tiangong_types::ContentBlock::text("第三个问题")],
@@ -573,10 +602,10 @@ async fn occupied_pending_slot_returns_busy() {
         "单槽占用时必须明确 Busy，当前: {c_result:?}"
     );
 
-    // B 落盘执行；C 不得悄悄出现。
+    commit.release();
     let status = wait_turn_status(&env, &sid, "msg-b").await;
     assert_eq!(status, TurnStatus::Success);
-    events.wait_done();
+    events.assert_done_count(2);
     let session = env.load_session(&sid);
     assert!(
         !session.messages.iter().any(|m| m.id == "msg-c"),
@@ -585,161 +614,125 @@ async fn occupied_pending_slot_returns_busy() {
     core.shutdown_join().expect("关闭失败");
 }
 
-/// 边界 3：已接受消息必须在关闭后存活——A 投递并被接收保存后立即关闭，
-/// 无条件检查 A 的归宿（最终会话存在或关闭明确失败）。
+/// 已接受但尚未保存/执行的消息在关闭后的归宿（提交屏障 + 单槽）：
+/// A 处于 Committing 时投递 B（deliver 成功、仅占单槽、未保存未执行），
+/// 立即关闭——关闭成功则 B 必须已保存；只有明确制造保存失败才允许关闭出错。
+/// B 可以没有最终状态（尚未执行）。返回 Busy 的消息不属于已接受，不适用。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_messages_survive_shutdown() {
-    let (env, sid) = TestEnv::new("survive");
+async fn accepted_not_yet_saved_message_survives_shutdown() {
+    let (env, sid) = TestEnv::new("survive-unsaved");
     let server = MockServer::start().await;
-    mount_sse(
-        &server,
-        vec![text_delta_chunk("长时间任务执行中")],
-        Some(Duration::from_secs(30)),
-    )
-    .await;
+    mount_sse(&server, vec![text_delta_chunk("A 完成。")], None).await;
     let (core, _events) = core_for(&env, &sid, &server.uri());
 
-    // A：投递并等待其被保存进会话（已确认接收）。
-    send_message(&core, "msg-a", "关闭前正在处理的消息");
-    {
-        let deadline = std::time::Instant::now() + WAIT;
-        loop {
-            let saved = env
-                .load_session(&sid)
-                .messages
-                .iter()
-                .any(|m| m.id == "msg-a");
-            if saved {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "等待 A 保存超时");
-            tokio::time::sleep(POLL).await;
-        }
-    }
+    let commit = arm_commit(&sid);
+    send_message(&core, "msg-a", "第一个问题");
+    commit.wait_frozen();
 
-    // 立即关闭。
+    // B：已接受（deliver Ok）、在单槽、未保存未执行。
+    send_message(&core, "msg-b", "关闭前未保存的消息");
+    assert!(
+        !env.load_session(&sid)
+            .messages
+            .iter()
+            .any(|m| m.id == "msg-b"),
+        "投递时刻 B 尚未保存（仅占单槽）"
+    );
+
+    // 立即关闭（不释放屏障——提交在关闭路径中收敛）。
     let shutdown = core.shutdown_join();
-    // 无条件检查 A：存在于最终会话，或关闭明确失败。
-    let a_in_final = env
-        .load_session(&sid)
+    let session = env.load_session(&sid);
+    let b_saved = session.messages.iter().any(|m| m.id == "msg-b");
+    if shutdown.is_ok() {
+        assert!(
+            b_saved,
+            "关闭成功时，已接受未执行的 B 必须已被保存（可恢复）"
+        );
+    } else {
+        assert!(!b_saved, "关闭失败时保存不应声称成功");
+    }
+    // B 尚未执行：可以没有最终状态。
+    let b_status = session
         .messages
         .iter()
-        .any(|m| m.id == "msg-a");
+        .find(|m| m.id == "msg-b")
+        .and_then(|m| m.turn_status);
     assert!(
-        a_in_final || shutdown.is_err(),
-        "已接受并保存的 A 必须在最终会话存活，或关闭明确失败"
+        b_status.is_none(),
+        "未执行的 B 不应有最终状态，当前: {b_status:?}"
     );
 }
 
-/// 边界 4：候选完成窗口注入——模型产生可结束文本后立即注入工具结果。
-/// 注入落点有两种合法时序，测试按实际落点分支断言（不依赖竞态碰撞）：
-/// - 落在候选完成窗口内：提交被撤销，出现下一次模型请求且包含注入结果，
-///   最终答复为结合注入后的结论；
-/// - 落在提交之后：turn 正常成功，注入积压不丢失，随下一条消息消费。
+/// 候选完成阶段的用户引导（封口屏障冻结，确定性窗口）：模型已生成候选
+/// 答复、提交尚未开始时用户再发消息——Core 中断提交、保存新消息、撤销
+/// 候选、基于新要求重新执行；唯一终态归属新消息。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inject_during_candidate_finish_reopens_loop() {
-    let (env, sid) = TestEnv::new("candidate-inject");
+async fn user_message_during_candidate_finish_steers_to_new_intent() {
+    let (env, sid) = TestEnv::new("candidate-steer");
     let server = MockServer::start().await;
     let (core, mut events) = core_for(&env, &sid, &server.uri());
 
-    mount_sse(&server, vec![text_delta_chunk("初步结论如下。")], None).await;
+    // 第一轮响应：候选答复（含标记，验证其不作为最终答复）。
+    mount_sse(&server, vec![text_delta_chunk("旧的候选答复内容。")], None).await;
+    // 撤销后基于新要求的请求与最终答复。
     mount_sse(
         &server,
-        vec![text_delta_chunk("结合注入信息的最终结论。")],
-        None,
-    )
-    .await;
-    // 落点 b（提交后积压）时，供下一条消息消费的请求。
-    mount_sse(
-        &server,
-        vec![text_delta_chunk("下一轮结合注入回答。")],
+        vec![text_delta_chunk("基于新要求的最终回答。")],
         None,
     )
     .await;
 
-    send_message(&core, "msg-1", "分析并等待补充信息");
-    // 等待第一轮响应文本流完（进入候选完成窗口附近），立即注入工具结果。
-    events.wait_until(
-        |e| matches!(e, StreamEvent::ReactText { content, .. } if content.contains("初步结论")),
-        "第一轮响应文本",
+    // 预置封口屏障：候选答复已保存、提交尚未开始的精确窗口。
+    let mut seal = arm_seal(&sid);
+    send_message(&core, "msg-a", "原始请求");
+    seal.wait_frozen();
+
+    // 冻结窗口投递用户消息（真正的引导语义）。
+    send_message(&core, "msg-b", "按新要求重新处理");
+    seal.release();
+
+    // 撤销生效：发起第二次模型请求，且包含新要求。
+    wait_requests(&server, 2).await;
+    let second = chat_request_at(&server, 1).await;
+    assert!(
+        second.role_message_contains("user", "按新要求重新处理"),
+        "撤销后的新请求必须包含新的用户要求"
     );
-    core.deliver(AgentInputKind::tool(
-        "browser_observation",
-        serde_json::json!({"summary": "CANDIDATE-INJECT-MARK", "url": "https://example.com"}),
-    ))
-    .expect("候选完成窗口的注入应被接受");
 
-    // 确定性区分落点：msg-1 是否已获得终态（时间预算在高并发下不可靠）。
-    // 已终态 = 落点 b（提交完成，注入积压）；无终态 = 落点 a（撤销进行中）。
-    let msg1_settled = {
-        let deadline = std::time::Instant::now() + WAIT;
-        loop {
-            let settled = env
-                .load_session(&sid)
-                .messages
-                .iter()
-                .any(|m| m.id == "msg-1" && m.turn_status.is_some());
-            if settled {
-                break true;
-            }
-            // 撤销路径出现第二次请求即确认落点 a。
-            if server.received_requests().await.map_or(0, |r| r.len()) >= 2 {
-                break false;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "等待落点确定（msg-1 终态或第二次请求）超时"
-            );
-            tokio::time::sleep(POLL).await;
-        }
-    };
-    let reopened = !msg1_settled;
-    if reopened {
-        let status = wait_turn_status(&env, &sid, "msg-1").await;
-        assert_eq!(status, TurnStatus::Success);
-        let second = chat_request_at(&server, 1).await;
-        assert!(
-            second.tool_results().iter().any(|(_, text)| {
-                text.contains("browser_observation") && text.contains("CANDIDATE-INJECT-MARK")
-            }),
-            "撤销后的请求必须包含注入的工具结果（来源与内容）"
-        );
-        events.wait_done();
-        events.assert_single_success_terminal();
-        let session = env.load_session(&sid);
-        assert!(
-            session
-                .messages
-                .iter()
-                .any(|m| m.text_content().contains("结合注入信息的最终结论")),
-            "最终答复应为结合注入后的结论"
-        );
-    } else {
-        // 落点 b：turn 已正常成功，注入积压未丢失——下一条消息的请求
-        // 必须包含注入内容。
-        let status = wait_turn_status(&env, &sid, "msg-1").await;
-        assert_eq!(status, TurnStatus::Success, "落点 b 时 turn 正常成功");
-        send_message(&core, "msg-2", "继续");
-        wait_requests(&server, 2).await;
-        let status2 = wait_turn_status(&env, &sid, "msg-2").await;
-        assert_eq!(status2, TurnStatus::Success);
-        let second = chat_request_at(&server, 1).await;
-        assert!(
-            second.tool_results().iter().any(|(_, text)| {
-                text.contains("browser_observation") && text.contains("CANDIDATE-INJECT-MARK")
-            }),
-            "积压的注入必须随下一条消息进入请求（不丢失）"
-        );
-        events.pump();
-        assert_eq!(
-            events
-                .seen()
-                .iter()
-                .filter(|e| matches!(e, StreamEvent::Done { .. }))
-                .count(),
-            2,
-            "两个 turn 各一次成功终态"
-        );
-    }
+    // 终态归属新消息；原消息无最终状态。
+    let status = wait_turn_status(&env, &sid, "msg-b").await;
+    assert_eq!(status, TurnStatus::Success, "最终状态归属新用户消息");
+    wait_idle(&sid).await;
+    let session = env.load_session(&sid);
+    let a_status = session
+        .messages
+        .iter()
+        .find(|m| m.id == "msg-a")
+        .and_then(|m| m.turn_status);
+    assert!(
+        a_status.is_none(),
+        "被引导接管的原始消息不得拥有最终状态，当前: {a_status:?}"
+    );
+
+    // 旧候选答复不得作为最终答复（Summary 相位）；新答复是唯一最终答复。
+    assert!(
+        !session.messages.iter().any(|m| {
+            m.role == MessageRole::Assistant
+                && m.text_content().contains("旧的候选答复")
+                && m.phase == crate::session::MessagePhase::Summary
+        }),
+        "旧候选答复不得被当成最终答复"
+    );
+    assert!(
+        session.messages.iter().any(|m| {
+            m.role == MessageRole::Assistant
+                && m.text_content().contains("基于新要求")
+                && m.phase == crate::session::MessagePhase::Summary
+        }),
+        "最终答复应为基于新要求的结果"
+    );
+    // 整个过程只有一个最终结果。
+    events.wait_done();
+    events.assert_single_success_terminal();
     core.shutdown_join().expect("关闭失败");
 }

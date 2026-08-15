@@ -490,6 +490,9 @@ pub(super) struct AgentLoopState {
     pub(super) last_observed_tokens: usize,
     /// 待处理的上下文溢出恢复（请求错误策略在下次请求前消费，ALR-304）。
     pub(super) pending_context_recovery: Option<String>,
+    /// 候选最终答复的消息 ID：进入封口时记录，**真正提交时**才标记
+    /// Summary 相位——封口窗口被引导/注入撤销时回收，不提前定格。
+    pub(super) pending_summary_msg_id: Option<String>,
 }
 
 impl AgentLoopState {
@@ -501,6 +504,7 @@ impl AgentLoopState {
             tool_history: ToolCallHistory::default(),
             last_observed_tokens: ctx.session.current_tokens,
             pending_context_recovery: None,
+            pending_summary_msg_id: None,
         }
     }
 
@@ -665,14 +669,9 @@ fn finish_react_text(
 
     match disposition {
         ReactTextDisposition::Complete => {
-            if let Some(message) = ctx
-                .session
-                .messages
-                .iter_mut()
-                .find(|message| message.id == pending_msg_id)
-            {
-                message.phase = MessagePhase::Summary;
-            }
+            // 记录候选答复 ID；Summary 相位在 PendingFinish 真正提交时标记
+            //（封口窗口被继续命令撤销时回收，候选不得提前定格为最终答复）。
+            state.pending_summary_msg_id = Some(pending_msg_id.clone());
             emit_session_message_upsert(ctx, &pending_msg_id);
             ctx.session.persist_to_disk();
             ExecutionPhase::PendingFinish(TurnExecutionResult::success(
@@ -848,8 +847,14 @@ pub(super) async fn execute_turn(
             // 直接形成终态；继续命令（引导/工具注入）恢复 Accepting 并重启；
             // 无决定性命令 → Committing，刷新为最新累计用量后提交（ALR-111）。
             ExecutionPhase::PendingFinish(result) => {
+                // 命令处理（取消/引导/审批分支）会 take 当前阶段：先装回自身，
+                // 否则排空窗口到达的决定性命令在 take_phase 断言上崩溃。
+                state.install_phase(ExecutionPhase::PendingFinish(result));
+                // 测试同步点（仅测试构建）：封口前屏障——候选答复已生成、
+                // 提交尚未开始的精确窗口，供集成测试投递引导/交接消息。
+                #[cfg(test)]
+                crate::core::test_support::seal_barrier(&ctx.session.id, "seal", cmd_rx).await;
                 crate::react::inbox::begin_seal(&ctx.session.id);
-                let mut pending_result = result;
                 loop {
                     let next = match cmd_rx.try_recv() {
                         Ok(command) => Some(Deferred::Command(command)),
@@ -894,10 +899,33 @@ pub(super) async fn execute_turn(
                     for command in sealed_steps {
                         crate::react::inbox::send_command(&ctx.session.id, command);
                     }
+                    // 撤销提交：装回 NeedModel 前清出占位的 PendingFinish。
+                    state.take_phase();
                     state.install_phase(ExecutionPhase::NeedModel);
                     continue 'agent_loop;
                 }
+                // 排空完毕无继续命令：取回占位的暂定结果，正式提交。
+                let ExecutionPhase::PendingFinish(pending_result) = state.take_phase() else {
+                    unreachable!("排空循环保持 PendingFinish 在位");
+                };
+                // 提交时刻标记候选答复为最终答复（此前撤销路径不会到达这里）。
+                if let Some(msg_id) = state.pending_summary_msg_id.take() {
+                    if let Some(message) = ctx
+                        .session
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == msg_id)
+                    {
+                        message.phase = MessagePhase::Summary;
+                    }
+                    emit_session_message_upsert(ctx, &msg_id);
+                }
                 crate::react::inbox::commit_ingress(&ctx.session.id);
+                // 测试同步点（仅测试构建）：提交已确定（Committing），此后
+                // 到达的用户消息只能占用待执行单槽——供关闭/交接/Busy 测试。
+                #[cfg(test)]
+                crate::core::test_support::seal_barrier(&ctx.session.id, "commit", cmd_rx).await;
+                let mut pending_result = pending_result;
                 pending_result.usage = state.accumulated_usage.clone();
                 tracing::debug!(
                     session_id = %ctx.session.id,

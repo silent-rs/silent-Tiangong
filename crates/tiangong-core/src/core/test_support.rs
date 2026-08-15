@@ -23,6 +23,129 @@ use crate::session::Session;
 pub const WAIT: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_millis(10);
 
+/// 测试同步屏障：在 Core 的封口前（候选已生成、提交未开始）与提交后
+/// （Committing，消息只能进单槽）两个瞬态窗口提供确定性同步。
+///
+/// 协议：测试端 [`arm_seal`]/[`arm_commit`] 按 session 预置；Core 到达屏障点
+/// 后 ack 并阻塞等待 release；测试端收到 ack（窗口已冻结）后投递消息，
+/// 再 [`release_barriers`] 让 Core 继续。按 session 多槽，并行测试互不干扰；
+/// 未预置的 session 直接通过（不影响不用屏障的测试）。
+/// 测试端持有的屏障句柄：`ack` 在 Core 到达冻结点时收到信号，
+/// `release()` 解除冻结。
+pub struct SealHandle {
+    ack_rx: std::sync::mpsc::Receiver<()>,
+    release_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl SealHandle {
+    /// 等待 Core 到达冻结点（屏障窗口已冻结）。
+    pub fn wait_frozen(&self) {
+        self.ack_rx.recv_timeout(WAIT).expect("等待屏障冻结超时");
+    }
+
+    /// 解除冻结（重复调用安全）。
+    pub fn release(&mut self) {
+        if let Some(tx) = self.release_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+struct SealGate {
+    armed: std::sync::Mutex<std::collections::HashMap<String, GateChannel>>,
+}
+
+struct GateChannel {
+    /// ack 发送到测试端；测试端 drop（panic/提前退出）时 send 失败，
+    /// 屏障立即自动解除（不残留冻结的 driver）。
+    ack_tx: std::sync::mpsc::Sender<()>,
+    /// tokio oneshot：drop（测试结束）或 send（release）都解除等待。
+    release_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl SealGate {
+    fn new() -> Self {
+        Self {
+            armed: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn arm(&self, sid: &str) -> SealHandle {
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        self.armed
+            .lock()
+            .unwrap()
+            .insert(sid.to_string(), GateChannel { ack_tx, release_rx });
+        SealHandle {
+            ack_rx,
+            release_tx: Some(release_tx),
+        }
+    }
+}
+
+/// 进程级测试屏障注册表（按 session 多槽，并行测试互不干扰）。
+static SEAL_GATES: std::sync::OnceLock<SealGates> = std::sync::OnceLock::new();
+
+struct SealGates {
+    seal: SealGate,
+    commit: SealGate,
+}
+
+fn seal_gates() -> &'static SealGates {
+    SEAL_GATES.get_or_init(|| SealGates {
+        seal: SealGate::new(),
+        commit: SealGate::new(),
+    })
+}
+
+/// Core 端屏障（async 等待，不阻塞共享 runtime 的 worker；未预置直接通过）。
+///
+/// - seal（Accepting，候选已生成、提交未开始）：只等测试释放——期间到达的
+///   用户消息应留给封口排空循环按继续命令处理，屏障不得吞命令；
+/// - commit（Committing）：额外监听命令通道——正常投递已被门控拒绝，唯一
+///   能进入的是关闭路径的 force_send(Cancel)，收到即解除（关闭流程兜底）。
+pub async fn seal_barrier(
+    sid: &str,
+    kind: &str,
+    cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::core::command::Command>,
+) {
+    let taken = match kind {
+        "seal" => seal_gates().seal.armed.lock().unwrap().remove(sid),
+        "commit" => seal_gates().commit.armed.lock().unwrap().remove(sid),
+        _ => None,
+    };
+    let Some(gate) = taken else {
+        return;
+    };
+    // 测试端已退出（panic 等）：解除冻结，Core 继续。
+    if gate.ack_tx.send(()).is_err() {
+        return;
+    }
+    match kind {
+        "commit" => {
+            tokio::select! {
+                _ = gate.release_rx => {}
+                // 关闭的强制取消：解除等待，命令由关闭流程兜底。
+                _ = cmd_rx.recv() => {}
+            }
+        }
+        _ => {
+            let _ = gate.release_rx.await;
+        }
+    }
+}
+
+/// 测试端：预置封口屏障（候选已生成、提交未开始的窗口）。
+pub fn arm_seal(sid: &str) -> SealHandle {
+    seal_gates().seal.arm(sid)
+}
+
+/// 测试端：预置提交屏障（Committing，消息只能进单槽）。
+pub fn arm_commit(sid: &str) -> SealHandle {
+    seal_gates().commit.arm(sid)
+}
+
 /// 自动清理的测试环境：持有临时目录直到测试结束。
 pub struct TestEnv {
     pub root: std::path::PathBuf,
@@ -119,16 +242,43 @@ impl EventLog {
         }
     }
 
-    /// 等待指定动作的压缩完成事件。
+    /// 等待指定动作的压缩完成事件，返回事件中的边界与剩余消息数
+    ///（供与磁盘最终状态核对一致）。
     pub fn wait_context_compressed(
         &mut self,
         action: tiangong_types::stream::ContextCompressAction,
-    ) {
+    ) -> (usize, usize) {
+        let expected = action.clone();
         let label = format!("{action:?}");
         self.wait_until(
-            move |e| matches!(e, StreamEvent::ContextCompressed { action: a, .. } if *a == action),
+            move |e| {
+                matches!(e, StreamEvent::ContextCompressed { action: a, .. } if *a == expected)
+            },
             &format!("压缩完成事件（action={label}）"),
         );
+        self.seen()
+            .iter()
+            .find_map(|e| {
+                if let StreamEvent::ContextCompressed {
+                    action: a,
+                    summary_up_to,
+                    remaining_messages,
+                } = e
+                {
+                    (*a == action).then_some((*summary_up_to, *remaining_messages))
+                } else {
+                    None
+                }
+            })
+            .expect("刚等待到的压缩事件必须存在")
+    }
+
+    fn count_errors(&mut self) -> usize {
+        self.pump();
+        self.seen()
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Error { .. }))
+            .count()
     }
 
     fn count_done(&mut self) -> usize {
@@ -199,7 +349,7 @@ impl EventLog {
         );
     }
 
-    /// 终态唯一性（取消）：恰好一个取消终态，无 Done。
+    /// 终态唯一性（取消）：恰好一个取消终态，无 Done，无其他错误。
     pub fn assert_single_cancelled_terminal(&mut self) {
         assert_eq!(
             self.count_cancelled(),
@@ -211,6 +361,12 @@ impl EventLog {
             self.count_done(),
             0,
             "取消场景不得出现 Done；已收到：{}",
+            self.summarize()
+        );
+        assert_eq!(
+            self.count_errors(),
+            1,
+            "取消场景除取消终态外不得有其他错误；已收到：{}",
             self.summarize()
         );
     }

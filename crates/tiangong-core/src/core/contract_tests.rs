@@ -55,22 +55,17 @@ async fn sealed_next_turn_reads_latest_session() {
         vec![tiangong_types::ContentBlock::text("请基于上一轮结果继续")],
     ))
     .expect("B 应被接受");
+    // 先等第二个请求发出，再结构化断言其内容。
     let deadline = Instant::now() + WAIT;
-    loop {
-        let requests = server.received_requests().await.expect("读取请求失败");
-        let saw = requests.iter().any(|r| {
-            r.url.path() == "/chat/completions"
-                && String::from_utf8_lossy(&r.body).contains(&marker)
-        });
-        if saw {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "B 的模型请求必须包含 A 的最终回复（最新 Session），不能使用旧快照"
-        );
+    while server.received_requests().await.map_or(0, |r| r.len()) < 2 {
+        assert!(Instant::now() < deadline, "等待 B 的模型请求发出超时");
         tokio::time::sleep(POLL).await;
     }
+    let request = super::test_support::chat_request_at(&server, 1).await;
+    assert!(
+        request.role_message_contains("assistant", &marker),
+        "B 的模型请求必须在 assistant 历史回复中包含 A 的最终答复（最新 Session），不能使用旧快照"
+    );
     core.shutdown_join().expect("关闭失败");
 }
 
@@ -83,7 +78,7 @@ async fn accepted_and_saved_message_survives_shutdown() {
     mount_sse(
         &server,
         vec![text_delta_chunk("长时间任务执行中")],
-        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(3)),
     )
     .await;
     let core = core_for(&env, &sid, &server.uri());
@@ -125,7 +120,7 @@ async fn busy_rejection_when_slot_occupied_is_explicit() {
     mount_sse(
         &server,
         vec![text_delta_chunk("挂起中")],
-        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(3)),
     )
     .await;
     let core = core_for(&env, &sid, &server.uri());
