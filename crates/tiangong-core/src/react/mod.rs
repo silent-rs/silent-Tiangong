@@ -2,9 +2,6 @@ pub(crate) mod cancel;
 mod command;
 pub(crate) mod compression;
 pub mod context;
-mod contract;
-#[cfg(test)]
-mod contract_tests;
 mod execute;
 mod helpers;
 pub mod inbox;

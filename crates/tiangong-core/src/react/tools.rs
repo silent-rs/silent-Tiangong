@@ -33,12 +33,15 @@ use super::phase::PreparedToolCall;
 use super::phase::ToolBatchState;
 use super::tool_call::start_tool_call;
 
+/// 单批工具的最大并发数（有界并行，ALR-301）。
+const MAX_PARALLEL_TOOLS: usize = 8;
+
 /// 工具批次执行结果。
 pub(super) enum ToolBatchOutcome {
-    /// 批次全部闭合（成功/失败/拒绝/跳过均为合法结果），回到 `NeedModel`。
+    /// 批次全部闭合（成功/失败/拒绝/跳过均为合法结果），回到 `NeedModel`：
+    /// 拒绝结果已写入会话，模型下一轮可见，可解释结束或换路径；是否允许
+    /// 完成仍由完成门控判定（必需义务被拒时不会虚假成功，ALR-307）。
     Completed,
-    /// 审批被拒绝且无新注入：turn 以当前已有内容成功结束（原审批拒绝语义）。
-    RejectedToFinish,
     /// 中断类命令（取消/关闭/引导）到达：批次已收敛闭合，命令交还执行驱动。
     Interrupted(Deferred),
 }
@@ -78,6 +81,10 @@ pub(super) async fn execute_tool_batch(
 ) -> ToolBatchOutcome {
     let mut tasks: JoinSet<ToolTaskOutput> = JoinSet::new();
     let mut running: HashMap<TaskId, RunningToolCall> = HashMap::new();
+    // 已就绪待启动（受并发上限约束）与已完成待按序提交的结果。
+    let mut pending_ready: std::collections::VecDeque<PreparedToolCall> =
+        std::collections::VecDeque::new();
+    let mut completed_buffer: Vec<(usize, RunningToolCall, ToolTaskOutput)> = Vec::new();
 
     'pipeline: loop {
         // ── 准备：逐个弹出待处理调用（校验/去重/权限分流）──
@@ -146,17 +153,12 @@ pub(super) async fn execute_tool_batch(
                         }
                         ApprovalDecision::Rejected => {
                             record_rejected_tool_call(ctx, &tool.call, &tool.args_summary);
-                            // 原审批拒绝语义：有新注入 → 继续（NeedModel）；
-                            // 否则 turn 以当前内容成功结束。剩余调用一并闭合。
-                            let received_new_injection =
-                                injections.generation() > batch.request_injection_generation;
+                            // 拒绝结果已写入会话：回到 NeedModel 让模型看到拒绝并
+                            // 决定（解释结束 / 换路径 / 重试）。是否允许完成由完成
+                            // 门控判定——必需义务被拒不会虚假成功（ALR-307）。
                             injections.commit(ctx);
                             close_pending_calls(ctx, stream_tx, "工具调用因审批被拒绝而未执行。");
-                            return if received_new_injection {
-                                ToolBatchOutcome::Completed
-                            } else {
-                                ToolBatchOutcome::RejectedToFinish
-                            };
+                            return ToolBatchOutcome::Completed;
                         }
                         ApprovalDecision::Interrupted(deferred_command) => {
                             // 待审批工具按拒绝闭合，剩余调用一并闭合。
@@ -169,11 +171,11 @@ pub(super) async fn execute_tool_batch(
             }
         }
 
-        // ── 执行：启动就绪工具并等待（有界并行由 JoinSet 承载）──
-        for tool in std::mem::take(&mut batch.ready_tools) {
-            start_tool_execution(ctx, tool, &mut tasks, &mut running);
-        }
+        // ── 执行：有界并行启动（≤MAX_PARALLEL_TOOLS），结果按模型声明顺序提交 ──
+        pending_ready.extend(std::mem::take(&mut batch.ready_tools));
+        launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
         if tasks.is_empty() {
+            flush_ordered_results(ctx, state, &mut batch, &mut completed_buffer, usize::MAX);
             break 'pipeline;
         }
         let joined = tokio::select! {
@@ -182,12 +184,26 @@ pub(super) async fn execute_tool_batch(
                 let command = match command {
                     Some(command) => command,
                     None => {
+                        flush_ordered_results(
+                            ctx,
+                            state,
+                            &mut batch,
+                            &mut completed_buffer,
+                            usize::MAX,
+                        );
                         abort_running_tools(ctx, &mut tasks, &mut running, stream_tx).await;
                         close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
                         return ToolBatchOutcome::Interrupted(Deferred::Closed);
                     }
                 };
                 if is_interrupting(&command) {
+                    flush_ordered_results(
+                        ctx,
+                        state,
+                        &mut batch,
+                        &mut completed_buffer,
+                        usize::MAX,
+                    );
                     abort_running_tools(ctx, &mut tasks, &mut running, stream_tx).await;
                     close_pending_calls(ctx, stream_tx, "工具调用因用户发送新消息而中断。");
                     return ToolBatchOutcome::Interrupted(Deferred::Command(command));
@@ -232,19 +248,17 @@ pub(super) async fn execute_tool_batch(
         let running_record = running
             .remove(&task_id)
             .expect("完成的工具任务必须存在运行记录");
-        let needs_recovery = record_completed_tool_call(
-            ctx,
-            CompletedToolCall {
-                call: &running_record.tool.call,
-                args_summary: &running_record.tool.args_summary,
-                dedupe_key: running_record.tool.dedupe_key,
-                result: &task_output.result,
-                duration_ms: task_output.duration_ms,
-            },
-            &mut state.tool_history,
-            &mut state.contract,
-        );
-        batch.needs_failure_recovery |= needs_recovery;
+        completed_buffer.push((running_record.tool.index, running_record, task_output));
+        // 提交边界：index 小于仍在途（运行或待启动）的最小 index 的结果
+        // 按 model 声明顺序落库（ALR-301）。
+        let inflight_min = running
+            .values()
+            .map(|record| record.tool.index)
+            .chain(pending_ready.iter().map(|tool| tool.index))
+            .min()
+            .unwrap_or(usize::MAX);
+        flush_ordered_results(ctx, state, &mut batch, &mut completed_buffer, inflight_min);
+        launch_ready_tools(ctx, &mut pending_ready, &mut tasks, &mut running);
     }
 
     // ── 收尾：无效调用上下文、失败恢复提示、观测压力记录 ──
@@ -380,6 +394,50 @@ fn handle_ambient_command(
         Command::Approval { .. } | Command::Cancel | Command::Shutdown => {}
         Command::InjectUserMessage { .. } => unreachable!("中断类命令已在上方分流"),
     }
+}
+
+/// 在并发上限内启动就绪工具。
+fn launch_ready_tools(
+    ctx: &mut TurnContext,
+    pending_ready: &mut std::collections::VecDeque<PreparedToolCall>,
+    tasks: &mut JoinSet<ToolTaskOutput>,
+    running: &mut HashMap<TaskId, RunningToolCall>,
+) {
+    while running.len() < MAX_PARALLEL_TOOLS
+        && let Some(tool) = pending_ready.pop_front()
+    {
+        start_tool_execution(ctx, tool, tasks, running);
+    }
+}
+
+/// 按 model 声明顺序提交已完成结果：提交所有 index < `boundary` 的缓冲项。
+fn flush_ordered_results(
+    ctx: &mut TurnContext,
+    state: &mut AgentLoopState,
+    batch: &mut ToolBatchState,
+    completed_buffer: &mut Vec<(usize, RunningToolCall, ToolTaskOutput)>,
+    boundary: usize,
+) {
+    completed_buffer.sort_by_key(|(index, _, _)| *index);
+    let mut needs_recovery = false;
+    while completed_buffer
+        .first()
+        .is_some_and(|(index, _, _)| *index < boundary)
+    {
+        let (_, running_record, task_output) = completed_buffer.remove(0);
+        needs_recovery |= record_completed_tool_call(
+            ctx,
+            CompletedToolCall {
+                call: &running_record.tool.call,
+                args_summary: &running_record.tool.args_summary,
+                dedupe_key: running_record.tool.dedupe_key,
+                result: &task_output.result,
+                duration_ms: task_output.duration_ms,
+            },
+            &mut state.tool_history,
+        );
+    }
+    batch.needs_failure_recovery |= needs_recovery;
 }
 
 /// 启动一个已就绪的工具任务（ToolStart 事件 + JoinSet 注册）。

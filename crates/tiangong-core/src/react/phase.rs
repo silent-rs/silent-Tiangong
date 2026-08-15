@@ -89,7 +89,6 @@ pub(super) struct ToolBatchState {
     pub(super) prepared_keys: HashSet<String>,
     pub(super) invalid_tool_calls: Vec<InvalidToolCall>,
     pub(super) response_usage: TokenUsage,
-    pub(super) request_injection_generation: u64,
     pub(super) needs_failure_recovery: bool,
 }
 

@@ -204,7 +204,7 @@ impl TiangongCore {
         // 手动压缩作为控制输入进入 Inbox，由唯一 driver 在空闲时执行，
         // 与后续用户消息天然串行（不再独立 spawn）。
         let scheduling = self.ensure_scheduling()?;
-        scheduling.push_turn_input(TurnInput::ManualCompression)
+        scheduling.deliver_input(TurnInput::ManualCompression)
     }
 
     fn reset_context(&self) -> Result<(), CoreError> {
@@ -212,7 +212,7 @@ impl TiangongCore {
             return Err(CoreError::Busy);
         }
         let scheduling = self.ensure_scheduling()?;
-        scheduling.push_turn_input(TurnInput::ResetContext)
+        scheduling.deliver_input(TurnInput::ResetContext)
     }
 
     /// 关闭并获取最终 session。
@@ -253,30 +253,19 @@ impl TiangongCore {
 
 impl crate::agent_input::AgentInput for TiangongCore {
     fn deliver(&self, input: crate::agent_input::AgentInputKind) -> Result<(), CoreError> {
-        use crate::agent_input::{
-            AgentInputKind, ApprovalInput, CommandInput, MessageDelivery, MessageInput,
-        };
+        use crate::agent_input::{AgentInputKind, ApprovalInput, CommandInput, MessageInput};
 
         match input {
             AgentInputKind::Message(MessageInput::UserMessage {
                 prepared,
                 message_id,
-                delivery,
             }) => {
-                // 用户消息进入 Agent 自有 Inbox：followup 排队下一 turn（FIFO），
-                // steer 修正当前活动；确认事件在 driver 校验并成功保存后才发送，
-                // 入队成功不虚报已处理（ALR-101/102/202）。
+                // 消息排队策略归 app 层：core 空闲时直接执行（单槽交接），
+                // 运行中按引导注入当前轮；封口瞬间到达的占用单槽等当前轮
+                // 结束。确认事件在 driver 校验并成功保存后才发送（ALR-102/202）。
                 let msg_id = message_id.unwrap_or_else(scru128::new_string);
                 let scheduling = self.ensure_scheduling()?;
-                match delivery {
-                    MessageDelivery::Followup => {
-                        scheduling.push_turn_input(TurnInput::UserMessage {
-                            message_id: msg_id,
-                            content: prepared,
-                        })
-                    }
-                    MessageDelivery::Steer => scheduling.push_steer(msg_id, prepared),
-                }
+                scheduling.push_steer(msg_id, prepared)
             }
             AgentInputKind::Tool(tool) => {
                 // inject：不唤醒 driver；空闲期积压在 next_step，由下一个 turn
@@ -529,7 +518,7 @@ impl TurnSpawner {
                     message_id,
                     content,
                 } => scheduling
-                    .push_turn_input(crate::react::inbox::TurnInput::UserMessage {
+                    .deliver_input(crate::react::inbox::TurnInput::UserMessage {
                         message_id: message_id.clone(),
                         content: content.clone(),
                     })
@@ -594,30 +583,44 @@ impl TurnSpawner {
         if user_messages.is_empty() {
             return;
         }
+        // 任何失败（加载会话/单条保存/落盘）都记录到调度状态，由
+        // shutdown_agent 在 join 后向调用方返回明确失败，并逐条发送错误
+        // 事件——已接受消息不得静默丢失（ALR-202/206）。
+        let mut failed: Vec<String> = Vec::new();
         match self.load_session() {
             Ok(mut session) => {
                 for (message_id, content) in user_messages {
-                    if session
+                    match session
                         .try_append_prepared_user_message_with_id(message_id.clone(), content)
-                        .is_ok()
                     {
-                        let _ = self.stream_tx.send(StreamEvent::Error {
-                            message: format!(
-                                "会话已关闭，消息 {message_id} 已保存但未处理；重新打开会话后可继续"
-                            ),
-                        });
+                        Ok(()) => {
+                            let _ = self.stream_tx.send(StreamEvent::Error {
+                                message: format!(
+                                    "会话已关闭，消息 {message_id} 已保存但未处理；重新打开会话后可继续"
+                                ),
+                            });
+                        }
+                        Err(error) => {
+                            failed.push(format!("消息 {message_id} 保存失败：{error}"));
+                            let _ = self.stream_tx.send(StreamEvent::Error {
+                                message: format!("会话已关闭，消息 {message_id} 未能保存：{error}"),
+                            });
+                        }
                     }
                 }
                 if let Err(error) = session.try_persist_to_disk() {
-                    tracing::warn!(%error, session_id = %self.session_id, "关闭排空持久化失败");
+                    failed.push(format!("关闭排空落盘失败：{error}"));
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, session_id = %self.session_id, "关闭排空加载会话失败");
+                failed.push(format!("关闭排空加载会话失败：{error}"));
                 let _ = self.stream_tx.send(StreamEvent::Error {
                     message: "会话已关闭，未处理消息未能持久化".to_string(),
                 });
             }
+        }
+        if !failed.is_empty() {
+            scheduling.set_close_error(failed.join("；"));
         }
     }
 }
@@ -634,18 +637,20 @@ async fn drive_agent(scheduling: Arc<AgentScheduling>, spawner: TurnSpawner) {
             crate::react::inbox::remove_agent(&spawner.session_id);
             return;
         }
-        let Some(input) = scheduling.take_next_turn() else {
+        let Some(input) = scheduling.take_input() else {
             if scheduling.try_park() {
                 scheduling.wait_wake().await;
             }
             continue;
         };
-        let pending_steps = scheduling.take_next_steps();
         match input {
             TurnInput::UserMessage {
                 message_id,
                 content,
             } => {
+                // next_step 只在真正开始用户 turn 时领取（ALR-103）；维护操作
+                // （压缩/重置）不 drain，积压保留给下一次用户活动。
+                let pending_steps = scheduling.take_next_steps();
                 spawner
                     .run_user_turn(&scheduling, message_id, content, pending_steps)
                     .await;
@@ -752,125 +757,5 @@ mod shared_runtime_tests {
             let result = tokio::task::spawn_blocking(move || core.shutdown_join()).await;
             assert!(result.is_ok(), "shutdown_join 不应 panic");
         }
-    }
-
-    /// ALR-104 交接端到端：当前 turn 执行中到达的 followup——**入队即接受**
-    /// （快速返回、不同步等待、不阻塞其他会话）、**只确认一次**、当前 turn
-    /// 提交后由**同一 driver 自动继续下一轮**并持久化；关闭后已接受消息不会
-    /// 偷偷执行（持久化为可恢复状态）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn running_turn_message_auto_starts_next_turn_with_single_confirmation() {
-        use crate::agent_input::{AgentInput, AgentInputKind};
-        use crate::session::Session;
-
-        let root = tempfile::tempdir().unwrap();
-        let config = CoreConfigProvider::new(CoreConfig::default());
-
-        // 会话 A：主测试对象（LLM 不可达，turn 快速失败结束）。
-        let mut session_a = Session::new("seal-a");
-        session_a.bind_storage_root(root.path());
-        session_a.try_persist_to_disk().unwrap();
-        let (event_tx_a, event_rx_a) = std::sync::mpsc::channel::<StreamEvent>();
-        let core_a = TiangongCore::builder()
-            .session_id(session_a.id.clone())
-            .config(config.clone())
-            .trust_mode(session_a.trust_mode)
-            .storage_root(root.path())
-            .workspace_dir(root.path().to_string_lossy())
-            .stream_tx(event_tx_a)
-            .plugins(vec![])
-            .build();
-
-        // 会话 B：验证 A 的交接不阻塞其他会话。
-        let mut session_b = Session::new("seal-b");
-        session_b.bind_storage_root(root.path());
-        session_b.try_persist_to_disk().unwrap();
-        let (event_tx_b, _event_rx_b) = std::sync::mpsc::channel::<StreamEvent>();
-        let core_b = TiangongCore::builder()
-            .session_id(session_b.id.clone())
-            .config(config.clone())
-            .trust_mode(session_b.trust_mode)
-            .storage_root(root.path())
-            .workspace_dir(root.path().to_string_lossy())
-            .stream_tx(event_tx_b)
-            .plugins(vec![])
-            .build();
-
-        let sid = session_a.id.clone();
-        // 第一条消息启动 turn A（不可达端点快速失败）。
-        core_a
-            .deliver(AgentInputKind::prepared_with_id(
-                "seal-msg-0",
-                vec![tiangong_types::ContentBlock::text("第一条消息")],
-            ))
-            .expect("第一条消息应被接受");
-
-        // turn A 尚在执行时投递第二条：入队即接受，快速返回 Ok（不进入同步等待）。
-        let msg_id = "seal-msg-1".to_string();
-        let start = std::time::Instant::now();
-        core_a
-            .deliver(AgentInputKind::prepared_with_id(
-                msg_id.clone(),
-                vec![tiangong_types::ContentBlock::text("运行中到达的消息")],
-            ))
-            .expect("运行中投递应返回 Ok（入队即接受）");
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(1),
-            "入队即接受，不应同步轮询等待当前 turn 结束"
-        );
-
-        // B 不受阻塞：A 的 turn 仍在执行，B 投递快速返回。
-        let start_b = std::time::Instant::now();
-        core_b
-            .deliver(AgentInputKind::message("B 的消息"))
-            .expect("B 投递不应受 A 交接影响");
-        assert!(
-            start_b.elapsed() < std::time::Duration::from_secs(1),
-            "其他会话不应被 A 的交接阻塞"
-        );
-
-        // 等待确认事件出现（driver 保存消息后发出）——以事件为交接完成信号。
-        // 第一条消息的确认会先到达，只统计目标消息（seal-msg-1）的事件。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut user_message_count = 0usize;
-        loop {
-            while let Ok(event) = event_rx_a.try_recv() {
-                if let StreamEvent::UserMessage { message_id, .. } = event
-                    && message_id == msg_id
-                {
-                    user_message_count += 1;
-                }
-            }
-            if user_message_count >= 1 {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "等待交接确认超时");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        // 等待 driver 彻底排空：全部轮次结束并回到空闲。
-        while crate::react::inbox::is_running(&sid) && std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        // 只确认一次：交接完成后该消息的 UserMessage 事件总数恰好 1（driver 保存时
-        // 发出，不重复确认）。
-        while let Ok(event) = event_rx_a.try_recv() {
-            if let StreamEvent::UserMessage { message_id, .. } = event
-                && message_id == msg_id
-            {
-                user_message_count += 1;
-            }
-        }
-        assert_eq!(user_message_count, 1, "交接消息应只确认一次，不重复发送");
-
-        // 消息已持久化到磁盘 session。
-        let loaded = core_a.load_session().expect("加载 session 失败");
-        assert!(
-            loaded.messages.iter().any(|m| m.id == msg_id),
-            "交接消息应已保存到 session"
-        );
-
-        core_a.shutdown_join().expect("关闭 A 失败");
-        core_b.shutdown_join().expect("关闭 B 失败");
     }
 }

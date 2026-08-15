@@ -30,7 +30,6 @@ use tiangong_types::{DeferredToolInjection, StreamEvent, StreamToolCall};
 
 use super::command::{CommandEffect, Deferred, handle_command};
 use super::compression::observed_total_tokens;
-use super::contract::{ReactTextDisposition, TaskContract};
 use super::outcome::TurnExecutionResult;
 use super::phase::{ActiveLlm, ExecutionBudget, ExecutionPhase, LlmPurpose, ToolBatchState};
 use super::request;
@@ -379,7 +378,6 @@ pub(super) fn record_completed_tool_call(
     ctx: &mut TurnContext,
     completion: CompletedToolCall<'_>,
     history: &mut ToolCallHistory,
-    contract: &mut TaskContract,
 ) -> bool {
     let CompletedToolCall {
         call,
@@ -388,8 +386,6 @@ pub(super) fn record_completed_tool_call(
         result,
         duration_ms,
     } = completion;
-    // 工具结果落库前更新义务状态：只有成功结果可满足义务（ALR-307）。
-    contract.record_tool_result(result.ok);
     ctx.observer.audit_tool_execution(
         &ctx.session.id,
         &call.name,
@@ -490,7 +486,6 @@ pub(super) struct AgentLoopState {
     pub(super) budget: ExecutionBudget,
     pub(super) accumulated_usage: TokenUsage,
     pub(super) tool_history: ToolCallHistory,
-    pub(super) contract: TaskContract,
     /// 最近一次模型响应/工具批次的观测 token 总量（请求前压力检查的信号）。
     pub(super) last_observed_tokens: usize,
     /// 待处理的上下文溢出恢复（请求错误策略在下次请求前消费，ALR-304）。
@@ -504,7 +499,6 @@ impl AgentLoopState {
             budget: ExecutionBudget::default(),
             accumulated_usage: TokenUsage::default(),
             tool_history: ToolCallHistory::default(),
-            contract: TaskContract::from_session_anchor(ctx),
             last_observed_tokens: ctx.session.current_tokens,
             pending_context_recovery: None,
         }
@@ -524,9 +518,8 @@ impl AgentLoopState {
         self.phase = Some(phase);
     }
 
-    /// 新用户意图（steer 注入）：重建工具义务契约并清工具去重记录。
-    pub(super) fn rebuild_for_new_intent(&mut self, ctx: &TurnContext) {
-        self.contract = TaskContract::from_session_anchor(ctx);
+    /// 新用户意图（steer 注入）：清工具去重记录。
+    pub(super) fn reset_tool_history(&mut self) {
         self.tool_history.clear();
     }
 }
@@ -600,15 +593,22 @@ pub(super) fn persist_streamed_react_message(
     emit_session_message_upsert(ctx, pending_msg_id);
 }
 
+/// ReAct 文本回复的后续去向。
+enum ReactTextDisposition {
+    /// 有效最终答复：提交（PendingFinish）。
+    Complete,
+    /// 无效输出（空回复/合成占位符）：明确失败。
+    InvalidOutput,
+}
+
 fn handle_react_text_response(
     ctx: &mut TurnContext,
     pending_msg_id: &str,
     response: &ModelFunctionResponse,
-    state: &AgentLoopState,
 ) -> ReactTextDisposition {
-    // 合成占位符不是有效输出：不保存为消息，直接进入修复路径。
+    // 合成占位符不是有效输出，不保存为消息。
     if is_synthetic_tool_call_placeholder(&response.text) {
-        return state.contract.gate_placeholder();
+        return ReactTextDisposition::InvalidOutput;
     }
 
     upsert_assistant_text_message(
@@ -631,7 +631,7 @@ fn handle_react_text_response(
         &mut ctx.session,
         "llm_output",
         format_llm_output_message(&LlmOutputRecord {
-            stage: format!("react-round-{}", state.budget.request_round),
+            stage: "react-round".to_string(),
             content: response.text.clone(),
             reasoning_content: response.reasoning_content.clone(),
             tool_calls: Vec::new(),
@@ -641,9 +641,12 @@ fn handle_react_text_response(
     );
     ctx.session.persist_to_disk();
 
-    // 候选完成门控（ALR-003/006）：纯文本只是候选完成信号，是否存在未满足的
-    // 工具义务由 TaskContract 确定性判定，不调用第二个模型判断"是否完成"。
-    state.contract.gate_text(&response.text)
+    // 附件内容不进入模型请求（模型看不见），自然会调用读取插件处理——
+    // 工具使用由模型基于上下文自主决策（Agent 的根基），Loop 不做义务门控。
+    if response.text.trim().is_empty() {
+        return ReactTextDisposition::InvalidOutput;
+    }
+    ReactTextDisposition::Complete
 }
 
 fn finish_react_text(
@@ -676,29 +679,9 @@ fn finish_react_text(
                 state.accumulated_usage.clone(),
             ))
         }
-        ReactTextDisposition::RepairRequired { reason } => {
-            // 有界工具协议修复（ALR-008）：记录缺失义务、注入明确指令，下一次
-            // 请求附带 Provider 原生工具约束（NeedModel 分支按契约设置）。
-            let instruction = state.contract.begin_repair();
-            tracing::warn!(
-                session_id = %ctx.session.id,
-                reason = %reason,
-                repairs = state.contract.protocol_repairs(),
-                "missing_required_tool_call：拒绝候选完成并发起协议修复"
-            );
-            inject_tool_to_messages(
-                &mut ctx.session,
-                "tool_protocol_repair",
-                &serde_json::json!({
-                    "reason": reason,
-                    "instruction": instruction,
-                }),
-            );
-            ctx.session.persist_to_disk();
-            ExecutionPhase::NeedModel
-        }
-        ReactTextDisposition::Exhausted { reason } => {
-            // 修复预算耗尽：明确失败，不把未经工具验证的文本发布为成功（ALR-009）。
+        ReactTextDisposition::InvalidOutput => {
+            // 模型未产生有效输出：明确失败，不把空回复发布为最终答复。
+            let reason = "模型未产生有效回复".to_string();
             persist_error(ctx, &reason);
             ExecutionPhase::PendingFinish(TurnExecutionResult::failed(
                 state.accumulated_usage.clone(),
@@ -845,9 +828,6 @@ pub(super) async fn execute_turn(
                         iteration: (state.budget.request_round + 1) as u32,
                     });
                 }
-                // 存在未满足工具义务时使用 Provider 原生约束（ALR-007），
-                // 不只依赖提示词提醒模型。
-                let tool_choice = state.contract.tool_constraint();
                 let active = start_llm_request(
                     ctx,
                     build_react_request(ctx),
@@ -855,7 +835,7 @@ pub(super) async fn execute_turn(
                         request_injection_generation,
                     },
                     StreamTextKind::React,
-                    tool_choice,
+                    None,
                 );
                 state.install_phase(ExecutionPhase::WaitingModel(active));
             }
@@ -904,6 +884,18 @@ pub(super) async fn execute_turn(
                             break 'agent_loop terminal;
                         }
                     }
+                }
+                // 候选完成检查（design.md 4.2.4）：封口竞态到达的 `next_step`
+                //（inject 在 Sealing 期间被拒后落入 Inbox）原子领取——有积压
+                // 则撤销暂定结果，注入生效后继续处理，不得滞留或丢失。
+                let sealed_steps = crate::react::inbox::take_pending_steps(&ctx.session.id);
+                if !sealed_steps.is_empty() {
+                    crate::react::inbox::reopen(&ctx.session.id);
+                    for command in sealed_steps {
+                        crate::react::inbox::send_command(&ctx.session.id, command);
+                    }
+                    state.install_phase(ExecutionPhase::NeedModel);
+                    continue 'agent_loop;
                 }
                 crate::react::inbox::commit_ingress(&ctx.session.id);
                 pending_result.usage = state.accumulated_usage.clone();
@@ -985,11 +977,6 @@ pub(super) async fn execute_turn(
                                 {
                                     tools::ToolBatchOutcome::Completed => {
                                         ExecutionPhase::NeedModel
-                                    }
-                                    tools::ToolBatchOutcome::RejectedToFinish => {
-                                        ExecutionPhase::PendingFinish(TurnExecutionResult::success(
-                                            state.accumulated_usage.clone(),
-                                        ))
                                     }
                                     tools::ToolBatchOutcome::Interrupted(deferred_command) => {
                                         // 归还阶段后交还统一命令处理（命令处理器会
@@ -1099,8 +1086,7 @@ fn complete_llm_request(
                 append_invalid_tool_calls_context(ctx, &response.invalid_tool_calls);
                 NextStep::Phase(ExecutionPhase::NeedModel)
             } else if response.tool_calls.is_empty() {
-                let disposition =
-                    handle_react_text_response(ctx, &pending_msg_id, &response, state);
+                let disposition = handle_react_text_response(ctx, &pending_msg_id, &response);
                 NextStep::Phase(finish_react_text(
                     ctx,
                     state,
@@ -1122,7 +1108,6 @@ fn complete_llm_request(
                     prepared_keys: HashSet::new(),
                     invalid_tool_calls: response.invalid_tool_calls,
                     response_usage: response.usage,
-                    request_injection_generation,
                     needs_failure_recovery: false,
                 })
             }
@@ -3274,6 +3259,15 @@ mod tests {
             vec![
                 tool_call_chunk("call_reject", "echo", "{}"),
                 usage_chunk(8, 2),
+            ],
+        )
+        .await;
+        // 拒绝后模型看到拒绝结果，解释结束（无义务 → 门控通过）。
+        mount_sse(
+            &server,
+            vec![
+                text_delta_chunk("已按你的要求取消执行该工具。"),
+                usage_chunk(10, 3),
             ],
         )
         .await;

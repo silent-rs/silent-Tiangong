@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use futures_util::FutureExt;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -48,6 +49,17 @@ impl CommandIngress {
     pub(crate) fn send(&self, cmd: Command) -> bool {
         let state = self.state.lock().unwrap();
         if !matches!(*state, IngressState::Accepting) {
+            return false;
+        }
+        self.sender.send(cmd).is_ok()
+    }
+
+    /// 用户消息专用入口：`Sealing`（终态封口排空中）也放行——封口排空逻辑
+    /// 会把它作为继续命令处理（撤销暂定提交并从新意图重启）；只有 `Committing`
+    /// （提交已在进行，不可逆）拒绝。用户引导有明确目的，不应因封口被延迟。
+    pub(crate) fn send_steering(&self, cmd: Command) -> bool {
+        let state = self.state.lock().unwrap();
+        if matches!(*state, IngressState::Committing) {
             return false;
         }
         self.sender.send(cmd).is_ok()
@@ -120,9 +132,13 @@ enum Phase {
 struct SchedulingState {
     /// 是否仍接受新输入；关闭后置 false（ALR-206：先停止接收再收敛）。
     accepting: bool,
+    /// 关闭排空结果：持久化失败时记录，`shutdown_agent` join 后向调用方
+    /// 返回明确失败（ALR-202：不得静默吞掉已接受消息的丢失）。
+    close_error: Option<String>,
     phase: Phase,
-    /// followup FIFO（ALR-101/205）。
-    next_turn: VecDeque<TurnInput>,
+    /// 待执行输入的单槽：core 不做消息排队（排队策略归 app 层），只保留
+    /// 一条已接受待执行的输入；占用时新到消息被明确拒绝。
+    pending_input: Option<TurnInput>,
     /// 无活动轮时积压的 inject 类输入；下一个 turn 开始时由 driver 一次性领取。
     next_step: VecDeque<Command>,
     /// 当前轮的命令入口；turn 结束后置 None。
@@ -135,8 +151,9 @@ impl SchedulingState {
     fn new() -> Self {
         Self {
             accepting: true,
+            close_error: None,
             phase: Phase::Idle,
-            next_turn: VecDeque::new(),
+            pending_input: None,
             next_step: VecDeque::new(),
             ingress: None,
             driver: None,
@@ -168,19 +185,23 @@ impl AgentScheduling {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
-    /// 入队一个 turn 级输入并按需唤醒 driver（投递与唤醒同临界区，ALR-105）。
-    pub(crate) fn push_turn_input(&self, input: TurnInput) -> Result<(), crate::core::CoreError> {
+    /// 投递一条 turn 级输入（占用即拒绝——排队由 app 层处理）。
+    pub(crate) fn deliver_input(&self, input: TurnInput) -> Result<(), crate::core::CoreError> {
         let mut state = self.lock();
         if !state.accepting {
             return Err(crate::core::CoreError::WorkerStopped);
         }
-        state.next_turn.push_back(input);
+        if state.pending_input.is_some() {
+            return Err(crate::core::CoreError::Busy);
+        }
+        state.pending_input = Some(input);
         self.wake_if_idle(&mut state);
         Ok(())
     }
 
-    /// steer 语义（ALR-102）：有活动轮时投递到当前轮（修正当前意图），
-    /// 无活动轮或当前轮正在封口时进入 `next_turn`，等同 followup（不丢消息）。
+    /// 运行中消息按引导处理（ALR-102）：投递到当前轮（修正当前意图）；
+    /// 无活动轮或当前轮正在封口时占用待执行单槽，由 driver 在当前轮
+    /// 结束后领取。
     pub(crate) fn push_steer(
         &self,
         message_id: String,
@@ -191,13 +212,16 @@ impl AgentScheduling {
             return Err(crate::core::CoreError::WorkerStopped);
         }
         let steered = state.ingress.as_ref().is_some_and(|ingress| {
-            ingress.send(Command::InjectUserMessage {
+            ingress.send_steering(Command::InjectUserMessage {
                 message_id: message_id.clone(),
                 content: content.clone(),
             })
         });
         if !steered {
-            state.next_turn.push_back(TurnInput::UserMessage {
+            if state.pending_input.is_some() {
+                return Err(crate::core::CoreError::Busy);
+            }
+            state.pending_input = Some(TurnInput::UserMessage {
                 message_id,
                 content,
             });
@@ -231,9 +255,9 @@ impl AgentScheduling {
         Ok(())
     }
 
-    /// driver 领取下一个 turn 输入（FIFO）。
-    pub(crate) fn take_next_turn(&self) -> Option<TurnInput> {
-        self.lock().next_turn.pop_front()
+    /// driver 领取待执行输入。
+    pub(crate) fn take_input(&self) -> Option<TurnInput> {
+        self.lock().pending_input.take()
     }
 
     /// turn 开始时领取当前积压的全部 `next_step`（保持接收顺序，ALR-103）。
@@ -243,12 +267,12 @@ impl AgentScheduling {
 
     /// driver 尝试挂起（进入 Idle）。返回 true 表示应等待唤醒。
     ///
-    /// 与投递方互斥：临界区内再次检查 `next_turn`，有待执行输入则不挂起，
+    /// 与投递方互斥：临界区内再次检查待执行输入，有则不挂起，
     /// 由 driver 重新领取——取消收敛窗口到达的消息不会丢失（ALR-105）。
     /// `next_step` 积压不阻止挂起：inject 本就等待下一次自然活动。
     pub(crate) fn try_park(&self) -> bool {
         let mut state = self.lock();
-        if state.next_turn.is_empty() {
+        if state.pending_input.is_none() {
             state.phase = Phase::Idle;
             true
         } else {
@@ -278,7 +302,7 @@ impl AgentScheduling {
     #[cfg(test)]
     pub(crate) fn has_pending(&self) -> bool {
         let state = self.lock();
-        !state.next_turn.is_empty() || !state.next_step.is_empty()
+        state.pending_input.is_some() || !state.next_step.is_empty()
     }
 
     /// 是否仍接受新输入（driver 关闭分支与投递方判定共用）。
@@ -286,9 +310,19 @@ impl AgentScheduling {
         self.lock().accepting
     }
 
-    /// 取出全部未处理输入（关闭排空用；保持接收顺序）。
+    /// 取出待执行输入（关闭排空用）。
     pub(crate) fn drain_pending(&self) -> Vec<TurnInput> {
-        self.lock().next_turn.drain(..).collect()
+        self.lock().pending_input.take().into_iter().collect()
+    }
+
+    /// 记录关闭排空失败（driver 关闭分支调用；join 后由 shutdown_agent 取出）。
+    pub(crate) fn set_close_error(&self, error: String) {
+        self.lock().close_error = Some(error);
+    }
+
+    /// 取出关闭排空结果。
+    fn take_close_error(&self) -> Option<String> {
+        self.lock().close_error.take()
     }
 
     /// 关闭：停止接收新输入，取消当前轮并唤醒挂起的 driver（ALR-206）。
@@ -357,7 +391,25 @@ where
         }
     };
     let future = driver_factory(entry.clone());
-    let driver = crate::shared_runtime::shared_runtime().spawn(future);
+    let panic_sid = session_id.to_string();
+    let driver = crate::shared_runtime::shared_runtime().spawn(async move {
+        // driver 异常退出守卫：panic 后从注册表移除条目——后续投递经
+        // ensure_agent_session 重建 driver，Inbox 消息不会变成无人消费。
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+        if let Err(panic) = outcome {
+            let detail = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "未知 panic".to_string());
+            tracing::error!(
+                session_id = %panic_sid,
+                detail,
+                "Agent driver 异常退出，移除调度条目（下次投递将重建）"
+            );
+            remove_agent(&panic_sid);
+        }
+    });
     {
         let mut state = entry.lock();
         state.driver = Some(driver);
@@ -447,6 +499,17 @@ pub fn commit_ingress(session_id: &str) {
     }
 }
 
+/// 原子领取指定 session 积压的全部 `next_step`（候选完成检查用，ALR-103）：
+/// PendingFinish 提交前检查封口竞态到达的注入，有积压则撤销暂定结果继续处理。
+pub fn take_pending_steps(session_id: &str) -> Vec<Command> {
+    if let Ok(agents) = agents().lock()
+        && let Some(entry) = agents.get(session_id)
+    {
+        return entry.take_next_steps();
+    }
+    Vec::new()
+}
+
 /// 查询指定 session 是否有活跃 turn（对外 `Running`）。
 pub fn is_running(session_id: &str) -> bool {
     if let Ok(agents) = agents().lock()
@@ -470,25 +533,36 @@ pub fn is_alive(session_id: &str) -> bool {
 /// 关闭指定 session 的 Agent：停止接收、取消当前轮、唤醒挂起 driver，
 /// 并等待 driver 完成关闭收敛（未处理输入的持久化由 driver 侧完成）。
 pub fn shutdown_agent(session_id: &str) -> Result<(), crate::core::CoreError> {
-    let driver = {
+    let entry = {
         let mut agents = agents()
             .lock()
             .map_err(|_| crate::core::CoreError::WorkerStopped)?;
         let Some(entry) = agents.remove(session_id) else {
             return Ok(());
         };
-        entry.shutdown()
+        entry
     };
-    let Some(driver) = driver else {
-        return Ok(());
-    };
-    std::thread::scope(|scope| {
-        scope
-            .spawn(move || crate::shared_runtime::shared_runtime().block_on(driver))
-            .join()
-            .map_err(|_| crate::core::CoreError::WorkerPanicked)?
-            .map_err(|_| crate::core::CoreError::WorkerPanicked)
-    })
+    let driver = entry.shutdown();
+    if let Some(driver) = driver {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || crate::shared_runtime::shared_runtime().block_on(driver))
+                .join()
+                .map_err(|_| crate::core::CoreError::WorkerPanicked)?
+                .map_err(|_| crate::core::CoreError::WorkerPanicked)
+        })?;
+    }
+    // driver 已收敛退出：关闭排空若失败，向调用方返回明确失败——
+    // 已接受消息既未持久化也未明确报告时不得静默返回成功（ALR-202）。
+    if let Some(error) = entry.take_close_error() {
+        tracing::warn!(
+            %error,
+            session_id,
+            "关闭排空持久化失败，向调用方返回明确失败"
+        );
+        return Err(crate::core::CoreError::WorkerStopped);
+    }
+    Ok(())
 }
 
 /// 非阻塞关闭（Drop 路径）：停止接收、取消当前轮并唤醒 driver 自行收敛退出。
@@ -540,39 +614,52 @@ mod tests {
         assert!(ingress.force_send(Command::Cancel));
     }
 
-    /// 单 driver 唤醒语义：FIFO 领取、park/唤醒互斥、关闭后拒绝（ALR-001/105）。
+    /// 单 driver 唤醒语义：单槽交接、占用拒绝、park/唤醒互斥、关闭后拒绝
+    ///（ALR-001/105；排队策略归 app 层）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn inbox_delivers_turns_in_fifo_with_single_driver() {
-        let sid = format!("inbox-fifo-{}", scru128::new_string());
+    async fn inbox_single_slot_delivery_with_single_driver() {
+        let sid = format!("inbox-slot-{}", scru128::new_string());
         let entry = ensure_inbox(&sid).expect("创建 Inbox 失败");
 
-        for i in 0..3 {
+        // 单槽：第一条接受，第二条占用即拒绝（排队由 app 层处理）。
+        entry
+            .deliver_input(TurnInput::UserMessage {
+                message_id: "msg-0".to_string(),
+                content: vec![tiangong_types::ContentBlock::text("第一条")],
+            })
+            .expect("首条投递应被接受");
+        assert!(
             entry
-                .push_turn_input(TurnInput::UserMessage {
-                    message_id: format!("msg-{i}"),
-                    content: vec![tiangong_types::ContentBlock::text(format!("第 {i} 条"))],
+                .deliver_input(TurnInput::UserMessage {
+                    message_id: "msg-1".to_string(),
+                    content: vec![tiangong_types::ContentBlock::text("第二条")],
                 })
-                .expect("投递应被接受");
-        }
-        // Inbox 无 driver 时不消费；领取保持 FIFO。
-        let first = entry.take_next_turn().expect("应可领取");
+                .is_err(),
+            "单槽占用时新消息应被明确拒绝（Busy）"
+        );
+        let first = entry.take_input().expect("应可领取");
         assert!(
             matches!(&first, TurnInput::UserMessage { message_id, .. } if message_id == "msg-0"),
-            "FIFO 顺序领取第一条"
+            "领取到已接受的输入"
         );
-        assert!(entry.has_pending(), "剩余输入仍在 Inbox");
+        assert!(!entry.has_pending(), "领取后单槽为空");
 
-        // park 语义：next_turn 有积压时不允许挂起；排空后允许
+        // park 语义：有待执行输入时不允许挂起；排空后允许
         //（next_step 积压不阻止挂起——inject 等待下次活动）。
-        assert!(!entry.try_park(), "next_turn 有积压时不得挂起");
+        entry
+            .deliver_input(TurnInput::UserMessage {
+                message_id: "hold".to_string(),
+                content: Vec::new(),
+            })
+            .expect("投递应被接受");
+        assert!(!entry.try_park(), "有待执行输入时不得挂起");
+        let _ = entry.take_input();
         entry
             .push_inject("browser".to_string(), serde_json::json!({}))
             .expect("inject 应被接受");
-        let _ = entry.take_next_turn();
-        let _ = entry.take_next_turn();
         assert!(
             entry.try_park(),
-            "next_turn 排空后应允许挂起（next_step 积压不阻止）"
+            "单槽排空后应允许挂起（next_step 积压不阻止）"
         );
         assert_eq!(
             entry.take_next_steps().len(),
@@ -582,7 +669,7 @@ mod tests {
 
         // 挂起中投递：唤醒锁存生效（Idle → 唤醒）。
         entry
-            .push_turn_input(TurnInput::UserMessage {
+            .deliver_input(TurnInput::UserMessage {
                 message_id: "msg-wake".to_string(),
                 content: Vec::new(),
             })
@@ -593,7 +680,7 @@ mod tests {
         assert!(woken, "挂起中的投递必须唤醒 driver");
         assert!(
             matches!(
-                &entry.take_next_turn().expect("唤醒后领取"),
+                &entry.take_input().expect("唤醒后领取"),
                 TurnInput::UserMessage { message_id, .. } if message_id == "msg-wake"
             ),
             "唤醒后应领取到新输入"
@@ -602,7 +689,7 @@ mod tests {
         // 关闭排空：shutdown 后不再接受。
         let _ = entry.shutdown();
         assert!(
-            entry.push_turn_input(TurnInput::ManualCompression).is_err(),
+            entry.deliver_input(TurnInput::ManualCompression).is_err(),
             "关闭后应拒绝新输入"
         );
         remove_agent(&sid);

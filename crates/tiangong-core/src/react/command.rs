@@ -45,8 +45,7 @@ pub(super) fn save_user_message_and_restart(
         "运行中注入用户消息：中断当前执行并追加新消息"
     );
     state.budget.reset_for_new_intent();
-    // steer 是新的用户意图：按新锚点重建工具义务契约（ALR-106）。
-    state.rebuild_for_new_intent(ctx);
+    state.reset_tool_history();
     Ok(())
 }
 
