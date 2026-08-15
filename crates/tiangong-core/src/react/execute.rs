@@ -2581,6 +2581,129 @@ mod tests {
         );
     }
 
+    /// 生命周期合同：on_turn_finished 在最终落盘前执行，本轮候选已被 Loop
+    /// 提交点标记为 Summary（暂定成功）——插件看到的是**暂定**最终答复；
+    /// 最终落盘失败时该标记会被回收。记录合同事实供插件侧设计参考。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_turn_finished_sees_provisional_summary_before_final_persist() {
+        use super::super::turn::run_turn;
+        use std::sync::Mutex;
+
+        struct ObservingPlugin {
+            seen_phases: Mutex<Vec<MessagePhase>>,
+        }
+
+        impl ToolOverrideHandler for ObservingPlugin {}
+        impl ToolSpecProvider for ObservingPlugin {}
+        impl PromptSectionProvider for ObservingPlugin {}
+        impl MentionCandidateProvider for ObservingPlugin {}
+        impl Plugin for ObservingPlugin {
+            fn id(&self) -> &str {
+                "observing"
+            }
+            fn on_turn_finished(&self, session: &mut Session, _: usize) {
+                let phase = session
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.role == MessageRole::Assistant
+                            && message.text_content().contains(FINAL_CANDIDATE_MARKER)
+                    })
+                    .map(|message| message.phase);
+                if let Some(phase) = phase {
+                    self.seen_phases.lock().unwrap().push(phase);
+                }
+            }
+        }
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+        let observing = Arc::new(ObservingPlugin {
+            seen_phases: Mutex::new(Vec::new()),
+        });
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![observing.clone()],
+        );
+        let TestHarness { ctx, .. } = harness;
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let seen = observing.seen_phases.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![MessagePhase::Summary],
+            "on_turn_finished 看到的是暂定 Summary（最终落盘前的合同）；成功路径随后确认"
+        );
+    }
+
+    /// 失败轮次的落盘失败不得倒推上一轮答复：原本 Failed 的轮次没有本轮
+    /// 候选，无条件倒序 demote 会误伤**上一轮**的最终答复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_turn_persistence_failure_does_not_demote_previous_reply() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        const PREVIOUS_MARKER: &str = "PREVIOUS-TURN-FINAL-REPLY";
+
+        // 单轮：模型流失败 → Failed；on_turn_finished 注入落盘失败 → 收尾再次
+        // 降级。预置的上一轮 Summary 答复是唯一的最终答复——无守卫的倒序
+        // demote 会把它退回 React。
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::failing_stream(
+            &["本轮部分输出"],
+            "本轮模型流失败",
+        )]);
+        let fail_plugin = Arc::new(FailFinalPersistencePlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![fail_plugin],
+        );
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        {
+            let mut previous = Message::new(MessageRole::Assistant, PREVIOUS_MARKER);
+            previous.phase = MessagePhase::Summary;
+            ctx.session.messages.push(previous);
+        }
+
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
+        let previous_replies: Vec<&crate::session::Message> = reloaded
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content().contains(PREVIOUS_MARKER)
+            })
+            .collect();
+        assert!(!previous_replies.is_empty(), "上一轮最终答复必须保留");
+        assert!(
+            previous_replies
+                .iter()
+                .all(|message| message.phase == MessagePhase::Summary),
+            "失败轮次的落盘失败不得倒推上一轮最终答复的相位"
+        );
+    }
+
     /// ALR-108：一个物理 turn 只调用一次 on_turn_started 和一次 on_turn_finished。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_turn_invokes_lifecycle_hooks_exactly_once() {

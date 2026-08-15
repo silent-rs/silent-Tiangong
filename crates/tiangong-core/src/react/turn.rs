@@ -112,8 +112,13 @@ pub(crate) async fn run_turn(
 
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
+        // 候选回收只在原本成功时执行：原本 Failed/Cancelled 的轮次没有本轮
+        // 候选，倒序查找会误伤**上一轮**的最终答复。
+        let was_success = matches!(outcome, TurnExecutionOutcome::Success);
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
-        demote_finalized_candidate(&mut ctx.session, &stream_tx);
+        if was_success {
+            demote_finalized_candidate(&mut ctx.session, &stream_tx);
+        }
         if let Some(idx) = ctx.session.latest_user_message_index() {
             ctx.session.messages[idx]
                 .set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);

@@ -65,6 +65,19 @@ impl ScriptedProviderCall {
         Self::Stream(events)
     }
 
+    /// 构造中途失败的流：发布部分文本后注入错误事件（流级失败）。
+    pub fn failing_stream(parts: &[&str], error_message: &str) -> Self {
+        let mut events = Vec::with_capacity(parts.len() + 2);
+        events.push(ProviderStreamEvent::MessageStart);
+        events.extend(
+            parts
+                .iter()
+                .map(|part| ProviderStreamEvent::TextDelta((*part).to_string())),
+        );
+        events.push(ProviderStreamEvent::Error(error_message.to_string()));
+        Self::Stream(events)
+    }
+
     fn kind(&self) -> ProviderCallKind {
         match self {
             Self::Complete(_) => ProviderCallKind::Complete,
