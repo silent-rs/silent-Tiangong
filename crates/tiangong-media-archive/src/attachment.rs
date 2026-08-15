@@ -304,6 +304,9 @@ impl AttachmentTransaction {
                         asset: asset.clone(),
                         data: Some(general_purpose::STANDARD.encode(bytes)),
                     });
+                    content.push(ContentBlock::ModelInstruction {
+                        text: inline_image_instruction(message_id, index, &asset),
+                    });
                 }
                 MediaKind::Image if capabilities.analyze_attachment => {
                     content.push(ContentBlock::AssetReference {
@@ -383,7 +386,14 @@ fn asset_notice_item(index: usize, asset: &StoredAsset) -> String {
 
 fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={message_id}，并指定 attachment_index={index}。\n- {}",
+        "本条用户消息包含已归档的图片附件。需要理解图片内容时，请调用 analyze_attachment 工具，使用 message_id={message_id}；只分析当前图片时指定 attachment_index={index}，需要同时分析多张图片时省略 attachment_index。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。\n- {}",
+        asset_notice_item(index, asset)
+    )
+}
+
+fn inline_image_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
+    format!(
+        "本条用户消息的图片内容已直接提供给模型，无需调用 analyze_attachment；图片同时已归档为本地资源。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。message_id={message_id}。\n- {}",
         asset_notice_item(index, asset)
     )
 }
@@ -938,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_image_is_a_final_image_block_with_stable_asset_data() {
+    fn inline_image_keeps_runtime_data_and_exposes_archived_path_to_tools() {
         let root = TestRoot::new();
         let mut transaction = root
             .store()
@@ -962,7 +972,7 @@ mod tests {
 
         assert_eq!(transaction.assets().len(), 1);
         assert!(!transaction.assets()[0].local_path.starts_with("data:"));
-        assert_eq!(message.len(), 2);
+        assert_eq!(message.len(), 3);
         match &message[1] {
             ContentBlock::Image { asset, data } => {
                 assert_eq!(asset, &transaction.assets()[0]);
@@ -976,8 +986,61 @@ mod tests {
             other => panic!("应生成最终 Image block，实际：{other:?}"),
         }
         assert!(matches!(
-            &tiangong_types::stable_content_blocks(&message)[1],
-            ContentBlock::Image { data: None, .. }
+            &message[2],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("message_id=message-inline")
+                    && text.contains("index=0")
+                    && text.contains("path=")
+                    && text.contains("generate_image")
+                    && text.contains("无需调用 analyze_attachment")
+        ));
+        let stable = tiangong_types::stable_content_blocks(&message);
+        assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
+        assert!(matches!(
+            &stable[2],
+            ContentBlock::ModelInstruction { text } if text.contains("path=")
+        ));
+    }
+
+    #[test]
+    fn inline_images_expose_all_archived_paths_in_upload_order() {
+        let root = TestRoot::new();
+        let mut transaction = root
+            .store()
+            .store_batch(vec![
+                data_attachment(MediaKind::Image, "person.png", "image/png", b"person"),
+                data_attachment(MediaKind::Image, "dress.png", "image/png", b"dress"),
+            ])
+            .unwrap();
+        let message = transaction
+            .prepare_message(
+                "message-two-images",
+                "try on",
+                AttachmentCapabilitySnapshot {
+                    chat_multimodal: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(message.len(), 5);
+        assert!(matches!(
+            &message[1],
+            ContentBlock::Image { asset, .. } if asset.original_name == "person.png"
+        ));
+        assert!(matches!(
+            &message[2],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("index=0") && text.contains("name=person.png")
+        ));
+        assert!(matches!(
+            &message[3],
+            ContentBlock::Image { asset, .. } if asset.original_name == "dress.png"
+        ));
+        assert!(matches!(
+            &message[4],
+            ContentBlock::ModelInstruction { text }
+                if text.contains("index=1") && text.contains("name=dress.png")
         ));
     }
 
@@ -1015,6 +1078,7 @@ mod tests {
                     && text.contains("message_id=message-analyze")
                     && text.contains("attachment_index=1")
                     && text.contains("name=analyze.png")
+                    && text.contains("generate_image")
                     && text.contains("path=")
         ));
     }
