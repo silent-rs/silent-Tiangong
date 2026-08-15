@@ -313,14 +313,20 @@ pub struct SingleProviderClient {
     cfg: ModelEndpoint,
     /// 重试时的回调通知（可选）
     on_retry: Option<OnRetryCallback>,
+    /// 显式注入的 provider；仅测试支持构建包含该能力。
+    #[cfg(any(test, feature = "test-provider"))]
+    injected_provider: Option<Arc<dyn LlmProvider>>,
 }
 
 impl std::fmt::Debug for SingleProviderClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SingleProviderClient")
+        let mut debug = f.debug_struct("SingleProviderClient");
+        debug
             .field("cfg", &self.cfg)
-            .field("on_retry", &self.on_retry.is_some())
-            .finish()
+            .field("on_retry", &self.on_retry.is_some());
+        #[cfg(any(test, feature = "test-provider"))]
+        debug.field("injected_provider", &self.injected_provider.is_some());
+        debug.finish()
     }
 }
 
@@ -351,7 +357,16 @@ impl SingleProviderClient {
         Self {
             cfg,
             on_retry: None,
+            #[cfg(any(test, feature = "test-provider"))]
+            injected_provider: None,
         }
+    }
+
+    /// 为测试支持构建显式注入统一 provider。
+    #[cfg(any(test, feature = "test-provider"))]
+    pub fn with_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
+        self.injected_provider = Some(provider);
+        self
     }
 
     /// 设置重试回调
@@ -452,6 +467,17 @@ impl SingleProviderClient {
     }
 
     fn build_provider_dispatch(&self, timeout_ms: u64) -> Result<ProviderDispatch> {
+        #[cfg(any(test, feature = "test-provider"))]
+        if let Some(provider) = &self.injected_provider {
+            return Ok(ProviderDispatch::Injected {
+                provider: Arc::clone(provider),
+                preserve_tool_call_order: matches!(
+                    self.protocol(),
+                    ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
+                ),
+            });
+        }
+
         match self.protocol() {
             ProviderProtocol::Anthropic => Ok(ProviderDispatch::Anthropic(Box::new(
                 self.build_anthropic_provider(timeout_ms)?,
@@ -517,7 +543,7 @@ impl SingleProviderClient {
             ));
         }
 
-        let provider = self.build_anthropic_provider(timeout_ms)?;
+        let provider = self.build_provider_dispatch(timeout_ms)?;
         let request = ProviderRequest {
             model: model.to_string(),
             system: Some(
@@ -667,16 +693,13 @@ impl SingleProviderClient {
             reasoning_effort: None,
             thinking_disabled: false,
         };
-        if self.protocol() == ProviderProtocol::Anthropic {
-            let provider = self.build_anthropic_provider(timeout_ms)?;
-            let response = self.block_on_llm(provider.complete(request))?;
-            return Ok(strip_think_tags(&collect_provider_text(&response))
-                .trim()
-                .to_string());
-        }
         let provider = self.build_provider_dispatch(timeout_ms)?;
         let response = self.block_on_llm(provider.complete(request))?;
-        Ok(collect_provider_text(&response).trim().to_string())
+        let text = collect_provider_text(&response).trim().to_string();
+        if self.protocol() == ProviderProtocol::Anthropic {
+            return Ok(strip_think_tags(&text).trim().to_string());
+        }
+        Ok(text)
     }
 
     /// 真正的 async 流式函数调用。
@@ -773,11 +796,8 @@ impl SingleProviderClient {
             ));
         }
         let request = build_provider_request(req, &model, MAX_TOKENS_MAIN, functions, tool_choice)?;
-        let preserve_tool_call_order = matches!(
-            self.protocol(),
-            ProviderProtocol::OpenAi | ProviderProtocol::OpenAiChatCompletions
-        );
         let provider = self.build_provider_dispatch(timeout_ms)?;
+        let preserve_tool_call_order = provider.preserve_tool_call_order();
 
         let mut text = String::new();
         let mut reasoning_content = String::new();
@@ -1801,6 +1821,11 @@ async fn consume_provider_stream_events_async(
 }
 
 enum ProviderDispatch {
+    #[cfg(any(test, feature = "test-provider"))]
+    Injected {
+        provider: Arc<dyn LlmProvider>,
+        preserve_tool_call_order: bool,
+    },
     Anthropic(Box<AnthropicProvider>),
     OpenAiResponses(Box<OpenAiResponsesProvider>),
     OpenAiChat(Box<OpenAiChatCompletionsProvider>),
@@ -1808,11 +1833,25 @@ enum ProviderDispatch {
 }
 
 impl ProviderDispatch {
+    fn preserve_tool_call_order(&self) -> bool {
+        match self {
+            #[cfg(any(test, feature = "test-provider"))]
+            ProviderDispatch::Injected {
+                preserve_tool_call_order,
+                ..
+            } => *preserve_tool_call_order,
+            ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_) => true,
+            ProviderDispatch::Anthropic(_) | ProviderDispatch::DeepSeek(_) => false,
+        }
+    }
+
     async fn complete(
         self,
         request: ProviderRequest,
     ) -> std::result::Result<ProviderResponse, crate::error::LlmError> {
         match self {
+            #[cfg(any(test, feature = "test-provider"))]
+            ProviderDispatch::Injected { provider, .. } => provider.complete(request).await,
             ProviderDispatch::Anthropic(provider) => provider.complete(request).await,
             ProviderDispatch::OpenAiResponses(provider) => provider.complete(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.complete(request).await,
@@ -1825,6 +1864,8 @@ impl ProviderDispatch {
         request: ProviderRequest,
     ) -> std::result::Result<ProviderStream, crate::error::LlmError> {
         match self {
+            #[cfg(any(test, feature = "test-provider"))]
+            ProviderDispatch::Injected { provider, .. } => provider.stream(request).await,
             ProviderDispatch::Anthropic(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAiResponses(provider) => provider.stream(request).await,
             ProviderDispatch::OpenAiChat(provider) => provider.stream(request).await,
@@ -1868,10 +1909,7 @@ fn block_on_provider_stream(
         request: ProviderRequest,
         on_delta: &mut dyn FnMut(&ModelStreamChunk),
     ) -> Result<ModelFunctionResponse> {
-        let preserve_tool_call_order = matches!(
-            &provider,
-            ProviderDispatch::OpenAiResponses(_) | ProviderDispatch::OpenAiChat(_)
-        );
+        let preserve_tool_call_order = provider.preserve_tool_call_order();
         let stream = provider.stream(request).await.map_err(map_llm_error)?;
         consume_provider_stream_events_async(stream, on_delta, preserve_tool_call_order).await
     }
@@ -1988,11 +2026,303 @@ fn resolve_function_timeout_ms(base_timeout_ms: u64, custom_timeout_ms: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tiangong_types::{
         ContentBlock, MediaKind, Message, MessagePhase, MessageRole, StoredAsset,
     };
     use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Default)]
+    struct InjectedProviderState {
+        complete_requests: Mutex<Vec<ProviderRequest>>,
+        stream_requests: Mutex<Vec<ProviderRequest>>,
+    }
+
+    #[derive(Clone)]
+    struct InjectedTestProvider {
+        state: Arc<InjectedProviderState>,
+        complete_response: ProviderResponse,
+        stream_events: Vec<std::result::Result<ProviderStreamEvent, crate::error::LlmError>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for InjectedTestProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                streaming: true,
+                tool_calling: true,
+                system_prompt: true,
+                list_models: false,
+            }
+        }
+
+        async fn complete(
+            &self,
+            req: ProviderRequest,
+        ) -> std::result::Result<ProviderResponse, crate::error::LlmError> {
+            self.state.complete_requests.lock().unwrap().push(req);
+            Ok(self.complete_response.clone())
+        }
+
+        async fn stream(
+            &self,
+            req: ProviderRequest,
+        ) -> std::result::Result<ProviderStream, crate::error::LlmError> {
+            self.state.stream_requests.lock().unwrap().push(req);
+            Ok(Box::pin(futures_util::stream::iter(
+                self.stream_events.clone(),
+            )))
+        }
+
+        async fn list_models(
+            &self,
+        ) -> std::result::Result<Vec<crate::model::ProviderModelInfo>, crate::error::LlmError>
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    fn injected_test_endpoint(protocol: ProviderProtocol) -> ModelEndpoint {
+        ModelEndpoint {
+            base_url: "http://unused.invalid".to_string(),
+            api_key: String::new(),
+            model: "injected-model".to_string(),
+            protocol,
+            timeout_ms: 5_000,
+            options: Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    fn injected_provider_response(text: &str) -> ProviderResponse {
+        ProviderResponse {
+            id: Some("injected-response".to_string()),
+            model: Some("injected-model".to_string()),
+            assistant_message: ChatMessage::text(LlmMessageRole::Assistant, text),
+            reasoning_content: None,
+            stop_reason: Some(StopReason::EndTurn),
+            usage: None,
+            raw: None,
+        }
+    }
+
+    fn injected_model_request(user_input: &str) -> ModelRequest {
+        ModelRequest {
+            user_input: user_input.to_string(),
+            context: vec![Message::new(MessageRole::System, "system prompt")],
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_stream_uses_assembled_request_and_preserves_openai_tool_order() {
+        let state = Arc::new(InjectedProviderState::default());
+        let provider = Arc::new(InjectedTestProvider {
+            state: state.clone(),
+            complete_response: injected_provider_response("unused"),
+            stream_events: vec![
+                Ok(ProviderStreamEvent::TextDelta("assembled".to_string())),
+                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: "call-z".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({}),
+                })),
+                Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id: "call-z".to_string(),
+                    partial_json: r#"{"path":"z"}"#.to_string(),
+                }),
+                Ok(ProviderStreamEvent::ToolCallStart(ToolCall {
+                    id: "call-a".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: json!({}),
+                })),
+                Ok(ProviderStreamEvent::ToolCallDelta {
+                    call_id: "call-a".to_string(),
+                    partial_json: r#"{"path":"a"}"#.to_string(),
+                }),
+                Ok(ProviderStreamEvent::MessageEnd {
+                    stop_reason: Some(StopReason::ToolUse),
+                }),
+            ],
+        });
+        let client = SingleProviderClient::new(injected_test_endpoint(
+            ProviderProtocol::OpenAiChatCompletions,
+        ))
+        .with_provider(provider);
+        let mut request = injected_model_request("current");
+        request
+            .context
+            .push(Message::new(MessageRole::User, "history"));
+        let mut orphan_result = Message::new(MessageRole::Tool, "orphan");
+        orphan_result.tool_call_id = Some("missing-call".to_string());
+        request.context.push(orphan_result);
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls_with_tool_choice(
+                request,
+                vec![schema_tool("read_file")],
+                Some(ToolChoice::Any),
+                chunk_tx,
+            )
+            .await
+            .unwrap();
+        let chunks = std::iter::from_fn(|| chunk_rx.try_recv().ok()).collect::<Vec<_>>();
+
+        assert_eq!(response.text, "assembled");
+        assert_eq!(
+            response
+                .tool_calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["call-z", "call-a"]
+        );
+        assert_eq!(response.tool_calls[0].arguments, json!({"path": "z"}));
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content, "assembled");
+        assert!(state.complete_requests.lock().unwrap().is_empty());
+        let requests = state.stream_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model, "injected-model");
+        assert_eq!(requests[0].system.as_deref(), Some("system prompt"));
+        assert_eq!(requests[0].tool_choice, Some(ToolChoice::Any));
+        assert_eq!(requests[0].tools, vec![schema_tool("read_file")]);
+        assert_eq!(
+            requests[0].messages,
+            vec![
+                ChatMessage::text(LlmMessageRole::User, "history"),
+                ChatMessage::text(LlmMessageRole::User, "current"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn injected_stream_error_falls_back_to_injected_complete() {
+        let state = Arc::new(InjectedProviderState::default());
+        let provider = Arc::new(InjectedTestProvider {
+            state: state.clone(),
+            complete_response: injected_provider_response("fallback"),
+            stream_events: vec![Err(crate::error::LlmError::Stream(
+                "injected stream failed".to_string(),
+            ))],
+        });
+        let client = SingleProviderClient::new(injected_test_endpoint(ProviderProtocol::Anthropic))
+            .with_provider(provider);
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls(
+                injected_model_request("fallback request"),
+                Vec::new(),
+                chunk_tx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.text, "fallback");
+        assert_eq!(chunk_rx.recv().await.unwrap().content, "fallback");
+        assert!(chunk_rx.recv().await.is_none());
+        let stream_requests = state.stream_requests.lock().unwrap();
+        let complete_requests = state.complete_requests.lock().unwrap();
+        assert_eq!(stream_requests.len(), 1);
+        assert_eq!(complete_requests.len(), 1);
+        assert_eq!(stream_requests[0], complete_requests[0]);
+    }
+
+    #[tokio::test]
+    async fn injected_partial_stream_error_does_not_fallback_or_duplicate_text() {
+        let state = Arc::new(InjectedProviderState::default());
+        let provider = Arc::new(InjectedTestProvider {
+            state: state.clone(),
+            complete_response: injected_provider_response("Hello"),
+            stream_events: vec![
+                Ok(ProviderStreamEvent::TextDelta("Hel".to_string())),
+                Err(crate::error::LlmError::Stream(
+                    "injected stream failed after delta".to_string(),
+                )),
+            ],
+        });
+        let client = SingleProviderClient::new(injected_test_endpoint(
+            ProviderProtocol::OpenAiChatCompletions,
+        ))
+        .with_provider(provider);
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = client
+            .stream_function_calls(
+                injected_model_request("partial stream failure"),
+                Vec::new(),
+                chunk_tx,
+            )
+            .await;
+
+        let chunks = std::iter::from_fn(|| chunk_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 1, "失败前只能发布已收到的流片段");
+        assert_eq!(chunks[0].content, "Hel");
+        assert_eq!(state.stream_requests.lock().unwrap().len(), 1);
+        assert!(
+            state.complete_requests.lock().unwrap().is_empty(),
+            "已有可见流内容时不得再发起非流式回退"
+        );
+        let error = result.expect_err("已输出文本后流失败必须返回错误");
+        assert!(
+            error
+                .to_string()
+                .contains("injected stream failed after delta")
+        );
+    }
+
+    #[test]
+    fn injected_provider_is_used_by_both_lite_entry_points() {
+        let state = Arc::new(InjectedProviderState::default());
+        let provider = Arc::new(InjectedTestProvider {
+            state: state.clone(),
+            complete_response: injected_provider_response("<think>hidden</think>title"),
+            stream_events: Vec::new(),
+        });
+        let client = SingleProviderClient::new(injected_test_endpoint(ProviderProtocol::Anthropic))
+            .with_provider(provider);
+
+        assert_eq!(client.complete_lite("first").unwrap(), "title");
+        assert_eq!(
+            client
+                .complete_lite_with_system("custom system", "second")
+                .unwrap(),
+            "title"
+        );
+
+        let requests = state.complete_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].messages[0],
+            ChatMessage::text(LlmMessageRole::User, "first")
+        );
+        assert_eq!(requests[1].system.as_deref(), Some("custom system"));
+        assert_eq!(
+            requests[1].messages[0],
+            ChatMessage::text(LlmMessageRole::User, "second")
+        );
+    }
+
+    #[test]
+    fn client_without_injection_keeps_protocol_dispatch() {
+        let mut endpoint = injected_test_endpoint(ProviderProtocol::OpenAiChatCompletions);
+        endpoint.api_key = "test-key".to_string();
+        let client = SingleProviderClient::new(endpoint);
+
+        assert!(client.injected_provider.is_none());
+        assert!(matches!(
+            client.build_provider_dispatch(5_000).unwrap(),
+            ProviderDispatch::OpenAiChat(_)
+        ));
+    }
 
     #[test]
     fn function_timeout_uses_provider_timeout_without_override() {
@@ -2264,6 +2594,84 @@ mod tests {
             .await;
     }
 
+    #[derive(Clone)]
+    struct StreamFallbackResponder {
+        stream_flags: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl Respond for StreamFallbackResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).expect("request JSON");
+            let stream = body["stream"].as_bool().expect("body.stream boolean");
+            self.stream_flags.lock().unwrap().push(stream);
+
+            if stream {
+                ResponseTemplate::new(200).set_body_raw("data: not-json\n\n", "text/event-stream")
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "chatcmpl-fallback",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "fallback-only"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 2,
+                        "completion_tokens": 1,
+                        "total_tokens": 3
+                    }
+                }))
+            }
+        }
+    }
+
+    async fn mount_stream_fallback_responder(server: &MockServer) -> Arc<Mutex<Vec<bool>>> {
+        let stream_flags = Arc::new(Mutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer test-key"))
+            .respond_with(StreamFallbackResponder {
+                stream_flags: stream_flags.clone(),
+            })
+            .mount(server)
+            .await;
+        stream_flags
+    }
+
+    fn stream_fallback_client(
+        server: &MockServer,
+        callback_count: Arc<AtomicUsize>,
+    ) -> SingleProviderClient {
+        SingleProviderClient::new(ModelEndpoint {
+            base_url: server.uri(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: Value::Object(serde_json::Map::new()),
+        })
+        .with_on_retry(Arc::new(move |_, _, _, _| {
+            callback_count.fetch_add(1, Ordering::SeqCst);
+        }))
+    }
+
+    fn stream_fallback_request() -> ModelRequest {
+        ModelRequest {
+            user_input: "test fallback".to_string(),
+            context: vec![Message::new(MessageRole::System, "system")],
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+            max_output_tokens: None,
+        }
+    }
+
     fn usage_chunk(prompt_tokens: usize, completion_tokens: usize) -> Value {
         serde_json::json!({
             "id": "chatcmpl-test",
@@ -2355,6 +2763,53 @@ mod tests {
         assert_eq!(requests.len(), 1);
     }
 
+    #[tokio::test]
+    async fn closed_chunk_receiver_stops_after_single_stream_error() {
+        let server = MockServer::start().await;
+        let stream_flags = mount_stream_fallback_responder(&server).await;
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let client = stream_fallback_client(&server, callback_count.clone());
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(chunk_rx);
+
+        let error = client
+            .stream_function_calls(stream_fallback_request(), Vec::new(), chunk_tx)
+            .await
+            .expect_err("closed receiver must stop fallback");
+
+        assert!(error.to_string().contains("流式请求被调用方中止"));
+        assert_eq!(*stream_flags.lock().unwrap(), vec![true]);
+        assert_eq!(callback_count.load(Ordering::SeqCst), 0);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_chunk_receiver_gets_single_text_from_non_stream_fallback() {
+        let server = MockServer::start().await;
+        let stream_flags = mount_stream_fallback_responder(&server).await;
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let client = stream_fallback_client(&server, callback_count.clone());
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = client
+            .stream_function_calls(stream_fallback_request(), Vec::new(), chunk_tx)
+            .await
+            .expect("non-stream fallback succeeds");
+        let mut chunks = Vec::new();
+        while let Some(chunk) = chunk_rx.recv().await {
+            chunks.push(chunk);
+        }
+
+        assert_eq!(response.text, "fallback-only");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content, "fallback-only");
+        assert!(chunks[0].reasoning_content.is_empty());
+        assert!(chunks[0].usage.is_none());
+        assert_eq!(*stream_flags.lock().unwrap(), vec![true, false]);
+        assert_eq!(callback_count.load(Ordering::SeqCst), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
     #[test]
     fn sanitize_defers_internal_tool_context_until_tool_results_complete() {
         let messages = vec![
@@ -2403,6 +2858,84 @@ mod tests {
         assert_eq!(provider_message_tool_result_count(&sanitized[2]), 2);
         assert_eq!(sanitized[3].role, LlmMessageRole::User);
         assert!(is_internal_tool_context_message(&sanitized[3]));
+    }
+
+    #[test]
+    fn sanitize_preserves_adjacent_user_turn_boundaries() {
+        let messages = vec![
+            ChatMessage::text(LlmMessageRole::User, "A"),
+            ChatMessage::text(LlmMessageRole::User, "B"),
+        ];
+
+        assert_eq!(sanitize_provider_messages(messages.clone()), messages);
+    }
+
+    #[test]
+    fn sanitize_preserves_user_tool_context_user_boundaries() {
+        let messages = vec![
+            ChatMessage::text(LlmMessageRole::User, "A"),
+            ChatMessage::text(
+                LlmMessageRole::User,
+                "<tool-context name=\"runtime\">context</tool-context>",
+            ),
+            ChatMessage::text(LlmMessageRole::User, "B"),
+        ];
+
+        assert_eq!(sanitize_provider_messages(messages.clone()), messages);
+    }
+
+    #[test]
+    fn sanitize_preserves_complete_tool_pair_before_next_user() {
+        let messages = vec![
+            ChatMessage::text(LlmMessageRole::User, "A"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("call-a")],
+            ),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("call-a")]),
+            ChatMessage::text(LlmMessageRole::User, "B"),
+        ];
+
+        assert_eq!(sanitize_provider_messages(messages.clone()), messages);
+    }
+
+    #[test]
+    fn sanitize_orders_parallel_results_then_context_then_next_user() {
+        let context = ChatMessage::text(
+            LlmMessageRole::User,
+            "<tool-context name=\"runtime\">context</tool-context>",
+        );
+        let sanitized = sanitize_provider_messages(vec![
+            ChatMessage::text(LlmMessageRole::User, "A"),
+            ChatMessage::new(
+                LlmMessageRole::Assistant,
+                vec![provider_tool_call("call-a"), provider_tool_call("call-b")],
+            ),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("call-a")]),
+            context.clone(),
+            ChatMessage::new(LlmMessageRole::Tool, vec![provider_tool_result("call-b")]),
+            ChatMessage::text(LlmMessageRole::User, "B"),
+        ]);
+
+        assert_eq!(
+            sanitized,
+            vec![
+                ChatMessage::text(LlmMessageRole::User, "A"),
+                ChatMessage::new(
+                    LlmMessageRole::Assistant,
+                    vec![provider_tool_call("call-a"), provider_tool_call("call-b")],
+                ),
+                ChatMessage::new(
+                    LlmMessageRole::Tool,
+                    vec![
+                        provider_tool_result("call-a"),
+                        provider_tool_result("call-b"),
+                    ],
+                ),
+                context,
+                ChatMessage::text(LlmMessageRole::User, "B"),
+            ]
+        );
     }
 
     #[test]

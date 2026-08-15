@@ -850,11 +850,12 @@ pub(super) async fn execute_turn(
                 // 命令处理（取消/引导/审批分支）会 take 当前阶段：先装回自身，
                 // 否则排空窗口到达的决定性命令在 take_phase 断言上崩溃。
                 state.install_phase(ExecutionPhase::PendingFinish(result));
-                // 测试同步点（仅测试构建）：封口前屏障——候选答复已生成、
-                // 提交尚未开始的精确窗口，供集成测试投递引导/交接消息。
+                crate::react::inbox::begin_seal(&ctx.session.id);
+                // 测试同步点（仅测试构建）：候选答复已生成且入口已进入
+                // Sealing，提交尚未开始。用户 steer 仍可进入当前轮，其他命令
+                // 必须按真实封口门控处理。
                 #[cfg(test)]
                 crate::core::test_support::seal_barrier(&ctx.session.id).await;
-                crate::react::inbox::begin_seal(&ctx.session.id);
                 loop {
                     let next = match cmd_rx.try_recv() {
                         Ok(command) => Some(Deferred::Command(command)),
@@ -1190,12 +1191,13 @@ mod tests {
     use crate::agent_config::AgentConfig;
     use crate::core::command::Command;
     use crate::core::plugin::Plugin;
+    use crate::core::test_support::{ScriptedLlmProvider, ScriptedProviderCall};
     use crate::model::SingleProviderClient;
     use crate::model::{ToolCall, ToolSpec};
     use crate::observe::Observer;
     use crate::permission::TrustMode;
     use crate::prompt::SystemPromptConfig;
-    use crate::session::{Message, MessageRole, MessageToolCall, Session};
+    use crate::session::{Message, MessagePhase, MessageRole, MessageToolCall, Session};
     use crate::tool::ToolResult;
     use crate::tool_override::{
         MentionCandidateProvider, PromptSectionProvider, ToolOverrideHandler, ToolSpecProvider,
@@ -1208,7 +1210,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tiangong_llm::{ModelEndpoint, ProviderProtocol};
-    use tiangong_types::{StreamEvent, TokenUsage, stream::ContextCompressAction};
+    use tiangong_types::{StreamEvent, TokenUsage, TurnStatus, stream::ContextCompressAction};
     use tokio::sync::{Barrier, Notify};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1528,9 +1530,9 @@ mod tests {
             )
         }
 
-        fn new_with_protocol(
-            server: &MockServer,
-            protocol: ProviderProtocol,
+        /// 使用现成 client 注入测试 provider。
+        fn new_with_client(
+            client: SingleProviderClient,
             tools: Vec<ToolSpec>,
             tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
             plugins: Vec<Arc<dyn Plugin>>,
@@ -1550,7 +1552,6 @@ mod tests {
                 reasoning_effort: "none".to_string(),
                 ..Default::default()
             };
-            let client = SingleProviderClient::new(endpoint_with_protocol(server, protocol));
             let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamEvent>();
             let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
 
@@ -1574,6 +1575,17 @@ mod tests {
                 cmd_rx,
                 storage_root,
             }
+        }
+
+        fn new_with_protocol(
+            server: &MockServer,
+            protocol: ProviderProtocol,
+            tools: Vec<ToolSpec>,
+            tool_overrides: HashMap<String, Arc<dyn ToolOverrideHandler>>,
+            plugins: Vec<Arc<dyn Plugin>>,
+        ) -> Self {
+            let client = SingleProviderClient::new(endpoint_with_protocol(server, protocol));
+            Self::new_with_client(client, tools, tool_overrides, plugins)
         }
 
         /// 排空 stream 通道里的所有积压事件(非阻塞),避免 channel 满导致 send 阻塞。
@@ -2347,6 +2359,227 @@ mod tests {
         fn on_turn_finished(&self, _: &mut Session, _: usize) {
             self.finished.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    const FINAL_CANDIDATE_MARKER: &str = "FINAL-CANDIDATE-MUST-NOT-BE-SUMMARY";
+    const ARTIFICIAL_UNFINISHED_CALL_ID: &str = "artificial-unfinished-call";
+    const ARTIFICIAL_UNFINISHED_TOOL_NAME: &str = "artificial_unfinished_tool";
+
+    struct ArtificialUnfinishedToolCallPlugin;
+
+    impl ToolOverrideHandler for ArtificialUnfinishedToolCallPlugin {}
+    impl ToolSpecProvider for ArtificialUnfinishedToolCallPlugin {}
+    impl PromptSectionProvider for ArtificialUnfinishedToolCallPlugin {}
+    impl MentionCandidateProvider for ArtificialUnfinishedToolCallPlugin {}
+
+    impl Plugin for ArtificialUnfinishedToolCallPlugin {
+        fn id(&self) -> &str {
+            "artificial-unfinished-tool-call"
+        }
+
+        fn on_turn_started(&self, session: &mut Session, _: usize) {
+            let mut assistant = Message::new(MessageRole::Assistant, "人工制造的未完成工具调用");
+            assistant.phase = MessagePhase::React;
+            assistant.tool_calls.push(MessageToolCall {
+                id: ARTIFICIAL_UNFINISHED_CALL_ID.to_string(),
+                name: ARTIFICIAL_UNFINISHED_TOOL_NAME.to_string(),
+                arguments: serde_json::json!({"source": "run_turn_test"}),
+            });
+            session.messages.push(assistant);
+        }
+    }
+
+    struct FailFinalPersistencePlugin;
+
+    impl ToolOverrideHandler for FailFinalPersistencePlugin {}
+    impl ToolSpecProvider for FailFinalPersistencePlugin {}
+    impl PromptSectionProvider for FailFinalPersistencePlugin {}
+    impl MentionCandidateProvider for FailFinalPersistencePlugin {}
+
+    impl Plugin for FailFinalPersistencePlugin {
+        fn id(&self) -> &str {
+            "fail-final-persistence"
+        }
+
+        fn on_turn_finished(&self, session: &mut Session, _: usize) {
+            crate::core::test_support::fail_next_persistence_for_session(&session.id);
+        }
+    }
+
+    fn assert_failed_user_and_unfinalized_candidate(
+        session: &Session,
+        events: &[StreamEvent],
+        candidate_marker: &str,
+    ) {
+        let latest_user = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .expect("重载 session 后必须保留用户消息");
+        assert_eq!(
+            latest_user.turn_status,
+            Some(TurnStatus::Failed),
+            "收尾降级必须把用户消息严格标记为 Failed"
+        );
+
+        let disk_candidates = session
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content().contains(candidate_marker)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(disk_candidates.len(), 1, "磁盘必须保留唯一候选答复");
+        assert_eq!(
+            disk_candidates[0].phase,
+            MessagePhase::React,
+            "失败终态下候选答复必须保留 React 相位，不得成为 Summary"
+        );
+
+        let candidate_events = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::SessionMessageUpsert { message, .. }
+                    if message.text_content().contains(candidate_marker) =>
+                {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !candidate_events.is_empty(),
+            "候选答复必须通过 SessionMessageUpsert 发布"
+        );
+        assert!(
+            candidate_events
+                .iter()
+                .all(|message| message.phase != MessagePhase::Summary),
+            "失败终态不得发布候选答复的 Summary 快照"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, StreamEvent::SummaryText { .. })),
+            "失败终态不得发布 SummaryText"
+        );
+    }
+
+    /// 完整 run_turn 收尾：Agent Loop 先产生成功候选，生命周期插件预置的人工悬空
+    /// 工具调用在后置协议修复中闭合，并把轮次降级为失败。候选不得提前定格。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_turn_unfinished_tool_downgrade_never_finalizes_candidate() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+        let plugin = Arc::new(ArtificialUnfinishedToolCallPlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![plugin],
+        );
+        let TestHarness {
+            ctx,
+            stream_rx,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        events.assert_single_failure_terminal("未完成的工具调用");
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
+        provider.assert_request_count_and_latest_user_contains(1, "你好");
+        assert_failed_user_and_unfinalized_candidate(
+            &reloaded,
+            events.seen(),
+            FINAL_CANDIDATE_MARKER,
+        );
+
+        let declared_calls = reloaded
+            .messages
+            .iter()
+            .flat_map(|message| message.tool_calls.iter())
+            .filter(|call| call.id == ARTIFICIAL_UNFINISHED_CALL_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(declared_calls.len(), 1, "人工工具调用声明必须保留且唯一");
+        assert_eq!(declared_calls[0].name, ARTIFICIAL_UNFINISHED_TOOL_NAME);
+        let closed_results = reloaded
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Tool
+                    && message.tool_call_id.as_deref() == Some(ARTIFICIAL_UNFINISHED_CALL_ID)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closed_results.len(), 1, "人工悬空调用必须恰好闭合一次");
+        assert_eq!(
+            closed_results[0].tool_name.as_deref(),
+            Some(ARTIFICIAL_UNFINISHED_TOOL_NAME)
+        );
+        assert!(closed_results[0].tool_result_is_error);
+        assert_eq!(closed_results[0].phase, MessagePhase::React);
+        assert!(closed_results[0].text_content().contains("本轮结束而中断"));
+        assert!(
+            !reloaded.has_unfinished_tool_calls(),
+            "收尾后不得残留未完成工具调用"
+        );
+    }
+
+    /// 完整 run_turn 收尾：on_turn_finished 精确安排最终写入失败；首次最终落盘失败
+    /// 后轮次降级，第二次补偿落盘成功并可重载。失败候选不得提前定格。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_turn_final_persistence_failure_never_finalizes_candidate() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &[FINAL_CANDIDATE_MARKER],
+            10,
+            5,
+        )]);
+        let plugin = Arc::new(FailFinalPersistencePlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![plugin],
+        );
+        let TestHarness {
+            ctx,
+            stream_rx,
+            storage_root,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+
+        run_turn(ctx, cmd_rx).await;
+
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        events.assert_single_failure_terminal("最终会话持久化失败");
+        let reloaded = Session::load_from_storage(&storage_root, &session_id)
+            .expect("一次性失败消费后，补偿落盘必须成功并可重载");
+        provider.assert_request_count_and_latest_user_contains(1, "你好");
+        assert_failed_user_and_unfinalized_candidate(
+            &reloaded,
+            events.seen(),
+            FINAL_CANDIDATE_MARKER,
+        );
     }
 
     /// ALR-108：一个物理 turn 只调用一次 on_turn_started 和一次 on_turn_finished。

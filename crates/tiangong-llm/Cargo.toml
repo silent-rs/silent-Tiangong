@@ -4,6 +4,10 @@ version.workspace = true
 edition = "2024"
 license = "Apache-2.0"
 
+[features]
+default = []
+test-provider = []
+
 [dependencies]
 tiangong-anthropic = { workspace = true }
 tiangong-deepseek = { workspace = true }

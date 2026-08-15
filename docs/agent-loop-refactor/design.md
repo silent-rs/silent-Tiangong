@@ -560,6 +560,24 @@ react/
 
 删除 Summary 触发、NeedMoreWork、ForceFinal、outer iteration 和 continuation limit 的控制流测试。若其中包含仍有效的取消、用量或消息断言，先抽离到对应行为测试。
 
+### 11.5 可注入 Provider 与测试分层（基础设施完成，生产缺陷待修复）
+
+Core 在模型请求边界提供可注入 Provider。正式运行不设置注入时，仍使用现有默认 Provider 构造、协议路由、流式请求和重试行为；注入能力不改变公开配置、Session 格式或 Provider 协议。
+
+测试职责按以下边界分层：
+
+- Core 状态测试由可控 Provider 响应驱动完整 turn，不监听端口、不建立 socket，只验证 turn 状态、Session、生命周期、事件和唯一终态；
+- `tiangong-llm` 的 Provider 协议测试继续验证请求映射、鉴权头、流式解析、非流式回退、重试和传输错误；
+- Core 测试不重复断言 HTTP 请求形态，Provider 协议测试不承担 Core 的状态收敛和持久化断言。
+
+本次迁移范围严格限制为三个新增 Core 测试：
+
+1. `cancel_during_candidate_seal_preserves_react_candidate_without_summary`；
+2. `run_turn_unfinished_tool_downgrade_never_finalizes_candidate`；
+3. `run_turn_final_persistence_failure_never_finalizes_candidate`。
+
+其他既有 Core 测试和 Provider 协议测试不在本次迁移范围。测试基础设施与三个用例迁移已经完成；严格断言暴露的封口取消、收尾过早定格、部分流失败回退和 Anthropic 消息归并问题按 `progress.md` 记录为后续生产修复，不在本次测试任务中弱化断言。
+
 ## 12. 分阶段实施
 
 ### 阶段 A：需求与安全网
@@ -624,7 +642,7 @@ react/
 | ALR-101~106 | 第 4 节 | 13~14 | Inbox、边界、wake latch 测试 |
 | ALR-201~206 | 第 4、7 节 | 14、18 | 最新 Session、顺序、关闭可靠性测试 |
 | ALR-301~307 | 第 6、8、9 节 | 15~17 | 工具义务、审批、压缩、重试、取消测试 |
-| ALR-401~405 | 第 10~13 节 | 13~18 | 协议回归、代码量检查、全链路验证 |
+| ALR-401~408 | 第 10~13 节 | 13~19 | 协议回归、Core 无 socket 状态测试、代码量检查、全链路验证 |
 
 ## 15. 最终决策
 

@@ -6,12 +6,24 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+use futures_util::stream;
+use tiangong_llm::error::LlmError;
+use tiangong_llm::message::{
+    MessageContent as ProviderMessageContent, MessageRole as ProviderRole,
+};
+use tiangong_llm::model::ProviderModelInfo;
+use tiangong_llm::provider::{LlmProvider, ProviderCapabilities};
+use tiangong_llm::request::ProviderRequest;
+use tiangong_llm::response::{ProviderResponse, StopReason};
+use tiangong_llm::stream::{ProviderStream, ProviderStreamEvent};
+use tiangong_llm::usage::TokenUsageData;
 use tiangong_types::{StreamEvent, TurnStatus};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -25,8 +37,265 @@ use crate::session::Session;
 pub const WAIT: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_millis(10);
 
-/// 测试同步屏障：在 Core 的封口前（候选已生成、提交未开始）与 turn 收尾前
-/// （ingress 已是 Committing，消息只能进单槽）提供确定性同步。
+/// 单个 fake provider 调用的预期结果。每次调用严格消费队首脚本。
+#[derive(Debug, Clone)]
+pub enum ScriptedProviderCall {
+    Complete(ProviderResponse),
+    Stream(Vec<ProviderStreamEvent>),
+    ListModels(Vec<ProviderModelInfo>),
+}
+
+impl ScriptedProviderCall {
+    /// 构造当前 Core 测试所需的分段文本流，并显式包含 usage 与 MessageEnd。
+    pub fn text_stream(parts: &[&str], prompt_tokens: usize, completion_tokens: usize) -> Self {
+        let mut events = Vec::with_capacity(parts.len() + 3);
+        events.push(ProviderStreamEvent::MessageStart);
+        events.extend(
+            parts
+                .iter()
+                .map(|part| ProviderStreamEvent::TextDelta((*part).to_string())),
+        );
+        events.push(ProviderStreamEvent::Usage(TokenUsageData::new(
+            prompt_tokens,
+            completion_tokens,
+        )));
+        events.push(ProviderStreamEvent::MessageEnd {
+            stop_reason: Some(StopReason::EndTurn),
+        });
+        Self::Stream(events)
+    }
+
+    fn kind(&self) -> ProviderCallKind {
+        match self {
+            Self::Complete(_) => ProviderCallKind::Complete,
+            Self::Stream(_) => ProviderCallKind::Stream,
+            Self::ListModels(_) => ProviderCallKind::ListModels,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderCallKind {
+    Complete,
+    Stream,
+    ListModels,
+}
+
+impl ProviderCallKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Stream => "stream",
+            Self::ListModels => "list_models",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScriptedProviderState {
+    scripts: VecDeque<ScriptedProviderCall>,
+    requests: Vec<ProviderRequest>,
+    failure: Option<String>,
+}
+
+/// 每测试独立、严格按顺序消费脚本的 LLM provider。
+///
+/// 流直接由内存迭代器返回，不创建生产任务；请求在脚本校验前完整记录，方便失败
+/// 后检查实际输入。脚本耗尽或调用类型不匹配时返回包含期望与实际类型的明确错误。
+#[derive(Debug, Clone)]
+pub struct ScriptedLlmProvider {
+    state: Arc<Mutex<ScriptedProviderState>>,
+}
+
+impl ScriptedLlmProvider {
+    pub fn new(scripts: impl IntoIterator<Item = ScriptedProviderCall>) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ScriptedProviderState {
+                scripts: scripts.into_iter().collect(),
+                requests: Vec::new(),
+                failure: None,
+            })),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<ProviderRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .requests
+            .clone()
+    }
+
+    pub fn assert_exhausted(&self) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.scripts.len(),
+            0,
+            "fake provider 仍有 {} 个脚本未消费",
+            state.scripts.len()
+        );
+        assert!(
+            state.failure.is_none(),
+            "fake provider 曾发生协议错误：{:?}",
+            state.failure
+        );
+    }
+
+    /// 统一断言调用次数以及最后一次请求中的最新用户文本。
+    pub fn assert_request_count_and_latest_user_contains(
+        &self,
+        expected_count: usize,
+        expected_latest_user: &str,
+    ) {
+        let requests = self.requests();
+        assert_eq!(requests.len(), expected_count, "fake provider 调用次数不符");
+        let latest_user = requests
+            .last()
+            .and_then(latest_provider_user_text)
+            .expect("最后一次 ProviderRequest 必须包含用户消息");
+        assert!(
+            latest_user.contains(expected_latest_user),
+            "最新用户消息不包含预期文本：expected={expected_latest_user:?}, actual={latest_user:?}"
+        );
+        self.assert_exhausted();
+    }
+
+    /// 构造绑定当前 fake 的现成 SingleProviderClient。
+    pub fn client(&self) -> crate::model::SingleProviderClient {
+        crate::model::SingleProviderClient::new(tiangong_llm::ModelEndpoint {
+            base_url: "http://scripted-provider.invalid".to_string(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            protocol: tiangong_llm::ProviderProtocol::OpenAiChatCompletions,
+            timeout_ms: 5_000,
+            options: serde_json::Value::Object(serde_json::Map::new()),
+        })
+        .with_provider(Arc::new(self.clone()))
+    }
+
+    fn consume(
+        &self,
+        actual: ProviderCallKind,
+        request: Option<ProviderRequest>,
+    ) -> Result<ScriptedProviderCall, LlmError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(request) = request {
+            state.requests.push(request);
+        }
+        if let Some(failure) = &state.failure {
+            return Err(LlmError::InvalidRequest(format!(
+                "ScriptedLlmProvider 已失败：{failure}"
+            )));
+        }
+        let Some(script) = state.scripts.front() else {
+            let failure = format!("收到额外 {} 调用：脚本已耗尽", actual.name());
+            state.failure = Some(failure.clone());
+            return Err(LlmError::InvalidRequest(format!(
+                "ScriptedLlmProvider {failure}"
+            )));
+        };
+        let expected = script.kind();
+        if expected != actual {
+            let failure = format!(
+                "调用类型不匹配：期望 {}，实际 {}",
+                expected.name(),
+                actual.name()
+            );
+            state.failure = Some(failure.clone());
+            return Err(LlmError::InvalidRequest(format!(
+                "ScriptedLlmProvider {failure}"
+            )));
+        }
+        Ok(state.scripts.pop_front().expect("队首脚本刚刚已确认存在"))
+    }
+}
+
+fn latest_provider_user_text(request: &ProviderRequest) -> Option<String> {
+    request.messages.iter().rev().find_map(|message| {
+        (message.role == ProviderRole::User).then(|| {
+            message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    ProviderMessageContent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+    })
+}
+
+#[async_trait]
+impl LlmProvider for ScriptedLlmProvider {
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tool_calling: true,
+            system_prompt: true,
+            list_models: true,
+        }
+    }
+
+    async fn complete(&self, request: ProviderRequest) -> Result<ProviderResponse, LlmError> {
+        match self.consume(ProviderCallKind::Complete, Some(request))? {
+            ScriptedProviderCall::Complete(response) => Ok(response),
+            _ => unreachable!("consume 已校验脚本类型"),
+        }
+    }
+
+    async fn stream(&self, request: ProviderRequest) -> Result<ProviderStream, LlmError> {
+        match self.consume(ProviderCallKind::Stream, Some(request))? {
+            ScriptedProviderCall::Stream(events) => {
+                Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+            }
+            _ => unreachable!("consume 已校验脚本类型"),
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ProviderModelInfo>, LlmError> {
+        match self.consume(ProviderCallKind::ListModels, None)? {
+            ScriptedProviderCall::ListModels(models) => Ok(models),
+            _ => unreachable!("consume 已校验脚本类型"),
+        }
+    }
+}
+
+/// 按 session 隔离的一次性持久化失败槽。
+///
+/// 测试先登记 session ID，下一次该 session 的 `try_persist_to_disk` 消费登记并失败；
+/// 其他 session 和后续补偿写入不受影响。
+static NEXT_PERSISTENCE_FAILURES: std::sync::OnceLock<Mutex<HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn next_persistence_failures() -> &'static Mutex<HashSet<String>> {
+    NEXT_PERSISTENCE_FAILURES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 安排指定 session 的下一次持久化失败。
+pub fn fail_next_persistence_for_session(sid: &str) {
+    next_persistence_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(sid.to_string());
+}
+
+/// 由 `Session::try_persist_to_disk` 消费一次性失败登记。
+pub(crate) fn take_persistence_failure_for_session(sid: &str) -> bool {
+    next_persistence_failures()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(sid)
+}
+
+/// 测试同步屏障：在 Core 的真实封口期（候选已生成、ingress 已进入 Sealing、
+/// 提交未开始）与 turn 收尾前（ingress 已是 Committing，消息只能进单槽）
+/// 提供确定性同步。
 ///
 /// 协议：测试端 [`arm_seal`]/[`arm_turn_finish`] 按 session 预置；Core 到达屏障点
 /// 后 ack 并阻塞等待 release；测试端收到 ack（窗口已冻结）后投递消息，
@@ -113,7 +382,8 @@ async fn wait_gate(gate: &SealGate, sid: &str) {
     let _ = gate.release_rx.await;
 }
 
-/// 候选已经生成、封口尚未开始。屏障只等待独立释放信号，不读取命令通道。
+/// 候选已经生成、ingress 已进入 Sealing、提交尚未开始。屏障只等待独立
+/// 释放信号，不读取命令通道。
 pub async fn seal_barrier(sid: &str) {
     wait_gate(&seal_gates().seal, sid).await;
 }
@@ -1094,6 +1364,35 @@ pub fn core_for(env: &TestEnv, sid: &str, endpoint: &str) -> (TiangongCore, Even
     core_with(env, sid, endpoint, TrustMode::FullTrust, Vec::new())
 }
 
+/// 使用现成模型 client 构建真实 TiangongCore，供 provider fake 测试复用。
+pub fn core_for_client(
+    env: &TestEnv,
+    sid: &str,
+    client: crate::model::SingleProviderClient,
+) -> (TiangongCore, EventLog) {
+    let mut session = Session::new("集成测试会话".to_string());
+    session.id = sid.to_string();
+    session.bind_storage_root(&env.root);
+    session.try_persist_to_disk().expect("预落盘 session 失败");
+
+    let config = CoreConfig::builder()
+        .with_chat("http://scripted-provider.invalid", "test-key", "test-model")
+        .with_trust_mode(TrustMode::FullTrust)
+        .build();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<StreamEvent>();
+    let core = TiangongCore::builder()
+        .session_id(sid.to_string())
+        .config(CoreConfigProvider::new(config))
+        .trust_mode(TrustMode::FullTrust)
+        .storage_root(env.root.clone())
+        .workspace_dir(env.root.to_string_lossy())
+        .stream_tx(event_tx)
+        .plugins(Vec::new())
+        .test_client(client)
+        .build();
+    (core, EventLog::new(event_rx))
+}
+
 pub fn send_message(core: &TiangongCore, message_id: &str, text: &str) {
     core.deliver(AgentInputKind::prepared_with_id(
         message_id,
@@ -1157,4 +1456,94 @@ pub async fn wait_idle(sid: &str) {
         !crate::react::inbox::is_running(sid),
         "等待 driver 空闲超时"
     );
+}
+
+#[cfg(test)]
+mod scripted_provider_tests {
+    use futures_util::TryStreamExt;
+    use tiangong_llm::message::{ChatMessage, MessageRole};
+
+    use super::*;
+
+    fn request(text: &str) -> ProviderRequest {
+        ProviderRequest {
+            model: "test-model".to_string(),
+            system: Some("test-system".to_string()),
+            messages: vec![ChatMessage::text(MessageRole::User, text)],
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 128,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn records_request_consumes_script_and_rejects_invalid_calls() {
+        let mismatched =
+            ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(&["unused"], 1, 1)]);
+        let type_error = mismatched
+            .complete(request("wrong type"))
+            .await
+            .expect_err("调用类型不匹配必须明确失败");
+        assert!(
+            type_error
+                .to_string()
+                .contains("期望 stream，实际 complete")
+        );
+        let latched_error = match mismatched.stream(request("must not recover")).await {
+            Ok(_) => panic!("类型错误后不得被后续正确调用治愈"),
+            Err(error) => error,
+        };
+        assert!(latched_error.to_string().contains("已失败"));
+        assert_eq!(mismatched.requests().len(), 2);
+
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &["part-a", "part-b"],
+            7,
+            3,
+        )]);
+        let events = provider
+            .stream(request("first user"))
+            .await
+            .expect("流脚本应成功")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("脚本事件应全部成功");
+        assert_eq!(
+            events,
+            vec![
+                ProviderStreamEvent::MessageStart,
+                ProviderStreamEvent::TextDelta("part-a".to_string()),
+                ProviderStreamEvent::TextDelta("part-b".to_string()),
+                ProviderStreamEvent::Usage(TokenUsageData::new(7, 3)),
+                ProviderStreamEvent::MessageEnd {
+                    stop_reason: Some(StopReason::EndTurn),
+                },
+            ]
+        );
+        provider.assert_request_count_and_latest_user_contains(1, "first user");
+
+        let stream_error = match provider.stream(request("extra user")).await {
+            Ok(_) => panic!("额外调用必须明确失败"),
+            Err(error) => error,
+        };
+        assert!(stream_error.to_string().contains("额外 stream 调用"));
+        let complete_error = provider
+            .complete(request("unscripted complete"))
+            .await
+            .expect_err("失败锁存后 complete 必须明确失败");
+        assert!(complete_error.to_string().contains("已失败"));
+        let list_error = provider
+            .list_models()
+            .await
+            .expect_err("失败锁存后 list_models 必须明确失败");
+        assert!(list_error.to_string().contains("已失败"));
+        assert_eq!(provider.requests().len(), 3, "请求型失败调用也必须完整记录");
+    }
 }

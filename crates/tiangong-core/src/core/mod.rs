@@ -71,6 +71,10 @@ pub struct TiangongCore {
     /// 首次 turn 置为 true，此后复用同一 Core 的轮次只触发 on_turn_started。
     #[builder(default)]
     session_ready: Arc<AtomicBool>,
+    /// 测试专用的模型客户端；发布构建不存在该字段及 builder 配置入口。
+    #[cfg(test)]
+    #[builder(default, setter(strip_option))]
+    test_client: Option<SingleProviderClient>,
 }
 
 impl TiangongCore {
@@ -198,6 +202,8 @@ impl TiangongCore {
             stream_tx: self.stream_tx.clone(),
             plugins: self.plugins.clone(),
             session_ready: self.session_ready.clone(),
+            #[cfg(test)]
+            test_client: self.test_client.clone(),
         }
     }
 
@@ -319,6 +325,8 @@ struct TurnSpawner {
     stream_tx: Sender<StreamEvent>,
     plugins: Vec<Arc<dyn Plugin>>,
     session_ready: Arc<AtomicBool>,
+    #[cfg(test)]
+    test_client: Option<SingleProviderClient>,
 }
 
 impl TurnSpawner {
@@ -383,7 +391,21 @@ impl TurnSpawner {
                     max_attempts,
                 });
             });
-        let client = SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry);
+        #[cfg(test)]
+        let (client, lite_client) = if let Some(test_client) = self.test_client.clone() {
+            let test_client = test_client.with_on_retry(on_retry.clone());
+            let lite_client = config.llm.lite.as_ref().map(|_| test_client.clone());
+            (test_client, lite_client)
+        } else {
+            (
+                SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone()),
+                config.llm.lite.clone().map(SingleProviderClient::new),
+            )
+        };
+        #[cfg(not(test))]
+        let client =
+            SingleProviderClient::new(config.llm.chat.clone()).with_on_retry(on_retry.clone());
+        #[cfg(not(test))]
         let lite_client = config.llm.lite.clone().map(SingleProviderClient::new);
         let prepared_plugins =
             crate::core::plugin::prepare_plugins(&plugins, &config, trust_mode, &session);

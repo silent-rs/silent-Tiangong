@@ -441,6 +441,51 @@ mod tests {
     use crate::request::ThinkingConfig;
     use crate::tool::ToolCall;
 
+    fn request_with_messages(messages: Vec<ChatMessage>) -> ProviderRequest {
+        ProviderRequest {
+            model: "test-model".to_string(),
+            system: None,
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        }
+    }
+
+    #[test]
+    fn adjacent_user_messages_remain_separate_and_ordered() {
+        let request = to_deepseek_request(&request_with_messages(vec![
+            ChatMessage::text(MessageRole::User, "A"),
+            ChatMessage::text(MessageRole::User, "B"),
+        ]))
+        .expect("request mapping");
+
+        let users = request
+            .messages
+            .iter()
+            .map(|message| {
+                (
+                    message.role.clone(),
+                    message.content.as_ref().and_then(Value::as_str),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            users,
+            vec![
+                (tiangong_deepseek::types::MessageRole::User, Some("A")),
+                (tiangong_deepseek::types::MessageRole::User, Some("B")),
+            ]
+        );
+    }
+
     #[test]
     fn multimodal_user_content_preserves_interleaved_order() {
         let message = ChatMessage::new(

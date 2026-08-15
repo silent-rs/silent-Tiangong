@@ -54,7 +54,9 @@ default = []
 llm-debug-log = []
 
 [dev-dependencies]
+async-trait = { workspace = true }
 dirs = { workspace = true }
+tiangong-llm = { workspace = true, features = ["test-provider"] }
 wiremock = { workspace = true }
 
 [[example]]

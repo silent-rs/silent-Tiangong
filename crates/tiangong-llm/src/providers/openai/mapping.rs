@@ -493,6 +493,44 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn request_with_messages(messages: Vec<ChatMessage>) -> ProviderRequest {
+        ProviderRequest {
+            model: "test-model".to_string(),
+            system: None,
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            max_tokens: 1024,
+            temperature: None,
+            top_p: None,
+            stop_sequences: Vec::new(),
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            thinking_disabled: false,
+        }
+    }
+
+    #[test]
+    fn adjacent_user_messages_remain_separate_and_ordered() {
+        let payload = build_request_json(
+            &request_with_messages(vec![
+                ChatMessage::text(MessageRole::User, "A"),
+                ChatMessage::text(MessageRole::User, "B"),
+            ]),
+            false,
+        )
+        .expect("request mapping");
+
+        assert_eq!(
+            payload["input"],
+            json!([
+                {"type": "message", "role": "user", "content": "A"},
+                {"type": "message", "role": "user", "content": "B"}
+            ])
+        );
+    }
+
     #[test]
     fn streaming_request_uses_regular_mode() {
         let req = ProviderRequest {

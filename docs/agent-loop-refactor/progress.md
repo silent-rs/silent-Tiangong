@@ -4,11 +4,11 @@
 
 ## 当前状态
 
-- 当前阶段：**00~10、12~18 全部完成；11 暂停交付（待真实宿主验证后恢复 PR）**。
-- 当前建议任务：用户在 GUI/CLI/Server 真实环境执行连续交互验证（普通问答、附件分析、多轮工具、运行中追问、取消、关闭），通过后恢复任务 11 的 PR 交付。
-- 当前阻塞：无。
-- 当前分支：`feature/agent-execution-core`，基线为 `main` v0.14.3（`7c425bac`）。
-- 当前实现是自动化可验证范围内的交付候选：全套检查通过、量化达标、审查清单无异常；唯一待办是真实宿主连续交互验证（需用户模型凭据，见任务 18 文档）。
+- 当前阶段：**任务 19 测试基础设施与迁移已完成；严格回归测试已锁定 6 个失败用例、4 类生产问题，等待后续修复**。
+- 当前建议任务：先修复真实 `Sealing` 期间取消、候选收尾过早定格、部分流失败重复回退和 Anthropic 相邻 user 归并，再恢复完整绿色验收。
+- 当前阻塞：无外部阻塞；当前测试失败均已稳定复现并定位。
+- 当前分支：`feature/agent-execution-core`，当前工作区包含未提交测试改动。
+- 当前自动化结果不是绿色交付候选：格式、双模式编译和静态检查通过；Core 98 通过/3 个目标失败，LLM 111 通过/3 个目标失败。
 - 当前文档决策：Loop 收敛为模型—工具最小循环；无工具响应只形成候选完成；通过确定性 `TaskContract`、Provider 工具约束和有界协议修复防止模型漏发必需 tool call；Agent 自有 Inbox 与单 driver；审批、压缩、重试和预算外置。
 - 任务 15 已落地：Summary/ForceFinal/continuation 全部删除（`summary.rs`、`completion_policy.rs` 移除），`react/contract.rs` 候选完成门控 + 有界协议修复（上限 2）+ Provider `tool_choice` 约束；`execute.rs` 4515 → 3728 行；8 项契约用例全部启用转绿。
 - 任务 16 已落地：`react/request.rs` 请求前压力检查与溢出恢复；压缩统一为 `ContextCompression` 会话（auto/forced/manual 单份等待/提交）；`Compressing` 顶层阶段与四处分散压缩点删除；压缩收敛为一次摘要调用（删 `[[CURRENT_TASK]]` LLM 提取）；锚点消息机制（LLM 可见/用户不可见，用户原文程序复制）满足 Provider 首条 User 约束。
@@ -60,6 +60,7 @@
 | 16 | 模型请求策略外置 | 已完成 | 0a0ed561 | request.rs 压缩外置、ContextCompression 统一、锚点消息机制、删 Compressing 阶段 |
 | 17 | 工具流水线收敛 | 已完成 | c241074a | tools.rs 流水线一体化、审批下沉、删 PreparingTools/WaitingTools/WaitingApproval |
 | 18 | 清理、验收与交付 | 自动化部分已完成 | 本次提交 | 双轨零残留、execute.rs 1162 行达标、审查清单无异常；宿主验证待用户 |
+| 19 | Core 无 socket 状态测试 | 测试基础设施与迁移已完成 | 未提交工作区 | feature 限定 Provider 注入、严格脚本 fake、3 个 Core 用例迁移；新增回归共锁定 6 个失败用例、4 类生产问题 |
 | 14 | Agent Inbox 与唯一 driver | 未开始 | — | next_turn/next_step、Idle/Running、wake_requested、最新 Session |
 | 15 | 最小 Loop | 未开始 | — | 模型—工具循环、TaskContract/CompletionGate、删除旧完成控制 |
 | 16 | 模型请求策略外置 | 未开始 | — | tool_choice、有界协议修复、压缩、重试和安全预算 |
@@ -261,6 +262,21 @@ cargo test -p tiangong-plugin-browser
 - `cargo test -p tiangong-plugin-agent-team`：10 通过、1 ignored；
 - `cargo test -p tiangong-plugin-browser`：32 通过；
 - 量化：`execute.rs` 4515 → 3728 行（-787）；整体 +161/-1737。
+
+任务 19 验证（Core 无 socket 状态测试与 Provider 回归补充）：
+
+- `SingleProviderClient` 注入由 `test-provider` feature 限定；普通 LLM 构建不包含注入字段、方法或分发分支；Core 仅在 dev-dependency 启用该 feature；
+- `ScriptedLlmProvider` 每测试独立，原子记录并消费脚本，首次协议错误锁存，额外调用不能被 fallback 隐式修复；
+- 三个指定 Core 测试已移除 `MockServer`，完整请求仍经过统一 `ProviderRequest` 组装；真实 `Sealing` 屏障位于 `begin_seal` 之后；
+- `cargo fmt --all -- --check`：通过；
+- `cargo check -p tiangong-llm --no-default-features`：通过；
+- `cargo check -p tiangong-llm --features test-provider --all-targets`：通过；
+- `cargo check -p tiangong-core --all-targets`：通过；
+- `cargo clippy -p tiangong-core -p tiangong-llm --all-targets -- -D warnings`：通过；
+- `cargo test -p tiangong-core`：98 通过、3 失败。失败分别为真实封口期间 Cancel 被拒绝，以及悬空工具/最终持久化降级后候选仍为 `Summary`；
+- `cargo test -p tiangong-llm`：111 通过、3 失败。失败分别为部分流输出后仍非流式回退导致重复文本，以及 Anthropic 相邻 user、tool result 后 user 未在映射层归并；
+- 其余定向绿测通过：严格脚本、真实 `Sealing` 中用户 steer、替代请求失败保护、空流正常回退、默认 Provider 分发；
+- 本任务只补测试与测试注入边界，不修上述生产行为，不提交代码。
 
 ## 分支与提交策略
 
