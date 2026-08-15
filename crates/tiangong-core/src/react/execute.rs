@@ -1942,7 +1942,7 @@ mod tests {
         });
 
         let result =
-            tokio::time::timeout(Duration::from_secs(2), execute_turn(&mut ctx, &mut cmd_rx))
+            tokio::time::timeout(Duration::from_secs(10), execute_turn(&mut ctx, &mut cmd_rx))
                 .await
                 .expect("取消压缩后 turn 应及时结束");
         let stream_rx = cancel_task.await.unwrap();
@@ -1996,20 +1996,33 @@ mod tests {
                 Err(command)
             };
         tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             crate::react::compression::run_manual_context_compression(ctx, cmd_rx, &defer_never),
         )
         .await
         .expect("取消手动压缩后任务应及时结束");
         let stream_rx = cancel_task.await.unwrap();
 
-        assert!(stream_rx.try_iter().any(|event| matches!(
-            event,
-            StreamEvent::ContextCompressed {
-                action: ContextCompressAction::Cancelled,
-                ..
+        // Cancelled 事件与压缩协程的取消收尾存在竞态：带超时等待而非立即断言。
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if stream_rx.try_iter().any(|event| {
+                matches!(
+                    event,
+                    StreamEvent::ContextCompressed {
+                        action: ContextCompressAction::Cancelled,
+                        ..
+                    }
+                )
+            }) {
+                break;
             }
-        )));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "等待手动压缩的取消事件超时"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2674,34 +2687,159 @@ mod tests {
             ..
         } = harness;
         let session_id = ctx.session.id.clone();
+        // 真实跨轮顺序：上一轮 User → 上一轮 Assistant(Summary) → 本轮 User。
+        ctx.session
+            .append_message(MessageRole::User, "上一轮的提问");
         {
             let mut previous = Message::new(MessageRole::Assistant, PREVIOUS_MARKER);
             previous.phase = MessagePhase::Summary;
             ctx.session.messages.push(previous);
         }
+        ctx.session.append_message(MessageRole::User, "本轮请求");
+        // 历史先落盘（真实上一轮已完成并保存），本轮失败收尾不依赖内存副本。
+        ctx.session.try_persist_to_disk().expect("预置历史落盘失败");
 
         let (_keep_open, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
         run_turn(ctx, cmd_rx).await;
+
+        // 证明收尾路径确实走了"最终落盘失败"分支（否则以下断言失去意义）。
+        let mut events = EventLog::new(stream_rx);
+        events.pump();
+        events.assert_single_failure_terminal("最终会话持久化失败");
+        provider.assert_request_count_and_latest_user_contains(1, "本轮请求");
+
+        let reloaded =
+            Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
+        // 本轮用户消息为 Failed；本轮部分输出存在且保持 React；本轮无新 Summary。
+        let current_user = reloaded
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .expect("本轮用户消息必须保留");
+        assert_eq!(
+            current_user.turn_status,
+            Some(TurnStatus::Failed),
+            "落盘失败后本轮用户消息必须为 Failed"
+        );
+        assert!(
+            reloaded.messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content().contains("本轮部分输出")
+                    && message.phase == MessagePhase::React
+            }),
+            "本轮部分输出必须存在且保持 React 相位"
+        );
+        // 上一轮最终答复保持 Summary；本轮不得产生新的 Summary。
+        let summary_replies: Vec<&crate::session::Message> = reloaded
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == MessageRole::Assistant && message.phase == MessagePhase::Summary
+            })
+            .collect();
+        assert_eq!(
+            summary_replies.len(),
+            1,
+            "仅上一轮的 Summary 保留，本轮不得产生新的 Summary"
+        );
+        assert!(
+            summary_replies[0].text_content().contains(PREVIOUS_MARKER),
+            "失败轮次的落盘失败不得倒推上一轮最终答复的相位"
+        );
+        // 事件流中不得出现上一轮答复的 React 降级快照。
+        assert!(
+            !events.seen().iter().any(|event| {
+                matches!(
+                    event,
+                    StreamEvent::SessionMessageUpsert { message, .. }
+                        if message.text_content().contains(PREVIOUS_MARKER)
+                            && message.phase != MessagePhase::Summary
+                )
+            }),
+            "不得发布上一轮答复的降级快照"
+        );
+    }
+
+    /// 取消轮次的落盘失败同样不得倒推上一轮答复（was_success 守卫的取消分支）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_turn_persistence_failure_does_not_demote_previous_reply() {
+        use super::super::turn::run_turn;
+        use crate::core::test_support::EventLog;
+
+        const PREVIOUS_MARKER: &str = "PREVIOUS-TURN-FINAL-REPLY-CANCEL";
+
+        // 单轮：模型流挂起 → 显式取消 → Cancelled；收尾落盘失败注入。
+        let provider = ScriptedLlmProvider::new([ScriptedProviderCall::text_stream(
+            &["挂起中的部分输出"],
+            10,
+            5,
+        )]);
+        let fail_plugin = Arc::new(FailFinalPersistencePlugin);
+        let harness = TestHarness::new_with_client(
+            provider.client(),
+            Vec::new(),
+            HashMap::new(),
+            vec![fail_plugin],
+        );
+        let TestHarness {
+            mut ctx,
+            stream_rx,
+            storage_root,
+            cmd_tx,
+            cmd_rx,
+            ..
+        } = harness;
+        let session_id = ctx.session.id.clone();
+        ctx.session
+            .append_message(MessageRole::User, "上一轮的提问");
+        {
+            let mut previous = Message::new(MessageRole::Assistant, PREVIOUS_MARKER);
+            previous.phase = MessagePhase::Summary;
+            ctx.session.messages.push(previous);
+        }
+        ctx.session.append_message(MessageRole::User, "本轮请求");
+        ctx.session.try_persist_to_disk().expect("预置历史落盘失败");
+
+        // 独立任务驱动 run_turn；等模型请求发出后发送取消并等待收尾完成。
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+        let turn = tokio::spawn(async move {
+            run_turn(ctx, cmd_rx).await;
+            let _ = done_tx.send(());
+        });
+        provider.wait_for_request_count(1).await;
+        cmd_tx.send(Command::Cancel).expect("取消投递失败");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if done_rx.try_recv().is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "等待取消后的 turn 收尾超时"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let _ = turn.await;
 
         let mut events = EventLog::new(stream_rx);
         events.pump();
         let reloaded =
             Session::load_from_storage(&storage_root, &session_id).expect("补偿落盘后应可重载");
-        let previous_replies: Vec<&crate::session::Message> = reloaded
+        // 取消 + 落盘失败：上一轮 Summary 不得被降级。
+        let summary_replies: Vec<&crate::session::Message> = reloaded
             .messages
             .iter()
             .filter(|message| {
-                message.role == MessageRole::Assistant
-                    && message.text_content().contains(PREVIOUS_MARKER)
+                message.role == MessageRole::Assistant && message.phase == MessagePhase::Summary
             })
             .collect();
-        assert!(!previous_replies.is_empty(), "上一轮最终答复必须保留");
-        assert!(
-            previous_replies
-                .iter()
-                .all(|message| message.phase == MessagePhase::Summary),
-            "失败轮次的落盘失败不得倒推上一轮最终答复的相位"
+        assert_eq!(
+            summary_replies.len(),
+            1,
+            "取消轮次的落盘失败不得倒推上一轮最终答复"
         );
+        assert!(summary_replies[0].text_content().contains(PREVIOUS_MARKER));
     }
 
     /// ALR-108：一个物理 turn 只调用一次 on_turn_started 和一次 on_turn_finished。

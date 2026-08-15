@@ -158,6 +158,21 @@ impl ScriptedLlmProvider {
     }
 
     /// 统一断言调用次数以及最后一次请求中的最新用户文本。
+    /// 等待 fake provider 收到至少 `n` 个请求（流脚本消费前的到达同步点）。
+    pub async fn wait_for_request_count(&self, n: usize) {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            if self.requests().len() >= n {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "等待 provider 收到 {n} 个请求超时"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
     pub fn assert_request_count_and_latest_user_contains(
         &self,
         expected_count: usize,

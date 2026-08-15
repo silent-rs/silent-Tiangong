@@ -146,7 +146,14 @@ pub trait Plugin:
     /// 可供 [`Plugin::on_turn_finished`] 计算本轮新增消息范围。
     fn on_turn_started(&self, _session: &mut crate::session::Session, _turn_start_idx: usize) {}
 
-    /// 一个对话轮次结束后调用：执行时长与 turn_result 已写入并落盘。
+    /// 一个对话轮次结束后调用：执行时长与 `turn_result` 已写入用户消息，
+    /// **最终持久化尚未发生**。
+    ///
+    /// 相位合同：本轮成功候选此时已被标记为最终答复（Summary），但这是
+    /// **暂定**状态——若随后的最终落盘失败，该标记会被回收（退回过程相位）。
+    /// 在本钩子中做不可回滚副作用（建立索引、提交记忆等）的插件必须容忍
+    /// "看到的成功可能被回收"；需要确认语义的插件应在会话重载后按最终
+    /// 磁盘状态对账。
     ///
     /// `turn_start_idx` 与 [`Plugin::on_turn_started`] 接收的值一致，可用于取出本轮
     /// 新增的消息做后处理（如批量写入索引）。
