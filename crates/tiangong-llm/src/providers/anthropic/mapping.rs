@@ -19,11 +19,24 @@ use crate::usage::TokenUsageData;
 pub(super) fn to_anthropic_request(
     request: &ProviderRequest,
 ) -> Result<MessagesCreateRequest, LlmError> {
-    let messages = request
+    let mapped = request
         .messages
         .iter()
         .filter_map(map_message)
         .collect::<Result<Vec<_>, _>>()?;
+    // Anthropic 协议要求相邻同角色消息归属同一 turn：core 层保留用户意图
+    // 边界（连续 user 消息独立），协议映射在此按顺序折叠为单 turn 的
+    // 有序内容块（tool_result 块之后继续跟随 text 块）。
+    let mut messages: Vec<AnthropicMessage> = Vec::with_capacity(mapped.len());
+    for message in mapped {
+        if let Some(last) = messages.last_mut()
+            && last.role == message.role
+        {
+            last.content.extend(message.content);
+        } else {
+            messages.push(message);
+        }
+    }
 
     let tools = if request.tools.is_empty() {
         None

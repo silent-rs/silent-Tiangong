@@ -912,21 +912,20 @@ pub(super) async fn execute_turn(
                 // 提交时刻标记候选答复为最终答复：仅成功终态——失败终态不
                 // 得把未验证的候选定格为最终答复（替代请求失败时旧候选必须
                 // 保留 React 过程相位）。
-                let candidate_id = state.pending_summary_msg_id.take();
                 if matches!(
                     pending_result.outcome,
                     super::outcome::TurnExecutionOutcome::Success
-                ) && let Some(msg_id) = candidate_id
-                {
-                    if let Some(message) = ctx
+                ) && let Some(msg_id) = state.pending_summary_msg_id.take()
+                    && let Some(message) = ctx
                         .session
                         .messages
                         .iter_mut()
                         .find(|message| message.id == msg_id)
-                    {
-                        message.phase = MessagePhase::Summary;
-                    }
-                    emit_session_message_upsert(ctx, &msg_id);
+                {
+                    message.phase = MessagePhase::Summary;
+                    // Summary 快照不在 Loop 提交点发布：run_turn 收尾若降级为
+                    // Failed（悬空工具/落盘失败）会回收相位，届时发布的是 React
+                    // 快照——失败终态不得发布 Summary 快照。
                 }
                 crate::react::inbox::commit_ingress(&ctx.session.id);
                 let mut pending_result = pending_result;

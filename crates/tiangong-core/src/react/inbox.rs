@@ -65,6 +65,16 @@ impl CommandIngress {
         self.sender.send(cmd).is_ok()
     }
 
+    /// 决定性命令（取消）专用入口：`Sealing` 排空窗口放行——排空循环将其
+    /// 处理为取消终态；仅 `Committing`（不可逆）拒绝。
+    pub(crate) fn send_terminating(&self, cmd: Command) -> bool {
+        let state = self.state.lock().unwrap();
+        if matches!(*state, IngressState::Committing) {
+            return false;
+        }
+        self.sender.send(cmd).is_ok()
+    }
+
     /// 绕过门控强制入队，仅用于 Core 关闭路径的强制取消（此时门控语义已无意义）。
     pub(crate) fn force_send(&self, cmd: Command) -> bool {
         self.sender.send(cmd).is_ok()
@@ -448,17 +458,22 @@ pub(crate) fn remove_agent(session_id: &str) {
 
 /// 向当前活跃 turn 发送命令（取消、审批、工具注入和运行配置更新等）。
 ///
-/// 无活跃 turn 或已进入终态封口（`Sealing`/`Committing`）时返回 false。
+/// 无活跃 turn 或已进入终态封口（`Sealing`/`Committing`）时返回 false——
+/// 唯一例外是取消：候选封口排空窗口的取消是决定性命令，由排空循环处理
+/// 形成取消终态（与用户引导同等待遇，仅 `Committing` 不可逆阶段拒绝）。
 /// 调用方按语义处理：用户消息/工具注入应转入 Inbox，取消与审批可视为无操作。
 pub fn send_command(session_id: &str, cmd: Command) -> bool {
     if let Ok(agents) = agents().lock()
         && let Some(entry) = agents.get(session_id)
     {
         let state = entry.lock();
-        return state
-            .ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.send(cmd));
+        return state.ingress.as_ref().is_some_and(|ingress| {
+            if matches!(cmd, Command::Cancel) {
+                ingress.send_terminating(cmd)
+            } else {
+                ingress.send(cmd)
+            }
+        });
     }
     false
 }

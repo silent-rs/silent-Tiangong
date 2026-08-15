@@ -725,7 +725,7 @@ impl SingleProviderClient {
         chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
         let response = self
-            .stream_function_calls_attempt(&req, &functions, tool_choice, &chunk_tx)
+            .stream_function_calls_attempt(&req, &functions, tool_choice, chunk_tx)
             .await?;
         filter_invalid_openai_tool_calls(self.protocol(), &functions, response)
     }
@@ -735,12 +735,20 @@ impl SingleProviderClient {
         req: &ModelRequest,
         functions: &[ToolSpec],
         tool_choice: Option<ToolChoice>,
-        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
     ) -> Result<ModelFunctionResponse> {
-        match self
-            .stream_function_calls_streaming(req, functions, tool_choice.clone(), chunk_tx)
-            .await
-        {
+        // 追踪本次流是否已发布可见内容（text/reasoning delta）。
+        let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = self
+            .stream_function_calls_streaming(
+                req,
+                functions,
+                tool_choice.clone(),
+                chunk_tx.clone(),
+                Some(emitted.clone()),
+            )
+            .await;
+        match result {
             Ok(response) => Ok(response),
             Err(err) => {
                 // 消费端已关闭：流失败源于调用方中止（引导/取消中断当前活动），
@@ -748,6 +756,16 @@ impl SingleProviderClient {
                 // 越过中断屏障产生一次新的完整请求）。
                 if chunk_tx.is_closed() {
                     return Err(err.context("流式请求被调用方中止"));
+                }
+                // 已发布可见流内容后失败：回退重发会造成文本重复（delta 与
+                // 完整文本都到达消费端），必须直接失败。
+                if emitted.load(std::sync::atomic::Ordering::SeqCst) {
+                    // 原始错误直接透传（保持可诊断信息），仅记录决策日志。
+                    tracing::warn!(
+                        error = %err,
+                        "流式请求在输出内容后失败，禁止非流式回退避免文本重复"
+                    );
+                    return Err(err);
                 }
                 if let Some(on_retry) = &self.on_retry {
                     on_retry(1, MAX_RETRIES, 0, &err.to_string());
@@ -786,7 +804,8 @@ impl SingleProviderClient {
         req: &ModelRequest,
         functions: &[ToolSpec],
         tool_choice: Option<ToolChoice>,
-        chunk_tx: &tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+        chunk_tx: tokio::sync::mpsc::UnboundedSender<ModelStreamChunk>,
+        emitted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<ModelFunctionResponse> {
         let timeout_ms = function_timeout_ms(self.cfg.timeout_ms);
         let model = self.cfg.model.trim().to_string();
@@ -814,6 +833,9 @@ impl SingleProviderClient {
                 ProviderStreamEvent::ReasoningDelta(delta) => {
                     if !delta.is_empty() {
                         reasoning_content.push_str(&delta);
+                        if let Some(flag) = &emitted {
+                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                         let _ = chunk_tx.send(ModelStreamChunk {
                             content: String::new(),
                             reasoning_content: delta,
@@ -829,6 +851,9 @@ impl SingleProviderClient {
                 ProviderStreamEvent::TextDelta(delta) => {
                     if !delta.is_empty() {
                         text.push_str(&delta);
+                        if let Some(flag) = &emitted {
+                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                         let _ = chunk_tx.send(ModelStreamChunk {
                             content: delta,
                             reasoning_content: String::new(),

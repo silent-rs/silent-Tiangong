@@ -79,6 +79,7 @@ pub(crate) async fn run_turn(
     }
     if had_interrupted_tools && matches!(outcome, TurnExecutionOutcome::Success) {
         outcome = TurnExecutionOutcome::Failed("本轮仍有未完成的工具调用，已安全中断".to_string());
+        demote_finalized_candidate(&mut ctx.session, &stream_tx);
     }
 
     // ── 提交轮次状态与插件收尾 ──
@@ -112,6 +113,7 @@ pub(crate) async fn run_turn(
     if let Err(error) = ctx.session.try_persist_to_disk() {
         // 最终落盘失败必须把本轮降级为 Failed，并带着失败状态再尝试保存一次。
         outcome = TurnExecutionOutcome::Failed(format!("最终会话持久化失败：{error}"));
+        demote_finalized_candidate(&mut ctx.session, &stream_tx);
         if let Some(idx) = ctx.session.latest_user_message_index() {
             ctx.session.messages[idx]
                 .set_turn_result(elapsed_ms, tiangong_types::TurnStatus::Failed);
@@ -119,9 +121,59 @@ pub(crate) async fn run_turn(
         let _ = ctx.session.try_persist_to_disk();
     }
 
+    // ── 成功终态发布最终答复快照 ──
+    // 放在最终落盘之后：落盘失败降级路径已回收相位并发布 React 快照，
+    // 此处只剩成功路径——失败终态不得发布 Summary 快照。
+    if matches!(outcome, TurnExecutionOutcome::Success)
+        && let Some(message) = ctx.session.messages.iter().rev().find(|message| {
+            message.role == MessageRole::Assistant
+                && message.phase == crate::session::MessagePhase::Summary
+        })
+    {
+        let mut snapshot = message.clone();
+        snapshot.clear_transient_data();
+        let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+            message: snapshot,
+            deferred_tool_injections: None,
+        });
+    }
+
     // ── 发布唯一终态 ──
     // 宿主在收到终态后从磁盘重载权威 Session，不再需要额外的最终消息快照。
     let _ = stream_tx.send(outcome.terminal_event(usage));
+}
+
+/// 收尾降级为 Failed 时回收本轮已定格的最终答复：唯一 Summary 相位的
+/// assistant 候选退回 React 过程相位——失败终态下未验证的候选不得保持
+/// 最终答复身份（run_turn 收尾晚于 execute 的提交标记，需在此回收）。
+fn demote_finalized_candidate(
+    session: &mut crate::session::Session,
+    stream_tx: &std::sync::mpsc::Sender<StreamEvent>,
+) {
+    let finalized = session
+        .messages
+        .iter_mut()
+        .rev()
+        .find(|message| {
+            message.role == MessageRole::Assistant
+                && message.phase == crate::session::MessagePhase::Summary
+        })
+        .map(|message| {
+            message.phase = crate::session::MessagePhase::React;
+            message.id.clone()
+        });
+    let Some(message_id) = finalized else {
+        return;
+    };
+    let _ = stream_tx.send(StreamEvent::SessionMessageUpsert {
+        message: session
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .cloned()
+            .expect("刚降级的消息必然存在"),
+        deferred_tool_injections: None,
+    });
 }
 
 /// 标题仍是默认值时，并行用 lite 模型据首条用户消息生成标题。
