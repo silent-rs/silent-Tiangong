@@ -305,7 +305,7 @@ impl AttachmentTransaction {
                         data: Some(general_purpose::STANDARD.encode(bytes)),
                     });
                     content.push(ContentBlock::ModelInstruction {
-                        text: inline_image_instruction(message_id, index, &asset),
+                        text: inline_image_instruction(index, &asset),
                     });
                 }
                 MediaKind::Image if capabilities.analyze_attachment => {
@@ -386,14 +386,14 @@ fn asset_notice_item(index: usize, asset: &StoredAsset) -> String {
 
 fn analyze_attachment_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息包含已归档的图片附件。需要理解图片内容时，请调用 analyze_attachment 工具，使用 message_id={message_id}；只分析当前图片时指定 attachment_index={index}，需要同时分析多张图片时省略 attachment_index。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。\n- {}",
+        "本条用户消息包含需要附件分析插件处理的附件。需要查看内容时，请调用 analyze_attachment 工具，必须使用 message_id={message_id}，并指定 attachment_index={index}。\n- {}",
         asset_notice_item(index, asset)
     )
 }
 
-fn inline_image_instruction(message_id: &str, index: usize, asset: &StoredAsset) -> String {
+fn inline_image_instruction(index: usize, asset: &StoredAsset) -> String {
     format!(
-        "本条用户消息的图片内容已直接提供给模型，无需调用 analyze_attachment；图片同时已归档为本地资源。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。message_id={message_id}。\n- {}",
+        "本条用户消息的图片内容已直接提供给模型，无需调用 analyze_attachment；图片同时已归档为本地资源。需要生成或编辑图片时，直接把全部相关附件的下列本地 path 按 index 顺序传给支持图片路径的工具（例如 generate_image 的 images），不要要求用户复制到工作区或重新上传。\n- {}",
         asset_notice_item(index, asset)
     )
 }
@@ -988,11 +988,11 @@ mod tests {
         assert!(matches!(
             &message[2],
             ContentBlock::ModelInstruction { text }
-                if text.contains("message_id=message-inline")
-                    && text.contains("index=0")
+                if text.contains("index=0")
                     && text.contains("path=")
                     && text.contains("generate_image")
                     && text.contains("无需调用 analyze_attachment")
+                    && !text.contains("message_id=")
         ));
         let stable = tiangong_types::stable_content_blocks(&message);
         assert!(matches!(&stable[1], ContentBlock::Image { data: None, .. }));
@@ -1078,7 +1078,6 @@ mod tests {
                     && text.contains("message_id=message-analyze")
                     && text.contains("attachment_index=1")
                     && text.contains("name=analyze.png")
-                    && text.contains("generate_image")
                     && text.contains("path=")
         ));
     }
